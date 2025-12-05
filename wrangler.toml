@@ -1,0 +1,5 @@
+# ABOUTME: Cloudflare Pages deployment config for Divine Relay Admin frontend
+# ABOUTME: Deploy with: npx wrangler pages deploy dist
+
+name = "divine-relay-admin"
+pages_build_output_dir = "dist"

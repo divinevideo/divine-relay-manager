@@ -1,42 +1,18 @@
-import { useState } from "react";
-import { useCurrentUser } from "@/hooks/useCurrentUser";
-import { LoginArea } from "@/components/auth/LoginArea";
+// ABOUTME: Main relay administration interface with tabs for events, users, reports, and labels
+// ABOUTME: Integrates all NIP-86 moderation tools into a unified dashboard
+
 import { EventsList } from "@/components/EventsList";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Button } from "@/components/ui/button";
+import { UserManagement } from "@/components/UserManagement";
+import { Reports } from "@/components/Reports";
+import { Labels } from "@/components/Labels";
+import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Server, FileText, Users, Settings } from "lucide-react";
+import { Server, FileText, Users, Settings, Flag, Tag } from "lucide-react";
+
+const RELAY_URL = "wss://relay.divine.video";
 
 export function RelayManager() {
-  const { user } = useCurrentUser();
-  const [relayUrl, setRelayUrl] = useState("wss://relay.damus.io");
-
-  if (!user) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800">
-        <Card className="w-full max-w-md mx-4">
-          <CardHeader className="text-center">
-            <CardTitle className="text-2xl font-bold">Nostr Relay Manager</CardTitle>
-            <CardDescription>
-              Manage your Nostr relay with NIP-86 moderation tools. Sign in with your Nostr keys to get started.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="text-center">
-              <LoginArea className="w-full" />
-            </div>
-            <div className="text-xs text-muted-foreground text-center">
-              Requires a NIP-07 compatible browser extension like Alby, nos2x, or Flamingo.
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-    );
-  }
-
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800">
       {/* Header */}
@@ -48,101 +24,56 @@ export function RelayManager() {
                 <Server className="h-6 w-6 text-white" />
               </div>
               <div>
-                <h1 className="text-2xl font-bold">Nostr Relay Manager</h1>
+                <h1 className="text-2xl font-bold">Divine Relay Admin</h1>
                 <p className="text-sm text-muted-foreground">NIP-86 Moderation Tools</p>
               </div>
             </div>
-            <div className="flex items-center space-x-4">
-              <Badge variant="outline" className="font-mono text-xs">
-                {relayUrl.replace('wss://', '')}
-              </Badge>
-              <LoginArea className="max-w-60" />
-            </div>
+            <Badge variant="outline" className="font-mono text-xs">
+              {RELAY_URL.replace('wss://', '')}
+            </Badge>
           </div>
         </div>
       </header>
 
       <div className="container mx-auto px-4 py-8">
-        {/* Relay URL Input */}
-        <Card className="mb-8">
-          <CardHeader>
-            <CardTitle className="flex items-center space-x-2">
-              <Server className="h-5 w-5" />
-              <span>Relay Connection</span>
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-4">
-              <div className="flex space-x-2">
-                <div className="flex-1">
-                  <Label htmlFor="relay-url">Relay URL</Label>
-                  <Input
-                    id="relay-url"
-                    value={relayUrl}
-                    onChange={(e) => setRelayUrl(e.target.value)}
-                    placeholder="wss://your-relay.com"
-                    className="mt-1"
-                  />
-                </div>
-                <div className="flex items-end">
-                  <Button>Connect</Button>
-                </div>
-              </div>
-              
-              {/* Quick relay options */}
-              <div>
-                <Label className="text-sm">Quick Connect:</Label>
-                <div className="flex flex-wrap gap-2 mt-2">
-                  {[
-                    "wss://relay.damus.io",
-                    "wss://nos.lol", 
-                    "wss://relay.nostr.band",
-                    "wss://nostr.wine"
-                  ].map((url) => (
-                    <Button
-                      key={url}
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setRelayUrl(url)}
-                      className="text-xs"
-                    >
-                      {url.replace('wss://', '')}
-                    </Button>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Main Content */}
         <Tabs defaultValue="events" className="space-y-6">
-          <TabsList className="grid w-full grid-cols-3">
+          <TabsList className="grid w-full grid-cols-5">
             <TabsTrigger value="events" className="flex items-center space-x-2">
               <FileText className="h-4 w-4" />
-              <span>Events & Moderation</span>
+              <span>Events</span>
             </TabsTrigger>
             <TabsTrigger value="users" className="flex items-center space-x-2">
               <Users className="h-4 w-4" />
-              <span>User Management</span>
+              <span>Users</span>
+            </TabsTrigger>
+            <TabsTrigger value="reports" className="flex items-center space-x-2">
+              <Flag className="h-4 w-4" />
+              <span>Reports</span>
+            </TabsTrigger>
+            <TabsTrigger value="labels" className="flex items-center space-x-2">
+              <Tag className="h-4 w-4" />
+              <span>Labels</span>
             </TabsTrigger>
             <TabsTrigger value="settings" className="flex items-center space-x-2">
               <Settings className="h-4 w-4" />
-              <span>Relay Settings</span>
+              <span>Settings</span>
             </TabsTrigger>
           </TabsList>
 
           <TabsContent value="events">
-            <EventsList relayUrl={relayUrl} />
+            <EventsList relayUrl={RELAY_URL} />
           </TabsContent>
 
           <TabsContent value="users">
-            <Card>
-              <CardContent className="py-12 text-center">
-                <Users className="h-12 w-12 mx-auto mb-4 opacity-50" />
-                <p className="text-muted-foreground">User management coming soon</p>
-              </CardContent>
-            </Card>
+            <UserManagement relayUrl={RELAY_URL} />
+          </TabsContent>
+
+          <TabsContent value="reports">
+            <Reports relayUrl={RELAY_URL} />
+          </TabsContent>
+
+          <TabsContent value="labels">
+            <Labels relayUrl={RELAY_URL} />
           </TabsContent>
 
           <TabsContent value="settings">

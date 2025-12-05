@@ -1,0 +1,17 @@
+# ABOUTME: Cloudflare Worker for Divine Relay Admin API
+# ABOUTME: Handles NIP-86 signing and publishing
+
+name = "divine-relay-admin-api"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+# Custom domain route - serves /api/* on the same domain as frontend
+routes = [
+  { pattern = "relay.admin.divine.video/api/*", zone_name = "divine.video" }
+]
+
+# The NOSTR_NSEC secret must be set via: wrangler secret put NOSTR_NSEC
+
+[vars]
+RELAY_URL = "wss://relay.divine.video"
+ALLOWED_ORIGIN = "https://relay.admin.divine.video"
