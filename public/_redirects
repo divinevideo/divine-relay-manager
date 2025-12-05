@@ -1,1 +1,6 @@
+# Redirect all pages.dev traffic to Zero Trust protected domain
+https://divine-relay-admin.pages.dev/* https://admin.divine.video/:splat 301!
+https://:hash.divine-relay-admin.pages.dev/* https://admin.divine.video/:splat 301!
+
+# SPA fallback
 /* /index.html 200
