@@ -1,5 +1,5 @@
 // ABOUTME: Displays kind 1985 labels (NIP-32 labeling)
-// ABOUTME: Shows labels applied to events/pubkeys for moderation context
+// ABOUTME: Shows labels applied to events/pubkeys for moderation context with full content preview
 
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -20,10 +21,14 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Tag, UserX, Clock, Filter } from "lucide-react";
+import { Tag, UserX, Clock, Filter, ChevronDown, ChevronRight, Eye } from "lucide-react";
 import { useToast } from "@/hooks/useToast";
 import { banPubkey } from "@/lib/adminApi";
 import { LabelPublisher } from "@/components/LabelPublisher";
+import { EventContentPreview } from "@/components/EventContentPreview";
+import { UserProfilePreview } from "@/components/UserProfilePreview";
+import { ReportedBy } from "@/components/ReporterInfo";
+import { HiveAIReport } from "@/components/HiveAIReport";
 import type { NostrEvent } from "@nostrify/nostrify";
 
 interface LabelsProps {
@@ -85,6 +90,19 @@ export function Labels({ relayUrl }: LabelsProps) {
   const [selectedLabel, setSelectedLabel] = useState<string | null>(null);
   const [namespaceFilter, setNamespaceFilter] = useState<string | null>(null);
   const [confirmBan, setConfirmBan] = useState<{ pubkey: string; reason: string } | null>(null);
+  const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
+
+  const toggleExpanded = (id: string) => {
+    setExpandedItems(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
 
   // Query for kind 1985 labels
   const { data: labels, isLoading, error } = useQuery({
@@ -258,6 +276,7 @@ export function Labels({ relayUrl }: LabelsProps) {
                     const namespace = getLabelNamespace(event);
                     const eventLabels = getLabels(event);
                     const target = getLabelTarget(event);
+                    const isExpanded = expandedItems.has(event.id);
 
                     return (
                       <div
@@ -278,6 +297,11 @@ export function Labels({ relayUrl }: LabelsProps) {
                                   {label}
                                 </Badge>
                               ))}
+                              {target && (
+                                <Badge variant="secondary">
+                                  {target.type === 'event' ? 'Event' : 'User'}
+                                </Badge>
+                              )}
                               {namespace && (
                                 <Badge variant="outline" className="text-xs">
                                   {namespace}
@@ -286,22 +310,66 @@ export function Labels({ relayUrl }: LabelsProps) {
                             </div>
                             {target && (
                               <p className="text-sm text-muted-foreground font-mono">
-                                {target.type}: {target.value.slice(0, 16)}...
+                                {target.value.slice(0, 16)}...
                               </p>
                             )}
                           </div>
-                          <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                          <div className="flex items-center gap-2 text-xs text-muted-foreground">
                             <Clock className="h-3 w-3" />
                             {new Date(event.created_at * 1000).toLocaleDateString()}
                           </div>
                         </div>
 
+                        {/* Reporter info */}
+                        <ReportedBy
+                          pubkey={event.pubkey}
+                          timestamp={event.created_at}
+                        />
+
+                        {/* Label reason/content */}
                         {event.content && (
-                          <p className="text-sm text-muted-foreground">{event.content.slice(0, 200)}</p>
+                          <p className="text-sm bg-muted/50 p-2 rounded">{event.content}</p>
                         )}
 
-                        {target?.type === 'pubkey' && (
-                          <div className="flex gap-2">
+                        {/* Expandable content preview */}
+                        {target && (
+                          <Collapsible open={isExpanded} onOpenChange={() => toggleExpanded(event.id)}>
+                            <CollapsibleTrigger asChild>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="w-full justify-start"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                {isExpanded ? (
+                                  <ChevronDown className="h-4 w-4 mr-2" />
+                                ) : (
+                                  <ChevronRight className="h-4 w-4 mr-2" />
+                                )}
+                                <Eye className="h-4 w-4 mr-2" />
+                                {isExpanded ? 'Hide Content' : 'View Content'}
+                              </Button>
+                            </CollapsibleTrigger>
+                            <CollapsibleContent className="space-y-3 mt-2">
+                              {target.type === 'event' && (
+                                <EventContentPreview eventId={target.value} />
+                              )}
+                              {target.type === 'pubkey' && (
+                                <UserProfilePreview pubkey={target.value} />
+                              )}
+
+                              {/* Hive AI / AI Moderation Results */}
+                              <HiveAIReport
+                                targetType={target.type}
+                                targetValue={target.value}
+                              />
+                            </CollapsibleContent>
+                          </Collapsible>
+                        )}
+
+                        {/* Action buttons */}
+                        <div className="flex gap-2">
+                          {target?.type === 'pubkey' && (
                             <Button
                               size="sm"
                               variant="destructive"
@@ -314,8 +382,8 @@ export function Labels({ relayUrl }: LabelsProps) {
                               <UserX className="h-4 w-4 mr-1" />
                               Ban User
                             </Button>
-                          </div>
-                        )}
+                          )}
+                        </div>
                       </div>
                     );
                   })}

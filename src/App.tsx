@@ -24,19 +24,12 @@ const queryClient = new QueryClient({
 
 const defaultConfig: AppConfig = {
   theme: "light",
-  relayUrl: "wss://relay.nostr.band",
+  relayUrl: "wss://relay.divine.video",
 };
-
-const presetRelays = [
-  { url: 'wss://ditto.pub/relay', name: 'Ditto' },
-  { url: 'wss://relay.nostr.band', name: 'Nostr.Band' },
-  { url: 'wss://relay.damus.io', name: 'Damus' },
-  { url: 'wss://relay.primal.net', name: 'Primal' },
-];
 
 export function App() {
   return (
-    <AppProvider storageKey="nostr:app-config" defaultConfig={defaultConfig} presetRelays={presetRelays}>
+    <AppProvider storageKey="nostr:app-config" defaultConfig={defaultConfig}>
       <QueryClientProvider client={queryClient}>
         <NostrLoginProvider storageKey='nostr:login'>
           <NostrProvider>

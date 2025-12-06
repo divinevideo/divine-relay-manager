@@ -23,6 +23,28 @@ function getTrustLevel(reportCount: number): { level: string; stars: number; col
   return { level: 'First-time', stars: 1, color: 'text-gray-500' };
 }
 
+// Simple component for backwards compatibility with Labels.tsx
+interface ReportedByProps {
+  pubkey: string;
+  timestamp: number;
+}
+
+export function ReportedBy({ pubkey, timestamp }: ReportedByProps) {
+  const displayName = pubkey.slice(0, 12) + '...';
+  const date = new Date(timestamp * 1000);
+
+  return (
+    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+      <Avatar className="h-5 w-5">
+        <AvatarFallback className="text-xs">{displayName.slice(0, 2).toUpperCase()}</AvatarFallback>
+      </Avatar>
+      <span className="font-mono">{displayName}</span>
+      <span>•</span>
+      <span>{date.toLocaleDateString()}</span>
+    </div>
+  );
+}
+
 export function ReporterInfo({ profile, pubkey, reportCount, isLoading }: ReporterInfoProps) {
   if (isLoading) {
     return (

@@ -1,18 +1,18 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/useToast";
 import { UserX, UserCheck, Plus, Trash2, Users } from "lucide-react";
+
+const WORKER_URL = import.meta.env.VITE_WORKER_URL || '';
 
 interface UserManagementProps {
   relayUrl: string;
@@ -28,62 +28,29 @@ interface AllowedUser {
   reason?: string;
 }
 
-// Helper function to create NIP-98 auth header
-async function createAuthHeader(url: string, method: string, payload?: string) {
-  if (!window.nostr) {
-    throw new Error("NIP-07 extension not found");
-  }
-
-  const event = {
-    kind: 27235,
-    content: "",
-    tags: [
-      ["u", url],
-      ["method", method],
-    ],
-    created_at: Math.floor(Date.now() / 1000),
-  };
-
-  if (payload) {
-    const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
-    const hashHex = Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
-    event.tags.push(["payload", hashHex]);
-  }
-
-  const signedEvent = await window.nostr.signEvent(event);
-  return `Nostr ${btoa(JSON.stringify(signedEvent))}` as string;
-}
-
-// API functions for relay management
-async function callRelayAPI(relayUrl: string, method: string, params: (string | number | undefined)[] = []) {
-  const httpUrl = relayUrl.replace(/^wss?:\/\//, 'https://');
-  const payload = JSON.stringify({ method, params });
-  
-  const authHeader = await createAuthHeader(httpUrl, 'POST', payload);
-  
-  const response = await fetch(httpUrl, {
+// API functions for relay management via Worker
+async function callRelayAPI(method: string, params: (string | number | undefined)[] = []) {
+  const response = await fetch(`${WORKER_URL}/api/relay-rpc`, {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/nostr+json+rpc',
-      'Authorization': authHeader,
+      'Content-Type': 'application/json',
     },
-    body: payload,
+    body: JSON.stringify({ method, params }),
   });
 
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}: ${response.statusText}`);
   }
 
-  const result = await response.json();
-  if (result.error) {
-    throw new Error(result.error);
+  const data = await response.json();
+  if (!data.success) {
+    throw new Error(data.error || 'Unknown error');
   }
 
-  return result.result;
+  return data.result;
 }
 
 export function UserManagement({ relayUrl }: UserManagementProps) {
-  const { user } = useCurrentUser();
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [newPubkey, setNewPubkey] = useState("");
@@ -93,24 +60,22 @@ export function UserManagement({ relayUrl }: UserManagementProps) {
 
   // Query for banned users
   const { data: bannedUsers, isLoading: loadingBanned, error: bannedError } = useQuery({
-    queryKey: ['banned-users', relayUrl],
-    queryFn: () => callRelayAPI(relayUrl, 'listbannedpubkeys'),
-    enabled: !!relayUrl && !!user,
+    queryKey: ['banned-users'],
+    queryFn: () => callRelayAPI('listbannedpubkeys'),
   });
 
   // Query for allowed users
   const { data: allowedUsers, isLoading: loadingAllowed, error: allowedError } = useQuery({
-    queryKey: ['allowed-users', relayUrl],
-    queryFn: () => callRelayAPI(relayUrl, 'listallowedpubkeys'),
-    enabled: !!relayUrl && !!user,
+    queryKey: ['allowed-users'],
+    queryFn: () => callRelayAPI('listallowedpubkeys'),
   });
 
   // Mutation for banning users
   const banUserMutation = useMutation({
     mutationFn: ({ pubkey, reason }: { pubkey: string; reason?: string }) =>
-      callRelayAPI(relayUrl, 'banpubkey', [pubkey, reason]),
+      callRelayAPI('banpubkey', [pubkey, reason]),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['banned-users', relayUrl] });
+      queryClient.invalidateQueries({ queryKey: ['banned-users'] });
       toast({ title: "User banned successfully" });
       setIsAddDialogOpen(false);
       setNewPubkey("");
@@ -128,9 +93,9 @@ export function UserManagement({ relayUrl }: UserManagementProps) {
   // Mutation for allowing users
   const allowUserMutation = useMutation({
     mutationFn: ({ pubkey, reason }: { pubkey: string; reason?: string }) =>
-      callRelayAPI(relayUrl, 'allowpubkey', [pubkey, reason]),
+      callRelayAPI('allowpubkey', [pubkey, reason]),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['allowed-users', relayUrl] });
+      queryClient.invalidateQueries({ queryKey: ['allowed-users'] });
       toast({ title: "User allowed successfully" });
       setIsAddDialogOpen(false);
       setNewPubkey("");
@@ -188,16 +153,6 @@ export function UserManagement({ relayUrl }: UserManagementProps) {
       });
     }
   };
-
-  if (!user) {
-    return (
-      <Alert>
-        <AlertDescription>
-          Please log in to manage users.
-        </AlertDescription>
-      </Alert>
-    );
-  }
 
   return (
     <div className="space-y-6">
