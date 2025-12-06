@@ -7,6 +7,8 @@ interface Env {
   NOSTR_NSEC: string;
   RELAY_URL: string;
   ALLOWED_ORIGIN: string;
+  ANTHROPIC_API_KEY?: string;
+  KV?: KVNamespace;
 }
 
 interface UnsignedEvent {
@@ -56,6 +58,10 @@ export default {
 
       if (path === '/api/relay-rpc' && request.method === 'POST') {
         return handleRelayRpc(request, env, corsHeaders);
+      }
+
+      if (path === '/api/summarize-user' && request.method === 'POST') {
+        return handleSummarizeUser(request, env, corsHeaders);
       }
 
       // 404 for unknown routes
@@ -299,6 +305,118 @@ async function handleRelayRpc(
     status: 200,
     headers: { 'Content-Type': 'application/json', ...corsHeaders },
   });
+}
+
+async function handleSummarizeUser(
+  request: Request,
+  env: Env,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  try {
+    const body = await request.json() as {
+      pubkey: string;
+      recentPosts: Array<{ content: string; created_at: number }>;
+      existingLabels: Array<{ tags: string[][]; created_at: number }>;
+      reportHistory: Array<{ content: string; tags: string[][]; created_at: number }>;
+    };
+
+    // Check cache first
+    const cacheKey = `summary:${body.pubkey}`;
+    const cached = await env.KV?.get(cacheKey);
+    if (cached) {
+      return new Response(cached, {
+        headers: { 'Content-Type': 'application/json', ...corsHeaders },
+      });
+    }
+
+    // Build context for Claude
+    const postSummary = body.recentPosts
+      .map(p => `- "${p.content.slice(0, 200)}"`)
+      .join('\n');
+
+    const labelSummary = body.existingLabels
+      .map(l => {
+        const label = l.tags.find(t => t[0] === 'l')?.[1] || 'unknown';
+        return `- ${label}`;
+      })
+      .join('\n') || 'None';
+
+    const reportSummary = body.reportHistory
+      .map(r => {
+        const category = r.tags.find(t => t[0] === 'report')?.[1] || 'unknown';
+        return `- ${category}: ${r.content?.slice(0, 100) || 'no details'}`;
+      })
+      .join('\n') || 'None';
+
+    const prompt = `You are a trust & safety analyst. Analyze this Nostr user and provide a brief 2-3 sentence summary of their behavior patterns and risk level.
+
+Recent posts (${body.recentPosts.length} total):
+${postSummary}
+
+Existing moderation labels:
+${labelSummary}
+
+Previous reports against them:
+${reportSummary}
+
+Respond with JSON only:
+{
+  "summary": "2-3 sentence behavioral summary",
+  "riskLevel": "low|medium|high|critical"
+}`;
+
+    if (!env.ANTHROPIC_API_KEY) {
+      throw new Error('ANTHROPIC_API_KEY not configured');
+    }
+
+    const claudeResponse = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-3-haiku-20240307',
+        max_tokens: 256,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+
+    if (!claudeResponse.ok) {
+      throw new Error(`Claude API error: ${claudeResponse.status}`);
+    }
+
+    const claudeData = await claudeResponse.json() as {
+      content: Array<{ type: string; text: string }>;
+    };
+
+    const responseText = claudeData.content[0]?.text || '';
+    const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+
+    if (!jsonMatch) {
+      throw new Error('Invalid response format');
+    }
+
+    const result = JSON.parse(jsonMatch[0]);
+
+    // Cache for 1 hour
+    await env.KV?.put(cacheKey, JSON.stringify(result), { expirationTtl: 3600 });
+
+    return new Response(JSON.stringify(result), {
+      headers: { 'Content-Type': 'application/json', ...corsHeaders },
+    });
+  } catch (error) {
+    console.error('Summarize error:', error);
+    return new Response(JSON.stringify({
+      error: 'Failed to generate summary',
+      summary: 'Unable to analyze user behavior at this time.',
+      riskLevel: 'medium'
+    }), {
+      status: 200, // Return 200 with fallback to not break UI
+      headers: { 'Content-Type': 'application/json', ...corsHeaders },
+    });
+  }
 }
 
 async function publishToRelay(
