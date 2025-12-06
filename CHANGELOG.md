@@ -4,6 +4,46 @@ All notable changes to ManVRelay will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.0] - 2025-12-07
+
+### Added
+- **Split-pane Reports view** - Master-detail layout for efficient report review
+  - Left pane: consolidated report list grouped by target
+  - Right pane: full context detail view
+  - URL-synced selection for shareable links
+- **ReportDetail component** - Comprehensive context for moderation decisions
+  - Thread context showing ancestors of reported posts
+  - User profile with stats (posts, reports, labels)
+  - AI-generated behavioral summary with risk level
+  - Related reports across user's content
+  - Media preview with Hive AI moderation results
+  - Decision history showing past actions on target
+- **ThreadModal** - View full conversation thread in modal
+- **MediaPreview component** - Display images/videos from events
+- **HiveAIReport component** - Show AI content moderation scores
+- **AISummary component** - AI-generated user behavioral analysis
+- **Decision logging** - Track all moderation actions with timestamps
+- **Media moderation** - Block/unblock media via sha256 hash
+  - Combined "Block Media & Delete Event" action
+  - Verification of moderation success
+- **Moderation status hooks** - Check if users/events already handled
+- **EventDetail component** - Full event inspection with raw JSON
+- **UserIdentifier component** - Consistent pubkey/npub display
+- **Kind names database** - Human-readable names for all NIP event kinds
+
+### Changed
+- Reports now show truncated npub instead of fake generated names
+- Content properly wraps long URLs with `break-all`
+- Cards have `overflow-hidden` to prevent layout blowout
+- Hide resolved reports toggle (default on)
+
+### Removed
+- `genUserName` - removed fake "Adjective Animal" name generation
+
+### Fixed
+- Layout overflow issues in Reports detail panel
+- Long URLs breaking container widths
+
 ## [0.2.0] - 2025-12-05
 
 ### Added

@@ -89,7 +89,7 @@ export function AISummary({ summary, riskLevel, isLoading, error }: AISummaryPro
             {risk.label}
           </Badge>
         </div>
-        <p className="text-sm">{summary}</p>
+        <p className="text-sm break-words">{summary}</p>
       </CardContent>
     </Card>
   );

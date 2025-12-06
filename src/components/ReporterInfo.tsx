@@ -1,11 +1,13 @@
 // ABOUTME: Displays information about who submitted a report
 // ABOUTME: Shows reporter profile and their report history count
 
+import { nip19 } from "nostr-tools";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Flag, Star } from "lucide-react";
+import { useAuthor } from "@/hooks/useAuthor";
 import type { NostrMetadata } from "@nostrify/nostrify";
 
 interface ReporterInfoProps {
@@ -30,15 +32,27 @@ interface ReportedByProps {
 }
 
 export function ReportedBy({ pubkey, timestamp }: ReportedByProps) {
-  const displayName = pubkey.slice(0, 12) + '...';
+  const author = useAuthor(pubkey);
+  const metadata = author.data?.metadata;
+
+  // Convert to npub
+  let npub = "";
+  try {
+    npub = nip19.npubEncode(pubkey);
+  } catch {
+    npub = pubkey;
+  }
+
+  const displayName = metadata?.display_name || metadata?.name || `${npub.slice(0, 12)}...`;
   const date = new Date(timestamp * 1000);
 
   return (
     <div className="flex items-center gap-2 text-xs text-muted-foreground">
       <Avatar className="h-5 w-5">
+        <AvatarImage src={metadata?.picture} />
         <AvatarFallback className="text-xs">{displayName.slice(0, 2).toUpperCase()}</AvatarFallback>
       </Avatar>
-      <span className="font-mono">{displayName}</span>
+      <span className={metadata?.name ? "font-medium" : "font-mono"}>{displayName}</span>
       <span>•</span>
       <span>{date.toLocaleDateString()}</span>
     </div>
@@ -66,7 +80,15 @@ export function ReporterInfo({ profile, pubkey, reportCount, isLoading }: Report
     return null;
   }
 
-  const displayName = profile?.name || pubkey.slice(0, 12) + '...';
+  // Convert to npub
+  let npub = "";
+  try {
+    npub = nip19.npubEncode(pubkey);
+  } catch {
+    npub = pubkey;
+  }
+
+  const displayName = profile?.display_name || profile?.name || `${npub.slice(0, 12)}...`;
   const trust = getTrustLevel(reportCount);
 
   return (
@@ -80,8 +102,11 @@ export function ReporterInfo({ profile, pubkey, reportCount, isLoading }: Report
             <AvatarImage src={profile?.picture} />
             <AvatarFallback>{displayName.slice(0, 2).toUpperCase()}</AvatarFallback>
           </Avatar>
-          <div className="flex-1">
-            <p className="text-sm font-medium">{displayName}</p>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-medium truncate">{displayName}</p>
+            {profile?.nip05 && (
+              <p className="text-xs text-muted-foreground truncate">{profile.nip05}</p>
+            )}
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <span className="flex items-center gap-1">
                 <Flag className="h-3 w-3" />

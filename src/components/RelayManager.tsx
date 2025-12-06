@@ -1,6 +1,7 @@
 // ABOUTME: Main relay administration interface with tabs for events, users, reports, and labels
-// ABOUTME: Integrates all NIP-86 moderation tools into a unified dashboard
+// ABOUTME: Integrates all NIP-86 moderation tools into a unified dashboard with URL routing
 
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { EventsList } from "@/components/EventsList";
 import { UserManagement } from "@/components/UserManagement";
 import { Reports } from "@/components/Reports";
@@ -12,7 +13,28 @@ import { Server, FileText, Users, Settings, Flag, Tag } from "lucide-react";
 
 const RELAY_URL = "wss://relay.divine.video";
 
+// Map URL paths to tab values
+function getTabFromPath(pathname: string): string {
+  if (pathname.startsWith('/events')) return 'events';
+  if (pathname.startsWith('/users')) return 'users';
+  if (pathname.startsWith('/reports')) return 'reports';
+  if (pathname.startsWith('/labels')) return 'labels';
+  if (pathname.startsWith('/settings')) return 'settings';
+  return 'reports'; // default
+}
+
 export function RelayManager() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const params = useParams();
+
+  const currentTab = getTabFromPath(location.pathname);
+
+  // Handle tab changes - navigate to the new route
+  const handleTabChange = (value: string) => {
+    navigate(`/${value}`);
+  };
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800">
       {/* Header */}
@@ -36,7 +58,7 @@ export function RelayManager() {
       </header>
 
       <div className="container mx-auto px-4 py-8">
-        <Tabs defaultValue="events" className="space-y-6">
+        <Tabs value={currentTab} onValueChange={handleTabChange} className="space-y-6">
           <TabsList className="grid w-full grid-cols-5">
             <TabsTrigger value="events" className="flex items-center space-x-2">
               <FileText className="h-4 w-4" />
@@ -65,11 +87,11 @@ export function RelayManager() {
           </TabsContent>
 
           <TabsContent value="users">
-            <UserManagement relayUrl={RELAY_URL} />
+            <UserManagement relayUrl={RELAY_URL} selectedPubkey={params.pubkey} />
           </TabsContent>
 
           <TabsContent value="reports">
-            <Reports relayUrl={RELAY_URL} />
+            <Reports relayUrl={RELAY_URL} selectedReportId={params.reportId} />
           </TabsContent>
 
           <TabsContent value="labels">

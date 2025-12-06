@@ -1,44 +1,45 @@
-// ABOUTME: Displays kind 1984 reports with split-pane layout
-// ABOUTME: List on left, full context detail view on right
+// ABOUTME: Displays kind 1984 reports with split-pane layout and consolidation
+// ABOUTME: Groups multiple reports on same target, shows count and all reporters
 
-import { useState } from "react";
+import { useState, useMemo, useEffect } from "react";
+import { nip19 } from "nostr-tools";
 import { useQuery } from "@tanstack/react-query";
 import { useNostr } from "@nostrify/react";
+import { useNavigate } from "react-router-dom";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Flag, RefreshCw, Clock } from "lucide-react";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
+import { Flag, RefreshCw, Clock, Users, Layers, CheckCircle } from "lucide-react";
 import { ReportDetail } from "@/components/ReportDetail";
+import { UserDisplayName } from "@/components/UserIdentifier";
+import { listBannedPubkeys, listBannedEvents } from "@/lib/adminApi";
+import { CATEGORY_LABELS } from "@/lib/constants";
 import type { NostrEvent } from "@nostrify/nostrify";
 
 interface ReportsProps {
   relayUrl: string;
+  selectedReportId?: string;
 }
 
-// DTSP category display names
-const CATEGORY_LABELS: Record<string, string> = {
-  'sexual_minors': 'CSAM',
-  'nonconsensual_sexual_content': 'Non-consensual',
-  'credible_threats': 'Threats',
-  'doxxing_pii': 'Doxxing/PII',
-  'terrorism_extremism': 'Terrorism',
-  'malware_scam': 'Malware/Scam',
-  'illegal_goods': 'Illegal Goods',
-  'hate_harassment': 'Hate/Harassment',
-  'self_harm_suicide': 'Self-harm',
-  'graphic_violence_gore': 'Violence/Gore',
-  'bullying_abuse': 'Bullying',
-  'adult_nudity': 'Nudity',
-  'explicit_sex': 'Explicit',
-  'pornography': 'Pornography',
-  'spam': 'Spam',
-  'impersonation': 'Impersonation',
-  'copyright': 'Copyright',
-  'other': 'Other',
-};
+interface ReportTarget {
+  type: 'event' | 'pubkey';
+  value: string;
+}
+
+interface ConsolidatedReport {
+  target: ReportTarget;
+  reports: NostrEvent[];
+  categories: string[];
+  reporters: string[];
+  latestReport: NostrEvent;
+  oldestReport: NostrEvent;
+}
 
 function getReportCategory(event: NostrEvent): string {
   const reportTag = event.tags.find(t => t[0] === 'report');
@@ -48,7 +49,7 @@ function getReportCategory(event: NostrEvent): string {
   return 'other';
 }
 
-function getReportTarget(event: NostrEvent): { type: 'event' | 'pubkey'; value: string } | null {
+function getReportTarget(event: NostrEvent): ReportTarget | null {
   const eTag = event.tags.find(t => t[0] === 'e');
   if (eTag) return { type: 'event', value: eTag[1] };
   const pTag = event.tags.find(t => t[0] === 'p');
@@ -56,10 +57,135 @@ function getReportTarget(event: NostrEvent): { type: 'event' | 'pubkey'; value: 
   return null;
 }
 
-function ReportListItem({
+function consolidateReports(reports: NostrEvent[]): ConsolidatedReport[] {
+  const byTarget = new Map<string, ConsolidatedReport>();
+
+  for (const report of reports) {
+    const target = getReportTarget(report);
+    if (!target) continue;
+
+    const key = `${target.type}:${target.value}`;
+    const category = getReportCategory(report);
+
+    if (!byTarget.has(key)) {
+      byTarget.set(key, {
+        target,
+        reports: [],
+        categories: [],
+        reporters: [],
+        latestReport: report,
+        oldestReport: report,
+      });
+    }
+
+    const consolidated = byTarget.get(key)!;
+    consolidated.reports.push(report);
+
+    if (!consolidated.categories.includes(category)) {
+      consolidated.categories.push(category);
+    }
+
+    if (!consolidated.reporters.includes(report.pubkey)) {
+      consolidated.reporters.push(report.pubkey);
+    }
+
+    if (report.created_at > consolidated.latestReport.created_at) {
+      consolidated.latestReport = report;
+    }
+    if (report.created_at < consolidated.oldestReport.created_at) {
+      consolidated.oldestReport = report;
+    }
+  }
+
+  // Sort by number of reports (most reported first), then by latest report date
+  return Array.from(byTarget.values()).sort((a, b) => {
+    if (b.reports.length !== a.reports.length) {
+      return b.reports.length - a.reports.length;
+    }
+    return b.latestReport.created_at - a.latestReport.created_at;
+  });
+}
+
+function ConsolidatedReportItem({
+  consolidated,
+  isSelected,
+  onClick,
+}: {
+  consolidated: ConsolidatedReport;
+  isSelected: boolean;
+  onClick: () => void;
+}) {
+  const reportCount = consolidated.reports.length;
+  const reporterCount = consolidated.reporters.length;
+  const primaryCategory = consolidated.categories[0];
+  const categoryLabel = CATEGORY_LABELS[primaryCategory] || primaryCategory;
+
+  return (
+    <div
+      className={`p-3 border rounded-lg cursor-pointer transition-colors ${
+        isSelected
+          ? 'border-primary bg-primary/5 ring-1 ring-primary'
+          : 'hover:bg-muted/50'
+      }`}
+      onClick={onClick}
+    >
+      <div className="space-y-2">
+        <div className="flex items-start justify-between gap-2">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <Badge variant="outline" className="text-xs">{categoryLabel}</Badge>
+            {consolidated.categories.length > 1 && (
+              <Badge variant="outline" className="text-xs">
+                +{consolidated.categories.length - 1} more
+              </Badge>
+            )}
+            <Badge variant="secondary" className="text-xs">
+              {consolidated.target.type === 'event' ? 'Event' : 'User'}
+            </Badge>
+          </div>
+          <div className="flex items-center gap-1 text-xs text-muted-foreground shrink-0">
+            <Clock className="h-3 w-3" />
+            {new Date(consolidated.latestReport.created_at * 1000).toLocaleDateString()}
+          </div>
+        </div>
+
+        {/* Report stats */}
+        <div className="flex items-center gap-3 text-xs">
+          <span className={`flex items-center gap-1 font-medium ${reportCount > 5 ? 'text-red-600' : reportCount > 2 ? 'text-orange-600' : 'text-muted-foreground'}`}>
+            <Flag className="h-3 w-3" />
+            {reportCount} report{reportCount !== 1 ? 's' : ''}
+          </span>
+          <span className="flex items-center gap-1 text-muted-foreground">
+            <Users className="h-3 w-3" />
+            {reporterCount} reporter{reporterCount !== 1 ? 's' : ''}
+          </span>
+        </div>
+
+        {/* Target ID - show name for users, note ID for events */}
+        {consolidated.target.type === 'pubkey' ? (
+          <div className="text-xs text-muted-foreground truncate">
+            <UserDisplayName pubkey={consolidated.target.value} fallbackLength={16} />
+          </div>
+        ) : (
+          <p className="text-xs text-muted-foreground font-mono truncate">
+            {(() => {
+              try {
+                const noteId = nip19.noteEncode(consolidated.target.value);
+                return `${noteId.slice(0, 16)}...`;
+              } catch {
+                return `${consolidated.target.value.slice(0, 16)}...`;
+              }
+            })()}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function IndividualReportItem({
   report,
   isSelected,
-  onClick
+  onClick,
 }: {
   report: NostrEvent;
   isSelected: boolean;
@@ -78,8 +204,8 @@ function ReportListItem({
       }`}
       onClick={onClick}
     >
-      <div className="flex items-start justify-between gap-2">
-        <div className="space-y-1 min-w-0">
+      <div className="space-y-2">
+        <div className="flex items-start justify-between gap-2">
           <div className="flex items-center gap-1.5 flex-wrap">
             <Badge variant="outline" className="text-xs">{categoryLabel}</Badge>
             {target && (
@@ -88,35 +214,162 @@ function ReportListItem({
               </Badge>
             )}
           </div>
-          {target && (
+          <div className="flex items-center gap-1 text-xs text-muted-foreground shrink-0">
+            <Clock className="h-3 w-3" />
+            {new Date(report.created_at * 1000).toLocaleDateString()}
+          </div>
+        </div>
+        {target && (
+          target.type === 'pubkey' ? (
+            <div className="text-xs text-muted-foreground truncate">
+              <UserDisplayName pubkey={target.value} fallbackLength={16} />
+            </div>
+          ) : (
             <p className="text-xs text-muted-foreground font-mono truncate">
-              {target.value.slice(0, 16)}...
+              {(() => {
+                try {
+                  const noteId = nip19.noteEncode(target.value);
+                  return `${noteId.slice(0, 16)}...`;
+                } catch {
+                  return `${target.value.slice(0, 16)}...`;
+                }
+              })()}
             </p>
-          )}
-        </div>
-        <div className="flex items-center gap-1 text-xs text-muted-foreground shrink-0">
-          <Clock className="h-3 w-3" />
-          {new Date(report.created_at * 1000).toLocaleDateString()}
-        </div>
+          )
+        )}
       </div>
     </div>
   );
 }
 
-export function Reports({ relayUrl }: ReportsProps) {
+export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const { nostr } = useNostr();
+  const navigate = useNavigate();
   const [selectedReport, setSelectedReport] = useState<NostrEvent | null>(null);
+  const [viewMode, setViewMode] = useState<'consolidated' | 'individual'>('consolidated');
+  const [hideResolved, setHideResolved] = useState(true);
 
   const { data: reports, isLoading, error, refetch, isFetching } = useQuery({
     queryKey: ['reports', relayUrl],
     queryFn: async ({ signal }) => {
       const events = await nostr.query(
-        [{ kinds: [1984], limit: 100 }],
+        [{ kinds: [1984], limit: 200 }],
         { signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]) }
       );
       return events.sort((a, b) => b.created_at - a.created_at);
     },
   });
+
+  // Query for resolution labels (kind 1985 with moderation/resolution namespace)
+  const { data: resolutionLabels } = useQuery({
+    queryKey: ['resolution-labels', relayUrl],
+    queryFn: async ({ signal }) => {
+      const events = await nostr.query(
+        [{ kinds: [1985], '#L': ['moderation/resolution'], limit: 500 }],
+        { signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]) }
+      );
+      return events;
+    },
+  });
+
+  // Query banned pubkeys from relay
+  const { data: bannedPubkeys } = useQuery({
+    queryKey: ['banned-pubkeys'],
+    queryFn: async () => {
+      try {
+        return await listBannedPubkeys();
+      } catch {
+        return [];
+      }
+    },
+    staleTime: 30 * 1000,
+  });
+
+  // Query banned/deleted events from relay
+  const { data: bannedEvents } = useQuery({
+    queryKey: ['banned-events'],
+    queryFn: async () => {
+      try {
+        return await listBannedEvents();
+      } catch {
+        return [];
+      }
+    },
+    staleTime: 30 * 1000,
+  });
+
+  // Build set of resolved target keys (from labels, bans, and deletions)
+  const resolvedTargets = useMemo(() => {
+    const resolved = new Set<string>();
+
+    // Add from resolution labels
+    if (resolutionLabels) {
+      for (const label of resolutionLabels) {
+        const eTag = label.tags.find(t => t[0] === 'e');
+        if (eTag) resolved.add(`event:${eTag[1]}`);
+        const pTag = label.tags.find(t => t[0] === 'p');
+        if (pTag) resolved.add(`pubkey:${pTag[1]}`);
+      }
+    }
+
+    // Add banned pubkeys
+    if (bannedPubkeys) {
+      for (const pubkey of bannedPubkeys) {
+        resolved.add(`pubkey:${pubkey}`);
+      }
+    }
+
+    // Add deleted events
+    if (bannedEvents) {
+      for (const event of bannedEvents) {
+        resolved.add(`event:${event.id}`);
+      }
+    }
+
+    return resolved;
+  }, [resolutionLabels, bannedPubkeys, bannedEvents]);
+
+  const consolidated = useMemo(() => {
+    if (!reports) return [];
+    let items = consolidateReports(reports);
+
+    // Filter out resolved if toggle is on
+    if (hideResolved) {
+      items = items.filter(c => !resolvedTargets.has(`${c.target.type}:${c.target.value}`));
+    }
+
+    return items;
+  }, [reports, hideResolved, resolvedTargets]);
+
+  const allConsolidated = useMemo(() => {
+    if (!reports) return [];
+    return consolidateReports(reports);
+  }, [reports]);
+
+  const uniqueTargets = consolidated.length;
+  const totalTargets = allConsolidated.length;
+  const totalReports = reports?.length || 0;
+  const resolvedCount = totalTargets - uniqueTargets;
+
+  // Sync selected report with URL
+  useEffect(() => {
+    if (selectedReportId && reports && !selectedReport) {
+      const report = reports.find(r => r.id === selectedReportId);
+      if (report) {
+        setSelectedReport(report);
+      }
+    }
+  }, [selectedReportId, reports, selectedReport]);
+
+  // Update URL when report selection changes
+  const handleSelectReport = (report: NostrEvent | null) => {
+    setSelectedReport(report);
+    if (report) {
+      navigate(`/reports/${report.id}`, { replace: true });
+    } else {
+      navigate('/reports', { replace: true });
+    }
+  };
 
   if (isLoading) {
     return (
@@ -124,7 +377,7 @@ export function Reports({ relayUrl }: ReportsProps) {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Flag className="h-5 w-5" />
-            User Reports
+            Reports
           </CardTitle>
         </CardHeader>
         <CardContent>
@@ -160,7 +413,9 @@ export function Reports({ relayUrl }: ReportsProps) {
                 Reports
               </CardTitle>
               <CardDescription>
-                {reports?.length || 0} reports
+                {uniqueTargets} pending{resolvedCount > 0 && hideResolved && (
+                  <span className="text-green-600"> ({resolvedCount} resolved)</span>
+                )}
               </CardDescription>
             </div>
             <Button
@@ -172,24 +427,69 @@ export function Reports({ relayUrl }: ReportsProps) {
               <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
             </Button>
           </div>
+
+          {/* View mode toggle */}
+          <Tabs value={viewMode} onValueChange={(v) => setViewMode(v as 'consolidated' | 'individual')} className="mt-2">
+            <TabsList className="grid w-full grid-cols-2">
+              <TabsTrigger value="consolidated" className="text-xs">
+                <Layers className="h-3 w-3 mr-1" />
+                Grouped ({uniqueTargets})
+              </TabsTrigger>
+              <TabsTrigger value="individual" className="text-xs">
+                <Flag className="h-3 w-3 mr-1" />
+                All ({totalReports})
+              </TabsTrigger>
+            </TabsList>
+          </Tabs>
+
+          {/* Hide resolved toggle */}
+          <div className="flex items-center justify-between mt-3 pt-2 border-t">
+            <Label htmlFor="hide-resolved" className="text-xs text-muted-foreground flex items-center gap-1.5">
+              <CheckCircle className="h-3 w-3 text-green-500" />
+              Hide resolved
+            </Label>
+            <Switch
+              id="hide-resolved"
+              checked={hideResolved}
+              onCheckedChange={setHideResolved}
+            />
+          </div>
         </CardHeader>
         <CardContent className="p-0">
-          <ScrollArea className="h-[calc(100vh-320px)]">
+          <ScrollArea className="h-[calc(100vh-380px)]">
             <div className="space-y-2 p-4 pt-0">
-              {!reports || reports.length === 0 ? (
-                <div className="text-center py-8 text-muted-foreground">
-                  <Flag className="h-8 w-8 mx-auto mb-2 opacity-50" />
-                  <p className="text-sm">No reports found</p>
-                </div>
+              {viewMode === 'consolidated' ? (
+                !consolidated || consolidated.length === 0 ? (
+                  <div className="text-center py-8 text-muted-foreground">
+                    <Flag className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                    <p className="text-sm">No reports found</p>
+                  </div>
+                ) : (
+                  consolidated.map((item) => (
+                    <ConsolidatedReportItem
+                      key={`${item.target.type}:${item.target.value}`}
+                      consolidated={item}
+                      isSelected={selectedReport?.id === item.latestReport.id}
+                      onClick={() => handleSelectReport(item.latestReport)}
+                    />
+                  ))
+                )
               ) : (
-                reports.map((report) => (
-                  <ReportListItem
-                    key={report.id}
-                    report={report}
-                    isSelected={selectedReport?.id === report.id}
-                    onClick={() => setSelectedReport(report)}
-                  />
-                ))
+                !reports || reports.length === 0 ? (
+                  <div className="text-center py-8 text-muted-foreground">
+                    <Flag className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                    <p className="text-sm">No reports found</p>
+                  </div>
+                ) : (
+                  reports.map((report) => (
+                    <IndividualReportItem
+                      key={report.id}
+                      report={report}
+                      isSelected={selectedReport?.id === report.id}
+                      onClick={() => handleSelectReport(report)}
+                    />
+                  ))
+                )
               )}
             </div>
           </ScrollArea>
@@ -200,7 +500,15 @@ export function Reports({ relayUrl }: ReportsProps) {
       <Card className="lg:col-span-3 overflow-hidden">
         <ReportDetail
           report={selectedReport}
-          onDismiss={() => setSelectedReport(null)}
+          allReportsForTarget={
+            selectedReport
+              ? consolidated.find(c =>
+                  c.reports.some(r => r.id === selectedReport.id)
+                )?.reports
+              : undefined
+          }
+          allReports={reports || []}
+          onDismiss={() => handleSelectReport(null)}
         />
       </Card>
     </div>

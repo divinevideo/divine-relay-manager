@@ -12,7 +12,7 @@ import {
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar.tsx';
 import { RelaySelector } from '@/components/RelaySelector';
 import { useLoggedInAccounts, type Account } from '@/hooks/useLoggedInAccounts';
-import { genUserName } from '@/lib/genUserName';
+import { nip19 } from 'nostr-tools';
 
 interface AccountSwitcherProps {
   onAddAccountClick: () => void;
@@ -24,7 +24,7 @@ export function AccountSwitcher({ onAddAccountClick }: AccountSwitcherProps) {
   if (!currentUser) return null;
 
   const getDisplayName = (account: Account): string => {
-    return account.metadata.name ?? genUserName(account.pubkey);
+    return account.metadata.name ?? nip19.npubEncode(account.pubkey).slice(0, 12) + '...';
   }
 
   return (

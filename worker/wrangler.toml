@@ -15,3 +15,9 @@ routes = [
 [vars]
 RELAY_URL = "wss://relay.divine.video"
 ALLOWED_ORIGIN = "https://relay.admin.divine.video"
+
+# D1 Database for moderation decision log
+[[d1_databases]]
+binding = "DB"
+database_name = "blossom-webhook-events"
+database_id = "829f06cf-294b-4491-8611-30fc53df2589"

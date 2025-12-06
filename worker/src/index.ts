@@ -8,8 +8,15 @@ interface Env {
   RELAY_URL: string;
   ALLOWED_ORIGIN: string;
   ANTHROPIC_API_KEY?: string;
+  MODERATION_API_KEY?: string;
+  // Cloudflare Access Service Token for moderation.admin.divine.video
+  CF_ACCESS_CLIENT_ID?: string;
+  CF_ACCESS_CLIENT_SECRET?: string;
   KV?: KVNamespace;
+  DB?: D1Database;
 }
+
+const MODERATION_SERVICE_URL = 'https://moderation.admin.divine.video';
 
 interface UnsignedEvent {
   kind: number;
@@ -62,6 +69,24 @@ export default {
 
       if (path === '/api/summarize-user' && request.method === 'POST') {
         return handleSummarizeUser(request, env, corsHeaders);
+      }
+
+      if (path === '/api/moderate-media' && request.method === 'POST') {
+        return handleModerateMedia(request, env, corsHeaders);
+      }
+
+      if (path === '/api/decisions' && request.method === 'POST') {
+        return handleLogDecision(request, env, corsHeaders);
+      }
+
+      if (path.startsWith('/api/decisions/') && request.method === 'GET') {
+        const targetId = path.replace('/api/decisions/', '');
+        return handleGetDecisions(targetId, env, corsHeaders);
+      }
+
+      if (path.startsWith('/api/check-result/') && request.method === 'GET') {
+        const sha256 = path.replace('/api/check-result/', '');
+        return handleCheckResult(sha256, env, corsHeaders);
       }
 
       // 404 for unknown routes
@@ -416,6 +441,249 @@ Respond with JSON only:
       status: 200, // Return 200 with fallback to not break UI
       headers: { 'Content-Type': 'application/json', ...corsHeaders },
     });
+  }
+}
+
+// Ensure moderation_decisions table exists
+async function ensureDecisionsTable(db: D1Database): Promise<void> {
+  // Run each statement separately to avoid issues with D1's exec
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS moderation_decisions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      target_type TEXT NOT NULL,
+      target_id TEXT NOT NULL,
+      action TEXT NOT NULL,
+      reason TEXT,
+      moderator_pubkey TEXT,
+      report_id TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+
+  // Create indexes in separate statements
+  try {
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_decisions_target ON moderation_decisions(target_type, target_id)`).run();
+  } catch {
+    // Index might already exist
+  }
+
+  try {
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_decisions_report ON moderation_decisions(report_id)`).run();
+  } catch {
+    // Index might already exist
+  }
+}
+
+async function handleLogDecision(
+  request: Request,
+  env: Env,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  try {
+    if (!env.DB) {
+      return jsonResponse({ success: false, error: 'Database not configured' }, 500, corsHeaders);
+    }
+
+    const body = await request.json() as {
+      targetType: 'event' | 'pubkey' | 'media';
+      targetId: string;
+      action: string;
+      reason?: string;
+      moderatorPubkey?: string;
+      reportId?: string;
+    };
+
+    if (!body.targetType || !body.targetId || !body.action) {
+      return jsonResponse({ success: false, error: 'Missing required fields' }, 400, corsHeaders);
+    }
+
+    await ensureDecisionsTable(env.DB);
+
+    await env.DB.prepare(`
+      INSERT INTO moderation_decisions (target_type, target_id, action, reason, moderator_pubkey, report_id)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).bind(
+      body.targetType,
+      body.targetId,
+      body.action,
+      body.reason || null,
+      body.moderatorPubkey || null,
+      body.reportId || null
+    ).run();
+
+    return new Response(JSON.stringify({ success: true }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders },
+    });
+  } catch (error) {
+    console.error('Log decision error:', error);
+    return jsonResponse(
+      { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+      500,
+      corsHeaders
+    );
+  }
+}
+
+async function handleGetDecisions(
+  targetId: string,
+  env: Env,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  try {
+    if (!env.DB) {
+      return jsonResponse({ success: false, error: 'Database not configured' }, 500, corsHeaders);
+    }
+
+    await ensureDecisionsTable(env.DB);
+
+    // Get all decisions for this target (could be event ID, pubkey, or media hash)
+    const decisions = await env.DB.prepare(`
+      SELECT * FROM moderation_decisions
+      WHERE target_id = ?
+      ORDER BY created_at DESC
+    `).bind(targetId).all();
+
+    return new Response(JSON.stringify({
+      success: true,
+      decisions: decisions.results || [],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders },
+    });
+  } catch (error) {
+    console.error('Get decisions error:', error);
+    return jsonResponse(
+      { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+      500,
+      corsHeaders
+    );
+  }
+}
+
+async function handleCheckResult(
+  sha256: string,
+  env: Env,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  try {
+    if (!sha256 || !/^[a-f0-9]{64}$/i.test(sha256)) {
+      return jsonResponse({ success: false, error: 'Invalid sha256' }, 400, corsHeaders);
+    }
+
+    // Build headers including Cloudflare Access service token if available
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+
+    if (env.CF_ACCESS_CLIENT_ID && env.CF_ACCESS_CLIENT_SECRET) {
+      headers['CF-Access-Client-Id'] = env.CF_ACCESS_CLIENT_ID;
+      headers['CF-Access-Client-Secret'] = env.CF_ACCESS_CLIENT_SECRET;
+    }
+
+    const response = await fetch(`${MODERATION_SERVICE_URL}/check-result/${sha256}`, {
+      method: 'GET',
+      headers,
+    });
+
+    if (!response.ok) {
+      if (response.status === 404) {
+        return new Response(JSON.stringify(null), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders },
+        });
+      }
+      return jsonResponse(
+        { success: false, error: `Moderation service error: ${response.status}` },
+        response.status,
+        corsHeaders
+      );
+    }
+
+    const result = await response.json();
+    return new Response(JSON.stringify(result), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders },
+    });
+  } catch (error) {
+    console.error('Check result error:', error);
+    return jsonResponse(
+      { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+      500,
+      corsHeaders
+    );
+  }
+}
+
+async function handleModerateMedia(
+  request: Request,
+  env: Env,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  try {
+    const body = await request.json() as {
+      sha256: string;
+      action: 'SAFE' | 'REVIEW' | 'AGE_RESTRICTED' | 'PERMANENT_BAN';
+      reason?: string;
+    };
+
+    if (!body.sha256) {
+      return jsonResponse({ success: false, error: 'Missing sha256' }, 400, corsHeaders);
+    }
+
+    if (!body.action) {
+      return jsonResponse({ success: false, error: 'Missing action' }, 400, corsHeaders);
+    }
+
+    if (!env.MODERATION_API_KEY) {
+      return jsonResponse({ success: false, error: 'MODERATION_API_KEY not configured' }, 500, corsHeaders);
+    }
+
+    // Build headers including Cloudflare Access service token if available
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'X-API-Key': env.MODERATION_API_KEY,
+    };
+
+    // Add Cloudflare Access headers if configured
+    if (env.CF_ACCESS_CLIENT_ID && env.CF_ACCESS_CLIENT_SECRET) {
+      headers['CF-Access-Client-Id'] = env.CF_ACCESS_CLIENT_ID;
+      headers['CF-Access-Client-Secret'] = env.CF_ACCESS_CLIENT_SECRET;
+    }
+
+    const response = await fetch(`${MODERATION_SERVICE_URL}/api/v1/moderate`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        sha256: body.sha256,
+        action: body.action,
+        reason: body.reason || 'Moderated via Divine Relay Admin',
+        source: 'relay-manager',
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      return jsonResponse(
+        { success: false, error: `Moderation service error: ${response.status} - ${errorText}` },
+        response.status,
+        corsHeaders
+      );
+    }
+
+    const result = await response.json() as { success: boolean; sha256: string; action: string };
+
+    return new Response(JSON.stringify({ success: true, result }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders },
+    });
+  } catch (error) {
+    console.error('Moderate media error:', error);
+    return jsonResponse(
+      { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+      500,
+      corsHeaders
+    );
   }
 }
 

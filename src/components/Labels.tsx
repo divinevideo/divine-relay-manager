@@ -21,14 +21,15 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Tag, UserX, Clock, Filter, ChevronDown, ChevronRight, Eye } from "lucide-react";
+import { Tag, UserX, Clock, Filter, ChevronDown, ChevronRight, Eye, FileText, Flag } from "lucide-react";
 import { useToast } from "@/hooks/useToast";
+import { useUserStats } from "@/hooks/useUserStats";
 import { banPubkey } from "@/lib/adminApi";
 import { LabelPublisher } from "@/components/LabelPublisher";
 import { EventContentPreview } from "@/components/EventContentPreview";
 import { UserProfilePreview } from "@/components/UserProfilePreview";
 import { ReportedBy } from "@/components/ReporterInfo";
-import { HiveAIReport } from "@/components/HiveAIReport";
+import { UserIdentifier } from "@/components/UserIdentifier";
 import type { NostrEvent } from "@nostrify/nostrify";
 
 interface LabelsProps {
@@ -201,15 +202,37 @@ export function Labels({ relayUrl }: LabelsProps) {
     <div className="space-y-6">
       {/* Ban Confirmation Dialog */}
       <AlertDialog open={!!confirmBan} onOpenChange={() => setConfirmBan(null)}>
-        <AlertDialogContent>
+        <AlertDialogContent className="max-w-md">
           <AlertDialogHeader>
             <AlertDialogTitle>Ban User?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This will permanently ban this user from the relay.
-              <br />
-              <code className="text-xs bg-muted px-1 py-0.5 rounded mt-2 inline-block">
-                {confirmBan?.pubkey.slice(0, 24)}...
-              </code>
+            <AlertDialogDescription asChild>
+              <div className="space-y-3">
+                <p>This will permanently ban this user from the relay.</p>
+
+                {confirmBan?.pubkey && (
+                  <>
+                    {/* User Identifier */}
+                    <div className="bg-muted px-3 py-2 rounded">
+                      <UserIdentifier
+                        pubkey={confirmBan.pubkey}
+                        showAvatar
+                        avatarSize="md"
+                        variant="block"
+                      />
+                    </div>
+
+                    {/* Labeled for */}
+                    {confirmBan.reason && (
+                      <div className="p-2 bg-amber-500/10 border border-amber-500/20 rounded text-xs">
+                        <span className="font-medium text-amber-700 dark:text-amber-400">
+                          <Tag className="h-3 w-3 inline mr-1" />
+                          Labeled as: {confirmBan.reason}
+                        </span>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -357,12 +380,6 @@ export function Labels({ relayUrl }: LabelsProps) {
                               {target.type === 'pubkey' && (
                                 <UserProfilePreview pubkey={target.value} />
                               )}
-
-                              {/* Hive AI / AI Moderation Results */}
-                              <HiveAIReport
-                                targetType={target.type}
-                                targetValue={target.value}
-                              />
                             </CollapsibleContent>
                           </Collapsible>
                         )}

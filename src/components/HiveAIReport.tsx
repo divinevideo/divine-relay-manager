@@ -1,251 +1,260 @@
-// ABOUTME: Displays Hive AI moderation results and other AI-based content analysis
-// ABOUTME: Shows confidence scores and classification categories from AI services
+// ABOUTME: Displays Hive AI moderation results from the divine-moderation-service
+// ABOUTME: Shows confidence scores and classification categories from video/image analysis
 
 import { useQuery } from "@tanstack/react-query";
-import { useNostr } from "@nostrify/react";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Bot, AlertTriangle, Shield, CheckCircle } from "lucide-react";
-import type { NostrEvent } from "@nostrify/nostrify";
+import { Bot, AlertTriangle, ShieldCheck, ShieldAlert, ShieldX, Eye } from "lucide-react";
+
+// Worker URL - proxies requests to moderation service with CF Access credentials
+const WORKER_URL = import.meta.env.VITE_WORKER_URL || 'https://divine-relay-admin-api.divine-video.workers.dev';
 
 interface HiveAIReportProps {
-  targetType: 'event' | 'pubkey';
-  targetValue: string;
+  sha256?: string;
+  eventTags?: string[][];
   className?: string;
 }
 
-// Known AI moderation label namespaces
-const AI_NAMESPACES = [
-  'hive.ai',
-  'hive',
-  'ai-moderation',
-  'NS-ai-generated',
-  'ai-generated',
-  'content-moderation',
-  'divine.video/moderation',
-  'nostr.watch/moderation',
-];
+interface ModerationResult {
+  action: 'SAFE' | 'REVIEW' | 'AGE_RESTRICTED' | 'PERMANENT_BAN' | 'FLAGGED' | 'QUARANTINE';
+  scores: {
+    nudity?: number;
+    violence?: number;
+    gore?: number;
+    offensive?: number;
+    weapon?: number;
+    self_harm?: number;
+    recreational_drug?: number;
+    alcohol?: number;
+    tobacco?: number;
+    ai_generated?: number;
+    deepfake?: number;
+    medical?: number;
+    gambling?: number;
+  };
+  category?: string;
+  reason?: string;
+  processedAt?: string;
+  categoryVerifications?: Record<string, 'confirmed' | 'rejected' | null>;
+}
 
-// Category severity levels for display
-const CATEGORY_SEVERITY: Record<string, 'low' | 'medium' | 'high' | 'critical'> = {
-  'ai-generated': 'low',
-  'aiGenerated': 'low',
-  'spam': 'medium',
-  'nsfw': 'medium',
-  'adult': 'medium',
-  'nudity': 'medium',
-  'sexual': 'high',
-  'violence': 'high',
-  'hate': 'high',
-  'harassment': 'medium',
-  'csam': 'critical',
-  'illegal': 'critical',
-  'terrorism': 'critical',
-};
-
-function getSeverityColor(severity: string): string {
-  switch (severity) {
-    case 'low': return 'bg-blue-500';
-    case 'medium': return 'bg-yellow-500';
-    case 'high': return 'bg-orange-500';
-    case 'critical': return 'bg-red-600';
-    default: return 'bg-gray-500';
+// Extract sha256 from event tags (x tag, imeta, or URL patterns)
+function extractSha256FromTags(tags: string[][]): string | null {
+  // Check for 'x' tag (file hash)
+  const xTag = tags.find(t => t[0] === 'x');
+  if (xTag?.[1] && /^[a-f0-9]{64}$/i.test(xTag[1])) {
+    return xTag[1].toLowerCase();
   }
-}
 
-function getSeverityForCategory(category: string): 'low' | 'medium' | 'high' | 'critical' {
-  const lowerCategory = category.toLowerCase();
-  for (const [key, severity] of Object.entries(CATEGORY_SEVERITY)) {
-    if (lowerCategory.includes(key.toLowerCase())) {
-      return severity;
-    }
-  }
-  return 'medium';
-}
-
-interface AIClassification {
-  label: string;
-  namespace: string;
-  confidence?: number;
-  source: string;
-  timestamp: number;
-}
-
-function extractAIClassifications(labels: NostrEvent[]): AIClassification[] {
-  const classifications: AIClassification[] = [];
-
-  for (const event of labels) {
-    const namespace = event.tags.find(t => t[0] === 'L')?.[1] || '';
-
-    // Check if this is from an AI namespace
-    const isAILabel = AI_NAMESPACES.some(ns =>
-      namespace.toLowerCase().includes(ns.toLowerCase())
-    );
-
-    if (!isAILabel) continue;
-
-    // Extract all labels
-    const labelTags = event.tags.filter(t => t[0] === 'l');
-    for (const tag of labelTags) {
-      const label = tag[1];
-      const labelNamespace = tag[2] || namespace;
-
-      // Try to extract confidence from tag or content
-      let confidence: number | undefined;
-      if (tag[3]) {
-        const parsed = parseFloat(tag[3]);
-        if (!isNaN(parsed)) confidence = parsed;
-      }
-
-      // Try to parse confidence from content if JSON
-      if (!confidence && event.content) {
-        try {
-          const parsed = JSON.parse(event.content);
-          if (parsed.confidence !== undefined) {
-            confidence = parsed.confidence;
+  // Check imeta tags for sha256
+  for (const tag of tags) {
+    if (tag[0] === 'imeta') {
+      for (let i = 1; i < tag.length; i++) {
+        const part = tag[i];
+        if (part.startsWith('x ')) {
+          const hash = part.slice(2);
+          if (/^[a-f0-9]{64}$/i.test(hash)) {
+            return hash.toLowerCase();
           }
-          if (parsed.score !== undefined) {
-            confidence = parsed.score;
-          }
-        } catch {
-          // Not JSON, ignore
         }
       }
-
-      classifications.push({
-        label,
-        namespace: labelNamespace,
-        confidence,
-        source: event.pubkey,
-        timestamp: event.created_at,
-      });
     }
   }
 
-  return classifications;
+  // Check URLs for sha256 patterns (divine.video URLs often include hash)
+  for (const tag of tags) {
+    if (tag[0] === 'url' || tag[0] === 'imeta') {
+      const urlMatch = tag.join(' ').match(/([a-f0-9]{64})/i);
+      if (urlMatch) {
+        return urlMatch[1].toLowerCase();
+      }
+    }
+  }
+
+  return null;
 }
 
-export function HiveAIReport({ targetType, targetValue, className }: HiveAIReportProps) {
-  const { nostr } = useNostr();
+// Category display configuration
+const CATEGORY_CONFIG: Record<string, { label: string; color: string; severity: number }> = {
+  nudity: { label: 'Nudity', color: 'bg-orange-500', severity: 2 },
+  violence: { label: 'Violence', color: 'bg-red-500', severity: 3 },
+  gore: { label: 'Gore', color: 'bg-red-700', severity: 4 },
+  offensive: { label: 'Offensive', color: 'bg-yellow-500', severity: 2 },
+  weapon: { label: 'Weapon', color: 'bg-red-400', severity: 2 },
+  self_harm: { label: 'Self-harm', color: 'bg-red-600', severity: 4 },
+  recreational_drug: { label: 'Drugs', color: 'bg-purple-500', severity: 2 },
+  alcohol: { label: 'Alcohol', color: 'bg-amber-500', severity: 1 },
+  tobacco: { label: 'Tobacco', color: 'bg-amber-600', severity: 1 },
+  ai_generated: { label: 'AI Generated', color: 'bg-blue-500', severity: 1 },
+  deepfake: { label: 'Deepfake', color: 'bg-purple-600', severity: 3 },
+  medical: { label: 'Medical', color: 'bg-teal-500', severity: 1 },
+  gambling: { label: 'Gambling', color: 'bg-green-600', severity: 1 },
+};
 
-  // Query for AI-related labels on this target
-  const { data: aiLabels, isLoading } = useQuery({
-    queryKey: ['ai-labels', targetType, targetValue],
-    queryFn: async ({ signal }) => {
-      const filter = targetType === 'event'
-        ? { kinds: [1985], '#e': [targetValue], limit: 50 }
-        : { kinds: [1985], '#p': [targetValue], limit: 50 };
+const ACTION_CONFIG: Record<string, { label: string; icon: typeof ShieldCheck; color: string }> = {
+  SAFE: { label: 'Safe', icon: ShieldCheck, color: 'text-green-500' },
+  REVIEW: { label: 'Needs Review', icon: Eye, color: 'text-yellow-500' },
+  AGE_RESTRICTED: { label: 'Age Restricted', icon: ShieldAlert, color: 'text-orange-500' },
+  FLAGGED: { label: 'Flagged', icon: ShieldAlert, color: 'text-orange-500' },
+  QUARANTINE: { label: 'Quarantined', icon: ShieldX, color: 'text-red-500' },
+  PERMANENT_BAN: { label: 'Banned', icon: ShieldX, color: 'text-red-600' },
+};
 
-      const events = await nostr.query(
-        [filter],
-        { signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]) }
-      );
+export function HiveAIReport({ sha256: providedSha256, eventTags, className }: HiveAIReportProps) {
+  // Determine sha256 from props or tags
+  const sha256 = providedSha256 || (eventTags ? extractSha256FromTags(eventTags) : null);
 
-      return events;
+  const { data: result, isLoading, error } = useQuery({
+    queryKey: ['hive-moderation', sha256],
+    queryFn: async (): Promise<ModerationResult | null> => {
+      if (!sha256) return null;
+
+      const response = await fetch(`${WORKER_URL}/api/check-result/${sha256}`);
+      if (!response.ok) {
+        if (response.status === 404) return null;
+        throw new Error(`Failed to fetch moderation result: ${response.status}`);
+      }
+
+      return response.json();
     },
-    staleTime: 5 * 60 * 1000,
+    enabled: !!sha256,
+    staleTime: 5 * 60 * 1000, // Cache for 5 minutes
   });
+
+  // No sha256 found - nothing to show
+  if (!sha256) {
+    return null;
+  }
 
   if (isLoading) {
     return (
-      <div className={className}>
-        <Skeleton className="h-16 w-full" />
-      </div>
+      <Card className={`border-blue-200 dark:border-blue-800 ${className}`}>
+        <CardHeader className="py-2 px-3">
+          <CardTitle className="text-sm flex items-center gap-2">
+            <Bot className="h-4 w-4 text-blue-500" />
+            Hive AI Analysis
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="py-2 px-3">
+          <Skeleton className="h-12 w-full" />
+        </CardContent>
+      </Card>
     );
   }
 
-  if (!aiLabels || aiLabels.length === 0) {
-    return null; // No AI labels found, don't show anything
+  // No result found
+  if (!result || error) {
+    return null;
   }
 
-  const classifications = extractAIClassifications(aiLabels);
+  const actionConfig = ACTION_CONFIG[result.action] || ACTION_CONFIG.REVIEW;
+  const ActionIcon = actionConfig.icon;
 
-  if (classifications.length === 0) {
-    return null; // No AI-specific classifications
-  }
+  // Filter scores above threshold (0.3)
+  const significantScores = Object.entries(result.scores || {})
+    .filter(([_, score]) => score && score >= 0.3)
+    .sort((a, b) => (b[1] || 0) - (a[1] || 0));
 
   return (
     <Card className={`border-blue-200 dark:border-blue-800 ${className}`}>
       <CardHeader className="py-2 px-3">
-        <CardTitle className="text-sm flex items-center gap-2">
-          <Bot className="h-4 w-4 text-blue-500" />
-          AI Moderation Results
+        <CardTitle className="text-sm flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Bot className="h-4 w-4 text-blue-500" />
+            Hive AI Analysis
+          </div>
+          <div className={`flex items-center gap-1 ${actionConfig.color}`}>
+            <ActionIcon className="h-4 w-4" />
+            <span className="text-xs font-medium">{actionConfig.label}</span>
+          </div>
         </CardTitle>
       </CardHeader>
-      <CardContent className="py-2 px-3 space-y-2">
-        {classifications.map((classification, idx) => {
-          const severity = getSeverityForCategory(classification.label);
-          const severityColor = getSeverityColor(severity);
+      <CardContent className="py-2 px-3 space-y-3">
+        {/* Significant scores */}
+        {significantScores.length > 0 ? (
+          <div className="space-y-2">
+            {significantScores.map(([category, score]) => {
+              const config = CATEGORY_CONFIG[category] || { label: category, color: 'bg-gray-500', severity: 1 };
+              const verification = result.categoryVerifications?.[category];
+              const percentage = Math.round((score || 0) * 100);
 
-          return (
-            <div key={idx} className="flex items-center gap-2">
-              <Badge className={`${severityColor} text-white text-xs`}>
-                {classification.label}
-              </Badge>
-              {classification.confidence !== undefined && (
-                <div className="flex items-center gap-2 flex-1">
+              return (
+                <div key={category} className="space-y-1">
+                  <div className="flex items-center justify-between text-xs">
+                    <div className="flex items-center gap-2">
+                      <Badge className={`${config.color} text-white text-xs`}>
+                        {config.label}
+                      </Badge>
+                      {verification === 'confirmed' && (
+                        <Badge variant="destructive" className="text-xs">Confirmed</Badge>
+                      )}
+                      {verification === 'rejected' && (
+                        <Badge variant="outline" className="text-xs text-green-600">Rejected</Badge>
+                      )}
+                    </div>
+                    <span className="text-muted-foreground">{percentage}%</span>
+                  </div>
                   <Progress
-                    value={classification.confidence * 100}
-                    className="h-1.5 flex-1 max-w-20"
+                    value={percentage}
+                    className={`h-1.5 ${percentage >= 70 ? '[&>div]:bg-red-500' : percentage >= 50 ? '[&>div]:bg-orange-500' : '[&>div]:bg-yellow-500'}`}
                   />
-                  <span className="text-xs text-muted-foreground">
-                    {Math.round(classification.confidence * 100)}%
-                  </span>
                 </div>
-              )}
-              <span className="text-xs text-muted-foreground">
-                {classification.namespace}
-              </span>
-            </div>
-          );
-        })}
+              );
+            })}
+          </div>
+        ) : (
+          <p className="text-xs text-muted-foreground">No significant detections</p>
+        )}
+
+        {/* Reason if provided */}
+        {result.reason && (
+          <p className="text-xs text-muted-foreground border-t pt-2">
+            {result.reason}
+          </p>
+        )}
+
+        {/* Hash reference */}
+        <p className="text-xs text-muted-foreground font-mono truncate">
+          sha256: {sha256.slice(0, 16)}...
+        </p>
       </CardContent>
     </Card>
   );
 }
 
-interface AIStatusBadgeProps {
-  labels: NostrEvent[];
+// Compact badge version for list views
+interface HiveStatusBadgeProps {
+  sha256?: string;
+  eventTags?: string[][];
   className?: string;
 }
 
-export function AIStatusBadge({ labels, className }: AIStatusBadgeProps) {
-  const classifications = extractAIClassifications(labels);
+export function HiveStatusBadge({ sha256: providedSha256, eventTags, className }: HiveStatusBadgeProps) {
+  const sha256 = providedSha256 || (eventTags ? extractSha256FromTags(eventTags) : null);
 
-  if (classifications.length === 0) {
-    return null;
-  }
+  const { data: result } = useQuery({
+    queryKey: ['hive-moderation', sha256],
+    queryFn: async (): Promise<ModerationResult | null> => {
+      if (!sha256) return null;
+      const response = await fetch(`${WORKER_URL}/api/check-result/${sha256}`);
+      if (!response.ok) return null;
+      return response.json();
+    },
+    enabled: !!sha256,
+    staleTime: 5 * 60 * 1000,
+  });
 
-  // Find highest severity
-  const severities = classifications.map(c => getSeverityForCategory(c.label));
-  const hasCritical = severities.includes('critical');
-  const hasHigh = severities.includes('high');
-  const hasMedium = severities.includes('medium');
+  if (!sha256 || !result) return null;
 
-  let statusColor = 'bg-blue-500';
-  let statusIcon = <Bot className="h-3 w-3" />;
-  let statusText = 'AI Flagged';
-
-  if (hasCritical) {
-    statusColor = 'bg-red-600';
-    statusIcon = <AlertTriangle className="h-3 w-3" />;
-    statusText = 'Critical';
-  } else if (hasHigh) {
-    statusColor = 'bg-orange-500';
-    statusIcon = <AlertTriangle className="h-3 w-3" />;
-    statusText = 'High Risk';
-  } else if (hasMedium) {
-    statusColor = 'bg-yellow-500';
-    statusIcon = <Shield className="h-3 w-3" />;
-    statusText = 'Flagged';
-  }
+  const actionConfig = ACTION_CONFIG[result.action] || ACTION_CONFIG.REVIEW;
+  const ActionIcon = actionConfig.icon;
 
   return (
-    <Badge className={`${statusColor} text-white ${className}`}>
-      {statusIcon}
-      <span className="ml-1">{statusText}</span>
+    <Badge variant="outline" className={`${className} ${actionConfig.color}`}>
+      <ActionIcon className="h-3 w-3 mr-1" />
+      {actionConfig.label}
     </Badge>
   );
 }

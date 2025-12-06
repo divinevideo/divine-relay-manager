@@ -3,7 +3,6 @@ import { type NostrEvent } from '@nostrify/nostrify';
 import { Link } from 'react-router-dom';
 import { nip19 } from 'nostr-tools';
 import { useAuthor } from '@/hooks/useAuthor';
-import { genUserName } from '@/lib/genUserName';
 import { cn } from '@/lib/utils';
 
 interface NoteContentProps {
@@ -119,7 +118,7 @@ function NostrMention({ pubkey }: { pubkey: string }) {
   const author = useAuthor(pubkey);
   const npub = nip19.npubEncode(pubkey);
   const hasRealName = !!author.data?.metadata?.name;
-  const displayName = author.data?.metadata?.name ?? genUserName(pubkey);
+  const displayName = author.data?.metadata?.name ?? nip19.npubEncode(pubkey).slice(0, 12) + '...';
 
   return (
     <Link 

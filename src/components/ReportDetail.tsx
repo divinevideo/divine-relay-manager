@@ -1,7 +1,9 @@
 // ABOUTME: Full detail view for a selected report in the split-pane layout
 // ABOUTME: Combines thread context, user profile, AI summary, and action buttons
 
-import { useState } from "react";
+import { useState, useMemo } from "react";
+import { useNavigate } from "react-router-dom";
+import { nip19 } from "nostr-tools";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -18,40 +20,29 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/useToast";
 import { useReportContext } from "@/hooks/useReportContext";
 import { useUserSummary } from "@/hooks/useUserSummary";
+import { useModerationStatus } from "@/hooks/useModerationStatus";
 import { ThreadContext } from "@/components/ThreadContext";
 import { UserProfileCard } from "@/components/UserProfileCard";
+import { UserIdentifier } from "@/components/UserIdentifier";
 import { ReporterInfo } from "@/components/ReporterInfo";
+import { ReporterList, ReporterInline } from "@/components/ReporterCard";
 import { AISummary } from "@/components/AISummary";
 import { LabelPublisherInline } from "@/components/LabelPublisher";
 import { ThreadModal } from "@/components/ThreadModal";
-import { banPubkey } from "@/lib/adminApi";
-import { UserX, Tag, XCircle, Flag } from "lucide-react";
+import { banPubkey, deleteEvent, markAsReviewed, moderateMedia, unblockMedia, extractMediaHashes, logDecision, verifyModerationAction, type ResolutionStatus, type ModerationAction } from "@/lib/adminApi";
+import { useAppContext } from "@/hooks/useAppContext";
+import { useMediaStatus } from "@/hooks/useMediaStatus";
+import { useDecisionLog } from "@/hooks/useDecisionLog";
+import { HiveAIReport } from "@/components/HiveAIReport";
+import { MediaPreview } from "@/components/MediaPreview";
+import { CATEGORY_LABELS } from "@/lib/constants";
+import { UserX, Tag, Flag, Trash2, CheckCircle, ThumbsDown, Video, History, Ban, ShieldX, Link2, User, FileText, Unlock } from "lucide-react";
 import type { NostrEvent } from "@nostrify/nostrify";
-
-// DTSP category display names
-const CATEGORY_LABELS: Record<string, string> = {
-  'sexual_minors': 'CSAM',
-  'nonconsensual_sexual_content': 'Non-consensual',
-  'credible_threats': 'Threats',
-  'doxxing_pii': 'Doxxing/PII',
-  'terrorism_extremism': 'Terrorism',
-  'malware_scam': 'Malware/Scam',
-  'illegal_goods': 'Illegal Goods',
-  'hate_harassment': 'Hate/Harassment',
-  'self_harm_suicide': 'Self-harm',
-  'graphic_violence_gore': 'Violence/Gore',
-  'bullying_abuse': 'Bullying',
-  'adult_nudity': 'Nudity',
-  'explicit_sex': 'Explicit',
-  'pornography': 'Pornography',
-  'spam': 'Spam',
-  'impersonation': 'Impersonation',
-  'copyright': 'Copyright',
-  'other': 'Other',
-};
 
 function getReportCategory(event: NostrEvent): string {
   const reportTag = event.tags.find(t => t[0] === 'report');
@@ -63,15 +54,33 @@ function getReportCategory(event: NostrEvent): string {
 
 interface ReportDetailProps {
   report: NostrEvent | null;
+  allReportsForTarget?: NostrEvent[];
+  allReports?: NostrEvent[];
   onDismiss?: () => void;
 }
 
-export function ReportDetail({ report, onDismiss }: ReportDetailProps) {
+// Helper to extract report target
+function getReportTarget(event: NostrEvent): { type: 'event' | 'pubkey'; value: string } | null {
+  const eTag = event.tags.find(t => t[0] === 'e');
+  if (eTag) return { type: 'event', value: eTag[1] };
+  const pTag = event.tags.find(t => t[0] === 'p');
+  if (pTag) return { type: 'pubkey', value: pTag[1] };
+  return null;
+}
+
+export function ReportDetail({ report, allReportsForTarget, allReports = [], onDismiss }: ReportDetailProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const { config } = useAppContext();
+  const navigate = useNavigate();
   const [showThreadModal, setShowThreadModal] = useState(false);
   const [showLabelForm, setShowLabelForm] = useState(false);
   const [confirmBan, setConfirmBan] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmBlockMedia, setConfirmBlockMedia] = useState(false);
+  const [confirmBlockAndDelete, setConfirmBlockAndDelete] = useState(false);
+  const [banOptions, setBanOptions] = useState({ deleteEvents: true, blockMedia: true });
+  const [isVerifying, setIsVerifying] = useState(false);
 
   const context = useReportContext(report);
 
@@ -82,19 +91,388 @@ export function ReportDetail({ report, onDismiss }: ReportDetailProps) {
     context.userStats?.previousReports
   );
 
+  // Check moderation status (banned/deleted)
+  const moderationStatus = useModerationStatus(
+    context.reportedUser.pubkey,
+    context.target?.type === 'event' ? context.target.value : null
+  );
+
+  // Get decision history for this target
+  const decisionLog = useDecisionLog(context.target?.value);
+
+  // Also check decision log for the pubkey specifically (in case target is an event)
+  const pubkeyDecisionLog = useDecisionLog(
+    context.target?.type === 'event' ? context.reportedUser.pubkey : null
+  );
+
+  // Combined status - user is banned if relay says so OR if we have a ban decision logged
+  const isUserBanned = moderationStatus.isBanned || decisionLog.isBanned || pubkeyDecisionLog.isBanned;
+  const isEventDeleted = moderationStatus.isDeleted || decisionLog.isDeleted;
+  const isResolved = decisionLog.hasDecisions || pubkeyDecisionLog.hasDecisions || isUserBanned || isEventDeleted;
+
+  // Find related reports: reports on this user AND reports on their events
+  const relatedReports = useMemo(() => {
+    if (!context.reportedUser.pubkey || !allReports.length) return { userReports: [], eventReports: [] };
+
+    const userPubkey = context.reportedUser.pubkey;
+    const currentTargetKey = context.target ? `${context.target.type}:${context.target.value}` : '';
+
+    // Reports directly on this user
+    const userReports = allReports.filter(r => {
+      const target = getReportTarget(r);
+      if (!target) return false;
+      // Don't include current report's target
+      if (`${target.type}:${target.value}` === currentTargetKey) return false;
+      return target.type === 'pubkey' && target.value === userPubkey;
+    });
+
+    // Reports on events by this user (we need to check if event author matches)
+    // For now, we use any 'e' reports where the report references this user via 'p' tag
+    // OR we check if the thread/event was authored by this user
+    const eventReports = allReports.filter(r => {
+      const target = getReportTarget(r);
+      if (!target || target.type !== 'event') return false;
+      // Don't include current report's target
+      if (`${target.type}:${target.value}` === currentTargetKey) return false;
+      // Check if report has a 'p' tag referencing this user
+      const pTag = r.tags.find(t => t[0] === 'p' && t[1] === userPubkey);
+      return !!pTag;
+    });
+
+    return { userReports, eventReports };
+  }, [allReports, context.reportedUser.pubkey, context.target]);
+
   const banMutation = useMutation({
-    mutationFn: async ({ pubkey, reason }: { pubkey: string; reason: string }) => {
+    mutationFn: async ({ pubkey, reason, deleteEvents, blockMedia }: {
+      pubkey: string;
+      reason: string;
+      deleteEvents?: boolean;
+      blockMedia?: boolean;
+    }) => {
+      const results = { banned: false, eventsDeleted: 0, mediaBlocked: 0 };
+
+      // Ban the pubkey
       await banPubkey(pubkey, reason);
+      results.banned = true;
+
+      // Log the ban decision
+      await logDecision({
+        targetType: 'pubkey',
+        targetId: pubkey,
+        action: 'ban_user',
+        reason,
+        reportId: report?.id,
+      });
+
+      // Optionally delete all their events
+      if (deleteEvents && context.userStats?.recentPosts) {
+        for (const event of context.userStats.recentPosts) {
+          try {
+            await deleteEvent(event.id, `User banned: ${reason}`);
+            await logDecision({
+              targetType: 'event',
+              targetId: event.id,
+              action: 'delete_event',
+              reason: `User banned: ${reason}`,
+              reportId: report?.id,
+            });
+            results.eventsDeleted++;
+          } catch {
+            // Continue even if some fail
+          }
+        }
+      }
+
+      // Optionally block all their media
+      if (blockMedia && context.userStats?.recentPosts) {
+        const allHashes = new Set<string>();
+        for (const event of context.userStats.recentPosts) {
+          const hashes = extractMediaHashes(event.content, event.tags);
+          hashes.forEach(h => allHashes.add(h));
+        }
+        for (const hash of allHashes) {
+          try {
+            await moderateMedia(hash, 'PERMANENT_BAN', `User banned: ${reason}`);
+            await logDecision({
+              targetType: 'media',
+              targetId: hash,
+              action: 'block_media',
+              reason: `User banned: ${reason}`,
+              reportId: report?.id,
+            });
+            results.mediaBlocked++;
+          } catch {
+            // Continue even if some fail
+          }
+        }
+      }
+
+      return results;
     },
-    onSuccess: () => {
+    onSuccess: (results) => {
       queryClient.invalidateQueries({ queryKey: ['banned-users'] });
       queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
-      toast({ title: "User banned successfully" });
+      queryClient.invalidateQueries({ queryKey: ['banned-events'] });
+      queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      moderationStatus.refetch();
+      decisionLog.refetch();
+
+      let message = "User banned";
+      if (results.eventsDeleted > 0) {
+        message += `, ${results.eventsDeleted} event(s) deleted`;
+      }
+      if (results.mediaBlocked > 0) {
+        message += `, ${results.mediaBlocked} media file(s) blocked`;
+      }
+
+      toast({ title: message });
       setConfirmBan(false);
     },
     onError: (error: Error) => {
       toast({
         title: "Failed to ban user",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: async ({ eventId, reason }: { eventId: string; reason: string }) => {
+      await deleteEvent(eventId, reason);
+      // Log the decision
+      await logDecision({
+        targetType: 'event',
+        targetId: eventId,
+        action: 'delete_event',
+        reason,
+        reportId: report?.id,
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['reports'] });
+      queryClient.invalidateQueries({ queryKey: ['banned-events'] });
+      queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      moderationStatus.refetch();
+      decisionLog.refetch();
+      toast({ title: "Event deleted from relay" });
+      setConfirmDelete(false);
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Failed to delete event",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  const reviewMutation = useMutation({
+    mutationFn: async ({ status, comment }: { status: ResolutionStatus; comment?: string }) => {
+      if (!context.target) throw new Error('No target');
+      await markAsReviewed(context.target.type, context.target.value, status, comment);
+      // Log the decision
+      await logDecision({
+        targetType: context.target.type,
+        targetId: context.target.value,
+        action: status,
+        reason: comment,
+        reportId: report?.id,
+      });
+    },
+    onSuccess: (_, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['reports'] });
+      queryClient.invalidateQueries({ queryKey: ['labels'] });
+      queryClient.invalidateQueries({ queryKey: ['resolution-labels'] });
+      queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      decisionLog.refetch();
+      toast({
+        title: variables.status === 'reviewed' ? "Marked as reviewed" : "Marked as false positive",
+        description: "A resolution label has been created",
+      });
+      onDismiss?.();
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Failed to mark as reviewed",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  const blockMediaMutation = useMutation({
+    mutationFn: async ({ hashes, action, reason }: { hashes: string[]; action: ModerationAction; reason: string }) => {
+      // Block all media hashes found in the event
+      const results = await Promise.all(
+        hashes.map(sha256 => moderateMedia(sha256, action, reason))
+      );
+      // Log decisions for each hash
+      await Promise.all(
+        hashes.map(sha256 => logDecision({
+          targetType: 'media',
+          targetId: sha256,
+          action: 'block_media',
+          reason,
+          reportId: report?.id,
+        }))
+      );
+      return results;
+    },
+    onSuccess: (_, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      queryClient.invalidateQueries({ queryKey: ['media-status'] });
+      decisionLog.refetch();
+      toast({
+        title: "Media blocked",
+        description: `${variables.hashes.length} media file(s) permanently banned`,
+      });
+      setConfirmBlockMedia(false);
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Failed to block media",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  // Extract media hashes from the reported event
+  const mediaHashes = context.thread?.event
+    ? extractMediaHashes(context.thread.event.content, context.thread.event.tags)
+    : [];
+
+  // Check media status from moderation service
+  const mediaStatus = useMediaStatus(mediaHashes);
+
+  const unblockMediaMutation = useMutation({
+    mutationFn: async ({ hashes, reason }: { hashes: string[]; reason: string }) => {
+      // Unblock all media hashes
+      const results = await Promise.all(
+        hashes.map(sha256 => unblockMedia(sha256, reason))
+      );
+      // Log decisions for each hash
+      await Promise.all(
+        hashes.map(sha256 => logDecision({
+          targetType: 'media',
+          targetId: sha256,
+          action: 'unblock_media',
+          reason,
+          reportId: report?.id,
+        }))
+      );
+      return results;
+    },
+    onSuccess: (_, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      queryClient.invalidateQueries({ queryKey: ['media-status'] });
+      mediaStatus.refetch();
+      decisionLog.refetch();
+      toast({
+        title: "Media unblocked",
+        description: `${variables.hashes.length} media file(s) unblocked`,
+      });
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Failed to unblock media",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  // Combined action: Block media AND delete event
+  const blockAndDeleteMutation = useMutation({
+    mutationFn: async ({ eventId, hashes, reason }: { eventId: string; hashes: string[]; reason: string }) => {
+      const results = { mediaBlocked: 0, eventDeleted: false };
+
+      // First block all media
+      for (const sha256 of hashes) {
+        try {
+          await moderateMedia(sha256, 'PERMANENT_BAN', reason);
+          await logDecision({
+            targetType: 'media',
+            targetId: sha256,
+            action: 'block_media',
+            reason,
+            reportId: report?.id,
+          });
+          results.mediaBlocked++;
+        } catch {
+          // Continue even if some fail
+        }
+      }
+
+      // Then delete the event
+      await deleteEvent(eventId, reason);
+      await logDecision({
+        targetType: 'event',
+        targetId: eventId,
+        action: 'delete_event',
+        reason,
+        reportId: report?.id,
+      });
+      results.eventDeleted = true;
+
+      return results;
+    },
+    onSuccess: async (results, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['reports'] });
+      queryClient.invalidateQueries({ queryKey: ['banned-events'] });
+      queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      queryClient.invalidateQueries({ queryKey: ['media-status'] });
+      moderationStatus.refetch();
+      decisionLog.refetch();
+      toast({
+        title: "Content removed",
+        description: `${results.mediaBlocked} media file(s) blocked and event deleted. Verifying...`,
+      });
+      setConfirmBlockAndDelete(false);
+
+      // Verify the moderation action worked
+      setIsVerifying(true);
+      try {
+        const verification = await verifyModerationAction(
+          variables.eventId,
+          variables.hashes,
+          config.relayUrl
+        );
+
+        if (verification.allSuccessful) {
+          toast({
+            title: "Verified",
+            description: "Event deleted and all media blocked successfully",
+          });
+        } else {
+          const issues: string[] = [];
+          if (!verification.eventDeleted) {
+            issues.push("Event may still be accessible");
+          }
+          const failedMedia = verification.mediaBlocked.filter(m => !m.blocked);
+          if (failedMedia.length > 0) {
+            issues.push(`${failedMedia.length} media file(s) may not be blocked`);
+          }
+          toast({
+            title: "Verification Warning",
+            description: issues.join(". "),
+            variant: "destructive",
+          });
+        }
+      } catch (verifyError) {
+        console.error('Verification failed:', verifyError);
+        toast({
+          title: "Verification unavailable",
+          description: "Could not verify moderation action",
+        });
+      } finally {
+        setIsVerifying(false);
+      }
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Failed to remove content",
         description: error.message,
         variant: "destructive",
       });
@@ -122,12 +500,47 @@ export function ReportDetail({ report, onDismiss }: ReportDetailProps) {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Ban User?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This will permanently ban this user from the relay.
-              <br />
-              <code className="text-xs bg-muted px-1 py-0.5 rounded mt-2 inline-block">
-                {context.reportedUser.pubkey?.slice(0, 24)}...
-              </code>
+            <AlertDialogDescription asChild>
+              <div className="space-y-3">
+                <p>This will permanently ban this user from the relay.</p>
+                {context.reportedUser.pubkey && (
+                  <div className="bg-muted px-2 py-1.5 rounded">
+                    <UserIdentifier
+                      pubkey={context.reportedUser.pubkey}
+                      showAvatar
+                      avatarSize="sm"
+                      variant="block"
+                    />
+                  </div>
+                )}
+
+                <div className="space-y-2 pt-2">
+                  <div className="flex items-center space-x-2">
+                    <Checkbox
+                      id="deleteEvents"
+                      checked={banOptions.deleteEvents}
+                      onCheckedChange={(checked) =>
+                        setBanOptions(prev => ({ ...prev, deleteEvents: !!checked }))
+                      }
+                    />
+                    <Label htmlFor="deleteEvents" className="text-sm font-normal">
+                      Delete all events from this user ({context.userStats?.recentPosts?.length || 0} found)
+                    </Label>
+                  </div>
+                  <div className="flex items-center space-x-2">
+                    <Checkbox
+                      id="blockMedia"
+                      checked={banOptions.blockMedia}
+                      onCheckedChange={(checked) =>
+                        setBanOptions(prev => ({ ...prev, blockMedia: !!checked }))
+                      }
+                    />
+                    <Label htmlFor="blockMedia" className="text-sm font-normal">
+                      Block all media/videos from this user
+                    </Label>
+                  </div>
+                </div>
+              </div>
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -138,6 +551,8 @@ export function ReportDetail({ report, onDismiss }: ReportDetailProps) {
                   banMutation.mutate({
                     pubkey: context.reportedUser.pubkey,
                     reason: `Report: ${categoryLabel}`,
+                    deleteEvents: banOptions.deleteEvents,
+                    blockMedia: banOptions.blockMedia,
                   });
                 }
               }}
@@ -145,6 +560,120 @@ export function ReportDetail({ report, onDismiss }: ReportDetailProps) {
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
               {banMutation.isPending ? 'Banning...' : 'Ban User'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Delete Event Confirmation Dialog */}
+      <AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Event?</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div>
+                <p>This will remove this event from the relay. The content will no longer be served.</p>
+                {context.target?.value && (
+                  <code className="text-xs bg-muted px-1 py-0.5 rounded mt-2 block font-mono">
+                    {(() => {
+                      try {
+                        const noteId = nip19.noteEncode(context.target.value);
+                        return `${noteId.slice(0, 16)}...${noteId.slice(-8)}`;
+                      } catch {
+                        return `${context.target.value.slice(0, 16)}...`;
+                      }
+                    })()}
+                  </code>
+                )}
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleteMutation.isPending}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (context.target?.type === 'event' && context.target.value) {
+                  deleteMutation.mutate({
+                    eventId: context.target.value,
+                    reason: `Report: ${categoryLabel}`,
+                  });
+                }
+              }}
+              disabled={deleteMutation.isPending}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {deleteMutation.isPending ? 'Deleting...' : 'Delete Event'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Block Media Confirmation Dialog */}
+      <AlertDialog open={confirmBlockMedia} onOpenChange={setConfirmBlockMedia}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Block Media?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will permanently ban {mediaHashes.length} media file(s) from being served.
+              <div className="mt-2 space-y-1">
+                {mediaHashes.map(hash => (
+                  <code key={hash} className="text-xs bg-muted px-1 py-0.5 rounded block truncate">
+                    {hash}
+                  </code>
+                ))}
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={blockMediaMutation.isPending}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                blockMediaMutation.mutate({
+                  hashes: mediaHashes,
+                  action: 'PERMANENT_BAN',
+                  reason: `Report: ${categoryLabel}`,
+                });
+              }}
+              disabled={blockMediaMutation.isPending}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {blockMediaMutation.isPending ? 'Blocking...' : 'Block Media'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Block Media AND Delete Event Combined Confirmation Dialog */}
+      <AlertDialog open={confirmBlockAndDelete} onOpenChange={setConfirmBlockAndDelete}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Remove Content?</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-2">
+                <p>This will:</p>
+                <ul className="list-disc list-inside space-y-1 text-sm">
+                  <li>Permanently ban {mediaHashes.length} media file(s)</li>
+                  <li>Delete the event from the relay</li>
+                </ul>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={blockAndDeleteMutation.isPending}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (context.target?.type === 'event' && context.target.value) {
+                  blockAndDeleteMutation.mutate({
+                    eventId: context.target.value,
+                    hashes: mediaHashes,
+                    reason: `Report: ${categoryLabel}`,
+                  });
+                }
+              }}
+              disabled={blockAndDeleteMutation.isPending}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {blockAndDeleteMutation.isPending ? 'Removing...' : 'Remove Content'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -160,25 +689,144 @@ export function ReportDetail({ report, onDismiss }: ReportDetailProps) {
       )}
 
       <ScrollArea className="h-full">
-        <div className="p-4 space-y-4">
+        <div className="p-4 space-y-4 overflow-hidden">
+          {/* Resolved Banner - prominently show when already handled */}
+          {isResolved && (
+            <div className="bg-green-100 dark:bg-green-950/50 border border-green-300 dark:border-green-800 rounded-lg p-3 flex items-center gap-3">
+              <CheckCircle className="h-6 w-6 text-green-600" />
+              <div className="flex-1">
+                <p className="font-medium text-green-800 dark:text-green-300">
+                  {isUserBanned ? 'User Already Banned' : isEventDeleted ? 'Event Already Deleted' : 'Already Reviewed'}
+                </p>
+                <p className="text-sm text-green-600 dark:text-green-400">
+                  {decisionLog.latestDecision || pubkeyDecisionLog.latestDecision
+                    ? `Last action: ${(decisionLog.latestDecision || pubkeyDecisionLog.latestDecision)?.action.replace(/_/g, ' ')} on ${new Date((decisionLog.latestDecision || pubkeyDecisionLog.latestDecision)?.created_at || '').toLocaleDateString()}`
+                    : 'This target has been moderated'}
+                </p>
+              </div>
+            </div>
+          )}
+
           {/* Header */}
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <Badge variant="outline">{categoryLabel}</Badge>
               <Badge variant="secondary">
                 {context.target?.type === 'event' ? 'Event' : 'User'}
               </Badge>
+              {isUserBanned && (
+                <Badge variant="destructive" className="flex items-center gap-1">
+                  <Ban className="h-3 w-3" />
+                  User Banned
+                </Badge>
+              )}
+              {isEventDeleted && (
+                <Badge variant="destructive" className="flex items-center gap-1">
+                  <ShieldX className="h-3 w-3" />
+                  Event Deleted
+                </Badge>
+              )}
             </div>
             <span className="text-xs text-muted-foreground">
               {new Date(report.created_at * 1000).toLocaleString()}
             </span>
           </div>
 
-          {/* Report Content */}
-          {report.content && (
-            <Card>
-              <CardContent className="p-3">
+          {/* Report Reasons - What reporters said */}
+          {allReportsForTarget && allReportsForTarget.length > 0 ? (
+            <Card className="border-red-200 bg-red-50/50 dark:bg-red-950/20">
+              <CardHeader className="py-3">
+                <CardTitle className="text-sm flex items-center gap-2 text-red-700 dark:text-red-400">
+                  <Flag className="h-4 w-4" />
+                  Why This Was Reported ({allReportsForTarget.length} report{allReportsForTarget.length !== 1 ? 's' : ''})
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="py-0 pb-3 space-y-3">
+                {allReportsForTarget.slice(0, 5).map((r) => {
+                  const cat = getReportCategory(r);
+                  const catLabel = CATEGORY_LABELS[cat] || cat;
+                  return (
+                    <div key={r.id} className="p-3 bg-background rounded-lg border">
+                      {/* Reporter info */}
+                      <div className="mb-2">
+                        <ReporterInline
+                          pubkey={r.pubkey}
+                          onViewProfile={(pubkey) => {
+                            // Navigate to Events tab filtered by this user
+                            navigate(`/events?pubkey=${pubkey}`);
+                          }}
+                        />
+                      </div>
+                      {/* Report details */}
+                      <div className="flex items-center gap-2 mb-1">
+                        <Badge variant="destructive" className="text-xs">{catLabel}</Badge>
+                        <span className="text-xs text-muted-foreground">
+                          {new Date(r.created_at * 1000).toLocaleDateString()}
+                        </span>
+                      </div>
+                      {r.content ? (
+                        <p className="text-sm text-muted-foreground">{r.content}</p>
+                      ) : (
+                        <p className="text-sm text-muted-foreground italic">No reason provided</p>
+                      )}
+                    </div>
+                  );
+                })}
+                {allReportsForTarget.length > 5 && (
+                  <p className="text-xs text-muted-foreground">+{allReportsForTarget.length - 5} more reports</p>
+                )}
+              </CardContent>
+            </Card>
+          ) : report.content ? (
+            <Card className="border-red-200 bg-red-50/50 dark:bg-red-950/20">
+              <CardHeader className="py-3">
+                <CardTitle className="text-sm flex items-center gap-2 text-red-700 dark:text-red-400">
+                  <Flag className="h-4 w-4" />
+                  Report Reason
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="py-0 pb-3">
+                {/* Single report - show reporter info */}
+                <div className="mb-2">
+                  <ReporterInline
+                    pubkey={report.pubkey}
+                    onViewProfile={(pubkey) => {
+                      navigate(`/events?pubkey=${pubkey}`);
+                    }}
+                  />
+                </div>
                 <p className="text-sm">{report.content}</p>
+              </CardContent>
+            </Card>
+          ) : null}
+
+          {/* Decision History - show if target already has decisions */}
+          {decisionLog.hasDecisions && (
+            <Card className="border-green-200 bg-green-50/50 dark:bg-green-950/20">
+              <CardHeader className="py-3">
+                <CardTitle className="text-sm flex items-center gap-2 text-green-700 dark:text-green-400">
+                  <History className="h-4 w-4" />
+                  Already Handled ({decisionLog.decisions.length} action{decisionLog.decisions.length !== 1 ? 's' : ''})
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="py-0 pb-3">
+                <div className="space-y-2">
+                  {decisionLog.decisions.slice(0, 5).map((decision) => (
+                    <div key={decision.id} className="flex items-start justify-between text-xs p-2 bg-background rounded">
+                      <div>
+                        <Badge variant="outline" className="text-xs mb-1">
+                          {decision.action.replace(/_/g, ' ')}
+                        </Badge>
+                        {decision.reason && (
+                          <p className="text-muted-foreground mt-1">{decision.reason}</p>
+                        )}
+                      </div>
+                      <span className="text-muted-foreground shrink-0">
+                        {new Date(decision.created_at).toLocaleDateString()}
+                      </span>
+                    </div>
+                  ))}
+                </div>
               </CardContent>
             </Card>
           )}
@@ -193,6 +841,20 @@ export function ReportDetail({ report, onDismiss }: ReportDetailProps) {
               onViewFullThread={() => setShowThreadModal(true)}
               isLoading={context.isLoading}
             />
+          )}
+
+          {/* Media Preview - show the actual content being reported */}
+          {context.thread?.event && (
+            <MediaPreview
+              event={context.thread.event}
+              showByDefault={true}
+              maxItems={6}
+            />
+          )}
+
+          {/* Hive AI Moderation Results */}
+          {context.thread?.event && (
+            <HiveAIReport eventTags={context.thread.event.tags} />
           )}
 
           <Separator />
@@ -213,15 +875,114 @@ export function ReportDetail({ report, onDismiss }: ReportDetailProps) {
             error={summary.error as Error | null}
           />
 
+          {/* Related Reports - show reports on this user AND their events */}
+          {(relatedReports.userReports.length > 0 || relatedReports.eventReports.length > 0) && (
+            <Card className="border-orange-200 bg-orange-50/50 dark:bg-orange-950/20">
+              <CardHeader className="py-3">
+                <CardTitle className="text-sm flex items-center gap-2 text-orange-700 dark:text-orange-400">
+                  <Link2 className="h-4 w-4" />
+                  Related Reports ({relatedReports.userReports.length + relatedReports.eventReports.length} on same user)
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="py-0 pb-3">
+                <div className="space-y-2">
+                  {relatedReports.userReports.length > 0 && (
+                    <div>
+                      <p className="text-xs font-medium flex items-center gap-1 mb-1.5 text-muted-foreground">
+                        <User className="h-3 w-3" />
+                        Reports on this User ({relatedReports.userReports.length})
+                      </p>
+                      <div className="space-y-1">
+                        {relatedReports.userReports.slice(0, 3).map((r) => {
+                          const cat = getReportCategory(r);
+                          const catLabel = CATEGORY_LABELS[cat] || cat;
+                          return (
+                            <div key={r.id} className="flex items-center gap-2 text-xs p-1.5 bg-background rounded">
+                              <Badge variant="outline" className="text-xs">{catLabel}</Badge>
+                              <span className="text-muted-foreground truncate flex-1">
+                                {r.content?.slice(0, 40) || 'No description'}
+                                {(r.content?.length || 0) > 40 && '...'}
+                              </span>
+                            </div>
+                          );
+                        })}
+                        {relatedReports.userReports.length > 3 && (
+                          <p className="text-xs text-muted-foreground pl-1">
+                            +{relatedReports.userReports.length - 3} more user reports
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                  {relatedReports.eventReports.length > 0 && (
+                    <div>
+                      <p className="text-xs font-medium flex items-center gap-1 mb-1.5 text-muted-foreground">
+                        <FileText className="h-3 w-3" />
+                        Reports on their Events ({relatedReports.eventReports.length})
+                      </p>
+                      <div className="space-y-1">
+                        {relatedReports.eventReports.slice(0, 3).map((r) => {
+                          const cat = getReportCategory(r);
+                          const catLabel = CATEGORY_LABELS[cat] || cat;
+                          const target = getReportTarget(r);
+                          let noteDisplay = target?.value?.slice(0, 12) + '...';
+                          if (target?.value) {
+                            try {
+                              const noteId = nip19.noteEncode(target.value);
+                              noteDisplay = `${noteId.slice(0, 12)}...`;
+                            } catch {
+                              // Keep hex fallback
+                            }
+                          }
+                          return (
+                            <div key={r.id} className="flex items-center gap-2 text-xs p-1.5 bg-background rounded">
+                              <Badge variant="outline" className="text-xs">{catLabel}</Badge>
+                              <span className="text-muted-foreground font-mono truncate">
+                                {noteDisplay}
+                              </span>
+                            </div>
+                          );
+                        })}
+                        {relatedReports.eventReports.length > 3 && (
+                          <p className="text-xs text-muted-foreground pl-1">
+                            +{relatedReports.eventReports.length - 3} more event reports
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
           <Separator />
 
-          {/* Reporter Info */}
-          <ReporterInfo
-            profile={context.reporter.profile}
-            pubkey={context.reporter.pubkey}
-            reportCount={context.reporter.reportCount}
-            isLoading={context.isLoading}
-          />
+          {/* All Reports Section - when consolidated */}
+          {allReportsForTarget && allReportsForTarget.length > 1 ? (
+            <Card>
+              <CardHeader className="py-3">
+                <CardTitle className="text-sm flex items-center gap-2">
+                  <Flag className="h-4 w-4" />
+                  {allReportsForTarget.length} Reports on this Target
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="py-0 pb-3">
+                <ReporterList
+                  reports={allReportsForTarget}
+                  maxVisible={5}
+                />
+              </CardContent>
+            </Card>
+          ) : (
+            /* Single Reporter Info */
+            <ReporterInfo
+              profile={context.reporter.profile}
+              pubkey={context.reporter.pubkey}
+              reportCount={context.reporter.reportCount}
+              isLoading={context.isLoading}
+            />
+          )}
 
           <Separator />
 
@@ -236,32 +997,122 @@ export function ReportDetail({ report, onDismiss }: ReportDetailProps) {
           )}
 
           {/* Action Buttons */}
-          <div className="flex gap-2 pt-2">
-            {context.reportedUser.pubkey && (
-              <Button
-                variant="destructive"
-                onClick={() => setConfirmBan(true)}
-                disabled={banMutation.isPending}
-              >
-                <UserX className="h-4 w-4 mr-1" />
-                Ban User
-              </Button>
-            )}
-            {context.target && !showLabelForm && (
+          <div className="space-y-3 pt-2">
+            {/* Resolution actions - mark as OK */}
+            <div className="flex flex-wrap gap-2">
               <Button
                 variant="outline"
-                onClick={() => setShowLabelForm(true)}
+                className="border-green-500 text-green-600 hover:bg-green-50"
+                onClick={() => reviewMutation.mutate({ status: 'reviewed', comment: 'Content reviewed and approved' })}
+                disabled={reviewMutation.isPending}
               >
-                <Tag className="h-4 w-4 mr-1" />
-                Create Label
+                <CheckCircle className="h-4 w-4 mr-1" />
+                {reviewMutation.isPending ? 'Marking...' : 'Mark OK'}
               </Button>
-            )}
-            {onDismiss && (
-              <Button variant="ghost" onClick={onDismiss}>
-                <XCircle className="h-4 w-4 mr-1" />
-                Dismiss
+              <Button
+                variant="outline"
+                onClick={() => reviewMutation.mutate({ status: 'false-positive', comment: 'False positive report' })}
+                disabled={reviewMutation.isPending}
+              >
+                <ThumbsDown className="h-4 w-4 mr-1" />
+                False Positive
               </Button>
+            </div>
+
+            {/* Primary enforcement action - combined when media present and not already blocked */}
+            {context.target?.type === 'event' && mediaHashes.length > 0 && !isEventDeleted && !mediaStatus.hasBlockedMedia && (
+              <div>
+                <Button
+                  variant="destructive"
+                  size="lg"
+                  className="w-full"
+                  onClick={() => setConfirmBlockAndDelete(true)}
+                  disabled={blockAndDeleteMutation.isPending || mediaStatus.isLoading || isVerifying}
+                >
+                  <Trash2 className="h-4 w-4 mr-2" />
+                  {blockAndDeleteMutation.isPending ? 'Removing...' : isVerifying ? 'Verifying...' : mediaStatus.isLoading ? 'Checking media...' : `Block Media & Delete Event`}
+                </Button>
+              </div>
             )}
+
+            {/* Secondary enforcement actions */}
+            <div className="flex flex-wrap gap-2">
+              {context.target?.type === 'event' && (
+                isEventDeleted ? (
+                  <Button variant="outline" disabled className="border-green-500 text-green-600">
+                    <CheckCircle className="h-4 w-4 mr-1" />
+                    Event Deleted
+                  </Button>
+                ) : (
+                  <Button
+                    variant="outline"
+                    onClick={() => setConfirmDelete(true)}
+                    disabled={deleteMutation.isPending}
+                  >
+                    <Trash2 className="h-4 w-4 mr-1" />
+                    Delete Event
+                  </Button>
+                )
+              )}
+              {mediaHashes.length > 0 && (
+                mediaStatus.hasBlockedMedia ? (
+                  // Show unblock button if media is already blocked
+                  <Button
+                    variant="outline"
+                    className="border-green-500 text-green-600 hover:bg-green-50"
+                    onClick={() => {
+                      const blockedHashes = mediaStatus.results
+                        .filter(r => r.isBlocked)
+                        .map(r => r.hash);
+                      unblockMediaMutation.mutate({
+                        hashes: blockedHashes,
+                        reason: 'Unblocked by moderator',
+                      });
+                    }}
+                    disabled={unblockMediaMutation.isPending || mediaStatus.isLoading}
+                  >
+                    <Unlock className="h-4 w-4 mr-1" />
+                    {unblockMediaMutation.isPending ? 'Unblocking...' : `Unblock Media (${mediaStatus.blockedCount})`}
+                  </Button>
+                ) : (
+                  // Show block button if media is not blocked
+                  <Button
+                    variant="outline"
+                    onClick={() => setConfirmBlockMedia(true)}
+                    disabled={blockMediaMutation.isPending || mediaStatus.isLoading}
+                  >
+                    <Video className="h-4 w-4 mr-1" />
+                    {mediaStatus.isLoading ? 'Checking...' : `Block Media (${mediaHashes.length})`}
+                  </Button>
+                )
+              )}
+              {context.reportedUser.pubkey && (
+                isUserBanned ? (
+                  <Button variant="outline" disabled className="border-green-500 text-green-600">
+                    <CheckCircle className="h-4 w-4 mr-1" />
+                    User Banned
+                  </Button>
+                ) : (
+                  <Button
+                    variant="destructive"
+                    onClick={() => setConfirmBan(true)}
+                    disabled={banMutation.isPending}
+                  >
+                    <UserX className="h-4 w-4 mr-1" />
+                    Ban User
+                  </Button>
+                )
+              )}
+              {context.target && !showLabelForm && (
+                <Button
+                  variant="outline"
+                  onClick={() => setShowLabelForm(true)}
+                >
+                  <Tag className="h-4 w-4 mr-1" />
+                  Create Label
+                </Button>
+              )}
+            </div>
           </div>
         </div>
       </ScrollArea>

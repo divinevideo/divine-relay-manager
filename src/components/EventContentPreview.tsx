@@ -1,12 +1,13 @@
 // ABOUTME: Displays preview of a Nostr event's content by fetching it from the relay
-// ABOUTME: Shows text content, images, and metadata for moderation review
+// ABOUTME: Shows text content, images, metadata, and Hive AI moderation results
 
 import { useQuery } from "@tanstack/react-query";
 import { useNostr } from "@nostrify/react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
-import { AlertTriangle, Image, FileText, User, ExternalLink } from "lucide-react";
+import { AlertTriangle, ExternalLink } from "lucide-react";
+import { HiveAIReport } from "@/components/HiveAIReport";
 import type { NostrEvent } from "@nostrify/nostrify";
 
 interface EventContentPreviewProps {
@@ -47,7 +48,10 @@ export function EventContentPreview({ eventId, className }: EventContentPreviewP
   }
 
   return (
-    <EventContent event={event} className={className} />
+    <div className={`space-y-3 ${className}`}>
+      <EventContent event={event} />
+      <HiveAIReport eventTags={event.tags} />
+    </div>
   );
 }
 

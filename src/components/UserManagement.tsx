@@ -10,9 +10,9 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/useToast";
-import { UserX, UserCheck, Plus, Trash2, Users } from "lucide-react";
-
-const WORKER_URL = import.meta.env.VITE_WORKER_URL || '';
+import { UserX, UserCheck, Plus, Users } from "lucide-react";
+import { BannedUserCard } from "@/components/BannedUserCard";
+import { callRelayRpc } from "@/lib/adminApi";
 
 interface UserManagementProps {
   relayUrl: string;
@@ -28,28 +28,6 @@ interface AllowedUser {
   reason?: string;
 }
 
-// API functions for relay management via Worker
-async function callRelayAPI(method: string, params: (string | number | undefined)[] = []) {
-  const response = await fetch(`${WORKER_URL}/api/relay-rpc`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ method, params }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-  }
-
-  const data = await response.json();
-  if (!data.success) {
-    throw new Error(data.error || 'Unknown error');
-  }
-
-  return data.result;
-}
-
 export function UserManagement({ relayUrl }: UserManagementProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -61,19 +39,19 @@ export function UserManagement({ relayUrl }: UserManagementProps) {
   // Query for banned users
   const { data: bannedUsers, isLoading: loadingBanned, error: bannedError } = useQuery({
     queryKey: ['banned-users'],
-    queryFn: () => callRelayAPI('listbannedpubkeys'),
+    queryFn: () => callRelayRpc('listbannedpubkeys'),
   });
 
   // Query for allowed users
   const { data: allowedUsers, isLoading: loadingAllowed, error: allowedError } = useQuery({
     queryKey: ['allowed-users'],
-    queryFn: () => callRelayAPI('listallowedpubkeys'),
+    queryFn: () => callRelayRpc('listallowedpubkeys'),
   });
 
   // Mutation for banning users
   const banUserMutation = useMutation({
     mutationFn: ({ pubkey, reason }: { pubkey: string; reason?: string }) =>
-      callRelayAPI('banpubkey', [pubkey, reason]),
+      callRelayRpc('banpubkey', [pubkey, reason]),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['banned-users'] });
       toast({ title: "User banned successfully" });
@@ -93,7 +71,7 @@ export function UserManagement({ relayUrl }: UserManagementProps) {
   // Mutation for allowing users
   const allowUserMutation = useMutation({
     mutationFn: ({ pubkey, reason }: { pubkey: string; reason?: string }) =>
-      callRelayAPI('allowpubkey', [pubkey, reason]),
+      callRelayRpc('allowpubkey', [pubkey, reason]),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['allowed-users'] });
       toast({ title: "User allowed successfully" });
@@ -283,21 +261,12 @@ export function UserManagement({ relayUrl }: UserManagementProps) {
               ) : (
                 <div className="space-y-3">
                   {bannedUsers.map((user: BannedUser, index: number) => (
-                    <div key={index} className="flex items-center justify-between p-3 border rounded-lg">
-                      <div>
-                        <p className="font-mono text-sm">{user.pubkey}</p>
-                        {user.reason && (
-                          <p className="text-sm text-muted-foreground mt-1">{user.reason}</p>
-                        )}
-                      </div>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => handleRemoveUser(user.pubkey, 'ban')}
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
-                    </div>
+                    <BannedUserCard
+                      key={index}
+                      pubkey={user.pubkey}
+                      reason={user.reason}
+                      onUnban={() => handleRemoveUser(user.pubkey, 'ban')}
+                    />
                   ))}
                 </div>
               )}

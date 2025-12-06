@@ -1,4 +1,4 @@
-import { BrowserRouter, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Route, Routes, Navigate } from "react-router-dom";
 import { ScrollToTop } from "./components/ScrollToTop";
 
 import Index from "./pages/Index";
@@ -9,7 +9,15 @@ export function AppRouter() {
     <BrowserRouter>
       <ScrollToTop />
       <Routes>
-        <Route path="/" element={<Index />} />
+        {/* Main tabs - each tab gets its own route */}
+        <Route path="/" element={<Navigate to="/reports" replace />} />
+        <Route path="/events" element={<Index />} />
+        <Route path="/users" element={<Index />} />
+        <Route path="/users/:pubkey" element={<Index />} />
+        <Route path="/reports" element={<Index />} />
+        <Route path="/reports/:reportId" element={<Index />} />
+        <Route path="/labels" element={<Index />} />
+        <Route path="/settings" element={<Index />} />
         {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
         <Route path="*" element={<NotFound />} />
       </Routes>

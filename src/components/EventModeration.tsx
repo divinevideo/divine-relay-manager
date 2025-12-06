@@ -12,8 +12,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/useToast";
 import { Shield, ShieldCheck, ShieldX, Plus, AlertTriangle, CheckCircle, XCircle } from "lucide-react";
-
-const WORKER_URL = import.meta.env.VITE_WORKER_URL || '';
+import { callRelayRpc } from "@/lib/adminApi";
 
 interface EventModerationProps {
   relayUrl: string;
@@ -29,28 +28,6 @@ interface BannedEvent {
   reason?: string;
 }
 
-// API functions for relay management via Worker
-async function callRelayAPI(method: string, params: (string | number | undefined)[] = []) {
-  const response = await fetch(`${WORKER_URL}/api/relay-rpc`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ method, params }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-  }
-
-  const data = await response.json();
-  if (!data.success) {
-    throw new Error(data.error || 'Unknown error');
-  }
-
-  return data.result;
-}
-
 export function EventModeration({ relayUrl }: EventModerationProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -61,19 +38,19 @@ export function EventModeration({ relayUrl }: EventModerationProps) {
   // Query for events needing moderation
   const { data: eventsNeedingModeration, isLoading: loadingPending, error: pendingError } = useQuery({
     queryKey: ['events-needing-moderation'],
-    queryFn: () => callRelayAPI('listeventsneedingmoderation'),
+    queryFn: () => callRelayRpc('listeventsneedingmoderation'),
   });
 
   // Query for banned events
   const { data: bannedEvents, isLoading: loadingBanned, error: bannedError } = useQuery({
     queryKey: ['banned-events'],
-    queryFn: () => callRelayAPI('listbannedevents'),
+    queryFn: () => callRelayRpc('listbannedevents'),
   });
 
   // Mutation for allowing events
   const allowEventMutation = useMutation({
     mutationFn: ({ eventId, reason }: { eventId: string; reason?: string }) =>
-      callRelayAPI('allowevent', [eventId, reason]),
+      callRelayRpc('allowevent', [eventId, reason]),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['events-needing-moderation'] });
       toast({ title: "Event approved successfully" });
@@ -90,7 +67,7 @@ export function EventModeration({ relayUrl }: EventModerationProps) {
   // Mutation for banning events
   const banEventMutation = useMutation({
     mutationFn: ({ eventId, reason }: { eventId: string; reason?: string }) =>
-      callRelayAPI('banevent', [eventId, reason]),
+      callRelayRpc('banevent', [eventId, reason]),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['events-needing-moderation'] });
       queryClient.invalidateQueries({ queryKey: ['banned-events'] });

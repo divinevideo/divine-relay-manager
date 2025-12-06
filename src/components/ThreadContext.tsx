@@ -52,7 +52,7 @@ function PostCard({
                   <Badge variant="destructive" className="text-xs">Reported</Badge>
                 )}
               </div>
-              <p className="text-sm mt-1 whitespace-pre-wrap break-words">
+              <p className="text-sm mt-1 whitespace-pre-wrap break-all">
                 {event.content.slice(0, 500)}
                 {event.content.length > 500 && '...'}
               </p>

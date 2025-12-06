@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
+import { callRelayRpc } from "@/lib/adminApi";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -18,59 +19,6 @@ interface RelaySettingsProps {
   relayUrl: string;
 }
 
-// Helper function to create NIP-98 auth header
-async function createAuthHeader(url: string, method: string, payload?: string) {
-  if (!window.nostr) {
-    throw new Error("NIP-07 extension not found");
-  }
-
-  const event = {
-    kind: 27235,
-    content: "",
-    tags: [
-      ["u", url],
-      ["method", method],
-    ],
-    created_at: Math.floor(Date.now() / 1000),
-  };
-
-  if (payload) {
-    const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
-    const hashHex = Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
-    event.tags.push(["payload", hashHex]);
-  }
-
-  const signedEvent = await window.nostr.signEvent(event);
-  return `Nostr ${btoa(JSON.stringify(signedEvent))}` as string;
-}
-
-// API functions for relay management
-async function callRelayAPI(relayUrl: string, method: string, params: (string | number | undefined)[] = []) {
-  const httpUrl = relayUrl.replace(/^wss?:\/\//, 'https://');
-  const payload = JSON.stringify({ method, params });
-  
-  const authHeader = await createAuthHeader(httpUrl, 'POST', payload);
-  
-  const response = await fetch(httpUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/nostr+json+rpc',
-      'Authorization': authHeader,
-    },
-    body: payload,
-  });
-
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-  }
-
-  const result = await response.json();
-  if (result.error) {
-    throw new Error(result.error);
-  }
-
-  return result.result;
-}
 
 export function RelaySettings({ relayUrl }: RelaySettingsProps) {
   const { user } = useCurrentUser();
@@ -91,20 +39,20 @@ export function RelaySettings({ relayUrl }: RelaySettingsProps) {
   // Query for allowed kinds
   const { data: allowedKinds, isLoading: loadingKinds, error: kindsError } = useQuery({
     queryKey: ['allowed-kinds', relayUrl],
-    queryFn: () => callRelayAPI(relayUrl, 'listallowedkinds'),
+    queryFn: () => callRelayRpc('listallowedkinds'),
     enabled: !!relayUrl && !!user,
   });
 
   // Query for blocked IPs
   const { data: blockedIps, isLoading: loadingIps, error: ipsError } = useQuery({
     queryKey: ['blocked-ips', relayUrl],
-    queryFn: () => callRelayAPI(relayUrl, 'listblockedips'),
+    queryFn: () => callRelayRpc('listblockedips'),
     enabled: !!relayUrl && !!user,
   });
 
   // Mutation for changing relay name
   const changeNameMutation = useMutation({
-    mutationFn: (name: string) => callRelayAPI(relayUrl, 'changerelayname', [name]),
+    mutationFn: (name: string) => callRelayRpc('changerelayname', [name]),
     onSuccess: () => {
       toast({ title: "Relay name updated successfully" });
       queryClient.invalidateQueries({ queryKey: ['relay-info', relayUrl] });
@@ -120,7 +68,7 @@ export function RelaySettings({ relayUrl }: RelaySettingsProps) {
 
   // Mutation for changing relay description
   const changeDescriptionMutation = useMutation({
-    mutationFn: (description: string) => callRelayAPI(relayUrl, 'changerelaydescription', [description]),
+    mutationFn: (description: string) => callRelayRpc('changerelaydescription', [description]),
     onSuccess: () => {
       toast({ title: "Relay description updated successfully" });
       queryClient.invalidateQueries({ queryKey: ['relay-info', relayUrl] });
@@ -136,7 +84,7 @@ export function RelaySettings({ relayUrl }: RelaySettingsProps) {
 
   // Mutation for changing relay icon
   const changeIconMutation = useMutation({
-    mutationFn: (icon: string) => callRelayAPI(relayUrl, 'changerelayicon', [icon]),
+    mutationFn: (icon: string) => callRelayRpc('changerelayicon', [icon]),
     onSuccess: () => {
       toast({ title: "Relay icon updated successfully" });
       queryClient.invalidateQueries({ queryKey: ['relay-info', relayUrl] });
@@ -154,7 +102,7 @@ export function RelaySettings({ relayUrl }: RelaySettingsProps) {
   const manageKindMutation = useMutation({
     mutationFn: ({ kind, action }: { kind: number; action: 'allow' | 'disallow' }) => {
       const method = action === 'allow' ? 'allowkind' : 'disallowkind';
-      return callRelayAPI(relayUrl, method, [kind]);
+      return callRelayRpc(method, [kind]);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['allowed-kinds', relayUrl] });
@@ -174,7 +122,7 @@ export function RelaySettings({ relayUrl }: RelaySettingsProps) {
   // Mutation for blocking IPs
   const blockIpMutation = useMutation({
     mutationFn: ({ ip, reason }: { ip: string; reason?: string }) =>
-      callRelayAPI(relayUrl, 'blockip', [ip, reason]),
+      callRelayRpc('blockip', [ip, reason]),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['blocked-ips', relayUrl] });
       toast({ title: "IP blocked successfully" });
@@ -193,7 +141,7 @@ export function RelaySettings({ relayUrl }: RelaySettingsProps) {
 
   // Mutation for unblocking IPs
   const unblockIpMutation = useMutation({
-    mutationFn: (ip: string) => callRelayAPI(relayUrl, 'unblockip', [ip]),
+    mutationFn: (ip: string) => callRelayRpc('unblockip', [ip]),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['blocked-ips', relayUrl] });
       toast({ title: "IP unblocked successfully" });

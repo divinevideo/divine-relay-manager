@@ -1,10 +1,13 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNostr } from "@/hooks/useNostr";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { useAuthor } from "@/hooks/useAuthor";
 import { useToast } from "@/hooks/useToast";
-import { genUserName } from "@/lib/genUserName";
+import { nip19 } from "nostr-tools";
+import { getKindInfo, getKindCategory } from "@/lib/kindNames";
+import { callRelayRpc } from "@/lib/adminApi";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -13,23 +16,31 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
-import { 
-  FileText, 
-  MoreVertical, 
-  Shield, 
-  ShieldX, 
-  ShieldCheck, 
-  User, 
-  Clock, 
-  Hash, 
+import { EventDetail } from "@/components/EventDetail";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  FileText,
+  MoreVertical,
+  Shield,
+  ShieldX,
+  ShieldCheck,
+  User,
+  Clock,
+  Hash,
   RefreshCw,
   Ban,
   CheckCircle,
   Copy,
-  AlertTriangle
+  AlertTriangle,
+  Eye,
+  Search,
+  Flag,
+  Image,
+  UserPlus,
 } from "lucide-react";
 import type { NostrEvent } from "@nostrify/nostrify";
 
@@ -42,71 +53,16 @@ interface EventWithModeration extends NostrEvent {
   moderationReason?: string;
 }
 
-// NIP-98 HTTP Auth helper
-async function createNip98Auth(url: string, method: string, payload?: string): Promise<string> {
-  if (!window.nostr) {
-    throw new Error("NIP-07 extension not found");
-  }
 
-  const event = {
-    kind: 27235,
-    content: "",
-    tags: [
-      ["u", url],
-      ["method", method],
-    ],
-    created_at: Math.floor(Date.now() / 1000),
-  };
-
-  if (payload) {
-    const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
-    const hashHex = Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
-    event.tags.push(["payload", hashHex]);
-  }
-
-  const signedEvent = await window.nostr.signEvent(event);
-  return `Nostr ${btoa(JSON.stringify(signedEvent))}`;
-}
-
-// NIP-86 Relay Management API
-async function callRelayAPI(relayUrl: string, method: string, params: (string | number | undefined)[] = []) {
-  const httpUrl = relayUrl.replace(/^wss?:\/\//, 'https://');
-  const payload = JSON.stringify({ method, params });
-  
-  try {
-    const authHeader = await createNip98Auth(httpUrl, 'POST', payload);
-    
-    const response = await fetch(httpUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/nostr+json+rpc',
-        'Authorization': authHeader,
-      },
-      body: payload,
-    });
-
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-    }
-
-    const result = await response.json();
-    if (result.error) {
-      throw new Error(result.error);
-    }
-
-    return result.result;
-  } catch (error) {
-    console.warn(`NIP-86 API call failed for ${method}:`, error);
-    // Return empty array for list methods to avoid breaking the UI
-    if (method.startsWith('list')) {
-      return [];
-    }
-    throw error;
-  }
-}
-
-function EventCard({ event, onModerate }: { 
-  event: EventWithModeration; 
+function EventCard({
+  event,
+  isSelected,
+  onSelect,
+  onModerate,
+}: {
+  event: EventWithModeration;
+  isSelected: boolean;
+  onSelect: () => void;
   onModerate: (eventId: string, action: 'allow' | 'ban', reason?: string) => void;
 }) {
   const author = useAuthor(event.pubkey);
@@ -115,8 +71,11 @@ function EventCard({ event, onModerate }: {
   const [moderationReason, setModerationReason] = useState('');
 
   const metadata = author.data?.metadata;
-  const displayName = metadata?.name || genUserName(event.pubkey);
+  const displayName = metadata?.name || nip19.npubEncode(event.pubkey).slice(0, 12) + '...';
   const profileImage = metadata?.picture;
+
+  const kindInfo = getKindInfo(event.kind);
+  const category = getKindCategory(event.kind);
 
   const handleModerate = () => {
     onModerate(event.id!, moderationAction, moderationReason.trim() || undefined);
@@ -124,142 +83,122 @@ function EventCard({ event, onModerate }: {
     setModerationReason('');
   };
 
-  const getKindName = (kind: number) => {
-    const kindNames: Record<number, string> = {
-      0: 'Profile',
-      1: 'Text Note',
-      3: 'Contacts',
-      4: 'DM',
-      5: 'Delete',
-      6: 'Repost',
-      7: 'Reaction',
-      1984: 'Report',
-      30023: 'Article',
-    };
-    return kindNames[kind] || `Kind ${kind}`;
-  };
-
   const formatTimestamp = (timestamp: number) => {
     return new Date(timestamp * 1000).toLocaleString();
   };
 
-  const truncateContent = (content: string, maxLength: number = 200) => {
+  const truncateContent = (content: string, maxLength: number = 100) => {
     if (content.length <= maxLength) return content;
     return content.slice(0, maxLength) + '...';
   };
 
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
-    // You could add a toast here
   };
 
   return (
     <>
-      <Card className="mb-4">
-        <CardHeader className="pb-3">
-          <div className="flex items-start justify-between">
-            <div className="flex items-center space-x-3">
-              {profileImage ? (
-                <img 
-                  src={profileImage} 
-                  alt={displayName}
-                  className="w-10 h-10 rounded-full object-cover"
-                />
-              ) : (
-                <div className="w-10 h-10 rounded-full bg-gray-200 dark:bg-gray-700 flex items-center justify-center">
-                  <User className="h-5 w-5 text-gray-500" />
-                </div>
-              )}
-              <div>
-                <p className="font-semibold text-sm">{displayName}</p>
-                <p className="text-xs text-muted-foreground font-mono">
-                  {event.pubkey.slice(0, 16)}...
-                </p>
+      <div
+        className={`p-3 border rounded-lg cursor-pointer transition-colors mb-2 ${
+          isSelected
+            ? 'border-primary bg-primary/5 ring-1 ring-primary'
+            : 'hover:bg-muted/50'
+        }`}
+        onClick={onSelect}
+      >
+        <div className="flex items-start justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            {profileImage ? (
+              <img
+                src={profileImage}
+                alt={displayName}
+                className="w-8 h-8 rounded-full object-cover shrink-0"
+              />
+            ) : (
+              <div className="w-8 h-8 rounded-full bg-gray-200 dark:bg-gray-700 flex items-center justify-center shrink-0">
+                <User className="h-4 w-4 text-gray-500" />
               </div>
+            )}
+            <div className="min-w-0">
+              <p className="font-medium text-sm truncate">{displayName}</p>
+              <p className="text-xs text-muted-foreground font-mono">
+                {event.pubkey.slice(0, 12)}...
+              </p>
             </div>
-            <div className="flex items-center space-x-2">
-              <Badge variant="outline" className="text-xs">
-                {getKindName(event.kind)}
+          </div>
+          <div className="flex items-center gap-1 shrink-0">
+            <Badge variant="outline" className="text-xs">
+              {kindInfo.name}
+            </Badge>
+            {event.moderationStatus && (
+              <Badge
+                variant={
+                  event.moderationStatus === 'approved' ? 'default' :
+                  event.moderationStatus === 'banned' ? 'destructive' : 'secondary'
+                }
+                className="text-xs"
+              >
+                {event.moderationStatus}
               </Badge>
-              {event.moderationStatus && (
-                <Badge 
-                  variant={
-                    event.moderationStatus === 'approved' ? 'default' :
-                    event.moderationStatus === 'banned' ? 'destructive' : 'secondary'
-                  }
-                  className="text-xs"
-                >
-                  {event.moderationStatus}
-                </Badge>
-              )}
-              
-              {/* Moderation Menu */}
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="ghost" size="sm">
-                    <MoreVertical className="h-4 w-4" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="w-48">
-                  <DropdownMenuItem onClick={() => setModerationDialogOpen(true)}>
-                    <Shield className="h-4 w-4 mr-2" />
-                    Moderate Event
-                  </DropdownMenuItem>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem onClick={() => copyToClipboard(event.id!)}>
-                    <Copy className="h-4 w-4 mr-2" />
-                    Copy Event ID
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => copyToClipboard(event.pubkey)}>
-                    <User className="h-4 w-4 mr-2" />
-                    Copy Pubkey
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => copyToClipboard(JSON.stringify(event, null, 2))}>
-                    <Hash className="h-4 w-4 mr-2" />
-                    Copy Event JSON
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent className="pt-0">
-          <div className="space-y-3">
-            {event.content && (
-              <div className="text-sm">
-                <p className="whitespace-pre-wrap break-words">
-                  {truncateContent(event.content)}
-                </p>
-              </div>
             )}
-            
-            <div className="flex items-center justify-between text-xs text-muted-foreground">
-              <div className="flex items-center space-x-4">
-                <div className="flex items-center space-x-1">
-                  <Clock className="h-3 w-3" />
-                  <span>{formatTimestamp(event.created_at)}</span>
-                </div>
-                <div className="flex items-center space-x-1">
-                  <Hash className="h-3 w-3" />
-                  <span className="font-mono">{event.id?.slice(0, 8)}...</span>
-                </div>
-              </div>
-              {event.tags.length > 0 && (
-                <span>{event.tags.length} tags</span>
-              )}
-            </div>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="sm" onClick={(e) => e.stopPropagation()}>
+                  <MoreVertical className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-48">
+                <DropdownMenuItem onClick={(e) => { e.stopPropagation(); onSelect(); }}>
+                  <Eye className="h-4 w-4 mr-2" />
+                  View Details
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={(e) => { e.stopPropagation(); setModerationDialogOpen(true); }}>
+                  <Shield className="h-4 w-4 mr-2" />
+                  Moderate Event
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={(e) => { e.stopPropagation(); copyToClipboard(event.id!); }}>
+                  <Copy className="h-4 w-4 mr-2" />
+                  Copy Event ID
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={(e) => { e.stopPropagation(); copyToClipboard(event.pubkey); }}>
+                  <User className="h-4 w-4 mr-2" />
+                  Copy Pubkey
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+        </div>
 
-            {event.moderationReason && (
-              <Alert>
-                <AlertTriangle className="h-4 w-4" />
-                <AlertDescription className="text-xs">
-                  <strong>Moderation reason:</strong> {event.moderationReason}
-                </AlertDescription>
-              </Alert>
-            )}
+        {event.content && (
+          <p className="text-sm mt-2 text-muted-foreground truncate">
+            {truncateContent(event.content)}
+          </p>
+        )}
+
+        <div className="flex items-center justify-between mt-2 text-xs text-muted-foreground">
+          <div className="flex items-center gap-3">
+            <span className="flex items-center gap-1">
+              <Clock className="h-3 w-3" />
+              {formatTimestamp(event.created_at)}
+            </span>
+            <span className="flex items-center gap-1 font-mono">
+              <Hash className="h-3 w-3" />
+              {event.id?.slice(0, 8)}...
+            </span>
           </div>
-        </CardContent>
-      </Card>
+          {event.tags.length > 0 && (
+            <span>{event.tags.length} tags</span>
+          )}
+        </div>
+
+        {event.moderationReason && (
+          <div className="mt-2 p-2 bg-destructive/10 rounded text-xs text-destructive">
+            <AlertTriangle className="h-3 w-3 inline mr-1" />
+            {event.moderationReason}
+          </div>
+        )}
+      </div>
 
       {/* Moderation Dialog */}
       <Dialog open={moderationDialogOpen} onOpenChange={setModerationDialogOpen}>
@@ -345,10 +284,37 @@ export function EventsList({ relayUrl }: EventsListProps) {
   const { user } = useCurrentUser();
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  
+  const [searchParams, setSearchParams] = useSearchParams();
+
   const [kindFilter, setKindFilter] = useState<string>('all');
   const [limit, setLimit] = useState(20);
   const [customKind, setCustomKind] = useState('');
+  const [selectedEvent, setSelectedEvent] = useState<NostrEvent | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filterHasReports, setFilterHasReports] = useState(false);
+  const [filterNewUsers, setFilterNewUsers] = useState(false);
+  const [filterHasMedia, setFilterHasMedia] = useState(false);
+  const [filterByPubkey, setFilterByPubkey] = useState<string | null>(
+    searchParams.get('pubkey')
+  );
+
+  // Sync URL params with filterByPubkey state
+  useEffect(() => {
+    const pubkeyParam = searchParams.get('pubkey');
+    if (pubkeyParam !== filterByPubkey) {
+      setFilterByPubkey(pubkeyParam);
+    }
+  }, [searchParams]);
+
+  // Update URL when filterByPubkey changes
+  const updatePubkeyFilter = (pubkey: string | null) => {
+    setFilterByPubkey(pubkey);
+    if (pubkey) {
+      setSearchParams({ pubkey });
+    } else {
+      setSearchParams({});
+    }
+  };
 
   // Query for recent events
   const { data: events, isLoading: loadingEvents, error: eventsError, refetch } = useQuery({
@@ -382,22 +348,61 @@ export function EventsList({ relayUrl }: EventsListProps) {
   // Query for banned events to mark them
   const { data: bannedEvents } = useQuery({
     queryKey: ['banned-events', relayUrl],
-    queryFn: () => callRelayAPI(relayUrl, 'listbannedevents'),
+    queryFn: () => callRelayRpc('listbannedevents'),
     enabled: !!relayUrl && !!user,
   });
 
   // Query for events needing moderation
   const { data: eventsNeedingModeration } = useQuery({
     queryKey: ['events-needing-moderation', relayUrl],
-    queryFn: () => callRelayAPI(relayUrl, 'listeventsneedingmoderation'),
+    queryFn: () => callRelayRpc('listeventsneedingmoderation'),
     enabled: !!relayUrl && !!user,
   });
+
+  // Query for all reports to check which users/events have been reported
+  const { data: allReports } = useQuery({
+    queryKey: ['all-reports', relayUrl],
+    queryFn: async () => {
+      const signal = AbortSignal.timeout(5000);
+      const reports = await nostr.query([{ kinds: [1984], limit: 500 }], { signal });
+      return reports;
+    },
+    enabled: filterHasReports,
+    staleTime: 60000,
+  });
+
+  // Build sets of reported event IDs and pubkeys
+  const reportedEventIds = new Set<string>();
+  const reportedPubkeys = new Set<string>();
+  if (allReports) {
+    for (const report of allReports) {
+      const eTag = report.tags.find(t => t[0] === 'e');
+      if (eTag) reportedEventIds.add(eTag[1]);
+      const pTag = report.tags.find(t => t[0] === 'p');
+      if (pTag) reportedPubkeys.add(pTag[1]);
+    }
+  }
+
+  // Helper to check if content has media
+  const hasMedia = (content: string): boolean => {
+    const mediaPattern = /https?:\/\/[^\s]+\.(jpg|jpeg|png|gif|webp|mp4|webm|mov)/i;
+    return mediaPattern.test(content);
+  };
+
+  // Helper to check if user is "new" (created within last 7 days based on event timestamp)
+  const isNewUser = (pubkey: string, events: NostrEvent[]): boolean => {
+    const userEvents = events.filter(e => e.pubkey === pubkey);
+    if (userEvents.length === 0) return true;
+    const oldest = Math.min(...userEvents.map(e => e.created_at));
+    const sevenDaysAgo = Date.now() / 1000 - (7 * 24 * 60 * 60);
+    return oldest > sevenDaysAgo;
+  };
 
   // Mutation for event moderation
   const moderateEventMutation = useMutation({
     mutationFn: ({ eventId, action, reason }: { eventId: string; action: 'allow' | 'ban'; reason?: string }) => {
       const method = action === 'allow' ? 'allowevent' : 'banevent';
-      return callRelayAPI(relayUrl, method, [eventId, reason]);
+      return callRelayRpc(method, [eventId, reason]);
     },
     onSuccess: (_, { action, eventId }) => {
       queryClient.invalidateQueries({ queryKey: ['banned-events', relayUrl] });
@@ -420,18 +425,53 @@ export function EventsList({ relayUrl }: EventsListProps) {
     moderateEventMutation.mutate({ eventId, action, reason });
   };
 
-  // Enhance events with moderation status
-  const enhancedEvents: EventWithModeration[] = events?.map(event => {
-    const isBanned = bannedEvents?.some((banned: { id: string }) => banned.id === event.id);
-    const needsModeration = eventsNeedingModeration?.some((pending: { id: string }) => pending.id === event.id);
-    
-    return {
-      ...event,
-      moderationStatus: isBanned ? 'banned' : needsModeration ? 'pending' : undefined,
-      moderationReason: isBanned ? bannedEvents?.find((banned: { id: string; reason?: string }) => banned.id === event.id)?.reason : 
-                       needsModeration ? eventsNeedingModeration?.find((pending: { id: string; reason?: string }) => pending.id === event.id)?.reason : undefined,
-    };
-  }) || [];
+  // Enhance events with moderation status and apply filters
+  const enhancedEvents: EventWithModeration[] = (events || [])
+    .map(event => {
+      const isBanned = bannedEvents?.some((banned: { id: string }) => banned.id === event.id);
+      const needsModeration = eventsNeedingModeration?.some((pending: { id: string }) => pending.id === event.id);
+
+      return {
+        ...event,
+        moderationStatus: isBanned ? 'banned' : needsModeration ? 'pending' : undefined,
+        moderationReason: isBanned ? bannedEvents?.find((banned: { id: string; reason?: string }) => banned.id === event.id)?.reason :
+                         needsModeration ? eventsNeedingModeration?.find((pending: { id: string; reason?: string }) => pending.id === event.id)?.reason : undefined,
+      };
+    })
+    .filter(event => {
+      // Filter by pubkey if set
+      if (filterByPubkey && event.pubkey !== filterByPubkey) {
+        return false;
+      }
+
+      // Search filter - check content and pubkey
+      if (searchQuery.trim()) {
+        const query = searchQuery.toLowerCase();
+        const matchesContent = event.content?.toLowerCase().includes(query);
+        const matchesPubkey = event.pubkey.toLowerCase().includes(query);
+        if (!matchesContent && !matchesPubkey) {
+          return false;
+        }
+      }
+
+      // Has reports filter
+      if (filterHasReports) {
+        const isReported = reportedEventIds.has(event.id!) || reportedPubkeys.has(event.pubkey);
+        if (!isReported) return false;
+      }
+
+      // Has media filter
+      if (filterHasMedia) {
+        if (!hasMedia(event.content || '')) return false;
+      }
+
+      // New users filter
+      if (filterNewUsers && events) {
+        if (!isNewUser(event.pubkey, events)) return false;
+      }
+
+      return true;
+    });
 
   const kindOptions = [
     { value: 'all', label: 'All Events' },
@@ -444,7 +484,8 @@ export function EventsList({ relayUrl }: EventsListProps) {
   ];
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
+      {/* Header */}
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-2xl font-bold">Events & Moderation</h2>
@@ -458,15 +499,24 @@ export function EventsList({ relayUrl }: EventsListProps) {
 
       {/* Filters */}
       <Card>
-        <CardHeader>
-          <CardTitle className="text-lg">Filters</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div>
-              <Label htmlFor="kind-filter">Event Kind</Label>
+        <CardContent className="py-3 space-y-3">
+          {/* Search Bar */}
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Input
+              placeholder="Search by content or pubkey..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="pl-9 h-9"
+            />
+          </div>
+
+          {/* Filter Row */}
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="flex-1 min-w-[150px]">
+              <Label htmlFor="kind-filter" className="text-xs">Event Kind</Label>
               <Select value={kindFilter} onValueChange={setKindFilter}>
-                <SelectTrigger className="mt-1">
+                <SelectTrigger className="mt-1 h-9">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -478,100 +528,164 @@ export function EventsList({ relayUrl }: EventsListProps) {
                 </SelectContent>
               </Select>
             </div>
-            
+
             {kindFilter === 'custom' && (
-              <div>
-                <Label htmlFor="custom-kind">Custom Kind Number</Label>
+              <div className="w-32">
+                <Label htmlFor="custom-kind" className="text-xs">Kind #</Label>
                 <Input
                   id="custom-kind"
                   type="number"
                   value={customKind}
                   onChange={(e) => setCustomKind(e.target.value)}
-                  placeholder="Enter kind number"
-                  className="mt-1"
+                  placeholder="Kind"
+                  className="mt-1 h-9"
                 />
               </div>
             )}
-            
-            <div>
-              <Label htmlFor="limit">Limit</Label>
+
+            <div className="w-24">
+              <Label htmlFor="limit" className="text-xs">Limit</Label>
               <Select value={limit.toString()} onValueChange={(value) => setLimit(parseInt(value))}>
-                <SelectTrigger className="mt-1">
+                <SelectTrigger className="mt-1 h-9">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="10">10 events</SelectItem>
-                  <SelectItem value="20">20 events</SelectItem>
-                  <SelectItem value="50">50 events</SelectItem>
-                  <SelectItem value="100">100 events</SelectItem>
+                  <SelectItem value="10">10</SelectItem>
+                  <SelectItem value="20">20</SelectItem>
+                  <SelectItem value="50">50</SelectItem>
+                  <SelectItem value="100">100</SelectItem>
                 </SelectContent>
               </Select>
             </div>
           </div>
+
+          {/* Smart Filters */}
+          <div className="flex flex-wrap gap-4">
+            <label className="flex items-center gap-2 text-sm cursor-pointer">
+              <Checkbox
+                checked={filterHasReports}
+                onCheckedChange={(checked) => setFilterHasReports(checked === true)}
+              />
+              <Flag className="h-4 w-4 text-muted-foreground" />
+              Has reports
+            </label>
+            <label className="flex items-center gap-2 text-sm cursor-pointer">
+              <Checkbox
+                checked={filterNewUsers}
+                onCheckedChange={(checked) => setFilterNewUsers(checked === true)}
+              />
+              <UserPlus className="h-4 w-4 text-muted-foreground" />
+              New users (&lt;7d)
+            </label>
+            <label className="flex items-center gap-2 text-sm cursor-pointer">
+              <Checkbox
+                checked={filterHasMedia}
+                onCheckedChange={(checked) => setFilterHasMedia(checked === true)}
+              />
+              <Image className="h-4 w-4 text-muted-foreground" />
+              Has media
+            </label>
+          </div>
+
+          {/* Active Pubkey Filter */}
+          {filterByPubkey && (
+            <div className="flex items-center gap-2 p-2 bg-muted rounded-lg">
+              <span className="text-xs text-muted-foreground">Filtering by user:</span>
+              <code className="text-xs font-mono">{filterByPubkey.slice(0, 16)}...</code>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 px-2"
+                onClick={() => updatePubkeyFilter(null)}
+              >
+                Clear
+              </Button>
+            </div>
+          )}
         </CardContent>
       </Card>
 
-      {/* Events List */}
-      <div>
-        {loadingEvents ? (
-          <div className="space-y-4">
-            {[...Array(5)].map((_, i) => (
-              <Card key={i}>
-                <CardHeader>
-                  <div className="flex items-center space-x-3">
-                    <Skeleton className="h-10 w-10 rounded-full" />
-                    <div className="space-y-1">
-                      <Skeleton className="h-4 w-32" />
-                      <Skeleton className="h-3 w-24" />
-                    </div>
-                  </div>
-                </CardHeader>
-                <CardContent>
-                  <div className="space-y-2">
-                    <Skeleton className="h-4 w-full" />
-                    <Skeleton className="h-4 w-3/4" />
-                    <Skeleton className="h-3 w-1/2" />
-                  </div>
-                </CardContent>
-              </Card>
-            ))}
-          </div>
-        ) : eventsError ? (
-          <Alert>
-            <AlertTriangle className="h-4 w-4" />
-            <AlertDescription>
-              Failed to load events: {eventsError.message}
-            </AlertDescription>
-          </Alert>
-        ) : !enhancedEvents || enhancedEvents.length === 0 ? (
-          <Card>
-            <CardContent className="py-12 text-center">
-              <FileText className="h-12 w-12 mx-auto mb-4 opacity-50" />
-              <p className="text-muted-foreground">No events found</p>
-              <p className="text-sm text-muted-foreground mt-1">
-                Try adjusting your filters or check if the relay is active
-              </p>
-            </CardContent>
-          </Card>
-        ) : (
-          <div>
-            <div className="mb-4 text-sm text-muted-foreground">
-              Showing {enhancedEvents.length} events
-              {eventsNeedingModeration && eventsNeedingModeration.length > 0 && (
-                <Badge variant="secondary" className="ml-2">
-                  {eventsNeedingModeration.length} pending moderation
-                </Badge>
-              )}
+      {/* Split Pane Layout */}
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 h-[calc(100vh-280px)]">
+        {/* Left Pane - Events List */}
+        <Card className="lg:col-span-2">
+          <CardHeader className="py-3">
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-lg flex items-center gap-2">
+                <FileText className="h-5 w-5" />
+                Events
+              </CardTitle>
+              <div className="text-sm text-muted-foreground">
+                {enhancedEvents.length} events
+                {eventsNeedingModeration && eventsNeedingModeration.length > 0 && (
+                  <Badge variant="secondary" className="ml-2 text-xs">
+                    {eventsNeedingModeration.length} pending
+                  </Badge>
+                )}
+              </div>
             </div>
-            {enhancedEvents.map((event) => (
-              <EventCard
-                key={event.id}
-                event={event}
-                onModerate={handleModerateEvent}
-              />
-            ))}
-          </div>
-        )}
+          </CardHeader>
+          <CardContent className="p-0">
+            <ScrollArea className="h-[calc(100vh-380px)]">
+              <div className="p-3">
+                {loadingEvents ? (
+                  <div className="space-y-2">
+                    {[...Array(5)].map((_, i) => (
+                      <Skeleton key={i} className="h-20 w-full" />
+                    ))}
+                  </div>
+                ) : eventsError ? (
+                  <Alert>
+                    <AlertTriangle className="h-4 w-4" />
+                    <AlertDescription>
+                      Failed to load events: {eventsError.message}
+                    </AlertDescription>
+                  </Alert>
+                ) : !enhancedEvents || enhancedEvents.length === 0 ? (
+                  <div className="text-center py-8 text-muted-foreground">
+                    <FileText className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                    <p className="text-sm">No events found</p>
+                  </div>
+                ) : (
+                  enhancedEvents.map((event) => (
+                    <EventCard
+                      key={event.id}
+                      event={event}
+                      isSelected={selectedEvent?.id === event.id}
+                      onSelect={() => setSelectedEvent(event)}
+                      onModerate={handleModerateEvent}
+                    />
+                  ))
+                )}
+              </div>
+            </ScrollArea>
+          </CardContent>
+        </Card>
+
+        {/* Right Pane - Event Detail */}
+        <Card className="lg:col-span-3 overflow-hidden">
+          {selectedEvent ? (
+            <EventDetail
+              event={selectedEvent}
+              onClose={() => setSelectedEvent(null)}
+              onSelectEvent={(eventId) => {
+                const found = enhancedEvents.find(e => e.id === eventId);
+                if (found) setSelectedEvent(found);
+              }}
+              onSelectPubkey={(pubkey) => {
+                updatePubkeyFilter(pubkey);
+                setSelectedEvent(null);
+              }}
+            />
+          ) : (
+            <div className="h-full flex items-center justify-center text-muted-foreground">
+              <div className="text-center">
+                <FileText className="h-12 w-12 mx-auto mb-4 opacity-50" />
+                <p>Select an event to view details</p>
+              </div>
+            </div>
+          )}
+        </Card>
       </div>
     </div>
   );
