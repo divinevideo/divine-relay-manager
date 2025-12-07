@@ -1,6 +1,6 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNostr } from "@/hooks/useNostr";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { useAuthor } from "@/hooks/useAuthor";
@@ -122,7 +122,14 @@ function EventCard({
             <div className="min-w-0">
               <p className="font-medium text-sm truncate">{displayName}</p>
               <p className="text-xs text-muted-foreground font-mono">
-                {event.pubkey.slice(0, 12)}...
+                {(() => {
+                  try {
+                    const npub = nip19.npubEncode(event.pubkey);
+                    return `${npub.slice(0, 12)}...`;
+                  } catch {
+                    return `${event.pubkey.slice(0, 12)}...`;
+                  }
+                })()}
               </p>
             </div>
           </div>
@@ -316,14 +323,30 @@ export function EventsList({ relayUrl }: EventsListProps) {
     }
   };
 
-  // Query for recent events
-  const { data: events, isLoading: loadingEvents, error: eventsError, refetch } = useQuery({
+  // Ref for infinite scroll trigger
+  const loadMoreRef = useRef<HTMLDivElement>(null);
+
+  // Query for recent events with infinite scroll
+  const {
+    data: eventsData,
+    isLoading: loadingEvents,
+    error: eventsError,
+    refetch,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useInfiniteQuery({
     queryKey: ['relay-events', relayUrl, kindFilter, limit, customKind],
-    queryFn: async () => {
+    queryFn: async ({ pageParam }) => {
       const signal = AbortSignal.timeout(10000);
-      
-      const filter: { limit: number; kinds?: number[] } = { limit };
-      
+
+      const filter: { limit: number; kinds?: number[]; until?: number } = { limit };
+
+      // Use `until` for pagination - fetch events older than the last one
+      if (pageParam) {
+        filter.until = pageParam;
+      }
+
       if (kindFilter !== 'all') {
         if (kindFilter === 'custom' && customKind) {
           const kind = parseInt(customKind);
@@ -341,9 +364,43 @@ export function EventsList({ relayUrl }: EventsListProps) {
       const events = await nostr.query([filter], { signal });
       return events.sort((a, b) => b.created_at - a.created_at);
     },
+    initialPageParam: undefined as number | undefined,
+    getNextPageParam: (lastPage) => {
+      // Get the oldest event's timestamp for the next page
+      if (lastPage.length === 0) return undefined;
+      const oldestEvent = lastPage[lastPage.length - 1];
+      // Return timestamp - 1 to get events strictly before this one
+      return oldestEvent.created_at - 1;
+    },
     enabled: !!relayUrl && !!nostr,
     refetchInterval: 30000, // Refresh every 30 seconds
   });
+
+  // Flatten all pages into a single events array
+  const events = eventsData?.pages.flat() ?? [];
+
+  // Auto-load more when scrolling to bottom (IntersectionObserver)
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting && hasNextPage && !isFetchingNextPage) {
+          fetchNextPage();
+        }
+      },
+      { threshold: 0.1 }
+    );
+
+    const currentRef = loadMoreRef.current;
+    if (currentRef) {
+      observer.observe(currentRef);
+    }
+
+    return () => {
+      if (currentRef) {
+        observer.unobserve(currentRef);
+      }
+    };
+  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
 
   // Query for banned events to mark them
   const { data: bannedEvents } = useQuery({
@@ -647,15 +704,39 @@ export function EventsList({ relayUrl }: EventsListProps) {
                     <p className="text-sm">No events found</p>
                   </div>
                 ) : (
-                  enhancedEvents.map((event) => (
-                    <EventCard
-                      key={event.id}
-                      event={event}
-                      isSelected={selectedEvent?.id === event.id}
-                      onSelect={() => setSelectedEvent(event)}
-                      onModerate={handleModerateEvent}
-                    />
-                  ))
+                  <>
+                    {enhancedEvents.map((event) => (
+                      <EventCard
+                        key={event.id}
+                        event={event}
+                        isSelected={selectedEvent?.id === event.id}
+                        onSelect={() => setSelectedEvent(event)}
+                        onModerate={handleModerateEvent}
+                      />
+                    ))}
+                    {/* Infinite scroll trigger */}
+                    <div ref={loadMoreRef} className="py-4 text-center">
+                      {isFetchingNextPage ? (
+                        <div className="flex items-center justify-center gap-2 text-sm text-muted-foreground">
+                          <RefreshCw className="h-4 w-4 animate-spin" />
+                          Loading older events...
+                        </div>
+                      ) : hasNextPage ? (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => fetchNextPage()}
+                          className="text-muted-foreground"
+                        >
+                          Load more
+                        </Button>
+                      ) : events.length > 0 ? (
+                        <p className="text-xs text-muted-foreground">
+                          End of events
+                        </p>
+                      ) : null}
+                    </div>
+                  </>
                 )}
               </div>
             </ScrollArea>

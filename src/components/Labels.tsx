@@ -2,6 +2,7 @@
 // ABOUTME: Shows labels applied to events/pubkeys for moderation context with full content preview
 
 import { useState } from "react";
+import { nip19 } from "nostr-tools";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNostr } from "@nostrify/react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -29,7 +30,7 @@ import { LabelPublisher } from "@/components/LabelPublisher";
 import { EventContentPreview } from "@/components/EventContentPreview";
 import { UserProfilePreview } from "@/components/UserProfilePreview";
 import { ReportedBy } from "@/components/ReporterInfo";
-import { UserIdentifier } from "@/components/UserIdentifier";
+import { UserIdentifier, UserDisplayName } from "@/components/UserIdentifier";
 import type { NostrEvent } from "@nostrify/nostrify";
 
 interface LabelsProps {
@@ -332,9 +333,22 @@ export function Labels({ relayUrl }: LabelsProps) {
                               )}
                             </div>
                             {target && (
-                              <p className="text-sm text-muted-foreground font-mono">
-                                {target.value.slice(0, 16)}...
-                              </p>
+                              target.type === 'pubkey' ? (
+                                <div className="text-sm text-muted-foreground">
+                                  <UserDisplayName pubkey={target.value} fallbackLength={16} />
+                                </div>
+                              ) : (
+                                <p className="text-sm text-muted-foreground font-mono">
+                                  {(() => {
+                                    try {
+                                      const noteId = nip19.noteEncode(target.value);
+                                      return `${noteId.slice(0, 16)}...`;
+                                    } catch {
+                                      return `${target.value.slice(0, 16)}...`;
+                                    }
+                                  })()}
+                                </p>
+                              )
                             )}
                           </div>
                           <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -426,9 +440,22 @@ export function Labels({ relayUrl }: LabelsProps) {
                             <Badge variant="secondary" className="mb-2">
                               {target.type === 'event' ? 'Event' : 'User'}
                             </Badge>
-                            <p className="font-mono text-sm">
-                              {target.value.slice(0, 24)}...
-                            </p>
+                            {target.type === 'pubkey' ? (
+                              <div className="text-sm">
+                                <UserDisplayName pubkey={target.value} fallbackLength={20} />
+                              </div>
+                            ) : (
+                              <p className="font-mono text-sm">
+                                {(() => {
+                                  try {
+                                    const noteId = nip19.noteEncode(target.value);
+                                    return `${noteId.slice(0, 20)}...`;
+                                  } catch {
+                                    return `${target.value.slice(0, 20)}...`;
+                                  }
+                                })()}
+                              </p>
+                            )}
                           </div>
                           <Badge variant="outline">{events.length} label(s)</Badge>
                         </div>

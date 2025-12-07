@@ -4,13 +4,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { listBannedPubkeys, listBannedEvents } from "@/lib/adminApi";
 
-interface ModerationStatus {
-  isBanned: boolean;
-  isDeleted: boolean;
-  banReason?: string;
-  deleteReason?: string;
-}
-
 export function useModerationStatus(
   pubkey?: string | null,
   eventId?: string | null
@@ -21,8 +14,9 @@ export function useModerationStatus(
     queryFn: async () => {
       try {
         return await listBannedPubkeys();
-      } catch {
-        // If the RPC fails, return empty array
+      } catch (error) {
+        // Log the error so we can see if NIP-86 RPC is failing
+        console.warn('NIP-86 listbannedpubkeys failed (relay may not support it):', error);
         return [];
       }
     },
@@ -35,8 +29,9 @@ export function useModerationStatus(
     queryFn: async () => {
       try {
         return await listBannedEvents();
-      } catch {
-        // If the RPC fails, return empty array
+      } catch (error) {
+        // Log the error so we can see if NIP-86 RPC is failing
+        console.warn('NIP-86 listbannedevents failed (relay may not support it):', error);
         return [];
       }
     },

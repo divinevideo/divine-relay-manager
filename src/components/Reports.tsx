@@ -18,7 +18,7 @@ import { Label } from "@/components/ui/label";
 import { Flag, RefreshCw, Clock, Users, Layers, CheckCircle } from "lucide-react";
 import { ReportDetail } from "@/components/ReportDetail";
 import { UserDisplayName } from "@/components/UserIdentifier";
-import { listBannedPubkeys, listBannedEvents } from "@/lib/adminApi";
+import { listBannedPubkeys, listBannedEvents, getAllDecisions } from "@/lib/adminApi";
 import { CATEGORY_LABELS } from "@/lib/constants";
 import type { NostrEvent } from "@nostrify/nostrify";
 
@@ -272,33 +272,48 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     },
   });
 
-  // Query banned pubkeys from relay
+  // Query banned pubkeys from relay (NIP-86 RPC)
   const { data: bannedPubkeys } = useQuery({
     queryKey: ['banned-pubkeys'],
     queryFn: async () => {
       try {
-        return await listBannedPubkeys();
-      } catch {
+        const pubkeys = await listBannedPubkeys();
+        console.log('[Reports] Banned pubkeys from relay:', pubkeys.length);
+        return pubkeys;
+      } catch (error) {
+        console.warn('NIP-86 listbannedpubkeys failed:', error);
         return [];
       }
     },
     staleTime: 30 * 1000,
   });
 
-  // Query banned/deleted events from relay
+  // Query banned/deleted events from relay (NIP-86 RPC)
   const { data: bannedEvents } = useQuery({
     queryKey: ['banned-events'],
     queryFn: async () => {
       try {
         return await listBannedEvents();
-      } catch {
+      } catch (error) {
+        console.warn('NIP-86 listbannedevents failed:', error);
         return [];
       }
     },
     staleTime: 30 * 1000,
   });
 
-  // Build set of resolved target keys (from labels, bans, and deletions)
+  // Query all moderation decisions from our D1 database
+  const { data: allDecisions } = useQuery({
+    queryKey: ['all-decisions'],
+    queryFn: async () => {
+      const decisions = await getAllDecisions();
+      console.log('[Reports] Loaded decisions:', decisions.length, decisions.slice(0, 3));
+      return decisions;
+    },
+    staleTime: 30 * 1000,
+  });
+
+  // Build set of resolved target keys (from labels, bans, deletions, and decisions)
   const resolvedTargets = useMemo(() => {
     const resolved = new Set<string>();
 
@@ -326,8 +341,20 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       }
     }
 
+    // Add from moderation decisions (ban_user, delete_event, etc.)
+    if (allDecisions) {
+      for (const decision of allDecisions) {
+        if (decision.target_type === 'pubkey') {
+          resolved.add(`pubkey:${decision.target_id}`);
+        } else if (decision.target_type === 'event') {
+          resolved.add(`event:${decision.target_id}`);
+        }
+      }
+    }
+
+    console.log('[Reports] Resolved targets:', resolved.size, Array.from(resolved).slice(0, 5));
     return resolved;
-  }, [resolutionLabels, bannedPubkeys, bannedEvents]);
+  }, [resolutionLabels, bannedPubkeys, bannedEvents, allDecisions]);
 
   const consolidated = useMemo(() => {
     if (!reports) return [];

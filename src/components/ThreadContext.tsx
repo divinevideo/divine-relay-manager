@@ -1,6 +1,7 @@
 // ABOUTME: Displays thread ancestry for a reported post (up to 3 levels)
 // ABOUTME: Shows grandparent -> parent -> reported post with visual hierarchy
 
+import { nip19 } from "nostr-tools";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -27,7 +28,14 @@ function PostCard({
   depth?: number;
 }) {
   const author = useAuthor(event.pubkey);
-  const displayName = author.data?.metadata?.name || event.pubkey.slice(0, 8) + '...';
+  const npubFallback = (() => {
+    try {
+      return nip19.npubEncode(event.pubkey).slice(0, 12) + '...';
+    } catch {
+      return event.pubkey.slice(0, 8) + '...';
+    }
+  })();
+  const displayName = author.data?.metadata?.display_name || author.data?.metadata?.name || npubFallback;
   const avatar = author.data?.metadata?.picture;
   const date = new Date(event.created_at * 1000);
 

@@ -18,6 +18,7 @@ export function AppRouter() {
         <Route path="/reports/:reportId" element={<Index />} />
         <Route path="/labels" element={<Index />} />
         <Route path="/settings" element={<Index />} />
+        <Route path="/debug" element={<Index />} />
         {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
         <Route path="*" element={<NotFound />} />
       </Routes>

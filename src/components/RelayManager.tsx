@@ -6,10 +6,11 @@ import { EventsList } from "@/components/EventsList";
 import { UserManagement } from "@/components/UserManagement";
 import { Reports } from "@/components/Reports";
 import { Labels } from "@/components/Labels";
+import { DebugPanel } from "@/components/DebugPanel";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Server, FileText, Users, Settings, Flag, Tag } from "lucide-react";
+import { Server, FileText, Users, Settings, Flag, Tag, Bug } from "lucide-react";
 
 const RELAY_URL = "wss://relay.divine.video";
 
@@ -20,6 +21,7 @@ function getTabFromPath(pathname: string): string {
   if (pathname.startsWith('/reports')) return 'reports';
   if (pathname.startsWith('/labels')) return 'labels';
   if (pathname.startsWith('/settings')) return 'settings';
+  if (pathname.startsWith('/debug')) return 'debug';
   return 'reports'; // default
 }
 
@@ -59,7 +61,7 @@ export function RelayManager() {
 
       <div className="container mx-auto px-4 py-8">
         <Tabs value={currentTab} onValueChange={handleTabChange} className="space-y-6">
-          <TabsList className="grid w-full grid-cols-5">
+          <TabsList className="grid w-full grid-cols-6">
             <TabsTrigger value="events" className="flex items-center space-x-2">
               <FileText className="h-4 w-4" />
               <span>Events</span>
@@ -79,6 +81,10 @@ export function RelayManager() {
             <TabsTrigger value="settings" className="flex items-center space-x-2">
               <Settings className="h-4 w-4" />
               <span>Settings</span>
+            </TabsTrigger>
+            <TabsTrigger value="debug" className="flex items-center space-x-2">
+              <Bug className="h-4 w-4" />
+              <span>Debug</span>
             </TabsTrigger>
           </TabsList>
 
@@ -104,6 +110,12 @@ export function RelayManager() {
                 <Settings className="h-12 w-12 mx-auto mb-4 opacity-50" />
                 <p className="text-muted-foreground">Relay settings coming soon</p>
               </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="debug">
+            <Card>
+              <DebugPanel />
             </Card>
           </TabsContent>
         </Tabs>

@@ -79,6 +79,10 @@ export default {
         return handleLogDecision(request, env, corsHeaders);
       }
 
+      if (path === '/api/decisions' && request.method === 'GET') {
+        return handleGetAllDecisions(env, corsHeaders);
+      }
+
       if (path.startsWith('/api/decisions/') && request.method === 'GET') {
         const targetId = path.replace('/api/decisions/', '');
         return handleGetDecisions(targetId, env, corsHeaders);
@@ -517,6 +521,41 @@ async function handleLogDecision(
     });
   } catch (error) {
     console.error('Log decision error:', error);
+    return jsonResponse(
+      { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+      500,
+      corsHeaders
+    );
+  }
+}
+
+async function handleGetAllDecisions(
+  env: Env,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  try {
+    if (!env.DB) {
+      return jsonResponse({ success: false, error: 'Database not configured' }, 500, corsHeaders);
+    }
+
+    await ensureDecisionsTable(env.DB);
+
+    // Get all decisions, ordered by most recent first
+    const decisions = await env.DB.prepare(`
+      SELECT * FROM moderation_decisions
+      ORDER BY created_at DESC
+      LIMIT 1000
+    `).all();
+
+    return new Response(JSON.stringify({
+      success: true,
+      decisions: decisions.results || [],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders },
+    });
+  } catch (error) {
+    console.error('Get all decisions error:', error);
     return jsonResponse(
       { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
       500,

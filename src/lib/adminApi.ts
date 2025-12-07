@@ -316,6 +316,15 @@ export async function getDecisions(targetId: string): Promise<ModerationDecision
   return data.decisions || [];
 }
 
+// Get all decisions (for building resolved targets list)
+export async function getAllDecisions(): Promise<ModerationDecision[]> {
+  const data = await apiRequest<{ success: boolean; decisions: ModerationDecision[] }>(
+    '/api/decisions',
+    'GET'
+  );
+  return data.decisions || [];
+}
+
 // Verify that an event was actually deleted from the relay
 export async function verifyEventDeleted(eventId: string, relayUrl: string): Promise<boolean> {
   try {

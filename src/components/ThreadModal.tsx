@@ -1,6 +1,7 @@
 // ABOUTME: Modal dialog showing the complete thread for a reported event
 // ABOUTME: Displays full conversation with nested replies
 
+import { nip19 } from "nostr-tools";
 import { useNostr } from "@nostrify/react";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -60,7 +61,14 @@ function ThreadPost({
   highlightId?: string;
 }) {
   const author = useAuthor(node.event.pubkey);
-  const displayName = author.data?.metadata?.name || node.event.pubkey.slice(0, 8) + '...';
+  const npubFallback = (() => {
+    try {
+      return nip19.npubEncode(node.event.pubkey).slice(0, 12) + '...';
+    } catch {
+      return node.event.pubkey.slice(0, 8) + '...';
+    }
+  })();
+  const displayName = author.data?.metadata?.display_name || author.data?.metadata?.name || npubFallback;
   const avatar = author.data?.metadata?.picture;
   const date = new Date(node.event.created_at * 1000);
   const isHighlighted = node.event.id === highlightId;

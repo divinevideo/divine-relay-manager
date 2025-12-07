@@ -53,7 +53,7 @@ export function UserProfilePreview({ pubkey, className }: UserProfilePreviewProp
     );
   }
 
-  const displayName = metadata?.display_name || metadata?.name || `${pubkey.slice(0, 8)}...`;
+  const displayName = metadata?.display_name || metadata?.name || `${npub.slice(0, 12)}...`;
 
   return (
     <Card className={`bg-muted/50 ${className}`}>
