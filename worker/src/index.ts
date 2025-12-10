@@ -8,7 +8,6 @@ interface Env {
   RELAY_URL: string;
   ALLOWED_ORIGIN: string;
   ANTHROPIC_API_KEY?: string;
-  MODERATION_API_KEY?: string;
   // Cloudflare Access Service Token for moderation.admin.divine.video
   CF_ACCESS_CLIENT_ID?: string;
   CF_ACCESS_CLIENT_SECRET?: string;
@@ -674,21 +673,17 @@ async function handleModerateMedia(
       return jsonResponse({ success: false, error: 'Missing action' }, 400, corsHeaders);
     }
 
-    if (!env.MODERATION_API_KEY) {
-      return jsonResponse({ success: false, error: 'MODERATION_API_KEY not configured' }, 500, corsHeaders);
+    // Require Zero Trust credentials for moderation service
+    if (!env.CF_ACCESS_CLIENT_ID || !env.CF_ACCESS_CLIENT_SECRET) {
+      return jsonResponse({ success: false, error: 'CF_ACCESS credentials not configured' }, 500, corsHeaders);
     }
 
-    // Build headers including Cloudflare Access service token if available
+    // Build headers with Cloudflare Access service token
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
-      'X-API-Key': env.MODERATION_API_KEY,
+      'CF-Access-Client-Id': env.CF_ACCESS_CLIENT_ID,
+      'CF-Access-Client-Secret': env.CF_ACCESS_CLIENT_SECRET,
     };
-
-    // Add Cloudflare Access headers if configured
-    if (env.CF_ACCESS_CLIENT_ID && env.CF_ACCESS_CLIENT_SECRET) {
-      headers['CF-Access-Client-Id'] = env.CF_ACCESS_CLIENT_ID;
-      headers['CF-Access-Client-Secret'] = env.CF_ACCESS_CLIENT_SECRET;
-    }
 
     const response = await fetch(`${MODERATION_SERVICE_URL}/api/v1/moderate`, {
       method: 'POST',
