@@ -4,6 +4,17 @@ All notable changes to ManVRelay will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **Report sorting and filtering** - Comprehensive queue management for moderators
+  - Sort by: Most Reports, Most Reporters, Newest, Oldest, By Category
+  - Filter by target type: All, Users only, Events only
+  - Filter by category with clickable chips
+  - High-priority categories (CSAM, threats, terrorism) shown first when sorting by category
+- **Priority indicators** - Visual highlighting for urgent reports
+  - Red highlighting for high-priority reports (CSAM, threats, terrorism, non-consensual content)
+  - Orange highlighting for medium-priority reports (doxxing, malware, illegal goods)
+  - Priority badge shown on high-severity reports
+
 ### Fixed
 - **Hide resolved now works** - Fixed multiple issues preventing the filter from working
   - Added error handling to decisions query (was silently failing)
