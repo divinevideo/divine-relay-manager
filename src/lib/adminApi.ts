@@ -165,9 +165,23 @@ export async function unbanPubkey(pubkey: string): Promise<void> {
   await callRelayRpc('allowpubkey', [pubkey]);
 }
 
-// List banned pubkeys
-export async function listBannedPubkeys(): Promise<string[]> {
-  return callRelayRpc<string[]>('listbannedpubkeys');
+// Banned pubkey can be a string or an object with pubkey and reason
+export interface BannedPubkeyEntry {
+  pubkey: string;
+  reason?: string;
+}
+
+// List banned pubkeys - normalizes response to always be BannedPubkeyEntry[]
+export async function listBannedPubkeys(): Promise<BannedPubkeyEntry[]> {
+  const result = await callRelayRpc<string[] | BannedPubkeyEntry[]>('listbannedpubkeys');
+
+  // Normalize: if it's an array of strings, convert to objects
+  return result.map(item => {
+    if (typeof item === 'string') {
+      return { pubkey: item };
+    }
+    return item as BannedPubkeyEntry;
+  });
 }
 
 // List banned events
@@ -318,10 +332,16 @@ export async function getDecisions(targetId: string): Promise<ModerationDecision
 
 // Get all decisions (for building resolved targets list)
 export async function getAllDecisions(): Promise<ModerationDecision[]> {
-  const data = await apiRequest<{ success: boolean; decisions: ModerationDecision[] }>(
+  const data = await apiRequest<{ success: boolean; decisions: ModerationDecision[]; error?: string }>(
     '/api/decisions',
     'GET'
   );
+
+  if (!data.success) {
+    console.error('[adminApi] getAllDecisions failed:', data.error);
+    throw new ApiError(data.error || 'Failed to get decisions');
+  }
+
   return data.decisions || [];
 }
 

@@ -4,6 +4,16 @@ All notable changes to ManVRelay will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **Hide resolved now works** - Fixed multiple issues preventing the filter from working
+  - Added error handling to decisions query (was silently failing)
+  - Individual "All" view now filters resolved reports (was only filtering Grouped view)
+  - Added detailed debug logging for resolved targets breakdown
+- **Debug page crash** - Fixed React error when rendering banned pubkeys
+  - Relay returns objects `{pubkey, reason}` not strings
+  - Added `BannedPubkeyEntry` type to normalize responses
+  - Updated DebugPanel and Reports to handle new format
+
 ## [0.3.0] - 2025-12-07
 
 ### Added

@@ -303,34 +303,48 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   });
 
   // Query all moderation decisions from our D1 database
-  const { data: allDecisions } = useQuery({
+  const { data: allDecisions, error: decisionsError } = useQuery({
     queryKey: ['all-decisions'],
     queryFn: async () => {
-      const decisions = await getAllDecisions();
-      console.log('[Reports] Loaded decisions:', decisions.length, decisions.slice(0, 3));
-      return decisions;
+      try {
+        const decisions = await getAllDecisions();
+        console.log('[Reports] Loaded decisions:', decisions.length, decisions.slice(0, 3));
+        return decisions;
+      } catch (error) {
+        console.error('[Reports] Failed to load decisions:', error);
+        return [];
+      }
     },
     staleTime: 30 * 1000,
   });
 
+  // Debug: log any decisions error
+  useEffect(() => {
+    if (decisionsError) {
+      console.error('[Reports] Decisions query error:', decisionsError);
+    }
+  }, [decisionsError]);
+
   // Build set of resolved target keys (from labels, bans, deletions, and decisions)
   const resolvedTargets = useMemo(() => {
     const resolved = new Set<string>();
+    let fromLabels = 0, fromBannedPubkeys = 0, fromBannedEvents = 0, fromDecisions = 0;
 
     // Add from resolution labels
     if (resolutionLabels) {
       for (const label of resolutionLabels) {
         const eTag = label.tags.find(t => t[0] === 'e');
-        if (eTag) resolved.add(`event:${eTag[1]}`);
+        if (eTag) { resolved.add(`event:${eTag[1]}`); fromLabels++; }
         const pTag = label.tags.find(t => t[0] === 'p');
-        if (pTag) resolved.add(`pubkey:${pTag[1]}`);
+        if (pTag) { resolved.add(`pubkey:${pTag[1]}`); fromLabels++; }
       }
     }
 
-    // Add banned pubkeys
+    // Add banned pubkeys (now returns BannedPubkeyEntry objects)
     if (bannedPubkeys) {
-      for (const pubkey of bannedPubkeys) {
-        resolved.add(`pubkey:${pubkey}`);
+      for (const entry of bannedPubkeys) {
+        resolved.add(`pubkey:${entry.pubkey}`);
+        fromBannedPubkeys++;
       }
     }
 
@@ -338,21 +352,31 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     if (bannedEvents) {
       for (const event of bannedEvents) {
         resolved.add(`event:${event.id}`);
+        fromBannedEvents++;
       }
     }
 
     // Add from moderation decisions (ban_user, delete_event, etc.)
-    if (allDecisions) {
+    if (allDecisions && allDecisions.length > 0) {
       for (const decision of allDecisions) {
         if (decision.target_type === 'pubkey') {
           resolved.add(`pubkey:${decision.target_id}`);
+          fromDecisions++;
         } else if (decision.target_type === 'event') {
           resolved.add(`event:${decision.target_id}`);
+          fromDecisions++;
         }
       }
     }
 
-    console.log('[Reports] Resolved targets:', resolved.size, Array.from(resolved).slice(0, 5));
+    console.log('[Reports] Resolved targets breakdown:', {
+      total: resolved.size,
+      fromLabels,
+      fromBannedPubkeys,
+      fromBannedEvents,
+      fromDecisions,
+      decisionsLoaded: allDecisions?.length ?? 'undefined',
+    });
     return resolved;
   }, [resolutionLabels, bannedPubkeys, bannedEvents, allDecisions]);
 
@@ -373,9 +397,22 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     return consolidateReports(reports);
   }, [reports]);
 
+  // Filter individual reports when hideResolved is on
+  const filteredReports = useMemo(() => {
+    if (!reports) return [];
+    if (!hideResolved) return reports;
+
+    return reports.filter(report => {
+      const target = getReportTarget(report);
+      if (!target) return true; // Keep reports without targets
+      return !resolvedTargets.has(`${target.type}:${target.value}`);
+    });
+  }, [reports, hideResolved, resolvedTargets]);
+
   const uniqueTargets = consolidated.length;
   const totalTargets = allConsolidated.length;
   const totalReports = reports?.length || 0;
+  const filteredReportsCount = filteredReports.length;
   const resolvedCount = totalTargets - uniqueTargets;
 
   // Sync selected report with URL
@@ -464,7 +501,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
               </TabsTrigger>
               <TabsTrigger value="individual" className="text-xs">
                 <Flag className="h-3 w-3 mr-1" />
-                All ({totalReports})
+                All ({hideResolved ? filteredReportsCount : totalReports})
               </TabsTrigger>
             </TabsList>
           </Tabs>
@@ -502,13 +539,13 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                   ))
                 )
               ) : (
-                !reports || reports.length === 0 ? (
+                filteredReports.length === 0 ? (
                   <div className="text-center py-8 text-muted-foreground">
                     <Flag className="h-8 w-8 mx-auto mb-2 opacity-50" />
                     <p className="text-sm">No reports found</p>
                   </div>
                 ) : (
-                  reports.map((report) => (
+                  filteredReports.map((report) => (
                     <IndividualReportItem
                       key={report.id}
                       report={report}
