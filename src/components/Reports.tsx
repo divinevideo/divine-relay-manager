@@ -750,7 +750,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                       <X className="h-3 w-3 ml-1" />
                     </Badge>
                   )}
-                  {!filterCategory && availableCategories.slice(0, 8).map(cat => (
+                  {!filterCategory && availableCategories.map(cat => (
                     <Badge
                       key={cat}
                       variant={HIGH_PRIORITY_CATEGORIES.includes(cat) ? 'destructive' : 'outline'}
@@ -763,11 +763,6 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                       {CATEGORY_LABELS[cat] || cat}
                     </Badge>
                   ))}
-                  {!filterCategory && availableCategories.length > 8 && (
-                    <Badge variant="outline" className="text-xs">
-                      +{availableCategories.length - 8} more
-                    </Badge>
-                  )}
                 </div>
               </div>
             )}
