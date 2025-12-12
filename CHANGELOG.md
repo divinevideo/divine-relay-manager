@@ -14,6 +14,11 @@ All notable changes to ManVRelay will be documented in this file.
   - Red highlighting for high-priority reports (CSAM, threats, terrorism, non-consensual content)
   - Orange highlighting for medium-priority reports (doxxing, malware, illegal goods)
   - Priority badge shown on high-severity reports
+- **Repost content display** - Shows original content when report is on a repost (kind 6/16)
+  - Fetches and displays the original event that was reposted
+  - Shows original author with profile info
+  - Includes media from the original post for moderation
+  - Media hashes from both repost and original are available for blocking
 
 ### Fixed
 - **Hide resolved now works** - Fixed multiple issues preventing the filter from working

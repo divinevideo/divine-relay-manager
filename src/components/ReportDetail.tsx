@@ -41,7 +41,7 @@ import { useDecisionLog } from "@/hooks/useDecisionLog";
 import { HiveAIReport } from "@/components/HiveAIReport";
 import { MediaPreview } from "@/components/MediaPreview";
 import { CATEGORY_LABELS } from "@/lib/constants";
-import { UserX, Tag, Flag, Trash2, CheckCircle, ThumbsDown, Video, History, Ban, ShieldX, Link2, User, FileText, Unlock } from "lucide-react";
+import { UserX, Tag, Flag, Trash2, CheckCircle, ThumbsDown, Video, History, Ban, ShieldX, Link2, User, FileText, Unlock, Repeat2 } from "lucide-react";
 import type { NostrEvent } from "@nostrify/nostrify";
 
 function getReportCategory(event: NostrEvent): string {
@@ -338,10 +338,24 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     },
   });
 
-  // Extract media hashes from the reported event
-  const mediaHashes = context.thread?.event
-    ? extractMediaHashes(context.thread.event.content, context.thread.event.tags)
-    : [];
+  // Extract media hashes from the reported event AND reposted event if it's a repost
+  const mediaHashes = useMemo(() => {
+    const hashes = new Set<string>();
+
+    // From the reported event itself
+    if (context.thread?.event) {
+      const eventHashes = extractMediaHashes(context.thread.event.content, context.thread.event.tags);
+      eventHashes.forEach(h => hashes.add(h));
+    }
+
+    // From the reposted original event
+    if (context.thread?.repostedEvent) {
+      const repostHashes = extractMediaHashes(context.thread.repostedEvent.content, context.thread.repostedEvent.tags);
+      repostHashes.forEach(h => hashes.add(h));
+    }
+
+    return Array.from(hashes);
+  }, [context.thread?.event, context.thread?.repostedEvent]);
 
   // Check media status from moderation service
   const mediaStatus = useMediaStatus(mediaHashes);
@@ -841,6 +855,55 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
               onViewFullThread={() => setShowThreadModal(true)}
               isLoading={context.isLoading}
             />
+          )}
+
+          {/* Repost Original Content - show when the reported event is a repost */}
+          {context.thread?.isRepost && (
+            <Card className="border-blue-200 bg-blue-50/50 dark:bg-blue-950/20">
+              <CardHeader className="py-3">
+                <CardTitle className="text-sm flex items-center gap-2 text-blue-700 dark:text-blue-400">
+                  <Repeat2 className="h-4 w-4" />
+                  This is a Repost - Original Content Below
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="py-0 pb-3">
+                {context.thread?.repostedEvent ? (
+                  <div className="space-y-3">
+                    {/* Original author */}
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-muted-foreground">Original author:</span>
+                      <UserIdentifier
+                        pubkey={context.thread.repostedEvent.pubkey}
+                        showAvatar
+                        avatarSize="sm"
+                        variant="inline"
+                      />
+                    </div>
+                    {/* Original content */}
+                    <div className="bg-background p-3 rounded-lg border">
+                      <p className="text-sm whitespace-pre-wrap break-words">
+                        {context.thread.repostedEvent.content}
+                      </p>
+                      <div className="flex items-center gap-2 mt-2 text-xs text-muted-foreground">
+                        <span>Kind {context.thread.repostedEvent.kind}</span>
+                        <span>·</span>
+                        <span>{new Date(context.thread.repostedEvent.created_at * 1000).toLocaleString()}</span>
+                      </div>
+                    </div>
+                    {/* Media in original post */}
+                    <MediaPreview
+                      event={context.thread.repostedEvent}
+                      showByDefault={true}
+                      maxItems={6}
+                    />
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground italic">
+                    Could not load the original event that was reposted
+                  </p>
+                )}
+              </CardContent>
+            </Card>
           )}
 
           {/* Media Preview - show the actual content being reported */}
