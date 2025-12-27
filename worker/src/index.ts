@@ -144,7 +144,7 @@ async function handleInfo(env: Env, corsHeaders: Record<string, string>): Promis
       200,
       corsHeaders
     );
-  } catch (error) {
+  } catch (_error) {
     return jsonResponse(
       { success: false, error: 'Secret key not configured' },
       500,
@@ -281,7 +281,7 @@ async function handleRelayRpc(
   }
 
   const secretKey = getSecretKey(env);
-  const pubkey = getPublicKey(secretKey);
+  const _pubkey = getPublicKey(secretKey);
 
   // Build NIP-98 auth event
   const httpUrl = env.RELAY_URL.replace(/^wss?:\/\//, 'https://');
@@ -760,7 +760,7 @@ async function publishToRelay(
         }
       });
 
-      ws.addEventListener('error', (err) => {
+      ws.addEventListener('error', (_err) => {
         if (!resolved) {
           clearTimeout(timeout);
           resolved = true;

@@ -29,8 +29,8 @@ function extractMediaItems(content: string, tags: string[][]): MediaItem[] {
   const items: Map<string, MediaItem> = new Map();
 
   // URL patterns for media
-  const urlPattern = /(https?:\/\/[^\s<>"{}|\\^`\[\]]+\.(?:jpg|jpeg|png|gif|webp|mp4|webm|mov|m4v|avi)(?:\?[^\s<>"{}|\\^`\[\]]*)?)/gi;
-  const genericUrlPattern = /(https?:\/\/(?:divine\.video|blossom\.[^\s]+|cdn\.[^\s]+|nostr\.build|void\.cat|image\.nostr\.build|media\.snort\.social|files\.v0l\.io|i\.nostr\.build)[^\s<>"{}|\\^`\[\]]*)/gi;
+  const urlPattern = /(https?:\/\/[^\s<>"{}|\\^`[\]]+\.(?:jpg|jpeg|png|gif|webp|mp4|webm|mov|m4v|avi)(?:\?[^\s<>"{}|\\^`[\]]*)?)/gi;
+  const genericUrlPattern = /(https?:\/\/(?:divine\.video|blossom\.[^\s]+|cdn\.[^\s]+|nostr\.build|void\.cat|image\.nostr\.build|media\.snort\.social|files\.v0l\.io|i\.nostr\.build)[^\s<>"{}|\\^`[\]]*)/gi;
 
   // Image extensions
   const imageExtensions = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'];

@@ -2,7 +2,7 @@
 // ABOUTME: Tracks what actions have been taken on report targets
 
 import { useQuery } from "@tanstack/react-query";
-import { getDecisions, type ModerationDecision } from "@/lib/adminApi";
+import { getDecisions } from "@/lib/adminApi";
 
 export function useDecisionLog(targetId: string | null | undefined) {
   const { data, isLoading, error, refetch } = useQuery({

@@ -72,7 +72,7 @@ function extractMediaUrls(content: string, tags: string[][]): { url: string; typ
   }
 
   // Extract from content
-  const urlPattern = /(https?:\/\/[^\s<>"{}|\\^`\[\]]+\.(?:jpg|jpeg|png|gif|webp|mp4|webm|mov|m4v)(?:\?[^\s]*)?)/gi;
+  const urlPattern = /(https?:\/\/[^\s<>"{}|\\^`[\]]+\.(?:jpg|jpeg|png|gif|webp|mp4|webm|mov|m4v)(?:\?[^\s]*)?)/gi;
   let match;
   while ((match = urlPattern.exec(content)) !== null) {
     const url = match[1];
@@ -84,7 +84,7 @@ function extractMediaUrls(content: string, tags: string[][]): { url: string; typ
   }
 
   // Also check for divine.video URLs
-  const divinePattern = /(https?:\/\/[^\s]*divine\.video[^\s<>"{}|\\^`\[\]]*)/gi;
+  const divinePattern = /(https?:\/\/[^\s]*divine\.video[^\s<>"{}|\\^`[\]]*)/gi;
   while ((match = divinePattern.exec(content)) !== null) {
     const url = match[1];
     if (!seen.has(url)) {
