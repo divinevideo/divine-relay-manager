@@ -6,7 +6,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useAuthor } from "@/hooks/useAuthor";
 import { useThread } from "@/hooks/useThread";
 import { useUserStats } from "@/hooks/useUserStats";
-import type { NostrEvent, NostrMetadata } from "@nostrify/nostrify";
+import type { NostrEvent } from "@nostrify/nostrify";
 
 interface ReportTarget {
   type: 'event' | 'pubkey';

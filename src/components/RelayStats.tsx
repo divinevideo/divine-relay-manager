@@ -42,45 +42,45 @@ export function RelayStats({ relayUrl }: RelayStatsProps) {
   // Query for banned users count
   const { data: bannedUsers, isLoading: loadingBanned } = useQuery({
     queryKey: ['banned-users', relayUrl],
-    queryFn: () => callRelayRpc('listbannedpubkeys'),
+    queryFn: () => callRelayRpc<string[] | Array<{ pubkey: string; reason?: string }>>('listbannedpubkeys'),
     enabled: !!relayUrl && !!user,
   });
 
   // Query for allowed users count
   const { data: allowedUsers, isLoading: loadingAllowed } = useQuery({
     queryKey: ['allowed-users', relayUrl],
-    queryFn: () => callRelayRpc('listallowedpubkeys'),
+    queryFn: () => callRelayRpc<string[] | Array<{ pubkey: string; reason?: string }>>('listallowedpubkeys'),
     enabled: !!relayUrl && !!user,
   });
 
   // Query for banned events count
   const { data: bannedEvents, isLoading: loadingBannedEvents } = useQuery({
     queryKey: ['banned-events', relayUrl],
-    queryFn: () => callRelayRpc('listbannedevents'),
+    queryFn: () => callRelayRpc<Array<{ id: string; reason?: string }>>('listbannedevents'),
     enabled: !!relayUrl && !!user,
   });
 
   // Query for events needing moderation
   const { data: eventsNeedingModeration, isLoading: loadingPending } = useQuery({
     queryKey: ['events-needing-moderation', relayUrl],
-    queryFn: () => callRelayRpc('listeventsneedingmoderation'),
+    queryFn: () => callRelayRpc<Array<{ id: string; reason?: string }>>('listeventsneedingmoderation'),
     enabled: !!relayUrl && !!user,
   });
 
   // Query for allowed kinds
   const { data: allowedKinds, isLoading: loadingKinds } = useQuery({
     queryKey: ['allowed-kinds', relayUrl],
-    queryFn: () => callRelayRpc('listallowedkinds'),
+    queryFn: () => callRelayRpc<number[]>('listallowedkinds'),
     enabled: !!relayUrl && !!user,
   });
 
   const isLoading = loadingInfo || loadingBanned || loadingAllowed || loadingBannedEvents || loadingPending || loadingKinds;
 
   // Calculate stats
-  const bannedUsersCount = bannedUsers?.length || 0;
-  const allowedUsersCount = allowedUsers?.length || 0;
-  const bannedEventsCount = bannedEvents?.length || 0;
-  const pendingModerationCount = eventsNeedingModeration?.length || 0;
+  const bannedUsersCount = Array.isArray(bannedUsers) ? bannedUsers.length : 0;
+  const allowedUsersCount = Array.isArray(allowedUsers) ? allowedUsers.length : 0;
+  const bannedEventsCount = Array.isArray(bannedEvents) ? bannedEvents.length : 0;
+  const pendingModerationCount = Array.isArray(eventsNeedingModeration) ? eventsNeedingModeration.length : 0;
 
   // Calculate usage percentages (mock data for demonstration)
   const maxConnections = relayInfo?.limitation?.max_subscriptions || 1000;
@@ -312,7 +312,7 @@ export function RelayStats({ relayUrl }: RelayStatsProps) {
                 <Skeleton key={i} className="h-6 w-16" />
               ))}
             </div>
-          ) : allowedKinds && allowedKinds.length > 0 ? (
+          ) : Array.isArray(allowedKinds) && allowedKinds.length > 0 ? (
             <div className="flex flex-wrap gap-2">
               {allowedKinds.map((kind: number) => (
                 <Badge key={kind} variant="secondary">

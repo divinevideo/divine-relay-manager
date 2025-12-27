@@ -21,7 +21,7 @@ export function UserProfilePreview({ pubkey, className }: UserProfilePreviewProp
   const { data: author, isLoading: loadingProfile } = useAuthor(pubkey);
 
   // Fetch recent activity (kind 1 notes)
-  const { data: recentNotes, isLoading: loadingNotes } = useQuery({
+  const { data: recentNotes, isLoading: _loadingNotes } = useQuery({
     queryKey: ['user-recent-notes', pubkey],
     queryFn: async ({ signal }) => {
       const events = await nostr.query(

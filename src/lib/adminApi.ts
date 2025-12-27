@@ -76,7 +76,7 @@ async function apiRequest<T>(
   return data;
 }
 
-async function apiRequestWithValidation<T>(
+async function _apiRequestWithValidation<T>(
   endpoint: string,
   method: 'GET' | 'POST',
   body?: object

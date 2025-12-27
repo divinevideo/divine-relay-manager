@@ -2,6 +2,7 @@
 // ABOUTME: Shows grandparent -> parent -> reported post with visual hierarchy
 
 import { nip19 } from "nostr-tools";
+import { Link } from "react-router-dom";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -60,10 +61,30 @@ function PostCard({
                   <Badge variant="destructive" className="text-xs">Reported</Badge>
                 )}
               </div>
-              <p className="text-sm mt-1 whitespace-pre-wrap break-all">
-                {event.content.slice(0, 500)}
-                {event.content.length > 500 && '...'}
-              </p>
+              <div className="text-sm mt-1 whitespace-pre-wrap break-all">
+                {event.content.length > 500 ? (
+                  <>
+                    {event.content.slice(0, 500)}
+                    {' ... '}
+                    <Link
+                      to={`/${(() => {
+                        try {
+                          return nip19.noteEncode(event.id);
+                        } catch {
+                          return `note1${event.id.slice(0, 8)}...`;
+                        }
+                      })()}`}
+                      className="text-blue-500 hover:underline inline-flex items-center gap-1"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <span>View full content</span>
+                      <ExternalLink className="h-3 w-3" />
+                    </Link>
+                  </>
+                ) : (
+                  event.content
+                )}
+              </div>
             </div>
           </div>
         </CardContent>
