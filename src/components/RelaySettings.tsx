@@ -39,7 +39,7 @@ export function RelaySettings({ relayUrl }: RelaySettingsProps) {
   // Query for allowed kinds
   const { data: allowedKinds, isLoading: loadingKinds, error: kindsError } = useQuery({
     queryKey: ['allowed-kinds', relayUrl],
-    queryFn: () => callRelayRpc('listallowedkinds'),
+    queryFn: () => callRelayRpc<number[]>('listallowedkinds'),
     enabled: !!relayUrl && !!user,
   });
 
@@ -434,7 +434,7 @@ export function RelaySettings({ relayUrl }: RelaySettingsProps) {
                     Failed to load allowed kinds: {kindsError.message}
                   </AlertDescription>
                 </Alert>
-              ) : !allowedKinds || allowedKinds.length === 0 ? (
+              ) : !Array.isArray(allowedKinds) || allowedKinds.length === 0 ? (
                 <div className="text-center py-8 text-muted-foreground">
                   <Shield className="h-12 w-12 mx-auto mb-4 opacity-50" />
                   <p>All event kinds are allowed</p>
@@ -536,7 +536,7 @@ export function RelaySettings({ relayUrl }: RelaySettingsProps) {
                     Failed to load blocked IPs: {ipsError.message}
                   </AlertDescription>
                 </Alert>
-              ) : !blockedIps || blockedIps.length === 0 ? (
+              ) : !Array.isArray(blockedIps) || blockedIps.length === 0 ? (
                 <div className="text-center py-8 text-muted-foreground">
                   <Network className="h-12 w-12 mx-auto mb-4 opacity-50" />
                   <p>No blocked IP addresses</p>

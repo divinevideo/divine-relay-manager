@@ -10,7 +10,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/useToast";
-import { UserX, UserCheck, Plus, Users } from "lucide-react";
+import { UserX, UserCheck, Plus, Users, Trash2 } from "lucide-react";
 import { BannedUserCard } from "@/components/BannedUserCard";
 import { callRelayRpc } from "@/lib/adminApi";
 
@@ -39,13 +39,13 @@ export function UserManagement({ relayUrl }: UserManagementProps) {
   // Query for banned users
   const { data: bannedUsers, isLoading: loadingBanned, error: bannedError } = useQuery({
     queryKey: ['banned-users'],
-    queryFn: () => callRelayRpc('listbannedpubkeys'),
+    queryFn: () => callRelayRpc<BannedUser[]>('listbannedpubkeys'),
   });
 
   // Query for allowed users
   const { data: allowedUsers, isLoading: loadingAllowed, error: allowedError } = useQuery({
     queryKey: ['allowed-users'],
-    queryFn: () => callRelayRpc('listallowedpubkeys'),
+    queryFn: () => callRelayRpc<AllowedUser[]>('listallowedpubkeys'),
   });
 
   // Mutation for banning users
@@ -253,7 +253,7 @@ export function UserManagement({ relayUrl }: UserManagementProps) {
                     Failed to load banned users: {bannedError.message}
                   </AlertDescription>
                 </Alert>
-              ) : !bannedUsers || bannedUsers.length === 0 ? (
+              ) : !Array.isArray(bannedUsers) || bannedUsers.length === 0 ? (
                 <div className="text-center py-8 text-muted-foreground">
                   <Users className="h-12 w-12 mx-auto mb-4 opacity-50" />
                   <p>No banned users</p>
@@ -304,7 +304,7 @@ export function UserManagement({ relayUrl }: UserManagementProps) {
                     Failed to load allowed users: {allowedError.message}
                   </AlertDescription>
                 </Alert>
-              ) : !allowedUsers || allowedUsers.length === 0 ? (
+              ) : !Array.isArray(allowedUsers) || allowedUsers.length === 0 ? (
                 <div className="text-center py-8 text-muted-foreground">
                   <Users className="h-12 w-12 mx-auto mb-4 opacity-50" />
                   <p>No explicitly allowed users</p>

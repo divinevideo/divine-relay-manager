@@ -405,14 +405,14 @@ export function EventsList({ relayUrl }: EventsListProps) {
   // Query for banned events to mark them
   const { data: bannedEvents } = useQuery({
     queryKey: ['banned-events', relayUrl],
-    queryFn: () => callRelayRpc('listbannedevents'),
+    queryFn: () => callRelayRpc<Array<{ id: string; reason?: string }>>('listbannedevents'),
     enabled: !!relayUrl && !!user,
   });
 
   // Query for events needing moderation
   const { data: eventsNeedingModeration } = useQuery({
     queryKey: ['events-needing-moderation', relayUrl],
-    queryFn: () => callRelayRpc('listeventsneedingmoderation'),
+    queryFn: () => callRelayRpc<Array<{ id: string; reason?: string }>>('listeventsneedingmoderation'),
     enabled: !!relayUrl && !!user,
   });
 
@@ -485,14 +485,17 @@ export function EventsList({ relayUrl }: EventsListProps) {
   // Enhance events with moderation status and apply filters
   const enhancedEvents: EventWithModeration[] = (events || [])
     .map(event => {
-      const isBanned = bannedEvents?.some((banned: { id: string }) => banned.id === event.id);
-      const needsModeration = eventsNeedingModeration?.some((pending: { id: string }) => pending.id === event.id);
+      const bannedEventsArray = Array.isArray(bannedEvents) ? bannedEvents : [];
+      const eventsNeedingModerationArray = Array.isArray(eventsNeedingModeration) ? eventsNeedingModeration : [];
+      
+      const isBanned = bannedEventsArray.some((banned: { id: string }) => banned.id === event.id);
+      const needsModeration = eventsNeedingModerationArray.some((pending: { id: string }) => pending.id === event.id);
 
       return {
         ...event,
-        moderationStatus: isBanned ? 'banned' : needsModeration ? 'pending' : undefined,
-        moderationReason: isBanned ? bannedEvents?.find((banned: { id: string; reason?: string }) => banned.id === event.id)?.reason :
-                         needsModeration ? eventsNeedingModeration?.find((pending: { id: string; reason?: string }) => pending.id === event.id)?.reason : undefined,
+        moderationStatus: (isBanned ? 'banned' : needsModeration ? 'pending' : undefined) as 'pending' | 'approved' | 'banned' | undefined,
+        moderationReason: isBanned ? bannedEventsArray.find((banned: { id: string; reason?: string }) => banned.id === event.id)?.reason :
+                         needsModeration ? eventsNeedingModerationArray.find((pending: { id: string; reason?: string }) => pending.id === event.id)?.reason : undefined,
       };
     })
     .filter(event => {
@@ -674,7 +677,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
               </CardTitle>
               <div className="text-sm text-muted-foreground">
                 {enhancedEvents.length} events
-                {eventsNeedingModeration && eventsNeedingModeration.length > 0 && (
+                {Array.isArray(eventsNeedingModeration) && eventsNeedingModeration.length > 0 && (
                   <Badge variant="secondary" className="ml-2 text-xs">
                     {eventsNeedingModeration.length} pending
                   </Badge>
