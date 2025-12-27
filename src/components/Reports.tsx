@@ -40,6 +40,8 @@ import { ReportDetail } from "@/components/ReportDetail";
 import { UserDisplayName } from "@/components/UserIdentifier";
 import { listBannedPubkeys, listBannedEvents, getAllDecisions } from "@/lib/adminApi";
 import { CATEGORY_LABELS } from "@/lib/constants";
+import { useIsMobile } from "@/hooks/useIsMobile";
+import { Sheet, SheetContent } from "@/components/ui/sheet";
 import type { NostrEvent } from "@nostrify/nostrify";
 
 // Sort options for moderation queue
@@ -321,6 +323,7 @@ function IndividualReportItem({
 export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const { nostr } = useNostr();
   const navigate = useNavigate();
+  const isMobile = useIsMobile();
   const [selectedReport, setSelectedReport] = useState<NostrEvent | null>(null);
   const [viewMode, setViewMode] = useState<'consolidated' | 'individual'>('consolidated');
   const [hideResolved, setHideResolved] = useState(true);
@@ -643,9 +646,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   }
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 h-[calc(100vh-200px)]">
-      {/* Left Pane - Report List */}
-      <Card className="lg:col-span-2">
+    <>
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 h-[calc(100vh-200px)]">
+        {/* Left Pane - Report List */}
+        <Card className="lg:col-span-2">
         <CardHeader className="pb-3">
           <div className="flex items-center justify-between">
             <div>
@@ -822,21 +826,44 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         </CardContent>
       </Card>
 
-      {/* Right Pane - Report Detail */}
-      <Card className="lg:col-span-3 overflow-hidden">
-        <ReportDetail
-          report={selectedReport}
-          allReportsForTarget={
-            selectedReport
-              ? consolidated.find(c =>
-                  c.reports.some(r => r.id === selectedReport.id)
-                )?.reports
-              : undefined
-          }
-          allReports={reports || []}
-          onDismiss={() => handleSelectReport(null)}
-        />
-      </Card>
-    </div>
+        {/* Right Pane - Report Detail (Desktop) */}
+        {!isMobile && (
+          <Card className="lg:col-span-3 overflow-hidden">
+            <ReportDetail
+              report={selectedReport}
+              allReportsForTarget={
+                selectedReport
+                  ? consolidated.find(c =>
+                      c.reports.some(r => r.id === selectedReport.id)
+                    )?.reports
+                  : undefined
+              }
+              allReports={reports || []}
+              onDismiss={() => handleSelectReport(null)}
+            />
+          </Card>
+        )}
+      </div>
+
+      {/* Mobile Sheet - Report Detail */}
+      {isMobile && (
+        <Sheet open={!!selectedReport} onOpenChange={(open) => !open && handleSelectReport(null)}>
+          <SheetContent side="right" className="w-full sm:max-w-lg overflow-y-auto">
+            <ReportDetail
+              report={selectedReport}
+              allReportsForTarget={
+                selectedReport
+                  ? consolidated.find(c =>
+                      c.reports.some(r => r.id === selectedReport.id)
+                    )?.reports
+                  : undefined
+              }
+              allReports={reports || []}
+              onDismiss={() => handleSelectReport(null)}
+            />
+          </SheetContent>
+        </Sheet>
+      )}
+    </>
   );
 }
