@@ -3,6 +3,8 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { useNostr } from "@nostrify/react";
+import { Link } from "react-router-dom";
+import { nip19 } from "nostr-tools";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
@@ -86,7 +88,27 @@ export function EventContent({ event, className }: EventContentProps) {
         {/* Text content */}
         {textContent && (
           <div className="text-sm whitespace-pre-wrap break-words">
-            {textContent.length > 500 ? `${textContent.slice(0, 500)}...` : textContent}
+            {textContent.length > 500 ? (
+              <>
+                {textContent.slice(0, 500)}
+                {' ... '}
+                <Link
+                  to={`/${(() => {
+                    try {
+                      return nip19.noteEncode(event.id);
+                    } catch {
+                      return `note1${event.id.slice(0, 8)}...`;
+                    }
+                  })()}`}
+                  className="text-blue-500 hover:underline inline-flex items-center gap-1"
+                >
+                  <span>View full content</span>
+                  <ExternalLink className="h-3 w-3" />
+                </Link>
+              </>
+            ) : (
+              textContent
+            )}
           </div>
         )}
 
