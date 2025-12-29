@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Bot, AlertTriangle, ShieldCheck, ShieldAlert, ShieldX, Eye } from "lucide-react";
+import { Bot, ShieldCheck, ShieldAlert, ShieldX, Eye } from "lucide-react";
 
 // Worker URL - proxies requests to moderation service with CF Access credentials
 const WORKER_URL = import.meta.env.VITE_WORKER_URL || 'https://divine-relay-admin-api.divine-video.workers.dev';

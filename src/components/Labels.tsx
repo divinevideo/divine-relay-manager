@@ -22,9 +22,8 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Tag, UserX, Clock, Filter, ChevronDown, ChevronRight, Eye, FileText, Flag } from "lucide-react";
+import { Tag, UserX, Clock, Filter, ChevronDown, ChevronRight, Eye } from "lucide-react";
 import { useToast } from "@/hooks/useToast";
-import { useUserStats } from "@/hooks/useUserStats";
 import { banPubkey } from "@/lib/adminApi";
 import { LabelPublisher } from "@/components/LabelPublisher";
 import { EventContentPreview } from "@/components/EventContentPreview";

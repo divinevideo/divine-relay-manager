@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery, useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNostr } from "@/hooks/useNostr";
@@ -75,7 +75,7 @@ function EventCard({
   const profileImage = metadata?.picture;
 
   const kindInfo = getKindInfo(event.kind);
-  const category = getKindCategory(event.kind);
+  const _category = getKindCategory(event.kind);
 
   const handleModerate = () => {
     onModerate(event.id!, moderationAction, moderationReason.trim() || undefined);
@@ -311,7 +311,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
     if (pubkeyParam !== filterByPubkey) {
       setFilterByPubkey(pubkeyParam);
     }
-  }, [searchParams]);
+  }, [searchParams, filterByPubkey]);
 
   // Update URL when filterByPubkey changes
   const updatePubkeyFilter = (pubkey: string | null) => {

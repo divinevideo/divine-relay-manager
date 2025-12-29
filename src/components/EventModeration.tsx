@@ -28,7 +28,7 @@ interface BannedEvent {
   reason?: string;
 }
 
-export function EventModeration({ relayUrl }: EventModerationProps) {
+export function EventModeration({ relayUrl: _relayUrl }: EventModerationProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [newEventId, setNewEventId] = useState("");

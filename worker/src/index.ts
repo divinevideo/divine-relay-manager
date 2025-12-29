@@ -144,7 +144,7 @@ async function handleInfo(env: Env, corsHeaders: Record<string, string>): Promis
       200,
       corsHeaders
     );
-  } catch (_error) {
+  } catch {
     return jsonResponse(
       { success: false, error: 'Secret key not configured' },
       500,

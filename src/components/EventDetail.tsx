@@ -33,13 +33,10 @@ import { HiveAIReport } from "@/components/HiveAIReport";
 import { ReporterList } from "@/components/ReporterCard";
 import {
   User,
-  Clock,
   Hash,
   Link,
   Tag,
   FileJson,
-  ChevronDown,
-  ChevronRight,
   Copy,
   ExternalLink,
   AtSign,
@@ -51,7 +48,6 @@ import {
   Trash2,
   UserX,
   ShieldAlert,
-  ShieldCheck,
   AlertTriangle,
 } from "lucide-react";
 import type { NostrEvent } from "@nostrify/nostrify";
@@ -200,7 +196,7 @@ function LinkedEvent({ eventId, onSelect }: { eventId: string; onSelect?: (id: s
 
 function TagsTable({ tags }: { tags: string[][] }) {
   const [expanded, setExpanded] = useState(false);
-  const displayTags = expanded ? tags : tags.slice(0, 10);
+  const _displayTags = expanded ? tags : tags.slice(0, 10);
 
   // Group tags by type
   const tagGroups: Record<string, string[][]> = {};
@@ -249,12 +245,12 @@ function TagsTable({ tags }: { tags: string[][] }) {
   );
 }
 
-export function EventDetail({ event, onClose, onSelectEvent, onSelectPubkey, onViewReports }: EventDetailProps) {
+export function EventDetail({ event, onClose: _onClose, onSelectEvent, onSelectPubkey, onViewReports }: EventDetailProps) {
   const { nostr } = useNostr();
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
-  const [showRawJson, setShowRawJson] = useState(false);
+  const [_showRawJson, _setShowRawJson] = useState(false);
   const [confirmBan, setConfirmBan] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
@@ -355,7 +351,7 @@ export function EventDetail({ event, onClose, onSelectEvent, onSelectPubkey, onV
   const otherUrls = urls.filter(u => !isMediaUrl(u));
 
   // Check for imeta tags (media metadata)
-  const imetaTags = event.tags.filter(t => t[0] === 'imeta');
+  const _imetaTags = event.tags.filter(t => t[0] === 'imeta');
 
   return (
     <>
@@ -768,7 +764,9 @@ export function EventDetail({ event, onClose, onSelectEvent, onSelectPubkey, onV
                   onClick={() => {
                     try {
                       navigator.clipboard.writeText(nip19.noteEncode(event.id || ''));
-                    } catch {}
+                    } catch {
+                      // Ignore clipboard errors
+                    }
                   }}
                 >
                   <Copy className="h-3 w-3" />

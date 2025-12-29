@@ -142,9 +142,11 @@ export function MediaPreview({
   const [failedUrls, setFailedUrls] = useState<Set<string>>(new Set());
 
   const content = propContent ?? event?.content ?? '';
-  const tags = propTags ?? event?.tags ?? [];
 
-  const mediaItems = useMemo(() => extractMediaItems(content, tags), [content, tags]);
+  const mediaItems = useMemo(() => {
+    const tags = propTags ?? event?.tags ?? [];
+    return extractMediaItems(content, tags);
+  }, [content, propTags, event?.tags]);
 
   if (mediaItems.length === 0) {
     return null;
