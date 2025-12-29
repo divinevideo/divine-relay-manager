@@ -131,6 +131,8 @@ describe('NoteContent', () => {
     // The text should start with @ and contain a generated name (not a truncated npub)
     const linkText = mention.textContent;
     expect(linkText).not.toMatch(/^@npub1/); // Should not be a truncated npub
-    expect(linkText).toEqual("@Swift Falcon");
+    // Should be a deterministic generated name (format: "Adjective Noun")
+    expect(linkText).toMatch(/^@[A-Z][a-z]+ [A-Z][a-z]+$/);
+    expect(linkText).toEqual("@Noble Jaguar"); // Deterministic name for this specific pubkey
   });
 });

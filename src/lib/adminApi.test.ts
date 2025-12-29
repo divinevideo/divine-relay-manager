@@ -392,7 +392,8 @@ describe('adminApi', () => {
           body: JSON.stringify({ method: 'listbannedpubkeys', params: [] }),
         })
       );
-      expect(result).toEqual(['pubkey1', 'pubkey2']);
+      // Function normalizes string array to BannedPubkeyEntry[] format
+      expect(result).toEqual([{ pubkey: 'pubkey1' }, { pubkey: 'pubkey2' }]);
     });
   });
 
