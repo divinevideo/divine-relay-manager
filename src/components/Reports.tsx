@@ -18,6 +18,7 @@ import { Label } from "@/components/ui/label";
 import { Flag, RefreshCw, Clock, Users, Layers, CheckCircle } from "lucide-react";
 import { ReportDetail } from "@/components/ReportDetail";
 import { UserDisplayName } from "@/components/UserIdentifier";
+import { CopyableId } from "@/components/CopyableId";
 import { listBannedPubkeys, listBannedEvents, getAllDecisions } from "@/lib/adminApi";
 import { CATEGORY_LABELS } from "@/lib/constants";
 import type { NostrEvent } from "@nostrify/nostrify";
@@ -166,16 +167,13 @@ function ConsolidatedReportItem({
             <UserDisplayName pubkey={consolidated.target.value} fallbackLength={16} />
           </div>
         ) : (
-          <p className="text-xs text-muted-foreground font-mono truncate">
-            {(() => {
-              try {
-                const noteId = nip19.noteEncode(consolidated.target.value);
-                return `${noteId.slice(0, 16)}...`;
-              } catch {
-                return `${consolidated.target.value.slice(0, 16)}...`;
-              }
-            })()}
-          </p>
+          <CopyableId
+            value={consolidated.target.value}
+            type="note"
+            truncateStart={12}
+            truncateEnd={4}
+            size="xs"
+          />
         )}
       </div>
     </div>
@@ -225,16 +223,13 @@ function IndividualReportItem({
               <UserDisplayName pubkey={target.value} fallbackLength={16} />
             </div>
           ) : (
-            <p className="text-xs text-muted-foreground font-mono truncate">
-              {(() => {
-                try {
-                  const noteId = nip19.noteEncode(target.value);
-                  return `${noteId.slice(0, 16)}...`;
-                } catch {
-                  return `${target.value.slice(0, 16)}...`;
-                }
-              })()}
-            </p>
+            <CopyableId
+              value={target.value}
+              type="note"
+              truncateStart={12}
+              truncateEnd={4}
+              size="xs"
+            />
           )
         )}
       </div>

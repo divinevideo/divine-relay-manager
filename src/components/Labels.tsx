@@ -22,10 +22,10 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Tag, UserX, Clock, Filter, ChevronDown, ChevronRight, Eye, FileText, Flag } from "lucide-react";
+import { Tag, UserX, Clock, Filter, ChevronDown, ChevronRight, Eye, FileText, Flag, Loader2, CheckCircle, XCircle } from "lucide-react";
 import { useToast } from "@/hooks/useToast";
 import { useUserStats } from "@/hooks/useUserStats";
-import { banPubkey } from "@/lib/adminApi";
+import { banPubkey, verifyPubkeyBanned } from "@/lib/adminApi";
 import { LabelPublisher } from "@/components/LabelPublisher";
 import { EventContentPreview } from "@/components/EventContentPreview";
 import { UserProfilePreview } from "@/components/UserProfilePreview";
@@ -93,6 +93,12 @@ export function Labels({ relayUrl }: LabelsProps) {
   const [namespaceFilter, setNamespaceFilter] = useState<string | null>(null);
   const [confirmBan, setConfirmBan] = useState<{ pubkey: string; reason: string } | null>(null);
   const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [verificationResult, setVerificationResult] = useState<{
+    pubkey: string;
+    success: boolean;
+    message: string;
+  } | null>(null);
 
   const toggleExpanded = (id: string) => {
     setExpandedItems(prev => {
@@ -122,12 +128,42 @@ export function Labels({ relayUrl }: LabelsProps) {
   const banMutation = useMutation({
     mutationFn: async ({ pubkey, reason }: { pubkey: string; reason: string }) => {
       await banPubkey(pubkey, reason);
+      return pubkey;
     },
-    onSuccess: () => {
+    onSuccess: async (pubkey) => {
       queryClient.invalidateQueries({ queryKey: ['banned-users'] });
       queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
-      toast({ title: "User banned successfully" });
+      toast({ title: "User banned", description: "Verifying..." });
       setConfirmBan(null);
+
+      // Verify the ban worked
+      setIsVerifying(true);
+      setVerificationResult(null);
+      try {
+        const verified = await verifyPubkeyBanned(pubkey);
+        setVerificationResult({
+          pubkey,
+          success: verified,
+          message: verified
+            ? 'Ban verified - user is in banned list'
+            : 'Warning: User may not be banned',
+        });
+        toast({
+          title: verified ? "Ban Verified" : "Verification Warning",
+          description: verified
+            ? "User confirmed banned on relay"
+            : "Could not confirm ban - check manually",
+          variant: verified ? "default" : "destructive",
+        });
+      } catch {
+        setVerificationResult({
+          pubkey,
+          success: false,
+          message: 'Could not verify ban status',
+        });
+      } finally {
+        setIsVerifying(false);
+      }
     },
     onError: (error: Error) => {
       toast({
@@ -248,6 +284,39 @@ export function Labels({ relayUrl }: LabelsProps) {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* Verification Status */}
+      {(isVerifying || verificationResult) && (
+        <Alert
+          variant={verificationResult?.success ? "default" : "destructive"}
+          className={verificationResult?.success ? "border-green-500/50 bg-green-500/10" : ""}
+        >
+          {isVerifying ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : verificationResult?.success ? (
+            <CheckCircle className="h-4 w-4 text-green-600" />
+          ) : (
+            <XCircle className="h-4 w-4" />
+          )}
+          <AlertDescription className="flex items-center justify-between">
+            <span>
+              {isVerifying
+                ? "Verifying ban action..."
+                : verificationResult?.message}
+            </span>
+            {verificationResult && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setVerificationResult(null)}
+                className="h-6 px-2"
+              >
+                Dismiss
+              </Button>
+            )}
+          </AlertDescription>
+        </Alert>
+      )}
 
       <Card>
         <CardHeader>

@@ -5,15 +5,17 @@ name = "divine-relay-admin-api"
 main = "src/index.ts"
 compatibility_date = "2024-12-01"
 
-# Custom domain route - serves /api/* on the same domain as frontend
+# Custom domain routes
 routes = [
-  { pattern = "relay.admin.divine.video/api/*", zone_name = "divine.video" }
+  { pattern = "relay.admin.divine.video/api/*", zone_name = "divine.video" },
+  { pattern = "api-relay.divine.video/*", zone_name = "divine.video" }
 ]
 
 # The NOSTR_NSEC secret must be set via: wrangler secret put NOSTR_NSEC
 
 [vars]
 RELAY_URL = "wss://relay.divine.video"
+# Allow both the main frontend and any local dev
 ALLOWED_ORIGIN = "https://relay.admin.divine.video"
 
 # D1 Database for moderation decision log

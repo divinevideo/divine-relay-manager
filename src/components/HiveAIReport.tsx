@@ -1,18 +1,28 @@
 // ABOUTME: Displays Hive AI moderation results from the divine-moderation-service
-// ABOUTME: Shows confidence scores and classification categories from video/image analysis
+// ABOUTME: Shows confidence scores, classification categories, timestamps, and re-check ability
 
-import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Bot, AlertTriangle, ShieldCheck, ShieldAlert, ShieldX, Eye } from "lucide-react";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import { Bot, ShieldCheck, ShieldAlert, ShieldX, Eye, Clock, RefreshCw, Loader2 } from "lucide-react";
+import { CopyableId } from "@/components/CopyableId";
 
 // Worker URL - proxies requests to moderation service with CF Access credentials
 const WORKER_URL = import.meta.env.VITE_WORKER_URL || 'https://divine-relay-admin-api.divine-video.workers.dev';
 
 interface HiveAIReportProps {
   sha256?: string;
+  videoUrl?: string;
   eventTags?: string[][];
   className?: string;
 }
@@ -37,6 +47,7 @@ interface ModerationResult {
   category?: string;
   reason?: string;
   processedAt?: string;
+  created_at?: string;
   categoryVerifications?: Record<string, 'confirmed' | 'rejected' | null>;
 }
 
@@ -102,11 +113,61 @@ const ACTION_CONFIG: Record<string, { label: string; icon: typeof ShieldCheck; c
   PERMANENT_BAN: { label: 'Banned', icon: ShieldX, color: 'text-red-600' },
 };
 
-export function HiveAIReport({ sha256: providedSha256, eventTags, className }: HiveAIReportProps) {
+// Extract video URL from event tags
+function extractVideoUrlFromTags(tags: string[][]): string | null {
+  // Check imeta tags for video URLs
+  for (const tag of tags) {
+    if (tag[0] === 'imeta') {
+      for (let i = 1; i < tag.length; i++) {
+        const part = tag[i];
+        if (part.startsWith('url ')) {
+          const url = part.slice(4);
+          // Match video extensions and divine.video URLs
+          if (/\.(mp4|webm|mov|m4v|avi)(\?|$)/i.test(url) || url.includes('divine.video')) {
+            return url;
+          }
+        }
+      }
+    }
+  }
+
+  // Check url tags
+  for (const tag of tags) {
+    if (tag[0] === 'url' && tag[1]) {
+      const url = tag[1];
+      if (/\.(mp4|webm|mov|m4v|avi|jpg|jpeg|png|gif|webp)(\?|$)/i.test(url) || url.includes('divine.video')) {
+        return url;
+      }
+    }
+  }
+
+  return null;
+}
+
+function formatDate(dateStr: string | undefined): string {
+  if (!dateStr) return 'Unknown';
+  try {
+    const date = new Date(dateStr);
+    return date.toLocaleString(undefined, {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  } catch {
+    return dateStr;
+  }
+}
+
+export function HiveAIReport({ sha256: providedSha256, videoUrl: providedVideoUrl, eventTags, className }: HiveAIReportProps) {
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const queryClient = useQueryClient();
+
   // Determine sha256 from props or tags
   const sha256 = providedSha256 || (eventTags ? extractSha256FromTags(eventTags) : null);
+  const videoUrl = providedVideoUrl || (eventTags ? extractVideoUrlFromTags(eventTags) : null);
 
-  const { data: result, isLoading, error } = useQuery({
+  const { data: result, isLoading, error, refetch } = useQuery({
     queryKey: ['hive-moderation', sha256],
     queryFn: async (): Promise<ModerationResult | null> => {
       if (!sha256) return null;
@@ -144,13 +205,70 @@ export function HiveAIReport({ sha256: providedSha256, eventTags, className }: H
     );
   }
 
-  // No result found
+  // Trigger re-check
+  const handleRecheck = async () => {
+    if (!sha256 || !videoUrl) return;
+
+    setIsSubmitting(true);
+    try {
+      // Call the worker to trigger a moderation check
+      const response = await fetch(`${WORKER_URL}/api/moderate-check`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: videoUrl, sha256 }),
+      });
+
+      if (response.ok) {
+        // Invalidate and refetch
+        queryClient.invalidateQueries({ queryKey: ['hive-moderation', sha256] });
+        refetch();
+      }
+    } catch (err) {
+      console.error('Failed to trigger moderation check:', err);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // No result found - show option to trigger check
   if (!result || error) {
-    return null;
+    return (
+      <Card className={`border-blue-200 dark:border-blue-800 ${className}`}>
+        <CardHeader className="py-2 px-3">
+          <CardTitle className="text-sm flex items-center gap-2">
+            <Bot className="h-4 w-4 text-blue-500" />
+            Hive AI Analysis
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="py-2 px-3">
+          <div className="flex items-center justify-between">
+            <p className="text-xs text-muted-foreground">Not analyzed yet</p>
+            {videoUrl && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleRecheck}
+                disabled={isSubmitting}
+                className="h-7 text-xs"
+              >
+                {isSubmitting ? (
+                  <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-3 w-3 mr-1" />
+                )}
+                Analyze
+              </Button>
+            )}
+          </div>
+          <CopyableId value={sha256} type="hash" label="sha256:" size="xs" className="mt-2" />
+        </CardContent>
+      </Card>
+    );
   }
 
   const actionConfig = ACTION_CONFIG[result.action] || ACTION_CONFIG.REVIEW;
   const ActionIcon = actionConfig.icon;
+  const checkedAt = result.processedAt || result.created_at;
 
   // Filter scores above threshold (0.3)
   const significantScores = Object.entries(result.scores || {})
@@ -215,10 +333,44 @@ export function HiveAIReport({ sha256: providedSha256, eventTags, className }: H
           </p>
         )}
 
+        {/* Timestamp and re-check */}
+        <div className="flex items-center justify-between text-xs text-muted-foreground border-t pt-2">
+          <div className="flex items-center gap-2">
+            <Clock className="h-3 w-3" />
+            {checkedAt ? (
+              <span>Checked: {formatDate(checkedAt)}</span>
+            ) : (
+              <span>Check time unknown</span>
+            )}
+          </div>
+          {videoUrl && (
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={handleRecheck}
+                    disabled={isSubmitting}
+                    className="h-6 text-xs px-2"
+                  >
+                    {isSubmitting ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : (
+                      <RefreshCw className="h-3 w-3" />
+                    )}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  <p>Re-analyze content</p>
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          )}
+        </div>
+
         {/* Hash reference */}
-        <p className="text-xs text-muted-foreground font-mono truncate">
-          sha256: {sha256.slice(0, 16)}...
-        </p>
+        <CopyableId value={sha256} type="hash" label="sha256:" size="xs" />
       </CardContent>
     </Card>
   );
@@ -250,11 +402,29 @@ export function HiveStatusBadge({ sha256: providedSha256, eventTags, className }
 
   const actionConfig = ACTION_CONFIG[result.action] || ACTION_CONFIG.REVIEW;
   const ActionIcon = actionConfig.icon;
+  const checkedAt = result.processedAt || result.created_at;
 
   return (
-    <Badge variant="outline" className={`${className} ${actionConfig.color}`}>
-      <ActionIcon className="h-3 w-3 mr-1" />
-      {actionConfig.label}
-    </Badge>
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Badge variant="outline" className={`${className} ${actionConfig.color} cursor-help`}>
+            <ActionIcon className="h-3 w-3 mr-1" />
+            {actionConfig.label}
+          </Badge>
+        </TooltipTrigger>
+        <TooltipContent>
+          <div className="text-xs space-y-1">
+            <p><strong>Hive AI:</strong> {actionConfig.label}</p>
+            {checkedAt && (
+              <p><strong>Checked:</strong> {formatDate(checkedAt)}</p>
+            )}
+            {result.category && (
+              <p><strong>Category:</strong> {result.category}</p>
+            )}
+          </div>
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   );
 }

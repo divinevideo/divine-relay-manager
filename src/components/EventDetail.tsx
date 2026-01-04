@@ -9,7 +9,8 @@ import { useUserStats } from "@/hooks/useUserStats";
 import { useModerationStatus } from "@/hooks/useModerationStatus";
 import { useToast } from "@/hooks/useToast";
 import { getKindInfo, getKindCategory } from "@/lib/kindNames";
-import { banPubkey, deleteEvent } from "@/lib/adminApi";
+import { banPubkey, deleteEvent, verifyPubkeyBanned, verifyEventDeleted } from "@/lib/adminApi";
+import { useAppContext } from "@/hooks/useAppContext";
 import { UserIdentifier } from "@/components/UserIdentifier";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -30,6 +31,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { HiveAIReport } from "@/components/HiveAIReport";
+import { AIDetectionReport } from "@/components/AIDetectionReport";
 import { ReporterList } from "@/components/ReporterCard";
 import {
   User,
@@ -53,6 +55,9 @@ import {
   ShieldAlert,
   ShieldCheck,
   AlertTriangle,
+  Loader2,
+  CheckCircle,
+  XCircle,
 } from "lucide-react";
 import type { NostrEvent } from "@nostrify/nostrify";
 import { nip19 } from "nostr-tools";
@@ -252,11 +257,18 @@ function TagsTable({ tags }: { tags: string[][] }) {
 export function EventDetail({ event, onClose, onSelectEvent, onSelectPubkey, onViewReports }: EventDetailProps) {
   const { nostr } = useNostr();
   const { toast } = useToast();
+  const { config } = useAppContext();
   const queryClient = useQueryClient();
 
   const [showRawJson, setShowRawJson] = useState(false);
   const [confirmBan, setConfirmBan] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [verificationResult, setVerificationResult] = useState<{
+    type: 'ban' | 'delete';
+    success: boolean;
+    message: string;
+  } | null>(null);
 
   const kindInfo = getKindInfo(event.kind);
   const category = getKindCategory(event.kind);
@@ -307,13 +319,43 @@ export function EventDetail({ event, onClose, onSelectEvent, onSelectPubkey, onV
   const banMutation = useMutation({
     mutationFn: async ({ pubkey, reason }: { pubkey: string; reason: string }) => {
       await banPubkey(pubkey, reason);
+      return pubkey;
     },
-    onSuccess: () => {
+    onSuccess: async (pubkey) => {
       queryClient.invalidateQueries({ queryKey: ['banned-users'] });
       queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
       moderationStatus.refetch();
-      toast({ title: "User banned successfully" });
+      toast({ title: "User banned", description: "Verifying..." });
       setConfirmBan(false);
+
+      // Verify the ban worked
+      setIsVerifying(true);
+      setVerificationResult(null);
+      try {
+        const verified = await verifyPubkeyBanned(pubkey);
+        setVerificationResult({
+          type: 'ban',
+          success: verified,
+          message: verified
+            ? 'User ban verified - pubkey is in banned list'
+            : 'Warning: User may not be banned - not found in banned list',
+        });
+        toast({
+          title: verified ? "Ban Verified" : "Verification Warning",
+          description: verified
+            ? "User is confirmed banned on relay"
+            : "Could not confirm ban - check relay manually",
+          variant: verified ? "default" : "destructive",
+        });
+      } catch (error) {
+        setVerificationResult({
+          type: 'ban',
+          success: false,
+          message: 'Could not verify ban status',
+        });
+      } finally {
+        setIsVerifying(false);
+      }
     },
     onError: (error: Error) => {
       toast({
@@ -327,13 +369,43 @@ export function EventDetail({ event, onClose, onSelectEvent, onSelectPubkey, onV
   const deleteMutation = useMutation({
     mutationFn: async ({ eventId, reason }: { eventId: string; reason: string }) => {
       await deleteEvent(eventId, reason);
+      return eventId;
     },
-    onSuccess: () => {
+    onSuccess: async (eventId) => {
       queryClient.invalidateQueries({ queryKey: ['relay-events'] });
       queryClient.invalidateQueries({ queryKey: ['banned-events'] });
       moderationStatus.refetch();
-      toast({ title: "Event deleted from relay" });
+      toast({ title: "Event deleted", description: "Verifying..." });
       setConfirmDelete(false);
+
+      // Verify the deletion worked
+      setIsVerifying(true);
+      setVerificationResult(null);
+      try {
+        const verified = await verifyEventDeleted(eventId, config.relayUrl);
+        setVerificationResult({
+          type: 'delete',
+          success: verified,
+          message: verified
+            ? 'Event deletion verified - no longer accessible on relay'
+            : 'Warning: Event may still be accessible on relay',
+        });
+        toast({
+          title: verified ? "Deletion Verified" : "Verification Warning",
+          description: verified
+            ? "Event is confirmed deleted from relay"
+            : "Event may still be accessible - check relay manually",
+          variant: verified ? "default" : "destructive",
+        });
+      } catch (error) {
+        setVerificationResult({
+          type: 'delete',
+          success: false,
+          message: 'Could not verify deletion status',
+        });
+      } finally {
+        setIsVerifying(false);
+      }
     },
     onError: (error: Error) => {
       toast({
@@ -343,6 +415,41 @@ export function EventDetail({ event, onClose, onSelectEvent, onSelectPubkey, onV
       });
     },
   });
+
+  // Manual re-verification function
+  const handleReVerify = async (type: 'ban' | 'delete') => {
+    setIsVerifying(true);
+    setVerificationResult(null);
+    try {
+      if (type === 'ban') {
+        const verified = await verifyPubkeyBanned(event.pubkey);
+        setVerificationResult({
+          type: 'ban',
+          success: verified,
+          message: verified
+            ? 'User ban verified - pubkey is in banned list'
+            : 'User is NOT in banned list',
+        });
+      } else {
+        const verified = await verifyEventDeleted(event.id, config.relayUrl);
+        setVerificationResult({
+          type: 'delete',
+          success: verified,
+          message: verified
+            ? 'Event is deleted from relay'
+            : 'Event is still accessible on relay',
+        });
+      }
+    } catch (error) {
+      setVerificationResult({
+        type,
+        success: false,
+        message: 'Verification failed - could not check status',
+      });
+    } finally {
+      setIsVerifying(false);
+    }
+  };
 
   // Extract linked events and pubkeys
   const linkedEvents = event.tags.filter(t => t[0] === 'e').map(t => t[1]);
@@ -465,7 +572,7 @@ export function EventDetail({ event, onClose, onSelectEvent, onSelectPubkey, onV
         {(moderationStatus.isBanned || moderationStatus.isDeleted) && (
           <Alert variant="destructive" className="border-destructive/50 bg-destructive/10">
             <ShieldAlert className="h-4 w-4" />
-            <AlertDescription className="flex items-center gap-2">
+            <AlertDescription className="flex items-center justify-between">
               <span className="font-medium">
                 {moderationStatus.isBanned && moderationStatus.isDeleted
                   ? 'This user is banned and this event has been deleted from the relay.'
@@ -473,6 +580,44 @@ export function EventDetail({ event, onClose, onSelectEvent, onSelectPubkey, onV
                     ? 'This user is banned from the relay.'
                     : 'This event has been deleted from the relay.'}
               </span>
+              <div className="flex gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => handleReVerify(moderationStatus.isBanned ? 'ban' : 'delete')}
+                  disabled={isVerifying}
+                  className="h-7 text-xs"
+                >
+                  {isVerifying ? (
+                    <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                  ) : (
+                    <CheckCircle className="h-3 w-3 mr-1" />
+                  )}
+                  Re-verify
+                </Button>
+              </div>
+            </AlertDescription>
+          </Alert>
+        )}
+
+        {/* Verification Result */}
+        {verificationResult && (
+          <Alert variant={verificationResult.success ? "default" : "destructive"} className={verificationResult.success ? "border-green-500/50 bg-green-500/10" : ""}>
+            {verificationResult.success ? (
+              <CheckCircle className="h-4 w-4 text-green-600" />
+            ) : (
+              <XCircle className="h-4 w-4" />
+            )}
+            <AlertDescription className="flex items-center justify-between">
+              <span>{verificationResult.message}</span>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setVerificationResult(null)}
+                className="h-6 px-2"
+              >
+                Dismiss
+              </Button>
             </AlertDescription>
           </Alert>
         )}
@@ -584,8 +729,11 @@ export function EventDetail({ event, onClose, onSelectEvent, onSelectPubkey, onV
           </Card>
         )}
 
-        {/* Hive AI Report if available */}
+        {/* Hive AI Content Moderation */}
         <HiveAIReport eventTags={event.tags} />
+
+        {/* AI Detection (Reality Defender multi-provider) */}
+        <AIDetectionReport eventTags={event.tags} eventId={event.id} />
 
         {/* Related Reports */}
         {relatedReports && relatedReports.length > 0 && (

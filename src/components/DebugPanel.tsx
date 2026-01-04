@@ -22,6 +22,8 @@ import {
   getAllDecisions,
   callRelayRpc,
   logDecision,
+  verifyPubkeyBanned,
+  verifyPubkeyUnbanned,
 } from "@/lib/adminApi";
 import {
   Bug,
@@ -36,6 +38,7 @@ import {
   Radio,
   AlertTriangle,
   Terminal,
+  Loader2,
 } from "lucide-react";
 
 interface RpcTestResult {
@@ -53,6 +56,12 @@ export function DebugPanel() {
   const [rpcMethod, setRpcMethod] = useState("listbannedpubkeys");
   const [rpcParams, setRpcParams] = useState("");
   const [rpcResults, setRpcResults] = useState<RpcTestResult[]>([]);
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [verificationResult, setVerificationResult] = useState<{
+    type: 'ban' | 'unban';
+    success: boolean;
+    message: string;
+  } | null>(null);
 
   // Worker info
   const workerInfo = useQuery({
@@ -112,11 +121,41 @@ export function DebugPanel() {
         action: 'ban_user',
         reason: 'Debug test ban',
       });
+      return pubkey;
     },
-    onSuccess: () => {
-      toast({ title: "Ban request sent" });
+    onSuccess: async (pubkey) => {
+      toast({ title: "Ban request sent", description: "Verifying..." });
       queryClient.invalidateQueries({ queryKey: ['debug-banned-pubkeys'] });
       queryClient.invalidateQueries({ queryKey: ['debug-decisions'] });
+
+      // Verify the ban worked
+      setIsVerifying(true);
+      setVerificationResult(null);
+      try {
+        const verified = await verifyPubkeyBanned(pubkey);
+        setVerificationResult({
+          type: 'ban',
+          success: verified,
+          message: verified
+            ? 'Ban verified - user is in banned list'
+            : 'Warning: User may not be banned',
+        });
+        toast({
+          title: verified ? "Ban Verified" : "Verification Warning",
+          description: verified
+            ? "User confirmed banned on relay"
+            : "Could not confirm ban - check manually",
+          variant: verified ? "default" : "destructive",
+        });
+      } catch {
+        setVerificationResult({
+          type: 'ban',
+          success: false,
+          message: 'Could not verify ban status',
+        });
+      } finally {
+        setIsVerifying(false);
+      }
     },
     onError: (error: Error) => {
       toast({ title: "Ban failed", description: error.message, variant: "destructive" });
@@ -133,11 +172,41 @@ export function DebugPanel() {
         action: 'unban_user',
         reason: 'Debug test unban',
       });
+      return pubkey;
     },
-    onSuccess: () => {
-      toast({ title: "Unban request sent" });
+    onSuccess: async (pubkey) => {
+      toast({ title: "Unban request sent", description: "Verifying..." });
       queryClient.invalidateQueries({ queryKey: ['debug-banned-pubkeys'] });
       queryClient.invalidateQueries({ queryKey: ['debug-decisions'] });
+
+      // Verify the unban worked
+      setIsVerifying(true);
+      setVerificationResult(null);
+      try {
+        const verified = await verifyPubkeyUnbanned(pubkey);
+        setVerificationResult({
+          type: 'unban',
+          success: verified,
+          message: verified
+            ? 'Unban verified - user removed from banned list'
+            : 'Warning: User may still be banned',
+        });
+        toast({
+          title: verified ? "Unban Verified" : "Verification Warning",
+          description: verified
+            ? "User confirmed removed from banned list"
+            : "Could not confirm unban - check manually",
+          variant: verified ? "default" : "destructive",
+        });
+      } catch {
+        setVerificationResult({
+          type: 'unban',
+          success: false,
+          message: 'Could not verify unban status',
+        });
+      } finally {
+        setIsVerifying(false);
+      }
     },
     onError: (error: Error) => {
       toast({ title: "Unban failed", description: error.message, variant: "destructive" });
@@ -392,6 +461,40 @@ export function DebugPanel() {
                   {unbanMutation.isPending ? 'Unbanning...' : 'Unban'}
                 </Button>
               </div>
+
+              {/* Verification Status */}
+              {(isVerifying || verificationResult) && (
+                <div
+                  className={`p-2 rounded flex items-center gap-2 text-xs ${
+                    verificationResult?.success
+                      ? "bg-green-50 dark:bg-green-950 border border-green-200 dark:border-green-800"
+                      : "bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800"
+                  }`}
+                >
+                  {isVerifying ? (
+                    <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                  ) : verificationResult?.success ? (
+                    <CheckCircle className="h-4 w-4 text-green-600" />
+                  ) : (
+                    <XCircle className="h-4 w-4 text-red-600" />
+                  )}
+                  <span className={verificationResult?.success ? "text-green-800 dark:text-green-300" : "text-red-800 dark:text-red-300"}>
+                    {isVerifying
+                      ? "Verifying..."
+                      : verificationResult?.message}
+                  </span>
+                  {verificationResult && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setVerificationResult(null)}
+                      className="h-5 px-1 ml-auto"
+                    >
+                      Dismiss
+                    </Button>
+                  )}
+                </div>
+              )}
 
               {/* Quick test: use a fake pubkey */}
               <Separator />

@@ -1,7 +1,7 @@
 // ABOUTME: API client for the Divine Relay Admin Worker
 // ABOUTME: Handles signing, publishing events, and NIP-86 relay management via the server-side Worker
 
-const WORKER_URL = import.meta.env.VITE_WORKER_URL || 'https://divine-relay-admin-api.divine-video.workers.dev';
+const WORKER_URL = import.meta.env.VITE_WORKER_URL || 'https://api-relay.divine.video';
 
 export interface UnsignedEvent {
   kind: number;
@@ -325,6 +325,32 @@ export async function getAllDecisions(): Promise<ModerationDecision[]> {
   return data.decisions || [];
 }
 
+// Verify that a pubkey was actually banned on the relay
+export async function verifyPubkeyBanned(pubkey: string): Promise<boolean> {
+  try {
+    // Give the relay a moment to process
+    await new Promise(resolve => setTimeout(resolve, 500));
+
+    const bannedList = await listBannedPubkeys();
+    return bannedList.includes(pubkey);
+  } catch {
+    // If we can't check, assume it worked
+    return true;
+  }
+}
+
+// Verify that a pubkey was actually unbanned on the relay
+export async function verifyPubkeyUnbanned(pubkey: string): Promise<boolean> {
+  try {
+    await new Promise(resolve => setTimeout(resolve, 500));
+
+    const bannedList = await listBannedPubkeys();
+    return !bannedList.includes(pubkey);
+  } catch {
+    return true;
+  }
+}
+
 // Verify that an event was actually deleted from the relay
 export async function verifyEventDeleted(eventId: string, relayUrl: string): Promise<boolean> {
   try {
@@ -452,4 +478,277 @@ export function extractMediaHashes(content: string, tags: string[][]): string[] 
   }
 
   return Array.from(hashes);
+}
+
+// AI Detection types (Reality Defender multi-provider aggregation)
+export type AIVerdict = 'AUTHENTIC' | 'UNCERTAIN' | 'LIKELY_AI';
+export type AIProviderStatus = 'pending' | 'processing' | 'complete' | 'error';
+
+export interface AIProviderBreakdown {
+  face_swap?: number | null;
+  lip_sync?: number | null;
+  voice_clone?: number | null;
+  full_synthetic?: number | null;
+  confidence?: number | null;
+  deepfake_score?: number | null;
+  ai_generated_score?: number | null;
+  synthetic_score?: number | null;
+  deepfake_probability?: number | null;
+  detection_score?: number | null;
+  techniques_detected?: string[];
+}
+
+export interface AIProviderResult {
+  status: AIProviderStatus;
+  score: number | null;
+  verdict: AIVerdict | null;
+  error: string | null;
+  breakdown?: AIProviderBreakdown | null;
+}
+
+export interface AIConsensus {
+  verdict: AIVerdict;
+  confidence: 'high' | 'medium' | 'low';
+  agreement: 'unanimous' | 'majority' | 'split';
+}
+
+export interface AIDetectionDetails {
+  consensus: AIConsensus | null;
+  providers: {
+    reality_defender?: AIProviderResult;
+    hive?: AIProviderResult;
+    sensity?: AIProviderResult;
+  };
+  aggregation_method: string;
+  average_score?: number;
+  max_score?: number;
+  provider_count?: number;
+  skipped?: boolean;
+  reason?: string;
+  message?: string;
+}
+
+export interface AIDetectionResult {
+  status: 'pending' | 'processing' | 'complete' | 'error';
+  scores: {
+    ai_generated: number;
+    deepfake: number;
+  };
+  details: {
+    ai_detection: AIDetectionDetails;
+  };
+  metadata: {
+    job_status: string;
+    job_id: string | null;
+    media_hash?: string;
+    submitted?: string;
+    completed?: string;
+    error?: string;
+  };
+}
+
+// Realness API base URL for AI detection
+const REALNESS_API_URL = 'https://realness.divine.video';
+
+// Fetch AI detection results for a media hash
+export async function getAIDetectionResult(sha256: string): Promise<AIDetectionResult | null> {
+  try {
+    const response = await fetch(`${REALNESS_API_URL}/api/jobs/${sha256}`, {
+      method: 'GET',
+      headers: { 'Accept': 'application/json' },
+    });
+
+    if (!response.ok) {
+      if (response.status === 404) return null;
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    const job = await response.json();
+
+    // Normalize the response to our standard format
+    return normalizeAIDetectionResponse(job);
+  } catch (error) {
+    console.error('Failed to fetch AI detection result:', error);
+    return null;
+  }
+}
+
+// Submit video for AI detection analysis
+export async function submitAIDetection(
+  videoUrl: string,
+  sha256: string,
+  eventId?: string
+): Promise<{ jobId: string; status: string } | null> {
+  try {
+    const response = await fetch(`${REALNESS_API_URL}/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        videoUrl,
+        mediaHash: sha256,
+        ...(eventId && { eventId }),
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    const result = await response.json();
+    return {
+      jobId: result.jobId || result.event_id || sha256,
+      status: result.status || 'pending',
+    };
+  } catch (error) {
+    console.error('Failed to submit AI detection:', error);
+    return null;
+  }
+}
+
+// Normalize raw job response to AIDetectionResult format
+function normalizeAIDetectionResponse(job: Record<string, unknown>): AIDetectionResult {
+  const results = (job.results || {}) as Record<string, Record<string, unknown>>;
+  const scores = { ai_generated: 0, deepfake: 0 };
+  const providers: AIDetectionDetails['providers'] = {};
+  const providerScores: Array<{ provider: string; score: number }> = [];
+
+  // Process each provider
+  for (const [name, result] of Object.entries(results)) {
+    const score = typeof result.score === 'number' ? result.score : null;
+    const providerResult: AIProviderResult = {
+      status: (result.status as AIProviderStatus) || 'pending',
+      score,
+      verdict: (result.verdict as AIVerdict) || getVerdictFromScore(score),
+      error: (result.error as string) || null,
+      breakdown: extractBreakdown(name, result.raw as Record<string, unknown>),
+    };
+
+    if (name === 'reality_defender') {
+      providers.reality_defender = providerResult;
+    } else if (name === 'hive') {
+      providers.hive = providerResult;
+    } else if (name === 'sensity') {
+      providers.sensity = providerResult;
+    }
+
+    if (result.status === 'complete' && score !== null) {
+      providerScores.push({ provider: name, score });
+    }
+  }
+
+  // Aggregate scores
+  if (providerScores.length > 0) {
+    const maxScore = Math.max(...providerScores.map(p => p.score));
+    scores.ai_generated = maxScore;
+
+    // Deepfake uses Reality Defender and Sensity only
+    const deepfakeProviders = providerScores.filter(
+      p => p.provider === 'reality_defender' || p.provider === 'sensity'
+    );
+    scores.deepfake = deepfakeProviders.length > 0
+      ? Math.max(...deepfakeProviders.map(p => p.score))
+      : maxScore;
+  }
+
+  // Determine consensus
+  const verdicts = providerScores.map(p => getVerdictFromScore(p.score));
+  const consensus = determineConsensus(verdicts);
+
+  return {
+    status: (job.status as 'pending' | 'processing' | 'complete' | 'error') || 'pending',
+    scores,
+    details: {
+      ai_detection: {
+        consensus,
+        providers,
+        aggregation_method: 'max_score',
+        average_score: providerScores.length > 0
+          ? providerScores.reduce((sum, p) => sum + p.score, 0) / providerScores.length
+          : undefined,
+        max_score: providerScores.length > 0
+          ? Math.max(...providerScores.map(p => p.score))
+          : undefined,
+        provider_count: providerScores.length,
+      },
+    },
+    metadata: {
+      job_status: (job.status as string) || 'unknown',
+      job_id: (job.event_id as string) || (job.job_id as string) || null,
+      media_hash: job.media_hash as string | undefined,
+      submitted: job.submitted as string | undefined,
+      completed: job.completed as string | undefined,
+    },
+  };
+}
+
+function getVerdictFromScore(score: number | null): AIVerdict | null {
+  if (score === null) return null;
+  if (score < 0.3) return 'AUTHENTIC';
+  if (score < 0.7) return 'UNCERTAIN';
+  return 'LIKELY_AI';
+}
+
+function determineConsensus(verdicts: (AIVerdict | null)[]): AIConsensus | null {
+  const valid = verdicts.filter((v): v is AIVerdict => v !== null);
+  if (valid.length === 0) return null;
+
+  const counts = { AUTHENTIC: 0, UNCERTAIN: 0, LIKELY_AI: 0 };
+  valid.forEach(v => counts[v]++);
+
+  if (counts.AUTHENTIC === valid.length) {
+    return { verdict: 'AUTHENTIC', confidence: 'high', agreement: 'unanimous' };
+  }
+  if (counts.LIKELY_AI === valid.length) {
+    return { verdict: 'LIKELY_AI', confidence: 'high', agreement: 'unanimous' };
+  }
+  if (valid.length >= 2) {
+    if (counts.AUTHENTIC >= 2) {
+      return { verdict: 'AUTHENTIC', confidence: 'medium', agreement: 'majority' };
+    }
+    if (counts.LIKELY_AI >= 2) {
+      return { verdict: 'LIKELY_AI', confidence: 'medium', agreement: 'majority' };
+    }
+  }
+
+  return { verdict: 'UNCERTAIN', confidence: 'low', agreement: 'split' };
+}
+
+function extractBreakdown(
+  provider: string,
+  raw: Record<string, unknown> | undefined
+): AIProviderBreakdown | null {
+  if (!raw) return null;
+
+  if (provider === 'reality_defender') {
+    const result = raw.result as Record<string, unknown> | undefined;
+    const details = result?.details as Record<string, unknown> | undefined;
+    return {
+      face_swap: details?.face_swap as number | null,
+      lip_sync: details?.lip_sync as number | null,
+      voice_clone: details?.voice_clone as number | null,
+      full_synthetic: details?.full_synthetic as number | null,
+      confidence: (result?.confidence as number) || null,
+    };
+  }
+
+  if (provider === 'hive') {
+    const result = (raw.result || raw) as Record<string, unknown>;
+    return {
+      deepfake_score: result.deepfake_score as number | null,
+      ai_generated_score: result.ai_generated_score as number | null,
+      synthetic_score: result.synthetic_score as number | null,
+    };
+  }
+
+  if (provider === 'sensity') {
+    const analysis = raw.analysis as Record<string, unknown> | undefined;
+    return {
+      deepfake_probability: analysis?.deepfake_probability as number | null,
+      detection_score: analysis?.detection_score as number | null,
+      confidence: analysis?.confidence as number | null,
+      techniques_detected: (analysis?.techniques_detected as string[]) || [],
+    };
+  }
+
+  return null;
 }

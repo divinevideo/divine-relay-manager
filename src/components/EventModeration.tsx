@@ -11,8 +11,9 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/useToast";
-import { Shield, ShieldCheck, ShieldX, Plus, AlertTriangle, CheckCircle, XCircle } from "lucide-react";
-import { callRelayRpc } from "@/lib/adminApi";
+import { Shield, ShieldCheck, ShieldX, Plus, AlertTriangle, CheckCircle, XCircle, Loader2 } from "lucide-react";
+import { callRelayRpc, verifyEventDeleted } from "@/lib/adminApi";
+import { useAppContext } from "@/hooks/useAppContext";
 
 interface EventModerationProps {
   relayUrl: string;
@@ -31,9 +32,16 @@ interface BannedEvent {
 export function EventModeration({ relayUrl }: EventModerationProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const { config } = useAppContext();
   const [newEventId, setNewEventId] = useState("");
   const [newReason, setNewReason] = useState("");
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [verificationResult, setVerificationResult] = useState<{
+    eventId: string;
+    success: boolean;
+    message: string;
+  } | null>(null);
 
   // Query for events needing moderation
   const { data: eventsNeedingModeration, isLoading: loadingPending, error: pendingError } = useQuery({
@@ -66,21 +74,52 @@ export function EventModeration({ relayUrl }: EventModerationProps) {
 
   // Mutation for banning events
   const banEventMutation = useMutation({
-    mutationFn: ({ eventId, reason }: { eventId: string; reason?: string }) =>
-      callRelayRpc('banevent', [eventId, reason]),
-    onSuccess: () => {
+    mutationFn: async ({ eventId, reason }: { eventId: string; reason?: string }) => {
+      await callRelayRpc('banevent', [eventId, reason]);
+      return eventId;
+    },
+    onSuccess: async (eventId) => {
       queryClient.invalidateQueries({ queryKey: ['events-needing-moderation'] });
       queryClient.invalidateQueries({ queryKey: ['banned-events'] });
-      toast({ title: "Event banned successfully" });
+      toast({ title: "Event banned", description: "Verifying..." });
       setIsAddDialogOpen(false);
       setNewEventId("");
       setNewReason("");
+
+      // Verify the ban worked by checking if event is gone from relay
+      setIsVerifying(true);
+      setVerificationResult(null);
+      try {
+        const isDeleted = await verifyEventDeleted(eventId, config.relayUrl);
+        setVerificationResult({
+          eventId,
+          success: isDeleted,
+          message: isDeleted
+            ? 'Event ban verified - event removed from relay'
+            : 'Warning: Event may still exist on relay',
+        });
+        toast({
+          title: isDeleted ? "Ban Verified" : "Verification Warning",
+          description: isDeleted
+            ? "Event confirmed removed from relay"
+            : "Could not confirm event removal - check manually",
+          variant: isDeleted ? "default" : "destructive",
+        });
+      } catch {
+        setVerificationResult({
+          eventId,
+          success: false,
+          message: 'Could not verify ban status',
+        });
+      } finally {
+        setIsVerifying(false);
+      }
     },
     onError: (error: Error) => {
-      toast({ 
-        title: "Failed to ban event", 
+      toast({
+        title: "Failed to ban event",
         description: error.message,
-        variant: "destructive" 
+        variant: "destructive"
       });
     },
   });
@@ -164,6 +203,39 @@ export function EventModeration({ relayUrl }: EventModerationProps) {
           </DialogContent>
         </Dialog>
       </div>
+
+      {/* Verification Status */}
+      {(isVerifying || verificationResult) && (
+        <Alert
+          variant={verificationResult?.success ? "default" : "destructive"}
+          className={verificationResult?.success ? "border-green-500/50 bg-green-500/10" : ""}
+        >
+          {isVerifying ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : verificationResult?.success ? (
+            <CheckCircle className="h-4 w-4 text-green-600" />
+          ) : (
+            <XCircle className="h-4 w-4" />
+          )}
+          <AlertDescription className="flex items-center justify-between">
+            <span>
+              {isVerifying
+                ? "Verifying ban action..."
+                : verificationResult?.message}
+            </span>
+            {verificationResult && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setVerificationResult(null)}
+                className="h-6 px-2"
+              >
+                Dismiss
+              </Button>
+            )}
+          </AlertDescription>
+        </Alert>
+      )}
 
       <Tabs defaultValue="pending" className="space-y-4">
         <TabsList>

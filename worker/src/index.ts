@@ -11,8 +11,22 @@ interface Env {
   // Cloudflare Access Service Token for moderation.admin.divine.video
   CF_ACCESS_CLIENT_ID?: string;
   CF_ACCESS_CLIENT_SECRET?: string;
+  // Zendesk integration
+  ZENDESK_SUBDOMAIN?: string;
+  ZENDESK_JWT_SECRET?: string;
+  ZENDESK_WEBHOOK_SECRET?: string;
   KV?: KVNamespace;
   DB?: D1Database;
+}
+
+// Zendesk JWT payload structure
+interface ZendeskJWTPayload {
+  iss: string;
+  iat: number;
+  exp: number;
+  email: string;
+  name: string;
+  external_id?: string;
 }
 
 const MODERATION_SERVICE_URL = 'https://moderation.admin.divine.video';
@@ -40,7 +54,7 @@ export default {
     const corsHeaders = {
       'Access-Control-Allow-Origin': env.ALLOWED_ORIGIN || '*',
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     };
 
     // Handle preflight
@@ -90,6 +104,11 @@ export default {
       if (path.startsWith('/api/check-result/') && request.method === 'GET') {
         const sha256 = path.replace('/api/check-result/', '');
         return handleCheckResult(sha256, env, corsHeaders);
+      }
+
+      // Zendesk integration endpoints (require JWT auth)
+      if (path.startsWith('/api/zendesk/')) {
+        return handleZendeskRoutes(request, path, env, corsHeaders);
       }
 
       // 404 for unknown routes
@@ -779,4 +798,540 @@ async function publishToRelay(
       resolve({ success: false, error: error instanceof Error ? error.message : 'Unknown error' });
     }
   });
+}
+
+// ============================================================================
+// Zendesk Integration
+// ============================================================================
+
+// Base64URL decode (handles URL-safe base64)
+function base64UrlDecode(str: string): string {
+  // Convert base64url to base64
+  let base64 = str.replace(/-/g, '+').replace(/_/g, '/');
+  // Add padding if needed
+  while (base64.length % 4) {
+    base64 += '=';
+  }
+  return atob(base64);
+}
+
+// Verify Zendesk JWT token
+async function verifyZendeskJWT(
+  request: Request,
+  env: Env
+): Promise<{ valid: true; payload: ZendeskJWTPayload } | { valid: false; error: string }> {
+  const authHeader = request.headers.get('Authorization');
+
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return { valid: false, error: 'Missing or invalid Authorization header' };
+  }
+
+  if (!env.ZENDESK_JWT_SECRET) {
+    return { valid: false, error: 'ZENDESK_JWT_SECRET not configured' };
+  }
+
+  const token = authHeader.slice(7); // Remove 'Bearer '
+
+  try {
+    const [headerB64, payloadB64, signatureB64] = token.split('.');
+
+    if (!headerB64 || !payloadB64 || !signatureB64) {
+      return { valid: false, error: 'Invalid JWT format' };
+    }
+
+    // Decode and parse payload
+    const payloadJson = base64UrlDecode(payloadB64);
+    const payload = JSON.parse(payloadJson) as ZendeskJWTPayload;
+
+    // Check expiration
+    const now = Math.floor(Date.now() / 1000);
+    if (payload.exp && payload.exp < now) {
+      return { valid: false, error: 'Token expired' };
+    }
+
+    // Check not-before (iat - issued at)
+    if (payload.iat && payload.iat > now + 60) {
+      // Allow 60s clock skew
+      return { valid: false, error: 'Token not yet valid' };
+    }
+
+    // Verify signature using HMAC-SHA256
+    const data = new TextEncoder().encode(`${headerB64}.${payloadB64}`);
+    const key = await crypto.subtle.importKey(
+      'raw',
+      new TextEncoder().encode(env.ZENDESK_JWT_SECRET),
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['verify']
+    );
+
+    // Decode signature from base64url
+    const signatureBytes = Uint8Array.from(
+      base64UrlDecode(signatureB64),
+      (c) => c.charCodeAt(0)
+    );
+
+    const valid = await crypto.subtle.verify('HMAC', key, signatureBytes, data);
+
+    if (!valid) {
+      return { valid: false, error: 'Invalid signature' };
+    }
+
+    return { valid: true, payload };
+  } catch (error) {
+    console.error('JWT verification error:', error);
+    return { valid: false, error: 'JWT verification failed' };
+  }
+}
+
+// Verify Zendesk webhook signature
+async function verifyZendeskWebhook(
+  request: Request,
+  body: string,
+  env: Env
+): Promise<boolean> {
+  if (!env.ZENDESK_WEBHOOK_SECRET) {
+    console.warn('ZENDESK_WEBHOOK_SECRET not configured');
+    return false;
+  }
+
+  const signature = request.headers.get('X-Zendesk-Webhook-Signature');
+  const timestamp = request.headers.get('X-Zendesk-Webhook-Signature-Timestamp');
+
+  if (!signature || !timestamp) {
+    return false;
+  }
+
+  // Zendesk signs: timestamp + "." + body
+  const signedPayload = `${timestamp}.${body}`;
+
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(env.ZENDESK_WEBHOOK_SECRET),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+
+  const signatureBytes = await crypto.subtle.sign(
+    'HMAC',
+    key,
+    new TextEncoder().encode(signedPayload)
+  );
+
+  const expectedSig = btoa(String.fromCharCode(...new Uint8Array(signatureBytes)));
+
+  return signature === expectedSig;
+}
+
+// Route handler for all /api/zendesk/* endpoints
+async function handleZendeskRoutes(
+  request: Request,
+  path: string,
+  env: Env,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  const subPath = path.replace('/api/zendesk', '');
+
+  // Webhook endpoint uses signature verification instead of JWT
+  if (subPath === '/webhook' && request.method === 'POST') {
+    return handleZendeskWebhook(request, env, corsHeaders);
+  }
+
+  // All other Zendesk endpoints require JWT auth
+  const authResult = await verifyZendeskJWT(request, env);
+  if (!authResult.valid) {
+    return jsonResponse({ success: false, error: authResult.error }, 401, corsHeaders);
+  }
+
+  const user = authResult.payload;
+
+  // Route to specific handlers
+  switch (subPath) {
+    case '/context':
+      if (request.method === 'GET') {
+        return handleZendeskContext(request, user, env, corsHeaders);
+      }
+      break;
+
+    case '/action':
+      if (request.method === 'POST') {
+        return handleZendeskAction(request, user, env, corsHeaders);
+      }
+      break;
+
+    case '/verify':
+      // Simple endpoint to verify JWT is valid
+      if (request.method === 'GET') {
+        return new Response(JSON.stringify({
+          success: true,
+          user: { email: user.email, name: user.name },
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders },
+        });
+      }
+      break;
+  }
+
+  return jsonResponse({ success: false, error: 'Not found' }, 404, corsHeaders);
+}
+
+// Handle Zendesk webhook (triggered by ticket field changes)
+async function handleZendeskWebhook(
+  request: Request,
+  env: Env,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  try {
+    const bodyText = await request.text();
+
+    // Verify webhook signature
+    const isValid = await verifyZendeskWebhook(request, bodyText, env);
+    if (!isValid) {
+      return jsonResponse({ success: false, error: 'Invalid webhook signature' }, 401, corsHeaders);
+    }
+
+    const body = JSON.parse(bodyText) as {
+      ticket_id: number;
+      action_requested?: string;
+      nostr_pubkey?: string;
+      nostr_event_id?: string;
+      agent_email?: string;
+    };
+
+    if (!body.action_requested || body.action_requested === 'none') {
+      return new Response(JSON.stringify({ success: true, message: 'No action requested' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json', ...corsHeaders },
+      });
+    }
+
+    // Execute the moderation action
+    const secretKey = getSecretKey(env);
+
+    let actionResult: { success: boolean; error?: string } = { success: false, error: 'Unknown action' };
+
+    switch (body.action_requested) {
+      case 'ban_user':
+        if (body.nostr_pubkey) {
+          // Use relay RPC to ban
+          const pubkey = getPublicKey(secretKey);
+          const httpUrl = env.RELAY_URL.replace(/^wss?:\/\//, 'https://');
+          const payload = JSON.stringify({ method: 'banpubkey', params: [body.nostr_pubkey, `Zendesk ticket #${body.ticket_id}`] });
+          const payloadHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
+          const payloadHashHex = Array.from(new Uint8Array(payloadHash)).map(b => b.toString(16).padStart(2, '0')).join('');
+
+          const authEvent = finalizeEvent({
+            kind: 27235,
+            content: '',
+            tags: [['u', httpUrl], ['method', 'POST'], ['payload', payloadHashHex]],
+            created_at: Math.floor(Date.now() / 1000),
+          }, secretKey);
+
+          const response = await fetch(httpUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/nostr+json+rpc',
+              'Authorization': `Nostr ${btoa(JSON.stringify(authEvent))}`,
+            },
+            body: payload,
+          });
+
+          actionResult = response.ok ? { success: true } : { success: false, error: `Relay error: ${response.status}` };
+        }
+        break;
+
+      case 'delete_event':
+        if (body.nostr_event_id) {
+          const event = finalizeEvent({
+            kind: 5,
+            content: `Zendesk ticket #${body.ticket_id}`,
+            tags: [['e', body.nostr_event_id]],
+            created_at: Math.floor(Date.now() / 1000),
+          }, secretKey);
+          actionResult = await publishToRelay(event, env.RELAY_URL);
+        }
+        break;
+
+      case 'allow_user':
+        if (body.nostr_pubkey) {
+          const httpUrl = env.RELAY_URL.replace(/^wss?:\/\//, 'https://');
+          const payload = JSON.stringify({ method: 'allowpubkey', params: [body.nostr_pubkey] });
+          const payloadHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
+          const payloadHashHex = Array.from(new Uint8Array(payloadHash)).map(b => b.toString(16).padStart(2, '0')).join('');
+
+          const authEvent = finalizeEvent({
+            kind: 27235,
+            content: '',
+            tags: [['u', httpUrl], ['method', 'POST'], ['payload', payloadHashHex]],
+            created_at: Math.floor(Date.now() / 1000),
+          }, secretKey);
+
+          const response = await fetch(httpUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/nostr+json+rpc',
+              'Authorization': `Nostr ${btoa(JSON.stringify(authEvent))}`,
+            },
+            body: payload,
+          });
+
+          actionResult = response.ok ? { success: true } : { success: false, error: `Relay error: ${response.status}` };
+        }
+        break;
+    }
+
+    // Log the decision
+    if (env.DB && actionResult.success) {
+      await ensureDecisionsTable(env.DB);
+      await env.DB.prepare(`
+        INSERT INTO moderation_decisions (target_type, target_id, action, reason, moderator_pubkey, report_id)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).bind(
+        body.nostr_event_id ? 'event' : 'pubkey',
+        body.nostr_event_id || body.nostr_pubkey || '',
+        body.action_requested,
+        `Zendesk ticket #${body.ticket_id}`,
+        body.agent_email || null,
+        `zendesk:${body.ticket_id}`
+      ).run();
+    }
+
+    return new Response(JSON.stringify({
+      success: actionResult.success,
+      action: body.action_requested,
+      error: actionResult.error,
+    }), {
+      status: actionResult.success ? 200 : 500,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders },
+    });
+  } catch (error) {
+    console.error('Zendesk webhook error:', error);
+    return jsonResponse(
+      { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+      500,
+      corsHeaders
+    );
+  }
+}
+
+// Get context for Zendesk sidebar app
+async function handleZendeskContext(
+  request: Request,
+  user: ZendeskJWTPayload,
+  env: Env,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  const url = new URL(request.url);
+  const pubkey = url.searchParams.get('pubkey');
+  const eventId = url.searchParams.get('event_id');
+
+  if (!pubkey && !eventId) {
+    return jsonResponse({ success: false, error: 'Missing pubkey or event_id parameter' }, 400, corsHeaders);
+  }
+
+  try {
+    const context: Record<string, unknown> = {
+      requested_by: user.email,
+    };
+
+    // Get decision history
+    if (env.DB) {
+      await ensureDecisionsTable(env.DB);
+      const targetId = eventId || pubkey;
+      const decisions = await env.DB.prepare(`
+        SELECT * FROM moderation_decisions
+        WHERE target_id = ?
+        ORDER BY created_at DESC
+        LIMIT 20
+      `).bind(targetId).all();
+
+      context.decisions = decisions.results || [];
+    }
+
+    // Check if user is banned (via relay RPC)
+    if (pubkey) {
+      try {
+        const secretKey = getSecretKey(env);
+        const httpUrl = env.RELAY_URL.replace(/^wss?:\/\//, 'https://');
+        const payload = JSON.stringify({ method: 'listbannedpubkeys', params: [] });
+        const payloadHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
+        const payloadHashHex = Array.from(new Uint8Array(payloadHash)).map(b => b.toString(16).padStart(2, '0')).join('');
+
+        const authEvent = finalizeEvent({
+          kind: 27235,
+          content: '',
+          tags: [['u', httpUrl], ['method', 'POST'], ['payload', payloadHashHex]],
+          created_at: Math.floor(Date.now() / 1000),
+        }, secretKey);
+
+        const response = await fetch(httpUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/nostr+json+rpc',
+            'Authorization': `Nostr ${btoa(JSON.stringify(authEvent))}`,
+          },
+          body: payload,
+        });
+
+        if (response.ok) {
+          const result = await response.json() as { result?: Array<{ pubkey: string }> };
+          const bannedList = result.result || [];
+          context.is_banned = bannedList.some((b) => b.pubkey === pubkey);
+        }
+      } catch {
+        context.is_banned = null; // Unknown
+      }
+    }
+
+    return new Response(JSON.stringify({ success: true, context }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders },
+    });
+  } catch (error) {
+    console.error('Zendesk context error:', error);
+    return jsonResponse(
+      { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+      500,
+      corsHeaders
+    );
+  }
+}
+
+// Execute moderation action from Zendesk sidebar
+async function handleZendeskAction(
+  request: Request,
+  user: ZendeskJWTPayload,
+  env: Env,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  try {
+    const body = await request.json() as {
+      action: string;
+      pubkey?: string;
+      event_id?: string;
+      reason?: string;
+      ticket_id?: number;
+    };
+
+    if (!body.action) {
+      return jsonResponse({ success: false, error: 'Missing action' }, 400, corsHeaders);
+    }
+
+    const secretKey = getSecretKey(env);
+    let actionResult: { success: boolean; error?: string } = { success: false, error: 'Unknown action' };
+
+    const reason = body.reason || `Via Zendesk by ${user.email}${body.ticket_id ? ` (ticket #${body.ticket_id})` : ''}`;
+
+    switch (body.action) {
+      case 'ban_user':
+        if (body.pubkey) {
+          const httpUrl = env.RELAY_URL.replace(/^wss?:\/\//, 'https://');
+          const payload = JSON.stringify({ method: 'banpubkey', params: [body.pubkey, reason] });
+          const payloadHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
+          const payloadHashHex = Array.from(new Uint8Array(payloadHash)).map(b => b.toString(16).padStart(2, '0')).join('');
+
+          const authEvent = finalizeEvent({
+            kind: 27235,
+            content: '',
+            tags: [['u', httpUrl], ['method', 'POST'], ['payload', payloadHashHex]],
+            created_at: Math.floor(Date.now() / 1000),
+          }, secretKey);
+
+          const response = await fetch(httpUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/nostr+json+rpc',
+              'Authorization': `Nostr ${btoa(JSON.stringify(authEvent))}`,
+            },
+            body: payload,
+          });
+
+          actionResult = response.ok ? { success: true } : { success: false, error: `Relay error: ${response.status}` };
+        } else {
+          actionResult = { success: false, error: 'Missing pubkey' };
+        }
+        break;
+
+      case 'allow_user':
+        if (body.pubkey) {
+          const httpUrl = env.RELAY_URL.replace(/^wss?:\/\//, 'https://');
+          const payload = JSON.stringify({ method: 'allowpubkey', params: [body.pubkey] });
+          const payloadHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
+          const payloadHashHex = Array.from(new Uint8Array(payloadHash)).map(b => b.toString(16).padStart(2, '0')).join('');
+
+          const authEvent = finalizeEvent({
+            kind: 27235,
+            content: '',
+            tags: [['u', httpUrl], ['method', 'POST'], ['payload', payloadHashHex]],
+            created_at: Math.floor(Date.now() / 1000),
+          }, secretKey);
+
+          const response = await fetch(httpUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/nostr+json+rpc',
+              'Authorization': `Nostr ${btoa(JSON.stringify(authEvent))}`,
+            },
+            body: payload,
+          });
+
+          actionResult = response.ok ? { success: true } : { success: false, error: `Relay error: ${response.status}` };
+        } else {
+          actionResult = { success: false, error: 'Missing pubkey' };
+        }
+        break;
+
+      case 'delete_event':
+        if (body.event_id) {
+          const event = finalizeEvent({
+            kind: 5,
+            content: reason,
+            tags: [['e', body.event_id]],
+            created_at: Math.floor(Date.now() / 1000),
+          }, secretKey);
+          actionResult = await publishToRelay(event, env.RELAY_URL);
+        } else {
+          actionResult = { success: false, error: 'Missing event_id' };
+        }
+        break;
+
+      default:
+        actionResult = { success: false, error: `Unknown action: ${body.action}` };
+    }
+
+    // Log the decision
+    if (env.DB && actionResult.success) {
+      await ensureDecisionsTable(env.DB);
+      await env.DB.prepare(`
+        INSERT INTO moderation_decisions (target_type, target_id, action, reason, moderator_pubkey, report_id)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).bind(
+        body.event_id ? 'event' : 'pubkey',
+        body.event_id || body.pubkey || '',
+        body.action,
+        reason,
+        user.email,
+        body.ticket_id ? `zendesk:${body.ticket_id}` : null
+      ).run();
+    }
+
+    return new Response(JSON.stringify({
+      success: actionResult.success,
+      action: body.action,
+      error: actionResult.error,
+      moderator: user.email,
+    }), {
+      status: actionResult.success ? 200 : 500,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders },
+    });
+  } catch (error) {
+    console.error('Zendesk action error:', error);
+    return jsonResponse(
+      { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+      500,
+      corsHeaders
+    );
+  }
 }

@@ -7,7 +7,8 @@ import { useAuthor } from "@/hooks/useAuthor";
 import { useToast } from "@/hooks/useToast";
 import { nip19 } from "nostr-tools";
 import { getKindInfo, getKindCategory } from "@/lib/kindNames";
-import { callRelayRpc } from "@/lib/adminApi";
+import { callRelayRpc, verifyEventDeleted } from "@/lib/adminApi";
+import { useAppContext } from "@/hooks/useAppContext";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -41,6 +42,8 @@ import {
   Flag,
   Image,
   UserPlus,
+  Loader2,
+  XCircle,
 } from "lucide-react";
 import type { NostrEvent } from "@nostrify/nostrify";
 
@@ -290,8 +293,15 @@ export function EventsList({ relayUrl }: EventsListProps) {
   const { nostr } = useNostr();
   const { user } = useCurrentUser();
   const { toast } = useToast();
+  const { config } = useAppContext();
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [verificationResult, setVerificationResult] = useState<{
+    eventId: string;
+    success: boolean;
+    message: string;
+  } | null>(null);
 
   const [kindFilter, setKindFilter] = useState<string>('all');
   const [limit, setLimit] = useState(20);
@@ -457,23 +467,55 @@ export function EventsList({ relayUrl }: EventsListProps) {
 
   // Mutation for event moderation
   const moderateEventMutation = useMutation({
-    mutationFn: ({ eventId, action, reason }: { eventId: string; action: 'allow' | 'ban'; reason?: string }) => {
+    mutationFn: async ({ eventId, action, reason }: { eventId: string; action: 'allow' | 'ban'; reason?: string }) => {
       const method = action === 'allow' ? 'allowevent' : 'banevent';
-      return callRelayRpc(method, [eventId, reason]);
+      await callRelayRpc(method, [eventId, reason]);
+      return { eventId, action };
     },
-    onSuccess: (_, { action, eventId }) => {
+    onSuccess: async ({ eventId, action }) => {
       queryClient.invalidateQueries({ queryKey: ['banned-events', relayUrl] });
       queryClient.invalidateQueries({ queryKey: ['events-needing-moderation', relayUrl] });
-      toast({ 
+      toast({
         title: `Event ${action === 'allow' ? 'approved' : 'banned'}`,
-        description: `Event ${eventId.slice(0, 8)}... has been ${action === 'allow' ? 'approved' : 'banned'}.`
+        description: action === 'ban' ? "Verifying..." : `Event ${eventId.slice(0, 8)}... has been approved.`
       });
+
+      // Only verify for ban actions
+      if (action === 'ban') {
+        setIsVerifying(true);
+        setVerificationResult(null);
+        try {
+          const isDeleted = await verifyEventDeleted(eventId, config.relayUrl);
+          setVerificationResult({
+            eventId,
+            success: isDeleted,
+            message: isDeleted
+              ? 'Event ban verified - event removed from relay'
+              : 'Warning: Event may still exist on relay',
+          });
+          toast({
+            title: isDeleted ? "Ban Verified" : "Verification Warning",
+            description: isDeleted
+              ? "Event confirmed removed from relay"
+              : "Could not confirm event removal - check manually",
+            variant: isDeleted ? "default" : "destructive",
+          });
+        } catch {
+          setVerificationResult({
+            eventId,
+            success: false,
+            message: 'Could not verify ban status',
+          });
+        } finally {
+          setIsVerifying(false);
+        }
+      }
     },
     onError: (error: Error, { action }) => {
-      toast({ 
-        title: `Failed to ${action} event`, 
+      toast({
+        title: `Failed to ${action} event`,
         description: error.message,
-        variant: "destructive" 
+        variant: "destructive"
       });
     },
   });
@@ -661,6 +703,39 @@ export function EventsList({ relayUrl }: EventsListProps) {
           )}
         </CardContent>
       </Card>
+
+      {/* Verification Status */}
+      {(isVerifying || verificationResult) && (
+        <Alert
+          variant={verificationResult?.success ? "default" : "destructive"}
+          className={verificationResult?.success ? "border-green-500/50 bg-green-500/10" : ""}
+        >
+          {isVerifying ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : verificationResult?.success ? (
+            <CheckCircle className="h-4 w-4 text-green-600" />
+          ) : (
+            <XCircle className="h-4 w-4" />
+          )}
+          <AlertDescription className="flex items-center justify-between">
+            <span>
+              {isVerifying
+                ? "Verifying moderation action..."
+                : verificationResult?.message}
+            </span>
+            {verificationResult && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setVerificationResult(null)}
+                className="h-6 px-2"
+              >
+                Dismiss
+              </Button>
+            )}
+          </AlertDescription>
+        </Alert>
+      )}
 
       {/* Split Pane Layout */}
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 h-[calc(100vh-280px)]">

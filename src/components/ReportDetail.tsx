@@ -34,14 +34,16 @@ import { ReporterList, ReporterInline } from "@/components/ReporterCard";
 import { AISummary } from "@/components/AISummary";
 import { LabelPublisherInline } from "@/components/LabelPublisher";
 import { ThreadModal } from "@/components/ThreadModal";
-import { banPubkey, deleteEvent, markAsReviewed, moderateMedia, unblockMedia, extractMediaHashes, logDecision, verifyModerationAction, type ResolutionStatus, type ModerationAction } from "@/lib/adminApi";
+import { banPubkey, deleteEvent, markAsReviewed, moderateMedia, unblockMedia, extractMediaHashes, logDecision, verifyModerationAction, verifyPubkeyBanned, verifyEventDeleted, verifyMediaBlocked, type ResolutionStatus, type ModerationAction } from "@/lib/adminApi";
 import { useAppContext } from "@/hooks/useAppContext";
 import { useMediaStatus } from "@/hooks/useMediaStatus";
 import { useDecisionLog } from "@/hooks/useDecisionLog";
 import { HiveAIReport } from "@/components/HiveAIReport";
+import { AIDetectionReport } from "@/components/AIDetectionReport";
 import { MediaPreview } from "@/components/MediaPreview";
 import { CATEGORY_LABELS } from "@/lib/constants";
-import { UserX, Tag, Flag, Trash2, CheckCircle, ThumbsDown, Video, History, Ban, ShieldX, Link2, User, FileText, Unlock } from "lucide-react";
+import { UserX, Tag, Flag, Trash2, CheckCircle, ThumbsDown, Video, History, Ban, ShieldX, Link2, User, FileText, Unlock, FileCode, Loader2, XCircle } from "lucide-react";
+import { CopyableId, CopyableTags } from "@/components/CopyableId";
 import type { NostrEvent } from "@nostrify/nostrify";
 
 function getReportCategory(event: NostrEvent): string {
@@ -81,6 +83,11 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   const [confirmBlockAndDelete, setConfirmBlockAndDelete] = useState(false);
   const [banOptions, setBanOptions] = useState({ deleteEvents: true, blockMedia: true });
   const [isVerifying, setIsVerifying] = useState(false);
+  const [verificationResult, setVerificationResult] = useState<{
+    type: 'ban' | 'delete' | 'media';
+    success: boolean;
+    message: string;
+  } | null>(null);
 
   const context = useReportContext(report);
 
@@ -209,7 +216,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
 
       return results;
     },
-    onSuccess: (results) => {
+    onSuccess: async (results, variables) => {
       queryClient.invalidateQueries({ queryKey: ['banned-users'] });
       queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
       queryClient.invalidateQueries({ queryKey: ['banned-events'] });
@@ -225,8 +232,37 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
         message += `, ${results.mediaBlocked} media file(s) blocked`;
       }
 
-      toast({ title: message });
+      toast({ title: message, description: "Verifying..." });
       setConfirmBan(false);
+
+      // Verify the ban worked
+      setIsVerifying(true);
+      setVerificationResult(null);
+      try {
+        const verified = await verifyPubkeyBanned(variables.pubkey);
+        setVerificationResult({
+          type: 'ban',
+          success: verified,
+          message: verified
+            ? 'Ban verified - user is in banned list'
+            : 'Warning: User may not be banned',
+        });
+        toast({
+          title: verified ? "Ban Verified" : "Verification Warning",
+          description: verified
+            ? "User confirmed banned on relay"
+            : "Could not confirm ban - check manually",
+          variant: verified ? "default" : "destructive",
+        });
+      } catch {
+        setVerificationResult({
+          type: 'ban',
+          success: false,
+          message: 'Could not verify ban status',
+        });
+      } finally {
+        setIsVerifying(false);
+      }
     },
     onError: (error: Error) => {
       toast({
@@ -248,15 +284,45 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
         reason,
         reportId: report?.id,
       });
+      return eventId;
     },
-    onSuccess: () => {
+    onSuccess: async (eventId) => {
       queryClient.invalidateQueries({ queryKey: ['reports'] });
       queryClient.invalidateQueries({ queryKey: ['banned-events'] });
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
       moderationStatus.refetch();
       decisionLog.refetch();
-      toast({ title: "Event deleted from relay" });
+      toast({ title: "Event deleted from relay", description: "Verifying..." });
       setConfirmDelete(false);
+
+      // Verify the delete worked
+      setIsVerifying(true);
+      setVerificationResult(null);
+      try {
+        const isDeleted = await verifyEventDeleted(eventId, config.relayUrl);
+        setVerificationResult({
+          type: 'delete',
+          success: isDeleted,
+          message: isDeleted
+            ? 'Delete verified - event removed from relay'
+            : 'Warning: Event may still exist on relay',
+        });
+        toast({
+          title: isDeleted ? "Delete Verified" : "Verification Warning",
+          description: isDeleted
+            ? "Event confirmed removed from relay"
+            : "Could not confirm event removal - check manually",
+          variant: isDeleted ? "default" : "destructive",
+        });
+      } catch {
+        setVerificationResult({
+          type: 'delete',
+          success: false,
+          message: 'Could not verify delete status',
+        });
+      } finally {
+        setIsVerifying(false);
+      }
     },
     onError: (error: Error) => {
       toast({
@@ -317,17 +383,54 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
           reportId: report?.id,
         }))
       );
-      return results;
+      return { results, hashes };
     },
-    onSuccess: (_, variables) => {
+    onSuccess: async ({ hashes }) => {
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
       queryClient.invalidateQueries({ queryKey: ['media-status'] });
       decisionLog.refetch();
       toast({
         title: "Media blocked",
-        description: `${variables.hashes.length} media file(s) permanently banned`,
+        description: `${hashes.length} media file(s) permanently banned. Verifying...`,
       });
       setConfirmBlockMedia(false);
+
+      // Verify the media block worked
+      setIsVerifying(true);
+      setVerificationResult(null);
+      try {
+        // Verify each hash individually
+        const verificationResults = await Promise.all(
+          hashes.map(async (hash) => ({
+            hash,
+            blocked: await verifyMediaBlocked(hash),
+          }))
+        );
+        const allBlocked = verificationResults.every(v => v.blocked);
+        const failedCount = verificationResults.filter(v => !v.blocked).length;
+        setVerificationResult({
+          type: 'media',
+          success: allBlocked,
+          message: allBlocked
+            ? 'Media block verified - all files blocked'
+            : `Warning: ${failedCount} file(s) may not be blocked`,
+        });
+        toast({
+          title: allBlocked ? "Block Verified" : "Verification Warning",
+          description: allBlocked
+            ? "All media confirmed blocked"
+            : "Some media may not be blocked - check manually",
+          variant: allBlocked ? "default" : "destructive",
+        });
+      } catch {
+        setVerificationResult({
+          type: 'media',
+          success: false,
+          message: 'Could not verify media block status',
+        });
+      } finally {
+        setIsVerifying(false);
+      }
     },
     onError: (error: Error) => {
       toast({
@@ -574,16 +677,15 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
               <div>
                 <p>This will remove this event from the relay. The content will no longer be served.</p>
                 {context.target?.value && (
-                  <code className="text-xs bg-muted px-1 py-0.5 rounded mt-2 block font-mono">
-                    {(() => {
-                      try {
-                        const noteId = nip19.noteEncode(context.target.value);
-                        return `${noteId.slice(0, 16)}...${noteId.slice(-8)}`;
-                      } catch {
-                        return `${context.target.value.slice(0, 16)}...`;
-                      }
-                    })()}
-                  </code>
+                  <div className="mt-2">
+                    <CopyableId
+                      value={context.target.value}
+                      type="note"
+                      truncateStart={16}
+                      truncateEnd={8}
+                      size="xs"
+                    />
+                  </div>
                 )}
               </div>
             </AlertDialogDescription>
@@ -613,14 +715,21 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Block Media?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This will permanently ban {mediaHashes.length} media file(s) from being served.
-              <div className="mt-2 space-y-1">
-                {mediaHashes.map(hash => (
-                  <code key={hash} className="text-xs bg-muted px-1 py-0.5 rounded block truncate">
-                    {hash}
-                  </code>
-                ))}
+            <AlertDialogDescription asChild>
+              <div>
+                <p>This will permanently ban {mediaHashes.length} media file(s) from being served.</p>
+                <div className="mt-2 space-y-1">
+                  {mediaHashes.map(hash => (
+                    <CopyableId
+                      key={hash}
+                      value={hash}
+                      type="hash"
+                      truncateStart={16}
+                      truncateEnd={8}
+                      size="xs"
+                    />
+                  ))}
+                </div>
               </div>
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -690,6 +799,42 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
 
       <ScrollArea className="h-full">
         <div className="p-4 space-y-4 overflow-hidden">
+          {/* Verification Status */}
+          {(isVerifying || verificationResult) && (
+            <div
+              className={`p-3 rounded-lg flex items-center gap-3 ${
+                verificationResult?.success
+                  ? "bg-green-100 dark:bg-green-950/50 border border-green-300 dark:border-green-800"
+                  : "bg-red-100 dark:bg-red-950/50 border border-red-300 dark:border-red-800"
+              }`}
+            >
+              {isVerifying ? (
+                <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+              ) : verificationResult?.success ? (
+                <CheckCircle className="h-5 w-5 text-green-600" />
+              ) : (
+                <XCircle className="h-5 w-5 text-red-600" />
+              )}
+              <div className="flex-1">
+                <p className={`text-sm font-medium ${verificationResult?.success ? "text-green-800 dark:text-green-300" : "text-red-800 dark:text-red-300"}`}>
+                  {isVerifying
+                    ? "Verifying moderation action..."
+                    : verificationResult?.message}
+                </p>
+              </div>
+              {verificationResult && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setVerificationResult(null)}
+                  className="h-6 px-2"
+                >
+                  Dismiss
+                </Button>
+              )}
+            </div>
+          )}
+
           {/* Resolved Banner - prominently show when already handled */}
           {isResolved && (
             <div className="bg-green-100 dark:bg-green-950/50 border border-green-300 dark:border-green-800 rounded-lg p-3 flex items-center gap-3">
@@ -831,6 +976,61 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             </Card>
           )}
 
+          {/* Event Metadata - Show IDs and tags for copying */}
+          <Card>
+            <CardHeader className="py-3">
+              <CardTitle className="text-sm flex items-center gap-2">
+                <FileCode className="h-4 w-4" />
+                Event Details
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="py-0 pb-3 space-y-3">
+              {/* Report Event ID */}
+              <div className="space-y-1">
+                <span className="text-xs font-medium text-muted-foreground">Report Event</span>
+                <div className="flex flex-col gap-1">
+                  <CopyableId value={report.id} type="note" label="ID:" size="xs" />
+                  <CopyableId value={report.pubkey} type="npub" label="Reporter:" size="xs" />
+                </div>
+              </div>
+
+              {/* Reported Target */}
+              {context.target && (
+                <div className="space-y-1">
+                  <span className="text-xs font-medium text-muted-foreground">
+                    Reported {context.target.type === 'event' ? 'Event' : 'User'}
+                  </span>
+                  <div className="flex flex-col gap-1">
+                    <CopyableId
+                      value={context.target.value}
+                      type={context.target.type === 'event' ? 'note' : 'npub'}
+                      label={context.target.type === 'event' ? 'ID:' : 'npub:'}
+                      size="xs"
+                    />
+                    {context.reportedUser.pubkey && context.target.type === 'event' && (
+                      <CopyableId value={context.reportedUser.pubkey} type="npub" label="Author:" size="xs" />
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Report Tags */}
+              {report.tags.length > 0 && (
+                <CopyableTags tags={report.tags} maxTags={8} />
+              )}
+
+              {/* Reported Event Tags (if different from report) */}
+              {context.thread?.event && context.thread.event.tags.length > 0 && (
+                <div className="pt-2 border-t">
+                  <span className="text-xs font-medium text-muted-foreground block mb-1">
+                    Reported Event Tags
+                  </span>
+                  <CopyableTags tags={context.thread.event.tags} maxTags={8} />
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
           <Separator />
 
           {/* Thread Context */}
@@ -852,9 +1052,17 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             />
           )}
 
-          {/* Hive AI Moderation Results */}
+          {/* Hive AI Content Moderation */}
           {context.thread?.event && (
             <HiveAIReport eventTags={context.thread.event.tags} />
+          )}
+
+          {/* AI Detection (Reality Defender multi-provider) */}
+          {context.thread?.event && (
+            <AIDetectionReport
+              eventTags={context.thread.event.tags}
+              eventId={context.thread.event.id}
+            />
           )}
 
           <Separator />
@@ -925,21 +1133,18 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                           const cat = getReportCategory(r);
                           const catLabel = CATEGORY_LABELS[cat] || cat;
                           const target = getReportTarget(r);
-                          let noteDisplay = target?.value?.slice(0, 12) + '...';
-                          if (target?.value) {
-                            try {
-                              const noteId = nip19.noteEncode(target.value);
-                              noteDisplay = `${noteId.slice(0, 12)}...`;
-                            } catch {
-                              // Keep hex fallback
-                            }
-                          }
                           return (
                             <div key={r.id} className="flex items-center gap-2 text-xs p-1.5 bg-background rounded">
                               <Badge variant="outline" className="text-xs">{catLabel}</Badge>
-                              <span className="text-muted-foreground font-mono truncate">
-                                {noteDisplay}
-                              </span>
+                              {target?.value && (
+                                <CopyableId
+                                  value={target.value}
+                                  type="note"
+                                  truncateStart={10}
+                                  truncateEnd={4}
+                                  size="xs"
+                                />
+                              )}
                             </div>
                           );
                         })}
