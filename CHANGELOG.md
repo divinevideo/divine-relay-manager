@@ -4,6 +4,32 @@ All notable changes to ManVRelay will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **Report sorting and filtering** - Comprehensive queue management for moderators
+  - Sort by: Most Reports, Most Reporters, Newest, Oldest, By Category
+  - Filter by target type: All, Users only, Events only
+  - Filter by category with clickable chips
+  - High-priority categories (CSAM, threats, terrorism) shown first when sorting by category
+- **Priority indicators** - Visual highlighting for urgent reports
+  - Red highlighting for high-priority reports (CSAM, threats, terrorism, non-consensual content)
+  - Orange highlighting for medium-priority reports (doxxing, malware, illegal goods)
+  - Priority badge shown on high-severity reports
+- **Repost content display** - Shows original content when report is on a repost (kind 6/16)
+  - Fetches and displays the original event that was reposted
+  - Shows original author with profile info
+  - Includes media from the original post for moderation
+  - Media hashes from both repost and original are available for blocking
+
+### Fixed
+- **Hide resolved now works** - Fixed multiple issues preventing the filter from working
+  - Added error handling to decisions query (was silently failing)
+  - Individual "All" view now filters resolved reports (was only filtering Grouped view)
+  - Added detailed debug logging for resolved targets breakdown
+- **Debug page crash** - Fixed React error when rendering banned pubkeys
+  - Relay returns objects `{pubkey, reason}` not strings
+  - Added `BannedPubkeyEntry` type to normalize responses
+  - Updated DebugPanel and Reports to handle new format
+
 ## [0.3.0] - 2025-12-07
 
 ### Added

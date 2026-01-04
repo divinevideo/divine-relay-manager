@@ -15,13 +15,55 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
-import { Flag, RefreshCw, Clock, Users, Layers, CheckCircle } from "lucide-react";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Flag,
+  RefreshCw,
+  Clock,
+  Users,
+  Layers,
+  CheckCircle,
+  ArrowUpDown,
+  Filter,
+  User,
+  FileText,
+  AlertTriangle,
+  X,
+} from "lucide-react";
 import { ReportDetail } from "@/components/ReportDetail";
 import { UserDisplayName } from "@/components/UserIdentifier";
 import { CopyableId } from "@/components/CopyableId";
 import { listBannedPubkeys, listBannedEvents, getAllDecisions } from "@/lib/adminApi";
 import { CATEGORY_LABELS } from "@/lib/constants";
 import type { NostrEvent } from "@nostrify/nostrify";
+
+// Sort options for moderation queue
+type SortOption = 'reports' | 'newest' | 'oldest' | 'category' | 'reporters';
+
+const SORT_OPTIONS: { value: SortOption; label: string }[] = [
+  { value: 'reports', label: 'Most Reports' },
+  { value: 'reporters', label: 'Most Reporters' },
+  { value: 'newest', label: 'Newest First' },
+  { value: 'oldest', label: 'Oldest First' },
+  { value: 'category', label: 'By Category' },
+];
+
+// High-priority categories that need immediate attention (CSAM, illegal content)
+const HIGH_PRIORITY_CATEGORIES = ['sexual_minors', 'nonconsensual_sexual_content', 'terrorism_extremism', 'credible_threats'];
+const MEDIUM_PRIORITY_CATEGORIES = ['doxxing_pii', 'malware_scam', 'illegal_goods'];
+
+// Category priority for sorting
+function getCategoryPriority(categories: string[]): number {
+  if (categories.some(c => HIGH_PRIORITY_CATEGORIES.includes(c))) return 0;
+  if (categories.some(c => MEDIUM_PRIORITY_CATEGORIES.includes(c))) return 1;
+  return 2;
+}
 
 interface ReportsProps {
   relayUrl: string;
@@ -120,12 +162,18 @@ function ConsolidatedReportItem({
   const reporterCount = consolidated.reporters.length;
   const primaryCategory = consolidated.categories[0];
   const categoryLabel = CATEGORY_LABELS[primaryCategory] || primaryCategory;
+  const isHighPriority = consolidated.categories.some(c => HIGH_PRIORITY_CATEGORIES.includes(c));
+  const isMediumPriority = consolidated.categories.some(c => MEDIUM_PRIORITY_CATEGORIES.includes(c));
 
   return (
     <div
       className={`p-3 border rounded-lg cursor-pointer transition-colors ${
         isSelected
           ? 'border-primary bg-primary/5 ring-1 ring-primary'
+          : isHighPriority
+          ? 'border-red-300 bg-red-50/50 dark:bg-red-950/20 hover:bg-red-50 dark:hover:bg-red-950/30'
+          : isMediumPriority
+          ? 'border-orange-200 bg-orange-50/30 dark:bg-orange-950/10 hover:bg-orange-50/50'
           : 'hover:bg-muted/50'
       }`}
       onClick={onClick}
@@ -133,7 +181,18 @@ function ConsolidatedReportItem({
       <div className="space-y-2">
         <div className="flex items-start justify-between gap-2">
           <div className="flex items-center gap-1.5 flex-wrap">
-            <Badge variant="outline" className="text-xs">{categoryLabel}</Badge>
+            {isHighPriority && (
+              <Badge variant="destructive" className="text-xs">
+                <AlertTriangle className="h-3 w-3 mr-1" />
+                Priority
+              </Badge>
+            )}
+            <Badge
+              variant={isHighPriority ? 'destructive' : 'outline'}
+              className="text-xs"
+            >
+              {categoryLabel}
+            </Badge>
             {consolidated.categories.length > 1 && (
               <Badge variant="outline" className="text-xs">
                 +{consolidated.categories.length - 1} more
@@ -192,12 +251,18 @@ function IndividualReportItem({
   const category = getReportCategory(report);
   const target = getReportTarget(report);
   const categoryLabel = CATEGORY_LABELS[category] || category;
+  const isHighPriority = HIGH_PRIORITY_CATEGORIES.includes(category);
+  const isMediumPriority = MEDIUM_PRIORITY_CATEGORIES.includes(category);
 
   return (
     <div
       className={`p-3 border rounded-lg cursor-pointer transition-colors ${
         isSelected
           ? 'border-primary bg-primary/5 ring-1 ring-primary'
+          : isHighPriority
+          ? 'border-red-300 bg-red-50/50 dark:bg-red-950/20 hover:bg-red-50 dark:hover:bg-red-950/30'
+          : isMediumPriority
+          ? 'border-orange-200 bg-orange-50/30 dark:bg-orange-950/10 hover:bg-orange-50/50'
           : 'hover:bg-muted/50'
       }`}
       onClick={onClick}
@@ -205,7 +270,18 @@ function IndividualReportItem({
       <div className="space-y-2">
         <div className="flex items-start justify-between gap-2">
           <div className="flex items-center gap-1.5 flex-wrap">
-            <Badge variant="outline" className="text-xs">{categoryLabel}</Badge>
+            {isHighPriority && (
+              <Badge variant="destructive" className="text-xs">
+                <AlertTriangle className="h-3 w-3 mr-1" />
+                Priority
+              </Badge>
+            )}
+            <Badge
+              variant={isHighPriority ? 'destructive' : 'outline'}
+              className="text-xs"
+            >
+              {categoryLabel}
+            </Badge>
             {target && (
               <Badge variant="secondary" className="text-xs">
                 {target.type === 'event' ? 'Event' : 'User'}
@@ -243,6 +319,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const [selectedReport, setSelectedReport] = useState<NostrEvent | null>(null);
   const [viewMode, setViewMode] = useState<'consolidated' | 'individual'>('consolidated');
   const [hideResolved, setHideResolved] = useState(true);
+  const [sortBy, setSortBy] = useState<SortOption>('reports');
+  const [filterCategory, setFilterCategory] = useState<string | null>(null);
+  const [filterTargetType, setFilterTargetType] = useState<'all' | 'event' | 'pubkey'>('all');
 
   const { data: reports, isLoading, error, refetch, isFetching } = useQuery({
     queryKey: ['reports', relayUrl],
@@ -298,34 +377,48 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   });
 
   // Query all moderation decisions from our D1 database
-  const { data: allDecisions } = useQuery({
+  const { data: allDecisions, error: decisionsError } = useQuery({
     queryKey: ['all-decisions'],
     queryFn: async () => {
-      const decisions = await getAllDecisions();
-      console.log('[Reports] Loaded decisions:', decisions.length, decisions.slice(0, 3));
-      return decisions;
+      try {
+        const decisions = await getAllDecisions();
+        console.log('[Reports] Loaded decisions:', decisions.length, decisions.slice(0, 3));
+        return decisions;
+      } catch (error) {
+        console.error('[Reports] Failed to load decisions:', error);
+        return [];
+      }
     },
     staleTime: 30 * 1000,
   });
 
+  // Debug: log any decisions error
+  useEffect(() => {
+    if (decisionsError) {
+      console.error('[Reports] Decisions query error:', decisionsError);
+    }
+  }, [decisionsError]);
+
   // Build set of resolved target keys (from labels, bans, deletions, and decisions)
   const resolvedTargets = useMemo(() => {
     const resolved = new Set<string>();
+    let fromLabels = 0, fromBannedPubkeys = 0, fromBannedEvents = 0, fromDecisions = 0;
 
     // Add from resolution labels
     if (resolutionLabels) {
       for (const label of resolutionLabels) {
         const eTag = label.tags.find(t => t[0] === 'e');
-        if (eTag) resolved.add(`event:${eTag[1]}`);
+        if (eTag) { resolved.add(`event:${eTag[1]}`); fromLabels++; }
         const pTag = label.tags.find(t => t[0] === 'p');
-        if (pTag) resolved.add(`pubkey:${pTag[1]}`);
+        if (pTag) { resolved.add(`pubkey:${pTag[1]}`); fromLabels++; }
       }
     }
 
-    // Add banned pubkeys
+    // Add banned pubkeys (now returns BannedPubkeyEntry objects)
     if (bannedPubkeys) {
-      for (const pubkey of bannedPubkeys) {
-        resolved.add(`pubkey:${pubkey}`);
+      for (const entry of bannedPubkeys) {
+        resolved.add(`pubkey:${entry.pubkey}`);
+        fromBannedPubkeys++;
       }
     }
 
@@ -333,23 +426,43 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     if (bannedEvents) {
       for (const event of bannedEvents) {
         resolved.add(`event:${event.id}`);
+        fromBannedEvents++;
       }
     }
 
     // Add from moderation decisions (ban_user, delete_event, etc.)
-    if (allDecisions) {
+    if (allDecisions && allDecisions.length > 0) {
       for (const decision of allDecisions) {
         if (decision.target_type === 'pubkey') {
           resolved.add(`pubkey:${decision.target_id}`);
+          fromDecisions++;
         } else if (decision.target_type === 'event') {
           resolved.add(`event:${decision.target_id}`);
+          fromDecisions++;
         }
       }
     }
 
-    console.log('[Reports] Resolved targets:', resolved.size, Array.from(resolved).slice(0, 5));
+    console.log('[Reports] Resolved targets breakdown:', {
+      total: resolved.size,
+      fromLabels,
+      fromBannedPubkeys,
+      fromBannedEvents,
+      fromDecisions,
+      decisionsLoaded: allDecisions?.length ?? 'undefined',
+    });
     return resolved;
   }, [resolutionLabels, bannedPubkeys, bannedEvents, allDecisions]);
+
+  // Get all unique categories from reports for filter chips
+  const availableCategories = useMemo(() => {
+    if (!reports) return [];
+    const categories = new Set<string>();
+    for (const report of reports) {
+      categories.add(getReportCategory(report));
+    }
+    return Array.from(categories).sort();
+  }, [reports]);
 
   const consolidated = useMemo(() => {
     if (!reports) return [];
@@ -360,17 +473,118 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       items = items.filter(c => !resolvedTargets.has(`${c.target.type}:${c.target.value}`));
     }
 
+    // Filter by category
+    if (filterCategory) {
+      items = items.filter(c => c.categories.includes(filterCategory));
+    }
+
+    // Filter by target type
+    if (filterTargetType !== 'all') {
+      items = items.filter(c => c.target.type === filterTargetType);
+    }
+
+    // Apply sorting
+    items.sort((a, b) => {
+      switch (sortBy) {
+        case 'reports':
+          // Most reports first, then by date
+          if (b.reports.length !== a.reports.length) {
+            return b.reports.length - a.reports.length;
+          }
+          return b.latestReport.created_at - a.latestReport.created_at;
+
+        case 'reporters':
+          // Most unique reporters first (higher confidence)
+          if (b.reporters.length !== a.reporters.length) {
+            return b.reporters.length - a.reporters.length;
+          }
+          return b.reports.length - a.reports.length;
+
+        case 'newest':
+          return b.latestReport.created_at - a.latestReport.created_at;
+
+        case 'oldest':
+          return a.oldestReport.created_at - b.oldestReport.created_at;
+
+        case 'category':
+          // Sort by priority (CSAM first), then alphabetically by category
+          const aPriority = getCategoryPriority(a.categories);
+          const bPriority = getCategoryPriority(b.categories);
+          if (aPriority !== bPriority) return aPriority - bPriority;
+          // Then by primary category name
+          const aCategory = a.categories[0] || 'zzz';
+          const bCategory = b.categories[0] || 'zzz';
+          if (aCategory !== bCategory) return aCategory.localeCompare(bCategory);
+          // Then by report count
+          return b.reports.length - a.reports.length;
+
+        default:
+          return 0;
+      }
+    });
+
     return items;
-  }, [reports, hideResolved, resolvedTargets]);
+  }, [reports, hideResolved, resolvedTargets, filterCategory, filterTargetType, sortBy]);
 
   const allConsolidated = useMemo(() => {
     if (!reports) return [];
     return consolidateReports(reports);
   }, [reports]);
 
+  // Filter individual reports when hideResolved is on
+  const filteredReports = useMemo(() => {
+    if (!reports) return [];
+    let items = [...reports];
+
+    // Filter resolved
+    if (hideResolved) {
+      items = items.filter(report => {
+        const target = getReportTarget(report);
+        if (!target) return true; // Keep reports without targets
+        return !resolvedTargets.has(`${target.type}:${target.value}`);
+      });
+    }
+
+    // Filter by category
+    if (filterCategory) {
+      items = items.filter(report => getReportCategory(report) === filterCategory);
+    }
+
+    // Filter by target type
+    if (filterTargetType !== 'all') {
+      items = items.filter(report => {
+        const target = getReportTarget(report);
+        return target?.type === filterTargetType;
+      });
+    }
+
+    // Apply sorting
+    items.sort((a, b) => {
+      switch (sortBy) {
+        case 'newest':
+          return b.created_at - a.created_at;
+        case 'oldest':
+          return a.created_at - b.created_at;
+        case 'category':
+          const aCat = getReportCategory(a);
+          const bCat = getReportCategory(b);
+          const aPriority = getCategoryPriority([aCat]);
+          const bPriority = getCategoryPriority([bCat]);
+          if (aPriority !== bPriority) return aPriority - bPriority;
+          return aCat.localeCompare(bCat);
+        default:
+          // For 'reports' and 'reporters', just use date for individual view
+          return b.created_at - a.created_at;
+      }
+    });
+
+    return items;
+  }, [reports, hideResolved, resolvedTargets, filterCategory, filterTargetType, sortBy]);
+
   const uniqueTargets = consolidated.length;
   const totalTargets = allConsolidated.length;
   const totalReports = reports?.length || 0;
+  const filteredReportsCount = filteredReports.length;
   const resolvedCount = totalTargets - uniqueTargets;
 
   // Sync selected report with URL
@@ -459,26 +673,111 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
               </TabsTrigger>
               <TabsTrigger value="individual" className="text-xs">
                 <Flag className="h-3 w-3 mr-1" />
-                All ({totalReports})
+                All ({hideResolved ? filteredReportsCount : totalReports})
               </TabsTrigger>
             </TabsList>
           </Tabs>
 
-          {/* Hide resolved toggle */}
-          <div className="flex items-center justify-between mt-3 pt-2 border-t">
-            <Label htmlFor="hide-resolved" className="text-xs text-muted-foreground flex items-center gap-1.5">
-              <CheckCircle className="h-3 w-3 text-green-500" />
-              Hide resolved
-            </Label>
-            <Switch
-              id="hide-resolved"
-              checked={hideResolved}
-              onCheckedChange={setHideResolved}
-            />
+          {/* Sort and Filter Controls */}
+          <div className="space-y-3 mt-3 pt-3 border-t">
+            {/* Sort dropdown */}
+            <div className="flex items-center gap-2">
+              <ArrowUpDown className="h-3 w-3 text-muted-foreground shrink-0" />
+              <Select value={sortBy} onValueChange={(v) => setSortBy(v as SortOption)}>
+                <SelectTrigger className="h-8 text-xs flex-1">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {SORT_OPTIONS.map(option => (
+                    <SelectItem key={option.value} value={option.value} className="text-xs">
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            {/* Target type filter */}
+            <div className="flex items-center gap-2">
+              <Filter className="h-3 w-3 text-muted-foreground shrink-0" />
+              <div className="flex gap-1 flex-1">
+                <Button
+                  variant={filterTargetType === 'all' ? 'secondary' : 'ghost'}
+                  size="sm"
+                  className="h-7 text-xs px-2 flex-1"
+                  onClick={() => setFilterTargetType('all')}
+                >
+                  All
+                </Button>
+                <Button
+                  variant={filterTargetType === 'pubkey' ? 'secondary' : 'ghost'}
+                  size="sm"
+                  className="h-7 text-xs px-2 flex-1"
+                  onClick={() => setFilterTargetType('pubkey')}
+                >
+                  <User className="h-3 w-3 mr-1" />
+                  Users
+                </Button>
+                <Button
+                  variant={filterTargetType === 'event' ? 'secondary' : 'ghost'}
+                  size="sm"
+                  className="h-7 text-xs px-2 flex-1"
+                  onClick={() => setFilterTargetType('event')}
+                >
+                  <FileText className="h-3 w-3 mr-1" />
+                  Events
+                </Button>
+              </div>
+            </div>
+
+            {/* Category filter chips */}
+            {availableCategories.length > 0 && (
+              <div className="space-y-1.5">
+                <Label className="text-xs text-muted-foreground">Category</Label>
+                <div className="flex flex-wrap gap-1">
+                  {filterCategory && (
+                    <Badge
+                      variant="default"
+                      className="text-xs cursor-pointer pr-1"
+                      onClick={() => setFilterCategory(null)}
+                    >
+                      {CATEGORY_LABELS[filterCategory] || filterCategory}
+                      <X className="h-3 w-3 ml-1" />
+                    </Badge>
+                  )}
+                  {!filterCategory && availableCategories.map(cat => (
+                    <Badge
+                      key={cat}
+                      variant={HIGH_PRIORITY_CATEGORIES.includes(cat) ? 'destructive' : 'outline'}
+                      className="text-xs cursor-pointer hover:bg-muted"
+                      onClick={() => setFilterCategory(cat)}
+                    >
+                      {HIGH_PRIORITY_CATEGORIES.includes(cat) && (
+                        <AlertTriangle className="h-3 w-3 mr-1" />
+                      )}
+                      {CATEGORY_LABELS[cat] || cat}
+                    </Badge>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Hide resolved toggle */}
+            <div className="flex items-center justify-between pt-2 border-t">
+              <Label htmlFor="hide-resolved" className="text-xs text-muted-foreground flex items-center gap-1.5">
+                <CheckCircle className="h-3 w-3 text-green-500" />
+                Hide resolved
+              </Label>
+              <Switch
+                id="hide-resolved"
+                checked={hideResolved}
+                onCheckedChange={setHideResolved}
+              />
+            </div>
           </div>
         </CardHeader>
         <CardContent className="p-0">
-          <ScrollArea className="h-[calc(100vh-380px)]">
+          <ScrollArea className="h-[calc(100vh-520px)]">
             <div className="space-y-2 p-4 pt-0">
               {viewMode === 'consolidated' ? (
                 !consolidated || consolidated.length === 0 ? (
@@ -497,13 +796,13 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                   ))
                 )
               ) : (
-                !reports || reports.length === 0 ? (
+                filteredReports.length === 0 ? (
                   <div className="text-center py-8 text-muted-foreground">
                     <Flag className="h-8 w-8 mx-auto mb-2 opacity-50" />
                     <p className="text-sm">No reports found</p>
                   </div>
                 ) : (
-                  reports.map((report) => (
+                  filteredReports.map((report) => (
                     <IndividualReportItem
                       key={report.id}
                       report={report}
