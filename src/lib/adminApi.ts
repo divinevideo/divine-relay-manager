@@ -1,7 +1,7 @@
 // ABOUTME: API client for the Divine Relay Admin Worker
 // ABOUTME: Handles signing, publishing events, and NIP-86 relay management via the server-side Worker
 
-const WORKER_URL = import.meta.env.VITE_WORKER_URL || 'https://divine-relay-admin-api.divine-video.workers.dev';
+const WORKER_URL = import.meta.env.VITE_WORKER_URL || 'https://relay.admin.divine.video';
 
 export interface UnsignedEvent {
   kind: number;
