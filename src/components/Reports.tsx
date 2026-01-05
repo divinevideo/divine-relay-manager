@@ -2,7 +2,7 @@
 // ABOUTME: Groups multiple reports on same target, shows count and all reporters
 
 import { useState, useMemo, useEffect } from "react";
-import { nip19 } from "nostr-tools";
+
 import { useQuery } from "@tanstack/react-query";
 import { useNostr } from "@nostrify/react";
 import { useNavigate } from "react-router-dom";

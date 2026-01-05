@@ -37,7 +37,6 @@ import {
   XCircle,
   RefreshCw,
   Send,
-  Trash2,
   UserX,
   UserCheck,
   Database,

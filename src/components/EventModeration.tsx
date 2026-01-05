@@ -29,7 +29,7 @@ interface BannedEvent {
   reason?: string;
 }
 
-export function EventModeration({ relayUrl }: EventModerationProps) {
+export function EventModeration() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const { config } = useAppContext();
