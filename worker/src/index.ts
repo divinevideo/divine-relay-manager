@@ -307,6 +307,30 @@ async function handleModerate(
     return jsonResponse({ success: false, error: publishResult.error }, 500, corsHeaders);
   }
 
+  // For delete_event: also call banevent RPC to add event to relay's ban list
+  if (body.action === 'delete_event' && body.eventId) {
+    try {
+      // Call our own /api/relay-rpc endpoint to invoke banevent
+      const rpcRequest = new Request(request.url.replace(/\/api\/moderate$/, '/api/relay-rpc'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          method: 'banevent',
+          params: [body.eventId, body.reason || 'Deleted by relay admin'],
+        }),
+      });
+
+      const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders);
+
+      if (!rpcResponse.ok) {
+        console.error('[handleModerate] banevent RPC failed:', rpcResponse.status);
+      }
+    } catch (error) {
+      console.error('[handleModerate] banevent RPC error:', error);
+      // Don't fail the whole operation if banevent fails
+    }
+  }
+
   return jsonResponse({ success: true, event }, 200, corsHeaders);
 }
 
