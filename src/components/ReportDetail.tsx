@@ -42,7 +42,7 @@ import { HiveAIReport } from "@/components/HiveAIReport";
 import { AIDetectionReport } from "@/components/AIDetectionReport";
 import { MediaPreview } from "@/components/MediaPreview";
 import { CATEGORY_LABELS } from "@/lib/constants";
-import { UserX, Tag, Flag, Trash2, CheckCircle, ThumbsDown, Video, History, Ban, ShieldX, Link2, User, FileText, Unlock, Repeat2, FileCode, Loader2, XCircle } from "lucide-react";
+import { UserX, Tag, Flag, Trash2, CheckCircle, ThumbsDown, Video, History, Ban, ShieldX, Link2, User, FileText, Unlock, Repeat2, FileCode, Loader2, XCircle, RefreshCw } from "lucide-react";
 import { CopyableId, CopyableTags } from "@/components/CopyableId";
 import type { NostrEvent } from "@nostrify/nostrify";
 
@@ -88,6 +88,12 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     success: boolean;
     message: string;
   } | null>(null);
+  const [liveStatus, setLiveStatus] = useState<{
+    userBanned: boolean | null;
+    eventDeleted: boolean | null;
+    checkedAt: Date | null;
+    isChecking: boolean;
+  }>({ userBanned: null, eventDeleted: null, checkedAt: null, isChecking: false });
 
   const context = useReportContext(report);
 
@@ -97,6 +103,42 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     context.userStats?.existingLabels,
     context.userStats?.previousReports
   );
+
+  // Function to check live status from relay
+  const checkLiveStatus = async () => {
+    setLiveStatus(prev => ({ ...prev, isChecking: true }));
+    try {
+      const results: { userBanned: boolean | null; eventDeleted: boolean | null } = {
+        userBanned: null,
+        eventDeleted: null,
+      };
+
+      // Check if user is banned
+      if (context.reportedUser.pubkey) {
+        results.userBanned = await verifyPubkeyBanned(context.reportedUser.pubkey);
+      }
+
+      // Check if event is deleted
+      if (context.target?.type === 'event') {
+        results.eventDeleted = await verifyEventDeleted(context.target.value, config.relayUrl);
+      }
+
+      setLiveStatus({
+        userBanned: results.userBanned,
+        eventDeleted: results.eventDeleted,
+        checkedAt: new Date(),
+        isChecking: false,
+      });
+    } catch (error) {
+      console.error('Failed to check live status:', error);
+      setLiveStatus(prev => ({ ...prev, isChecking: false }));
+      toast({
+        title: "Failed to check status",
+        description: "Could not verify moderation status from relay",
+        variant: "destructive",
+      });
+    }
+  };
 
   // Check moderation status (banned/deleted)
   const moderationStatus = useModerationStatus(
@@ -813,7 +855,89 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
 
       <ScrollArea className="h-full">
         <div className="p-4 space-y-4 overflow-hidden">
-          {/* Verification Status */}
+          {/* Live Status Check - Verify current moderation state */}
+          <Card className="border-blue-200 bg-blue-50/50 dark:bg-blue-950/20">
+            <CardHeader className="py-3">
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-sm flex items-center gap-2 text-blue-700 dark:text-blue-400">
+                  <RefreshCw className={`h-4 w-4 ${liveStatus.isChecking ? 'animate-spin' : ''}`} />
+                  Live Moderation Status
+                </CardTitle>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={checkLiveStatus}
+                  disabled={liveStatus.isChecking}
+                  className="h-7 text-xs"
+                >
+                  {liveStatus.isChecking ? 'Checking...' : liveStatus.checkedAt ? 'Re-check' : 'Check Now'}
+                </Button>
+              </div>
+            </CardHeader>
+            <CardContent className="py-0 pb-3">
+              {liveStatus.checkedAt ? (
+                <div className="space-y-2">
+                  {/* User ban status */}
+                  {context.reportedUser.pubkey && (
+                    <div className={`flex items-center gap-2 p-2 rounded ${
+                      liveStatus.userBanned
+                        ? 'bg-green-100 dark:bg-green-950/50'
+                        : 'bg-yellow-100 dark:bg-yellow-950/50'
+                    }`}>
+                      {liveStatus.userBanned ? (
+                        <>
+                          <Ban className="h-4 w-4 text-green-600" />
+                          <span className="text-sm font-medium text-green-700 dark:text-green-400">
+                            User IS BANNED on relay
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          <User className="h-4 w-4 text-yellow-600" />
+                          <span className="text-sm font-medium text-yellow-700 dark:text-yellow-400">
+                            User is NOT banned
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  )}
+                  {/* Event deletion status */}
+                  {context.target?.type === 'event' && (
+                    <div className={`flex items-center gap-2 p-2 rounded ${
+                      liveStatus.eventDeleted
+                        ? 'bg-green-100 dark:bg-green-950/50'
+                        : 'bg-yellow-100 dark:bg-yellow-950/50'
+                    }`}>
+                      {liveStatus.eventDeleted ? (
+                        <>
+                          <ShieldX className="h-4 w-4 text-green-600" />
+                          <span className="text-sm font-medium text-green-700 dark:text-green-400">
+                            Event IS DELETED from relay
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          <FileText className="h-4 w-4 text-yellow-600" />
+                          <span className="text-sm font-medium text-yellow-700 dark:text-yellow-400">
+                            Event is still on relay
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  )}
+                  <p className="text-xs text-muted-foreground">
+                    Checked: {liveStatus.checkedAt.toLocaleTimeString()}
+                  </p>
+                </div>
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  Click "Check Now" to verify current moderation status from the relay
+                </p>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Verification Status - for just-completed actions */}
           {(isVerifying || verificationResult) && (
             <div
               className={`p-3 rounded-lg flex items-center gap-3 ${
