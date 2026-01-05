@@ -526,7 +526,7 @@ export function DebugPanel() {
                           <div className="p-2 bg-red-100 dark:bg-red-900/30 rounded">
                             <Label className="text-red-600 dark:text-red-400">Error:</Label>
                             <pre className="whitespace-pre-wrap text-red-700 dark:text-red-300 mt-1">
-                              {log.error}
+                              {String(log.error)}
                             </pre>
                           </div>
                         )}
