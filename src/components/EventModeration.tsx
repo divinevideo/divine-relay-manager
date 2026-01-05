@@ -46,13 +46,13 @@ export function EventModeration({ relayUrl }: EventModerationProps) {
   // Query for events needing moderation
   const { data: eventsNeedingModeration, isLoading: loadingPending, error: pendingError } = useQuery({
     queryKey: ['events-needing-moderation'],
-    queryFn: () => callRelayRpc('listeventsneedingmoderation'),
+    queryFn: () => callRelayRpc<EventNeedingModeration[]>('listeventsneedingmoderation'),
   });
 
   // Query for banned events
   const { data: bannedEvents, isLoading: loadingBanned, error: bannedError } = useQuery({
     queryKey: ['banned-events'],
-    queryFn: () => callRelayRpc('listbannedevents'),
+    queryFn: () => callRelayRpc<BannedEvent[]>('listbannedevents'),
   });
 
   // Mutation for allowing events

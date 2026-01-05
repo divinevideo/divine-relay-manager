@@ -93,7 +93,7 @@ export function RelayManager() {
           </TabsContent>
 
           <TabsContent value="users">
-            <UserManagement relayUrl={RELAY_URL} selectedPubkey={params.pubkey} />
+            <UserManagement relayUrl={RELAY_URL} />
           </TabsContent>
 
           <TabsContent value="reports">

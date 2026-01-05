@@ -53,7 +53,7 @@ class ApiError extends Error {
 
 async function apiRequest<T>(
   endpoint: string,
-  method: 'GET' | 'POST',
+  method: 'GET' | 'POST' | 'DELETE',
   body?: object
 ): Promise<T> {
   const response = await fetch(`${WORKER_URL}${endpoint}`, {
@@ -361,7 +361,7 @@ export async function verifyPubkeyBanned(pubkey: string): Promise<boolean> {
     await new Promise(resolve => setTimeout(resolve, 500));
 
     const bannedList = await listBannedPubkeys();
-    return bannedList.includes(pubkey);
+    return bannedList.some(entry => entry.pubkey === pubkey);
   } catch {
     // If we can't check, assume it worked
     return true;
@@ -374,7 +374,7 @@ export async function verifyPubkeyUnbanned(pubkey: string): Promise<boolean> {
     await new Promise(resolve => setTimeout(resolve, 500));
 
     const bannedList = await listBannedPubkeys();
-    return !bannedList.includes(pubkey);
+    return !bannedList.some(entry => entry.pubkey === pubkey);
   } catch {
     return true;
   }

@@ -48,13 +48,13 @@ export function UserManagement({ relayUrl }: UserManagementProps) {
   // Query for banned users
   const { data: bannedUsers, isLoading: loadingBanned, error: bannedError } = useQuery({
     queryKey: ['banned-users'],
-    queryFn: () => callRelayRpc('listbannedpubkeys'),
+    queryFn: () => callRelayRpc<import('@/lib/adminApi').BannedPubkeyEntry[]>('listbannedpubkeys'),
   });
 
   // Query for allowed users
   const { data: allowedUsers, isLoading: loadingAllowed, error: allowedError } = useQuery({
     queryKey: ['allowed-users'],
-    queryFn: () => callRelayRpc('listallowedpubkeys'),
+    queryFn: () => callRelayRpc<import('@/lib/adminApi').BannedPubkeyEntry[]>('listallowedpubkeys'),
   });
 
   // Mutation for banning users
