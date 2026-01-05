@@ -530,7 +530,7 @@ export function DebugPanel() {
                             </pre>
                           </div>
                         )}
-                        {log.result && (
+                        {!!log.result && (
                           <div className="p-2 bg-background rounded">
                             <div className="flex items-center justify-between">
                               <Label className="text-muted-foreground">Result:</Label>
