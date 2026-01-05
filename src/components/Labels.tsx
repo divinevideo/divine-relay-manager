@@ -22,9 +22,8 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Tag, UserX, Clock, Filter, ChevronDown, ChevronRight, Eye, FileText, Flag, Loader2, CheckCircle, XCircle } from "lucide-react";
+import { Tag, UserX, Clock, Filter, ChevronDown, ChevronRight, Eye, Loader2, CheckCircle, XCircle } from "lucide-react";
 import { useToast } from "@/hooks/useToast";
-import { useUserStats } from "@/hooks/useUserStats";
 import { banPubkey, verifyPubkeyBanned } from "@/lib/adminApi";
 import { LabelPublisher } from "@/components/LabelPublisher";
 import { EventContentPreview } from "@/components/EventContentPreview";

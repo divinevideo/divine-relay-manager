@@ -325,7 +325,6 @@ async function handleRelayRpc(
   }
 
   const secretKey = getSecretKey(env);
-  const pubkey = getPublicKey(secretKey);
 
   // Build NIP-98 auth event
   const httpUrl = env.RELAY_URL.replace(/^wss?:\/\//, 'https://');

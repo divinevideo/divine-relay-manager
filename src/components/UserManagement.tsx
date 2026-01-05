@@ -31,7 +31,7 @@ interface AllowedUser {
   reason?: string;
 }
 
-export function UserManagement({ relayUrl }: UserManagementProps) {
+export function UserManagement() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [newPubkey, setNewPubkey] = useState("");
