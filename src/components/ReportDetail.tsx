@@ -22,6 +22,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useToast } from "@/hooks/useToast";
 import { useReportContext } from "@/hooks/useReportContext";
 import { useUserSummary } from "@/hooks/useUserSummary";
@@ -1392,38 +1393,59 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
           <div className="space-y-3 pt-2">
             {/* Resolution actions - mark as OK */}
             <div className="flex flex-wrap gap-2">
-              <Button
-                variant="outline"
-                className="border-green-500 text-green-600 hover:bg-green-50"
-                onClick={() => reviewMutation.mutate({ status: 'reviewed', comment: 'Content reviewed and approved' })}
-                disabled={reviewMutation.isPending}
-              >
-                <CheckCircle className="h-4 w-4 mr-1" />
-                {reviewMutation.isPending ? 'Marking...' : 'Mark OK'}
-              </Button>
-              <Button
-                variant="outline"
-                onClick={() => reviewMutation.mutate({ status: 'false-positive', comment: 'False positive report' })}
-                disabled={reviewMutation.isPending}
-              >
-                <ThumbsDown className="h-4 w-4 mr-1" />
-                False Positive
-              </Button>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="outline"
+                    className="border-green-500 text-green-600 hover:bg-green-50"
+                    onClick={() => reviewMutation.mutate({ status: 'reviewed', comment: 'Content reviewed and approved' })}
+                    disabled={reviewMutation.isPending}
+                  >
+                    <CheckCircle className="h-4 w-4 mr-1" />
+                    {reviewMutation.isPending ? 'Marking...' : 'Mark OK'}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" className="max-w-xs">
+                  <p>Mark as reviewed - no action needed. Content stays up, user is not banned. Just records that a moderator approved this.</p>
+                </TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="outline"
+                    onClick={() => reviewMutation.mutate({ status: 'false-positive', comment: 'False positive report' })}
+                    disabled={reviewMutation.isPending}
+                  >
+                    <ThumbsDown className="h-4 w-4 mr-1" />
+                    False Positive
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" className="max-w-xs">
+                  <p>Mark as false positive - the report was wrong or mistaken. Content stays up, user is not banned.</p>
+                </TooltipContent>
+              </Tooltip>
             </div>
 
             {/* Primary enforcement action - combined when media present and not already blocked */}
             {context.target?.type === 'event' && mediaHashes.length > 0 && !isEventDeleted && !mediaStatus.hasBlockedMedia && (
               <div>
-                <Button
-                  variant="destructive"
-                  size="lg"
-                  className="w-full"
-                  onClick={() => setConfirmBlockAndDelete(true)}
-                  disabled={blockAndDeleteMutation.isPending || mediaStatus.isLoading || isVerifying}
-                >
-                  <Trash2 className="h-4 w-4 mr-2" />
-                  {blockAndDeleteMutation.isPending ? 'Removing...' : isVerifying ? 'Verifying...' : mediaStatus.isLoading ? 'Checking media...' : `Block Media & Delete Event`}
-                </Button>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="destructive"
+                      size="lg"
+                      className="w-full"
+                      onClick={() => setConfirmBlockAndDelete(true)}
+                      disabled={blockAndDeleteMutation.isPending || mediaStatus.isLoading || isVerifying}
+                    >
+                      <Trash2 className="h-4 w-4 mr-2" />
+                      {blockAndDeleteMutation.isPending ? 'Removing...' : isVerifying ? 'Verifying...' : mediaStatus.isLoading ? 'Checking media...' : `Block Media & Delete Event`}
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" className="max-w-xs">
+                    <p>Permanently block all media files (images/videos) AND delete the event from the relay. The media will be blocked by hash so re-uploads are prevented.</p>
+                  </TooltipContent>
+                </Tooltip>
               </div>
             )}
 
@@ -1431,78 +1453,125 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             <div className="flex flex-wrap gap-2">
               {context.target?.type === 'event' && (
                 isEventDeleted ? (
-                  <Button variant="outline" disabled className="border-green-500 text-green-600">
-                    <CheckCircle className="h-4 w-4 mr-1" />
-                    Event Deleted
-                  </Button>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button variant="outline" disabled className="border-green-500 text-green-600">
+                        <CheckCircle className="h-4 w-4 mr-1" />
+                        Event Deleted
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom" className="max-w-xs">
+                      <p>This event has already been deleted from the relay.</p>
+                    </TooltipContent>
+                  </Tooltip>
                 ) : (
-                  <Button
-                    variant="outline"
-                    onClick={() => setConfirmDelete(true)}
-                    disabled={deleteMutation.isPending}
-                  >
-                    <Trash2 className="h-4 w-4 mr-1" />
-                    Delete Event
-                  </Button>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="outline"
+                        onClick={() => setConfirmDelete(true)}
+                        disabled={deleteMutation.isPending}
+                      >
+                        <Trash2 className="h-4 w-4 mr-1" />
+                        Delete Event
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom" className="max-w-xs">
+                      <p>Delete this event from the relay. The event will no longer be served, but the user can still post new content.</p>
+                    </TooltipContent>
+                  </Tooltip>
                 )
               )}
               {mediaHashes.length > 0 && (
                 mediaStatus.hasBlockedMedia ? (
-                  // Show unblock button if media is already blocked
-                  <Button
-                    variant="outline"
-                    className="border-green-500 text-green-600 hover:bg-green-50"
-                    onClick={() => {
-                      const blockedHashes = mediaStatus.results
-                        .filter(r => r.isBlocked)
-                        .map(r => r.hash);
-                      unblockMediaMutation.mutate({
-                        hashes: blockedHashes,
-                        reason: 'Unblocked by moderator',
-                      });
-                    }}
-                    disabled={unblockMediaMutation.isPending || mediaStatus.isLoading}
-                  >
-                    <Unlock className="h-4 w-4 mr-1" />
-                    {unblockMediaMutation.isPending ? 'Unblocking...' : `Unblock Media (${mediaStatus.blockedCount})`}
-                  </Button>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="outline"
+                        className="border-green-500 text-green-600 hover:bg-green-50"
+                        onClick={() => {
+                          const blockedHashes = mediaStatus.results
+                            .filter(r => r.isBlocked)
+                            .map(r => r.hash);
+                          unblockMediaMutation.mutate({
+                            hashes: blockedHashes,
+                            reason: 'Unblocked by moderator',
+                          });
+                        }}
+                        disabled={unblockMediaMutation.isPending || mediaStatus.isLoading}
+                      >
+                        <Unlock className="h-4 w-4 mr-1" />
+                        {unblockMediaMutation.isPending ? 'Unblocking...' : `Unblock Media (${mediaStatus.blockedCount})`}
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom" className="max-w-xs">
+                      <p>Unblock previously blocked media files. They will be allowed to be served again.</p>
+                    </TooltipContent>
+                  </Tooltip>
                 ) : (
-                  // Show block button if media is not blocked
-                  <Button
-                    variant="outline"
-                    onClick={() => setConfirmBlockMedia(true)}
-                    disabled={blockMediaMutation.isPending || mediaStatus.isLoading}
-                  >
-                    <Video className="h-4 w-4 mr-1" />
-                    {mediaStatus.isLoading ? 'Checking...' : `Block Media (${mediaHashes.length})`}
-                  </Button>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="outline"
+                        onClick={() => setConfirmBlockMedia(true)}
+                        disabled={blockMediaMutation.isPending || mediaStatus.isLoading}
+                      >
+                        <Video className="h-4 w-4 mr-1" />
+                        {mediaStatus.isLoading ? 'Checking...' : `Block Media (${mediaHashes.length})`}
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom" className="max-w-xs">
+                      <p>Permanently block media files by their hash. They won't be served and re-uploads of the same file will be blocked.</p>
+                    </TooltipContent>
+                  </Tooltip>
                 )
               )}
               {context.reportedUser.pubkey && (
                 isUserBanned ? (
-                  <Button variant="outline" disabled className="border-green-500 text-green-600">
-                    <CheckCircle className="h-4 w-4 mr-1" />
-                    User Banned
-                  </Button>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button variant="outline" disabled className="border-green-500 text-green-600">
+                        <CheckCircle className="h-4 w-4 mr-1" />
+                        User Banned
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom" className="max-w-xs">
+                      <p>This user has already been banned from the relay.</p>
+                    </TooltipContent>
+                  </Tooltip>
                 ) : (
-                  <Button
-                    variant="destructive"
-                    onClick={() => setConfirmBan(true)}
-                    disabled={banMutation.isPending}
-                  >
-                    <UserX className="h-4 w-4 mr-1" />
-                    Ban User
-                  </Button>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="destructive"
+                        onClick={() => setConfirmBan(true)}
+                        disabled={banMutation.isPending}
+                      >
+                        <UserX className="h-4 w-4 mr-1" />
+                        Ban User
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom" className="max-w-xs">
+                      <p>Permanently ban this user from the relay. They won't be able to post new content. Optionally delete all their events and block their media.</p>
+                    </TooltipContent>
+                  </Tooltip>
                 )
               )}
               {context.target && !showLabelForm && (
-                <Button
-                  variant="outline"
-                  onClick={() => setShowLabelForm(true)}
-                >
-                  <Tag className="h-4 w-4 mr-1" />
-                  Create Label
-                </Button>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="outline"
+                      onClick={() => setShowLabelForm(true)}
+                    >
+                      <Tag className="h-4 w-4 mr-1" />
+                      Create Label
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" className="max-w-xs">
+                    <p>Create a custom NIP-32 label for this content. Labels can be used for categorization without taking enforcement action.</p>
+                  </TooltipContent>
+                </Tooltip>
               )}
             </div>
           </div>
