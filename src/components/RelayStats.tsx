@@ -42,35 +42,35 @@ export function RelayStats({ relayUrl }: RelayStatsProps) {
   // Query for banned users count
   const { data: bannedUsers, isLoading: loadingBanned } = useQuery({
     queryKey: ['banned-users', relayUrl],
-    queryFn: () => callRelayRpc('listbannedpubkeys'),
+    queryFn: () => callRelayRpc<import('@/lib/adminApi').BannedPubkeyEntry[]>('listbannedpubkeys'),
     enabled: !!relayUrl && !!user,
   });
 
   // Query for allowed users count
   const { data: allowedUsers, isLoading: loadingAllowed } = useQuery({
     queryKey: ['allowed-users', relayUrl],
-    queryFn: () => callRelayRpc('listallowedpubkeys'),
+    queryFn: () => callRelayRpc<import('@/lib/adminApi').BannedPubkeyEntry[]>('listallowedpubkeys'),
     enabled: !!relayUrl && !!user,
   });
 
   // Query for banned events count
   const { data: bannedEvents, isLoading: loadingBannedEvents } = useQuery({
     queryKey: ['banned-events', relayUrl],
-    queryFn: () => callRelayRpc('listbannedevents'),
+    queryFn: () => callRelayRpc<Array<{ id: string; reason?: string }>>('listbannedevents'),
     enabled: !!relayUrl && !!user,
   });
 
   // Query for events needing moderation
   const { data: eventsNeedingModeration, isLoading: loadingPending } = useQuery({
     queryKey: ['events-needing-moderation', relayUrl],
-    queryFn: () => callRelayRpc('listeventsneedingmoderation'),
+    queryFn: () => callRelayRpc<Array<{ id: string; reason?: string }>>('listeventsneedingmoderation'),
     enabled: !!relayUrl && !!user,
   });
 
   // Query for allowed kinds
   const { data: allowedKinds, isLoading: loadingKinds } = useQuery({
     queryKey: ['allowed-kinds', relayUrl],
-    queryFn: () => callRelayRpc('listallowedkinds'),
+    queryFn: () => callRelayRpc<number[]>('listallowedkinds'),
     enabled: !!relayUrl && !!user,
   });
 

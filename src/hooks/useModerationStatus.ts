@@ -38,7 +38,7 @@ export function useModerationStatus(
     staleTime: 30 * 1000, // 30 seconds
   });
 
-  const isBanned = pubkey ? bannedPubkeys.data?.includes(pubkey) ?? false : false;
+  const isBanned = pubkey ? bannedPubkeys.data?.some(entry => entry.pubkey === pubkey) ?? false : false;
   const bannedEvent = eventId
     ? bannedEvents.data?.find(e => e.id === eventId)
     : undefined;

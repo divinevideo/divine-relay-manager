@@ -122,9 +122,6 @@ export const KIND_NAMES: Record<number, { name: string; description: string; nip
   // Highlights
   9802: { name: 'Highlight', description: 'Text highlight', nip: 'NIP-84' },
 
-  // Relay Information
-  10002: { name: 'Relay List', description: 'User relay preferences', nip: 'NIP-65' },
-
   // Communities
   34550: { name: 'Community Definition', description: 'Define a community', nip: 'NIP-72' },
 
