@@ -547,7 +547,7 @@ export function DebugPanel() {
                               </Button>
                             </div>
                             <pre className="whitespace-pre-wrap overflow-auto max-h-32 mt-1">
-                              {JSON.stringify(log.result, null, 2)}
+                              {JSON.stringify(log.result as object, null, 2)}
                             </pre>
                           </div>
                         )}
