@@ -6,7 +6,7 @@ import { finalizeEvent, nip19, getPublicKey } from 'nostr-tools';
 interface Env {
   NOSTR_NSEC: string;
   RELAY_URL: string;
-  ALLOWED_ORIGIN: string;
+  ALLOWED_ORIGINS: string;
   ANTHROPIC_API_KEY?: string;
   // Cloudflare Access Service Token for moderation.admin.divine.video
   CF_ACCESS_CLIENT_ID?: string;
@@ -31,6 +31,24 @@ interface ZendeskJWTPayload {
 
 const MODERATION_SERVICE_URL = 'https://moderation.admin.divine.video';
 
+function getAllowedOrigin(requestOrigin: string | null, allowedOriginsEnv: string | undefined): string {
+  if (!allowedOriginsEnv?.trim()) return '';
+
+  const allowedOrigins = allowedOriginsEnv.split(',').map(o => o.trim());
+  if (!requestOrigin) return allowedOrigins[0] || '';
+
+  for (const allowed of allowedOrigins) {
+    if (allowed.startsWith('*.') && requestOrigin.endsWith(allowed.slice(1))) {
+      return requestOrigin;
+    }
+    if (requestOrigin === allowed) {
+      return requestOrigin;
+    }
+  }
+
+  return allowedOrigins[0] || '';
+}
+
 interface UnsignedEvent {
   kind: number;
   content: string;
@@ -50,9 +68,11 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    // CORS headers
+    const requestOrigin = request.headers.get('Origin');
+    const allowedOrigin = getAllowedOrigin(requestOrigin, env.ALLOWED_ORIGINS);
+
     const corsHeaders = {
-      'Access-Control-Allow-Origin': env.ALLOWED_ORIGIN || '*',
+      'Access-Control-Allow-Origin': allowedOrigin,
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     };
