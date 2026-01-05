@@ -532,7 +532,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
 
       return {
         ...event,
-        moderationStatus: isBanned ? 'banned' : needsModeration ? 'pending' : undefined,
+        moderationStatus: (isBanned ? 'banned' : needsModeration ? 'pending' : undefined) as "pending" | "approved" | "banned" | undefined,
         moderationReason: isBanned ? bannedEvents?.find((banned: { id: string; reason?: string }) => banned.id === event.id)?.reason :
                          needsModeration ? eventsNeedingModeration?.find((pending: { id: string; reason?: string }) => pending.id === event.id)?.reason : undefined,
       };

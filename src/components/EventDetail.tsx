@@ -283,7 +283,7 @@ export function EventDetail({ event, onClose, onSelectEvent, onSelectPubkey, onV
   const { data: relatedReports } = useQuery({
     queryKey: ['related-reports', event.id, event.pubkey],
     queryFn: async ({ signal }) => {
-      const queries = [];
+      const queries: Promise<import('@nostrify/nostrify').NostrEvent[]>[] = [];
 
       // Reports on this specific event
       if (event.id) {
