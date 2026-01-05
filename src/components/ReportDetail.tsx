@@ -35,7 +35,7 @@ import { ReporterList, ReporterInline } from "@/components/ReporterCard";
 import { AISummary } from "@/components/AISummary";
 import { LabelPublisherInline } from "@/components/LabelPublisher";
 import { ThreadModal } from "@/components/ThreadModal";
-import { banPubkey, deleteEvent, markAsReviewed, moderateMedia, unblockMedia, extractMediaHashes, logDecision, verifyModerationAction, verifyPubkeyBanned, verifyEventDeleted, verifyMediaBlocked, type ResolutionStatus, type ModerationAction } from "@/lib/adminApi";
+import { banPubkey, deleteEvent, markAsReviewed, moderateMedia, unblockMedia, extractMediaHashes, logDecision, deleteDecisions, verifyModerationAction, verifyPubkeyBanned, verifyEventDeleted, verifyMediaBlocked, type ResolutionStatus, type ModerationAction } from "@/lib/adminApi";
 import { useAppContext } from "@/hooks/useAppContext";
 import { useMediaStatus } from "@/hooks/useMediaStatus";
 import { useDecisionLog } from "@/hooks/useDecisionLog";
@@ -43,7 +43,7 @@ import { HiveAIReport } from "@/components/HiveAIReport";
 import { AIDetectionReport } from "@/components/AIDetectionReport";
 import { MediaPreview } from "@/components/MediaPreview";
 import { CATEGORY_LABELS } from "@/lib/constants";
-import { UserX, Tag, Flag, Trash2, CheckCircle, ThumbsDown, Video, History, Ban, ShieldX, Link2, User, FileText, Unlock, Repeat2, FileCode, Loader2, XCircle, RefreshCw } from "lucide-react";
+import { UserX, Tag, Flag, Trash2, CheckCircle, Video, History, Ban, ShieldX, Link2, User, FileText, Unlock, Repeat2, FileCode, Loader2, XCircle, RefreshCw } from "lucide-react";
 import { CopyableId, CopyableTags } from "@/components/CopyableId";
 import type { NostrEvent } from "@nostrify/nostrify";
 
@@ -404,6 +404,34 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     onError: (error: Error) => {
       toast({
         title: "Failed to mark as reviewed",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  const reopenMutation = useMutation({
+    mutationFn: async () => {
+      if (!context.target) throw new Error('No target');
+      // Delete all decisions for this target
+      await deleteDecisions(context.target.value);
+      // Also delete decisions for the pubkey if this is an event report
+      if (context.target.type === 'event' && context.reportedUser.pubkey) {
+        await deleteDecisions(context.reportedUser.pubkey);
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      decisionLog.refetch();
+      pubkeyDecisionLog.refetch();
+      toast({
+        title: "Report reopened",
+        description: "This report is now back in the pending queue",
+      });
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Failed to reopen",
         description: error.message,
         variant: "destructive",
       });
@@ -1391,39 +1419,45 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
 
           {/* Action Buttons */}
           <div className="space-y-3 pt-2">
-            {/* Resolution actions - mark as OK */}
+            {/* Resolution actions - dismiss or reopen */}
             <div className="flex flex-wrap gap-2">
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="outline"
-                    className="border-green-500 text-green-600 hover:bg-green-50"
-                    onClick={() => reviewMutation.mutate({ status: 'reviewed', comment: 'Content reviewed and approved' })}
-                    disabled={reviewMutation.isPending}
-                  >
-                    <CheckCircle className="h-4 w-4 mr-1" />
-                    {reviewMutation.isPending ? 'Marking...' : 'Mark OK'}
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent side="bottom" className="max-w-xs">
-                  <p>Mark as reviewed - no action needed. Content stays up, user is not banned. Just records that a moderator approved this.</p>
-                </TooltipContent>
-              </Tooltip>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="outline"
-                    onClick={() => reviewMutation.mutate({ status: 'false-positive', comment: 'False positive report' })}
-                    disabled={reviewMutation.isPending}
-                  >
-                    <ThumbsDown className="h-4 w-4 mr-1" />
-                    False Positive
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent side="bottom" className="max-w-xs">
-                  <p>Mark as false positive - the report was wrong or mistaken. Content stays up, user is not banned.</p>
-                </TooltipContent>
-              </Tooltip>
+              {(decisionLog.hasDecisions || pubkeyDecisionLog.hasDecisions) && !isUserBanned && !isEventDeleted ? (
+                /* Show Reopen button if dismissed but not banned/deleted */
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="outline"
+                      className="border-orange-500 text-orange-600 hover:bg-orange-50"
+                      onClick={() => reopenMutation.mutate()}
+                      disabled={reopenMutation.isPending}
+                    >
+                      <History className="h-4 w-4 mr-1" />
+                      {reopenMutation.isPending ? 'Reopening...' : 'Reopen'}
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" className="max-w-xs">
+                    <p>Reopen this report for review. Removes the dismiss decision and puts it back in the pending queue.</p>
+                  </TooltipContent>
+                </Tooltip>
+              ) : (
+                /* Show Dismiss button if not yet resolved */
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="outline"
+                      className="border-green-500 text-green-600 hover:bg-green-50"
+                      onClick={() => reviewMutation.mutate({ status: 'reviewed', comment: 'Dismissed - no action needed' })}
+                      disabled={reviewMutation.isPending || isResolved}
+                    >
+                      <CheckCircle className="h-4 w-4 mr-1" />
+                      {reviewMutation.isPending ? 'Dismissing...' : 'Dismiss'}
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" className="max-w-xs">
+                    <p>Dismiss this report - no action needed. Content stays up, user is not banned. Use this when the report doesn't warrant action.</p>
+                  </TooltipContent>
+                </Tooltip>
+              )}
             </div>
 
             {/* Primary enforcement action - combined when media present and not already blocked */}

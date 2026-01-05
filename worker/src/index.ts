@@ -101,6 +101,11 @@ export default {
         return handleGetDecisions(targetId, env, corsHeaders);
       }
 
+      if (path.startsWith('/api/decisions/') && request.method === 'DELETE') {
+        const targetId = path.replace('/api/decisions/', '');
+        return handleDeleteDecisions(targetId, env, corsHeaders);
+      }
+
       if (path.startsWith('/api/check-result/') && request.method === 'GET') {
         const sha256 = path.replace('/api/check-result/', '');
         return handleCheckResult(sha256, env, corsHeaders);
@@ -610,6 +615,38 @@ async function handleGetDecisions(
     });
   } catch (error) {
     console.error('Get decisions error:', error);
+    return jsonResponse(
+      { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+      500,
+      corsHeaders
+    );
+  }
+}
+
+async function handleDeleteDecisions(
+  targetId: string,
+  env: Env,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  try {
+    if (!env.DB) {
+      return jsonResponse({ success: false, error: 'Database not configured' }, 500, corsHeaders);
+    }
+
+    await ensureDecisionsTable(env.DB);
+
+    // Delete all decisions for this target (reopens the report)
+    const result = await env.DB.prepare(`
+      DELETE FROM moderation_decisions
+      WHERE target_id = ?
+    `).bind(targetId).run();
+
+    return jsonResponse({
+      success: true,
+      deleted: result.meta.changes || 0,
+    }, 200, corsHeaders);
+  } catch (error) {
+    console.error('Delete decisions error:', error);
     return jsonResponse(
       { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
       500,

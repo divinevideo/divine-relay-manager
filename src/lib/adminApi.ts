@@ -345,6 +345,15 @@ export async function getAllDecisions(): Promise<ModerationDecision[]> {
   return data.decisions || [];
 }
 
+// Delete all decisions for a target (reopens the report)
+export async function deleteDecisions(targetId: string): Promise<number> {
+  const data = await apiRequest<{ success: boolean; deleted: number }>(
+    `/api/decisions/${targetId}`,
+    'DELETE'
+  );
+  return data.deleted || 0;
+}
+
 // Verify that a pubkey was actually banned on the relay
 export async function verifyPubkeyBanned(pubkey: string): Promise<boolean> {
   try {
