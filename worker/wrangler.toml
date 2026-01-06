@@ -15,8 +15,8 @@ routes = [
 
 [vars]
 RELAY_URL = "wss://relay.divine.video"
-# Allow both the main frontend and any local dev
-ALLOWED_ORIGIN = "https://relay.admin.divine.video"
+# Allow both the main frontend and Cloudflare Pages preview deployments
+ALLOWED_ORIGINS = "https://relay.admin.divine.video,*.divine-relay-manager.pages.dev,*.divine-relay-admin.pages.dev"
 
 # D1 Database for moderation decision log
 [[d1_databases]]
