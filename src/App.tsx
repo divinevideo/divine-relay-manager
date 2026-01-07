@@ -24,7 +24,7 @@ const queryClient = new QueryClient({
 
 const defaultConfig: AppConfig = {
   theme: "light",
-  relayUrl: "wss://relay.divine.video",
+  relayUrl: import.meta.env.VITE_RELAY_URL || "wss://relay.divine.video",
 };
 
 export function App() {

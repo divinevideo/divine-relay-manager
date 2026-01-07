@@ -17,6 +17,9 @@ interface Env {
   ZENDESK_WEBHOOK_SECRET?: string;
   KV?: KVNamespace;
   DB?: D1Database;
+  // Relay management configuration
+  MANAGEMENT_PATH?: string;  // Path for NIP-86 management API, defaults to "/management"
+  MODERATION_SERVICE_URL?: string;  // URL for media moderation service
 }
 
 // Zendesk JWT payload structure
@@ -29,7 +32,24 @@ interface ZendeskJWTPayload {
   external_id?: string;
 }
 
-const MODERATION_SERVICE_URL = 'https://moderation.admin.divine.video';
+const DEFAULT_MODERATION_SERVICE_URL = 'https://moderation.admin.divine.video';
+
+/**
+ * Get the NIP-86 management API URL for the configured relay.
+ * Converts WSS relay URL to HTTPS and appends the management path.
+ */
+function getManagementUrl(env: Env): string {
+  const baseUrl = env.RELAY_URL.replace(/^wss?:\/\//, 'https://');
+  const managementPath = env.MANAGEMENT_PATH || '/management';
+  return `${baseUrl}${managementPath}`;
+}
+
+/**
+ * Get the moderation service URL from env or use default.
+ */
+function getModerationServiceUrl(env: Env): string {
+  return env.MODERATION_SERVICE_URL || DEFAULT_MODERATION_SERVICE_URL;
+}
 
 function getAllowedOrigin(requestOrigin: string | null, allowedOriginsEnv: string | undefined): string {
   if (!allowedOriginsEnv?.trim()) return '';
@@ -351,7 +371,7 @@ async function handleRelayRpc(
   const secretKey = getSecretKey(env);
 
   // Build NIP-98 auth event
-  const httpUrl = env.RELAY_URL.replace(/^wss?:\/\//, 'https://');
+  const httpUrl = getManagementUrl(env);
   const payload = JSON.stringify({ method: body.method, params: body.params || [] });
   const payloadHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
   const payloadHashHex = Array.from(new Uint8Array(payloadHash)).map(b => b.toString(16).padStart(2, '0')).join('');
@@ -718,7 +738,7 @@ async function handleCheckResult(
       headers['CF-Access-Client-Secret'] = env.CF_ACCESS_CLIENT_SECRET;
     }
 
-    const response = await fetch(`${MODERATION_SERVICE_URL}/check-result/${sha256}`, {
+    const response = await fetch(`${getModerationServiceUrl(env)}/check-result/${sha256}`, {
       method: 'GET',
       headers,
     });
@@ -784,7 +804,7 @@ async function handleModerateMedia(
       'CF-Access-Client-Secret': env.CF_ACCESS_CLIENT_SECRET,
     };
 
-    const response = await fetch(`${MODERATION_SERVICE_URL}/api/v1/moderate`, {
+    const response = await fetch(`${getModerationServiceUrl(env)}/api/v1/moderate`, {
       method: 'POST',
       headers,
       body: JSON.stringify({
@@ -1097,7 +1117,7 @@ async function handleZendeskWebhook(
         if (body.nostr_pubkey) {
           // Use relay RPC to ban
           const pubkey = getPublicKey(secretKey);
-          const httpUrl = env.RELAY_URL.replace(/^wss?:\/\//, 'https://');
+          const httpUrl = getManagementUrl(env);
           const payload = JSON.stringify({ method: 'banpubkey', params: [body.nostr_pubkey, `Zendesk ticket #${body.ticket_id}`] });
           const payloadHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
           const payloadHashHex = Array.from(new Uint8Array(payloadHash)).map(b => b.toString(16).padStart(2, '0')).join('');
@@ -1136,7 +1156,7 @@ async function handleZendeskWebhook(
 
       case 'allow_user':
         if (body.nostr_pubkey) {
-          const httpUrl = env.RELAY_URL.replace(/^wss?:\/\//, 'https://');
+          const httpUrl = getManagementUrl(env);
           const payload = JSON.stringify({ method: 'allowpubkey', params: [body.nostr_pubkey] });
           const payloadHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
           const payloadHashHex = Array.from(new Uint8Array(payloadHash)).map(b => b.toString(16).padStart(2, '0')).join('');
@@ -1234,7 +1254,7 @@ async function handleZendeskContext(
     if (pubkey) {
       try {
         const secretKey = getSecretKey(env);
-        const httpUrl = env.RELAY_URL.replace(/^wss?:\/\//, 'https://');
+        const httpUrl = getManagementUrl(env);
         const payload = JSON.stringify({ method: 'listbannedpubkeys', params: [] });
         const payloadHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
         const payloadHashHex = Array.from(new Uint8Array(payloadHash)).map(b => b.toString(16).padStart(2, '0')).join('');
@@ -1307,7 +1327,7 @@ async function handleZendeskAction(
     switch (body.action) {
       case 'ban_user':
         if (body.pubkey) {
-          const httpUrl = env.RELAY_URL.replace(/^wss?:\/\//, 'https://');
+          const httpUrl = getManagementUrl(env);
           const payload = JSON.stringify({ method: 'banpubkey', params: [body.pubkey, reason] });
           const payloadHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
           const payloadHashHex = Array.from(new Uint8Array(payloadHash)).map(b => b.toString(16).padStart(2, '0')).join('');
@@ -1336,7 +1356,7 @@ async function handleZendeskAction(
 
       case 'allow_user':
         if (body.pubkey) {
-          const httpUrl = env.RELAY_URL.replace(/^wss?:\/\//, 'https://');
+          const httpUrl = getManagementUrl(env);
           const payload = JSON.stringify({ method: 'allowpubkey', params: [body.pubkey] });
           const payloadHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
           const payloadHashHex = Array.from(new Uint8Array(payloadHash)).map(b => b.toString(16).padStart(2, '0')).join('');
