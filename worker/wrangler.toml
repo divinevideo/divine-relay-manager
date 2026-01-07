@@ -14,9 +14,9 @@ routes = [
 # The NOSTR_NSEC secret must be set via: wrangler secret put NOSTR_NSEC
 
 [vars]
-RELAY_URL = "wss://relay.dvines.org"
+RELAY_URL = "wss://relay.divine.video"
 # Path for NIP-86 management API (appended to relay URL converted to HTTPS)
-MANAGEMENT_PATH = "/management"
+MANAGEMENT_PATH = "/"
 # URL for media moderation service
 MODERATION_SERVICE_URL = "https://moderation.admin.divine.video"
 # Allow both the main frontend and Cloudflare Pages preview deployments
