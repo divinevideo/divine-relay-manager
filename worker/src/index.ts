@@ -208,7 +208,7 @@ async function handleInfo(env: Env, corsHeaders: Record<string, string>): Promis
       200,
       corsHeaders
     );
-  } catch (error) {
+  } catch {
     return jsonResponse(
       { success: false, error: 'Secret key not configured' },
       500,
@@ -879,7 +879,7 @@ async function publishToRelay(
         }
       });
 
-      ws.addEventListener('error', (err) => {
+      ws.addEventListener('error', (_err) => {
         if (!resolved) {
           clearTimeout(timeout);
           resolved = true;
@@ -1116,7 +1116,7 @@ async function handleZendeskWebhook(
       case 'ban_user':
         if (body.nostr_pubkey) {
           // Use relay RPC to ban
-          const pubkey = getPublicKey(secretKey);
+          const _pubkey = getPublicKey(secretKey);
           const httpUrl = getManagementUrl(env);
           const payload = JSON.stringify({ method: 'banpubkey', params: [body.nostr_pubkey, `Zendesk ticket #${body.ticket_id}`] });
           const payloadHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));

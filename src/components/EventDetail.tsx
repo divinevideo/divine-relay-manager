@@ -10,7 +10,6 @@ import { useModerationStatus } from "@/hooks/useModerationStatus";
 import { useToast } from "@/hooks/useToast";
 import { getKindInfo, getKindCategory } from "@/lib/kindNames";
 import { useAdminApi } from "@/hooks/useAdminApi";
-import { useAppContext } from "@/hooks/useAppContext";
 import { UserIdentifier } from "@/components/UserIdentifier";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -253,7 +252,6 @@ function TagsTable({ tags }: { tags: string[][] }) {
 export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReports }: EventDetailProps) {
   const { nostr } = useNostr();
   const { toast } = useToast();
-  const { config } = useAppContext();
   const { banPubkey, deleteEvent, verifyPubkeyBanned, verifyEventDeleted } = useAdminApi();
   const queryClient = useQueryClient();
 
@@ -459,7 +457,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
   const otherUrls = urls.filter(u => !isMediaUrl(u));
 
   // Check for imeta tags (media metadata)
-  const imetaTags = event.tags.filter(t => t[0] === 'imeta');
+  const _imetaTags = event.tags.filter(t => t[0] === 'imeta');
 
   return (
     <>

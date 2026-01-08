@@ -36,7 +36,6 @@ import { LabelPublisherInline } from "@/components/LabelPublisher";
 import { ThreadModal } from "@/components/ThreadModal";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { extractMediaHashes, type ResolutionStatus, type ModerationAction } from "@/lib/adminApi";
-import { useAppContext } from "@/hooks/useAppContext";
 import { useMediaStatus } from "@/hooks/useMediaStatus";
 import { useDecisionLog } from "@/hooks/useDecisionLog";
 import { HiveAIReport } from "@/components/HiveAIReport";
@@ -74,7 +73,6 @@ function getReportTarget(event: NostrEvent): { type: 'event' | 'pubkey'; value: 
 export function ReportDetail({ report, allReportsForTarget, allReports = [], onDismiss }: ReportDetailProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const { config } = useAppContext();
   const {
     banPubkey, deleteEvent, markAsReviewed, moderateMedia, unblockMedia,
     logDecision, deleteDecisions, verifyModerationAction, verifyPubkeyBanned,

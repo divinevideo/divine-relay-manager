@@ -8,7 +8,6 @@ import { useToast } from "@/hooks/useToast";
 import { nip19 } from "nostr-tools";
 import { getKindInfo, getKindCategory } from "@/lib/kindNames";
 import { useAdminApi } from "@/hooks/useAdminApi";
-import { useAppContext } from "@/hooks/useAppContext";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -78,7 +77,7 @@ function EventCard({
   const profileImage = metadata?.picture;
 
   const kindInfo = getKindInfo(event.kind);
-  const category = getKindCategory(event.kind);
+  const _category = getKindCategory(event.kind);
 
   const handleModerate = () => {
     onModerate(event.id!, moderationAction, moderationReason.trim() || undefined);
@@ -293,7 +292,6 @@ export function EventsList({ relayUrl }: EventsListProps) {
   const { nostr } = useNostr();
   const { user } = useCurrentUser();
   const { toast } = useToast();
-  const { config } = useAppContext();
   const { callRelayRpc, verifyEventDeleted } = useAdminApi();
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();

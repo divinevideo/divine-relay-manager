@@ -1,7 +1,7 @@
 // ABOUTME: Hook that provides admin API functions bound to the current environment's apiUrl
 // ABOUTME: Enables environment switching without changing component code
 
-import { useCallback, useMemo } from 'react';
+import { useMemo } from 'react';
 import { useAppContext } from '@/hooks/useAppContext';
 import * as adminApi from '@/lib/adminApi';
 

@@ -3,7 +3,6 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { useAdminApi } from "@/hooks/useAdminApi";
-import type { ModerationDecision } from "@/lib/adminApi";
 
 export function useDecisionLog(targetId: string | null | undefined) {
   const { getDecisions } = useAdminApi();

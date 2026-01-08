@@ -3,7 +3,7 @@
 
 import { useState } from "react";
 import { nip19 } from "nostr-tools";
-import { Copy, Check, User } from "lucide-react";
+import { Copy, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import {

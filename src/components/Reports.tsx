@@ -507,7 +507,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         case 'oldest':
           return a.oldestReport.created_at - b.oldestReport.created_at;
 
-        case 'category':
+        case 'category': {
           // Sort by priority (CSAM first), then alphabetically by category
           const aPriority = getCategoryPriority(a.categories);
           const bPriority = getCategoryPriority(b.categories);
@@ -518,6 +518,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           if (aCategory !== bCategory) return aCategory.localeCompare(bCategory);
           // Then by report count
           return b.reports.length - a.reports.length;
+        }
 
         default:
           return 0;
@@ -566,13 +567,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           return b.created_at - a.created_at;
         case 'oldest':
           return a.created_at - b.created_at;
-        case 'category':
+        case 'category': {
           const aCat = getReportCategory(a);
           const bCat = getReportCategory(b);
           const aPriority = getCategoryPriority([aCat]);
           const bPriority = getCategoryPriority([bCat]);
           if (aPriority !== bPriority) return aPriority - bPriority;
           return aCat.localeCompare(bCat);
+        }
         default:
           // For 'reports' and 'reporters', just use date for individual view
           return b.created_at - a.created_at;

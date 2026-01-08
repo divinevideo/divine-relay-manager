@@ -13,11 +13,6 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { useToast } from "@/hooks/useToast";
 import { Shield, ShieldCheck, ShieldX, Plus, AlertTriangle, CheckCircle, XCircle, Loader2 } from "lucide-react";
 import { useAdminApi } from "@/hooks/useAdminApi";
-import { useAppContext } from "@/hooks/useAppContext";
-
-interface EventModerationProps {
-  relayUrl: string;
-}
 
 interface EventNeedingModeration {
   id: string;
@@ -32,7 +27,6 @@ interface BannedEvent {
 export function EventModeration() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const { config } = useAppContext();
   const { callRelayRpc, verifyEventDeleted } = useAdminApi();
   const [newEventId, setNewEventId] = useState("");
   const [newReason, setNewReason] = useState("");
