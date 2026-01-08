@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
-import { callRelayRpc } from "@/lib/adminApi";
+import { useAdminApi } from "@/hooks/useAdminApi";
+import type { BannedPubkeyEntry } from "@/lib/adminApi";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -31,6 +32,7 @@ async function fetchRelayInfo(relayUrl: string) {
 
 export function RelayStats({ relayUrl }: RelayStatsProps) {
   const { user } = useCurrentUser();
+  const { callRelayRpc } = useAdminApi();
 
   // Query for relay info
   const { data: relayInfo, isLoading: loadingInfo } = useQuery({
@@ -42,14 +44,14 @@ export function RelayStats({ relayUrl }: RelayStatsProps) {
   // Query for banned users count
   const { data: bannedUsers, isLoading: loadingBanned } = useQuery({
     queryKey: ['banned-users', relayUrl],
-    queryFn: () => callRelayRpc<import('@/lib/adminApi').BannedPubkeyEntry[]>('listbannedpubkeys'),
+    queryFn: () => callRelayRpc<BannedPubkeyEntry[]>('listbannedpubkeys'),
     enabled: !!relayUrl && !!user,
   });
 
   // Query for allowed users count
   const { data: allowedUsers, isLoading: loadingAllowed } = useQuery({
     queryKey: ['allowed-users', relayUrl],
-    queryFn: () => callRelayRpc<import('@/lib/adminApi').BannedPubkeyEntry[]>('listallowedpubkeys'),
+    queryFn: () => callRelayRpc<BannedPubkeyEntry[]>('listallowedpubkeys'),
     enabled: !!relayUrl && !!user,
   });
 

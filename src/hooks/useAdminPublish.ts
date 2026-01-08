@@ -2,13 +2,7 @@
 // ABOUTME: Use this instead of useNostrPublish when Worker signing is needed
 
 import { useMutation, useQuery } from '@tanstack/react-query';
-import {
-  publishEvent,
-  deleteEvent,
-  banPubkey,
-  allowPubkey,
-  getWorkerInfo,
-} from '@/lib/adminApi';
+import { useAdminApi } from '@/hooks/useAdminApi';
 
 interface UnsignedEvent {
   kind: number;
@@ -18,6 +12,8 @@ interface UnsignedEvent {
 }
 
 export function useWorkerInfo() {
+  const { getWorkerInfo } = useAdminApi();
+
   return useQuery({
     queryKey: ['worker-info'],
     queryFn: getWorkerInfo,
@@ -27,6 +23,8 @@ export function useWorkerInfo() {
 }
 
 export function useAdminPublish() {
+  const { publishEvent } = useAdminApi();
+
   return useMutation({
     mutationFn: (event: UnsignedEvent) => publishEvent(event),
     onError: (error) => {
@@ -43,6 +41,8 @@ export function useAdminPublish() {
 }
 
 export function useDeleteEvent() {
+  const { deleteEvent } = useAdminApi();
+
   return useMutation({
     mutationFn: ({ eventId, reason }: { eventId: string; reason?: string }) =>
       deleteEvent(eventId, reason),
@@ -53,6 +53,8 @@ export function useDeleteEvent() {
 }
 
 export function useBanPubkey() {
+  const { banPubkey } = useAdminApi();
+
   return useMutation({
     mutationFn: ({ pubkey, reason }: { pubkey: string; reason?: string }) =>
       banPubkey(pubkey, reason),
@@ -63,6 +65,8 @@ export function useBanPubkey() {
 }
 
 export function useAllowPubkey() {
+  const { allowPubkey } = useAdminApi();
+
   return useMutation({
     mutationFn: (pubkey: string) => allowPubkey(pubkey),
     onError: (error) => {

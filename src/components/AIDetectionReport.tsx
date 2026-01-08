@@ -31,12 +31,11 @@ import {
   XCircle,
   Loader2,
 } from "lucide-react";
-import {
-  getAIDetectionResult,
-  submitAIDetection,
-  type AIDetectionResult,
-  type AIVerdict,
-  type AIProviderResult,
+import { useAdminApi } from "@/hooks/useAdminApi";
+import type {
+  AIDetectionResult,
+  AIVerdict,
+  AIProviderResult,
 } from "@/lib/adminApi";
 import { CopyableId } from "@/components/CopyableId";
 
@@ -249,6 +248,7 @@ export function AIDetectionReport({
   const [isExpanded, setIsExpanded] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const queryClient = useQueryClient();
+  const { getAIDetectionResult, submitAIDetection } = useAdminApi();
 
   const sha256 = providedSha256 || (eventTags ? extractSha256FromTags(eventTags) : null);
   const videoUrl = providedVideoUrl || (eventTags ? extractVideoUrlFromTags(eventTags) : null);

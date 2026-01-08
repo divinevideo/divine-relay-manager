@@ -12,7 +12,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/useToast";
 import { Shield, ShieldCheck, ShieldX, Plus, AlertTriangle, CheckCircle, XCircle, Loader2 } from "lucide-react";
-import { callRelayRpc, verifyEventDeleted } from "@/lib/adminApi";
+import { useAdminApi } from "@/hooks/useAdminApi";
 import { useAppContext } from "@/hooks/useAppContext";
 
 interface EventModerationProps {
@@ -33,6 +33,7 @@ export function EventModeration() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const { config } = useAppContext();
+  const { callRelayRpc, verifyEventDeleted } = useAdminApi();
   const [newEventId, setNewEventId] = useState("");
   const [newReason, setNewReason] = useState("");
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
@@ -90,7 +91,7 @@ export function EventModeration() {
       setIsVerifying(true);
       setVerificationResult(null);
       try {
-        const isDeleted = await verifyEventDeleted(eventId, config.relayUrl);
+        const isDeleted = await verifyEventDeleted(eventId);
         setVerificationResult({
           eventId,
           success: isDeleted,

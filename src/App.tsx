@@ -25,6 +25,7 @@ const queryClient = new QueryClient({
 const defaultConfig: AppConfig = {
   theme: "light",
   relayUrl: import.meta.env.VITE_RELAY_URL || "wss://relay.divine.video",
+  apiUrl: import.meta.env.VITE_WORKER_URL || "https://api-relay.divine.video",
 };
 
 export function App() {

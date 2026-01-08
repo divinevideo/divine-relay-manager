@@ -15,11 +15,8 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { useToast } from "@/hooks/useToast";
 import { UserX, UserCheck, Plus, Users, Loader2, CheckCircle, XCircle, Trash2 } from "lucide-react";
 import { BannedUserCard } from "@/components/BannedUserCard";
-import { callRelayRpc, verifyPubkeyBanned } from "@/lib/adminApi";
-
-interface UserManagementProps {
-  relayUrl: string;
-}
+import { useAdminApi } from "@/hooks/useAdminApi";
+import type { BannedPubkeyEntry } from "@/lib/adminApi";
 
 interface BannedUser {
   pubkey: string;
@@ -34,6 +31,7 @@ interface AllowedUser {
 export function UserManagement() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const { callRelayRpc, verifyPubkeyBanned } = useAdminApi();
   const [newPubkey, setNewPubkey] = useState("");
   const [newReason, setNewReason] = useState("");
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
@@ -48,13 +46,13 @@ export function UserManagement() {
   // Query for banned users
   const { data: bannedUsers, isLoading: loadingBanned, error: bannedError } = useQuery({
     queryKey: ['banned-users'],
-    queryFn: () => callRelayRpc<import('@/lib/adminApi').BannedPubkeyEntry[]>('listbannedpubkeys'),
+    queryFn: () => callRelayRpc<BannedPubkeyEntry[]>('listbannedpubkeys'),
   });
 
   // Query for allowed users
   const { data: allowedUsers, isLoading: loadingAllowed, error: allowedError } = useQuery({
     queryKey: ['allowed-users'],
-    queryFn: () => callRelayRpc<import('@/lib/adminApi').BannedPubkeyEntry[]>('listallowedpubkeys'),
+    queryFn: () => callRelayRpc<BannedPubkeyEntry[]>('listallowedpubkeys'),
   });
 
   // Mutation for banning users

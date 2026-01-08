@@ -9,7 +9,7 @@ import { useUserStats } from "@/hooks/useUserStats";
 import { useModerationStatus } from "@/hooks/useModerationStatus";
 import { useToast } from "@/hooks/useToast";
 import { getKindInfo, getKindCategory } from "@/lib/kindNames";
-import { banPubkey, deleteEvent, verifyPubkeyBanned, verifyEventDeleted } from "@/lib/adminApi";
+import { useAdminApi } from "@/hooks/useAdminApi";
 import { useAppContext } from "@/hooks/useAppContext";
 import { UserIdentifier } from "@/components/UserIdentifier";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -254,6 +254,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
   const { nostr } = useNostr();
   const { toast } = useToast();
   const { config } = useAppContext();
+  const { banPubkey, deleteEvent, verifyPubkeyBanned, verifyEventDeleted } = useAdminApi();
   const queryClient = useQueryClient();
 
   const [_showRawJson, _setShowRawJson] = useState(false);
@@ -378,7 +379,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
       setIsVerifying(true);
       setVerificationResult(null);
       try {
-        const verified = await verifyEventDeleted(eventId, config.relayUrl);
+        const verified = await verifyEventDeleted(eventId);
         setVerificationResult({
           type: 'delete',
           success: verified,
@@ -427,7 +428,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
             : 'User is NOT in banned list',
         });
       } else {
-        const verified = await verifyEventDeleted(event.id, config.relayUrl);
+        const verified = await verifyEventDeleted(event.id);
         setVerificationResult({
           type: 'delete',
           success: verified,

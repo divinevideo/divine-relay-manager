@@ -7,12 +7,11 @@ import { UserManagement } from "@/components/UserManagement";
 import { Reports } from "@/components/Reports";
 import { Labels } from "@/components/Labels";
 import { DebugPanel } from "@/components/DebugPanel";
+import { EnvironmentSelector } from "@/components/EnvironmentSelector";
 import { Card, CardContent } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Server, FileText, Users, Settings, Flag, Tag, Bug } from "lucide-react";
-
-const RELAY_URL = "wss://relay.divine.video";
+import { useAppContext } from "@/hooks/useAppContext";
 
 // Map URL paths to tab values
 function getTabFromPath(pathname: string): string {
@@ -29,6 +28,7 @@ export function RelayManager() {
   const location = useLocation();
   const navigate = useNavigate();
   const params = useParams();
+  const { config } = useAppContext();
 
   const currentTab = getTabFromPath(location.pathname);
 
@@ -52,9 +52,7 @@ export function RelayManager() {
                 <p className="text-sm text-muted-foreground">NIP-86 Moderation Tools</p>
               </div>
             </div>
-            <Badge variant="outline" className="font-mono text-xs">
-              {RELAY_URL.replace('wss://', '')}
-            </Badge>
+            <EnvironmentSelector />
           </div>
         </div>
       </header>
@@ -89,19 +87,19 @@ export function RelayManager() {
           </TabsList>
 
           <TabsContent value="events">
-            <EventsList relayUrl={RELAY_URL} />
+            <EventsList relayUrl={config.relayUrl} />
           </TabsContent>
 
           <TabsContent value="users">
-            <UserManagement relayUrl={RELAY_URL} />
+            <UserManagement />
           </TabsContent>
 
           <TabsContent value="reports">
-            <Reports relayUrl={RELAY_URL} selectedReportId={params.reportId} />
+            <Reports relayUrl={config.relayUrl} selectedReportId={params.reportId} />
           </TabsContent>
 
           <TabsContent value="labels">
-            <Labels relayUrl={RELAY_URL} />
+            <Labels relayUrl={config.relayUrl} />
           </TabsContent>
 
           <TabsContent value="settings">

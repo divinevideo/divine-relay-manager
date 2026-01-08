@@ -18,19 +18,8 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { useToast } from "@/hooks/useToast";
-import {
-  getWorkerInfo,
-  banPubkey,
-  unbanPubkey,
-  listBannedPubkeys,
-  listBannedEvents,
-  getAllDecisions,
-  callRelayRpc,
-  logDecision,
-  verifyPubkeyBanned,
-  verifyPubkeyUnbanned,
-  type BannedPubkeyEntry,
-} from "@/lib/adminApi";
+import { useAdminApi } from "@/hooks/useAdminApi";
+import type { BannedPubkeyEntry } from "@/lib/adminApi";
 import {
   Bug,
   CheckCircle,
@@ -74,6 +63,18 @@ let actionId = 0;
 export function DebugPanel() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const {
+    getWorkerInfo,
+    banPubkey,
+    unbanPubkey,
+    listBannedPubkeys,
+    listBannedEvents,
+    getAllDecisions,
+    callRelayRpc,
+    logDecision,
+    verifyPubkeyBanned,
+    verifyPubkeyUnbanned,
+  } = useAdminApi();
   const [testPubkey, setTestPubkey] = useState("");
   const [rpcMethod, setRpcMethod] = useState("listbannedpubkeys");
   const [rpcParams, setRpcParams] = useState("");

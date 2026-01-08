@@ -39,7 +39,7 @@ import {
 import { ReportDetail } from "@/components/ReportDetail";
 import { UserDisplayName } from "@/components/UserIdentifier";
 import { CopyableId } from "@/components/CopyableId";
-import { listBannedPubkeys, listBannedEvents, getAllDecisions } from "@/lib/adminApi";
+import { useAdminApi } from "@/hooks/useAdminApi";
 import { CATEGORY_LABELS } from "@/lib/constants";
 import type { NostrEvent } from "@nostrify/nostrify";
 
@@ -316,6 +316,7 @@ function IndividualReportItem({
 export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const { nostr } = useNostr();
   const navigate = useNavigate();
+  const { listBannedPubkeys, listBannedEvents, getAllDecisions } = useAdminApi();
   const [selectedReport, setSelectedReport] = useState<NostrEvent | null>(null);
   const [viewMode, setViewMode] = useState<'consolidated' | 'individual'>('consolidated');
   const [hideResolved, setHideResolved] = useState(true);

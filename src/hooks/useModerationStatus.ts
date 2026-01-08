@@ -2,12 +2,14 @@
 // ABOUTME: Uses NIP-86 RPC to query relay moderation status
 
 import { useQuery } from "@tanstack/react-query";
-import { listBannedPubkeys, listBannedEvents } from "@/lib/adminApi";
+import { useAdminApi } from "@/hooks/useAdminApi";
 
 export function useModerationStatus(
   pubkey?: string | null,
   eventId?: string | null
 ) {
+  const { listBannedPubkeys, listBannedEvents } = useAdminApi();
+
   // Query banned pubkeys
   const bannedPubkeys = useQuery({
     queryKey: ['banned-pubkeys'],

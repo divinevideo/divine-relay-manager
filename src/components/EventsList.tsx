@@ -7,7 +7,7 @@ import { useAuthor } from "@/hooks/useAuthor";
 import { useToast } from "@/hooks/useToast";
 import { nip19 } from "nostr-tools";
 import { getKindInfo, getKindCategory } from "@/lib/kindNames";
-import { callRelayRpc, verifyEventDeleted } from "@/lib/adminApi";
+import { useAdminApi } from "@/hooks/useAdminApi";
 import { useAppContext } from "@/hooks/useAppContext";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -294,6 +294,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
   const { user } = useCurrentUser();
   const { toast } = useToast();
   const { config } = useAppContext();
+  const { callRelayRpc, verifyEventDeleted } = useAdminApi();
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const [isVerifying, setIsVerifying] = useState(false);
@@ -485,7 +486,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
         setIsVerifying(true);
         setVerificationResult(null);
         try {
-          const isDeleted = await verifyEventDeleted(eventId, config.relayUrl);
+          const isDeleted = await verifyEventDeleted(eventId);
           setVerificationResult({
             eventId,
             success: isDeleted,

@@ -14,7 +14,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/useToast";
 import { Tag, Plus, X, UserX } from "lucide-react";
-import { publishLabel, publishLabelAndBan, type LabelParams } from "@/lib/adminApi";
+import { useAdminApi } from "@/hooks/useAdminApi";
+import type { LabelParams } from "@/lib/adminApi";
 
 interface LabelPublisherProps {
   onSuccess?: () => void;
@@ -66,6 +67,7 @@ const NAMESPACES = [
 export function LabelPublisher({ onSuccess, defaultTarget, defaultLabels, banOnPublish }: LabelPublisherProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const { publishLabel, publishLabelAndBan } = useAdminApi();
   const [isOpen, setIsOpen] = useState(false);
 
   const [targetType, setTargetType] = useState<'event' | 'pubkey'>(defaultTarget?.type || 'pubkey');
@@ -320,6 +322,7 @@ export function LabelPublisherInline({
 }) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const { publishLabel, publishLabelAndBan } = useAdminApi();
   const [selectedLabels, setSelectedLabels] = useState<string[]>([]);
   const [shouldBan, setShouldBan] = useState(false);
 

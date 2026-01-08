@@ -1,7 +1,6 @@
 // ABOUTME: API client for the Divine Relay Admin Worker
 // ABOUTME: Handles signing, publishing events, and NIP-86 relay management via the server-side Worker
-
-const WORKER_URL = import.meta.env.VITE_WORKER_URL || 'https://api-relay.divine.video';
+// ABOUTME: All functions accept apiUrl as first parameter to support environment switching
 
 export interface UnsignedEvent {
   kind: number;
@@ -52,11 +51,12 @@ class ApiError extends Error {
 }
 
 async function apiRequest<T>(
+  apiUrl: string,
   endpoint: string,
   method: 'GET' | 'POST' | 'DELETE',
   body?: object
 ): Promise<T> {
-  const response = await fetch(`${WORKER_URL}${endpoint}`, {
+  const response = await fetch(`${apiUrl}${endpoint}`, {
     method,
     headers: {
       'Content-Type': 'application/json',
@@ -77,11 +77,12 @@ async function apiRequest<T>(
 }
 
 async function _apiRequestWithValidation<T>(
+  apiUrl: string,
   endpoint: string,
   method: 'GET' | 'POST',
   body?: object
 ): Promise<T> {
-  const data = await apiRequest<ApiResponse<T>>(endpoint, method, body);
+  const data = await apiRequest<ApiResponse<T>>(apiUrl, endpoint, method, body);
 
   if (!data.success) {
     throw new ApiError(data.error || 'Unknown error');
@@ -91,13 +92,13 @@ async function _apiRequestWithValidation<T>(
 }
 
 // Info endpoint
-export async function getWorkerInfo(): Promise<InfoResponse> {
-  return apiRequest<InfoResponse>('/api/info', 'GET');
+export async function getWorkerInfo(apiUrl: string): Promise<InfoResponse> {
+  return apiRequest<InfoResponse>(apiUrl, '/api/info', 'GET');
 }
 
 // Publish endpoint - for general event publishing
-export async function publishEvent(event: UnsignedEvent): Promise<ApiResponse> {
-  const data = await apiRequest<ApiResponse>('/api/publish', 'POST', event);
+export async function publishEvent(apiUrl: string, event: UnsignedEvent): Promise<ApiResponse> {
+  const data = await apiRequest<ApiResponse>(apiUrl, '/api/publish', 'POST', event);
   if (!data.success) {
     throw new ApiError(data.error || 'Failed to publish event');
   }
@@ -105,32 +106,33 @@ export async function publishEvent(event: UnsignedEvent): Promise<ApiResponse> {
 }
 
 // Moderate endpoint - for moderation actions
-export async function moderateAction(params: ModerateParams): Promise<ApiResponse> {
-  const data = await apiRequest<ApiResponse>('/api/moderate', 'POST', params);
+export async function moderateAction(apiUrl: string, params: ModerateParams): Promise<ApiResponse> {
+  const data = await apiRequest<ApiResponse>(apiUrl, '/api/moderate', 'POST', params);
   if (!data.success) {
     throw new ApiError(data.error || 'Moderation action failed');
   }
   return data;
 }
 
-export async function deleteEvent(eventId: string, reason?: string): Promise<ApiResponse> {
-  return moderateAction({ action: 'delete_event', eventId, reason });
+export async function deleteEvent(apiUrl: string, eventId: string, reason?: string): Promise<ApiResponse> {
+  return moderateAction(apiUrl, { action: 'delete_event', eventId, reason });
 }
 
-export async function banPubkeyViaModerate(pubkey: string, reason?: string): Promise<ApiResponse> {
-  return moderateAction({ action: 'ban_pubkey', pubkey, reason });
+export async function banPubkeyViaModerate(apiUrl: string, pubkey: string, reason?: string): Promise<ApiResponse> {
+  return moderateAction(apiUrl, { action: 'ban_pubkey', pubkey, reason });
 }
 
-export async function allowPubkey(pubkey: string): Promise<ApiResponse> {
-  return moderateAction({ action: 'allow_pubkey', pubkey });
+export async function allowPubkey(apiUrl: string, pubkey: string): Promise<ApiResponse> {
+  return moderateAction(apiUrl, { action: 'allow_pubkey', pubkey });
 }
 
 // NIP-86 Relay RPC endpoint - for direct relay management
 export async function callRelayRpc<T = unknown>(
+  apiUrl: string,
   method: string,
   params: (string | number | undefined)[] = []
 ): Promise<T> {
-  const response = await fetch(`${WORKER_URL}/api/relay-rpc`, {
+  const response = await fetch(`${apiUrl}/api/relay-rpc`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -156,13 +158,13 @@ export async function callRelayRpc<T = unknown>(
 }
 
 // Convenience function for banning pubkey via NIP-86 RPC
-export async function banPubkey(pubkey: string, reason?: string): Promise<void> {
-  await callRelayRpc('banpubkey', [pubkey, reason || 'Banned via admin']);
+export async function banPubkey(apiUrl: string, pubkey: string, reason?: string): Promise<void> {
+  await callRelayRpc(apiUrl, 'banpubkey', [pubkey, reason || 'Banned via admin']);
 }
 
 // Convenience function for unbanning pubkey via NIP-86 RPC
-export async function unbanPubkey(pubkey: string): Promise<void> {
-  await callRelayRpc('allowpubkey', [pubkey]);
+export async function unbanPubkey(apiUrl: string, pubkey: string): Promise<void> {
+  await callRelayRpc(apiUrl, 'allowpubkey', [pubkey]);
 }
 
 // Banned pubkey can be a string or an object with pubkey and reason
@@ -172,8 +174,8 @@ export interface BannedPubkeyEntry {
 }
 
 // List banned pubkeys - normalizes response to always be BannedPubkeyEntry[]
-export async function listBannedPubkeys(): Promise<BannedPubkeyEntry[]> {
-  const result = await callRelayRpc<string[] | BannedPubkeyEntry[]>('listbannedpubkeys');
+export async function listBannedPubkeys(apiUrl: string): Promise<BannedPubkeyEntry[]> {
+  const result = await callRelayRpc<string[] | BannedPubkeyEntry[]>(apiUrl, 'listbannedpubkeys');
 
   // Normalize: if it's an array of strings, convert to objects
   return result.map(item => {
@@ -185,19 +187,19 @@ export async function listBannedPubkeys(): Promise<BannedPubkeyEntry[]> {
 }
 
 // List banned events
-export async function listBannedEvents(): Promise<Array<{ id: string; reason?: string }>> {
-  return callRelayRpc<Array<{ id: string; reason?: string }>>('listbannedevents');
+export async function listBannedEvents(apiUrl: string): Promise<Array<{ id: string; reason?: string }>> {
+  return callRelayRpc<Array<{ id: string; reason?: string }>>(apiUrl, 'listbannedevents');
 }
 
 // Publish a NIP-32 label (kind 1985)
-export async function publishLabel(params: LabelParams): Promise<ApiResponse> {
+export async function publishLabel(apiUrl: string, params: LabelParams): Promise<ApiResponse> {
   const tags: string[][] = [
     ['L', params.namespace],
     ...params.labels.map(l => ['l', l, params.namespace]),
     [params.targetType === 'event' ? 'e' : 'p', params.targetValue],
   ];
 
-  return publishEvent({
+  return publishEvent(apiUrl, {
     kind: 1985,
     content: params.comment || '',
     tags,
@@ -206,17 +208,18 @@ export async function publishLabel(params: LabelParams): Promise<ApiResponse> {
 
 // Combined action: publish label and optionally ban
 export async function publishLabelAndBan(
+  apiUrl: string,
   params: LabelParams & { shouldBan?: boolean }
 ): Promise<{ labelPublished: boolean; banned: boolean }> {
   const result = { labelPublished: false, banned: false };
 
   // Publish the label first
-  await publishLabel(params);
+  await publishLabel(apiUrl, params);
   result.labelPublished = true;
 
   // Optionally ban the pubkey
   if (params.shouldBan && params.targetType === 'pubkey') {
-    await banPubkey(params.targetValue, `Labeled: ${params.labels.join(', ')}`);
+    await banPubkey(apiUrl, params.targetValue, `Labeled: ${params.labels.join(', ')}`);
     result.banned = true;
   }
 
@@ -228,12 +231,13 @@ export type ResolutionStatus = 'reviewed' | 'dismissed' | 'no-action' | 'false-p
 
 // Mark a report target as reviewed/resolved (creates a 1985 label)
 export async function markAsReviewed(
+  apiUrl: string,
   targetType: 'event' | 'pubkey',
   targetValue: string,
   status: ResolutionStatus = 'reviewed',
   comment?: string
 ): Promise<ApiResponse> {
-  return publishLabel({
+  return publishLabel(apiUrl, {
     targetType,
     targetValue,
     namespace: 'moderation/resolution',
@@ -254,11 +258,12 @@ export interface MediaStatus {
 }
 
 export async function moderateMedia(
+  apiUrl: string,
   sha256: string,
   action: ModerationAction,
   reason?: string
 ): Promise<ApiResponse> {
-  const data = await apiRequest<ApiResponse>('/api/moderate-media', 'POST', {
+  const data = await apiRequest<ApiResponse>(apiUrl, '/api/moderate-media', 'POST', {
     sha256,
     action,
     reason,
@@ -270,9 +275,9 @@ export async function moderateMedia(
 }
 
 // Check media moderation status
-export async function checkMediaStatus(sha256: string): Promise<MediaStatus | null> {
+export async function checkMediaStatus(apiUrl: string, sha256: string): Promise<MediaStatus | null> {
   try {
-    const response = await fetch(`${WORKER_URL}/api/check-result/${sha256}`, {
+    const response = await fetch(`${apiUrl}/api/check-result/${sha256}`, {
       method: 'GET',
       headers: { 'Content-Type': 'application/json' },
     });
@@ -293,8 +298,8 @@ export async function checkMediaStatus(sha256: string): Promise<MediaStatus | nu
 }
 
 // Unblock media (set back to SAFE)
-export async function unblockMedia(sha256: string, reason?: string): Promise<ApiResponse> {
-  return moderateMedia(sha256, 'SAFE', reason || 'Unblocked by moderator');
+export async function unblockMedia(apiUrl: string, sha256: string, reason?: string): Promise<ApiResponse> {
+  return moderateMedia(apiUrl, sha256, 'SAFE', reason || 'Unblocked by moderator');
 }
 
 // Decision log types
@@ -310,7 +315,7 @@ export interface ModerationDecision {
 }
 
 // Log a moderation decision
-export async function logDecision(params: {
+export async function logDecision(apiUrl: string, params: {
   targetType: 'event' | 'pubkey' | 'media';
   targetId: string;
   action: string;
@@ -318,12 +323,13 @@ export async function logDecision(params: {
   moderatorPubkey?: string;
   reportId?: string;
 }): Promise<void> {
-  await apiRequest<ApiResponse>('/api/decisions', 'POST', params);
+  await apiRequest<ApiResponse>(apiUrl, '/api/decisions', 'POST', params);
 }
 
 // Get decisions for a target
-export async function getDecisions(targetId: string): Promise<ModerationDecision[]> {
+export async function getDecisions(apiUrl: string, targetId: string): Promise<ModerationDecision[]> {
   const data = await apiRequest<{ success: boolean; decisions: ModerationDecision[] }>(
+    apiUrl,
     `/api/decisions/${targetId}`,
     'GET'
   );
@@ -331,8 +337,9 @@ export async function getDecisions(targetId: string): Promise<ModerationDecision
 }
 
 // Get all decisions (for building resolved targets list)
-export async function getAllDecisions(): Promise<ModerationDecision[]> {
+export async function getAllDecisions(apiUrl: string): Promise<ModerationDecision[]> {
   const data = await apiRequest<{ success: boolean; decisions: ModerationDecision[]; error?: string }>(
+    apiUrl,
     '/api/decisions',
     'GET'
   );
@@ -346,8 +353,9 @@ export async function getAllDecisions(): Promise<ModerationDecision[]> {
 }
 
 // Delete all decisions for a target (reopens the report)
-export async function deleteDecisions(targetId: string): Promise<number> {
+export async function deleteDecisions(apiUrl: string, targetId: string): Promise<number> {
   const data = await apiRequest<{ success: boolean; deleted: number }>(
+    apiUrl,
     `/api/decisions/${targetId}`,
     'DELETE'
   );
@@ -355,12 +363,12 @@ export async function deleteDecisions(targetId: string): Promise<number> {
 }
 
 // Verify that a pubkey was actually banned on the relay
-export async function verifyPubkeyBanned(pubkey: string): Promise<boolean> {
+export async function verifyPubkeyBanned(apiUrl: string, pubkey: string): Promise<boolean> {
   try {
     // Give the relay a moment to process
     await new Promise(resolve => setTimeout(resolve, 500));
 
-    const bannedList = await listBannedPubkeys();
+    const bannedList = await listBannedPubkeys(apiUrl);
     return bannedList.some(entry => entry.pubkey === pubkey);
   } catch {
     // If we can't check, assume it worked
@@ -369,11 +377,11 @@ export async function verifyPubkeyBanned(pubkey: string): Promise<boolean> {
 }
 
 // Verify that a pubkey was actually unbanned on the relay
-export async function verifyPubkeyUnbanned(pubkey: string): Promise<boolean> {
+export async function verifyPubkeyUnbanned(apiUrl: string, pubkey: string): Promise<boolean> {
   try {
     await new Promise(resolve => setTimeout(resolve, 500));
 
-    const bannedList = await listBannedPubkeys();
+    const bannedList = await listBannedPubkeys(apiUrl);
     return !bannedList.some(entry => entry.pubkey === pubkey);
   } catch {
     return true;
@@ -432,13 +440,13 @@ export async function verifyEventDeleted(eventId: string, relayUrl: string): Pro
 }
 
 // Verify that media was actually blocked
-export async function verifyMediaBlocked(sha256: string): Promise<boolean> {
+export async function verifyMediaBlocked(apiUrl: string, sha256: string): Promise<boolean> {
   try {
     // Give the moderation service a moment to process
     await new Promise(resolve => setTimeout(resolve, 1000));
 
     // Check the moderation status
-    const status = await checkMediaStatus(sha256);
+    const status = await checkMediaStatus(apiUrl, sha256);
     return status?.action === 'PERMANENT_BAN';
   } catch {
     return false;
@@ -453,6 +461,7 @@ export interface VerificationResult {
 }
 
 export async function verifyModerationAction(
+  apiUrl: string,
   eventId: string,
   mediaHashes: string[],
   relayUrl: string
@@ -462,7 +471,7 @@ export async function verifyModerationAction(
     verifyEventDeleted(eventId, relayUrl),
     ...mediaHashes.map(async hash => ({
       hash,
-      blocked: await verifyMediaBlocked(hash),
+      blocked: await verifyMediaBlocked(apiUrl, hash),
     })),
   ]);
 

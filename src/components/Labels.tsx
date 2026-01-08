@@ -24,7 +24,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Tag, UserX, Clock, Filter, ChevronDown, ChevronRight, Eye, Loader2, CheckCircle, XCircle } from "lucide-react";
 import { useToast } from "@/hooks/useToast";
-import { banPubkey, verifyPubkeyBanned } from "@/lib/adminApi";
+import { useAdminApi } from "@/hooks/useAdminApi";
 import { LabelPublisher } from "@/components/LabelPublisher";
 import { EventContentPreview } from "@/components/EventContentPreview";
 import { UserProfilePreview } from "@/components/UserProfilePreview";
@@ -88,6 +88,7 @@ export function Labels({ relayUrl }: LabelsProps) {
   const { nostr } = useNostr();
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const { banPubkey, verifyPubkeyBanned } = useAdminApi();
   const [selectedLabel, setSelectedLabel] = useState<string | null>(null);
   const [namespaceFilter, setNamespaceFilter] = useState<string | null>(null);
   const [confirmBan, setConfirmBan] = useState<{ pubkey: string; reason: string } | null>(null);
