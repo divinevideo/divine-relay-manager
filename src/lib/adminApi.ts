@@ -586,7 +586,7 @@ export interface AIDetectionResult {
 }
 
 // Realness API base URL for AI detection
-const REALNESS_API_URL = 'https://realness.divine.video';
+const REALNESS_API_URL = 'https://realness.admin.divine.video';
 
 // Fetch AI detection results for a media hash
 export async function getAIDetectionResult(sha256: string): Promise<AIDetectionResult | null> {
