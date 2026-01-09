@@ -327,7 +327,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const [filterCategory, setFilterCategory] = useState<string | null>(null);
   const [filterTargetType, setFilterTargetType] = useState<'all' | 'event' | 'pubkey'>('all');
 
-  const { data: reports, isLoading, error, refetch, isFetching } = useQuery({
+  const { data: reports, isLoading, error, refetch, isFetching, dataUpdatedAt } = useQuery({
     queryKey: ['reports', relayUrl],
     queryFn: async ({ signal }) => {
       const events = await nostr.query(
@@ -336,6 +336,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       );
       return events.sort((a, b) => b.created_at - a.created_at);
     },
+    refetchInterval: 15 * 1000, // Poll every 15 seconds for team consistency
   });
 
   // Query for resolution labels (kind 1985 with moderation/resolution namespace)
@@ -348,6 +349,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       );
       return events;
     },
+    refetchInterval: 15 * 1000,
   });
 
   // Query banned pubkeys from relay (NIP-86 RPC)
@@ -364,6 +366,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       }
     },
     staleTime: 30 * 1000,
+    refetchInterval: 15 * 1000,
   });
 
   // Query banned/deleted events from relay (NIP-86 RPC)
@@ -378,6 +381,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       }
     },
     staleTime: 30 * 1000,
+    refetchInterval: 15 * 1000,
   });
 
   // Query all moderation decisions from our D1 database
@@ -394,6 +398,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       }
     },
     staleTime: 30 * 1000,
+    refetchInterval: 15 * 1000,
   });
 
   // Debug: log any decisions error
@@ -402,6 +407,28 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       console.error('[Reports] Decisions query error:', decisionsError);
     }
   }, [decisionsError]);
+
+  // Track relative time since last data update for freshness indicator
+  const [lastUpdatedText, setLastUpdatedText] = useState<string>('');
+  useEffect(() => {
+    if (!dataUpdatedAt) return;
+
+    const updateRelativeTime = () => {
+      const seconds = Math.floor((Date.now() - dataUpdatedAt) / 1000);
+      if (seconds < 5) {
+        setLastUpdatedText('just now');
+      } else if (seconds < 60) {
+        setLastUpdatedText(`${seconds}s ago`);
+      } else {
+        const minutes = Math.floor(seconds / 60);
+        setLastUpdatedText(`${minutes}m ago`);
+      }
+    };
+
+    updateRelativeTime();
+    const interval = setInterval(updateRelativeTime, 5000);
+    return () => clearInterval(interval);
+  }, [dataUpdatedAt]);
 
   // Build set of resolved target keys (from labels, bans, deletions, and decisions)
   const resolvedTargets = useMemo(() => {
@@ -661,14 +688,23 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                 )}
               </CardDescription>
             </div>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => refetch()}
-              disabled={isFetching}
-            >
-              <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
-            </Button>
+            <div className="flex items-center gap-2">
+              {lastUpdatedText && (
+                <span className="text-xs text-muted-foreground hidden sm:inline">
+                  {lastUpdatedText}
+                </span>
+              )}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => refetch()}
+                disabled={isFetching}
+                title={lastUpdatedText ? `Last updated ${lastUpdatedText}` : 'Refresh'}
+                className="min-w-[44px] min-h-[44px] sm:min-w-0 sm:min-h-0"
+              >
+                <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
+              </Button>
+            </div>
           </div>
 
           {/* View mode toggle */}

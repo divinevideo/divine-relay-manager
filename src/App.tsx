@@ -15,7 +15,7 @@ import AppRouter from './AppRouter';
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      refetchOnWindowFocus: false,
+      refetchOnWindowFocus: true,
       staleTime: 60000, // 1 minute
       gcTime: Infinity,
     },
