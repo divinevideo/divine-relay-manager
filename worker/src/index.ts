@@ -19,6 +19,7 @@ interface Env {
   DB?: D1Database;
   // Relay management configuration
   MANAGEMENT_PATH?: string;  // Path for NIP-86 management API, defaults to "/management"
+  MANAGEMENT_URL?: string;   // Full URL override for NIP-86 management API (for local dev with HTTP)
   MODERATION_SERVICE_URL?: string;  // URL for media moderation service
 }
 
@@ -36,9 +37,13 @@ const DEFAULT_MODERATION_SERVICE_URL = 'https://moderation.admin.divine.video';
 
 /**
  * Get the NIP-86 management API URL for the configured relay.
- * Converts WSS relay URL to HTTPS and appends the management path.
+ * If MANAGEMENT_URL is set (for local dev with HTTP), use it directly.
+ * Otherwise, converts WSS relay URL to HTTPS and appends the management path.
  */
 function getManagementUrl(env: Env): string {
+  if (env.MANAGEMENT_URL) {
+    return env.MANAGEMENT_URL;
+  }
   const baseUrl = env.RELAY_URL.replace(/^wss?:\/\//, 'https://');
   const managementPath = env.MANAGEMENT_PATH || '/management';
   return `${baseUrl}${managementPath}`;
