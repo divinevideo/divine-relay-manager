@@ -1000,6 +1000,13 @@ async function verifyZendeskWebhook(
     return false;
   }
 
+  // Option 1: Simple API key header (X-Webhook-Key)
+  const apiKey = request.headers.get('X-Webhook-Key');
+  if (apiKey && apiKey === env.ZENDESK_WEBHOOK_SECRET) {
+    return true;
+  }
+
+  // Option 2: Zendesk native webhook signing (X-Zendesk-Webhook-Signature)
   const signature = request.headers.get('X-Zendesk-Webhook-Signature');
   const timestamp = request.headers.get('X-Zendesk-Webhook-Signature-Timestamp');
 
