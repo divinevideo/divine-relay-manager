@@ -91,7 +91,7 @@ export function RelayManager() {
           </TabsContent>
 
           <TabsContent value="users">
-            <UserManagement />
+            <UserManagement selectedPubkey={params.pubkey} />
           </TabsContent>
 
           <TabsContent value="reports">

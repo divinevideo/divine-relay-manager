@@ -5,7 +5,7 @@ import { useState, useMemo, useEffect } from "react";
 
 import { useQuery } from "@tanstack/react-query";
 import { useNostr } from "@nostrify/react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -318,6 +318,7 @@ function IndividualReportItem({
 export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const { nostr } = useNostr();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { listBannedPubkeys, listBannedEvents, getAllDecisions } = useAdminApi();
   const isMobile = useIsMobile();
   const [selectedReport, setSelectedReport] = useState<NostrEvent | null>(null);
@@ -326,6 +327,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const [sortBy, setSortBy] = useState<SortOption>('reports');
   const [filterCategory, setFilterCategory] = useState<string | null>(null);
   const [filterTargetType, setFilterTargetType] = useState<'all' | 'event' | 'pubkey'>('all');
+  // Track if we've processed deep link params to avoid re-processing
+  const [deepLinkProcessed, setDeepLinkProcessed] = useState(false);
+
+  // Check for deep link params to force fresh data fetch
+  const hasDeepLinkParams = !!(searchParams.get('event') || searchParams.get('pubkey'));
 
   const { data: reports, isLoading, error, refetch, isFetching, dataUpdatedAt } = useQuery({
     queryKey: ['reports', relayUrl],
@@ -353,7 +359,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   });
 
   // Query banned pubkeys from relay (NIP-86 RPC)
-  const { data: bannedPubkeys } = useQuery({
+  // Force fresh fetch (staleTime: 0) when deep linking to ensure accurate ban status
+  const { data: bannedPubkeys, isFetching: isFetchingBanned } = useQuery({
     queryKey: ['banned-pubkeys'],
     queryFn: async () => {
       try {
@@ -365,7 +372,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         return [];
       }
     },
-    staleTime: 30 * 1000,
+    staleTime: hasDeepLinkParams && !deepLinkProcessed ? 0 : 30 * 1000,
     refetchInterval: 15 * 1000,
   });
 
@@ -629,6 +636,48 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       }
     }
   }, [selectedReportId, reports, selectedReport]);
+
+  // Handle deep linking via query params (?event=... or ?pubkey=...)
+  useEffect(() => {
+    const eventParam = searchParams.get('event');
+    const pubkeyParam = searchParams.get('pubkey');
+
+    // Skip if no params or already processed
+    if (!eventParam && !pubkeyParam) return;
+    if (deepLinkProcessed) return;
+    if (!allConsolidated || allConsolidated.length === 0) return;
+
+    // Wait for fresh ban data before processing deep link
+    if (isFetchingBanned) return;
+
+    let targetReport: ConsolidatedReport | undefined;
+
+    if (eventParam) {
+      targetReport = allConsolidated.find(c =>
+        c.target.type === 'event' && c.target.value === eventParam
+      );
+    } else if (pubkeyParam) {
+      targetReport = allConsolidated.find(c =>
+        c.target.type === 'pubkey' && c.target.value === pubkeyParam
+      );
+    }
+
+    if (targetReport) {
+      // If target is resolved and we're hiding resolved, temporarily show it
+      const targetKey = `${targetReport.target.type}:${targetReport.target.value}`;
+      if (hideResolved && resolvedTargets.has(targetKey)) {
+        setHideResolved(false);
+      }
+
+      // Select the report
+      setSelectedReport(targetReport.latestReport);
+      navigate(`/reports/${targetReport.latestReport.id}`, { replace: true });
+    }
+
+    // Mark as processed and clear params
+    setDeepLinkProcessed(true);
+    setSearchParams({}, { replace: true });
+  }, [allConsolidated, searchParams, deepLinkProcessed, hideResolved, resolvedTargets, navigate, setSearchParams, isFetchingBanned]);
 
   // Update URL when report selection changes
   const handleSelectReport = (report: NostrEvent | null) => {

@@ -1,7 +1,8 @@
 // ABOUTME: User management interface for banning and allowing users on the relay
 // ABOUTME: Includes verification to confirm NIP-86 actions succeeded
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -13,10 +14,16 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/useToast";
-import { UserX, UserCheck, Plus, Users, Loader2, CheckCircle, XCircle, Trash2 } from "lucide-react";
+import { UserX, UserCheck, Plus, Users, Loader2, Trash2, User, X } from "lucide-react";
 import { BannedUserCard } from "@/components/BannedUserCard";
 import { useAdminApi } from "@/hooks/useAdminApi";
+import { UserDisplayName } from "@/components/UserIdentifier";
+import { CopyableId } from "@/components/CopyableId";
 import type { BannedPubkeyEntry } from "@/lib/adminApi";
+
+interface UserManagementProps {
+  selectedPubkey?: string;
+}
 
 interface BannedUser {
   pubkey: string;
@@ -28,20 +35,27 @@ interface AllowedUser {
   reason?: string;
 }
 
-export function UserManagement() {
+export function UserManagement({ selectedPubkey }: UserManagementProps) {
   const { toast } = useToast();
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { callRelayRpc, verifyPubkeyBanned } = useAdminApi();
   const [newPubkey, setNewPubkey] = useState("");
   const [newReason, setNewReason] = useState("");
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
   const [actionType, setActionType] = useState<'ban' | 'allow'>('ban');
-  const [isVerifying, setIsVerifying] = useState(false);
-  const [verificationResult, setVerificationResult] = useState<{
-    pubkey: string;
-    success: boolean;
-    message: string;
-  } | null>(null);
+
+  // Clear selected pubkey from URL
+  const clearSelectedPubkey = () => {
+    navigate('/users', { replace: true });
+  };
+
+  // Helper to invalidate all user-related query caches
+  const invalidateUserQueries = () => {
+    queryClient.invalidateQueries({ queryKey: ['banned-users'] });
+    queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
+    queryClient.invalidateQueries({ queryKey: ['allowed-users'] });
+  };
 
   // Query for banned users
   const { data: bannedUsers, isLoading: loadingBanned, error: bannedError } = useQuery({
@@ -62,40 +76,19 @@ export function UserManagement() {
       return pubkey;
     },
     onSuccess: async (pubkey) => {
-      queryClient.invalidateQueries({ queryKey: ['banned-users'] });
-      toast({ title: "User banned", description: "Verifying..." });
+      invalidateUserQueries();
+      toast({ title: "User banned successfully" });
       setIsAddDialogOpen(false);
       setNewPubkey("");
       setNewReason("");
 
-      // Verify the ban worked
-      setIsVerifying(true);
-      setVerificationResult(null);
-      try {
-        const verified = await verifyPubkeyBanned(pubkey);
-        setVerificationResult({
-          pubkey,
-          success: verified,
-          message: verified
-            ? 'Ban verified - user is in banned list'
-            : 'Warning: User may not be banned',
-        });
-        toast({
-          title: verified ? "Ban Verified" : "Verification Warning",
-          description: verified
-            ? "User confirmed banned on relay"
-            : "Could not confirm ban - check manually",
-          variant: verified ? "default" : "destructive",
-        });
-      } catch {
-        setVerificationResult({
-          pubkey,
-          success: false,
-          message: 'Could not verify ban status',
-        });
-      } finally {
-        setIsVerifying(false);
-      }
+      // Background verification for debugging - don't show warnings to user
+      // RPC success means relay accepted the command
+      verifyPubkeyBanned(pubkey).then(verified => {
+        if (!verified) {
+          console.warn('[UserManagement] Ban verification failed for', pubkey, '- relay may have async processing');
+        }
+      });
     },
     onError: (error: Error) => {
       toast({
@@ -111,7 +104,7 @@ export function UserManagement() {
     mutationFn: ({ pubkey, reason }: { pubkey: string; reason?: string }) =>
       callRelayRpc('allowpubkey', [pubkey, reason]),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['allowed-users'] });
+      invalidateUserQueries();
       toast({ title: "User allowed successfully" });
       setIsAddDialogOpen(false);
       setNewPubkey("");
@@ -249,37 +242,48 @@ export function UserManagement() {
         </Dialog>
       </div>
 
-      {/* Verification Status */}
-      {(isVerifying || verificationResult) && (
-        <Alert
-          variant={verificationResult?.success ? "default" : "destructive"}
-          className={verificationResult?.success ? "border-green-500/50 bg-green-500/10" : ""}
-        >
-          {isVerifying ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : verificationResult?.success ? (
-            <CheckCircle className="h-4 w-4 text-green-600" />
-          ) : (
-            <XCircle className="h-4 w-4" />
-          )}
-          <AlertDescription className="flex items-center justify-between">
-            <span>
-              {isVerifying
-                ? "Verifying action..."
-                : verificationResult?.message}
-            </span>
-            {verificationResult && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setVerificationResult(null)}
-                className="h-6 px-2"
-              >
-                Dismiss
+      {/* Selected User from Deep Link */}
+      {selectedPubkey && (
+        <Card className="border-primary/50 bg-primary/5">
+          <CardHeader className="pb-3">
+            <div className="flex items-center justify-between">
+              <CardTitle className="flex items-center gap-2 text-lg">
+                <User className="h-5 w-5" />
+                Selected User
+              </CardTitle>
+              <Button variant="ghost" size="sm" onClick={clearSelectedPubkey} className="h-8 w-8 p-0">
+                <X className="h-4 w-4" />
               </Button>
-            )}
-          </AlertDescription>
-        </Alert>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div>
+              <div className="font-medium"><UserDisplayName pubkey={selectedPubkey} fallbackLength={16} /></div>
+              <CopyableId value={selectedPubkey} type="npub" truncateStart={12} truncateEnd={8} size="xs" />
+            </div>
+            <div className="flex items-center gap-2 text-sm">
+              {bannedUsers?.some((u: BannedUser) => u.pubkey === selectedPubkey) ? (
+                <span className="flex items-center gap-1 text-red-600"><UserX className="h-4 w-4" />Banned</span>
+              ) : allowedUsers?.some((u: AllowedUser) => u.pubkey === selectedPubkey) ? (
+                <span className="flex items-center gap-1 text-green-600"><UserCheck className="h-4 w-4" />Allowed</span>
+              ) : (
+                <span className="text-muted-foreground">No restrictions</span>
+              )}
+            </div>
+            <div className="flex gap-2">
+              {!bannedUsers?.some((u: BannedUser) => u.pubkey === selectedPubkey) && (
+                <Button variant="destructive" size="sm" onClick={() => banUserMutation.mutate({ pubkey: selectedPubkey })} disabled={banUserMutation.isPending}>
+                  <UserX className="h-4 w-4 mr-1" />Ban
+                </Button>
+              )}
+              {!allowedUsers?.some((u: AllowedUser) => u.pubkey === selectedPubkey) && (
+                <Button variant="outline" size="sm" onClick={() => allowUserMutation.mutate({ pubkey: selectedPubkey })} disabled={allowUserMutation.isPending}>
+                  <UserCheck className="h-4 w-4 mr-1" />Allow
+                </Button>
+              )}
+            </div>
+          </CardContent>
+        </Card>
       )}
 
       <Tabs defaultValue="banned" className="space-y-4">

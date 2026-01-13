@@ -158,9 +158,10 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     context.target?.type === 'event' ? context.reportedUser.pubkey : null
   );
 
-  // Combined status - user is banned if relay says so OR if we have a ban decision logged
-  const isUserBanned = moderationStatus.isBanned || decisionLog.isBanned || pubkeyDecisionLog.isBanned;
-  const isEventDeleted = moderationStatus.isDeleted || decisionLog.isDeleted;
+  // Relay is source of truth for current ban/delete status
+  // D1 decisions are audit log only, not status indicators
+  const isUserBanned = moderationStatus.isBanned;
+  const isEventDeleted = moderationStatus.isDeleted;
   const isResolved = decisionLog.hasDecisions || pubkeyDecisionLog.hasDecisions || isUserBanned || isEventDeleted;
 
   // Find related reports: reports on this user AND reports on their events
