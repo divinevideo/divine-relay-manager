@@ -162,9 +162,11 @@ export async function banPubkey(apiUrl: string, pubkey: string, reason?: string)
   await callRelayRpc(apiUrl, 'banpubkey', [pubkey, reason || 'Banned via admin']);
 }
 
-// Convenience function for unbanning pubkey via NIP-86 RPC
+// Convenience function for unbanning pubkey
+// Note: 'unbanpubkey' is not in NIP-86 spec but is a necessary extension
+// This will fail on relays that don't support it until they add the method
 export async function unbanPubkey(apiUrl: string, pubkey: string): Promise<void> {
-  await callRelayRpc(apiUrl, 'allowpubkey', [pubkey]);
+  await callRelayRpc(apiUrl, 'unbanpubkey', [pubkey]);
 }
 
 // Banned pubkey can be a string or an object with pubkey and reason

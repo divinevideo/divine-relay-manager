@@ -363,7 +363,7 @@ describe('adminApi', () => {
   });
 
   describe('unbanPubkey', () => {
-    it('should call allowpubkey RPC method', async () => {
+    it('should call unbanpubkey RPC method', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => ({ success: true, result: null }),
@@ -374,7 +374,7 @@ describe('adminApi', () => {
       expect(mockFetch).toHaveBeenCalledWith(
         expect.stringContaining('/api/relay-rpc'),
         expect.objectContaining({
-          body: JSON.stringify({ method: 'allowpubkey', params: ['pubkey123'] }),
+          body: JSON.stringify({ method: 'unbanpubkey', params: ['pubkey123'] }),
         })
       );
     });

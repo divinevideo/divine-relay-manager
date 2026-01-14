@@ -1,7 +1,7 @@
 // ABOUTME: User management interface for banning and allowing users on the relay
-// ABOUTME: Includes verification to confirm NIP-86 actions succeeded
+// ABOUTME: Includes verification to confirm NIP-86 actions succeeded and D1 audit logging
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -14,9 +14,10 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/useToast";
-import { UserX, UserCheck, Plus, Users, Loader2, Trash2, User, X } from "lucide-react";
+import { UserX, UserCheck, Plus, Users, Trash2, User, X } from "lucide-react";
 import { BannedUserCard } from "@/components/BannedUserCard";
 import { useAdminApi } from "@/hooks/useAdminApi";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { UserDisplayName } from "@/components/UserIdentifier";
 import { CopyableId } from "@/components/CopyableId";
 import type { BannedPubkeyEntry } from "@/lib/adminApi";
@@ -39,7 +40,8 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
   const { toast } = useToast();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { callRelayRpc, verifyPubkeyBanned } = useAdminApi();
+  const { callRelayRpc, verifyPubkeyBanned, logDecision } = useAdminApi();
+  const { user } = useCurrentUser();
   const [newPubkey, setNewPubkey] = useState("");
   const [newReason, setNewReason] = useState("");
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
@@ -73,6 +75,14 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
   const banUserMutation = useMutation({
     mutationFn: async ({ pubkey, reason }: { pubkey: string; reason?: string }) => {
       await callRelayRpc('banpubkey', [pubkey, reason]);
+      // Log to D1 for audit trail
+      await logDecision({
+        targetType: 'pubkey',
+        targetId: pubkey,
+        action: 'ban_user',
+        reason: reason || 'Banned via User Management',
+        moderatorPubkey: user?.pubkey,
+      });
       return pubkey;
     },
     onSuccess: async (pubkey) => {
@@ -101,8 +111,18 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
 
   // Mutation for allowing users
   const allowUserMutation = useMutation({
-    mutationFn: ({ pubkey, reason }: { pubkey: string; reason?: string }) =>
-      callRelayRpc('allowpubkey', [pubkey, reason]),
+    mutationFn: async ({ pubkey, reason }: { pubkey: string; reason?: string }) => {
+      await callRelayRpc('allowpubkey', [pubkey, reason]);
+      // Log to D1 for audit trail
+      await logDecision({
+        targetType: 'pubkey',
+        targetId: pubkey,
+        action: 'allow_user',
+        reason: reason || 'Allowed via User Management',
+        moderatorPubkey: user?.pubkey,
+      });
+      return pubkey;
+    },
     onSuccess: () => {
       invalidateUserQueries();
       toast({ title: "User allowed successfully" });
@@ -111,20 +131,20 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
       setNewReason("");
     },
     onError: (error: Error) => {
-      toast({ 
-        title: "Failed to allow user", 
+      toast({
+        title: "Failed to allow user",
         description: error.message,
-        variant: "destructive" 
+        variant: "destructive"
       });
     },
   });
 
   const handleAddUser = () => {
     if (!newPubkey.trim()) {
-      toast({ 
-        title: "Invalid input", 
+      toast({
+        title: "Invalid input",
         description: "Please enter a valid pubkey",
-        variant: "destructive" 
+        variant: "destructive"
       });
       return;
     }
@@ -137,28 +157,19 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
   };
 
   const handleRemoveUser = async (pubkey: string, type: 'ban' | 'allow') => {
-    try {
-      if (type === 'ban') {
-        // Note: NIP-86 doesn't define an "unban" method, so we'd need to implement this
-        // For now, we'll show a message that this isn't supported
-        toast({ 
-          title: "Not supported", 
-          description: "Unbanning users is not supported by NIP-86",
-          variant: "destructive" 
-        });
-      } else {
-        // Similar issue with removing from allow list
-        toast({ 
-          title: "Not supported", 
-          description: "Removing from allow list is not supported by NIP-86",
-          variant: "destructive" 
-        });
-      }
-    } catch (error) {
-      toast({ 
-        title: "Error", 
-        description: error instanceof Error ? error.message : "Unknown error",
-        variant: "destructive" 
+    if (type === 'ban') {
+      // NIP-86 doesn't define 'unbanpubkey' - waiting for relay support
+      toast({
+        title: "Not yet supported",
+        description: "Unbanning requires 'unbanpubkey' RPC method which is not yet implemented in the relay",
+        variant: "destructive"
+      });
+    } else {
+      // NIP-86 doesn't define a method to remove from allow list
+      toast({
+        title: "Not yet supported",
+        description: "Removing from allow list requires an RPC method which is not defined in NIP-86",
+        variant: "destructive"
       });
     }
   };
