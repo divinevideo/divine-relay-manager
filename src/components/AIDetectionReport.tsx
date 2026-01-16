@@ -274,12 +274,12 @@ export function AIDetectionReport({
   const videoUrl = providedVideoUrl || (eventTags ? extractVideoUrlFromTags(eventTags) : null);
 
   const { data: result, isLoading, error, refetch } = useQuery({
-    queryKey: ['ai-detection', sha256],
+    queryKey: ['ai-detection', eventId],
     queryFn: async (): Promise<AIDetectionResult | null> => {
-      if (!sha256) return null;
-      return getAIDetectionResult(sha256);
+      if (!eventId) return null;
+      return getAIDetectionResult(eventId);
     },
-    enabled: !!sha256,
+    enabled: !!eventId,
     staleTime: 30 * 1000, // 30 seconds - AI detection results change during processing
     refetchInterval: (query) => {
       // Auto-refresh while processing
@@ -292,14 +292,14 @@ export function AIDetectionReport({
   });
 
   const handleTriggerCheck = async () => {
-    if (!sha256 || !videoUrl) return;
+    if (!sha256 || !videoUrl || !eventId) return;
 
     setIsSubmitting(true);
     try {
       const submitResult = await submitAIDetection(videoUrl, sha256, eventId);
       if (submitResult) {
         // Invalidate and refetch
-        queryClient.invalidateQueries({ queryKey: ['ai-detection', sha256] });
+        queryClient.invalidateQueries({ queryKey: ['ai-detection', eventId] });
         refetch();
         toast({
           title: "Analysis submitted",

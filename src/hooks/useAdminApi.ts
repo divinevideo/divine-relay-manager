@@ -83,8 +83,8 @@ export function useAdminApi() {
       adminApi.deleteDecisions(apiUrl, targetId),
 
     // AI Detection (uses separate Realness API, not apiUrl)
-    getAIDetectionResult: (sha256: string) =>
-      adminApi.getAIDetectionResult(sha256),
+    getAIDetectionResult: (eventId: string) =>
+      adminApi.getAIDetectionResult(eventId),
     submitAIDetection: (videoUrl: string, sha256: string, eventId?: string) =>
       adminApi.submitAIDetection(videoUrl, sha256, eventId),
 

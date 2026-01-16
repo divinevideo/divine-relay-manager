@@ -590,10 +590,10 @@ export interface AIDetectionResult {
 // Realness API base URL for AI detection
 const REALNESS_API_URL = 'https://realness.admin.divine.video';
 
-// Fetch AI detection results for a media hash
-export async function getAIDetectionResult(sha256: string): Promise<AIDetectionResult | null> {
+// Fetch AI detection results by event ID
+export async function getAIDetectionResult(eventId: string): Promise<AIDetectionResult | null> {
   try {
-    const response = await fetch(`${REALNESS_API_URL}/api/jobs/${sha256}`, {
+    const response = await fetch(`${REALNESS_API_URL}/api/jobs/${eventId}`, {
       method: 'GET',
       headers: { 'Accept': 'application/json' },
     });
@@ -655,10 +655,13 @@ function normalizeAIDetectionResponse(job: Record<string, unknown>): AIDetection
   // Process each provider
   for (const [name, result] of Object.entries(results)) {
     const score = typeof result.score === 'number' ? result.score : null;
+    // Normalize verdict to uppercase (realness returns lowercase)
+    const rawVerdict = result.verdict as string | undefined;
+    const normalizedVerdict = rawVerdict ? rawVerdict.toUpperCase() as AIVerdict : null;
     const providerResult: AIProviderResult = {
       status: (result.status as AIProviderStatus) || 'pending',
       score,
-      verdict: (result.verdict as AIVerdict) || getVerdictFromScore(score),
+      verdict: normalizedVerdict || getVerdictFromScore(score),
       error: (result.error as string) || null,
       breakdown: extractBreakdown(name, result.raw as Record<string, unknown>),
     };
@@ -715,8 +718,9 @@ function normalizeAIDetectionResponse(job: Record<string, unknown>): AIDetection
       job_status: (job.status as string) || 'unknown',
       job_id: (job.event_id as string) || (job.job_id as string) || null,
       media_hash: job.media_hash as string | undefined,
-      submitted: job.submitted as string | undefined,
-      completed: job.completed as string | undefined,
+      // Map realness field names (submitted_at/completed_at) to our format
+      submitted: (job.submitted_at as string) || (job.submitted as string) || undefined,
+      completed: (job.completed_at as string) || (job.completed as string) || undefined,
     },
   };
 }
