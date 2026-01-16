@@ -15,6 +15,10 @@ interface Env {
   ZENDESK_SUBDOMAIN?: string;
   ZENDESK_JWT_SECRET?: string;
   ZENDESK_WEBHOOK_SECRET?: string;
+  ZENDESK_API_TOKEN?: string;
+  ZENDESK_EMAIL?: string;
+  ZENDESK_FIELD_ACTION_STATUS?: string;
+  ZENDESK_FIELD_ACTION_REQUESTED?: string;
   KV?: KVNamespace;
   DB?: D1Database;
   // Relay management configuration
@@ -1036,6 +1040,63 @@ async function verifyZendeskWebhook(
   return signature === expectedSig;
 }
 
+// Update Zendesk ticket with action result and internal note
+async function updateZendeskTicket(
+  ticketId: number,
+  success: boolean,
+  actionRequested: string,
+  note: string,
+  env: Env
+): Promise<void> {
+  if (!env.ZENDESK_SUBDOMAIN || !env.ZENDESK_API_TOKEN || !env.ZENDESK_EMAIL) {
+    console.warn('[updateZendeskTicket] Missing Zendesk API credentials, skipping callback');
+    return;
+  }
+
+  if (!env.ZENDESK_FIELD_ACTION_STATUS || !env.ZENDESK_FIELD_ACTION_REQUESTED) {
+    console.warn('[updateZendeskTicket] Missing Zendesk field IDs, skipping callback');
+    return;
+  }
+
+  try {
+    const auth = btoa(`${env.ZENDESK_EMAIL}/token:${env.ZENDESK_API_TOKEN}`);
+    const url = `https://${env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets/${ticketId}`;
+
+    const customFields = [
+      { id: parseInt(env.ZENDESK_FIELD_ACTION_STATUS, 10), value: success ? 'success' : 'failed' },
+    ];
+
+    // Only reset action_requested to 'none' on success
+    if (success) {
+      customFields.push({ id: parseInt(env.ZENDESK_FIELD_ACTION_REQUESTED, 10), value: 'none' });
+    }
+
+    const response = await fetch(url, {
+      method: 'PUT',
+      headers: {
+        'Authorization': `Basic ${auth}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ticket: {
+          custom_fields: customFields,
+          comment: {
+            body: note,
+            public: false,
+          },
+        },
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`[updateZendeskTicket] Failed to update ticket ${ticketId}: ${response.status} - ${errorText}`);
+    }
+  } catch (error) {
+    console.error('[updateZendeskTicket] Error:', error);
+  }
+}
+
 // Route handler for all /api/zendesk/* endpoints
 async function handleZendeskRoutes(
   request: Request,
@@ -1208,6 +1269,41 @@ async function handleZendeskWebhook(
         body.agent_email || null,
         `zendesk:${body.ticket_id}`
       ).run();
+    }
+
+    // Callback to Zendesk to update ticket status and add internal note
+    // TODO: allow_user case skipped until semantics of allow_user vs unban are clarified
+    if (body.action_requested !== 'allow_user') {
+      const agentInfo = body.agent_email ? ` by ${body.agent_email}` : '';
+      let zendeskNote: string;
+
+      if (actionResult.success) {
+        switch (body.action_requested) {
+          case 'ban_user':
+            zendeskNote = `✅ Ban executed successfully for pubkey ${body.nostr_pubkey}${agentInfo}`;
+            break;
+          case 'delete_event':
+            zendeskNote = `✅ Delete event executed successfully for event ${body.nostr_event_id}${agentInfo}`;
+            break;
+          default:
+            zendeskNote = `✅ Action "${body.action_requested}" executed successfully${agentInfo}`;
+        }
+      } else {
+        switch (body.action_requested) {
+          case 'ban_user':
+            zendeskNote = `❌ Ban failed for pubkey ${body.nostr_pubkey}: ${actionResult.error}`;
+            break;
+          case 'delete_event':
+            zendeskNote = `❌ Delete event failed for event ${body.nostr_event_id}: ${actionResult.error}`;
+            break;
+          default:
+            zendeskNote = `❌ Action "${body.action_requested}" failed: ${actionResult.error}`;
+        }
+      }
+
+      // Fire-and-forget: don't await, don't let errors break the response
+      updateZendeskTicket(body.ticket_id, actionResult.success, body.action_requested, zendeskNote, env)
+        .catch((err) => console.error('[handleZendeskWebhook] Zendesk callback error:', err));
     }
 
     return new Response(JSON.stringify({

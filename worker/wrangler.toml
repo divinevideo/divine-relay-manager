@@ -21,6 +21,9 @@ MANAGEMENT_PATH = "/"
 MODERATION_SERVICE_URL = "https://moderation.admin.divine.video"
 # Allow both the main frontend and Cloudflare Pages preview deployments
 ALLOWED_ORIGINS = "https://relay.admin.divine.video,*.divine-relay-manager.pages.dev,*.divine-relay-admin.pages.dev"
+# Zendesk custom field IDs for webhook callback
+ZENDESK_FIELD_ACTION_STATUS = "14545793289743"
+ZENDESK_FIELD_ACTION_REQUESTED = "14545826900367"
 
 # D1 Database for moderation decision log
 [[d1_databases]]
