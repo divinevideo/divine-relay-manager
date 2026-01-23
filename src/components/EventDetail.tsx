@@ -9,8 +9,7 @@ import { useUserStats } from "@/hooks/useUserStats";
 import { useModerationStatus } from "@/hooks/useModerationStatus";
 import { useToast } from "@/hooks/useToast";
 import { getKindInfo, getKindCategory } from "@/lib/kindNames";
-import { banPubkey, deleteEvent, verifyPubkeyBanned, verifyEventDeleted } from "@/lib/adminApi";
-import { useAppContext } from "@/hooks/useAppContext";
+import { useAdminApi } from "@/hooks/useAdminApi";
 import { UserIdentifier } from "@/components/UserIdentifier";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -35,13 +34,10 @@ import { AIDetectionReport } from "@/components/AIDetectionReport";
 import { ReporterList } from "@/components/ReporterCard";
 import {
   User,
-  Clock,
   Hash,
   Link,
   Tag,
   FileJson,
-  ChevronDown,
-  ChevronRight,
   Copy,
   ExternalLink,
   AtSign,
@@ -53,7 +49,6 @@ import {
   Trash2,
   UserX,
   ShieldAlert,
-  ShieldCheck,
   AlertTriangle,
   Loader2,
   CheckCircle,
@@ -205,7 +200,7 @@ function LinkedEvent({ eventId, onSelect }: { eventId: string; onSelect?: (id: s
 
 function TagsTable({ tags }: { tags: string[][] }) {
   const [expanded, setExpanded] = useState(false);
-  const displayTags = expanded ? tags : tags.slice(0, 10);
+  const _displayTags = expanded ? tags : tags.slice(0, 10);
 
   // Group tags by type
   const tagGroups: Record<string, string[][]> = {};
@@ -254,13 +249,13 @@ function TagsTable({ tags }: { tags: string[][] }) {
   );
 }
 
-export function EventDetail({ event, onClose, onSelectEvent, onSelectPubkey, onViewReports }: EventDetailProps) {
+export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReports }: EventDetailProps) {
   const { nostr } = useNostr();
   const { toast } = useToast();
-  const { config } = useAppContext();
+  const { banPubkey, deleteEvent, verifyPubkeyBanned, verifyEventDeleted } = useAdminApi();
   const queryClient = useQueryClient();
 
-  const [showRawJson, setShowRawJson] = useState(false);
+  const [_showRawJson, _setShowRawJson] = useState(false);
   const [confirmBan, setConfirmBan] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [isVerifying, setIsVerifying] = useState(false);
@@ -283,7 +278,7 @@ export function EventDetail({ event, onClose, onSelectEvent, onSelectPubkey, onV
   const { data: relatedReports } = useQuery({
     queryKey: ['related-reports', event.id, event.pubkey],
     queryFn: async ({ signal }) => {
-      const queries = [];
+      const queries: Promise<import('@nostrify/nostrify').NostrEvent[]>[] = [];
 
       // Reports on this specific event
       if (event.id) {
@@ -347,7 +342,7 @@ export function EventDetail({ event, onClose, onSelectEvent, onSelectPubkey, onV
             : "Could not confirm ban - check relay manually",
           variant: verified ? "default" : "destructive",
         });
-      } catch (error) {
+      } catch {
         setVerificationResult({
           type: 'ban',
           success: false,
@@ -382,7 +377,7 @@ export function EventDetail({ event, onClose, onSelectEvent, onSelectPubkey, onV
       setIsVerifying(true);
       setVerificationResult(null);
       try {
-        const verified = await verifyEventDeleted(eventId, config.relayUrl);
+        const verified = await verifyEventDeleted(eventId);
         setVerificationResult({
           type: 'delete',
           success: verified,
@@ -397,7 +392,7 @@ export function EventDetail({ event, onClose, onSelectEvent, onSelectPubkey, onV
             : "Event may still be accessible - check relay manually",
           variant: verified ? "default" : "destructive",
         });
-      } catch (error) {
+      } catch {
         setVerificationResult({
           type: 'delete',
           success: false,
@@ -431,7 +426,7 @@ export function EventDetail({ event, onClose, onSelectEvent, onSelectPubkey, onV
             : 'User is NOT in banned list',
         });
       } else {
-        const verified = await verifyEventDeleted(event.id, config.relayUrl);
+        const verified = await verifyEventDeleted(event.id);
         setVerificationResult({
           type: 'delete',
           success: verified,
@@ -440,7 +435,7 @@ export function EventDetail({ event, onClose, onSelectEvent, onSelectPubkey, onV
             : 'Event is still accessible on relay',
         });
       }
-    } catch (error) {
+    } catch {
       setVerificationResult({
         type,
         success: false,
@@ -462,7 +457,7 @@ export function EventDetail({ event, onClose, onSelectEvent, onSelectPubkey, onV
   const otherUrls = urls.filter(u => !isMediaUrl(u));
 
   // Check for imeta tags (media metadata)
-  const imetaTags = event.tags.filter(t => t[0] === 'imeta');
+  const _imetaTags = event.tags.filter(t => t[0] === 'imeta');
 
   return (
     <>
@@ -916,7 +911,9 @@ export function EventDetail({ event, onClose, onSelectEvent, onSelectPubkey, onV
                   onClick={() => {
                     try {
                       navigator.clipboard.writeText(nip19.noteEncode(event.id || ''));
-                    } catch {}
+                    } catch {
+                      // Ignore copy errors
+                    }
                   }}
                 >
                   <Copy className="h-3 w-3" />

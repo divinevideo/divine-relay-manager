@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery, useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNostr } from "@/hooks/useNostr";
@@ -7,8 +7,7 @@ import { useAuthor } from "@/hooks/useAuthor";
 import { useToast } from "@/hooks/useToast";
 import { nip19 } from "nostr-tools";
 import { getKindInfo, getKindCategory } from "@/lib/kindNames";
-import { callRelayRpc, verifyEventDeleted } from "@/lib/adminApi";
-import { useAppContext } from "@/hooks/useAppContext";
+import { useAdminApi } from "@/hooks/useAdminApi";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -78,7 +77,7 @@ function EventCard({
   const profileImage = metadata?.picture;
 
   const kindInfo = getKindInfo(event.kind);
-  const category = getKindCategory(event.kind);
+  const _category = getKindCategory(event.kind);
 
   const handleModerate = () => {
     onModerate(event.id!, moderationAction, moderationReason.trim() || undefined);
@@ -293,7 +292,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
   const { nostr } = useNostr();
   const { user } = useCurrentUser();
   const { toast } = useToast();
-  const { config } = useAppContext();
+  const { callRelayRpc, verifyEventDeleted } = useAdminApi();
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const [isVerifying, setIsVerifying] = useState(false);
@@ -415,14 +414,14 @@ export function EventsList({ relayUrl }: EventsListProps) {
   // Query for banned events to mark them
   const { data: bannedEvents } = useQuery({
     queryKey: ['banned-events', relayUrl],
-    queryFn: () => callRelayRpc('listbannedevents'),
+    queryFn: () => callRelayRpc<Array<{ id: string; reason?: string }>>('listbannedevents'),
     enabled: !!relayUrl && !!user,
   });
 
   // Query for events needing moderation
   const { data: eventsNeedingModeration } = useQuery({
     queryKey: ['events-needing-moderation', relayUrl],
-    queryFn: () => callRelayRpc('listeventsneedingmoderation'),
+    queryFn: () => callRelayRpc<Array<{ id: string; reason?: string }>>('listeventsneedingmoderation'),
     enabled: !!relayUrl && !!user,
   });
 
@@ -485,7 +484,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
         setIsVerifying(true);
         setVerificationResult(null);
         try {
-          const isDeleted = await verifyEventDeleted(eventId, config.relayUrl);
+          const isDeleted = await verifyEventDeleted(eventId);
           setVerificationResult({
             eventId,
             success: isDeleted,
@@ -532,7 +531,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
 
       return {
         ...event,
-        moderationStatus: isBanned ? 'banned' : needsModeration ? 'pending' : undefined,
+        moderationStatus: (isBanned ? 'banned' : needsModeration ? 'pending' : undefined) as "pending" | "approved" | "banned" | undefined,
         moderationReason: isBanned ? bannedEvents?.find((banned: { id: string; reason?: string }) => banned.id === event.id)?.reason :
                          needsModeration ? eventsNeedingModeration?.find((pending: { id: string; reason?: string }) => pending.id === event.id)?.reason : undefined,
       };

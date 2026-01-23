@@ -18,26 +18,14 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { useToast } from "@/hooks/useToast";
-import {
-  getWorkerInfo,
-  banPubkey,
-  unbanPubkey,
-  listBannedPubkeys,
-  listBannedEvents,
-  getAllDecisions,
-  callRelayRpc,
-  logDecision,
-  verifyPubkeyBanned,
-  verifyPubkeyUnbanned,
-  type BannedPubkeyEntry,
-} from "@/lib/adminApi";
+import { useAdminApi } from "@/hooks/useAdminApi";
+import type { BannedPubkeyEntry } from "@/lib/adminApi";
 import {
   Bug,
   CheckCircle,
   XCircle,
   RefreshCw,
   Send,
-  Trash2,
   UserX,
   UserCheck,
   Database,
@@ -75,6 +63,18 @@ let actionId = 0;
 export function DebugPanel() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const {
+    getWorkerInfo,
+    banPubkey,
+    unbanPubkey,
+    listBannedPubkeys,
+    listBannedEvents,
+    getAllDecisions,
+    callRelayRpc,
+    logDecision,
+    verifyPubkeyBanned,
+    verifyPubkeyUnbanned,
+  } = useAdminApi();
   const [testPubkey, setTestPubkey] = useState("");
   const [rpcMethod, setRpcMethod] = useState("listbannedpubkeys");
   const [rpcParams, setRpcParams] = useState("");
@@ -526,11 +526,11 @@ export function DebugPanel() {
                           <div className="p-2 bg-red-100 dark:bg-red-900/30 rounded">
                             <Label className="text-red-600 dark:text-red-400">Error:</Label>
                             <pre className="whitespace-pre-wrap text-red-700 dark:text-red-300 mt-1">
-                              {log.error}
+                              {String(log.error)}
                             </pre>
                           </div>
                         )}
-                        {log.result && (
+                        {!!log.result && (
                           <div className="p-2 bg-background rounded">
                             <div className="flex items-center justify-between">
                               <Label className="text-muted-foreground">Result:</Label>
@@ -547,7 +547,7 @@ export function DebugPanel() {
                               </Button>
                             </div>
                             <pre className="whitespace-pre-wrap overflow-auto max-h-32 mt-1">
-                              {JSON.stringify(log.result, null, 2)}
+                              {JSON.stringify(log.result as object, null, 2)}
                             </pre>
                           </div>
                         )}

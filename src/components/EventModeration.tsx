@@ -12,12 +12,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/useToast";
 import { Shield, ShieldCheck, ShieldX, Plus, AlertTriangle, CheckCircle, XCircle, Loader2 } from "lucide-react";
-import { callRelayRpc, verifyEventDeleted } from "@/lib/adminApi";
-import { useAppContext } from "@/hooks/useAppContext";
-
-interface EventModerationProps {
-  relayUrl: string;
-}
+import { useAdminApi } from "@/hooks/useAdminApi";
 
 interface EventNeedingModeration {
   id: string;
@@ -29,10 +24,10 @@ interface BannedEvent {
   reason?: string;
 }
 
-export function EventModeration({ relayUrl }: EventModerationProps) {
+export function EventModeration() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const { config } = useAppContext();
+  const { callRelayRpc, verifyEventDeleted } = useAdminApi();
   const [newEventId, setNewEventId] = useState("");
   const [newReason, setNewReason] = useState("");
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
@@ -46,13 +41,13 @@ export function EventModeration({ relayUrl }: EventModerationProps) {
   // Query for events needing moderation
   const { data: eventsNeedingModeration, isLoading: loadingPending, error: pendingError } = useQuery({
     queryKey: ['events-needing-moderation'],
-    queryFn: () => callRelayRpc('listeventsneedingmoderation'),
+    queryFn: () => callRelayRpc<EventNeedingModeration[]>('listeventsneedingmoderation'),
   });
 
   // Query for banned events
   const { data: bannedEvents, isLoading: loadingBanned, error: bannedError } = useQuery({
     queryKey: ['banned-events'],
-    queryFn: () => callRelayRpc('listbannedevents'),
+    queryFn: () => callRelayRpc<BannedEvent[]>('listbannedevents'),
   });
 
   // Mutation for allowing events
@@ -90,7 +85,7 @@ export function EventModeration({ relayUrl }: EventModerationProps) {
       setIsVerifying(true);
       setVerificationResult(null);
       try {
-        const isDeleted = await verifyEventDeleted(eventId, config.relayUrl);
+        const isDeleted = await verifyEventDeleted(eventId);
         setVerificationResult({
           eventId,
           success: isDeleted,

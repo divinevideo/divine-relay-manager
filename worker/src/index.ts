@@ -6,7 +6,7 @@ import { finalizeEvent, nip19, getPublicKey } from 'nostr-tools';
 interface Env {
   NOSTR_NSEC: string;
   RELAY_URL: string;
-  ALLOWED_ORIGIN: string;
+  ALLOWED_ORIGINS: string;
   ANTHROPIC_API_KEY?: string;
   // Cloudflare Access Service Token for moderation.admin.divine.video
   CF_ACCESS_CLIENT_ID?: string;
@@ -15,8 +15,16 @@ interface Env {
   ZENDESK_SUBDOMAIN?: string;
   ZENDESK_JWT_SECRET?: string;
   ZENDESK_WEBHOOK_SECRET?: string;
+  ZENDESK_API_TOKEN?: string;
+  ZENDESK_EMAIL?: string;
+  ZENDESK_FIELD_ACTION_STATUS?: string;
+  ZENDESK_FIELD_ACTION_REQUESTED?: string;
   KV?: KVNamespace;
   DB?: D1Database;
+  // Relay management configuration
+  MANAGEMENT_PATH?: string;  // Path for NIP-86 management API, defaults to "/management"
+  MANAGEMENT_URL?: string;   // Full URL override for NIP-86 management API (for local dev with HTTP)
+  MODERATION_SERVICE_URL?: string;  // URL for media moderation service
 }
 
 // Zendesk JWT payload structure
@@ -29,7 +37,46 @@ interface ZendeskJWTPayload {
   external_id?: string;
 }
 
-const MODERATION_SERVICE_URL = 'https://moderation.admin.divine.video';
+const DEFAULT_MODERATION_SERVICE_URL = 'https://moderation.admin.divine.video';
+
+/**
+ * Get the NIP-86 management API URL for the configured relay.
+ * If MANAGEMENT_URL is set (for local dev with HTTP), use it directly.
+ * Otherwise, converts WSS relay URL to HTTPS and appends the management path.
+ */
+function getManagementUrl(env: Env): string {
+  if (env.MANAGEMENT_URL) {
+    return env.MANAGEMENT_URL;
+  }
+  const baseUrl = env.RELAY_URL.replace(/^wss?:\/\//, 'https://');
+  const managementPath = env.MANAGEMENT_PATH || '/management';
+  return `${baseUrl}${managementPath}`;
+}
+
+/**
+ * Get the moderation service URL from env or use default.
+ */
+function getModerationServiceUrl(env: Env): string {
+  return env.MODERATION_SERVICE_URL || DEFAULT_MODERATION_SERVICE_URL;
+}
+
+function getAllowedOrigin(requestOrigin: string | null, allowedOriginsEnv: string | undefined): string {
+  if (!allowedOriginsEnv?.trim()) return '';
+
+  const allowedOrigins = allowedOriginsEnv.split(',').map(o => o.trim());
+  if (!requestOrigin) return allowedOrigins[0] || '';
+
+  for (const allowed of allowedOrigins) {
+    if (allowed.startsWith('*.') && requestOrigin.endsWith(allowed.slice(1))) {
+      return requestOrigin;
+    }
+    if (requestOrigin === allowed) {
+      return requestOrigin;
+    }
+  }
+
+  return allowedOrigins[0] || '';
+}
 
 interface UnsignedEvent {
   kind: number;
@@ -50,9 +97,11 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    // CORS headers
+    const requestOrigin = request.headers.get('Origin');
+    const allowedOrigin = getAllowedOrigin(requestOrigin, env.ALLOWED_ORIGINS);
+
     const corsHeaders = {
-      'Access-Control-Allow-Origin': env.ALLOWED_ORIGIN || '*',
+      'Access-Control-Allow-Origin': allowedOrigin,
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     };
@@ -168,7 +217,7 @@ async function handleInfo(env: Env, corsHeaders: Record<string, string>): Promis
       200,
       corsHeaders
     );
-  } catch (error) {
+  } catch {
     return jsonResponse(
       { success: false, error: 'Secret key not configured' },
       500,
@@ -287,6 +336,30 @@ async function handleModerate(
     return jsonResponse({ success: false, error: publishResult.error }, 500, corsHeaders);
   }
 
+  // For delete_event: also call banevent RPC to add event to relay's ban list
+  if (body.action === 'delete_event' && body.eventId) {
+    try {
+      // Call our own /api/relay-rpc endpoint to invoke banevent
+      const rpcRequest = new Request(request.url.replace(/\/api\/moderate$/, '/api/relay-rpc'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          method: 'banevent',
+          params: [body.eventId, body.reason || 'Deleted by relay admin'],
+        }),
+      });
+
+      const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders);
+
+      if (!rpcResponse.ok) {
+        console.error('[handleModerate] banevent RPC failed:', rpcResponse.status);
+      }
+    } catch (error) {
+      console.error('[handleModerate] banevent RPC error:', error);
+      // Don't fail the whole operation if banevent fails
+    }
+  }
+
   return jsonResponse({ success: true, event }, 200, corsHeaders);
 }
 
@@ -305,10 +378,9 @@ async function handleRelayRpc(
   }
 
   const secretKey = getSecretKey(env);
-  const pubkey = getPublicKey(secretKey);
 
   // Build NIP-98 auth event
-  const httpUrl = env.RELAY_URL.replace(/^wss?:\/\//, 'https://');
+  const httpUrl = getManagementUrl(env);
   const payload = JSON.stringify({ method: body.method, params: body.params || [] });
   const payloadHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
   const payloadHashHex = Array.from(new Uint8Array(payloadHash)).map(b => b.toString(16).padStart(2, '0')).join('');
@@ -675,7 +747,7 @@ async function handleCheckResult(
       headers['CF-Access-Client-Secret'] = env.CF_ACCESS_CLIENT_SECRET;
     }
 
-    const response = await fetch(`${MODERATION_SERVICE_URL}/check-result/${sha256}`, {
+    const response = await fetch(`${getModerationServiceUrl(env)}/check-result/${sha256}`, {
       method: 'GET',
       headers,
     });
@@ -741,7 +813,7 @@ async function handleModerateMedia(
       'CF-Access-Client-Secret': env.CF_ACCESS_CLIENT_SECRET,
     };
 
-    const response = await fetch(`${MODERATION_SERVICE_URL}/api/v1/moderate`, {
+    const response = await fetch(`${getModerationServiceUrl(env)}/api/v1/moderate`, {
       method: 'POST',
       headers,
       body: JSON.stringify({
@@ -816,7 +888,7 @@ async function publishToRelay(
         }
       });
 
-      ws.addEventListener('error', (err) => {
+      ws.addEventListener('error', (_err) => {
         if (!resolved) {
           clearTimeout(timeout);
           resolved = true;
@@ -932,6 +1004,13 @@ async function verifyZendeskWebhook(
     return false;
   }
 
+  // Option 1: Simple API key header (X-Webhook-Key)
+  const apiKey = request.headers.get('X-Webhook-Key');
+  if (apiKey && apiKey === env.ZENDESK_WEBHOOK_SECRET) {
+    return true;
+  }
+
+  // Option 2: Zendesk native webhook signing (X-Zendesk-Webhook-Signature)
   const signature = request.headers.get('X-Zendesk-Webhook-Signature');
   const timestamp = request.headers.get('X-Zendesk-Webhook-Signature-Timestamp');
 
@@ -959,6 +1038,63 @@ async function verifyZendeskWebhook(
   const expectedSig = btoa(String.fromCharCode(...new Uint8Array(signatureBytes)));
 
   return signature === expectedSig;
+}
+
+// Update Zendesk ticket with action result and internal note
+async function updateZendeskTicket(
+  ticketId: number,
+  success: boolean,
+  actionRequested: string,
+  note: string,
+  env: Env
+): Promise<void> {
+  if (!env.ZENDESK_SUBDOMAIN || !env.ZENDESK_API_TOKEN || !env.ZENDESK_EMAIL) {
+    console.warn('[updateZendeskTicket] Missing Zendesk API credentials, skipping callback');
+    return;
+  }
+
+  if (!env.ZENDESK_FIELD_ACTION_STATUS || !env.ZENDESK_FIELD_ACTION_REQUESTED) {
+    console.warn('[updateZendeskTicket] Missing Zendesk field IDs, skipping callback');
+    return;
+  }
+
+  try {
+    const auth = btoa(`${env.ZENDESK_EMAIL}/token:${env.ZENDESK_API_TOKEN}`);
+    const url = `https://${env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets/${ticketId}`;
+
+    const customFields = [
+      { id: parseInt(env.ZENDESK_FIELD_ACTION_STATUS, 10), value: success ? 'success' : 'failed' },
+    ];
+
+    // Only reset action_requested to 'none' on success
+    if (success) {
+      customFields.push({ id: parseInt(env.ZENDESK_FIELD_ACTION_REQUESTED, 10), value: 'none' });
+    }
+
+    const response = await fetch(url, {
+      method: 'PUT',
+      headers: {
+        'Authorization': `Basic ${auth}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ticket: {
+          custom_fields: customFields,
+          comment: {
+            body: note,
+            public: false,
+          },
+        },
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`[updateZendeskTicket] Failed to update ticket ${ticketId}: ${response.status} - ${errorText}`);
+    }
+  } catch (error) {
+    console.error('[updateZendeskTicket] Error:', error);
+  }
 }
 
 // Route handler for all /api/zendesk/* endpoints
@@ -1053,8 +1189,8 @@ async function handleZendeskWebhook(
       case 'ban_user':
         if (body.nostr_pubkey) {
           // Use relay RPC to ban
-          const pubkey = getPublicKey(secretKey);
-          const httpUrl = env.RELAY_URL.replace(/^wss?:\/\//, 'https://');
+          const _pubkey = getPublicKey(secretKey);
+          const httpUrl = getManagementUrl(env);
           const payload = JSON.stringify({ method: 'banpubkey', params: [body.nostr_pubkey, `Zendesk ticket #${body.ticket_id}`] });
           const payloadHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
           const payloadHashHex = Array.from(new Uint8Array(payloadHash)).map(b => b.toString(16).padStart(2, '0')).join('');
@@ -1093,7 +1229,7 @@ async function handleZendeskWebhook(
 
       case 'allow_user':
         if (body.nostr_pubkey) {
-          const httpUrl = env.RELAY_URL.replace(/^wss?:\/\//, 'https://');
+          const httpUrl = getManagementUrl(env);
           const payload = JSON.stringify({ method: 'allowpubkey', params: [body.nostr_pubkey] });
           const payloadHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
           const payloadHashHex = Array.from(new Uint8Array(payloadHash)).map(b => b.toString(16).padStart(2, '0')).join('');
@@ -1133,6 +1269,41 @@ async function handleZendeskWebhook(
         body.agent_email || null,
         `zendesk:${body.ticket_id}`
       ).run();
+    }
+
+    // Callback to Zendesk to update ticket status and add internal note
+    // TODO: allow_user case skipped until semantics of allow_user vs unban are clarified
+    if (body.action_requested !== 'allow_user') {
+      const agentInfo = body.agent_email ? ` by ${body.agent_email}` : '';
+      let zendeskNote: string;
+
+      if (actionResult.success) {
+        switch (body.action_requested) {
+          case 'ban_user':
+            zendeskNote = `✅ Ban executed successfully for pubkey ${body.nostr_pubkey}${agentInfo}`;
+            break;
+          case 'delete_event':
+            zendeskNote = `✅ Delete event executed successfully for event ${body.nostr_event_id}${agentInfo}`;
+            break;
+          default:
+            zendeskNote = `✅ Action "${body.action_requested}" executed successfully${agentInfo}`;
+        }
+      } else {
+        switch (body.action_requested) {
+          case 'ban_user':
+            zendeskNote = `❌ Ban failed for pubkey ${body.nostr_pubkey}: ${actionResult.error}`;
+            break;
+          case 'delete_event':
+            zendeskNote = `❌ Delete event failed for event ${body.nostr_event_id}: ${actionResult.error}`;
+            break;
+          default:
+            zendeskNote = `❌ Action "${body.action_requested}" failed: ${actionResult.error}`;
+        }
+      }
+
+      // Fire-and-forget: don't await, don't let errors break the response
+      updateZendeskTicket(body.ticket_id, actionResult.success, body.action_requested, zendeskNote, env)
+        .catch((err) => console.error('[handleZendeskWebhook] Zendesk callback error:', err));
     }
 
     return new Response(JSON.stringify({
@@ -1191,7 +1362,7 @@ async function handleZendeskContext(
     if (pubkey) {
       try {
         const secretKey = getSecretKey(env);
-        const httpUrl = env.RELAY_URL.replace(/^wss?:\/\//, 'https://');
+        const httpUrl = getManagementUrl(env);
         const payload = JSON.stringify({ method: 'listbannedpubkeys', params: [] });
         const payloadHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
         const payloadHashHex = Array.from(new Uint8Array(payloadHash)).map(b => b.toString(16).padStart(2, '0')).join('');
@@ -1264,7 +1435,7 @@ async function handleZendeskAction(
     switch (body.action) {
       case 'ban_user':
         if (body.pubkey) {
-          const httpUrl = env.RELAY_URL.replace(/^wss?:\/\//, 'https://');
+          const httpUrl = getManagementUrl(env);
           const payload = JSON.stringify({ method: 'banpubkey', params: [body.pubkey, reason] });
           const payloadHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
           const payloadHashHex = Array.from(new Uint8Array(payloadHash)).map(b => b.toString(16).padStart(2, '0')).join('');
@@ -1293,7 +1464,7 @@ async function handleZendeskAction(
 
       case 'allow_user':
         if (body.pubkey) {
-          const httpUrl = env.RELAY_URL.replace(/^wss?:\/\//, 'https://');
+          const httpUrl = getManagementUrl(env);
           const payload = JSON.stringify({ method: 'allowpubkey', params: [body.pubkey] });
           const payloadHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
           const payloadHashHex = Array.from(new Uint8Array(payloadHash)).map(b => b.toString(16).padStart(2, '0')).join('');

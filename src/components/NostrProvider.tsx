@@ -1,8 +1,7 @@
-import React, { useRef } from 'react';
+import React, { useMemo } from 'react';
 import { NostrEvent, NPool, NRelay1 } from '@nostrify/nostrify';
 import { NostrContext } from '@nostrify/react';
-
-const RELAY_URL = "wss://relay.divine.video";
+import { useAppContext } from '@/hooks/useAppContext';
 
 interface NostrProviderProps {
   children: React.ReactNode;
@@ -10,27 +9,26 @@ interface NostrProviderProps {
 
 const NostrProvider: React.FC<NostrProviderProps> = (props) => {
   const { children } = props;
+  const { config } = useAppContext();
+  const relayUrl = config.relayUrl;
 
-  // Create NPool instance only once
-  const pool = useRef<NPool | undefined>(undefined);
-
-  // Initialize NPool only once
-  if (!pool.current) {
-    pool.current = new NPool({
+  // Recreate NPool when relay URL changes
+  const pool = useMemo(() => {
+    return new NPool({
       open(url: string) {
         return new NRelay1(url);
       },
       reqRouter(filters) {
-        return new Map([[RELAY_URL, filters]]);
+        return new Map([[relayUrl, filters]]);
       },
       eventRouter(_event: NostrEvent) {
-        return [RELAY_URL];
+        return [relayUrl];
       },
     });
-  }
+  }, [relayUrl]);
 
   return (
-    <NostrContext.Provider value={{ nostr: pool.current }}>
+    <NostrContext.Provider value={{ nostr: pool }}>
       {children}
     </NostrContext.Provider>
   );

@@ -30,13 +30,14 @@ import {
   Clock,
   XCircle,
   Loader2,
+  ExternalLink,
 } from "lucide-react";
-import {
-  getAIDetectionResult,
-  submitAIDetection,
-  type AIDetectionResult,
-  type AIVerdict,
-  type AIProviderResult,
+import { useAdminApi } from "@/hooks/useAdminApi";
+import { useToast } from "@/hooks/useToast";
+import type {
+  AIDetectionResult,
+  AIVerdict,
+  AIProviderResult,
 } from "@/lib/adminApi";
 import { CopyableId } from "@/components/CopyableId";
 
@@ -87,16 +88,31 @@ function extractSha256FromTags(tags: string[][]): string | null {
 
 // Extract video URL from event tags
 function extractVideoUrlFromTags(tags: string[][]): string | null {
-  // Check imeta tags for video URLs
+  const videoExtensions = /\.(mp4|webm|mov|m4v|avi|mkv)(\?|$)/i;
+  const videoMimeTypes = /^video\//i;
+
+  // Check imeta tags first (most reliable - can have mime type)
   for (const tag of tags) {
     if (tag[0] === 'imeta') {
+      let url: string | undefined;
+      let mimeType: string | undefined;
+
       for (let i = 1; i < tag.length; i++) {
         const part = tag[i];
         if (part.startsWith('url ')) {
-          const url = part.slice(4);
-          if (/\.(mp4|webm|mov|m4v|avi)(\?|$)/i.test(url)) {
-            return url;
-          }
+          url = part.slice(4);
+        } else if (part.startsWith('m ')) {
+          mimeType = part.slice(2);
+        }
+      }
+
+      // Return if we have a URL and it's a video (by mime type or extension)
+      if (url) {
+        if (mimeType && videoMimeTypes.test(mimeType)) {
+          return url;
+        }
+        if (videoExtensions.test(url)) {
+          return url;
         }
       }
     }
@@ -106,7 +122,7 @@ function extractVideoUrlFromTags(tags: string[][]): string | null {
   for (const tag of tags) {
     if (tag[0] === 'url' && tag[1]) {
       const url = tag[1];
-      if (/\.(mp4|webm|mov|m4v|avi)(\?|$)/i.test(url)) {
+      if (videoExtensions.test(url)) {
         return url;
       }
     }
@@ -126,6 +142,8 @@ const PROVIDER_NAMES: Record<string, string> = {
   hive: 'Hive AI',
   sensity: 'Sensity',
 };
+
+const REALNESS_DASHBOARD_URL = 'https://realness.admin.divine.video';
 
 function formatDate(dateStr: string | undefined): string {
   if (!dateStr) return 'Unknown';
@@ -249,17 +267,19 @@ export function AIDetectionReport({
   const [isExpanded, setIsExpanded] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const queryClient = useQueryClient();
+  const { toast } = useToast();
+  const { getAIDetectionResult, submitAIDetection } = useAdminApi();
 
   const sha256 = providedSha256 || (eventTags ? extractSha256FromTags(eventTags) : null);
   const videoUrl = providedVideoUrl || (eventTags ? extractVideoUrlFromTags(eventTags) : null);
 
   const { data: result, isLoading, error, refetch } = useQuery({
-    queryKey: ['ai-detection', sha256],
+    queryKey: ['ai-detection', eventId],
     queryFn: async (): Promise<AIDetectionResult | null> => {
-      if (!sha256) return null;
-      return getAIDetectionResult(sha256);
+      if (!eventId) return null;
+      return getAIDetectionResult(eventId);
     },
-    enabled: !!sha256,
+    enabled: !!eventId,
     staleTime: 30 * 1000, // 30 seconds - AI detection results change during processing
     refetchInterval: (query) => {
       // Auto-refresh while processing
@@ -272,16 +292,32 @@ export function AIDetectionReport({
   });
 
   const handleTriggerCheck = async () => {
-    if (!sha256 || !videoUrl) return;
+    if (!sha256 || !videoUrl || !eventId) return;
 
     setIsSubmitting(true);
     try {
       const submitResult = await submitAIDetection(videoUrl, sha256, eventId);
       if (submitResult) {
         // Invalidate and refetch
-        queryClient.invalidateQueries({ queryKey: ['ai-detection', sha256] });
+        queryClient.invalidateQueries({ queryKey: ['ai-detection', eventId] });
         refetch();
+        toast({
+          title: "Analysis submitted",
+          description: "AI detection is processing. Results will appear shortly.",
+        });
+      } else {
+        toast({
+          variant: "destructive",
+          title: "Analysis failed",
+          description: "Could not submit video for AI detection. Check console for details.",
+        });
       }
+    } catch (error) {
+      toast({
+        variant: "destructive",
+        title: "Analysis failed",
+        description: error instanceof Error ? error.message : "Unknown error occurred",
+      });
     } finally {
       setIsSubmitting(false);
     }
@@ -323,23 +359,39 @@ export function AIDetectionReport({
         <CardContent className="py-2 px-3">
           <div className="flex items-center justify-between">
             <p className="text-xs text-muted-foreground">Not analyzed yet</p>
-            {videoUrl && (
+            <div className="flex items-center gap-2">
+              {videoUrl && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleTriggerCheck}
+                  disabled={isSubmitting}
+                  className="h-7 text-xs"
+                >
+                  {isSubmitting ? (
+                    <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                  ) : (
+                    <RefreshCw className="h-3 w-3 mr-1" />
+                  )}
+                  Analyze
+                </Button>
+              )}
               <Button
-                variant="outline"
+                variant="ghost"
                 size="sm"
-                onClick={handleTriggerCheck}
-                disabled={isSubmitting}
+                asChild
                 className="h-7 text-xs"
               >
-                {isSubmitting ? (
-                  <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                ) : (
-                  <RefreshCw className="h-3 w-3 mr-1" />
-                )}
-                Analyze
+                <a href={REALNESS_DASHBOARD_URL} target="_blank" rel="noopener noreferrer">
+                  <ExternalLink className="h-3 w-3 mr-1" />
+                  Realness
+                </a>
               </Button>
-            )}
+            </div>
           </div>
+          {eventId && (
+            <CopyableId value={eventId} type="hex" label="Event ID:" size="xs" className="mt-2" />
+          )}
           <CopyableId value={sha256} type="hash" label="sha256:" size="xs" className="mt-2" />
         </CardContent>
       </Card>
@@ -505,24 +557,41 @@ export function AIDetectionReport({
               <span>Unknown</span>
             )}
           </div>
-          {videoUrl && !isProcessing && (
+          <div className="flex items-center gap-1">
+            {videoUrl && !isProcessing && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={handleTriggerCheck}
+                disabled={isSubmitting}
+                className="h-6 text-xs px-2"
+                title="Re-analyze"
+              >
+                {isSubmitting ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-3 w-3" />
+                )}
+              </Button>
+            )}
             <Button
               variant="ghost"
               size="sm"
-              onClick={handleTriggerCheck}
-              disabled={isSubmitting}
+              asChild
               className="h-6 text-xs px-2"
+              title="Open in Realness dashboard"
             >
-              {isSubmitting ? (
-                <Loader2 className="h-3 w-3 animate-spin" />
-              ) : (
-                <RefreshCw className="h-3 w-3" />
-              )}
+              <a href={REALNESS_DASHBOARD_URL} target="_blank" rel="noopener noreferrer">
+                <ExternalLink className="h-3 w-3" />
+              </a>
             </Button>
-          )}
+          </div>
         </div>
 
-        {/* Hash reference */}
+        {/* Event and hash references */}
+        {eventId && (
+          <CopyableId value={eventId} type="hex" label="Event ID:" size="xs" />
+        )}
         <CopyableId value={sha256} type="hash" label="sha256:" size="xs" />
       </CardContent>
     </Card>

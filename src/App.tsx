@@ -15,7 +15,7 @@ import AppRouter from './AppRouter';
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      refetchOnWindowFocus: false,
+      refetchOnWindowFocus: true,
       staleTime: 60000, // 1 minute
       gcTime: Infinity,
     },
@@ -24,7 +24,8 @@ const queryClient = new QueryClient({
 
 const defaultConfig: AppConfig = {
   theme: "light",
-  relayUrl: "wss://relay.divine.video",
+  relayUrl: import.meta.env.VITE_RELAY_URL || "wss://relay.divine.video",
+  apiUrl: import.meta.env.VITE_WORKER_URL || "https://api-relay.divine.video",
 };
 
 export function App() {

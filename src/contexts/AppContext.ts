@@ -7,6 +7,8 @@ export interface AppConfig {
   theme: Theme;
   /** Selected relay URL */
   relayUrl: string;
+  /** API worker URL for moderation actions */
+  apiUrl: string;
 }
 
 export interface AppContextType {

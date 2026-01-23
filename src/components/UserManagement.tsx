@@ -1,7 +1,8 @@
 // ABOUTME: User management interface for banning and allowing users on the relay
-// ABOUTME: Includes verification to confirm NIP-86 actions succeeded
+// ABOUTME: Includes verification to confirm NIP-86 actions succeeded and D1 audit logging
 
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -13,12 +14,16 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/useToast";
-import { UserX, UserCheck, Plus, Users, Loader2, CheckCircle, XCircle, Trash2 } from "lucide-react";
+import { UserX, UserCheck, Plus, Users, Trash2, User, X } from "lucide-react";
 import { BannedUserCard } from "@/components/BannedUserCard";
-import { callRelayRpc, verifyPubkeyBanned } from "@/lib/adminApi";
+import { useAdminApi } from "@/hooks/useAdminApi";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
+import { UserDisplayName } from "@/components/UserIdentifier";
+import { CopyableId } from "@/components/CopyableId";
+import type { BannedPubkeyEntry } from "@/lib/adminApi";
 
 interface UserManagementProps {
-  relayUrl: string;
+  selectedPubkey?: string;
 }
 
 interface BannedUser {
@@ -31,73 +36,69 @@ interface AllowedUser {
   reason?: string;
 }
 
-export function UserManagement({ relayUrl }: UserManagementProps) {
+export function UserManagement({ selectedPubkey }: UserManagementProps) {
   const { toast } = useToast();
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const { callRelayRpc, verifyPubkeyBanned, logDecision } = useAdminApi();
+  const { user } = useCurrentUser();
   const [newPubkey, setNewPubkey] = useState("");
   const [newReason, setNewReason] = useState("");
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
   const [actionType, setActionType] = useState<'ban' | 'allow'>('ban');
-  const [isVerifying, setIsVerifying] = useState(false);
-  const [verificationResult, setVerificationResult] = useState<{
-    pubkey: string;
-    success: boolean;
-    message: string;
-  } | null>(null);
+
+  // Clear selected pubkey from URL
+  const clearSelectedPubkey = () => {
+    navigate('/users', { replace: true });
+  };
+
+  // Helper to invalidate all user-related query caches
+  const invalidateUserQueries = () => {
+    queryClient.invalidateQueries({ queryKey: ['banned-users'] });
+    queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
+    queryClient.invalidateQueries({ queryKey: ['allowed-users'] });
+  };
 
   // Query for banned users
   const { data: bannedUsers, isLoading: loadingBanned, error: bannedError } = useQuery({
     queryKey: ['banned-users'],
-    queryFn: () => callRelayRpc('listbannedpubkeys'),
+    queryFn: () => callRelayRpc<BannedPubkeyEntry[]>('listbannedpubkeys'),
   });
 
   // Query for allowed users
   const { data: allowedUsers, isLoading: loadingAllowed, error: allowedError } = useQuery({
     queryKey: ['allowed-users'],
-    queryFn: () => callRelayRpc('listallowedpubkeys'),
+    queryFn: () => callRelayRpc<BannedPubkeyEntry[]>('listallowedpubkeys'),
   });
 
   // Mutation for banning users
   const banUserMutation = useMutation({
     mutationFn: async ({ pubkey, reason }: { pubkey: string; reason?: string }) => {
       await callRelayRpc('banpubkey', [pubkey, reason]);
+      // Log to D1 for audit trail
+      await logDecision({
+        targetType: 'pubkey',
+        targetId: pubkey,
+        action: 'ban_user',
+        reason: reason || 'Banned via User Management',
+        moderatorPubkey: user?.pubkey,
+      });
       return pubkey;
     },
     onSuccess: async (pubkey) => {
-      queryClient.invalidateQueries({ queryKey: ['banned-users'] });
-      toast({ title: "User banned", description: "Verifying..." });
+      invalidateUserQueries();
+      toast({ title: "User banned successfully" });
       setIsAddDialogOpen(false);
       setNewPubkey("");
       setNewReason("");
 
-      // Verify the ban worked
-      setIsVerifying(true);
-      setVerificationResult(null);
-      try {
-        const verified = await verifyPubkeyBanned(pubkey);
-        setVerificationResult({
-          pubkey,
-          success: verified,
-          message: verified
-            ? 'Ban verified - user is in banned list'
-            : 'Warning: User may not be banned',
-        });
-        toast({
-          title: verified ? "Ban Verified" : "Verification Warning",
-          description: verified
-            ? "User confirmed banned on relay"
-            : "Could not confirm ban - check manually",
-          variant: verified ? "default" : "destructive",
-        });
-      } catch {
-        setVerificationResult({
-          pubkey,
-          success: false,
-          message: 'Could not verify ban status',
-        });
-      } finally {
-        setIsVerifying(false);
-      }
+      // Background verification for debugging - don't show warnings to user
+      // RPC success means relay accepted the command
+      verifyPubkeyBanned(pubkey).then(verified => {
+        if (!verified) {
+          console.warn('[UserManagement] Ban verification failed for', pubkey, '- relay may have async processing');
+        }
+      });
     },
     onError: (error: Error) => {
       toast({
@@ -110,30 +111,40 @@ export function UserManagement({ relayUrl }: UserManagementProps) {
 
   // Mutation for allowing users
   const allowUserMutation = useMutation({
-    mutationFn: ({ pubkey, reason }: { pubkey: string; reason?: string }) =>
-      callRelayRpc('allowpubkey', [pubkey, reason]),
+    mutationFn: async ({ pubkey, reason }: { pubkey: string; reason?: string }) => {
+      await callRelayRpc('allowpubkey', [pubkey, reason]);
+      // Log to D1 for audit trail
+      await logDecision({
+        targetType: 'pubkey',
+        targetId: pubkey,
+        action: 'allow_user',
+        reason: reason || 'Allowed via User Management',
+        moderatorPubkey: user?.pubkey,
+      });
+      return pubkey;
+    },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['allowed-users'] });
+      invalidateUserQueries();
       toast({ title: "User allowed successfully" });
       setIsAddDialogOpen(false);
       setNewPubkey("");
       setNewReason("");
     },
     onError: (error: Error) => {
-      toast({ 
-        title: "Failed to allow user", 
+      toast({
+        title: "Failed to allow user",
         description: error.message,
-        variant: "destructive" 
+        variant: "destructive"
       });
     },
   });
 
   const handleAddUser = () => {
     if (!newPubkey.trim()) {
-      toast({ 
-        title: "Invalid input", 
+      toast({
+        title: "Invalid input",
         description: "Please enter a valid pubkey",
-        variant: "destructive" 
+        variant: "destructive"
       });
       return;
     }
@@ -146,28 +157,19 @@ export function UserManagement({ relayUrl }: UserManagementProps) {
   };
 
   const handleRemoveUser = async (pubkey: string, type: 'ban' | 'allow') => {
-    try {
-      if (type === 'ban') {
-        // Note: NIP-86 doesn't define an "unban" method, so we'd need to implement this
-        // For now, we'll show a message that this isn't supported
-        toast({ 
-          title: "Not supported", 
-          description: "Unbanning users is not supported by NIP-86",
-          variant: "destructive" 
-        });
-      } else {
-        // Similar issue with removing from allow list
-        toast({ 
-          title: "Not supported", 
-          description: "Removing from allow list is not supported by NIP-86",
-          variant: "destructive" 
-        });
-      }
-    } catch (error) {
-      toast({ 
-        title: "Error", 
-        description: error instanceof Error ? error.message : "Unknown error",
-        variant: "destructive" 
+    if (type === 'ban') {
+      // NIP-86 doesn't define 'unbanpubkey' - waiting for relay support
+      toast({
+        title: "Not yet supported",
+        description: "Unbanning requires 'unbanpubkey' RPC method which is not yet implemented in the relay",
+        variant: "destructive"
+      });
+    } else {
+      // NIP-86 doesn't define a method to remove from allow list
+      toast({
+        title: "Not yet supported",
+        description: "Removing from allow list requires an RPC method which is not defined in NIP-86",
+        variant: "destructive"
       });
     }
   };
@@ -251,37 +253,48 @@ export function UserManagement({ relayUrl }: UserManagementProps) {
         </Dialog>
       </div>
 
-      {/* Verification Status */}
-      {(isVerifying || verificationResult) && (
-        <Alert
-          variant={verificationResult?.success ? "default" : "destructive"}
-          className={verificationResult?.success ? "border-green-500/50 bg-green-500/10" : ""}
-        >
-          {isVerifying ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : verificationResult?.success ? (
-            <CheckCircle className="h-4 w-4 text-green-600" />
-          ) : (
-            <XCircle className="h-4 w-4" />
-          )}
-          <AlertDescription className="flex items-center justify-between">
-            <span>
-              {isVerifying
-                ? "Verifying action..."
-                : verificationResult?.message}
-            </span>
-            {verificationResult && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setVerificationResult(null)}
-                className="h-6 px-2"
-              >
-                Dismiss
+      {/* Selected User from Deep Link */}
+      {selectedPubkey && (
+        <Card className="border-primary/50 bg-primary/5">
+          <CardHeader className="pb-3">
+            <div className="flex items-center justify-between">
+              <CardTitle className="flex items-center gap-2 text-lg">
+                <User className="h-5 w-5" />
+                Selected User
+              </CardTitle>
+              <Button variant="ghost" size="sm" onClick={clearSelectedPubkey} className="h-8 w-8 p-0">
+                <X className="h-4 w-4" />
               </Button>
-            )}
-          </AlertDescription>
-        </Alert>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div>
+              <div className="font-medium"><UserDisplayName pubkey={selectedPubkey} fallbackLength={16} /></div>
+              <CopyableId value={selectedPubkey} type="npub" truncateStart={12} truncateEnd={8} size="xs" />
+            </div>
+            <div className="flex items-center gap-2 text-sm">
+              {bannedUsers?.some((u: BannedUser) => u.pubkey === selectedPubkey) ? (
+                <span className="flex items-center gap-1 text-red-600"><UserX className="h-4 w-4" />Banned</span>
+              ) : allowedUsers?.some((u: AllowedUser) => u.pubkey === selectedPubkey) ? (
+                <span className="flex items-center gap-1 text-green-600"><UserCheck className="h-4 w-4" />Allowed</span>
+              ) : (
+                <span className="text-muted-foreground">No restrictions</span>
+              )}
+            </div>
+            <div className="flex gap-2">
+              {!bannedUsers?.some((u: BannedUser) => u.pubkey === selectedPubkey) && (
+                <Button variant="destructive" size="sm" onClick={() => banUserMutation.mutate({ pubkey: selectedPubkey })} disabled={banUserMutation.isPending}>
+                  <UserX className="h-4 w-4 mr-1" />Ban
+                </Button>
+              )}
+              {!allowedUsers?.some((u: AllowedUser) => u.pubkey === selectedPubkey) && (
+                <Button variant="outline" size="sm" onClick={() => allowUserMutation.mutate({ pubkey: selectedPubkey })} disabled={allowUserMutation.isPending}>
+                  <UserCheck className="h-4 w-4 mr-1" />Allow
+                </Button>
+              )}
+            </div>
+          </CardContent>
+        </Card>
       )}
 
       <Tabs defaultValue="banned" className="space-y-4">

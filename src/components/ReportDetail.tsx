@@ -3,7 +3,6 @@
 
 import { useState, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
-import { nip19 } from "nostr-tools";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -35,8 +34,8 @@ import { ReporterList, ReporterInline } from "@/components/ReporterCard";
 import { AISummary } from "@/components/AISummary";
 import { LabelPublisherInline } from "@/components/LabelPublisher";
 import { ThreadModal } from "@/components/ThreadModal";
-import { banPubkey, deleteEvent, markAsReviewed, moderateMedia, unblockMedia, extractMediaHashes, logDecision, deleteDecisions, verifyModerationAction, verifyPubkeyBanned, verifyEventDeleted, verifyMediaBlocked, type ResolutionStatus, type ModerationAction } from "@/lib/adminApi";
-import { useAppContext } from "@/hooks/useAppContext";
+import { useAdminApi } from "@/hooks/useAdminApi";
+import { extractMediaHashes, type ResolutionStatus, type ModerationAction } from "@/lib/adminApi";
 import { useMediaStatus } from "@/hooks/useMediaStatus";
 import { useDecisionLog } from "@/hooks/useDecisionLog";
 import { HiveAIReport } from "@/components/HiveAIReport";
@@ -74,7 +73,11 @@ function getReportTarget(event: NostrEvent): { type: 'event' | 'pubkey'; value: 
 export function ReportDetail({ report, allReportsForTarget, allReports = [], onDismiss }: ReportDetailProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const { config } = useAppContext();
+  const {
+    banPubkey, deleteEvent, markAsReviewed, moderateMedia, unblockMedia,
+    logDecision, deleteDecisions, verifyModerationAction, verifyPubkeyBanned,
+    verifyEventDeleted, verifyMediaBlocked,
+  } = useAdminApi();
   const navigate = useNavigate();
   const [showThreadModal, setShowThreadModal] = useState(false);
   const [showLabelForm, setShowLabelForm] = useState(false);
@@ -121,7 +124,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
 
       // Check if event is deleted
       if (context.target?.type === 'event') {
-        results.eventDeleted = await verifyEventDeleted(context.target.value, config.relayUrl);
+        results.eventDeleted = await verifyEventDeleted(context.target.value);
       }
 
       setLiveStatus({
@@ -155,9 +158,10 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     context.target?.type === 'event' ? context.reportedUser.pubkey : null
   );
 
-  // Combined status - user is banned if relay says so OR if we have a ban decision logged
-  const isUserBanned = moderationStatus.isBanned || decisionLog.isBanned || pubkeyDecisionLog.isBanned;
-  const isEventDeleted = moderationStatus.isDeleted || decisionLog.isDeleted;
+  // Relay is source of truth for current ban/delete status
+  // D1 decisions are audit log only, not status indicators
+  const isUserBanned = moderationStatus.isBanned;
+  const isEventDeleted = moderationStatus.isDeleted;
   const isResolved = decisionLog.hasDecisions || pubkeyDecisionLog.hasDecisions || isUserBanned || isEventDeleted;
 
   // Find related reports: reports on this user AND reports on their events
@@ -342,7 +346,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
       setIsVerifying(true);
       setVerificationResult(null);
       try {
-        const isDeleted = await verifyEventDeleted(eventId, config.relayUrl);
+        const isDeleted = await verifyEventDeleted(eventId);
         setVerificationResult({
           type: 'delete',
           success: isDeleted,
@@ -624,8 +628,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
       try {
         const verification = await verifyModerationAction(
           variables.eventId,
-          variables.hashes,
-          config.relayUrl
+          variables.hashes
         );
 
         if (verification.allSuccessful) {

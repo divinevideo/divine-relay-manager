@@ -31,6 +31,9 @@ import {
 const mockFetch = vi.fn();
 global.fetch = mockFetch;
 
+// Test API URL
+const API_URL = 'https://test-api.example.com';
+
 describe('adminApi', () => {
   beforeEach(() => {
     mockFetch.mockReset();
@@ -43,10 +46,10 @@ describe('adminApi', () => {
         json: async () => ({ success: true, pubkey: 'abc123' }),
       });
 
-      await getWorkerInfo();
+      await getWorkerInfo(API_URL);
 
       expect(mockFetch).toHaveBeenCalledWith(
-        expect.stringContaining('/api/info'),
+        `${API_URL}/api/info`,
         expect.objectContaining({
           method: 'GET',
           headers: { 'Content-Type': 'application/json' },
@@ -61,7 +64,7 @@ describe('adminApi', () => {
         json: async () => ({ success: true }),
       });
 
-      await publishEvent(event);
+      await publishEvent(API_URL, event);
 
       expect(mockFetch).toHaveBeenCalledWith(
         expect.stringContaining('/api/publish'),
@@ -81,7 +84,7 @@ describe('adminApi', () => {
         json: async () => ({}),
       });
 
-      await expect(getWorkerInfo()).rejects.toThrow('HTTP 404: Not Found');
+      await expect(getWorkerInfo(API_URL)).rejects.toThrow('HTTP 404: Not Found');
     });
 
     it('should parse JSON response', async () => {
@@ -91,7 +94,7 @@ describe('adminApi', () => {
         json: async () => mockData,
       });
 
-      const result = await getWorkerInfo();
+      const result = await getWorkerInfo(API_URL);
 
       expect(result).toEqual(mockData);
     });
@@ -104,7 +107,7 @@ describe('adminApi', () => {
         json: async () => ({ success: true, pubkey: 'abc' }),
       });
 
-      await getWorkerInfo();
+      await getWorkerInfo(API_URL);
 
       expect(mockFetch).toHaveBeenCalledWith(
         expect.stringContaining('/api/info'),
@@ -119,7 +122,7 @@ describe('adminApi', () => {
         json: async () => mockInfo,
       });
 
-      const result = await getWorkerInfo();
+      const result = await getWorkerInfo(API_URL);
 
       expect(result).toEqual(mockInfo);
     });
@@ -139,7 +142,7 @@ describe('adminApi', () => {
         json: async () => ({ success: true, event: { id: 'event123' } }),
       });
 
-      await publishEvent(event);
+      await publishEvent(API_URL, event);
 
       expect(mockFetch).toHaveBeenCalledWith(
         expect.stringContaining('/api/publish'),
@@ -156,7 +159,7 @@ describe('adminApi', () => {
         json: async () => ({ success: false, error: 'Invalid event' }),
       });
 
-      await expect(publishEvent({ kind: 1, content: 'test' })).rejects.toThrow('Invalid event');
+      await expect(publishEvent(API_URL, { kind: 1, content: 'test' })).rejects.toThrow('Invalid event');
     });
 
     it('should return successful response', async () => {
@@ -166,7 +169,7 @@ describe('adminApi', () => {
         json: async () => mockResponse,
       });
 
-      const result = await publishEvent({ kind: 1, content: 'test' });
+      const result = await publishEvent(API_URL, { kind: 1, content: 'test' });
 
       expect(result).toEqual(mockResponse);
     });
@@ -179,7 +182,7 @@ describe('adminApi', () => {
         json: async () => ({ success: true }),
       });
 
-      await moderateAction({ action: 'delete_event', eventId: 'event123' });
+      await moderateAction(API_URL, { action: 'delete_event', eventId: 'event123' });
 
       expect(mockFetch).toHaveBeenCalledWith(
         expect.stringContaining('/api/moderate'),
@@ -199,7 +202,7 @@ describe('adminApi', () => {
         json: async () => ({ success: true }),
       });
 
-      await moderateAction(params);
+      await moderateAction(API_URL, params);
 
       expect(mockFetch).toHaveBeenCalledWith(
         expect.anything(),
@@ -215,7 +218,7 @@ describe('adminApi', () => {
         json: async () => ({ success: false, error: 'Unauthorized' }),
       });
 
-      await expect(moderateAction({ action: 'delete_event', eventId: 'event123' })).rejects.toThrow(
+      await expect(moderateAction(API_URL, { action: 'delete_event', eventId: 'event123' })).rejects.toThrow(
         'Unauthorized'
       );
     });
@@ -228,7 +231,7 @@ describe('adminApi', () => {
         json: async () => ({ success: true }),
       });
 
-      await deleteEvent('event123', 'Inappropriate content');
+      await deleteEvent(API_URL, 'event123', 'Inappropriate content');
 
       expect(mockFetch).toHaveBeenCalledWith(
         expect.stringContaining('/api/moderate'),
@@ -250,7 +253,7 @@ describe('adminApi', () => {
         json: async () => ({ success: true }),
       });
 
-      await banPubkeyViaModerate('pubkey123', 'Spam bot');
+      await banPubkeyViaModerate(API_URL, 'pubkey123', 'Spam bot');
 
       expect(mockFetch).toHaveBeenCalledWith(
         expect.stringContaining('/api/moderate'),
@@ -272,7 +275,7 @@ describe('adminApi', () => {
         json: async () => ({ success: true }),
       });
 
-      await allowPubkey('pubkey123');
+      await allowPubkey(API_URL, 'pubkey123');
 
       expect(mockFetch).toHaveBeenCalledWith(
         expect.stringContaining('/api/moderate'),
@@ -293,7 +296,7 @@ describe('adminApi', () => {
         json: async () => ({ success: true, result: 'done' }),
       });
 
-      await callRelayRpc('testmethod', ['param1', 123]);
+      await callRelayRpc(API_URL, 'testmethod', ['param1', 123]);
 
       expect(mockFetch).toHaveBeenCalledWith(
         expect.stringContaining('/api/relay-rpc'),
@@ -310,7 +313,7 @@ describe('adminApi', () => {
         json: async () => ({ success: false, error: 'Method not found' }),
       });
 
-      await expect(callRelayRpc('invalidmethod')).rejects.toThrow('Method not found');
+      await expect(callRelayRpc(API_URL, 'invalidmethod')).rejects.toThrow('Method not found');
     });
 
     it('should return result from successful RPC call', async () => {
@@ -319,7 +322,7 @@ describe('adminApi', () => {
         json: async () => ({ success: true, result: ['pubkey1', 'pubkey2'] }),
       });
 
-      const result = await callRelayRpc<string[]>('listbannedpubkeys');
+      const result = await callRelayRpc<string[]>(API_URL, 'listbannedpubkeys');
 
       expect(result).toEqual(['pubkey1', 'pubkey2']);
     });
@@ -332,7 +335,7 @@ describe('adminApi', () => {
         json: async () => ({ success: true, result: null }),
       });
 
-      await banPubkey('pubkey123', 'Spam');
+      await banPubkey(API_URL, 'pubkey123', 'Spam');
 
       expect(mockFetch).toHaveBeenCalledWith(
         expect.stringContaining('/api/relay-rpc'),
@@ -348,7 +351,7 @@ describe('adminApi', () => {
         json: async () => ({ success: true, result: null }),
       });
 
-      await banPubkey('pubkey123');
+      await banPubkey(API_URL, 'pubkey123');
 
       expect(mockFetch).toHaveBeenCalledWith(
         expect.anything(),
@@ -360,18 +363,18 @@ describe('adminApi', () => {
   });
 
   describe('unbanPubkey', () => {
-    it('should call allowpubkey RPC method', async () => {
+    it('should call unbanpubkey RPC method', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => ({ success: true, result: null }),
       });
 
-      await unbanPubkey('pubkey123');
+      await unbanPubkey(API_URL, 'pubkey123');
 
       expect(mockFetch).toHaveBeenCalledWith(
         expect.stringContaining('/api/relay-rpc'),
         expect.objectContaining({
-          body: JSON.stringify({ method: 'allowpubkey', params: ['pubkey123'] }),
+          body: JSON.stringify({ method: 'unbanpubkey', params: ['pubkey123'] }),
         })
       );
     });
@@ -384,7 +387,7 @@ describe('adminApi', () => {
         json: async () => ({ success: true, result: ['pubkey1', 'pubkey2'] }),
       });
 
-      const result = await listBannedPubkeys();
+      const result = await listBannedPubkeys(API_URL);
 
       expect(mockFetch).toHaveBeenCalledWith(
         expect.stringContaining('/api/relay-rpc'),
@@ -392,7 +395,8 @@ describe('adminApi', () => {
           body: JSON.stringify({ method: 'listbannedpubkeys', params: [] }),
         })
       );
-      expect(result).toEqual(['pubkey1', 'pubkey2']);
+      // listBannedPubkeys normalizes string arrays to objects
+      expect(result).toEqual([{ pubkey: 'pubkey1' }, { pubkey: 'pubkey2' }]);
     });
   });
 
@@ -408,7 +412,7 @@ describe('adminApi', () => {
         json: async () => ({ success: true, result: bannedEvents }),
       });
 
-      const result = await listBannedEvents();
+      const result = await listBannedEvents(API_URL);
 
       expect(mockFetch).toHaveBeenCalledWith(
         expect.stringContaining('/api/relay-rpc'),
@@ -435,7 +439,7 @@ describe('adminApi', () => {
         comment: 'Graphic content',
       };
 
-      await publishLabel(params);
+      await publishLabel(API_URL, params);
 
       expect(mockFetch).toHaveBeenCalledWith(
         expect.stringContaining('/api/publish'),
@@ -460,7 +464,7 @@ describe('adminApi', () => {
         json: async () => ({ success: true }),
       });
 
-      await publishLabel({
+      await publishLabel(API_URL, {
         targetType: 'pubkey',
         targetValue: 'pubkey123',
         namespace: 'test-namespace',
@@ -477,7 +481,7 @@ describe('adminApi', () => {
         json: async () => ({ success: true }),
       });
 
-      await publishLabel({
+      await publishLabel(API_URL, {
         targetType: 'event',
         targetValue: 'event123',
         namespace: 'moderation',
@@ -495,7 +499,7 @@ describe('adminApi', () => {
         json: async () => ({ success: true }),
       });
 
-      await publishLabel({
+      await publishLabel(API_URL, {
         targetType: 'event',
         targetValue: 'event123',
         namespace: 'test',
@@ -512,7 +516,7 @@ describe('adminApi', () => {
         json: async () => ({ success: true }),
       });
 
-      await publishLabel({
+      await publishLabel(API_URL, {
         targetType: 'pubkey',
         targetValue: 'pubkey123',
         namespace: 'test',
@@ -529,7 +533,7 @@ describe('adminApi', () => {
         json: async () => ({ success: true }),
       });
 
-      await publishLabel({
+      await publishLabel(API_URL, {
         targetType: 'event',
         targetValue: 'event123',
         namespace: 'test',
@@ -548,7 +552,7 @@ describe('adminApi', () => {
         json: async () => ({ success: true }),
       });
 
-      const result = await publishLabelAndBan({
+      const result = await publishLabelAndBan(API_URL, {
         targetType: 'pubkey',
         targetValue: 'pubkey123',
         namespace: 'spam',
@@ -566,7 +570,7 @@ describe('adminApi', () => {
         json: async () => ({ success: true, result: null }),
       });
 
-      const result = await publishLabelAndBan({
+      const result = await publishLabelAndBan(API_URL, {
         targetType: 'pubkey',
         targetValue: 'pubkey123',
         namespace: 'spam',
@@ -590,7 +594,7 @@ describe('adminApi', () => {
         json: async () => ({ success: true }),
       });
 
-      const result = await publishLabelAndBan({
+      const result = await publishLabelAndBan(API_URL, {
         targetType: 'event',
         targetValue: 'event123',
         namespace: 'spam',
@@ -610,7 +614,7 @@ describe('adminApi', () => {
         json: async () => ({ success: true }),
       });
 
-      await markAsReviewed('event', 'event123', 'reviewed');
+      await markAsReviewed(API_URL, 'event', 'event123', 'reviewed');
 
       const callBody = JSON.parse(mockFetch.mock.calls[0][1].body);
       expect(callBody.tags).toContainEqual(['L', 'moderation/resolution']);
@@ -622,7 +626,7 @@ describe('adminApi', () => {
         json: async () => ({ success: true }),
       });
 
-      await markAsReviewed('pubkey', 'pubkey123', 'dismissed', 'False alarm');
+      await markAsReviewed(API_URL, 'pubkey', 'pubkey123', 'dismissed', 'False alarm');
 
       const callBody = JSON.parse(mockFetch.mock.calls[0][1].body);
       expect(callBody.tags).toContainEqual(['l', 'dismissed', 'moderation/resolution']);
@@ -635,7 +639,7 @@ describe('adminApi', () => {
         json: async () => ({ success: true }),
       });
 
-      await markAsReviewed('event', 'event123', 'no-action');
+      await markAsReviewed(API_URL, 'event', 'event123', 'no-action');
 
       const callBody = JSON.parse(mockFetch.mock.calls[0][1].body);
       expect(callBody.content).toBe('Marked as no-action by moderator');
@@ -647,7 +651,7 @@ describe('adminApi', () => {
         json: async () => ({ success: true }),
       });
 
-      await markAsReviewed('event', 'event123');
+      await markAsReviewed(API_URL, 'event', 'event123');
 
       const callBody = JSON.parse(mockFetch.mock.calls[0][1].body);
       expect(callBody.tags).toContainEqual(['l', 'reviewed', 'moderation/resolution']);
@@ -665,7 +669,7 @@ describe('adminApi', () => {
       const action: ModerationAction = 'AGE_RESTRICTED';
       const reason = 'Adult content';
 
-      await moderateMedia(sha256, action, reason);
+      await moderateMedia(API_URL, sha256, action, reason);
 
       expect(mockFetch).toHaveBeenCalledWith(
         expect.stringContaining('/api/moderate-media'),
@@ -682,7 +686,7 @@ describe('adminApi', () => {
         json: async () => ({ success: false, error: 'Invalid hash' }),
       });
 
-      await expect(moderateMedia('badhash', 'SAFE')).rejects.toThrow('Invalid hash');
+      await expect(moderateMedia(API_URL, 'badhash', 'SAFE')).rejects.toThrow('Invalid hash');
     });
 
     it('should handle all moderation actions', async () => {
@@ -694,7 +698,7 @@ describe('adminApi', () => {
       const actions: ModerationAction[] = ['SAFE', 'REVIEW', 'AGE_RESTRICTED', 'PERMANENT_BAN'];
 
       for (const action of actions) {
-        await moderateMedia('hash123', action);
+        await moderateMedia(API_URL, 'hash123', action);
         const lastCall = mockFetch.mock.calls[mockFetch.mock.calls.length - 1];
         const callBody = JSON.parse(lastCall[1].body);
         expect(callBody.action).toBe(action);
@@ -709,7 +713,7 @@ describe('adminApi', () => {
         json: async () => ({ success: true }),
       });
 
-      await logDecision({
+      await logDecision(API_URL, {
         targetType: 'event',
         targetId: 'event123',
         action: 'deleted',
@@ -740,7 +744,7 @@ describe('adminApi', () => {
         json: async () => ({ success: true }),
       });
 
-      await logDecision({
+      await logDecision(API_URL, {
         targetType: 'media',
         targetId: 'hash123',
         action: 'banned',
@@ -771,7 +775,7 @@ describe('adminApi', () => {
         json: async () => ({ success: true, decisions: mockDecisions }),
       });
 
-      const result = await getDecisions('event123');
+      const result = await getDecisions(API_URL, 'event123');
 
       expect(mockFetch).toHaveBeenCalledWith(
         expect.stringContaining('/api/decisions/event123'),
@@ -786,7 +790,7 @@ describe('adminApi', () => {
         json: async () => ({ success: true }),
       });
 
-      const result = await getDecisions('event123');
+      const result = await getDecisions(API_URL, 'event123');
 
       expect(result).toEqual([]);
     });

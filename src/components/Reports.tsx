@@ -2,10 +2,10 @@
 // ABOUTME: Groups multiple reports on same target, shows count and all reporters
 
 import { useState, useMemo, useEffect } from "react";
-import { nip19 } from "nostr-tools";
+
 import { useQuery } from "@tanstack/react-query";
 import { useNostr } from "@nostrify/react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -39,8 +39,10 @@ import {
 import { ReportDetail } from "@/components/ReportDetail";
 import { UserDisplayName } from "@/components/UserIdentifier";
 import { CopyableId } from "@/components/CopyableId";
-import { listBannedPubkeys, listBannedEvents, getAllDecisions } from "@/lib/adminApi";
+import { useAdminApi } from "@/hooks/useAdminApi";
 import { CATEGORY_LABELS } from "@/lib/constants";
+import { useIsMobile } from "@/hooks/useIsMobile";
+import { Sheet, SheetContent } from "@/components/ui/sheet";
 import type { NostrEvent } from "@nostrify/nostrify";
 
 // Sort options for moderation queue
@@ -316,14 +318,22 @@ function IndividualReportItem({
 export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const { nostr } = useNostr();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const { listBannedPubkeys, listBannedEvents, getAllDecisions } = useAdminApi();
+  const isMobile = useIsMobile();
   const [selectedReport, setSelectedReport] = useState<NostrEvent | null>(null);
   const [viewMode, setViewMode] = useState<'consolidated' | 'individual'>('consolidated');
   const [hideResolved, setHideResolved] = useState(true);
   const [sortBy, setSortBy] = useState<SortOption>('reports');
   const [filterCategory, setFilterCategory] = useState<string | null>(null);
   const [filterTargetType, setFilterTargetType] = useState<'all' | 'event' | 'pubkey'>('all');
+  // Track if we've processed deep link params to avoid re-processing
+  const [deepLinkProcessed, setDeepLinkProcessed] = useState(false);
 
-  const { data: reports, isLoading, error, refetch, isFetching } = useQuery({
+  // Check for deep link params to force fresh data fetch
+  const hasDeepLinkParams = !!(searchParams.get('event') || searchParams.get('pubkey'));
+
+  const { data: reports, isLoading, error, refetch, isFetching, dataUpdatedAt } = useQuery({
     queryKey: ['reports', relayUrl],
     queryFn: async ({ signal }) => {
       const events = await nostr.query(
@@ -332,6 +342,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       );
       return events.sort((a, b) => b.created_at - a.created_at);
     },
+    refetchInterval: 15 * 1000, // Poll every 15 seconds for team consistency
   });
 
   // Query for resolution labels (kind 1985 with moderation/resolution namespace)
@@ -344,10 +355,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       );
       return events;
     },
+    refetchInterval: 15 * 1000,
   });
 
   // Query banned pubkeys from relay (NIP-86 RPC)
-  const { data: bannedPubkeys } = useQuery({
+  // Force fresh fetch (staleTime: 0) when deep linking to ensure accurate ban status
+  const { data: bannedPubkeys, isFetching: isFetchingBanned } = useQuery({
     queryKey: ['banned-pubkeys'],
     queryFn: async () => {
       try {
@@ -359,7 +372,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         return [];
       }
     },
-    staleTime: 30 * 1000,
+    staleTime: hasDeepLinkParams && !deepLinkProcessed ? 0 : 30 * 1000,
+    refetchInterval: 15 * 1000,
   });
 
   // Query banned/deleted events from relay (NIP-86 RPC)
@@ -374,6 +388,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       }
     },
     staleTime: 30 * 1000,
+    refetchInterval: 15 * 1000,
   });
 
   // Query all moderation decisions from our D1 database
@@ -390,6 +405,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       }
     },
     staleTime: 30 * 1000,
+    refetchInterval: 15 * 1000,
   });
 
   // Debug: log any decisions error
@@ -398,6 +414,28 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       console.error('[Reports] Decisions query error:', decisionsError);
     }
   }, [decisionsError]);
+
+  // Track relative time since last data update for freshness indicator
+  const [lastUpdatedText, setLastUpdatedText] = useState<string>('');
+  useEffect(() => {
+    if (!dataUpdatedAt) return;
+
+    const updateRelativeTime = () => {
+      const seconds = Math.floor((Date.now() - dataUpdatedAt) / 1000);
+      if (seconds < 5) {
+        setLastUpdatedText('just now');
+      } else if (seconds < 60) {
+        setLastUpdatedText(`${seconds}s ago`);
+      } else {
+        const minutes = Math.floor(seconds / 60);
+        setLastUpdatedText(`${minutes}m ago`);
+      }
+    };
+
+    updateRelativeTime();
+    const interval = setInterval(updateRelativeTime, 5000);
+    return () => clearInterval(interval);
+  }, [dataUpdatedAt]);
 
   // Build set of resolved target keys (from labels, bans, deletions, and decisions)
   const resolvedTargets = useMemo(() => {
@@ -506,7 +544,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         case 'oldest':
           return a.oldestReport.created_at - b.oldestReport.created_at;
 
-        case 'category':
+        case 'category': {
           // Sort by priority (CSAM first), then alphabetically by category
           const aPriority = getCategoryPriority(a.categories);
           const bPriority = getCategoryPriority(b.categories);
@@ -517,6 +555,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           if (aCategory !== bCategory) return aCategory.localeCompare(bCategory);
           // Then by report count
           return b.reports.length - a.reports.length;
+        }
 
         default:
           return 0;
@@ -565,13 +604,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           return b.created_at - a.created_at;
         case 'oldest':
           return a.created_at - b.created_at;
-        case 'category':
+        case 'category': {
           const aCat = getReportCategory(a);
           const bCat = getReportCategory(b);
           const aPriority = getCategoryPriority([aCat]);
           const bPriority = getCategoryPriority([bCat]);
           if (aPriority !== bPriority) return aPriority - bPriority;
           return aCat.localeCompare(bCat);
+        }
         default:
           // For 'reports' and 'reporters', just use date for individual view
           return b.created_at - a.created_at;
@@ -596,6 +636,48 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       }
     }
   }, [selectedReportId, reports, selectedReport]);
+
+  // Handle deep linking via query params (?event=... or ?pubkey=...)
+  useEffect(() => {
+    const eventParam = searchParams.get('event');
+    const pubkeyParam = searchParams.get('pubkey');
+
+    // Skip if no params or already processed
+    if (!eventParam && !pubkeyParam) return;
+    if (deepLinkProcessed) return;
+    if (!allConsolidated || allConsolidated.length === 0) return;
+
+    // Wait for fresh ban data before processing deep link
+    if (isFetchingBanned) return;
+
+    let targetReport: ConsolidatedReport | undefined;
+
+    if (eventParam) {
+      targetReport = allConsolidated.find(c =>
+        c.target.type === 'event' && c.target.value === eventParam
+      );
+    } else if (pubkeyParam) {
+      targetReport = allConsolidated.find(c =>
+        c.target.type === 'pubkey' && c.target.value === pubkeyParam
+      );
+    }
+
+    if (targetReport) {
+      // If target is resolved and we're hiding resolved, temporarily show it
+      const targetKey = `${targetReport.target.type}:${targetReport.target.value}`;
+      if (hideResolved && resolvedTargets.has(targetKey)) {
+        setHideResolved(false);
+      }
+
+      // Select the report
+      setSelectedReport(targetReport.latestReport);
+      navigate(`/reports/${targetReport.latestReport.id}`, { replace: true });
+    }
+
+    // Mark as processed and clear params
+    setDeepLinkProcessed(true);
+    setSearchParams({}, { replace: true });
+  }, [allConsolidated, searchParams, deepLinkProcessed, hideResolved, resolvedTargets, navigate, setSearchParams, isFetchingBanned]);
 
   // Update URL when report selection changes
   const handleSelectReport = (report: NostrEvent | null) => {
@@ -638,9 +720,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   }
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 h-[calc(100vh-200px)]">
-      {/* Left Pane - Report List */}
-      <Card className="lg:col-span-2">
+    <>
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 h-[calc(100vh-200px)]">
+        {/* Left Pane - Report List */}
+        <Card className="lg:col-span-2">
         <CardHeader className="pb-3">
           <div className="flex items-center justify-between">
             <div>
@@ -654,14 +737,23 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                 )}
               </CardDescription>
             </div>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => refetch()}
-              disabled={isFetching}
-            >
-              <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
-            </Button>
+            <div className="flex items-center gap-2">
+              {lastUpdatedText && (
+                <span className="text-xs text-muted-foreground hidden sm:inline">
+                  {lastUpdatedText}
+                </span>
+              )}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => refetch()}
+                disabled={isFetching}
+                title={lastUpdatedText ? `Last updated ${lastUpdatedText}` : 'Refresh'}
+                className="min-w-[44px] min-h-[44px] sm:min-w-0 sm:min-h-0"
+              >
+                <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
+              </Button>
+            </div>
           </div>
 
           {/* View mode toggle */}
@@ -817,21 +909,44 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         </CardContent>
       </Card>
 
-      {/* Right Pane - Report Detail */}
-      <Card className="lg:col-span-3 overflow-hidden">
-        <ReportDetail
-          report={selectedReport}
-          allReportsForTarget={
-            selectedReport
-              ? consolidated.find(c =>
-                  c.reports.some(r => r.id === selectedReport.id)
-                )?.reports
-              : undefined
-          }
-          allReports={reports || []}
-          onDismiss={() => handleSelectReport(null)}
-        />
-      </Card>
-    </div>
+        {/* Right Pane - Report Detail (Desktop) */}
+        {!isMobile && (
+          <Card className="lg:col-span-3 overflow-hidden">
+            <ReportDetail
+              report={selectedReport}
+              allReportsForTarget={
+                selectedReport
+                  ? consolidated.find(c =>
+                      c.reports.some(r => r.id === selectedReport.id)
+                    )?.reports
+                  : undefined
+              }
+              allReports={reports || []}
+              onDismiss={() => handleSelectReport(null)}
+            />
+          </Card>
+        )}
+      </div>
+
+      {/* Mobile Sheet - Report Detail */}
+      {isMobile && (
+        <Sheet open={!!selectedReport} onOpenChange={(open) => !open && handleSelectReport(null)}>
+          <SheetContent side="right" className="!w-full !max-w-[100vw] p-0 overflow-y-auto">
+            <ReportDetail
+              report={selectedReport}
+              allReportsForTarget={
+                selectedReport
+                  ? consolidated.find(c =>
+                      c.reports.some(r => r.id === selectedReport.id)
+                    )?.reports
+                  : undefined
+              }
+              allReports={reports || []}
+              onDismiss={() => handleSelectReport(null)}
+            />
+          </SheetContent>
+        </Sheet>
+      )}
+    </>
   );
 }

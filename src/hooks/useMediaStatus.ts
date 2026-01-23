@@ -2,7 +2,8 @@
 // ABOUTME: Queries the moderation service to determine if media is blocked
 
 import { useQuery } from "@tanstack/react-query";
-import { checkMediaStatus, type MediaStatus } from "@/lib/adminApi";
+import { useAdminApi } from "@/hooks/useAdminApi";
+import type { MediaStatus } from "@/lib/adminApi";
 
 export interface MediaStatusResult {
   hash: string;
@@ -11,6 +12,8 @@ export interface MediaStatusResult {
 }
 
 export function useMediaStatus(hashes: string[]) {
+  const { checkMediaStatus } = useAdminApi();
+
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['media-status', ...hashes],
     queryFn: async () => {
