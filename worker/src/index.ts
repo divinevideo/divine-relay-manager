@@ -78,24 +78,6 @@ function getAllowedOrigin(requestOrigin: string | null, allowedOriginsEnv: strin
   return allowedOrigins[0] || '';
 }
 
-function getAllowedOrigin(requestOrigin: string | null, allowedOriginsEnv: string | undefined): string {
-  if (!allowedOriginsEnv?.trim()) return '';
-
-  const allowedOrigins = allowedOriginsEnv.split(',').map(o => o.trim());
-  if (!requestOrigin) return allowedOrigins[0] || '';
-
-  for (const allowed of allowedOrigins) {
-    if (allowed.startsWith('*.') && requestOrigin.endsWith(allowed.slice(1))) {
-      return requestOrigin;
-    }
-    if (requestOrigin === allowed) {
-      return requestOrigin;
-    }
-  }
-
-  return allowedOrigins[0] || '';
-}
-
 interface UnsignedEvent {
   kind: number;
   content: string;
