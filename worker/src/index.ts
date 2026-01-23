@@ -3,8 +3,13 @@
 
 import { finalizeEvent, nip19, getPublicKey } from 'nostr-tools';
 
+// Secrets Store secret object (for account-level secrets)
+interface SecretStoreSecret {
+  get(): Promise<string>;
+}
+
 interface Env {
-  NOSTR_NSEC: string;
+  NOSTR_NSEC: string | SecretStoreSecret;
   RELAY_URL: string;
   ALLOWED_ORIGINS: string;
   ANTHROPIC_API_KEY?: string;
@@ -25,6 +30,7 @@ interface Env {
   MANAGEMENT_PATH?: string;  // Path for NIP-86 management API, defaults to "/management"
   MANAGEMENT_URL?: string;   // Full URL override for NIP-86 management API (for local dev with HTTP)
   MODERATION_SERVICE_URL?: string;  // URL for media moderation service
+  REALNESS_API_URL?: string;  // URL for AI detection/realness service
 }
 
 // Zendesk JWT payload structure
@@ -38,6 +44,7 @@ interface ZendeskJWTPayload {
 }
 
 const DEFAULT_MODERATION_SERVICE_URL = 'https://moderation.admin.divine.video';
+const DEFAULT_REALNESS_API_URL = 'https://realness.admin.divine.video';
 
 /**
  * Get the NIP-86 management API URL for the configured relay.
@@ -160,6 +167,11 @@ export default {
         return handleCheckResult(sha256, env, corsHeaders);
       }
 
+      // Realness API proxy (for AI detection behind CF Access)
+      if (path.startsWith('/api/realness/')) {
+        return handleRealnessProxy(request, path, env, corsHeaders);
+      }
+
       // Zendesk integration endpoints (require JWT auth)
       if (path.startsWith('/api/zendesk/')) {
         return handleZendeskRoutes(request, path, env, corsHeaders);
@@ -188,12 +200,16 @@ function jsonResponse(data: ApiResponse, status: number, headers: Record<string,
   });
 }
 
-function getSecretKey(env: Env): Uint8Array {
-  if (!env.NOSTR_NSEC) {
+async function getSecretKey(env: Env): Promise<Uint8Array> {
+  const nsec = typeof env.NOSTR_NSEC === 'string'
+    ? env.NOSTR_NSEC
+    : await env.NOSTR_NSEC.get();
+
+  if (!nsec) {
     throw new Error('NOSTR_NSEC secret not configured');
   }
 
-  const decoded = nip19.decode(env.NOSTR_NSEC);
+  const decoded = nip19.decode(nsec);
   if (decoded.type !== 'nsec') {
     throw new Error('Invalid NOSTR_NSEC format - must be nsec1...');
   }
@@ -203,7 +219,7 @@ function getSecretKey(env: Env): Uint8Array {
 
 async function handleInfo(env: Env, corsHeaders: Record<string, string>): Promise<Response> {
   try {
-    const secretKey = getSecretKey(env);
+    const secretKey = await getSecretKey(env);
     const pubkey = getPublicKey(secretKey);
     const npub = nip19.npubEncode(pubkey);
 
@@ -237,7 +253,7 @@ async function handlePublish(
     return jsonResponse({ success: false, error: 'Missing required fields: kind, content' }, 400, corsHeaders);
   }
 
-  const secretKey = getSecretKey(env);
+  const secretKey = await getSecretKey(env);
 
   const event = finalizeEvent(
     {
@@ -275,7 +291,7 @@ async function handleModerate(
     return jsonResponse({ success: false, error: 'Missing action' }, 400, corsHeaders);
   }
 
-  const secretKey = getSecretKey(env);
+  const secretKey = await getSecretKey(env);
 
   // Build NIP-86 moderation event (kind 10000 + action-specific kinds)
   let kind: number;
@@ -377,7 +393,7 @@ async function handleRelayRpc(
     return jsonResponse({ success: false, error: 'Missing method' }, 400, corsHeaders);
   }
 
-  const secretKey = getSecretKey(env);
+  const secretKey = await getSecretKey(env);
 
   // Build NIP-98 auth event
   const httpUrl = getManagementUrl(env);
@@ -1097,6 +1113,73 @@ async function updateZendeskTicket(
   }
 }
 
+// Proxy handler for realness API (AI detection behind CF Access)
+async function handleRealnessProxy(
+  request: Request,
+  path: string,
+  env: Env,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  const realnessUrl = env.REALNESS_API_URL || DEFAULT_REALNESS_API_URL;
+  const subPath = path.replace('/api/realness', '');
+
+  // Check CF Access credentials
+  if (!env.CF_ACCESS_CLIENT_ID || !env.CF_ACCESS_CLIENT_SECRET) {
+    return jsonResponse({ success: false, error: 'CF_ACCESS credentials not configured' }, 500, corsHeaders);
+  }
+
+  // Build headers with CF Access auth
+  const headers: Record<string, string> = {
+    'CF-Access-Client-Id': env.CF_ACCESS_CLIENT_ID,
+    'CF-Access-Client-Secret': env.CF_ACCESS_CLIENT_SECRET,
+    'Accept': 'application/json',
+  };
+
+  // GET /api/realness/jobs/:id -> GET realness/api/jobs/:id
+  if (subPath.startsWith('/jobs/') && request.method === 'GET') {
+    const jobId = subPath.replace('/jobs/', '');
+    try {
+      const response = await fetch(`${realnessUrl}/api/jobs/${jobId}`, { headers });
+      const text = await response.text();
+      try {
+        const data = JSON.parse(text);
+        return jsonResponse(data, response.status, corsHeaders);
+      } catch {
+        console.error('[realness proxy] jobs non-JSON response:', response.status, text.slice(0, 500));
+        return jsonResponse({ success: false, error: `Upstream error: ${response.status}`, details: text.slice(0, 200) }, response.status, corsHeaders);
+      }
+    } catch (error) {
+      console.error('[realness proxy] jobs error:', error);
+      return jsonResponse({ success: false, error: 'Failed to fetch job', details: String(error) }, 500, corsHeaders);
+    }
+  }
+
+  // POST /api/realness/analyze -> POST realness/analyze
+  if (subPath === '/analyze' && request.method === 'POST') {
+    try {
+      const body = await request.text();
+      const response = await fetch(`${realnessUrl}/analyze`, {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body,
+      });
+      const text = await response.text();
+      try {
+        const data = JSON.parse(text);
+        return jsonResponse(data, response.status, corsHeaders);
+      } catch {
+        console.error('[realness proxy] analyze non-JSON response:', response.status, text.slice(0, 500));
+        return jsonResponse({ success: false, error: `Upstream error: ${response.status}`, details: text.slice(0, 200) }, response.status, corsHeaders);
+      }
+    } catch (error) {
+      console.error('[realness proxy] analyze error:', error);
+      return jsonResponse({ success: false, error: 'Failed to submit analysis', details: String(error) }, 500, corsHeaders);
+    }
+  }
+
+  return jsonResponse({ success: false, error: 'Unknown realness endpoint' }, 404, corsHeaders);
+}
+
 // Route handler for all /api/zendesk/* endpoints
 async function handleZendeskRoutes(
   request: Request,
@@ -1181,7 +1264,7 @@ async function handleZendeskWebhook(
     }
 
     // Execute the moderation action
-    const secretKey = getSecretKey(env);
+    const secretKey = await getSecretKey(env);
 
     let actionResult: { success: boolean; error?: string } = { success: false, error: 'Unknown action' };
 
@@ -1361,7 +1444,7 @@ async function handleZendeskContext(
     // Check if user is banned (via relay RPC)
     if (pubkey) {
       try {
-        const secretKey = getSecretKey(env);
+        const secretKey = await getSecretKey(env);
         const httpUrl = getManagementUrl(env);
         const payload = JSON.stringify({ method: 'listbannedpubkeys', params: [] });
         const payloadHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
@@ -1427,7 +1510,7 @@ async function handleZendeskAction(
       return jsonResponse({ success: false, error: 'Missing action' }, 400, corsHeaders);
     }
 
-    const secretKey = getSecretKey(env);
+    const secretKey = await getSecretKey(env);
     let actionResult: { success: boolean; error?: string } = { success: false, error: 'Unknown action' };
 
     const reason = body.reason || `Via Zendesk by ${user.email}${body.ticket_id ? ` (ticket #${body.ticket_id})` : ''}`;
