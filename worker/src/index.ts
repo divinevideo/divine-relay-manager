@@ -19,7 +19,8 @@ interface Env {
   // Zendesk integration
   ZENDESK_SUBDOMAIN?: string;
   ZENDESK_JWT_SECRET?: string;
-  ZENDESK_WEBHOOK_SECRET?: string;
+  ZENDESK_WEBHOOK_SECRET?: string;  // For /api/zendesk/webhook
+  ZENDESK_PARSE_REPORT_SECRET?: string;  // For /api/zendesk/parse-report
   ZENDESK_API_TOKEN?: string;
   ZENDESK_EMAIL?: string;
   ZENDESK_FIELD_ACTION_STATUS?: string;
@@ -1069,16 +1070,16 @@ async function verifyZendeskJWT(
 async function verifyZendeskWebhook(
   request: Request,
   body: string,
-  env: Env
+  secret: string | undefined
 ): Promise<boolean> {
-  if (!env.ZENDESK_WEBHOOK_SECRET) {
-    console.warn('ZENDESK_WEBHOOK_SECRET not configured');
+  if (!secret) {
+    console.warn('Zendesk webhook secret not configured');
     return false;
   }
 
   // Option 1: Simple API key header (X-Webhook-Key)
   const apiKey = request.headers.get('X-Webhook-Key');
-  if (apiKey && apiKey === env.ZENDESK_WEBHOOK_SECRET) {
+  if (apiKey && apiKey === secret) {
     return true;
   }
 
@@ -1095,7 +1096,7 @@ async function verifyZendeskWebhook(
 
   const key = await crypto.subtle.importKey(
     'raw',
-    new TextEncoder().encode(env.ZENDESK_WEBHOOK_SECRET),
+    new TextEncoder().encode(secret),
     { name: 'HMAC', hash: 'SHA-256' },
     false,
     ['sign']
@@ -1351,7 +1352,7 @@ async function handleZendeskWebhook(
     const bodyText = await request.text();
 
     // Verify webhook signature
-    const isValid = await verifyZendeskWebhook(request, bodyText, env);
+    const isValid = await verifyZendeskWebhook(request, bodyText, env.ZENDESK_WEBHOOK_SECRET);
     if (!isValid) {
       return jsonResponse({ success: false, error: 'Invalid webhook signature' }, 401, corsHeaders);
     }
@@ -1533,8 +1534,18 @@ async function handleParseReport(
   try {
     const bodyText = await request.text();
 
+    // Debug: log what headers we're receiving
+    const debugHeaders: Record<string, string> = {};
+    request.headers.forEach((value, key) => {
+      if (key.toLowerCase().includes('webhook') || key.toLowerCase().includes('zendesk') || key.toLowerCase() === 'x-webhook-key') {
+        debugHeaders[key] = value.substring(0, 20) + '...';  // Truncate for safety
+      }
+    });
+    console.log('[handleParseReport] Headers received:', JSON.stringify(debugHeaders));
+    console.log('[handleParseReport] Secret configured:', env.ZENDESK_PARSE_REPORT_SECRET ? 'yes' : 'no');
+
     // Verify webhook signature
-    if (!await verifyZendeskWebhook(request, bodyText, env)) {
+    if (!await verifyZendeskWebhook(request, bodyText, env.ZENDESK_PARSE_REPORT_SECRET)) {
       return jsonResponse({ success: false, error: 'Invalid webhook signature' }, 401, corsHeaders);
     }
 
@@ -1560,11 +1571,22 @@ async function handleParseReport(
       return jsonResponse({ success: false, error: 'Could not parse event_id or author_pubkey from description' }, 400, corsHeaders);
     }
 
-    // Store mapping in D1
+    // Store mapping in D1 (skip if already processed)
     if (env.DB) {
       await ensureZendeskTable(env.DB);
+
+      // Check if we've already processed this ticket
+      const existing = await env.DB.prepare(
+        `SELECT id FROM zendesk_tickets WHERE ticket_id = ?`
+      ).bind(ticket_id).first();
+
+      if (existing) {
+        console.log(`[handleParseReport] Ticket ${ticket_id} already processed, skipping`);
+        return jsonResponse({ success: true, ticket_id, event_id, author_pubkey, violation_type, skipped: true }, 200, corsHeaders);
+      }
+
       await env.DB.prepare(`
-        INSERT OR REPLACE INTO zendesk_tickets (ticket_id, event_id, author_pubkey, violation_type, status)
+        INSERT INTO zendesk_tickets (ticket_id, event_id, author_pubkey, violation_type, status)
         VALUES (?, ?, ?, ?, 'open')
       `).bind(ticket_id, event_id, author_pubkey, violation_type).run();
     }
