@@ -442,6 +442,15 @@ async function handleModerate(
     getPublicKey(secretKey)
   ).catch((err) => console.error('[handleModerate] Zendesk sync error:', err));
 
+  // Sync any linked Zendesk tickets
+  syncZendeskAfterAction(
+    env,
+    body.action,
+    body.eventId ? 'event' : 'pubkey',
+    body.eventId || body.pubkey || '',
+    getPublicKey(secretKey)
+  ).catch((err) => console.error('[handleModerate] Zendesk sync error:', err));
+
   return jsonResponse({ success: true, event }, 200, corsHeaders);
 }
 
