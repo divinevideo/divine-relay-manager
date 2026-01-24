@@ -376,6 +376,15 @@ async function handleModerate(
     }
   }
 
+  // Sync any linked Zendesk tickets
+  syncZendeskAfterAction(
+    env,
+    body.action,
+    body.eventId ? 'event' : 'pubkey',
+    body.eventId || body.pubkey || '',
+    getPublicKey(secretKey)
+  ).catch((err) => console.error('[handleModerate] Zendesk sync error:', err));
+
   return jsonResponse({ success: true, event }, 200, corsHeaders);
 }
 
@@ -584,6 +593,42 @@ async function ensureDecisionsTable(db: D1Database): Promise<void> {
 
   try {
     await db.prepare(`CREATE INDEX IF NOT EXISTS idx_decisions_report ON moderation_decisions(report_id)`).run();
+  } catch {
+    // Index might already exist
+  }
+}
+
+// Ensure zendesk_tickets table exists for tracking Zendesk ↔ Nostr mappings
+async function ensureZendeskTable(db: D1Database): Promise<void> {
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS zendesk_tickets (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ticket_id INTEGER NOT NULL UNIQUE,
+      event_id TEXT,
+      author_pubkey TEXT,
+      violation_type TEXT,
+      status TEXT DEFAULT 'open',
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      resolved_at TEXT,
+      resolution_action TEXT,
+      resolution_moderator TEXT
+    )
+  `).run();
+
+  try {
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_zendesk_event ON zendesk_tickets(event_id)`).run();
+  } catch {
+    // Index might already exist
+  }
+
+  try {
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_zendesk_pubkey ON zendesk_tickets(author_pubkey)`).run();
+  } catch {
+    // Index might already exist
+  }
+
+  try {
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_zendesk_status ON zendesk_tickets(status)`).run();
   } catch {
     // Index might already exist
   }
@@ -851,6 +896,17 @@ async function handleModerateMedia(
 
     const result = await response.json() as { success: boolean; sha256: string; action: string };
 
+    // Sync any linked Zendesk tickets
+    // Note: media actions use sha256, but current ticket mapping is by event_id/pubkey
+    // This will be a no-op unless ticket mapping is enhanced to track media hashes
+    syncZendeskAfterAction(
+      env,
+      body.action,
+      'media',
+      body.sha256,
+      'relay-manager'
+    ).catch((err) => console.error('[handleModerateMedia] Zendesk sync error:', err));
+
     return new Response(JSON.stringify({ success: true, result }), {
       status: 200,
       headers: { 'Content-Type': 'application/json', ...corsHeaders },
@@ -1113,6 +1169,53 @@ async function updateZendeskTicket(
   }
 }
 
+// Add internal note to Zendesk ticket (simpler than updateZendeskTicket - just adds comment, optionally solves)
+async function addZendeskInternalNote(
+  ticketId: number,
+  note: string,
+  env: Env,
+  solve: boolean = false
+): Promise<void> {
+  if (!env.ZENDESK_SUBDOMAIN || !env.ZENDESK_API_TOKEN || !env.ZENDESK_EMAIL) {
+    console.warn('[addZendeskInternalNote] Missing Zendesk credentials, skipping');
+    return;
+  }
+
+  try {
+    const auth = btoa(`${env.ZENDESK_EMAIL}/token:${env.ZENDESK_API_TOKEN}`);
+    const url = `https://${env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets/${ticketId}`;
+
+    const payload: { ticket: { comment: { body: string; public: boolean }; status?: string } } = {
+      ticket: {
+        comment: {
+          body: note,
+          public: false,
+        },
+      },
+    };
+
+    if (solve) {
+      payload.ticket.status = 'solved';
+    }
+
+    const response = await fetch(url, {
+      method: 'PUT',
+      headers: {
+        'Authorization': `Basic ${auth}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`[addZendeskInternalNote] Failed: ${response.status} - ${errorText}`);
+    }
+  } catch (error) {
+    console.error('[addZendeskInternalNote] Error:', error);
+  }
+}
+
 // Proxy handler for realness API (AI detection behind CF Access)
 async function handleRealnessProxy(
   request: Request,
@@ -1192,6 +1295,11 @@ async function handleZendeskRoutes(
   // Webhook endpoint uses signature verification instead of JWT
   if (subPath === '/webhook' && request.method === 'POST') {
     return handleZendeskWebhook(request, env, corsHeaders);
+  }
+
+  // Parse report endpoint - extracts Nostr IDs from ticket description, stores mapping, adds links
+  if (subPath === '/parse-report' && request.method === 'POST') {
+    return handleParseReport(request, env, corsHeaders);
   }
 
   // All other Zendesk endpoints require JWT auth
@@ -1352,6 +1460,15 @@ async function handleZendeskWebhook(
         body.agent_email || null,
         `zendesk:${body.ticket_id}`
       ).run();
+
+      // Sync any linked Zendesk tickets (via our mapping table)
+      syncZendeskAfterAction(
+        env,
+        body.action_requested,
+        body.nostr_event_id ? 'event' : 'pubkey',
+        body.nostr_event_id || body.nostr_pubkey || '',
+        body.agent_email || 'webhook'
+      ).catch((err) => console.error('[handleZendeskWebhook] Zendesk sync error:', err));
     }
 
     // Callback to Zendesk to update ticket status and add internal note
@@ -1404,6 +1521,151 @@ async function handleZendeskWebhook(
       500,
       corsHeaders
     );
+  }
+}
+
+// Parse content report ticket and store mapping, add helpful links as internal note
+async function handleParseReport(
+  request: Request,
+  env: Env,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  try {
+    const bodyText = await request.text();
+
+    // Verify webhook signature
+    if (!await verifyZendeskWebhook(request, bodyText, env)) {
+      return jsonResponse({ success: false, error: 'Invalid webhook signature' }, 401, corsHeaders);
+    }
+
+    const { ticket_id, description } = JSON.parse(bodyText) as {
+      ticket_id: number;
+      description: string;
+    };
+
+    if (!ticket_id || !description) {
+      return jsonResponse({ success: false, error: 'Missing ticket_id or description' }, 400, corsHeaders);
+    }
+
+    // Parse description with regex
+    const eventMatch = description.match(/Event ID:\s*([a-f0-9]{64})/i);
+    const pubkeyMatch = description.match(/Author Pubkey:\s*([a-f0-9]{64})/i);
+    const violationMatch = description.match(/Violation Type:\s*(\w+)/i);
+
+    const event_id = eventMatch?.[1] || null;
+    const author_pubkey = pubkeyMatch?.[1] || null;
+    const violation_type = violationMatch?.[1] || null;
+
+    if (!event_id && !author_pubkey) {
+      return jsonResponse({ success: false, error: 'Could not parse event_id or author_pubkey from description' }, 400, corsHeaders);
+    }
+
+    // Store mapping in D1
+    if (env.DB) {
+      await ensureZendeskTable(env.DB);
+      await env.DB.prepare(`
+        INSERT OR REPLACE INTO zendesk_tickets (ticket_id, event_id, author_pubkey, violation_type, status)
+        VALUES (?, ?, ?, ?, 'open')
+      `).bind(ticket_id, event_id, author_pubkey, violation_type).run();
+    }
+
+    // Generate internal note with links
+    const lines = ['📋 **Content Report Links**', ''];
+    if (violation_type) {
+      lines.push(`**Violation Type:** ${violation_type}`, '');
+    }
+    if (event_id) {
+      lines.push('**Reported Event:**');
+      lines.push(`• [View in Relay Admin](https://relay.admin.divine.video/reports?event=${event_id})`);
+      lines.push(`• Event ID: \`${event_id}\``);
+      lines.push('');
+    }
+    if (author_pubkey) {
+      lines.push('**Reported Author:**');
+      lines.push(`• [View in Relay Admin](https://relay.admin.divine.video/reports?pubkey=${author_pubkey})`);
+      lines.push(`• Pubkey: \`${author_pubkey}\``);
+    }
+
+    const note = lines.join('\n');
+
+    // Add internal note to Zendesk
+    await addZendeskInternalNote(ticket_id, note, env);
+
+    return jsonResponse({ success: true, ticket_id, event_id, author_pubkey, violation_type }, 200, corsHeaders);
+  } catch (error) {
+    console.error('[handleParseReport] Error:', error);
+    return jsonResponse(
+      { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+      500,
+      corsHeaders
+    );
+  }
+}
+
+// Sync Zendesk ticket after moderation action in relay-manager
+async function syncZendeskAfterAction(
+  env: Env,
+  action: string,
+  targetType: 'event' | 'pubkey' | 'media',
+  targetId: string,
+  moderator: string
+): Promise<void> {
+  if (!env.DB) return;
+
+  try {
+    await ensureZendeskTable(env.DB);
+
+    // Find linked open ticket
+    let linked: { ticket_id: number } | null = null;
+
+    if (targetType === 'event') {
+      linked = await env.DB.prepare(
+        `SELECT ticket_id FROM zendesk_tickets WHERE event_id = ? AND status = 'open'`
+      ).bind(targetId).first();
+    } else if (targetType === 'pubkey') {
+      linked = await env.DB.prepare(
+        `SELECT ticket_id FROM zendesk_tickets WHERE author_pubkey = ? AND status = 'open'`
+      ).bind(targetId).first();
+    }
+
+    if (!linked?.ticket_id) return;
+
+    // Determine if this is a resolution action (should solve ticket)
+    const resolutionActions = ['reviewed', 'dismissed', 'no-action', 'false-positive'];
+    const isResolution = resolutionActions.includes(action);
+
+    // Build note
+    const actionDisplay = action.replace(/_/g, ' ').replace(/([A-Z])/g, ' $1').trim();
+    const timestamp = new Date().toISOString();
+
+    const note = [
+      '📋 **Moderation Action Taken**',
+      '',
+      `**Action:** ${actionDisplay}`,
+      `**Target:** \`${targetId}\``,
+      `**Moderator:** ${moderator}`,
+      `**Time:** ${timestamp}`,
+    ].join('\n');
+
+    // Add note (and solve if resolution action)
+    await addZendeskInternalNote(linked.ticket_id, note, env, isResolution);
+
+    // Update our tracking if resolved
+    if (isResolution) {
+      await env.DB.prepare(`
+        UPDATE zendesk_tickets
+        SET status = 'resolved',
+            resolved_at = CURRENT_TIMESTAMP,
+            resolution_action = ?,
+            resolution_moderator = ?
+        WHERE ticket_id = ?
+      `).bind(action, moderator, linked.ticket_id).run();
+    }
+
+    console.log(`[syncZendeskAfterAction] Updated ticket #${linked.ticket_id} with action: ${action}`);
+  } catch (error) {
+    console.error('[syncZendeskAfterAction] Error:', error);
+    // Don't throw - Zendesk sync failure shouldn't break moderation
   }
 }
 
@@ -1606,6 +1868,17 @@ async function handleZendeskAction(
         user.email,
         body.ticket_id ? `zendesk:${body.ticket_id}` : null
       ).run();
+    }
+
+    // Sync any linked Zendesk tickets
+    if (actionResult.success) {
+      syncZendeskAfterAction(
+        env,
+        body.action,
+        body.event_id ? 'event' : 'pubkey',
+        body.event_id || body.pubkey || '',
+        user.email
+      ).catch((err) => console.error('[handleZendeskAction] Zendesk sync error:', err));
     }
 
     return new Response(JSON.stringify({
