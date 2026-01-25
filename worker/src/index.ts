@@ -110,7 +110,7 @@ export default {
 
     const corsHeaders = {
       'Access-Control-Allow-Origin': allowedOrigin,
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     };
 
@@ -777,7 +777,46 @@ async function handleDeleteDecisions(
 
     await ensureDecisionsTable(env.DB);
 
-    // Delete all decisions for this target (reopens the report)
+    let labelsDeleted = 0;
+
+    // First, query for and delete any resolution labels (kind 1985) on the relay
+    // Try both 'e' tag (event target) and 'p' tag (pubkey target)
+    const labelFilters = [
+      { kinds: [1985], '#e': [targetId], '#L': ['moderation/resolution'], limit: 10 },
+      { kinds: [1985], '#p': [targetId], '#L': ['moderation/resolution'], limit: 10 },
+    ];
+
+    for (const filter of labelFilters) {
+      const queryResult = await queryRelay(filter, env.RELAY_URL);
+      if (queryResult.success && queryResult.events && queryResult.events.length > 0) {
+        for (const labelEvent of queryResult.events) {
+          const eventId = (labelEvent as { id?: string }).id;
+          if (eventId) {
+            // Ban the label event to remove it from the relay
+            const rpcRequest = new Request(`https://placeholder/api/relay-rpc`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                method: 'banevent',
+                params: [eventId, 'Removed by reopen action'],
+              }),
+            });
+
+            try {
+              const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders);
+              const rpcResult = await rpcResponse.json() as { success: boolean };
+              if (rpcResult.success) {
+                labelsDeleted++;
+              }
+            } catch (err) {
+              console.error('Failed to delete resolution label:', eventId, err);
+            }
+          }
+        }
+      }
+    }
+
+    // Delete all decisions for this target from D1 (reopens the report)
     const result = await env.DB.prepare(`
       DELETE FROM moderation_decisions
       WHERE target_id = ?
@@ -786,6 +825,7 @@ async function handleDeleteDecisions(
     return jsonResponse({
       success: true,
       deleted: result.meta.changes || 0,
+      labelsDeleted,
     }, 200, corsHeaders);
   } catch (error) {
     console.error('Delete decisions error:', error);
@@ -928,6 +968,67 @@ async function handleModerateMedia(
       corsHeaders
     );
   }
+}
+
+// Query relay for events matching a filter
+async function queryRelay(
+  filter: object,
+  relayUrl: string
+): Promise<{ success: boolean; events?: object[]; error?: string }> {
+  return new Promise((resolve) => {
+    try {
+      const ws = new WebSocket(relayUrl);
+      let resolved = false;
+      const events: object[] = [];
+      const subId = `query-${Date.now()}`;
+
+      const timeout = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          ws.close();
+          resolve({ success: true, events });
+        }
+      }, 5000);
+
+      ws.addEventListener('open', () => {
+        ws.send(JSON.stringify(['REQ', subId, filter]));
+      });
+
+      ws.addEventListener('message', (msg) => {
+        try {
+          const data = JSON.parse(msg.data as string);
+          if (data[0] === 'EVENT' && data[1] === subId) {
+            events.push(data[2]);
+          } else if (data[0] === 'EOSE' && data[1] === subId) {
+            clearTimeout(timeout);
+            resolved = true;
+            ws.close();
+            resolve({ success: true, events });
+          }
+        } catch {
+          // Ignore parse errors
+        }
+      });
+
+      ws.addEventListener('error', () => {
+        if (!resolved) {
+          clearTimeout(timeout);
+          resolved = true;
+          resolve({ success: false, error: 'WebSocket error' });
+        }
+      });
+
+      ws.addEventListener('close', () => {
+        if (!resolved) {
+          clearTimeout(timeout);
+          resolved = true;
+          resolve({ success: true, events });
+        }
+      });
+    } catch (error) {
+      resolve({ success: false, error: error instanceof Error ? error.message : 'Unknown error' });
+    }
+  });
 }
 
 async function publishToRelay(
