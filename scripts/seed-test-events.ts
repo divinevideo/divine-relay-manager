@@ -4,17 +4,11 @@
  * Usage: npx tsx scripts/seed-test-events.ts
  */
 
-import { getPublicKey, finalizeEvent } from 'nostr-tools/pure';
+import { generateSecretKey, getPublicKey, finalizeEvent } from 'nostr-tools/pure';
 import { bytesToHex } from '@noble/hashes/utils';
-import { sha256 } from '@noble/hashes/sha256';
 import WebSocket from 'ws';
 
 const RELAY_URL = process.env.RELAY_URL || 'wss://relay.dvines.org';
-
-// Generate a deterministic sha256 hash from a seed string
-function makeHash(seed: string): string {
-  return bytesToHex(sha256(new TextEncoder().encode(seed)));
-}
 
 // Generate deterministic test users (so we can allowlist them)
 function createTestUser(seed: number) {
@@ -24,7 +18,7 @@ function createTestUser(seed: number) {
 }
 
 // Publish event to relay
-async function publishEvent(event: Record<string, unknown>): Promise<boolean> {
+async function publishEvent(event: any): Promise<boolean> {
   return new Promise((resolve) => {
     const ws = new WebSocket(RELAY_URL);
     let resolved = false;
@@ -62,12 +56,9 @@ async function publishEvent(event: Record<string, unknown>): Promise<boolean> {
 }
 
 // Create a video post (kind 34235 - NIP-71 horizontal video)
-function createVideoPost(user: { sk: Uint8Array; pk: string }, title: string, hashSeed: string) {
-  // Generate deterministic sha256 hash for the "media file"
-  const mediaHash = makeHash(hashSeed);
+function createVideoPost(user: { sk: Uint8Array; pk: string }, title: string, videoUrl: string) {
+  const sha256 = crypto.randomUUID().replace(/-/g, '') + crypto.randomUUID().replace(/-/g, ''); // 64 char fake hash
   const dTag = `video-${Date.now()}`;
-  // Use Blossom-style URL with hash as filename (this is how extractMediaHashes finds it)
-  const videoUrl = `https://blossom.divine.video/${mediaHash}.mp4`;
   const event = finalizeEvent({
     kind: 34235,
     created_at: Math.floor(Date.now() / 1000),
@@ -76,15 +67,13 @@ function createVideoPost(user: { sk: Uint8Array; pk: string }, title: string, ha
       ['title', title],
       ['url', videoUrl],
       ['m', 'video/mp4'],
-      ['x', mediaHash],
+      ['x', sha256],
       ['size', '1024000'],
       ['duration', '120'],
-      // Also add imeta tag for full NIP-94 compliance
-      ['imeta', `url ${videoUrl}`, `x ${mediaHash}`, 'm video/mp4', 'size 1024000'],
     ],
-    content: `${title}\n\n${videoUrl}`,
+    content: title,
   }, user.sk);
-  return { event, mediaHash };
+  return event;
 }
 
 // Create a comment (kind 1111 - NIP-22 comment on video)
@@ -153,24 +142,24 @@ async function main() {
   // Publish video posts
   console.log('\nPublishing video posts...');
 
-  const { event: video1, mediaHash: hash1 } = createVideoPost(
+  const video1 = createVideoPost(
     alice,
     'Check out this cool video! #nostr #test',
-    'alice-video-1'
+    'https://divine.video/test/sample1.mp4'
   );
   await publishEvent(video1);
 
-  const { event: video2, mediaHash: hash2 } = createVideoPost(
+  const video2 = createVideoPost(
     bob,
     'Another test video for moderation',
-    'bob-video-1'
+    'https://divine.video/test/sample2.mp4'
   );
   await publishEvent(video2);
 
-  const { event: video3, mediaHash: hash3 } = createVideoPost(
+  const video3 = createVideoPost(
     alice,
     'This one might need review',
-    'alice-flagged-video'
+    'https://divine.video/test/flagged-content.mp4'
   );
   await publishEvent(video3);
 
@@ -219,10 +208,6 @@ async function main() {
   console.log(`  Video 2 (Bob):      ${video2.id}`);
   console.log(`  Video 3 (Flagged):  ${video3.id}`);
   console.log(`  Spam comment:       ${spamComment.id}`);
-  console.log('\nMedia hashes for Block Media testing:');
-  console.log(`  Video 1 hash: ${hash1}`);
-  console.log(`  Video 2 hash: ${hash2}`);
-  console.log(`  Video 3 hash: ${hash3}`);
   console.log('');
 }
 
