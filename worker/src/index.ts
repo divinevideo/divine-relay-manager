@@ -300,14 +300,46 @@ async function handleModerate(
   const tags: string[][] = [];
 
   switch (body.action) {
-    case 'delete_event':
+    case 'delete_event': {
+      // Use banevent RPC directly instead of publishing kind 5 events.
+      // NIP-09 kind 5 deletion only allows authors to delete their own events.
+      // Admin moderation requires NIP-86 banevent RPC method instead.
       if (!body.eventId) {
         return jsonResponse({ success: false, error: 'Missing eventId for delete_event' }, 400, corsHeaders);
       }
-      kind = 5; // NIP-09 deletion
-      content = body.reason || 'Deleted by relay admin';
-      tags.push(['e', body.eventId]);
-      break;
+
+      try {
+        const rpcRequest = new Request(request.url.replace(/\/api\/moderate$/, '/api/relay-rpc'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            method: 'banevent',
+            params: [body.eventId, body.reason || 'Deleted by relay admin'],
+          }),
+        });
+
+        const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders);
+        const rpcResult = await rpcResponse.json() as { success: boolean; error?: string };
+
+        if (!rpcResult.success) {
+          return jsonResponse({ success: false, error: rpcResult.error || 'banevent RPC failed' }, 500, corsHeaders);
+        }
+
+        // Sync any linked Zendesk tickets
+        syncZendeskAfterAction(
+          env,
+          body.action,
+          'event',
+          body.eventId,
+          getPublicKey(secretKey)
+        ).catch((err) => console.error('[handleModerate] Zendesk sync error:', err));
+
+        return jsonResponse({ success: true, eventId: body.eventId }, 200, corsHeaders);
+      } catch (error) {
+        console.error('[handleModerate] delete_event error:', error);
+        return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Unknown error' }, 500, corsHeaders);
+      }
+    }
 
     case 'ban_pubkey':
       if (!body.pubkey) {
@@ -351,30 +383,6 @@ async function handleModerate(
 
   if (!publishResult.success) {
     return jsonResponse({ success: false, error: publishResult.error }, 500, corsHeaders);
-  }
-
-  // For delete_event: also call banevent RPC to add event to relay's ban list
-  if (body.action === 'delete_event' && body.eventId) {
-    try {
-      // Call our own /api/relay-rpc endpoint to invoke banevent
-      const rpcRequest = new Request(request.url.replace(/\/api\/moderate$/, '/api/relay-rpc'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          method: 'banevent',
-          params: [body.eventId, body.reason || 'Deleted by relay admin'],
-        }),
-      });
-
-      const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders);
-
-      if (!rpcResponse.ok) {
-        console.error('[handleModerate] banevent RPC failed:', rpcResponse.status);
-      }
-    } catch (error) {
-      console.error('[handleModerate] banevent RPC error:', error);
-      // Don't fail the whole operation if banevent fails
-    }
   }
 
   // Sync any linked Zendesk tickets
