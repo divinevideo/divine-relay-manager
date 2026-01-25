@@ -13,6 +13,17 @@ routes = [
 
 # The NOSTR_NSEC secret must be set via: wrangler secret put NOSTR_NSEC
 
+# CF Access credentials for realness proxy (shared across workers)
+[[secrets_store_secrets]]
+binding = "CF_ACCESS_CLIENT_ID"
+store_id = "ef490704b12a4feb91c7feb51229c364"
+secret_name = "CF-Access-Client-Id"
+
+[[secrets_store_secrets]]
+binding = "CF_ACCESS_CLIENT_SECRET"
+store_id = "ef490704b12a4feb91c7feb51229c364"
+secret_name = "CF-Access-Client-Secret"
+
 [vars]
 RELAY_URL = "wss://relay.divine.video"
 # Path for NIP-86 management API (appended to relay URL converted to HTTPS)

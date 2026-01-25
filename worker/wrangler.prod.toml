@@ -16,6 +16,17 @@ binding = "NOSTR_NSEC"
 store_id = "ef490704b12a4feb91c7feb51229c364"
 secret_name = "NOSTR_NSEC"
 
+# CF Access credentials for realness proxy (shared across workers)
+[[secrets_store_secrets]]
+binding = "CF_ACCESS_CLIENT_ID"
+store_id = "ef490704b12a4feb91c7feb51229c364"
+secret_name = "CF-Access-Client-Id"
+
+[[secrets_store_secrets]]
+binding = "CF_ACCESS_CLIENT_SECRET"
+store_id = "ef490704b12a4feb91c7feb51229c364"
+secret_name = "CF-Access-Client-Secret"
+
 [vars]
 RELAY_URL = "wss://relay.dvines.org"
 # Path for NIP-86 management API (Funnelcake uses /management)
