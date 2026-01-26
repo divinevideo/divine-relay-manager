@@ -4,7 +4,7 @@
  * Usage: npx tsx scripts/seed-test-events.ts
  */
 
-import { generateSecretKey, getPublicKey, finalizeEvent } from 'nostr-tools/pure';
+import { getPublicKey, finalizeEvent } from 'nostr-tools/pure';
 import { bytesToHex } from '@noble/hashes/utils';
 import { sha256 } from '@noble/hashes/sha256';
 import WebSocket from 'ws';
@@ -24,7 +24,7 @@ function createTestUser(seed: number) {
 }
 
 // Publish event to relay
-async function publishEvent(event: any): Promise<boolean> {
+async function publishEvent(event: Record<string, unknown>): Promise<boolean> {
   return new Promise((resolve) => {
     const ws = new WebSocket(RELAY_URL);
     let resolved = false;
