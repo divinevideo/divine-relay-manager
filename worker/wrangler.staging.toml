@@ -1,0 +1,48 @@
+# ABOUTME: Cloudflare Worker for Divine Relay Admin API - STAGING
+# ABOUTME: Deploy with: npx wrangler deploy --config wrangler.staging.toml
+
+name = "divine-relay-admin-api-staging"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+# Staging API route
+routes = [
+  { pattern = "api-relay-staging.divine.video/*", zone_name = "divine.video" }
+]
+
+# NOSTR_NSEC is bound via secrets store (shared across workers)
+[[secrets_store_secrets]]
+binding = "NOSTR_NSEC"
+store_id = "ef490704b12a4feb91c7feb51229c364"
+secret_name = "NOSTR_NSEC"
+
+# CF Access credentials for realness proxy (shared across workers)
+[[secrets_store_secrets]]
+binding = "CF_ACCESS_CLIENT_ID"
+store_id = "ef490704b12a4feb91c7feb51229c364"
+secret_name = "CF-Access-Client-Id"
+
+[[secrets_store_secrets]]
+binding = "CF_ACCESS_CLIENT_SECRET"
+store_id = "ef490704b12a4feb91c7feb51229c364"
+secret_name = "CF-Access-Client-Secret"
+
+[vars]
+RELAY_URL = "wss://relay.staging.dvines.org"
+# Path for NIP-86 management API (Funnelcake uses /management)
+MANAGEMENT_PATH = "/"
+# URL for media moderation service
+MODERATION_SERVICE_URL = "https://moderation.admin.divine.video"
+# Allow both the main frontend and Cloudflare Pages preview deployments
+ALLOWED_ORIGINS = "https://relay.admin.divine.video,*.divine-relay-manager.pages.dev,*.divine-relay-admin.pages.dev"
+
+# D1 Database for moderation decision log (staging)
+[[d1_databases]]
+binding = "DB"
+database_name = "divine-moderation-decisions-staging"
+database_id = "5e694cde-20d4-491d-aed3-aaac47a5a9b5"
+
+# Service binding to divine-realness worker (bypasses CF Access 522 issue)
+[[services]]
+binding = "REALNESS"
+service = "divine-ai-detector"
