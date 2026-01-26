@@ -16,6 +16,8 @@ interface Env {
   // Cloudflare Access Service Token for moderation.admin.divine.video
   CF_ACCESS_CLIENT_ID?: string;
   CF_ACCESS_CLIENT_SECRET?: string;
+  // Service binding to divine-realness worker (bypasses CF Access)
+  REALNESS?: Fetcher;
   // Zendesk integration
   ZENDESK_SUBDOMAIN?: string;
   ZENDESK_JWT_SECRET?: string;
@@ -1326,19 +1328,80 @@ async function addZendeskInternalNote(
   }
 }
 
-// Proxy handler for realness API (AI detection behind CF Access)
+// Proxy handler for realness API (AI detection)
+// Uses service binding if available (preferred), falls back to HTTP with CF Access
 async function handleRealnessProxy(
   request: Request,
   path: string,
   env: Env,
   corsHeaders: Record<string, string>
 ): Promise<Response> {
-  const realnessUrl = env.REALNESS_API_URL || DEFAULT_REALNESS_API_URL;
   const subPath = path.replace('/api/realness', '');
+
+  // Prefer service binding (bypasses CF Access, no 522 issues)
+  if (env.REALNESS) {
+    return handleRealnessViaBinding(request, subPath, env.REALNESS, corsHeaders);
+  }
+
+  // Fallback to HTTP with CF Access credentials
+  return handleRealnessViaHTTP(request, subPath, env, corsHeaders);
+}
+
+// Service binding path (preferred)
+async function handleRealnessViaBinding(
+  request: Request,
+  subPath: string,
+  realness: Fetcher,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  // GET /api/realness/jobs/:id -> GET realness/api/jobs/:id
+  if (subPath.startsWith('/jobs/') && request.method === 'GET') {
+    const jobId = subPath.replace('/jobs/', '');
+    try {
+      // Service binding uses a dummy URL - the host is ignored
+      const response = await realness.fetch(`https://realness/api/jobs/${jobId}`, {
+        headers: { 'Accept': 'application/json' },
+      });
+      const data = await response.json();
+      return jsonResponse(data, response.status, corsHeaders);
+    } catch (error) {
+      console.error('[realness proxy/binding] jobs error:', error);
+      return jsonResponse({ success: false, error: 'Failed to fetch job', details: String(error) }, 500, corsHeaders);
+    }
+  }
+
+  // POST /api/realness/analyze -> POST realness/analyze
+  if (subPath === '/analyze' && request.method === 'POST') {
+    try {
+      const body = await request.text();
+      const response = await realness.fetch('https://realness/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+      });
+      const data = await response.json();
+      return jsonResponse(data, response.status, corsHeaders);
+    } catch (error) {
+      console.error('[realness proxy/binding] analyze error:', error);
+      return jsonResponse({ success: false, error: 'Failed to submit analysis', details: String(error) }, 500, corsHeaders);
+    }
+  }
+
+  return jsonResponse({ success: false, error: 'Unknown realness endpoint' }, 404, corsHeaders);
+}
+
+// HTTP fallback path (legacy, kept for backwards compatibility)
+async function handleRealnessViaHTTP(
+  request: Request,
+  subPath: string,
+  env: Env,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  const realnessUrl = env.REALNESS_API_URL || DEFAULT_REALNESS_API_URL;
 
   // Check CF Access credentials
   if (!env.CF_ACCESS_CLIENT_ID || !env.CF_ACCESS_CLIENT_SECRET) {
-    return jsonResponse({ success: false, error: 'CF_ACCESS credentials not configured' }, 500, corsHeaders);
+    return jsonResponse({ success: false, error: 'CF_ACCESS credentials not configured (and no service binding)' }, 500, corsHeaders);
   }
 
   // Build headers with CF Access auth
@@ -1358,11 +1421,11 @@ async function handleRealnessProxy(
         const data = JSON.parse(text);
         return jsonResponse(data, response.status, corsHeaders);
       } catch {
-        console.error('[realness proxy] jobs non-JSON response:', response.status, text.slice(0, 500));
+        console.error('[realness proxy/http] jobs non-JSON response:', response.status, text.slice(0, 500));
         return jsonResponse({ success: false, error: `Upstream error: ${response.status}`, details: text.slice(0, 200) }, response.status, corsHeaders);
       }
     } catch (error) {
-      console.error('[realness proxy] jobs error:', error);
+      console.error('[realness proxy/http] jobs error:', error);
       return jsonResponse({ success: false, error: 'Failed to fetch job', details: String(error) }, 500, corsHeaders);
     }
   }
@@ -1381,11 +1444,11 @@ async function handleRealnessProxy(
         const data = JSON.parse(text);
         return jsonResponse(data, response.status, corsHeaders);
       } catch {
-        console.error('[realness proxy] analyze non-JSON response:', response.status, text.slice(0, 500));
+        console.error('[realness proxy/http] analyze non-JSON response:', response.status, text.slice(0, 500));
         return jsonResponse({ success: false, error: `Upstream error: ${response.status}`, details: text.slice(0, 200) }, response.status, corsHeaders);
       }
     } catch (error) {
-      console.error('[realness proxy] analyze error:', error);
+      console.error('[realness proxy/http] analyze error:', error);
       return jsonResponse({ success: false, error: 'Failed to submit analysis', details: String(error) }, 500, corsHeaders);
     }
   }

@@ -41,3 +41,8 @@ ALLOWED_ORIGINS = "https://relay.admin.divine.video,*.divine-relay-manager.pages
 binding = "DB"
 database_name = "divine-moderation-decisions-prod"
 database_id = "d000fe55-dfac-4f54-a348-5c57241c2453"
+
+# Service binding to divine-realness worker (bypasses CF Access 522 issue)
+[[services]]
+binding = "REALNESS"
+service = "divine-ai-detector"
