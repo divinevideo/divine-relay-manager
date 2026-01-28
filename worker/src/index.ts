@@ -283,14 +283,32 @@ async function handleModerate(
   const tags: string[][] = [];
 
   switch (body.action) {
-    case 'delete_event':
+    case 'delete_event': {
+      // Use NIP-86 banevent RPC directly instead of kind 5
+      // Kind 5 (NIP-09) only allows authors to delete their own events
       if (!body.eventId) {
         return jsonResponse({ success: false, error: 'Missing eventId for delete_event' }, 400, corsHeaders);
       }
-      kind = 5; // NIP-09 deletion
-      content = body.reason || 'Deleted by relay admin';
-      tags.push(['e', body.eventId]);
-      break;
+
+      // Call banevent RPC to remove the event from the relay
+      const rpcRequest = new Request(request.url.replace(/\/api\/moderate$/, '/api/relay-rpc'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          method: 'banevent',
+          params: [body.eventId, body.reason || 'Deleted by relay admin'],
+        }),
+      });
+
+      const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders);
+
+      if (!rpcResponse.ok) {
+        const errorBody = await rpcResponse.text();
+        return jsonResponse({ success: false, error: `banevent failed: ${errorBody}` }, 500, corsHeaders);
+      }
+
+      return jsonResponse({ success: true, method: 'banevent', eventId: body.eventId }, 200, corsHeaders);
+    }
 
     case 'ban_pubkey':
       if (!body.pubkey) {
@@ -334,30 +352,6 @@ async function handleModerate(
 
   if (!publishResult.success) {
     return jsonResponse({ success: false, error: publishResult.error }, 500, corsHeaders);
-  }
-
-  // For delete_event: also call banevent RPC to add event to relay's ban list
-  if (body.action === 'delete_event' && body.eventId) {
-    try {
-      // Call our own /api/relay-rpc endpoint to invoke banevent
-      const rpcRequest = new Request(request.url.replace(/\/api\/moderate$/, '/api/relay-rpc'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          method: 'banevent',
-          params: [body.eventId, body.reason || 'Deleted by relay admin'],
-        }),
-      });
-
-      const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders);
-
-      if (!rpcResponse.ok) {
-        console.error('[handleModerate] banevent RPC failed:', rpcResponse.status);
-      }
-    } catch (error) {
-      console.error('[handleModerate] banevent RPC error:', error);
-      // Don't fail the whole operation if banevent fails
-    }
   }
 
   return jsonResponse({ success: true, event }, 200, corsHeaders);

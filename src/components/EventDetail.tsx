@@ -80,6 +80,47 @@ function isMediaUrl(url: string): 'image' | 'video' | null {
   return null;
 }
 
+// Extract media URLs from NIP-71/NIP-92 imeta tags
+function extractImetaMedia(tags: string[][]): { url: string; type: 'image' | 'video'; thumbnail?: string }[] {
+  const media: { url: string; type: 'image' | 'video'; thumbnail?: string }[] = [];
+
+  for (const tag of tags) {
+    if (tag[0] !== 'imeta') continue;
+
+    let url: string | undefined;
+    let mimeType: string | undefined;
+    let thumbnail: string | undefined;
+
+    // Parse imeta tag parts (format: "key value")
+    for (let i = 1; i < tag.length; i++) {
+      const part = tag[i];
+      if (part.startsWith('url ')) {
+        url = part.slice(4);
+      } else if (part.startsWith('m ')) {
+        mimeType = part.slice(2);
+      } else if (part.startsWith('image ')) {
+        thumbnail = part.slice(6);
+      }
+    }
+
+    if (url) {
+      // Determine type from mime type or URL
+      let type: 'image' | 'video' = 'video'; // Default to video for NIP-71
+      if (mimeType) {
+        if (mimeType.startsWith('image/')) type = 'image';
+        else if (mimeType.startsWith('video/')) type = 'video';
+      } else {
+        const urlType = isMediaUrl(url);
+        if (urlType) type = urlType;
+      }
+
+      media.push({ url, type, thumbnail });
+    }
+  }
+
+  return media;
+}
+
 // Format pubkey for display
 function formatPubkey(pubkey: string): string {
   try {
@@ -453,11 +494,19 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
 
   // Extract URLs from content
   const urls = extractUrls(event.content || '');
-  const mediaUrls = urls.filter(u => isMediaUrl(u));
+  const contentMediaUrls = urls.filter(u => isMediaUrl(u));
   const otherUrls = urls.filter(u => !isMediaUrl(u));
 
-  // Check for imeta tags (media metadata)
-  const _imetaTags = event.tags.filter(t => t[0] === 'imeta');
+  // Extract media from NIP-71/NIP-92 imeta tags
+  const imetaMedia = extractImetaMedia(event.tags);
+
+  // Combine content media URLs and imeta media (imeta takes priority for NIP-71 video events)
+  const allMedia = imetaMedia.length > 0
+    ? imetaMedia
+    : contentMediaUrls.map(url => ({ url, type: isMediaUrl(url) as 'image' | 'video', thumbnail: undefined }));
+
+  // For backwards compat, keep mediaUrls as string array (used for URL display)
+  const _mediaUrls = allMedia.map(m => m.url);
 
   return (
     <>
@@ -690,35 +739,38 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
         )}
 
         {/* Media Preview */}
-        {mediaUrls.length > 0 && (
+        {allMedia.length > 0 && (
           <Card>
             <CardHeader className="py-2 px-3">
               <CardTitle className="text-sm flex items-center gap-2">
-                {mediaUrls.some(u => isMediaUrl(u) === 'video') ? (
+                {allMedia.some(m => m.type === 'video') ? (
                   <Video className="h-4 w-4" />
                 ) : (
                   <Image className="h-4 w-4" />
                 )}
-                Media ({mediaUrls.length})
+                Media ({allMedia.length})
               </CardTitle>
             </CardHeader>
             <CardContent className="py-2 px-3">
-              <div className="grid grid-cols-2 gap-2">
-                {mediaUrls.slice(0, 4).map((url, idx) => {
-                  const type = isMediaUrl(url);
-                  return (
-                    <div key={idx} className="relative aspect-video bg-muted rounded overflow-hidden">
-                      {type === 'image' ? (
-                        <img src={url} alt="" className="w-full h-full object-cover" />
-                      ) : (
-                        <video src={url} controls className="w-full h-full object-cover" />
-                      )}
-                    </div>
-                  );
-                })}
+              <div className="grid grid-cols-1 gap-2">
+                {allMedia.slice(0, 4).map((media, idx) => (
+                  <div key={idx} className="relative aspect-video bg-muted rounded overflow-hidden">
+                    {media.type === 'image' ? (
+                      <img src={media.url} alt="" className="w-full h-full object-cover" />
+                    ) : (
+                      <video
+                        src={media.url}
+                        poster={media.thumbnail}
+                        controls
+                        className="w-full h-full object-contain bg-black"
+                        preload="metadata"
+                      />
+                    )}
+                  </div>
+                ))}
               </div>
-              {mediaUrls.length > 4 && (
-                <p className="text-xs text-muted-foreground mt-2">+{mediaUrls.length - 4} more</p>
+              {allMedia.length > 4 && (
+                <p className="text-xs text-muted-foreground mt-2">+{allMedia.length - 4} more</p>
               )}
             </CardContent>
           </Card>
