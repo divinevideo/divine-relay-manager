@@ -327,9 +327,6 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const [sortBy, setSortBy] = useState<SortOption>('reports');
   const [filterCategory, setFilterCategory] = useState<string | null>(null);
   const [filterTargetType, setFilterTargetType] = useState<'all' | 'event' | 'pubkey'>('all');
-  // Track if we've processed deep link params to avoid re-processing
-  const [deepLinkProcessed, setDeepLinkProcessed] = useState(false);
-
   // Check for deep link params to force fresh data fetch
   const hasDeepLinkParams = !!(searchParams.get('event') || searchParams.get('pubkey'));
 
@@ -372,7 +369,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         return [];
       }
     },
-    staleTime: hasDeepLinkParams && !deepLinkProcessed ? 0 : 30 * 1000,
+    staleTime: hasDeepLinkParams ? 0 : 30 * 1000,
     refetchInterval: 15 * 1000,
   });
 
@@ -642,9 +639,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     const eventParam = searchParams.get('event');
     const pubkeyParam = searchParams.get('pubkey');
 
-    // Skip if no params or already processed
+    // Skip if no params
     if (!eventParam && !pubkeyParam) return;
-    if (deepLinkProcessed) return;
     if (!allConsolidated || allConsolidated.length === 0) return;
 
     // Wait for fresh ban data before processing deep link
@@ -673,12 +669,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       setSelectedReport(targetReport.latestReport);
       navigate(`/reports/${targetReport.latestReport.id}`, { replace: true });
 
-      // Only mark as processed and clear params once we've found the report
-      setDeepLinkProcessed(true);
+      // Clear params from URL now that we've navigated
       setSearchParams({}, { replace: true });
     }
     // If report not found, keep params — effect will re-run when more data loads
-  }, [allConsolidated, searchParams, deepLinkProcessed, hideResolved, resolvedTargets, navigate, setSearchParams, isFetchingBanned]);
+  }, [allConsolidated, searchParams, hideResolved, resolvedTargets, navigate, setSearchParams, isFetchingBanned]);
 
   // Update URL when report selection changes
   const handleSelectReport = (report: NostrEvent | null) => {
