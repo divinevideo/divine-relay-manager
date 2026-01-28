@@ -477,6 +477,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
                     showAvatar
                     avatarSize="md"
                     variant="block"
+                    linkToProfile
                   />
                 </div>
 

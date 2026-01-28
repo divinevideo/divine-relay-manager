@@ -75,6 +75,13 @@ function EventCard({
   const metadata = author.data?.metadata;
   const displayName = metadata?.name || nip19.npubEncode(event.pubkey).slice(0, 12) + '...';
   const profileImage = metadata?.picture;
+  const profileUrl = (() => {
+    try {
+      return `https://divine.video/profile/${nip19.npubEncode(event.pubkey)}`;
+    } catch {
+      return undefined;
+    }
+  })();
 
   const kindInfo = getKindInfo(event.kind);
   const _category = getKindCategory(event.kind);
@@ -110,19 +117,23 @@ function EventCard({
       >
         <div className="flex items-start justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0">
-            {profileImage ? (
-              <img
-                src={profileImage}
-                alt={displayName}
-                className="w-8 h-8 rounded-full object-cover shrink-0"
-              />
-            ) : (
-              <div className="w-8 h-8 rounded-full bg-gray-200 dark:bg-gray-700 flex items-center justify-center shrink-0">
-                <User className="h-4 w-4 text-gray-500" />
-              </div>
-            )}
+            <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80 shrink-0" onClick={(e) => e.stopPropagation()}>
+              {profileImage ? (
+                <img
+                  src={profileImage}
+                  alt={displayName}
+                  className="w-8 h-8 rounded-full object-cover"
+                />
+              ) : (
+                <div className="w-8 h-8 rounded-full bg-gray-200 dark:bg-gray-700 flex items-center justify-center">
+                  <User className="h-4 w-4 text-gray-500" />
+                </div>
+              )}
+            </a>
             <div className="min-w-0">
-              <p className="font-medium text-sm truncate">{displayName}</p>
+              <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80" onClick={(e) => e.stopPropagation()}>
+                <p className="font-medium text-sm truncate">{displayName}</p>
+              </a>
               <p className="text-xs text-muted-foreground font-mono">
                 {(() => {
                   try {

@@ -44,6 +44,7 @@ export function ReporterCard({
 
   const displayName = profile?.display_name || profile?.name || `${npub.slice(0, 12)}...`;
   const npubDisplay = `${npub.slice(0, 12)}...${npub.slice(-6)}`;
+  const profileUrl = `https://divine.video/profile/${npub}`;
 
   const copyPubkey = async () => {
     try {
@@ -73,12 +74,16 @@ export function ReporterCard({
   if (compact) {
     return (
       <div className="flex items-center gap-2 p-2 rounded-lg bg-muted/50 hover:bg-muted transition-colors">
-        <Avatar className="h-6 w-6">
-          <AvatarImage src={profile?.picture} />
-          <AvatarFallback className="text-xs">{displayName.slice(0, 2).toUpperCase()}</AvatarFallback>
-        </Avatar>
+        <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80 shrink-0">
+          <Avatar className="h-6 w-6">
+            <AvatarImage src={profile?.picture} />
+            <AvatarFallback className="text-xs">{displayName.slice(0, 2).toUpperCase()}</AvatarFallback>
+          </Avatar>
+        </a>
         <div className="flex-1 min-w-0">
-          <p className="text-sm font-medium truncate">{displayName}</p>
+          <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80">
+            <p className="text-sm font-medium truncate">{displayName}</p>
+          </a>
           <p className="text-xs text-muted-foreground font-mono truncate">{npubDisplay}</p>
         </div>
         {category && (
@@ -96,14 +101,18 @@ export function ReporterCard({
   return (
     <div className="p-3 rounded-lg border bg-card">
       <div className="flex items-start gap-3">
-        <Avatar className="h-10 w-10">
-          <AvatarImage src={profile?.picture} />
-          <AvatarFallback>{displayName.slice(0, 2).toUpperCase()}</AvatarFallback>
-        </Avatar>
+        <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80 shrink-0">
+          <Avatar className="h-10 w-10">
+            <AvatarImage src={profile?.picture} />
+            <AvatarFallback>{displayName.slice(0, 2).toUpperCase()}</AvatarFallback>
+          </Avatar>
+        </a>
 
         <div className="flex-1 min-w-0 space-y-1">
           <div className="flex items-center gap-2">
-            <p className="font-medium truncate">{displayName}</p>
+            <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80">
+              <p className="font-medium truncate">{displayName}</p>
+            </a>
             {category && (
               <Badge variant="outline" className="text-xs shrink-0">{category}</Badge>
             )}

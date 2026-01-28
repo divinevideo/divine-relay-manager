@@ -702,6 +702,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                       showAvatar
                       avatarSize="sm"
                       variant="block"
+                      linkToProfile
                     />
                   </div>
                 )}
@@ -1188,6 +1189,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                         showAvatar
                         avatarSize="sm"
                         variant="inline"
+                        linkToProfile
                       />
                     </div>
                     {/* Original content */}

@@ -269,7 +269,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
           </CardHeader>
           <CardContent className="space-y-3">
             <div>
-              <div className="font-medium"><UserDisplayName pubkey={selectedPubkey} fallbackLength={16} /></div>
+              <div className="font-medium"><UserDisplayName pubkey={selectedPubkey} fallbackLength={16} linkToProfile /></div>
               <CopyableId value={selectedPubkey} type="npub" truncateStart={12} truncateEnd={8} size="xs" />
             </div>
             <div className="flex items-center gap-2 text-sm">
