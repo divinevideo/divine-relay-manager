@@ -345,11 +345,16 @@ export function EventsList({ relayUrl }: EventsListProps) {
     hasNextPage,
     isFetchingNextPage,
   } = useInfiniteQuery({
-    queryKey: ['relay-events', relayUrl, kindFilter, limit, customKind],
+    queryKey: ['relay-events', relayUrl, kindFilter, limit, customKind, filterByPubkey],
     queryFn: async ({ pageParam }) => {
       const signal = AbortSignal.timeout(10000);
 
-      const filter: { limit: number; kinds?: number[]; until?: number } = { limit };
+      const filter: { limit: number; kinds?: number[]; until?: number; authors?: string[] } = { limit };
+
+      // Filter by pubkey if set (from URL param or profile link)
+      if (filterByPubkey) {
+        filter.authors = [filterByPubkey];
+      }
 
       // Use `until` for pagination - fetch events older than the last one
       if (pageParam) {

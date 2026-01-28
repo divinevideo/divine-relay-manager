@@ -717,10 +717,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
   return (
     <>
-      <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 h-[calc(100vh-200px)]">
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 h-full">
         {/* Left Pane - Report List */}
-        <Card className="lg:col-span-2">
-        <CardHeader className="pb-3">
+        <Card className="lg:col-span-2 h-full overflow-hidden flex flex-col">
+        <CardHeader className="pb-3 shrink-0">
           <div className="flex items-center justify-between">
             <div>
               <CardTitle className="flex items-center gap-2 text-lg">
@@ -864,8 +864,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
             </div>
           </div>
         </CardHeader>
-        <CardContent className="p-0">
-          <ScrollArea className="h-[calc(100vh-520px)]">
+        <CardContent className="p-0 flex-1 min-h-0">
+          <ScrollArea className="h-full">
             <div className="space-y-2 p-4 pt-0">
               {viewMode === 'consolidated' ? (
                 !consolidated || consolidated.length === 0 ? (
@@ -907,7 +907,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
         {/* Right Pane - Report Detail (Desktop) */}
         {!isMobile && (
-          <Card className="lg:col-span-3 overflow-hidden">
+          <Card className="lg:col-span-3 overflow-hidden h-full">
             <ReportDetail
               report={selectedReport}
               allReportsForTarget={

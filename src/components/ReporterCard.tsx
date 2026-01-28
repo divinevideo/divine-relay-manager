@@ -145,8 +145,8 @@ export function ReporterCard({
               className="flex-1"
               onClick={() => onViewProfile(pubkey)}
             >
-              <User className="h-3 w-3 mr-1" />
-              View Profile
+              <FileText className="h-3 w-3 mr-1" />
+              Reporter's Events
             </Button>
           )}
           {onViewPosts && (
@@ -232,6 +232,15 @@ export function ReporterList({
   );
 }
 
+// Trust level based on report count
+function getTrustLevel(reportCount: number): { level: string; color: string } {
+  if (reportCount >= 50) return { level: 'Trusted', color: 'text-green-600 border-green-300 bg-green-50' };
+  if (reportCount >= 20) return { level: 'Active', color: 'text-blue-600 border-blue-300 bg-blue-50' };
+  if (reportCount >= 10) return { level: 'Regular', color: 'text-yellow-600 border-yellow-300 bg-yellow-50' };
+  if (reportCount >= 3) return { level: 'New', color: 'text-orange-600 border-orange-300 bg-orange-50' };
+  return { level: 'First-time', color: 'text-gray-600 border-gray-300 bg-gray-50' };
+}
+
 // Inline reporter info - shows who filed a report with their report count
 interface ReporterInlineProps {
   pubkey: string;
@@ -265,6 +274,7 @@ export function ReporterInline({ pubkey, onViewProfile }: ReporterInlineProps) {
   }
 
   const displayName = profile?.display_name || profile?.name || `${npub.slice(0, 12)}...`;
+  const trust = getTrustLevel(reportCount);
 
   if (author.isLoading) {
     return (
@@ -292,6 +302,9 @@ export function ReporterInline({ pubkey, onViewProfile }: ReporterInlineProps) {
         <Flag className="h-3 w-3" />
         {reportCount} report{reportCount !== 1 ? 's' : ''} filed
       </span>
+      <Badge variant="outline" className={`text-xs ${trust.color}`}>
+        {trust.level}
+      </Badge>
       {onViewProfile && (
         <Button
           variant="ghost"
@@ -299,8 +312,8 @@ export function ReporterInline({ pubkey, onViewProfile }: ReporterInlineProps) {
           className="h-6 px-2 text-xs"
           onClick={() => onViewProfile(pubkey)}
         >
-          <User className="h-3 w-3 mr-1" />
-          Profile
+          <FileText className="h-3 w-3 mr-1" />
+          Reporter's Events
         </Button>
       )}
     </div>

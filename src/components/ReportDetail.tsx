@@ -685,7 +685,8 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   const categoryLabel = CATEGORY_LABELS[category] || category;
 
   return (
-    <>
+    <div className="h-full flex flex-col overflow-hidden">
+      {/* Dialogs - rendered as portals, don't affect flex layout */}
       {/* Ban Confirmation Dialog */}
       <AlertDialog open={confirmBan} onOpenChange={setConfirmBan}>
         <AlertDialogContent>
@@ -885,7 +886,8 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
         />
       )}
 
-      <ScrollArea className="h-full">
+      {/* Scrollable content area */}
+      <ScrollArea className="flex-1 min-h-0">
         <div className="p-4 space-y-4 overflow-hidden">
           {/* Live Status Check - Verify current moderation state */}
           <Card className="border-blue-200 bg-blue-50/50 dark:bg-blue-950/20">
@@ -1043,7 +1045,14 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
               )}
             </div>
             <span className="text-xs text-muted-foreground">
-              {new Date(report.created_at * 1000).toLocaleString()}
+              Reported: {new Date(report.created_at * 1000).toLocaleString(undefined, {
+                year: 'numeric',
+                month: 'short',
+                day: 'numeric',
+                hour: 'numeric',
+                minute: '2-digit',
+                timeZoneName: 'short'
+              })}
             </span>
           </div>
 
@@ -1146,64 +1155,10 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             </Card>
           )}
 
-          {/* Event Metadata - Show IDs and tags for copying */}
-          <Card>
-            <CardHeader className="py-3">
-              <CardTitle className="text-sm flex items-center gap-2">
-                <FileCode className="h-4 w-4" />
-                Event Details
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="py-0 pb-3 space-y-3">
-              {/* Report Event ID */}
-              <div className="space-y-1">
-                <span className="text-xs font-medium text-muted-foreground">Report Event</span>
-                <div className="flex flex-col gap-1">
-                  <CopyableId value={report.id} type="note" label="ID:" size="xs" />
-                  <CopyableId value={report.pubkey} type="npub" label="Reporter:" size="xs" />
-                </div>
-              </div>
+          {/* Section: Reported Content */}
+          <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Reported Content</h4>
 
-              {/* Reported Target */}
-              {context.target && (
-                <div className="space-y-1">
-                  <span className="text-xs font-medium text-muted-foreground">
-                    Reported {context.target.type === 'event' ? 'Event' : 'User'}
-                  </span>
-                  <div className="flex flex-col gap-1">
-                    <CopyableId
-                      value={context.target.value}
-                      type={context.target.type === 'event' ? 'note' : 'npub'}
-                      label={context.target.type === 'event' ? 'ID:' : 'npub:'}
-                      size="xs"
-                    />
-                    {context.reportedUser.pubkey && context.target.type === 'event' && (
-                      <CopyableId value={context.reportedUser.pubkey} type="npub" label="Author:" size="xs" />
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {/* Report Tags */}
-              {report.tags.length > 0 && (
-                <CopyableTags tags={report.tags} maxTags={8} />
-              )}
-
-              {/* Reported Event Tags (if different from report) */}
-              {context.thread?.event && context.thread.event.tags.length > 0 && (
-                <div className="pt-2 border-t">
-                  <span className="text-xs font-medium text-muted-foreground block mb-1">
-                    Reported Event Tags
-                  </span>
-                  <CopyableTags tags={context.thread.event.tags} maxTags={8} />
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
-          <Separator />
-
-          {/* Thread Context */}
+          {/* Thread Context - the text content being reported */}
           {context.target?.type === 'event' && (
             <ThreadContext
               ancestors={context.thread?.ancestors || []}
@@ -1271,6 +1226,19 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             />
           )}
 
+          {/* Reported User - who created the reported content */}
+          <UserProfileCard
+            profile={context.reportedUser.profile}
+            pubkey={context.reportedUser.pubkey}
+            stats={context.userStats}
+            isLoading={context.isLoading}
+          />
+
+          <Separator />
+
+          {/* Section: Investigation Helpers */}
+          <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Investigation Helpers</h4>
+
           {/* Hive AI Content Moderation */}
           {context.thread?.event && (
             <HiveAIReport eventTags={context.thread.event.tags} />
@@ -1284,16 +1252,6 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             />
           )}
 
-          <Separator />
-
-          {/* Reported User */}
-          <UserProfileCard
-            profile={context.reportedUser.profile}
-            pubkey={context.reportedUser.pubkey}
-            stats={context.userStats}
-            isLoading={context.isLoading}
-          />
-
           {/* AI Summary */}
           <AISummary
             summary={summary.data?.summary}
@@ -1301,6 +1259,8 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             isLoading={summary.isLoading}
             error={summary.error as Error | null}
           />
+
+          <Separator />
 
           {/* Related Reports - show reports on this user AND their events */}
           {(relatedReports.userReports.length > 0 || relatedReports.eventReports.length > 0) && (
@@ -1380,33 +1340,74 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             </Card>
           )}
 
-          <Separator />
+          {/* Section: Technical Details */}
+          <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Technical Details</h4>
 
-          {/* All Reports Section - when consolidated */}
-          {allReportsForTarget && allReportsForTarget.length > 1 ? (
-            <Card>
-              <CardHeader className="py-3">
-                <CardTitle className="text-sm flex items-center gap-2">
-                  <Flag className="h-4 w-4" />
-                  {allReportsForTarget.length} Reports on this Target
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="py-0 pb-3">
-                <ReporterList
-                  reports={allReportsForTarget}
-                  maxVisible={5}
-                />
-              </CardContent>
-            </Card>
-          ) : (
-            /* Single Reporter Info */
-            <ReporterInfo
-              profile={context.reporter.profile}
-              pubkey={context.reporter.pubkey}
-              reportCount={context.reporter.reportCount}
-              isLoading={context.isLoading}
-            />
-          )}
+          {/* Event Metadata - Show IDs and tags for copying */}
+          <Card>
+            <CardHeader className="py-3">
+              <CardTitle className="text-sm flex items-center gap-2">
+                <FileCode className="h-4 w-4" />
+                Reported Event Details
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="py-0 pb-3 space-y-3">
+              {/* Report Event ID */}
+              <div className="space-y-1">
+                <span className="text-xs font-medium text-muted-foreground">Report Event</span>
+                <div className="flex flex-col gap-1">
+                  <CopyableId value={report.id} type="note" label="ID:" size="xs" />
+                  <CopyableId value={report.pubkey} type="npub" label="Reporter:" size="xs" />
+                </div>
+              </div>
+
+              {/* Reported Target */}
+              {context.target && (
+                <div className="space-y-1">
+                  <span className="text-xs font-medium text-muted-foreground">
+                    Reported {context.target.type === 'event' ? 'Event' : 'User'}
+                  </span>
+                  <div className="flex flex-col gap-1">
+                    <CopyableId
+                      value={context.target.value}
+                      type={context.target.type === 'event' ? 'note' : 'npub'}
+                      label={context.target.type === 'event' ? 'ID:' : 'npub:'}
+                      size="xs"
+                    />
+                    {context.reportedUser.pubkey && context.target.type === 'event' && (
+                      <CopyableId value={context.reportedUser.pubkey} type="npub" label="Author:" size="xs" />
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Report Tags */}
+              {report.tags.length > 0 && (
+                <CopyableTags tags={report.tags} maxTags={8} />
+              )}
+
+              {/* Reported Event Tags (if different from report) */}
+              {context.thread?.event && context.thread.event.tags.length > 0 && (
+                <div className="pt-2 border-t">
+                  <span className="text-xs font-medium text-muted-foreground block mb-1">
+                    Reported Event Tags
+                  </span>
+                  <CopyableTags tags={context.thread.event.tags} maxTags={8} />
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {/*
+            REMOVED: Redundant reporter section (Jan 2026)
+            - Was showing ReporterList (multiple) or ReporterInfo (single) here
+            - Now redundant because "Why This Was Reported" section above shows reporters
+              with trust level badges via ReporterInline component
+            - To restore: use <ReporterList reports={allReportsForTarget} maxVisible={5} />
+              for multiple reports, or <ReporterInfo profile={context.reporter.profile}
+              pubkey={context.reporter.pubkey} reportCount={context.reporter.reportCount} />
+              for single reporter
+          */}
 
           <Separator />
 
@@ -1420,8 +1421,11 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             />
           )}
 
-          {/* Action Buttons */}
-          <div className="space-y-3 pt-2">
+        </div>
+      </ScrollArea>
+
+      {/* Action Buttons - fixed at bottom */}
+      <div className="border-t bg-background p-4 space-y-3 shrink-0">
             {/* Resolution actions - dismiss or reopen */}
             <div className="flex flex-wrap gap-2">
               {(decisionLog.hasDecisions || pubkeyDecisionLog.hasDecisions) && !isUserBanned && !isEventDeleted ? (
@@ -1453,7 +1457,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                       disabled={reviewMutation.isPending || isResolved}
                     >
                       <CheckCircle className="h-4 w-4 mr-1" />
-                      {reviewMutation.isPending ? 'Dismissing...' : 'Dismiss'}
+                      {reviewMutation.isPending ? 'Dismissing...' : 'Dismiss Report'}
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent side="bottom" className="max-w-xs">
@@ -1611,9 +1615,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                 </Tooltip>
               )}
             </div>
-          </div>
         </div>
-      </ScrollArea>
-    </>
+    </div>
   );
 }
