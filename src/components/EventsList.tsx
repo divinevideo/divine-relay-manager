@@ -21,6 +21,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { EventDetail } from "@/components/EventDetail";
+import { BulkDeleteByKind } from "@/components/BulkDeleteByKind";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   FileText,
@@ -314,6 +315,24 @@ export function EventsList({ relayUrl }: EventsListProps) {
     searchParams.get('pubkey')
   );
 
+  // Derive hex pubkey from search query if it's an npub/nprofile
+  const searchPubkeyHex = (() => {
+    const query = searchQuery.trim().toLowerCase();
+    if (query.startsWith('npub1') || query.startsWith('nprofile1')) {
+      try {
+        const decoded = nip19.decode(query);
+        if (decoded.type === 'npub') {
+          return decoded.data;
+        } else if (decoded.type === 'nprofile') {
+          return decoded.data.pubkey;
+        }
+      } catch {
+        // Invalid nip19
+      }
+    }
+    return null;
+  })();
+
   // Sync URL params with filterByPubkey state
   useEffect(() => {
     const pubkeyParam = searchParams.get('pubkey');
@@ -345,11 +364,16 @@ export function EventsList({ relayUrl }: EventsListProps) {
     hasNextPage,
     isFetchingNextPage,
   } = useInfiniteQuery({
-    queryKey: ['relay-events', relayUrl, kindFilter, limit, customKind],
+    queryKey: ['relay-events', relayUrl, kindFilter, limit, customKind, searchPubkeyHex],
     queryFn: async ({ pageParam }) => {
       const signal = AbortSignal.timeout(10000);
 
-      const filter: { limit: number; kinds?: number[]; until?: number } = { limit };
+      const filter: { limit: number; kinds?: number[]; until?: number; authors?: string[] } = { limit };
+
+      // Filter by author pubkey if searching by npub/nprofile
+      if (searchPubkeyHex) {
+        filter.authors = [searchPubkeyHex];
+      }
 
       // Use `until` for pagination - fetch events older than the last one
       if (pageParam) {
@@ -546,7 +570,26 @@ export function EventsList({ relayUrl }: EventsListProps) {
       if (searchQuery.trim()) {
         const query = searchQuery.toLowerCase();
         const matchesContent = event.content?.toLowerCase().includes(query);
-        const matchesPubkey = event.pubkey.toLowerCase().includes(query);
+
+        // Try to decode npub/nprofile to hex for pubkey matching
+        let searchPubkeyHex: string | null = null;
+        if (query.startsWith('npub1') || query.startsWith('nprofile1')) {
+          try {
+            const decoded = nip19.decode(query);
+            if (decoded.type === 'npub') {
+              searchPubkeyHex = decoded.data;
+            } else if (decoded.type === 'nprofile') {
+              searchPubkeyHex = decoded.data.pubkey;
+            }
+          } catch {
+            // Invalid nip19, fall back to direct string matching
+          }
+        }
+
+        const matchesPubkey = searchPubkeyHex
+          ? event.pubkey === searchPubkeyHex
+          : event.pubkey.toLowerCase().includes(query);
+
         if (!matchesContent && !matchesPubkey) {
           return false;
         }
@@ -573,11 +616,19 @@ export function EventsList({ relayUrl }: EventsListProps) {
 
   const kindOptions = [
     { value: 'all', label: 'All Events' },
+    // Video kinds per NIP-71
+    { value: '34235', label: 'Video - Addressable (34235)' },
+    { value: '34236', label: 'Short Video - Addressable (34236)' },
+    { value: '21', label: 'Video (21)' },
+    { value: '22', label: 'Short Video (22)' },
+    // Standard kinds
     { value: '1', label: 'Text Notes (1)' },
     { value: '0', label: 'Profiles (0)' },
     { value: '3', label: 'Contacts (3)' },
     { value: '6', label: 'Reposts (6)' },
     { value: '7', label: 'Reactions (7)' },
+    { value: '1984', label: 'Reports (1984)' },
+    { value: '1985', label: 'Labels (1985)' },
     { value: 'custom', label: 'Custom Kind' },
   ];
 
@@ -687,17 +738,23 @@ export function EventsList({ relayUrl }: EventsListProps) {
 
           {/* Active Pubkey Filter */}
           {filterByPubkey && (
-            <div className="flex items-center gap-2 p-2 bg-muted rounded-lg">
-              <span className="text-xs text-muted-foreground">Filtering by user:</span>
-              <code className="text-xs font-mono">{filterByPubkey.slice(0, 16)}...</code>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-6 px-2"
-                onClick={() => updatePubkeyFilter(null)}
-              >
-                Clear
-              </Button>
+            <div className="flex items-center justify-between gap-2 p-2 bg-muted rounded-lg">
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-muted-foreground">Filtering by user:</span>
+                <code className="text-xs font-mono">{filterByPubkey.slice(0, 16)}...</code>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 px-2"
+                  onClick={() => updatePubkeyFilter(null)}
+                >
+                  Clear
+                </Button>
+              </div>
+              <BulkDeleteByKind
+                pubkey={filterByPubkey}
+                onComplete={() => refetch()}
+              />
             </div>
           )}
         </CardContent>

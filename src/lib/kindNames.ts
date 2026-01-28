@@ -138,11 +138,11 @@ export const KIND_NAMES: Record<number, { name: string; description: string; nip
   // Wiki
   30818: { name: 'Wiki Article', description: 'Wiki page', nip: 'NIP-54' },
 
-  // Video Events (Divine Video specific)
-  21: { name: 'Video Note', description: 'Short-form video', nip: '' },
-  34235: { name: 'Video', description: 'Video event', nip: 'NIP-71' },
-  34236: { name: 'Video View', description: 'Video view record', nip: 'NIP-71' },
-  34237: { name: 'Short Video', description: 'Short-form video', nip: 'NIP-71' },
+  // Video Events (NIP-71)
+  21: { name: 'Video', description: 'Normal video event', nip: 'NIP-71' },
+  22: { name: 'Short Video', description: 'Short-form video event', nip: 'NIP-71' },
+  34235: { name: 'Video (Addressable)', description: 'Addressable normal video', nip: 'NIP-71' },
+  34236: { name: 'Short Video (Addressable)', description: 'Addressable short video', nip: 'NIP-71' },
 
   // What's Hot (custom)
   11998: { name: "What's Hot", description: 'Trending/hot content aggregation', nip: '' },

@@ -41,6 +41,7 @@ import { useDecisionLog } from "@/hooks/useDecisionLog";
 import { HiveAIReport } from "@/components/HiveAIReport";
 import { AIDetectionReport } from "@/components/AIDetectionReport";
 import { MediaPreview } from "@/components/MediaPreview";
+import { BulkDeleteByKind } from "@/components/BulkDeleteByKind";
 import { CATEGORY_LABELS } from "@/lib/constants";
 import { UserX, Tag, Flag, Trash2, CheckCircle, Video, History, Ban, ShieldX, Link2, User, FileText, Unlock, Repeat2, FileCode, Loader2, XCircle, RefreshCw } from "lucide-react";
 import { CopyableId, CopyableTags } from "@/components/CopyableId";
@@ -1593,6 +1594,23 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                     </TooltipContent>
                   </Tooltip>
                 )
+              )}
+              {context.reportedUser.pubkey && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <div>
+                      <BulkDeleteByKind
+                        pubkey={context.reportedUser.pubkey}
+                        onComplete={() => {
+                          queryClient.invalidateQueries({ queryKey: ['user-stats', context.reportedUser.pubkey] });
+                        }}
+                      />
+                    </div>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" className="max-w-xs">
+                    <p>Delete all events of a specific kind (e.g., all video views) from this user without banning them entirely.</p>
+                  </TooltipContent>
+                </Tooltip>
               )}
               {context.target && !showLabelForm && (
                 <Tooltip>
