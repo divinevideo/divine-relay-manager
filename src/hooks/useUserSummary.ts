@@ -3,8 +3,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import type { NostrEvent } from "@nostrify/nostrify";
-
-const WORKER_URL = import.meta.env.VITE_WORKER_URL || '';
+import { useApiUrl } from "@/hooks/useAdminApi";
 
 interface SummaryResponse {
   summary: string;
@@ -17,6 +16,7 @@ export function useUserSummary(
   existingLabels: NostrEvent[] | undefined,
   previousReports: NostrEvent[] | undefined
 ) {
+  const apiUrl = useApiUrl();
   return useQuery<SummaryResponse>({
     queryKey: ['user-summary', pubkey],
     queryFn: async () => {
@@ -24,7 +24,7 @@ export function useUserSummary(
         throw new Error('Missing required data');
       }
 
-      const response = await fetch(`${WORKER_URL}/api/summarize-user`, {
+      const response = await fetch(`${apiUrl}/api/summarize-user`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

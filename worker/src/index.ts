@@ -3,18 +3,26 @@
 
 import { finalizeEvent, nip19, getPublicKey } from 'nostr-tools';
 
+// Secrets Store secret object (for account-level secrets)
+interface SecretStoreSecret {
+  get(): Promise<string>;
+}
+
 interface Env {
-  NOSTR_NSEC: string;
+  NOSTR_NSEC: string | SecretStoreSecret;
   RELAY_URL: string;
   ALLOWED_ORIGINS: string;
   ANTHROPIC_API_KEY?: string;
   // Cloudflare Access Service Token for moderation.admin.divine.video
   CF_ACCESS_CLIENT_ID?: string;
   CF_ACCESS_CLIENT_SECRET?: string;
+  // Service binding to divine-realness worker (bypasses CF Access)
+  REALNESS?: Fetcher;
   // Zendesk integration
   ZENDESK_SUBDOMAIN?: string;
   ZENDESK_JWT_SECRET?: string;
-  ZENDESK_WEBHOOK_SECRET?: string;
+  ZENDESK_WEBHOOK_SECRET?: string;  // For /api/zendesk/webhook
+  ZENDESK_PARSE_REPORT_SECRET?: string;  // For /api/zendesk/parse-report
   ZENDESK_API_TOKEN?: string;
   ZENDESK_EMAIL?: string;
   ZENDESK_FIELD_ACTION_STATUS?: string;
@@ -25,6 +33,7 @@ interface Env {
   MANAGEMENT_PATH?: string;  // Path for NIP-86 management API, defaults to "/management"
   MANAGEMENT_URL?: string;   // Full URL override for NIP-86 management API (for local dev with HTTP)
   MODERATION_SERVICE_URL?: string;  // URL for media moderation service
+  REALNESS_API_URL?: string;  // URL for AI detection/realness service
 }
 
 // Zendesk JWT payload structure
@@ -38,6 +47,7 @@ interface ZendeskJWTPayload {
 }
 
 const DEFAULT_MODERATION_SERVICE_URL = 'https://moderation.admin.divine.video';
+const DEFAULT_REALNESS_API_URL = 'https://realness.admin.divine.video';
 
 /**
  * Get the NIP-86 management API URL for the configured relay.
@@ -102,7 +112,7 @@ export default {
 
     const corsHeaders = {
       'Access-Control-Allow-Origin': allowedOrigin,
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     };
 
@@ -160,6 +170,11 @@ export default {
         return handleCheckResult(sha256, env, corsHeaders);
       }
 
+      // Realness API proxy (for AI detection behind CF Access)
+      if (path.startsWith('/api/realness/')) {
+        return handleRealnessProxy(request, path, env, corsHeaders);
+      }
+
       // Zendesk integration endpoints (require JWT auth)
       if (path.startsWith('/api/zendesk/')) {
         return handleZendeskRoutes(request, path, env, corsHeaders);
@@ -188,12 +203,16 @@ function jsonResponse(data: ApiResponse, status: number, headers: Record<string,
   });
 }
 
-function getSecretKey(env: Env): Uint8Array {
-  if (!env.NOSTR_NSEC) {
+async function getSecretKey(env: Env): Promise<Uint8Array> {
+  const nsec = typeof env.NOSTR_NSEC === 'string'
+    ? env.NOSTR_NSEC
+    : await env.NOSTR_NSEC.get();
+
+  if (!nsec) {
     throw new Error('NOSTR_NSEC secret not configured');
   }
 
-  const decoded = nip19.decode(env.NOSTR_NSEC);
+  const decoded = nip19.decode(nsec);
   if (decoded.type !== 'nsec') {
     throw new Error('Invalid NOSTR_NSEC format - must be nsec1...');
   }
@@ -203,7 +222,7 @@ function getSecretKey(env: Env): Uint8Array {
 
 async function handleInfo(env: Env, corsHeaders: Record<string, string>): Promise<Response> {
   try {
-    const secretKey = getSecretKey(env);
+    const secretKey = await getSecretKey(env);
     const pubkey = getPublicKey(secretKey);
     const npub = nip19.npubEncode(pubkey);
 
@@ -237,7 +256,7 @@ async function handlePublish(
     return jsonResponse({ success: false, error: 'Missing required fields: kind, content' }, 400, corsHeaders);
   }
 
-  const secretKey = getSecretKey(env);
+  const secretKey = await getSecretKey(env);
 
   const event = finalizeEvent(
     {
@@ -275,7 +294,7 @@ async function handleModerate(
     return jsonResponse({ success: false, error: 'Missing action' }, 400, corsHeaders);
   }
 
-  const secretKey = getSecretKey(env);
+  const secretKey = await getSecretKey(env);
 
   // Build NIP-86 moderation event (kind 10000 + action-specific kinds)
   let kind: number;
@@ -284,30 +303,44 @@ async function handleModerate(
 
   switch (body.action) {
     case 'delete_event': {
-      // Use NIP-86 banevent RPC directly instead of kind 5
-      // Kind 5 (NIP-09) only allows authors to delete their own events
+      // Use banevent RPC directly instead of publishing kind 5 events.
+      // NIP-09 kind 5 deletion only allows authors to delete their own events.
+      // Admin moderation requires NIP-86 banevent RPC method instead.
       if (!body.eventId) {
         return jsonResponse({ success: false, error: 'Missing eventId for delete_event' }, 400, corsHeaders);
       }
 
-      // Call banevent RPC to remove the event from the relay
-      const rpcRequest = new Request(request.url.replace(/\/api\/moderate$/, '/api/relay-rpc'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          method: 'banevent',
-          params: [body.eventId, body.reason || 'Deleted by relay admin'],
-        }),
-      });
+      try {
+        const rpcRequest = new Request(request.url.replace(/\/api\/moderate$/, '/api/relay-rpc'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            method: 'banevent',
+            params: [body.eventId, body.reason || 'Deleted by relay admin'],
+          }),
+        });
 
-      const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders);
+        const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders);
+        const rpcResult = await rpcResponse.json() as { success: boolean; error?: string };
 
-      if (!rpcResponse.ok) {
-        const errorBody = await rpcResponse.text();
-        return jsonResponse({ success: false, error: `banevent failed: ${errorBody}` }, 500, corsHeaders);
+        if (!rpcResult.success) {
+          return jsonResponse({ success: false, error: rpcResult.error || 'banevent RPC failed' }, 500, corsHeaders);
+        }
+
+        // Sync any linked Zendesk tickets
+        syncZendeskAfterAction(
+          env,
+          body.action,
+          'event',
+          body.eventId,
+          getPublicKey(secretKey)
+        ).catch((err) => console.error('[handleModerate] Zendesk sync error:', err));
+
+        return jsonResponse({ success: true, eventId: body.eventId }, 200, corsHeaders);
+      } catch (error) {
+        console.error('[handleModerate] delete_event error:', error);
+        return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Unknown error' }, 500, corsHeaders);
       }
-
-      return jsonResponse({ success: true, method: 'banevent', eventId: body.eventId }, 200, corsHeaders);
     }
 
     case 'ban_pubkey':
@@ -354,6 +387,15 @@ async function handleModerate(
     return jsonResponse({ success: false, error: publishResult.error }, 500, corsHeaders);
   }
 
+  // Sync any linked Zendesk tickets (delete_event syncs in its own early return)
+  syncZendeskAfterAction(
+    env,
+    body.action,
+    body.pubkey ? 'pubkey' : 'event',
+    body.pubkey || '',
+    getPublicKey(secretKey)
+  ).catch((err) => console.error('[handleModerate] Zendesk sync error:', err));
+
   return jsonResponse({ success: true, event }, 200, corsHeaders);
 }
 
@@ -371,7 +413,7 @@ async function handleRelayRpc(
     return jsonResponse({ success: false, error: 'Missing method' }, 400, corsHeaders);
   }
 
-  const secretKey = getSecretKey(env);
+  const secretKey = await getSecretKey(env);
 
   // Build NIP-98 auth event
   const httpUrl = getManagementUrl(env);
@@ -567,6 +609,42 @@ async function ensureDecisionsTable(db: D1Database): Promise<void> {
   }
 }
 
+// Ensure zendesk_tickets table exists for tracking Zendesk ↔ Nostr mappings
+async function ensureZendeskTable(db: D1Database): Promise<void> {
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS zendesk_tickets (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ticket_id INTEGER NOT NULL UNIQUE,
+      event_id TEXT,
+      author_pubkey TEXT,
+      violation_type TEXT,
+      status TEXT DEFAULT 'open',
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      resolved_at TEXT,
+      resolution_action TEXT,
+      resolution_moderator TEXT
+    )
+  `).run();
+
+  try {
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_zendesk_event ON zendesk_tickets(event_id)`).run();
+  } catch {
+    // Index might already exist
+  }
+
+  try {
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_zendesk_pubkey ON zendesk_tickets(author_pubkey)`).run();
+  } catch {
+    // Index might already exist
+  }
+
+  try {
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_zendesk_status ON zendesk_tickets(status)`).run();
+  } catch {
+    // Index might already exist
+  }
+}
+
 async function handleLogDecision(
   request: Request,
   env: Env,
@@ -701,7 +779,46 @@ async function handleDeleteDecisions(
 
     await ensureDecisionsTable(env.DB);
 
-    // Delete all decisions for this target (reopens the report)
+    let labelsDeleted = 0;
+
+    // First, query for and delete any resolution labels (kind 1985) on the relay
+    // Try both 'e' tag (event target) and 'p' tag (pubkey target)
+    const labelFilters = [
+      { kinds: [1985], '#e': [targetId], '#L': ['moderation/resolution'], limit: 10 },
+      { kinds: [1985], '#p': [targetId], '#L': ['moderation/resolution'], limit: 10 },
+    ];
+
+    for (const filter of labelFilters) {
+      const queryResult = await queryRelay(filter, env.RELAY_URL);
+      if (queryResult.success && queryResult.events && queryResult.events.length > 0) {
+        for (const labelEvent of queryResult.events) {
+          const eventId = (labelEvent as { id?: string }).id;
+          if (eventId) {
+            // Ban the label event to remove it from the relay
+            const rpcRequest = new Request(`https://placeholder/api/relay-rpc`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                method: 'banevent',
+                params: [eventId, 'Removed by reopen action'],
+              }),
+            });
+
+            try {
+              const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders);
+              const rpcResult = await rpcResponse.json() as { success: boolean };
+              if (rpcResult.success) {
+                labelsDeleted++;
+              }
+            } catch (err) {
+              console.error('Failed to delete resolution label:', eventId, err);
+            }
+          }
+        }
+      }
+    }
+
+    // Delete all decisions for this target from D1 (reopens the report)
     const result = await env.DB.prepare(`
       DELETE FROM moderation_decisions
       WHERE target_id = ?
@@ -710,6 +827,7 @@ async function handleDeleteDecisions(
     return jsonResponse({
       success: true,
       deleted: result.meta.changes || 0,
+      labelsDeleted,
     }, 200, corsHeaders);
   } catch (error) {
     console.error('Delete decisions error:', error);
@@ -829,6 +947,17 @@ async function handleModerateMedia(
 
     const result = await response.json() as { success: boolean; sha256: string; action: string };
 
+    // Sync any linked Zendesk tickets
+    // Note: media actions use sha256, but current ticket mapping is by event_id/pubkey
+    // This will be a no-op unless ticket mapping is enhanced to track media hashes
+    syncZendeskAfterAction(
+      env,
+      body.action,
+      'media',
+      body.sha256,
+      'relay-manager'
+    ).catch((err) => console.error('[handleModerateMedia] Zendesk sync error:', err));
+
     return new Response(JSON.stringify({ success: true, result }), {
       status: 200,
       headers: { 'Content-Type': 'application/json', ...corsHeaders },
@@ -841,6 +970,67 @@ async function handleModerateMedia(
       corsHeaders
     );
   }
+}
+
+// Query relay for events matching a filter
+async function queryRelay(
+  filter: object,
+  relayUrl: string
+): Promise<{ success: boolean; events?: object[]; error?: string }> {
+  return new Promise((resolve) => {
+    try {
+      const ws = new WebSocket(relayUrl);
+      let resolved = false;
+      const events: object[] = [];
+      const subId = `query-${Date.now()}`;
+
+      const timeout = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          ws.close();
+          resolve({ success: true, events });
+        }
+      }, 5000);
+
+      ws.addEventListener('open', () => {
+        ws.send(JSON.stringify(['REQ', subId, filter]));
+      });
+
+      ws.addEventListener('message', (msg) => {
+        try {
+          const data = JSON.parse(msg.data as string);
+          if (data[0] === 'EVENT' && data[1] === subId) {
+            events.push(data[2]);
+          } else if (data[0] === 'EOSE' && data[1] === subId) {
+            clearTimeout(timeout);
+            resolved = true;
+            ws.close();
+            resolve({ success: true, events });
+          }
+        } catch {
+          // Ignore parse errors
+        }
+      });
+
+      ws.addEventListener('error', () => {
+        if (!resolved) {
+          clearTimeout(timeout);
+          resolved = true;
+          resolve({ success: false, error: 'WebSocket error' });
+        }
+      });
+
+      ws.addEventListener('close', () => {
+        if (!resolved) {
+          clearTimeout(timeout);
+          resolved = true;
+          resolve({ success: true, events });
+        }
+      });
+    } catch (error) {
+      resolve({ success: false, error: error instanceof Error ? error.message : 'Unknown error' });
+    }
+  });
 }
 
 async function publishToRelay(
@@ -991,16 +1181,16 @@ async function verifyZendeskJWT(
 async function verifyZendeskWebhook(
   request: Request,
   body: string,
-  env: Env
+  secret: string | undefined
 ): Promise<boolean> {
-  if (!env.ZENDESK_WEBHOOK_SECRET) {
-    console.warn('ZENDESK_WEBHOOK_SECRET not configured');
+  if (!secret) {
+    console.warn('Zendesk webhook secret not configured');
     return false;
   }
 
   // Option 1: Simple API key header (X-Webhook-Key)
   const apiKey = request.headers.get('X-Webhook-Key');
-  if (apiKey && apiKey === env.ZENDESK_WEBHOOK_SECRET) {
+  if (apiKey && apiKey === secret) {
     return true;
   }
 
@@ -1017,7 +1207,7 @@ async function verifyZendeskWebhook(
 
   const key = await crypto.subtle.importKey(
     'raw',
-    new TextEncoder().encode(env.ZENDESK_WEBHOOK_SECRET),
+    new TextEncoder().encode(secret),
     { name: 'HMAC', hash: 'SHA-256' },
     false,
     ['sign']
@@ -1091,6 +1281,181 @@ async function updateZendeskTicket(
   }
 }
 
+// Add internal note to Zendesk ticket (simpler than updateZendeskTicket - just adds comment, optionally solves)
+async function addZendeskInternalNote(
+  ticketId: number,
+  note: string,
+  env: Env,
+  solve: boolean = false
+): Promise<void> {
+  if (!env.ZENDESK_SUBDOMAIN || !env.ZENDESK_API_TOKEN || !env.ZENDESK_EMAIL) {
+    console.warn('[addZendeskInternalNote] Missing Zendesk credentials, skipping');
+    return;
+  }
+
+  try {
+    const auth = btoa(`${env.ZENDESK_EMAIL}/token:${env.ZENDESK_API_TOKEN}`);
+    const url = `https://${env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets/${ticketId}`;
+
+    const payload: { ticket: { comment: { body: string; public: boolean }; status?: string } } = {
+      ticket: {
+        comment: {
+          body: note,
+          public: false,
+        },
+      },
+    };
+
+    if (solve) {
+      payload.ticket.status = 'solved';
+    }
+
+    const response = await fetch(url, {
+      method: 'PUT',
+      headers: {
+        'Authorization': `Basic ${auth}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`[addZendeskInternalNote] Failed: ${response.status} - ${errorText}`);
+    }
+  } catch (error) {
+    console.error('[addZendeskInternalNote] Error:', error);
+  }
+}
+
+// Proxy handler for realness API (AI detection)
+// Uses service binding if available (preferred), falls back to HTTP with CF Access
+async function handleRealnessProxy(
+  request: Request,
+  path: string,
+  env: Env,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  const subPath = path.replace('/api/realness', '');
+
+  // Prefer service binding (bypasses CF Access, no 522 issues)
+  if (env.REALNESS) {
+    return handleRealnessViaBinding(request, subPath, env.REALNESS, corsHeaders);
+  }
+
+  // Fallback to HTTP with CF Access credentials
+  return handleRealnessViaHTTP(request, subPath, env, corsHeaders);
+}
+
+// Service binding path (preferred)
+async function handleRealnessViaBinding(
+  request: Request,
+  subPath: string,
+  realness: Fetcher,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  // GET /api/realness/jobs/:id -> GET realness/api/jobs/:id
+  if (subPath.startsWith('/jobs/') && request.method === 'GET') {
+    const jobId = subPath.replace('/jobs/', '');
+    try {
+      // Service binding uses a dummy URL - the host is ignored
+      const response = await realness.fetch(`https://realness/api/jobs/${jobId}`, {
+        headers: { 'Accept': 'application/json' },
+      });
+      const data = await response.json();
+      return jsonResponse(data, response.status, corsHeaders);
+    } catch (error) {
+      console.error('[realness proxy/binding] jobs error:', error);
+      return jsonResponse({ success: false, error: 'Failed to fetch job', details: String(error) }, 500, corsHeaders);
+    }
+  }
+
+  // POST /api/realness/analyze -> POST realness/analyze
+  if (subPath === '/analyze' && request.method === 'POST') {
+    try {
+      const body = await request.text();
+      const response = await realness.fetch('https://realness/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+      });
+      const data = await response.json();
+      return jsonResponse(data, response.status, corsHeaders);
+    } catch (error) {
+      console.error('[realness proxy/binding] analyze error:', error);
+      return jsonResponse({ success: false, error: 'Failed to submit analysis', details: String(error) }, 500, corsHeaders);
+    }
+  }
+
+  return jsonResponse({ success: false, error: 'Unknown realness endpoint' }, 404, corsHeaders);
+}
+
+// HTTP fallback path (legacy, kept for backwards compatibility)
+async function handleRealnessViaHTTP(
+  request: Request,
+  subPath: string,
+  env: Env,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  const realnessUrl = env.REALNESS_API_URL || DEFAULT_REALNESS_API_URL;
+
+  // Check CF Access credentials
+  if (!env.CF_ACCESS_CLIENT_ID || !env.CF_ACCESS_CLIENT_SECRET) {
+    return jsonResponse({ success: false, error: 'CF_ACCESS credentials not configured (and no service binding)' }, 500, corsHeaders);
+  }
+
+  // Build headers with CF Access auth
+  const headers: Record<string, string> = {
+    'CF-Access-Client-Id': env.CF_ACCESS_CLIENT_ID,
+    'CF-Access-Client-Secret': env.CF_ACCESS_CLIENT_SECRET,
+    'Accept': 'application/json',
+  };
+
+  // GET /api/realness/jobs/:id -> GET realness/api/jobs/:id
+  if (subPath.startsWith('/jobs/') && request.method === 'GET') {
+    const jobId = subPath.replace('/jobs/', '');
+    try {
+      const response = await fetch(`${realnessUrl}/api/jobs/${jobId}`, { headers });
+      const text = await response.text();
+      try {
+        const data = JSON.parse(text);
+        return jsonResponse(data, response.status, corsHeaders);
+      } catch {
+        console.error('[realness proxy/http] jobs non-JSON response:', response.status, text.slice(0, 500));
+        return jsonResponse({ success: false, error: `Upstream error: ${response.status}`, details: text.slice(0, 200) }, response.status, corsHeaders);
+      }
+    } catch (error) {
+      console.error('[realness proxy/http] jobs error:', error);
+      return jsonResponse({ success: false, error: 'Failed to fetch job', details: String(error) }, 500, corsHeaders);
+    }
+  }
+
+  // POST /api/realness/analyze -> POST realness/analyze
+  if (subPath === '/analyze' && request.method === 'POST') {
+    try {
+      const body = await request.text();
+      const response = await fetch(`${realnessUrl}/analyze`, {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body,
+      });
+      const text = await response.text();
+      try {
+        const data = JSON.parse(text);
+        return jsonResponse(data, response.status, corsHeaders);
+      } catch {
+        console.error('[realness proxy/http] analyze non-JSON response:', response.status, text.slice(0, 500));
+        return jsonResponse({ success: false, error: `Upstream error: ${response.status}`, details: text.slice(0, 200) }, response.status, corsHeaders);
+      }
+    } catch (error) {
+      console.error('[realness proxy/http] analyze error:', error);
+      return jsonResponse({ success: false, error: 'Failed to submit analysis', details: String(error) }, 500, corsHeaders);
+    }
+  }
+
+  return jsonResponse({ success: false, error: 'Unknown realness endpoint' }, 404, corsHeaders);
+}
+
 // Route handler for all /api/zendesk/* endpoints
 async function handleZendeskRoutes(
   request: Request,
@@ -1103,6 +1468,11 @@ async function handleZendeskRoutes(
   // Webhook endpoint uses signature verification instead of JWT
   if (subPath === '/webhook' && request.method === 'POST') {
     return handleZendeskWebhook(request, env, corsHeaders);
+  }
+
+  // Parse report endpoint - extracts Nostr IDs from ticket description, stores mapping, adds links
+  if (subPath === '/parse-report' && request.method === 'POST') {
+    return handleParseReport(request, env, corsHeaders);
   }
 
   // All other Zendesk endpoints require JWT auth
@@ -1154,7 +1524,7 @@ async function handleZendeskWebhook(
     const bodyText = await request.text();
 
     // Verify webhook signature
-    const isValid = await verifyZendeskWebhook(request, bodyText, env);
+    const isValid = await verifyZendeskWebhook(request, bodyText, env.ZENDESK_WEBHOOK_SECRET);
     if (!isValid) {
       return jsonResponse({ success: false, error: 'Invalid webhook signature' }, 401, corsHeaders);
     }
@@ -1175,7 +1545,7 @@ async function handleZendeskWebhook(
     }
 
     // Execute the moderation action
-    const secretKey = getSecretKey(env);
+    const secretKey = await getSecretKey(env);
 
     let actionResult: { success: boolean; error?: string } = { success: false, error: 'Unknown action' };
 
@@ -1263,6 +1633,15 @@ async function handleZendeskWebhook(
         body.agent_email || null,
         `zendesk:${body.ticket_id}`
       ).run();
+
+      // Sync any linked Zendesk tickets (via our mapping table)
+      syncZendeskAfterAction(
+        env,
+        body.action_requested,
+        body.nostr_event_id ? 'event' : 'pubkey',
+        body.nostr_event_id || body.nostr_pubkey || '',
+        body.agent_email || 'webhook'
+      ).catch((err) => console.error('[handleZendeskWebhook] Zendesk sync error:', err));
     }
 
     // Callback to Zendesk to update ticket status and add internal note
@@ -1318,6 +1697,172 @@ async function handleZendeskWebhook(
   }
 }
 
+// Parse content report ticket and store mapping, add helpful links as internal note
+async function handleParseReport(
+  request: Request,
+  env: Env,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  try {
+    const bodyText = await request.text();
+
+    // Debug: log what headers we're receiving
+    const debugHeaders: Record<string, string> = {};
+    request.headers.forEach((value, key) => {
+      if (key.toLowerCase().includes('webhook') || key.toLowerCase().includes('zendesk') || key.toLowerCase() === 'x-webhook-key') {
+        debugHeaders[key] = value.substring(0, 20) + '...';  // Truncate for safety
+      }
+    });
+    console.log('[handleParseReport] Headers received:', JSON.stringify(debugHeaders));
+    console.log('[handleParseReport] Secret configured:', env.ZENDESK_PARSE_REPORT_SECRET ? 'yes' : 'no');
+
+    // Verify webhook signature
+    if (!await verifyZendeskWebhook(request, bodyText, env.ZENDESK_PARSE_REPORT_SECRET)) {
+      return jsonResponse({ success: false, error: 'Invalid webhook signature' }, 401, corsHeaders);
+    }
+
+    const { ticket_id, description } = JSON.parse(bodyText) as {
+      ticket_id: number;
+      description: string;
+    };
+
+    if (!ticket_id || !description) {
+      return jsonResponse({ success: false, error: 'Missing ticket_id or description' }, 400, corsHeaders);
+    }
+
+    // Parse description with regex
+    const eventMatch = description.match(/Event ID:\s*([a-f0-9]{64})/i);
+    const pubkeyMatch = description.match(/Author Pubkey:\s*([a-f0-9]{64})/i);
+    const violationMatch = description.match(/Violation Type:\s*(\w+)/i);
+
+    const event_id = eventMatch?.[1] || null;
+    const author_pubkey = pubkeyMatch?.[1] || null;
+    const violation_type = violationMatch?.[1] || null;
+
+    if (!event_id && !author_pubkey) {
+      return jsonResponse({ success: false, error: 'Could not parse event_id or author_pubkey from description' }, 400, corsHeaders);
+    }
+
+    // Store mapping in D1 (skip if already processed)
+    if (env.DB) {
+      await ensureZendeskTable(env.DB);
+
+      // Check if we've already processed this ticket
+      const existing = await env.DB.prepare(
+        `SELECT id FROM zendesk_tickets WHERE ticket_id = ?`
+      ).bind(ticket_id).first();
+
+      if (existing) {
+        console.log(`[handleParseReport] Ticket ${ticket_id} already processed, skipping`);
+        return jsonResponse({ success: true, ticket_id, event_id, author_pubkey, violation_type, skipped: true }, 200, corsHeaders);
+      }
+
+      await env.DB.prepare(`
+        INSERT INTO zendesk_tickets (ticket_id, event_id, author_pubkey, violation_type, status)
+        VALUES (?, ?, ?, ?, 'open')
+      `).bind(ticket_id, event_id, author_pubkey, violation_type).run();
+    }
+
+    // Generate internal note with links
+    const lines = ['📋 **Content Report Links**', ''];
+    if (violation_type) {
+      lines.push(`**Violation Type:** ${violation_type}`, '');
+    }
+    if (event_id) {
+      lines.push('**Reported Event:**');
+      lines.push(`• [View in Relay Admin](https://relay.admin.divine.video/reports?event=${event_id})`);
+      lines.push(`• Event ID: \`${event_id}\``);
+      lines.push('');
+    }
+    if (author_pubkey) {
+      lines.push('**Reported Author:**');
+      lines.push(`• [View in Relay Admin](https://relay.admin.divine.video/reports?pubkey=${author_pubkey})`);
+      lines.push(`• Pubkey: \`${author_pubkey}\``);
+    }
+
+    const note = lines.join('\n');
+
+    // Add internal note to Zendesk
+    await addZendeskInternalNote(ticket_id, note, env);
+
+    return jsonResponse({ success: true, ticket_id, event_id, author_pubkey, violation_type }, 200, corsHeaders);
+  } catch (error) {
+    console.error('[handleParseReport] Error:', error);
+    return jsonResponse(
+      { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+      500,
+      corsHeaders
+    );
+  }
+}
+
+// Sync Zendesk ticket after moderation action in relay-manager
+async function syncZendeskAfterAction(
+  env: Env,
+  action: string,
+  targetType: 'event' | 'pubkey' | 'media',
+  targetId: string,
+  moderator: string
+): Promise<void> {
+  if (!env.DB) return;
+
+  try {
+    await ensureZendeskTable(env.DB);
+
+    // Find linked open ticket
+    let linked: { ticket_id: number } | null = null;
+
+    if (targetType === 'event') {
+      linked = await env.DB.prepare(
+        `SELECT ticket_id FROM zendesk_tickets WHERE event_id = ? AND status = 'open'`
+      ).bind(targetId).first();
+    } else if (targetType === 'pubkey') {
+      linked = await env.DB.prepare(
+        `SELECT ticket_id FROM zendesk_tickets WHERE author_pubkey = ? AND status = 'open'`
+      ).bind(targetId).first();
+    }
+
+    if (!linked?.ticket_id) return;
+
+    // Determine if this is a resolution action (should solve ticket)
+    const resolutionActions = ['reviewed', 'dismissed', 'no-action', 'false-positive'];
+    const isResolution = resolutionActions.includes(action);
+
+    // Build note
+    const actionDisplay = action.replace(/_/g, ' ').replace(/([A-Z])/g, ' $1').trim();
+    const timestamp = new Date().toISOString();
+
+    const note = [
+      '📋 **Moderation Action Taken**',
+      '',
+      `**Action:** ${actionDisplay}`,
+      `**Target:** \`${targetId}\``,
+      `**Moderator:** ${moderator}`,
+      `**Time:** ${timestamp}`,
+    ].join('\n');
+
+    // Add note (and solve if resolution action)
+    await addZendeskInternalNote(linked.ticket_id, note, env, isResolution);
+
+    // Update our tracking if resolved
+    if (isResolution) {
+      await env.DB.prepare(`
+        UPDATE zendesk_tickets
+        SET status = 'resolved',
+            resolved_at = CURRENT_TIMESTAMP,
+            resolution_action = ?,
+            resolution_moderator = ?
+        WHERE ticket_id = ?
+      `).bind(action, moderator, linked.ticket_id).run();
+    }
+
+    console.log(`[syncZendeskAfterAction] Updated ticket #${linked.ticket_id} with action: ${action}`);
+  } catch (error) {
+    console.error('[syncZendeskAfterAction] Error:', error);
+    // Don't throw - Zendesk sync failure shouldn't break moderation
+  }
+}
+
 // Get context for Zendesk sidebar app
 async function handleZendeskContext(
   request: Request,
@@ -1355,7 +1900,7 @@ async function handleZendeskContext(
     // Check if user is banned (via relay RPC)
     if (pubkey) {
       try {
-        const secretKey = getSecretKey(env);
+        const secretKey = await getSecretKey(env);
         const httpUrl = getManagementUrl(env);
         const payload = JSON.stringify({ method: 'listbannedpubkeys', params: [] });
         const payloadHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
@@ -1421,7 +1966,7 @@ async function handleZendeskAction(
       return jsonResponse({ success: false, error: 'Missing action' }, 400, corsHeaders);
     }
 
-    const secretKey = getSecretKey(env);
+    const secretKey = await getSecretKey(env);
     let actionResult: { success: boolean; error?: string } = { success: false, error: 'Unknown action' };
 
     const reason = body.reason || `Via Zendesk by ${user.email}${body.ticket_id ? ` (ticket #${body.ticket_id})` : ''}`;
@@ -1517,6 +2062,17 @@ async function handleZendeskAction(
         user.email,
         body.ticket_id ? `zendesk:${body.ticket_id}` : null
       ).run();
+    }
+
+    // Sync any linked Zendesk tickets
+    if (actionResult.success) {
+      syncZendeskAfterAction(
+        env,
+        body.action,
+        body.event_id ? 'event' : 'pubkey',
+        body.event_id || body.pubkey || '',
+        user.email
+      ).catch((err) => console.error('[handleZendeskAction] Zendesk sync error:', err));
     }
 
     return new Response(JSON.stringify({
