@@ -7,8 +7,9 @@ import { UserManagement } from "@/components/UserManagement";
 import { Reports } from "@/components/Reports";
 import { Labels } from "@/components/Labels";
 import { DebugPanel } from "@/components/DebugPanel";
+import { SettingsDashboard } from "@/components/SettingsDashboard";
 import { EnvironmentSelector } from "@/components/EnvironmentSelector";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Server, FileText, Users, Settings, Flag, Tag, Bug } from "lucide-react";
 import { useAppContext } from "@/hooks/useAppContext";
@@ -102,13 +103,8 @@ export function RelayManager() {
             <Labels relayUrl={config.relayUrl} />
           </TabsContent>
 
-          <TabsContent value="settings">
-            <Card>
-              <CardContent className="py-12 text-center">
-                <Settings className="h-12 w-12 mx-auto mb-4 opacity-50" />
-                <p className="text-muted-foreground">Relay settings coming soon</p>
-              </CardContent>
-            </Card>
+          <TabsContent value="settings" className="flex-1 min-h-0 mt-4">
+            <SettingsDashboard />
           </TabsContent>
 
           <TabsContent value="debug">
