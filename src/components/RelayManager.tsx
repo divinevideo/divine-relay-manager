@@ -57,7 +57,7 @@ export function RelayManager() {
         </div>
       </header>
 
-      <div className="flex-1 min-h-0 container mx-auto px-4 py-4">
+      <div className="flex-1 min-h-0 overflow-hidden container mx-auto px-4 py-4">
         <Tabs value={currentTab} onValueChange={handleTabChange} className="h-full flex flex-col">
           <TabsList className="shrink-0 grid w-full grid-cols-6">
             <TabsTrigger value="events" className="flex items-center space-x-2">
@@ -86,7 +86,7 @@ export function RelayManager() {
             </TabsTrigger>
           </TabsList>
 
-          <TabsContent value="events" className="flex-1 min-h-0 mt-4">
+          <TabsContent value="events" className="flex-1 min-h-0 overflow-hidden mt-4">
             <EventsList relayUrl={config.relayUrl} />
           </TabsContent>
 

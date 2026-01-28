@@ -611,7 +611,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
   ];
 
   return (
-    <div className="h-full flex flex-col gap-4">
+    <div className="h-full flex flex-col gap-4 overflow-hidden">
       {/* Header */}
       <div className="shrink-0 flex items-center justify-between">
         <div>
@@ -766,7 +766,8 @@ export function EventsList({ relayUrl }: EventsListProps) {
       )}
 
       {/* Split Pane Layout */}
-      <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 flex-1 min-h-0">
+      <div className="flex-1 min-h-0 relative">
+      <div className="absolute inset-0 grid grid-cols-1 lg:grid-cols-5 gap-4">
         {/* Left Pane - Events List */}
         <Card className="lg:col-span-2 h-full overflow-hidden flex flex-col">
           <CardHeader className="py-3 shrink-0">
@@ -865,6 +866,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
             </div>
           )}
         </Card>
+      </div>
       </div>
     </div>
   );

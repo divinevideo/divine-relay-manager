@@ -41,7 +41,7 @@ import { HiveAIReport } from "@/components/HiveAIReport";
 import { AIDetectionReport } from "@/components/AIDetectionReport";
 import { MediaPreview } from "@/components/MediaPreview";
 import { CATEGORY_LABELS } from "@/lib/constants";
-import { UserX, Tag, Flag, Trash2, CheckCircle, Video, History, Ban, ShieldX, Link2, User, FileText, Unlock, Repeat2, FileCode, Loader2, XCircle, RefreshCw } from "lucide-react";
+import { UserX, UserCheck, Tag, Flag, Trash2, CheckCircle, Video, History, Ban, ShieldX, Link2, User, FileText, Unlock, Repeat2, FileCode, Loader2, XCircle, RefreshCw, Undo2 } from "lucide-react";
 import { CopyableId, CopyableTags } from "@/components/CopyableId";
 import type { NostrEvent } from "@nostrify/nostrify";
 
@@ -75,7 +75,8 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   const {
     banPubkey, deleteEvent, markAsReviewed, moderateMedia, unblockMedia,
     logDecision, deleteDecisions, verifyModerationAction, verifyPubkeyBanned,
-    verifyEventDeleted, verifyMediaBlocked,
+    verifyPubkeyUnbanned, verifyEventDeleted, verifyMediaBlocked,
+    unbanPubkey, callRelayRpc,
   } = useAdminApi();
   const navigate = useNavigate();
   const [showThreadModal, setShowThreadModal] = useState(false);
@@ -574,6 +575,85 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     },
   });
 
+  const unbanUserMutation = useMutation({
+    mutationFn: async ({ pubkey }: { pubkey: string }) => {
+      await unbanPubkey(pubkey);
+      await logDecision({
+        targetType: 'pubkey',
+        targetId: pubkey,
+        action: 'unban_user',
+        reason: 'Unbanned from report viewer',
+        reportId: report?.id,
+      });
+      return pubkey;
+    },
+    onSuccess: async (pubkey) => {
+      queryClient.invalidateQueries({ queryKey: ['banned-users'] });
+      queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
+      queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      moderationStatus.refetch();
+      decisionLog.refetch();
+      toast({ title: "User unbanned", description: "Verifying..." });
+
+      setIsVerifying(true);
+      setVerificationResult(null);
+      try {
+        const verified = await verifyPubkeyUnbanned(pubkey);
+        setVerificationResult({
+          type: 'ban',
+          success: verified,
+          message: verified
+            ? 'Unban verified - user is no longer in banned list'
+            : 'Warning: User may still be banned',
+        });
+      } catch {
+        setVerificationResult({
+          type: 'ban',
+          success: false,
+          message: 'Could not verify unban status',
+        });
+      } finally {
+        setIsVerifying(false);
+      }
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Failed to unban user",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  const restoreEventMutation = useMutation({
+    mutationFn: async ({ eventId }: { eventId: string }) => {
+      await callRelayRpc('allowevent', [eventId]);
+      await logDecision({
+        targetType: 'event',
+        targetId: eventId,
+        action: 'restore_event',
+        reason: 'Restored from report viewer',
+        reportId: report?.id,
+      });
+      return eventId;
+    },
+    onSuccess: async () => {
+      queryClient.invalidateQueries({ queryKey: ['reports'] });
+      queryClient.invalidateQueries({ queryKey: ['banned-events'] });
+      queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      moderationStatus.refetch();
+      decisionLog.refetch();
+      toast({ title: "Event restored" });
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Failed to restore event",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
   // Combined action: Block media AND delete event
   const blockAndDeleteMutation = useMutation({
     mutationFn: async ({ eventId, hashes, reason }: { eventId: string; hashes: string[]; reason: string }) => {
@@ -693,7 +773,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             <AlertDialogTitle>Ban User?</AlertDialogTitle>
             <AlertDialogDescription asChild>
               <div className="space-y-3">
-                <p>This will permanently ban this user from the relay.</p>
+                <p>This will ban this user from the relay. This can be reversed.</p>
                 {context.reportedUser.pubkey && (
                   <div className="bg-muted px-2 py-1.5 rounded">
                     <UserIdentifier
@@ -761,10 +841,10 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
       <AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete Event?</AlertDialogTitle>
+            <AlertDialogTitle>Ban Event?</AlertDialogTitle>
             <AlertDialogDescription asChild>
               <div>
-                <p>This will remove this event from the relay. The content will no longer be served.</p>
+                <p>This will remove this event from the relay. The content will no longer be served. This can be reversed.</p>
                 {context.target?.value && (
                   <div className="mt-2">
                     <CopyableId
@@ -793,7 +873,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
               disabled={deleteMutation.isPending}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
-              {deleteMutation.isPending ? 'Deleting...' : 'Delete Event'}
+              {deleteMutation.isPending ? 'Banning...' : 'Ban Event'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -806,7 +886,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             <AlertDialogTitle>Block Media?</AlertDialogTitle>
             <AlertDialogDescription asChild>
               <div>
-                <p>This will permanently ban {mediaHashes.length} media file(s) from being served.</p>
+                <p>This will ban {mediaHashes.length} media file(s) from being served. This can be reversed.</p>
                 <div className="mt-2 space-y-1">
                   {mediaHashes.map(hash => (
                     <CopyableId
@@ -850,7 +930,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
               <div className="space-y-2">
                 <p>This will:</p>
                 <ul className="list-disc list-inside space-y-1 text-sm">
-                  <li>Permanently ban {mediaHashes.length} media file(s)</li>
+                  <li>Ban {mediaHashes.length} media file(s)</li>
                   <li>Delete the event from the relay</li>
                 </ul>
               </div>
@@ -1481,11 +1561,11 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                       disabled={blockAndDeleteMutation.isPending || mediaStatus.isLoading || isVerifying}
                     >
                       <Trash2 className="h-4 w-4 mr-2" />
-                      {blockAndDeleteMutation.isPending ? 'Removing...' : isVerifying ? 'Verifying...' : mediaStatus.isLoading ? 'Checking media...' : `Block Media & Delete Event`}
+                      {blockAndDeleteMutation.isPending ? 'Removing...' : isVerifying ? 'Verifying...' : mediaStatus.isLoading ? 'Checking media...' : `Block Media & Ban Event`}
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent side="bottom" className="max-w-xs">
-                    <p>Permanently block all media files (images/videos) AND delete the event from the relay. The media will be blocked by hash so re-uploads are prevented.</p>
+                    <p>Block all media files (images/videos) AND ban the event from the relay. The media will be blocked by hash so re-uploads are prevented. Both actions can be reversed.</p>
                   </TooltipContent>
                 </Tooltip>
               </div>
@@ -1497,13 +1577,21 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                 isEventDeleted ? (
                   <Tooltip>
                     <TooltipTrigger asChild>
-                      <Button variant="outline" disabled className="border-green-500 text-green-600">
-                        <CheckCircle className="h-4 w-4 mr-1" />
-                        Event Deleted
+                      <Button
+                        variant="outline"
+                        onClick={() => {
+                          if (context.target?.type === 'event' && context.target.value) {
+                            restoreEventMutation.mutate({ eventId: context.target.value });
+                          }
+                        }}
+                        disabled={restoreEventMutation.isPending}
+                      >
+                        <Undo2 className="h-4 w-4 mr-1" />
+                        {restoreEventMutation.isPending ? 'Restoring...' : 'Restore Event'}
                       </Button>
                     </TooltipTrigger>
                     <TooltipContent side="bottom" className="max-w-xs">
-                      <p>This event has already been deleted from the relay.</p>
+                      <p>Restore this event to the relay. This reverses the ban and allows the content to be served again.</p>
                     </TooltipContent>
                   </Tooltip>
                 ) : (
@@ -1514,12 +1602,12 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                         onClick={() => setConfirmDelete(true)}
                         disabled={deleteMutation.isPending}
                       >
-                        <Trash2 className="h-4 w-4 mr-1" />
-                        Delete Event
+                        <ShieldX className="h-4 w-4 mr-1" />
+                        Ban Event
                       </Button>
                     </TooltipTrigger>
                     <TooltipContent side="bottom" className="max-w-xs">
-                      <p>Delete this event from the relay. The event will no longer be served, but the user can still post new content.</p>
+                      <p>Ban this event from the relay. The event will no longer be served, but the user can still post new content. This can be reversed.</p>
                     </TooltipContent>
                   </Tooltip>
                 )
@@ -1563,7 +1651,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                       </Button>
                     </TooltipTrigger>
                     <TooltipContent side="bottom" className="max-w-xs">
-                      <p>Permanently block media files by their hash. They won't be served and re-uploads of the same file will be blocked.</p>
+                      <p>Block media files by their hash. They won't be served and re-uploads of the same file will be blocked. This can be reversed.</p>
                     </TooltipContent>
                   </Tooltip>
                 )
@@ -1572,13 +1660,21 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                 isUserBanned ? (
                   <Tooltip>
                     <TooltipTrigger asChild>
-                      <Button variant="outline" disabled className="border-green-500 text-green-600">
-                        <CheckCircle className="h-4 w-4 mr-1" />
-                        User Banned
+                      <Button
+                        variant="outline"
+                        onClick={() => {
+                          if (context.reportedUser.pubkey) {
+                            unbanUserMutation.mutate({ pubkey: context.reportedUser.pubkey });
+                          }
+                        }}
+                        disabled={unbanUserMutation.isPending}
+                      >
+                        <UserCheck className="h-4 w-4 mr-1" />
+                        {unbanUserMutation.isPending ? 'Unbanning...' : 'Unban User'}
                       </Button>
                     </TooltipTrigger>
                     <TooltipContent side="bottom" className="max-w-xs">
-                      <p>This user has already been banned from the relay.</p>
+                      <p>Unban this user from the relay. They will be able to post new content again. This reverses the ban.</p>
                     </TooltipContent>
                   </Tooltip>
                 ) : (
@@ -1594,7 +1690,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                       </Button>
                     </TooltipTrigger>
                     <TooltipContent side="bottom" className="max-w-xs">
-                      <p>Permanently ban this user from the relay. They won't be able to post new content. Optionally delete all their events and block their media.</p>
+                      <p>Ban this user from the relay. They won't be able to post new content. Optionally delete all their events and block their media. This can be reversed.</p>
                     </TooltipContent>
                   </Tooltip>
                 )

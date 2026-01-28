@@ -40,7 +40,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
   const { toast } = useToast();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { callRelayRpc, verifyPubkeyBanned, logDecision } = useAdminApi();
+  const { callRelayRpc, verifyPubkeyBanned, verifyPubkeyUnbanned, unbanPubkey, logDecision } = useAdminApi();
   const { user } = useCurrentUser();
   const [newPubkey, setNewPubkey] = useState("");
   const [newReason, setNewReason] = useState("");
@@ -156,14 +156,42 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
     }
   };
 
-  const handleRemoveUser = async (pubkey: string, type: 'ban' | 'allow') => {
-    if (type === 'ban') {
-      // NIP-86 doesn't define 'unbanpubkey' - waiting for relay support
+  // Mutation for unbanning users
+  const unbanUserMutation = useMutation({
+    mutationFn: async ({ pubkey }: { pubkey: string }) => {
+      await unbanPubkey(pubkey);
+      await logDecision({
+        targetType: 'pubkey',
+        targetId: pubkey,
+        action: 'unban_user',
+        reason: 'Unbanned via User Management',
+        moderatorPubkey: user?.pubkey,
+      });
+      return pubkey;
+    },
+    onSuccess: async (pubkey) => {
+      invalidateUserQueries();
+      toast({ title: "User unbanned successfully" });
+
+      // Background verification
+      verifyPubkeyUnbanned(pubkey).then(verified => {
+        if (!verified) {
+          console.warn('[UserManagement] Unban verification failed for', pubkey, '- relay may have async processing');
+        }
+      });
+    },
+    onError: (error: Error) => {
       toast({
-        title: "Not yet supported",
-        description: "Unbanning requires 'unbanpubkey' RPC method which is not yet implemented in the relay",
+        title: "Failed to unban user",
+        description: error.message,
         variant: "destructive"
       });
+    },
+  });
+
+  const handleRemoveUser = async (pubkey: string, type: 'ban' | 'allow') => {
+    if (type === 'ban') {
+      unbanUserMutation.mutate({ pubkey });
     } else {
       // NIP-86 doesn't define a method to remove from allow list
       toast({
