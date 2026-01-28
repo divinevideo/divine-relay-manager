@@ -16,9 +16,7 @@ import {
 } from "@/components/ui/tooltip";
 import { Bot, ShieldCheck, ShieldAlert, ShieldX, Eye, Clock, RefreshCw, Loader2 } from "lucide-react";
 import { CopyableId } from "@/components/CopyableId";
-
-// Worker URL - proxies requests to moderation service with CF Access credentials
-const WORKER_URL = import.meta.env.VITE_WORKER_URL || 'https://divine-relay-admin-api.divine-video.workers.dev';
+import { useApiUrl } from "@/hooks/useAdminApi";
 
 interface HiveAIReportProps {
   sha256?: string;
@@ -162,6 +160,7 @@ function formatDate(dateStr: string | undefined): string {
 export function HiveAIReport({ sha256: providedSha256, videoUrl: providedVideoUrl, eventTags, className }: HiveAIReportProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const queryClient = useQueryClient();
+  const apiUrl = useApiUrl();
 
   // Determine sha256 from props or tags
   const sha256 = providedSha256 || (eventTags ? extractSha256FromTags(eventTags) : null);
@@ -172,7 +171,7 @@ export function HiveAIReport({ sha256: providedSha256, videoUrl: providedVideoUr
     queryFn: async (): Promise<ModerationResult | null> => {
       if (!sha256) return null;
 
-      const response = await fetch(`${WORKER_URL}/api/check-result/${sha256}`);
+      const response = await fetch(`${apiUrl}/api/check-result/${sha256}`);
       if (!response.ok) {
         if (response.status === 404) return null;
         throw new Error(`Failed to fetch moderation result: ${response.status}`);
@@ -212,7 +211,7 @@ export function HiveAIReport({ sha256: providedSha256, videoUrl: providedVideoUr
     setIsSubmitting(true);
     try {
       // Call the worker to trigger a moderation check
-      const response = await fetch(`${WORKER_URL}/api/moderate-check`, {
+      const response = await fetch(`${apiUrl}/api/moderate-check`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: videoUrl, sha256 }),
@@ -384,13 +383,14 @@ interface HiveStatusBadgeProps {
 }
 
 export function HiveStatusBadge({ sha256: providedSha256, eventTags, className }: HiveStatusBadgeProps) {
+  const apiUrl = useApiUrl();
   const sha256 = providedSha256 || (eventTags ? extractSha256FromTags(eventTags) : null);
 
   const { data: result } = useQuery({
     queryKey: ['hive-moderation', sha256],
     queryFn: async (): Promise<ModerationResult | null> => {
       if (!sha256) return null;
-      const response = await fetch(`${WORKER_URL}/api/check-result/${sha256}`);
+      const response = await fetch(`${apiUrl}/api/check-result/${sha256}`);
       if (!response.ok) return null;
       return response.json();
     },

@@ -82,11 +82,11 @@ export function useAdminApi() {
     deleteDecisions: (targetId: string) =>
       adminApi.deleteDecisions(apiUrl, targetId),
 
-    // AI Detection (uses separate Realness API, not apiUrl)
+    // AI Detection (proxied through worker to handle CF Access)
     getAIDetectionResult: (eventId: string) =>
-      adminApi.getAIDetectionResult(eventId),
+      adminApi.getAIDetectionResult(apiUrl, eventId),
     submitAIDetection: (videoUrl: string, sha256: string, eventId?: string) =>
-      adminApi.submitAIDetection(videoUrl, sha256, eventId),
+      adminApi.submitAIDetection(apiUrl, videoUrl, sha256, eventId),
 
     // Verification
     verifyPubkeyBanned: (pubkey: string) =>

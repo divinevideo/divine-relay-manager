@@ -13,6 +13,8 @@ routes = [
 
 # The NOSTR_NSEC secret must be set via: wrangler secret put NOSTR_NSEC
 
+# CF Access credentials - set via: wrangler secret put CF_ACCESS_CLIENT_ID / CF_ACCESS_CLIENT_SECRET
+
 [vars]
 RELAY_URL = "wss://relay.divine.video"
 # Path for NIP-86 management API (appended to relay URL converted to HTTPS)
@@ -30,3 +32,8 @@ ZENDESK_FIELD_ACTION_REQUESTED = "14545826900367"
 binding = "DB"
 database_name = "blossom-webhook-events"
 database_id = "829f06cf-294b-4491-8611-30fc53df2589"
+
+# Service binding to divine-realness worker (bypasses CF Access 522 issue)
+[[services]]
+binding = "REALNESS"
+service = "divine-ai-detector"

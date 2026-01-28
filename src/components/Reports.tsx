@@ -672,11 +672,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       // Select the report
       setSelectedReport(targetReport.latestReport);
       navigate(`/reports/${targetReport.latestReport.id}`, { replace: true });
-    }
 
-    // Mark as processed and clear params
-    setDeepLinkProcessed(true);
-    setSearchParams({}, { replace: true });
+      // Only mark as processed and clear params once we've found the report
+      setDeepLinkProcessed(true);
+      setSearchParams({}, { replace: true });
+    }
+    // If report not found, keep params — effect will re-run when more data loads
   }, [allConsolidated, searchParams, deepLinkProcessed, hideResolved, resolvedTargets, navigate, setSearchParams, isFetchingBanned]);
 
   // Update URL when report selection changes

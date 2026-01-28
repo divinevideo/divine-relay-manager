@@ -22,7 +22,7 @@ export const environments: Environment[] = [
     id: 'production',
     name: 'Production',
     relayUrl: 'wss://relay.dvines.org',
-    apiUrl: 'https://api-prod.divine.video',
+    apiUrl: 'https://api-relay-prod.divine.video',
   },
   {
     id: 'staging',

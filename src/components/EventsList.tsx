@@ -498,6 +498,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
     onSuccess: async ({ eventId, action }) => {
       queryClient.invalidateQueries({ queryKey: ['banned-events', relayUrl] });
       queryClient.invalidateQueries({ queryKey: ['events-needing-moderation', relayUrl] });
+      queryClient.invalidateQueries({ queryKey: ['relay-events', relayUrl] });
       toast({
         title: `Event ${action === 'allow' ? 'approved' : 'banned'}`,
         description: action === 'ban' ? "Verifying..." : `Event ${eventId.slice(0, 8)}... has been approved.`
@@ -561,6 +562,11 @@ export function EventsList({ relayUrl }: EventsListProps) {
       };
     })
     .filter(event => {
+      // Filter out banned events (relay filters these, but NPool cache may be stale)
+      if (event.moderationStatus === 'banned') {
+        return false;
+      }
+
       // Filter by pubkey if set
       if (filterByPubkey && event.pubkey !== filterByPubkey) {
         return false;

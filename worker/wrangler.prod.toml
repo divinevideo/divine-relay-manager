@@ -7,15 +7,30 @@ compatibility_date = "2024-12-01"
 
 # Production API route
 routes = [
-  { pattern = "api-prod.divine.video/*", zone_name = "divine.video" }
+  { pattern = "api-relay-prod.divine.video/*", zone_name = "divine.video" }
 ]
 
-# The NOSTR_NSEC secret must be set via: wrangler secret put NOSTR_NSEC --config wrangler.prod.toml
+# NOSTR_NSEC is bound via secrets store (shared across workers)
+[[secrets_store_secrets]]
+binding = "NOSTR_NSEC"
+store_id = "ef490704b12a4feb91c7feb51229c364"
+secret_name = "NOSTR_NSEC"
+
+# CF Access credentials for realness proxy (shared across workers)
+[[secrets_store_secrets]]
+binding = "CF_ACCESS_CLIENT_ID"
+store_id = "ef490704b12a4feb91c7feb51229c364"
+secret_name = "CF-Access-Client-Id"
+
+[[secrets_store_secrets]]
+binding = "CF_ACCESS_CLIENT_SECRET"
+store_id = "ef490704b12a4feb91c7feb51229c364"
+secret_name = "CF-Access-Client-Secret"
 
 [vars]
 RELAY_URL = "wss://relay.dvines.org"
 # Path for NIP-86 management API (Funnelcake uses /management)
-MANAGEMENT_PATH = "/management"
+MANAGEMENT_PATH = "/"
 # URL for media moderation service
 MODERATION_SERVICE_URL = "https://moderation.admin.divine.video"
 # Allow both the main frontend and Cloudflare Pages preview deployments
@@ -26,3 +41,8 @@ ALLOWED_ORIGINS = "https://relay.admin.divine.video,*.divine-relay-manager.pages
 binding = "DB"
 database_name = "divine-moderation-decisions-prod"
 database_id = "d000fe55-dfac-4f54-a348-5c57241c2453"
+
+# Service binding to divine-realness worker (bypasses CF Access 522 issue)
+[[services]]
+binding = "REALNESS"
+service = "divine-ai-detector"

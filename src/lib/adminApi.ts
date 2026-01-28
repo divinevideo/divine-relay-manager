@@ -587,13 +587,10 @@ export interface AIDetectionResult {
   };
 }
 
-// Realness API base URL for AI detection
-const REALNESS_API_URL = 'https://realness.admin.divine.video';
-
-// Fetch AI detection results by event ID
-export async function getAIDetectionResult(eventId: string): Promise<AIDetectionResult | null> {
+// Fetch AI detection results by event ID (via worker proxy)
+export async function getAIDetectionResult(apiUrl: string, eventId: string): Promise<AIDetectionResult | null> {
   try {
-    const response = await fetch(`${REALNESS_API_URL}/api/jobs/${eventId}`, {
+    const response = await fetch(`${apiUrl}/api/realness/jobs/${eventId}`, {
       method: 'GET',
       headers: { 'Accept': 'application/json' },
     });
@@ -613,14 +610,15 @@ export async function getAIDetectionResult(eventId: string): Promise<AIDetection
   }
 }
 
-// Submit video for AI detection analysis
+// Submit video for AI detection analysis (via worker proxy)
 export async function submitAIDetection(
+  apiUrl: string,
   videoUrl: string,
   sha256: string,
   eventId?: string
 ): Promise<{ jobId: string; status: string } | null> {
   try {
-    const response = await fetch(`${REALNESS_API_URL}/analyze`, {
+    const response = await fetch(`${apiUrl}/api/realness/analyze`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
