@@ -98,6 +98,107 @@ function formatEventId(id: string): string {
   }
 }
 
+function ProfileMetadataCard({ content }: { content: string }) {
+  let metadata: Record<string, unknown>;
+  try {
+    metadata = JSON.parse(content);
+  } catch {
+    // If it's not valid JSON, fall back to raw display
+    return (
+      <Card>
+        <CardHeader className="py-2 px-3">
+          <CardTitle className="text-sm flex items-center gap-2">
+            <User className="h-4 w-4" />
+            Profile Metadata
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="py-2 px-3">
+          <div className="whitespace-pre-wrap break-words text-sm max-h-96 overflow-y-auto">
+            {content}
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  const name = metadata.name as string | undefined;
+  const displayName = metadata.display_name as string | undefined;
+  const about = metadata.about as string | undefined;
+  const picture = metadata.picture as string | undefined;
+  const banner = metadata.banner as string | undefined;
+  const nip05 = metadata.nip05 as string | undefined;
+  const website = metadata.website as string | undefined;
+  const lud16 = metadata.lud16 as string | undefined;
+  const bot = metadata.bot as boolean | undefined;
+
+  return (
+    <Card>
+      <CardHeader className="py-2 px-3">
+        <CardTitle className="text-sm flex items-center gap-2">
+          <User className="h-4 w-4" />
+          Profile Metadata
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="py-2 px-3 space-y-3">
+        {/* Banner */}
+        {banner && (
+          <div className="relative -mx-3 -mt-3 h-24 overflow-hidden rounded-t">
+            <img src={banner} alt="" className="w-full h-full object-cover" />
+          </div>
+        )}
+
+        {/* Avatar + Name */}
+        <div className="flex items-center gap-3">
+          {picture && (
+            <img
+              src={picture}
+              alt={displayName || name || ''}
+              className="h-12 w-12 rounded-full object-cover"
+            />
+          )}
+          <div className="min-w-0">
+            {displayName && (
+              <p className="font-semibold truncate">{displayName}</p>
+            )}
+            {name && name !== displayName && (
+              <p className="text-sm text-muted-foreground">@{name}</p>
+            )}
+            {nip05 && (
+              <p className="text-xs text-muted-foreground">{nip05}</p>
+            )}
+          </div>
+          {bot && (
+            <Badge variant="secondary" className="text-xs shrink-0">Bot</Badge>
+          )}
+        </div>
+
+        {/* Bio */}
+        {about && (
+          <p className="text-sm whitespace-pre-wrap break-words">{about}</p>
+        )}
+
+        {/* Links */}
+        {(website || lud16) && (
+          <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+            {website && (
+              <a href={website} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 hover:text-foreground">
+                <Link className="h-3 w-3" />
+                {website.replace(/^https?:\/\//, '')}
+              </a>
+            )}
+            {lud16 && (
+              <span className="flex items-center gap-1">
+                <AtSign className="h-3 w-3" />
+                {lud16}
+              </span>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function AuthorCard({ pubkey }: { pubkey: string }) {
   const author = useAuthor(pubkey);
   const metadata = author.data?.metadata;
@@ -675,19 +776,23 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
 
         {/* Content */}
         {event.content && (
-          <Card>
-            <CardHeader className="py-2 px-3">
-              <CardTitle className="text-sm flex items-center gap-2">
-                <MessageSquare className="h-4 w-4" />
-                Content
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="py-2 px-3">
-              <div className="whitespace-pre-wrap break-words text-sm max-h-96 overflow-y-auto">
-                {event.content}
-              </div>
-            </CardContent>
-          </Card>
+          event.kind === 0 ? (
+            <ProfileMetadataCard content={event.content} />
+          ) : (
+            <Card>
+              <CardHeader className="py-2 px-3">
+                <CardTitle className="text-sm flex items-center gap-2">
+                  <MessageSquare className="h-4 w-4" />
+                  Content
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="py-2 px-3">
+                <div className="whitespace-pre-wrap break-words text-sm max-h-96 overflow-y-auto">
+                  {event.content}
+                </div>
+              </CardContent>
+            </Card>
+          )
         )}
 
         {/* Media Preview */}
