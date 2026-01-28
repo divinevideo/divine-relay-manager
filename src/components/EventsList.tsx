@@ -192,7 +192,18 @@ function EventCard({
 
         {event.content && (
           <p className="text-sm mt-2 text-muted-foreground truncate">
-            {truncateContent(event.content)}
+            {event.kind === 0 ? (() => {
+              try {
+                const meta = JSON.parse(event.content);
+                const parts: string[] = [];
+                if (meta.display_name) parts.push(meta.display_name);
+                if (meta.about) parts.push(meta.about);
+                else if (meta.nip05) parts.push(meta.nip05);
+                return parts.join(' — ') || 'Profile update';
+              } catch {
+                return truncateContent(event.content);
+              }
+            })() : truncateContent(event.content)}
           </p>
         )}
 
@@ -343,8 +354,8 @@ export function EventsList({ relayUrl }: EventsListProps) {
     }
   };
 
-  // Ref for infinite scroll trigger
-  const loadMoreRef = useRef<HTMLDivElement>(null);
+  // Ref for scroll viewport (infinite scroll)
+  const scrollViewportRef = useRef<HTMLDivElement>(null);
 
   // Query for recent events with infinite scroll
   const {
@@ -404,27 +415,23 @@ export function EventsList({ relayUrl }: EventsListProps) {
   // Flatten all pages into a single events array
   const events = eventsData?.pages.flat() ?? [];
 
-  // Auto-load more when scrolling to bottom (IntersectionObserver)
+  // Auto-load more when scrolling near bottom of the scroll area
   useEffect(() => {
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries[0].isIntersecting && hasNextPage && !isFetchingNextPage) {
-          fetchNextPage();
-        }
-      },
-      { threshold: 0.1 }
-    );
+    const viewport = scrollViewportRef.current;
+    if (!viewport) return;
 
-    const currentRef = loadMoreRef.current;
-    if (currentRef) {
-      observer.observe(currentRef);
-    }
-
-    return () => {
-      if (currentRef) {
-        observer.unobserve(currentRef);
+    const handleScroll = () => {
+      const { scrollTop, scrollHeight, clientHeight } = viewport;
+      if (scrollHeight - scrollTop - clientHeight < 200 && hasNextPage && !isFetchingNextPage) {
+        fetchNextPage();
       }
     };
+
+    viewport.addEventListener('scroll', handleScroll);
+    // Check immediately in case content is shorter than viewport
+    handleScroll();
+
+    return () => viewport.removeEventListener('scroll', handleScroll);
   }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
 
   // Query for banned events to mark them
@@ -604,9 +611,9 @@ export function EventsList({ relayUrl }: EventsListProps) {
   ];
 
   return (
-    <div className="space-y-4">
+    <div className="h-full flex flex-col gap-4">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="shrink-0 flex items-center justify-between">
         <div>
           <h2 className="text-2xl font-bold">Events & Moderation</h2>
           <p className="text-muted-foreground">View and moderate events using NIP-86</p>
@@ -618,7 +625,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
       </div>
 
       {/* Filters */}
-      <Card>
+      <Card className="shrink-0">
         <CardContent className="py-3 space-y-3">
           {/* Search Bar */}
           <div className="relative">
@@ -664,7 +671,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
             )}
 
             <div className="w-24">
-              <Label htmlFor="limit" className="text-xs">Limit</Label>
+              <Label htmlFor="limit" className="text-xs">Page Size</Label>
               <Select value={limit.toString()} onValueChange={(value) => setLimit(parseInt(value))}>
                 <SelectTrigger className="mt-1 h-9">
                   <SelectValue />
@@ -759,10 +766,10 @@ export function EventsList({ relayUrl }: EventsListProps) {
       )}
 
       {/* Split Pane Layout */}
-      <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 h-[calc(100vh-280px)]">
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 flex-1 min-h-0">
         {/* Left Pane - Events List */}
-        <Card className="lg:col-span-2">
-          <CardHeader className="py-3">
+        <Card className="lg:col-span-2 h-full overflow-hidden flex flex-col">
+          <CardHeader className="py-3 shrink-0">
             <div className="flex items-center justify-between">
               <CardTitle className="text-lg flex items-center gap-2">
                 <FileText className="h-5 w-5" />
@@ -778,9 +785,9 @@ export function EventsList({ relayUrl }: EventsListProps) {
               </div>
             </div>
           </CardHeader>
-          <CardContent className="p-0">
-            <ScrollArea className="h-[calc(100vh-380px)]">
-              <div className="p-3">
+          <CardContent className="p-0 flex-1 min-h-0">
+            <ScrollArea className="h-full" viewportRef={scrollViewportRef}>
+              <div className="p-3 pr-4">
                 {loadingEvents ? (
                   <div className="space-y-2">
                     {[...Array(5)].map((_, i) => (
@@ -810,22 +817,17 @@ export function EventsList({ relayUrl }: EventsListProps) {
                         onModerate={handleModerateEvent}
                       />
                     ))}
-                    {/* Infinite scroll trigger */}
-                    <div ref={loadMoreRef} className="py-4 text-center">
+                    {/* Infinite scroll status */}
+                    <div className="py-4 text-center">
                       {isFetchingNextPage ? (
                         <div className="flex items-center justify-center gap-2 text-sm text-muted-foreground">
                           <RefreshCw className="h-4 w-4 animate-spin" />
                           Loading older events...
                         </div>
                       ) : hasNextPage ? (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => fetchNextPage()}
-                          className="text-muted-foreground"
-                        >
-                          Load more
-                        </Button>
+                        <p className="text-xs text-muted-foreground">
+                          Scroll for more
+                        </p>
                       ) : events.length > 0 ? (
                         <p className="text-xs text-muted-foreground">
                           End of events
@@ -840,7 +842,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
         </Card>
 
         {/* Right Pane - Event Detail */}
-        <Card className="lg:col-span-3 overflow-hidden">
+        <Card className="lg:col-span-3 h-full overflow-hidden">
           {selectedEvent ? (
             <EventDetail
               event={selectedEvent}
