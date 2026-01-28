@@ -62,6 +62,6 @@ export function getCurrentEnvironment(relayUrl: string, apiUrl: string): Environ
 }
 
 /**
- * Default environment (staging for safety - less risky for accidental actions)
+ * Default environment (production — canonical relay for moderation)
  */
-export const defaultEnvironment = environments.find(e => e.id === 'staging') || environments[0];
+export const defaultEnvironment = environments.find(e => e.id === 'production') || environments[0];

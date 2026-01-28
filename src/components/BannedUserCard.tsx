@@ -23,13 +23,27 @@ interface BannedUserCardProps {
   onUnban?: () => void;
 }
 
-export function BannedUserCard({ pubkey, reason, onUnban }: BannedUserCardProps) {
+export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban }: BannedUserCardProps) {
   const { nostr } = useNostr();
   const [isOpen, setIsOpen] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  // Convert to npub
-  const npub = nip19.npubEncode(pubkey);
+  // Normalize: if an npub was stored, decode to hex; otherwise use as-is
+  let pubkey = rawPubkey;
+  if (rawPubkey.startsWith('npub1')) {
+    try {
+      const decoded = nip19.decode(rawPubkey);
+      if (decoded.type === 'npub') pubkey = decoded.data;
+    } catch { /* keep rawPubkey */ }
+  }
+
+  // Convert to npub for display
+  let npub: string;
+  try {
+    npub = nip19.npubEncode(pubkey);
+  } catch {
+    npub = pubkey; // fallback if hex is somehow invalid
+  }
   const shortNpub = npub.slice(0, 12) + '...' + npub.slice(-8);
 
   // Fetch user profile

@@ -16,6 +16,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { useToast } from "@/hooks/useToast";
 import { UserX, UserCheck, Plus, Users, Trash2, User, X } from "lucide-react";
 import { BannedUserCard } from "@/components/BannedUserCard";
+import { nip19 } from "nostr-tools";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { UserDisplayName } from "@/components/UserIdentifier";
@@ -140,19 +141,39 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
   });
 
   const handleAddUser = () => {
-    if (!newPubkey.trim()) {
+    const raw = newPubkey.trim();
+    if (!raw) {
       toast({
         title: "Invalid input",
-        description: "Please enter a valid pubkey",
+        description: "Please enter a valid pubkey or npub",
         variant: "destructive"
       });
       return;
     }
 
+    // Convert npub to hex if needed
+    let hexPubkey = raw;
+    if (raw.startsWith('npub1')) {
+      try {
+        const decoded = nip19.decode(raw);
+        if (decoded.type !== 'npub') {
+          toast({ title: "Invalid npub", description: "Could not decode npub", variant: "destructive" });
+          return;
+        }
+        hexPubkey = decoded.data;
+      } catch {
+        toast({ title: "Invalid npub", description: "Could not decode npub — check the value and try again", variant: "destructive" });
+        return;
+      }
+    } else if (!/^[0-9a-f]{64}$/i.test(raw)) {
+      toast({ title: "Invalid pubkey", description: "Enter a 64-character hex pubkey or an npub", variant: "destructive" });
+      return;
+    }
+
     if (actionType === 'ban') {
-      banUserMutation.mutate({ pubkey: newPubkey.trim(), reason: newReason.trim() || undefined });
+      banUserMutation.mutate({ pubkey: hexPubkey, reason: newReason.trim() || undefined });
     } else {
-      allowUserMutation.mutate({ pubkey: newPubkey.trim(), reason: newReason.trim() || undefined });
+      allowUserMutation.mutate({ pubkey: hexPubkey, reason: newReason.trim() || undefined });
     }
   };
 
@@ -218,12 +239,12 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
                 </div>
               </div>
               <div>
-                <Label htmlFor="pubkey">Public Key (hex)</Label>
+                <Label htmlFor="pubkey">Public Key</Label>
                 <Input
                   id="pubkey"
                   value={newPubkey}
                   onChange={(e) => setNewPubkey(e.target.value)}
-                  placeholder="Enter 64-character hex pubkey"
+                  placeholder="hex pubkey or npub1..."
                   className="mt-1"
                 />
               </div>
