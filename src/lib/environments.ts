@@ -13,24 +13,42 @@ export interface Environment {
 }
 
 /**
+ * Build environments array from environment variables.
+ * Only includes environments where both URLs are configured.
+ * URLs are set via VITE_* env vars to avoid committing domains.
+ */
+function buildEnvironments(): Environment[] {
+  const envs: Environment[] = [];
+
+  // Production
+  if (import.meta.env.VITE_PROD_RELAY_URL && import.meta.env.VITE_PROD_API_URL) {
+    envs.push({
+      id: 'production',
+      name: 'Production',
+      relayUrl: import.meta.env.VITE_PROD_RELAY_URL,
+      apiUrl: import.meta.env.VITE_PROD_API_URL,
+    });
+  }
+
+  // Staging
+  if (import.meta.env.VITE_STAGING_RELAY_URL && import.meta.env.VITE_STAGING_API_URL) {
+    envs.push({
+      id: 'staging',
+      name: 'Staging',
+      relayUrl: import.meta.env.VITE_STAGING_RELAY_URL,
+      apiUrl: import.meta.env.VITE_STAGING_API_URL,
+    });
+  }
+
+  return envs;
+}
+
+/**
  * Available environments for moderation.
  * Each environment pairs a relay with its corresponding worker,
  * ensuring moderation actions always go to the correct backend.
  */
-export const environments: Environment[] = [
-  {
-    id: 'production',
-    name: 'Production',
-    relayUrl: 'wss://relay.dvines.org',
-    apiUrl: 'https://api-relay-prod.divine.video',
-  },
-  {
-    id: 'staging',
-    name: 'Staging',
-    relayUrl: 'wss://relay.divine.video',
-    apiUrl: 'https://api-relay.divine.video',
-  },
-];
+export const environments: Environment[] = buildEnvironments();
 
 /**
  * Get an environment by its ID.

@@ -1,13 +1,13 @@
-# ABOUTME: Cloudflare Worker for Divine Relay Admin API - PRODUCTION
-# ABOUTME: Deploy with: npx wrangler deploy --config wrangler.prod.toml
+# ABOUTME: Cloudflare Worker for Divine Relay Admin API - STAGING
+# ABOUTME: Deploy with: npx wrangler deploy --config wrangler.staging.toml
 
-name = "divine-relay-admin-api-prod"
+name = "divine-relay-admin-api-staging"
 main = "src/index.ts"
 compatibility_date = "2024-12-01"
 
-# Production API route
+# Staging API route
 routes = [
-  { pattern = "api-relay-prod.divine.video/*", zone_name = "divine.video" }
+  { pattern = "api-relay-staging.divine.video/*", zone_name = "divine.video" }
 ]
 
 # NOSTR_NSEC is bound via secrets store (shared across workers)
@@ -28,8 +28,8 @@ store_id = "ef490704b12a4feb91c7feb51229c364"
 secret_name = "CF-Access-Client-Secret"
 
 [vars]
-RELAY_URL = "wss://relay.divine.video"
-# Path for NIP-86 management API (Funnelcake uses /management)
+RELAY_URL = "wss://relay.staging.divine.video"
+# Path for NIP-86 management API
 MANAGEMENT_PATH = "/"
 # URL for media moderation service
 MODERATION_SERVICE_URL = "https://moderation.admin.divine.video"
@@ -39,11 +39,11 @@ ALLOWED_ORIGINS = "https://relay.admin.divine.video,*.divine-relay-manager.pages
 ZENDESK_FIELD_ACTION_STATUS = "14545793289743"
 ZENDESK_FIELD_ACTION_REQUESTED = "14545826900367"
 
-# D1 Database for moderation decision log (production)
+# D1 Database for moderation decision log (staging)
 [[d1_databases]]
 binding = "DB"
-database_name = "divine-moderation-decisions-prod"
-database_id = "d000fe55-dfac-4f54-a348-5c57241c2453"
+database_name = "divine-moderation-decisions-staging"
+database_id = "5e694cde-20d4-491d-aed3-aaac47a5a9b5"
 
 # Service binding to divine-realness worker (bypasses CF Access 522 issue)
 [[services]]
