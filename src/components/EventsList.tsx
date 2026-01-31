@@ -337,31 +337,13 @@ export function EventsList({ relayUrl }: EventsListProps) {
     searchParams.get('pubkey')
   );
 
-  // Derive hex pubkey from search query if it's an npub/nprofile
-  const searchPubkeyHex = (() => {
-    const query = searchQuery.trim().toLowerCase();
-    if (query.startsWith('npub1') || query.startsWith('nprofile1')) {
-      try {
-        const decoded = nip19.decode(query);
-        if (decoded.type === 'npub') {
-          return decoded.data;
-        } else if (decoded.type === 'nprofile') {
-          return decoded.data.pubkey;
-        }
-      } catch {
-        // Invalid nip19
-      }
-    }
-    return null;
-  })();
-
   // Sync URL params with filterByPubkey state
   useEffect(() => {
     const pubkeyParam = searchParams.get('pubkey');
     if (pubkeyParam !== filterByPubkey) {
       setFilterByPubkey(pubkeyParam);
     }
-  }, [searchParams]);
+  }, [searchParams, filterByPubkey]);
 
   // Update URL when filterByPubkey changes
   const updatePubkeyFilter = (pubkey: string | null) => {
