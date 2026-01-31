@@ -39,6 +39,13 @@ function PostCard({
   const displayName = author.data?.metadata?.display_name || author.data?.metadata?.name || npubFallback;
   const avatar = author.data?.metadata?.picture;
   const date = new Date(event.created_at * 1000);
+  const profileUrl = (() => {
+    try {
+      return `https://divine.video/profile/${nip19.npubEncode(event.pubkey)}`;
+    } catch {
+      return undefined;
+    }
+  })();
 
   return (
     <div
@@ -47,13 +54,17 @@ function PostCard({
       <Card className={isReported ? 'border-destructive bg-destructive/5' : ''}>
         <CardContent className="p-3">
           <div className="flex items-start gap-3">
-            <Avatar className="h-8 w-8">
-              <AvatarImage src={avatar} />
-              <AvatarFallback>{displayName.slice(0, 2).toUpperCase()}</AvatarFallback>
-            </Avatar>
+            <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80 shrink-0">
+              <Avatar className="h-8 w-8">
+                <AvatarImage src={avatar} />
+                <AvatarFallback>{displayName.slice(0, 2).toUpperCase()}</AvatarFallback>
+              </Avatar>
+            </a>
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2 flex-wrap">
-                <span className="font-medium text-sm">{displayName}</span>
+                <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80">
+                  <span className="font-medium text-sm">{displayName}</span>
+                </a>
                 <span className="text-xs text-muted-foreground">
                   {date.toLocaleDateString()} {date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                 </span>

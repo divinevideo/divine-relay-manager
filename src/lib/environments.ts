@@ -1,5 +1,6 @@
 // ABOUTME: Environment definitions for relay/worker pairs
 // ABOUTME: Enables switching between staging and production from a single frontend
+// ABOUTME: URLs are loaded from environment variables (VITE_*) to avoid committing domains
 
 export interface Environment {
   /** Unique identifier for the environment */

@@ -39,9 +39,9 @@ export function RelayManager() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800">
+    <div className="h-screen flex flex-col overflow-hidden bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800">
       {/* Header */}
-      <header className="border-b bg-white/80 dark:bg-gray-900/80 backdrop-blur-sm">
+      <header className="shrink-0 border-b bg-white/80 dark:bg-gray-900/80 backdrop-blur-sm">
         <div className="container mx-auto px-4 py-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-3">
@@ -58,9 +58,9 @@ export function RelayManager() {
         </div>
       </header>
 
-      <div className="container mx-auto px-4 py-8">
-        <Tabs value={currentTab} onValueChange={handleTabChange} className="space-y-6">
-          <TabsList className="grid w-full grid-cols-6">
+      <div className="flex-1 min-h-0 overflow-hidden container mx-auto px-4 py-4">
+        <Tabs value={currentTab} onValueChange={handleTabChange} className="h-full flex flex-col">
+          <TabsList className="shrink-0 grid w-full grid-cols-6">
             <TabsTrigger value="events" className="flex items-center space-x-2">
               <FileText className="h-4 w-4" />
               <span>Events</span>
@@ -87,19 +87,19 @@ export function RelayManager() {
             </TabsTrigger>
           </TabsList>
 
-          <TabsContent value="events">
+          <TabsContent value="events" className="flex-1 min-h-0 overflow-hidden mt-4">
             <EventsList relayUrl={config.relayUrl} />
           </TabsContent>
 
-          <TabsContent value="users">
+          <TabsContent value="users" className="flex-1 min-h-0 mt-4">
             <UserManagement selectedPubkey={params.pubkey} />
           </TabsContent>
 
-          <TabsContent value="reports">
+          <TabsContent value="reports" className="flex-1 min-h-0 mt-4">
             <Reports relayUrl={config.relayUrl} selectedReportId={params.reportId} />
           </TabsContent>
 
-          <TabsContent value="labels">
+          <TabsContent value="labels" className="flex-1 min-h-0 mt-4">
             <Labels relayUrl={config.relayUrl} />
           </TabsContent>
 
@@ -107,7 +107,7 @@ export function RelayManager() {
             <SettingsDashboard />
           </TabsContent>
 
-          <TabsContent value="debug">
+          <TabsContent value="debug" className="flex-1 min-h-0 mt-4">
             <Card>
               <DebugPanel />
             </Card>
