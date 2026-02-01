@@ -275,6 +275,38 @@ async function handlePublish(
     return jsonResponse({ success: false, error: publishResult.error }, 500, corsHeaders);
   }
 
+  // If this is a moderation/resolution label (kind 1985), sync to Zendesk
+  if (body.kind === 1985 && body.tags) {
+    const isResolutionLabel = body.tags.some(
+      (tag: string[]) => tag[0] === 'L' && tag[1] === 'moderation/resolution'
+    );
+
+    if (isResolutionLabel) {
+      // Extract resolution status from 'l' tag
+      const statusTag = body.tags.find(
+        (tag: string[]) => tag[0] === 'l' && tag[2] === 'moderation/resolution'
+      );
+      const status = statusTag?.[1];
+
+      // Extract target from 'e' or 'p' tag
+      const eventTag = body.tags.find((tag: string[]) => tag[0] === 'e');
+      const pubkeyTag = body.tags.find((tag: string[]) => tag[0] === 'p');
+
+      const targetType = eventTag ? 'event' : pubkeyTag ? 'pubkey' : null;
+      const targetId = eventTag?.[1] || pubkeyTag?.[1];
+
+      if (status && targetType && targetId) {
+        syncZendeskAfterAction(
+          env,
+          status, // 'reviewed', 'dismissed', 'no-action', 'false-positive'
+          targetType,
+          targetId,
+          getPublicKey(secretKey)
+        ).catch((err) => console.error('[handlePublish] Zendesk sync error:', err));
+      }
+    }
+  }
+
   return jsonResponse({ success: true, event }, 200, corsHeaders);
 }
 
