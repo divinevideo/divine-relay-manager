@@ -29,6 +29,8 @@ secret_name = "CF-Access-Client-Secret"
 
 [vars]
 RELAY_URL = "wss://relay.divine.video"
+# Auto-hide feature flag (set to "true" to enable automatic content hiding)
+AUTO_HIDE_ENABLED = "false"
 # Path for NIP-86 management API (Funnelcake uses /management)
 MANAGEMENT_PATH = "/"
 # URL for media moderation service
@@ -49,3 +51,14 @@ database_id = "d000fe55-dfac-4f54-a348-5c57241c2453"
 [[services]]
 binding = "REALNESS"
 service = "divine-ai-detector"
+
+# Durable Objects for persistent state
+[durable_objects]
+bindings = [
+  { name = "REPORT_WATCHER", class_name = "ReportWatcher" }
+]
+
+# DO migrations
+[[migrations]]
+tag = "v1"
+new_classes = ["ReportWatcher"]

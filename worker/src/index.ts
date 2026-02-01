@@ -2,11 +2,15 @@
 // ABOUTME: Holds the relay admin nsec in secrets and handles NIP-86 moderation actions
 
 import { finalizeEvent, nip19, getPublicKey } from 'nostr-tools';
+import {
+  getSecretKey,
+  getManagementUrl,
+  callNip86Rpc,
+  type SecretStoreSecret,
+} from './nip86';
 
-// Secrets Store secret object (for account-level secrets)
-interface SecretStoreSecret {
-  get(): Promise<string>;
-}
+// Re-export ReportWatcher Durable Object for wrangler
+export { ReportWatcher } from './ReportWatcher';
 
 interface Env {
   NOSTR_NSEC: string | SecretStoreSecret;
@@ -34,6 +38,10 @@ interface Env {
   MANAGEMENT_URL?: string;   // Full URL override for NIP-86 management API (for local dev with HTTP)
   MODERATION_SERVICE_URL?: string;  // URL for media moderation service
   REALNESS_API_URL?: string;  // URL for AI detection/realness service
+  // Durable Object bindings
+  REPORT_WATCHER?: DurableObjectNamespace;
+  // Auto-hide feature flag
+  AUTO_HIDE_ENABLED?: string;
 }
 
 // Zendesk JWT payload structure
@@ -48,20 +56,6 @@ interface ZendeskJWTPayload {
 
 const DEFAULT_MODERATION_SERVICE_URL = 'https://moderation.admin.divine.video';
 const DEFAULT_REALNESS_API_URL = 'https://realness.admin.divine.video';
-
-/**
- * Get the NIP-86 management API URL for the configured relay.
- * If MANAGEMENT_URL is set (for local dev with HTTP), use it directly.
- * Otherwise, converts WSS relay URL to HTTPS and appends the management path.
- */
-function getManagementUrl(env: Env): string {
-  if (env.MANAGEMENT_URL) {
-    return env.MANAGEMENT_URL;
-  }
-  const baseUrl = env.RELAY_URL.replace(/^wss?:\/\//, 'https://');
-  const managementPath = env.MANAGEMENT_PATH || '/management';
-  return `${baseUrl}${managementPath}`;
-}
 
 /**
  * Get the moderation service URL from env or use default.
@@ -180,6 +174,11 @@ export default {
         return handleZendeskRoutes(request, path, env, corsHeaders);
       }
 
+      // Report watcher management endpoints
+      if (path.startsWith('/api/report-watcher/')) {
+        return handleReportWatcherRoutes(request, path, env, corsHeaders);
+      }
+
       // 404 for unknown routes
       return jsonResponse({ success: false, error: 'Not found' }, 404, corsHeaders);
     } catch (error) {
@@ -201,23 +200,6 @@ function jsonResponse(data: ApiResponse, status: number, headers: Record<string,
       ...headers,
     },
   });
-}
-
-async function getSecretKey(env: Env): Promise<Uint8Array> {
-  const nsec = typeof env.NOSTR_NSEC === 'string'
-    ? env.NOSTR_NSEC
-    : await env.NOSTR_NSEC.get();
-
-  if (!nsec) {
-    throw new Error('NOSTR_NSEC secret not configured');
-  }
-
-  const decoded = nip19.decode(nsec);
-  if (decoded.type !== 'nsec') {
-    throw new Error('Invalid NOSTR_NSEC format - must be nsec1...');
-  }
-
-  return decoded.data as Uint8Array;
 }
 
 async function handleInfo(env: Env, corsHeaders: Record<string, string>): Promise<Response> {
@@ -459,51 +441,10 @@ async function handleRelayRpc(
     return jsonResponse({ success: false, error: 'Missing method' }, 400, corsHeaders);
   }
 
-  const secretKey = await getSecretKey(env);
+  // Use shared NIP-86 RPC utility
+  const result = await callNip86Rpc(body.method, body.params || [], env);
 
-  // Build NIP-98 auth event
-  const httpUrl = getManagementUrl(env);
-  const payload = JSON.stringify({ method: body.method, params: body.params || [] });
-  const payloadHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
-  const payloadHashHex = Array.from(new Uint8Array(payloadHash)).map(b => b.toString(16).padStart(2, '0')).join('');
-
-  const authEvent = finalizeEvent(
-    {
-      kind: 27235,
-      content: '',
-      tags: [
-        ['u', httpUrl],
-        ['method', 'POST'],
-        ['payload', payloadHashHex],
-      ],
-      created_at: Math.floor(Date.now() / 1000),
-    },
-    secretKey
-  );
-
-  const authHeader = `Nostr ${btoa(JSON.stringify(authEvent))}`;
-
-  // Call relay RPC
-  const response = await fetch(httpUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/nostr+json+rpc',
-      'Authorization': authHeader,
-    },
-    body: payload,
-  });
-
-  if (!response.ok) {
-    return jsonResponse(
-      { success: false, error: `Relay error: ${response.status} ${response.statusText}` },
-      response.status,
-      corsHeaders
-    );
-  }
-
-  const result = await response.json() as { result?: unknown; error?: string };
-
-  if (result.error) {
+  if (!result.success) {
     return jsonResponse({ success: false, error: result.error }, 400, corsHeaders);
   }
 
@@ -1500,6 +1441,58 @@ async function handleRealnessViaHTTP(
   }
 
   return jsonResponse({ success: false, error: 'Unknown realness endpoint' }, 404, corsHeaders);
+}
+
+// ============================================================================
+// Report Watcher Management
+// ============================================================================
+
+/**
+ * Handle /api/report-watcher/* routes
+ * Proxies requests to the ReportWatcher Durable Object
+ */
+async function handleReportWatcherRoutes(
+  request: Request,
+  path: string,
+  env: Env,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  if (!env.REPORT_WATCHER) {
+    return jsonResponse(
+      { success: false, error: 'Report watcher not configured' },
+      500,
+      corsHeaders
+    );
+  }
+
+  const subPath = path.replace('/api/report-watcher', '');
+
+  // Get the singleton DO instance (using a fixed ID)
+  const id = env.REPORT_WATCHER.idFromName('singleton');
+  const stub = env.REPORT_WATCHER.get(id);
+
+  try {
+    // Forward the request to the DO
+    const doRequest = new Request(`https://do${subPath}`, {
+      method: request.method,
+      headers: request.headers,
+    });
+
+    const response = await stub.fetch(doRequest);
+    const data = await response.json();
+
+    return new Response(JSON.stringify(data), {
+      status: response.status,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders },
+    });
+  } catch (error) {
+    console.error('[handleReportWatcherRoutes] Error:', error);
+    return jsonResponse(
+      { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+      500,
+      corsHeaders
+    );
+  }
 }
 
 // Route handler for all /api/zendesk/* endpoints
