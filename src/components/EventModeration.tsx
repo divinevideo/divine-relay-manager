@@ -10,8 +10,18 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { useToast } from "@/hooks/useToast";
-import { Shield, ShieldCheck, ShieldX, Plus, AlertTriangle, CheckCircle, XCircle, Loader2 } from "lucide-react";
+import { Shield, ShieldCheck, ShieldX, Plus, AlertTriangle, CheckCircle, XCircle, Loader2, Undo2 } from "lucide-react";
 import { useAdminApi } from "@/hooks/useAdminApi";
 
 interface EventNeedingModeration {
@@ -37,6 +47,7 @@ export function EventModeration() {
     success: boolean;
     message: string;
   } | null>(null);
+  const [confirmUnbanEventId, setConfirmUnbanEventId] = useState<string | null>(null);
 
   // Query for events needing moderation
   const { data: eventsNeedingModeration, isLoading: loadingPending, error: pendingError } = useQuery({
@@ -119,6 +130,27 @@ export function EventModeration() {
     },
   });
 
+  // Mutation for unbanning events (restoring)
+  const unbanEventMutation = useMutation({
+    mutationFn: async ({ eventId }: { eventId: string }) => {
+      await callRelayRpc('allowevent', [eventId]);
+      return eventId;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['banned-events'] });
+      queryClient.invalidateQueries({ queryKey: ['events-needing-moderation'] });
+      toast({ title: "Event unbanned", description: "Event has been restored" });
+      setConfirmUnbanEventId(null);
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Failed to unban event",
+        description: error.message,
+        variant: "destructive"
+      });
+    },
+  });
+
   const handleBanEvent = () => {
     if (!newEventId.trim()) {
       toast({ 
@@ -142,6 +174,35 @@ export function EventModeration() {
 
   return (
     <div className="space-y-6">
+      {/* Unban Event Confirmation Dialog */}
+      <AlertDialog open={!!confirmUnbanEventId} onOpenChange={(open) => !open && setConfirmUnbanEventId(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Unban Event?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will restore the event and allow it to be served by the relay again.
+              <br />
+              <code className="text-xs bg-muted px-1 py-0.5 rounded mt-2 inline-block">
+                {confirmUnbanEventId?.slice(0, 24)}...
+              </code>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={unbanEventMutation.isPending}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (confirmUnbanEventId) {
+                  unbanEventMutation.mutate({ eventId: confirmUnbanEventId });
+                }
+              }}
+              disabled={unbanEventMutation.isPending}
+            >
+              {unbanEventMutation.isPending ? 'Unbanning...' : 'Unban Event'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-2xl font-bold">Event Moderation</h2>
@@ -371,7 +432,15 @@ export function EventModeration() {
                           <p className="text-sm text-muted-foreground mt-1">{event.reason}</p>
                         )}
                       </div>
-                      <Badge variant="destructive">Banned</Badge>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setConfirmUnbanEventId(event.id)}
+                        disabled={unbanEventMutation.isPending}
+                      >
+                        <Undo2 className="h-4 w-4 mr-1" />
+                        Unban
+                      </Button>
                     </div>
                   ))}
                 </div>

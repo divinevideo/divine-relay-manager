@@ -225,7 +225,7 @@ function ConsolidatedReportItem({
         {/* Target ID - show name for users, note ID for events */}
         {consolidated.target.type === 'pubkey' ? (
           <div className="text-xs text-muted-foreground truncate">
-            <UserDisplayName pubkey={consolidated.target.value} fallbackLength={16} />
+            <UserDisplayName pubkey={consolidated.target.value} fallbackLength={16} linkToProfile />
           </div>
         ) : (
           <CopyableId
@@ -298,7 +298,7 @@ function IndividualReportItem({
         {target && (
           target.type === 'pubkey' ? (
             <div className="text-xs text-muted-foreground truncate">
-              <UserDisplayName pubkey={target.value} fallbackLength={16} />
+              <UserDisplayName pubkey={target.value} fallbackLength={16} linkToProfile />
             </div>
           ) : (
             <CopyableId
@@ -327,9 +327,6 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const [sortBy, setSortBy] = useState<SortOption>('reports');
   const [filterCategory, setFilterCategory] = useState<string | null>(null);
   const [filterTargetType, setFilterTargetType] = useState<'all' | 'event' | 'pubkey'>('all');
-  // Track if we've processed deep link params to avoid re-processing
-  const [deepLinkProcessed, setDeepLinkProcessed] = useState(false);
-
   // Check for deep link params to force fresh data fetch
   const hasDeepLinkParams = !!(searchParams.get('event') || searchParams.get('pubkey'));
 
@@ -372,7 +369,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         return [];
       }
     },
-    staleTime: hasDeepLinkParams && !deepLinkProcessed ? 0 : 30 * 1000,
+    staleTime: hasDeepLinkParams ? 0 : 30 * 1000,
     refetchInterval: 15 * 1000,
   });
 
@@ -642,9 +639,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     const eventParam = searchParams.get('event');
     const pubkeyParam = searchParams.get('pubkey');
 
-    // Skip if no params or already processed
+    // Skip if no params
     if (!eventParam && !pubkeyParam) return;
-    if (deepLinkProcessed) return;
     if (!allConsolidated || allConsolidated.length === 0) return;
 
     // Wait for fresh ban data before processing deep link
@@ -673,12 +669,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       setSelectedReport(targetReport.latestReport);
       navigate(`/reports/${targetReport.latestReport.id}`, { replace: true });
 
-      // Only mark as processed and clear params once we've found the report
-      setDeepLinkProcessed(true);
+      // Clear params from URL now that we've navigated
       setSearchParams({}, { replace: true });
     }
     // If report not found, keep params — effect will re-run when more data loads
-  }, [allConsolidated, searchParams, deepLinkProcessed, hideResolved, resolvedTargets, navigate, setSearchParams, isFetchingBanned]);
+  }, [allConsolidated, searchParams, hideResolved, resolvedTargets, navigate, setSearchParams, isFetchingBanned]);
 
   // Update URL when report selection changes
   const handleSelectReport = (report: NostrEvent | null) => {
@@ -722,10 +717,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
   return (
     <>
-      <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 h-[calc(100vh-200px)]">
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 h-full">
         {/* Left Pane - Report List */}
-        <Card className="lg:col-span-2">
-        <CardHeader className="pb-3">
+        <Card className="lg:col-span-2 h-full overflow-hidden flex flex-col">
+        <CardHeader className="pb-3 shrink-0">
           <div className="flex items-center justify-between">
             <div>
               <CardTitle className="flex items-center gap-2 text-lg">
@@ -869,8 +864,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
             </div>
           </div>
         </CardHeader>
-        <CardContent className="p-0">
-          <ScrollArea className="h-[calc(100vh-520px)]">
+        <CardContent className="p-0 flex-1 min-h-0">
+          <ScrollArea className="h-full">
             <div className="space-y-2 p-4 pt-0">
               {viewMode === 'consolidated' ? (
                 !consolidated || consolidated.length === 0 ? (
@@ -912,7 +907,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
         {/* Right Pane - Report Detail (Desktop) */}
         {!isMobile && (
-          <Card className="lg:col-span-3 overflow-hidden">
+          <Card className="lg:col-span-3 overflow-hidden h-full">
             <ReportDetail
               report={selectedReport}
               allReportsForTarget={

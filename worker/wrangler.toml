@@ -1,4 +1,11 @@
-# ABOUTME: Cloudflare Worker for Divine Relay Admin API
+# ⚠️  DEPRECATED — Use wrangler.prod.toml or wrangler.staging.toml instead
+#
+# This legacy config deploys to api-relay.divine.video with the old D1 database
+# (blossom-webhook-events). New deployments should use:
+#   - Production: npx wrangler deploy --config wrangler.prod.toml
+#   - Staging:    npx wrangler deploy --config wrangler.staging.toml
+#
+# ABOUTME: Cloudflare Worker for Divine Relay Admin API (LEGACY)
 # ABOUTME: Handles NIP-86 signing and publishing
 
 name = "divine-relay-admin-api"

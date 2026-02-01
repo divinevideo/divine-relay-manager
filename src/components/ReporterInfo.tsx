@@ -45,14 +45,17 @@ export function ReportedBy({ pubkey, timestamp }: ReportedByProps) {
 
   const displayName = metadata?.display_name || metadata?.name || `${npub.slice(0, 12)}...`;
   const date = new Date(timestamp * 1000);
+  const profileUrl = `https://divine.video/profile/${npub}`;
 
   return (
     <div className="flex items-center gap-2 text-xs text-muted-foreground">
-      <Avatar className="h-5 w-5">
-        <AvatarImage src={metadata?.picture} />
-        <AvatarFallback className="text-xs">{displayName.slice(0, 2).toUpperCase()}</AvatarFallback>
-      </Avatar>
-      <span className={metadata?.name ? "font-medium" : "font-mono"}>{displayName}</span>
+      <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 hover:opacity-80">
+        <Avatar className="h-5 w-5">
+          <AvatarImage src={metadata?.picture} />
+          <AvatarFallback className="text-xs">{displayName.slice(0, 2).toUpperCase()}</AvatarFallback>
+        </Avatar>
+        <span className={metadata?.name ? "font-medium" : "font-mono"}>{displayName}</span>
+      </a>
       <span>•</span>
       <span>{date.toLocaleDateString()}</span>
     </div>
@@ -90,6 +93,7 @@ export function ReporterInfo({ profile, pubkey, reportCount, isLoading }: Report
 
   const displayName = profile?.display_name || profile?.name || `${npub.slice(0, 12)}...`;
   const trust = getTrustLevel(reportCount);
+  const profileUrl = `https://divine.video/profile/${npub}`;
 
   return (
     <Card>
@@ -98,12 +102,16 @@ export function ReporterInfo({ profile, pubkey, reportCount, isLoading }: Report
           Reported By
         </h5>
         <div className="flex items-center gap-3">
-          <Avatar className="h-8 w-8">
-            <AvatarImage src={profile?.picture} />
-            <AvatarFallback>{displayName.slice(0, 2).toUpperCase()}</AvatarFallback>
-          </Avatar>
+          <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80 shrink-0">
+            <Avatar className="h-8 w-8">
+              <AvatarImage src={profile?.picture} />
+              <AvatarFallback>{displayName.slice(0, 2).toUpperCase()}</AvatarFallback>
+            </Avatar>
+          </a>
           <div className="flex-1 min-w-0">
-            <p className="text-sm font-medium truncate">{displayName}</p>
+            <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80">
+              <p className="text-sm font-medium truncate">{displayName}</p>
+            </a>
             {profile?.nip05 && (
               <p className="text-xs text-muted-foreground truncate">{profile.nip05}</p>
             )}

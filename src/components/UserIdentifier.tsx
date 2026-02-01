@@ -15,12 +15,15 @@ import {
 import { useAuthor } from "@/hooks/useAuthor";
 import { cn } from "@/lib/utils";
 
+const DIVINE_PROFILE_URL = "https://divine.video/profile";
+
 interface UserIdentifierProps {
   pubkey: string;
   showAvatar?: boolean;
   avatarSize?: "sm" | "md" | "lg";
   showCopyButton?: boolean;
   showNip05?: boolean;
+  linkToProfile?: boolean;
   variant?: "inline" | "block" | "compact";
   className?: string;
 }
@@ -31,6 +34,7 @@ export function UserIdentifier({
   avatarSize = "sm",
   showCopyButton = true,
   showNip05 = true,
+  linkToProfile = false,
   variant = "inline",
   className,
 }: UserIdentifierProps) {
@@ -80,31 +84,53 @@ export function UserIdentifier({
   // Truncated npub for display (npub1abc...xyz)
   const truncatedNpub = `${npub.slice(0, 8)}...${npub.slice(-4)}`;
 
+  const profileUrl = `${DIVINE_PROFILE_URL}/${npub}`;
+
   if (variant === "compact") {
+    const content = (
+      <>
+        {showAvatar && (
+          <Avatar className={avatarSizeClasses[avatarSize]}>
+            <AvatarImage src={picture} alt={displayName || npub} />
+            <AvatarFallback className={avatarTextSizes[avatarSize]}>
+              {initials}
+            </AvatarFallback>
+          </Avatar>
+        )}
+        <span className="font-medium">
+          {displayName || truncatedNpub}
+        </span>
+      </>
+    );
+
     return (
       <TooltipProvider>
         <Tooltip>
           <TooltipTrigger asChild>
-            <span
-              className={cn(
-                "inline-flex items-center gap-1 cursor-pointer hover:opacity-80",
-                className
-              )}
-              onClick={handleCopy}
-            >
-              {showAvatar && (
-                <Avatar className={avatarSizeClasses[avatarSize]}>
-                  <AvatarImage src={picture} alt={displayName || npub} />
-                  <AvatarFallback className={avatarTextSizes[avatarSize]}>
-                    {initials}
-                  </AvatarFallback>
-                </Avatar>
-              )}
-              <span className="font-medium">
-                {displayName || truncatedNpub}
+            {linkToProfile ? (
+              <a
+                href={profileUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className={cn(
+                  "inline-flex items-center gap-1 hover:opacity-80",
+                  className
+                )}
+              >
+                {content}
+              </a>
+            ) : (
+              <span
+                className={cn(
+                  "inline-flex items-center gap-1 cursor-pointer hover:opacity-80",
+                  className
+                )}
+                onClick={handleCopy}
+              >
+                {content}
+                {copied && <Check className="h-3 w-3 text-green-500" />}
               </span>
-              {copied && <Check className="h-3 w-3 text-green-500" />}
-            </span>
+            )}
           </TooltipTrigger>
           <TooltipContent side="top" className="max-w-xs">
             <div className="space-y-1">
@@ -115,7 +141,9 @@ export function UserIdentifier({
                 <p className="text-xs text-muted-foreground">{nip05}</p>
               )}
               <p className="text-xs font-mono break-all">{npub}</p>
-              <p className="text-xs text-muted-foreground">Click to copy</p>
+              <p className="text-xs text-muted-foreground">
+                {linkToProfile ? "Click to view profile" : "Click to copy"}
+              </p>
             </div>
           </TooltipContent>
         </Tooltip>
@@ -124,19 +152,45 @@ export function UserIdentifier({
   }
 
   if (variant === "block") {
+    const avatarElement = showAvatar && (
+      <Avatar className={avatarSizeClasses[avatarSize]}>
+        <AvatarImage src={picture} alt={displayName || npub} />
+        <AvatarFallback className={avatarTextSizes[avatarSize]}>
+          {initials}
+        </AvatarFallback>
+      </Avatar>
+    );
+
+    const nameElement = displayName && (
+      <p className="font-medium text-sm truncate">{displayName}</p>
+    );
+
     return (
       <div className={cn("flex items-center gap-2", className)}>
-        {showAvatar && (
-          <Avatar className={avatarSizeClasses[avatarSize]}>
-            <AvatarImage src={picture} alt={displayName || npub} />
-            <AvatarFallback className={avatarTextSizes[avatarSize]}>
-              {initials}
-            </AvatarFallback>
-          </Avatar>
+        {linkToProfile ? (
+          <a
+            href={profileUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-2 hover:opacity-80 shrink-0"
+          >
+            {avatarElement}
+          </a>
+        ) : (
+          avatarElement
         )}
         <div className="flex-1 min-w-0">
-          {displayName && (
-            <p className="font-medium text-sm truncate">{displayName}</p>
+          {linkToProfile && displayName ? (
+            <a
+              href={profileUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="hover:opacity-80"
+            >
+              {nameElement}
+            </a>
+          ) : (
+            nameElement
           )}
           {nip05 && showNip05 && (
             <p className="text-xs text-muted-foreground truncate">{nip05}</p>
@@ -166,8 +220,8 @@ export function UserIdentifier({
   }
 
   // Default inline variant
-  return (
-    <span className={cn("inline-flex items-center gap-1", className)}>
+  const inlineContent = (
+    <>
       {showAvatar && (
         <Avatar className={avatarSizeClasses[avatarSize]}>
           <AvatarImage src={picture} alt={displayName || npub} />
@@ -201,6 +255,23 @@ export function UserIdentifier({
           </TooltipContent>
         </Tooltip>
       </TooltipProvider>
+    </>
+  );
+
+  return (
+    <span className={cn("inline-flex items-center gap-1", className)}>
+      {linkToProfile ? (
+        <a
+          href={profileUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1 hover:opacity-80"
+        >
+          {inlineContent}
+        </a>
+      ) : (
+        inlineContent
+      )}
       {showCopyButton && (
         <Button
           variant="ghost"
@@ -223,23 +294,20 @@ export function UserIdentifier({
 interface UserDisplayNameProps {
   pubkey: string;
   fallbackLength?: number;
+  linkToProfile?: boolean;
   className?: string;
 }
 
 export function UserDisplayName({
   pubkey,
   fallbackLength = 8,
+  linkToProfile = false,
   className,
 }: UserDisplayNameProps) {
   const author = useAuthor(pubkey);
   const metadata = author.data?.metadata;
   const displayName = metadata?.display_name || metadata?.name;
 
-  if (displayName) {
-    return <span className={className}>{displayName}</span>;
-  }
-
-  // Convert to npub for fallback
   let npub = "";
   try {
     npub = nip19.npubEncode(pubkey);
@@ -247,11 +315,28 @@ export function UserDisplayName({
     npub = pubkey;
   }
 
-  return (
+  const content = displayName ? (
+    <span className={className}>{displayName}</span>
+  ) : (
     <code className={cn("font-mono", className)}>
       {npub.slice(0, fallbackLength)}...
     </code>
   );
+
+  if (linkToProfile) {
+    return (
+      <a
+        href={`${DIVINE_PROFILE_URL}/${npub}`}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="hover:opacity-80"
+      >
+        {content}
+      </a>
+    );
+  }
+
+  return content;
 }
 
 // Avatar with profile lookup

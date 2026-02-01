@@ -36,6 +36,7 @@ export function UserProfilePreview({ pubkey, className }: UserProfilePreviewProp
   const metadata = author?.metadata;
   const npub = nip19.npubEncode(pubkey);
   const isBot = metadata?.bot;
+  const profileUrl = `https://divine.video/profile/${npub}`;
 
   if (loadingProfile) {
     return (
@@ -60,17 +61,21 @@ export function UserProfilePreview({ pubkey, className }: UserProfilePreviewProp
       <CardContent className="p-4 space-y-4">
         {/* Profile header */}
         <div className="flex items-start gap-3">
-          <Avatar className="h-12 w-12">
-            {metadata?.picture && (
-              <AvatarImage src={metadata.picture} alt={displayName} />
-            )}
-            <AvatarFallback>
-              {isBot ? <Bot className="h-5 w-5" /> : <User className="h-5 w-5" />}
-            </AvatarFallback>
-          </Avatar>
+          <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80 shrink-0">
+            <Avatar className="h-12 w-12">
+              {metadata?.picture && (
+                <AvatarImage src={metadata.picture} alt={displayName} />
+              )}
+              <AvatarFallback>
+                {isBot ? <Bot className="h-5 w-5" /> : <User className="h-5 w-5" />}
+              </AvatarFallback>
+            </Avatar>
+          </a>
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
-              <h4 className="font-semibold truncate">{displayName}</h4>
+              <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80">
+                <h4 className="font-semibold truncate">{displayName}</h4>
+              </a>
               {isBot && (
                 <Badge variant="secondary" className="text-xs">
                   <Bot className="h-3 w-3 mr-1" />

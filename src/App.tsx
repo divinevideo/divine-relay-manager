@@ -24,13 +24,13 @@ const queryClient = new QueryClient({
 
 const defaultConfig: AppConfig = {
   theme: "light",
-  relayUrl: import.meta.env.VITE_RELAY_URL || "wss://relay.divine.video",
-  apiUrl: import.meta.env.VITE_WORKER_URL || "https://api-relay.divine.video",
+  relayUrl: import.meta.env.VITE_RELAY_URL || import.meta.env.VITE_PROD_RELAY_URL || "wss://relay.divine.video",
+  apiUrl: import.meta.env.VITE_WORKER_URL || import.meta.env.VITE_PROD_API_URL || "https://api-relay-prod.divine.video",
 };
 
 export function App() {
   return (
-    <AppProvider storageKey="nostr:app-config" defaultConfig={defaultConfig}>
+    <AppProvider storageKey="nostr:app-config-v2" defaultConfig={defaultConfig}>
       <QueryClientProvider client={queryClient}>
         <NostrLoginProvider storageKey='nostr:login'>
           <NostrProvider>

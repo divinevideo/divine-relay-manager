@@ -382,7 +382,7 @@ export function AIDetectionReport({
                 asChild
                 className="h-7 text-xs"
               >
-                <a href={REALNESS_DASHBOARD_URL} target="_blank" rel="noopener noreferrer">
+                <a href={eventId ? `${REALNESS_DASHBOARD_URL}?event=${eventId}` : REALNESS_DASHBOARD_URL} target="_blank" rel="noopener noreferrer">
                   <ExternalLink className="h-3 w-3 mr-1" />
                   Realness
                 </a>
@@ -581,7 +581,7 @@ export function AIDetectionReport({
               className="h-6 text-xs px-2"
               title="Open in Realness dashboard"
             >
-              <a href={REALNESS_DASHBOARD_URL} target="_blank" rel="noopener noreferrer">
+              <a href={eventId ? `${REALNESS_DASHBOARD_URL}?event=${eventId}` : REALNESS_DASHBOARD_URL} target="_blank" rel="noopener noreferrer">
                 <ExternalLink className="h-3 w-3" />
               </a>
             </Button>
