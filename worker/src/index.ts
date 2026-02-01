@@ -277,9 +277,11 @@ async function handlePublish(
 
   // If this is a moderation/resolution label (kind 1985), sync to Zendesk
   if (body.kind === 1985 && body.tags) {
+    console.log('[handlePublish] Kind 1985 detected, checking for resolution label');
     const isResolutionLabel = body.tags.some(
       (tag: string[]) => tag[0] === 'L' && tag[1] === 'moderation/resolution'
     );
+    console.log('[handlePublish] isResolutionLabel:', isResolutionLabel);
 
     if (isResolutionLabel) {
       // Extract resolution status from 'l' tag
@@ -295,14 +297,26 @@ async function handlePublish(
       const targetType = eventTag ? 'event' : pubkeyTag ? 'pubkey' : null;
       const targetId = eventTag?.[1] || pubkeyTag?.[1];
 
+      console.log('[handlePublish] Resolution label details:', { status, targetType, targetId });
+
       if (status && targetType && targetId) {
-        syncZendeskAfterAction(
+        // Use waitUntil to ensure sync completes even after response is sent
+        const syncPromise = syncZendeskAfterAction(
           env,
           status, // 'reviewed', 'dismissed', 'no-action', 'false-positive'
           targetType,
           targetId,
           getPublicKey(secretKey)
-        ).catch((err) => console.error('[handlePublish] Zendesk sync error:', err));
+        );
+        // Still await to catch errors, but also ensure completion via waitUntil pattern
+        try {
+          await syncPromise;
+          console.log('[handlePublish] Zendesk sync completed successfully');
+        } catch (err) {
+          console.error('[handlePublish] Zendesk sync error:', err);
+        }
+      } else {
+        console.log('[handlePublish] Missing required fields for sync:', { status, targetType, targetId });
       }
     }
   }
@@ -1836,7 +1850,12 @@ async function syncZendeskAfterAction(
   targetId: string,
   moderator: string
 ): Promise<void> {
-  if (!env.DB) return;
+  console.log('[syncZendeskAfterAction] Called with:', { action, targetType, targetId, moderator });
+
+  if (!env.DB) {
+    console.log('[syncZendeskAfterAction] No DB configured, skipping');
+    return;
+  }
 
   try {
     await ensureZendeskTable(env.DB);
@@ -1845,16 +1864,23 @@ async function syncZendeskAfterAction(
     let linked: { ticket_id: number } | null = null;
 
     if (targetType === 'event') {
+      console.log('[syncZendeskAfterAction] Querying for event_id:', targetId);
       linked = await env.DB.prepare(
         `SELECT ticket_id FROM zendesk_tickets WHERE event_id = ? AND status = 'open'`
       ).bind(targetId).first();
     } else if (targetType === 'pubkey') {
+      console.log('[syncZendeskAfterAction] Querying for author_pubkey:', targetId);
       linked = await env.DB.prepare(
         `SELECT ticket_id FROM zendesk_tickets WHERE author_pubkey = ? AND status = 'open'`
       ).bind(targetId).first();
     }
 
-    if (!linked?.ticket_id) return;
+    console.log('[syncZendeskAfterAction] Query result:', linked);
+
+    if (!linked?.ticket_id) {
+      console.log('[syncZendeskAfterAction] No linked open ticket found, skipping');
+      return;
+    }
 
     // Determine if this is a resolution action (should solve ticket)
     const resolutionActions = ['reviewed', 'dismissed', 'no-action', 'false-positive'];
