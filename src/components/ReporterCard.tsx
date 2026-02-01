@@ -294,19 +294,23 @@ export function ReporterInline({ pubkey, onViewProfile }: ReporterInlineProps) {
     );
   }
 
+  const profileUrl = `https://divine.video/profile/${npub}`;
+
   return (
     <div className="flex items-center gap-2 flex-wrap">
-      <button
-        onClick={() => onViewProfile?.(pubkey)}
+      <a
+        href={profileUrl}
+        target="_blank"
+        rel="noopener noreferrer"
         className="flex items-center gap-1.5 hover:bg-muted rounded-full pr-2 transition-colors"
-        title="View reporter profile"
+        title="View reporter's profile on diVine"
       >
         <Avatar className="h-5 w-5">
           <AvatarImage src={profile?.picture} />
           <AvatarFallback className="text-[10px]">{displayName.slice(0, 2).toUpperCase()}</AvatarFallback>
         </Avatar>
         <span className="text-sm font-medium hover:underline">{displayName}</span>
-      </button>
+      </a>
       <span className="text-xs text-muted-foreground flex items-center gap-1">
         <Flag className="h-3 w-3" />
         {reportCount} report{reportCount !== 1 ? 's' : ''} filed
@@ -316,6 +320,7 @@ export function ReporterInline({ pubkey, onViewProfile }: ReporterInlineProps) {
       </Badge>
       {onViewProfile && (
         <Button
+          type="button"
           variant="ghost"
           size="sm"
           className="h-6 px-2 text-xs"
