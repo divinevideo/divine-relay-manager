@@ -24,6 +24,7 @@ routes = [
 
 [vars]
 RELAY_URL = "wss://relay.divine.video"
+AUTO_HIDE_ENABLED = "false"
 # Path for NIP-86 management API (appended to relay URL converted to HTTPS)
 MANAGEMENT_PATH = "/"
 # URL for media moderation service
@@ -44,3 +45,13 @@ database_id = "829f06cf-294b-4491-8611-30fc53df2589"
 [[services]]
 binding = "REALNESS"
 service = "divine-ai-detector"
+
+# Durable Objects for persistent state (needed for local dev)
+[durable_objects]
+bindings = [
+  { name = "REPORT_WATCHER", class_name = "ReportWatcher" }
+]
+
+[[migrations]]
+tag = "v1"
+new_classes = ["ReportWatcher"]
