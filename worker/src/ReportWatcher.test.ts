@@ -480,6 +480,7 @@ describe('ReportWatcher', () => {
         prepare: vi.fn().mockReturnValue({
           bind: vi.fn().mockReturnValue({
             run: mockDbRun,
+            first: vi.fn().mockResolvedValue(null), // Default: no existing decision
           }),
         }),
       } as unknown as D1Database;
@@ -660,6 +661,47 @@ describe('ReportWatcher', () => {
       expect(mockDbRun).toHaveBeenCalled();
 
       // eventsAutoHidden should still be 0
+      const response = await watcher.fetch(new Request('https://do/status', { method: 'GET' }));
+      const body = await response.json() as { status: { eventsAutoHidden: number } };
+      expect(body.status.eventsAutoHidden).toBe(0);
+    });
+
+    it('should skip processing if event is already auto-hidden (deduplication)', async () => {
+      mockEnv.AUTO_HIDE_ENABLED = 'true';
+
+      // Mock D1 to return an existing decision
+      mockEnv.DB = {
+        prepare: vi.fn().mockReturnValue({
+          bind: vi.fn().mockReturnValue({
+            run: mockDbRun,
+            first: vi.fn().mockResolvedValue({ 1: 1 }), // Existing decision found
+          }),
+        }),
+      } as unknown as D1Database;
+
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const ws = getLastMockWebSocket();
+      const reportEvent: ReportEvent = {
+        id: 'duplicate_report',
+        pubkey: 'reporter',
+        kind: 1984,
+        content: 'Duplicate CSAM report',
+        tags: [
+          ['e', 'already_hidden_event'],
+          ['report', 'sexual_minors'],
+        ],
+        created_at: Math.floor(Date.now() / 1000),
+      };
+
+      ws!.simulateMessage(JSON.stringify(['EVENT', 'auto-hide-reports', reportEvent]));
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      // Should NOT have called fetch (banevent) - event already hidden
+      expect(mockFetch).not.toHaveBeenCalled();
+
+      // eventsAutoHidden should be 0 (no new events hidden)
       const response = await watcher.fetch(new Request('https://do/status', { method: 'GET' }));
       const body = await response.json() as { status: { eventsAutoHidden: number } };
       expect(body.status.eventsAutoHidden).toBe(0);
