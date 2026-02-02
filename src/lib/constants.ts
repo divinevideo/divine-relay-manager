@@ -3,6 +3,8 @@
 
 export const CATEGORY_LABELS: Record<string, string> = {
   'sexual_minors': 'CSAM',
+  'csam': 'CSAM',
+  'NS-csam': 'CSAM',
   'nonconsensual_sexual_content': 'Non-consensual',
   'credible_threats': 'Threats',
   'doxxing_pii': 'Doxxing/PII',
@@ -17,7 +19,12 @@ export const CATEGORY_LABELS: Record<string, string> = {
   'explicit_sex': 'Explicit',
   'pornography': 'Pornography',
   'spam': 'Spam',
+  'Spam': 'Spam',
   'impersonation': 'Impersonation',
+  'Impersonation': 'Impersonation',
+  'harassment': 'Harassment',
+  'nudity': 'Nudity',
+  'illegal': 'Illegal',
   'copyright': 'Copyright',
   'aiGenerated': 'AI Generated',
   'ai-generated': 'AI Generated',

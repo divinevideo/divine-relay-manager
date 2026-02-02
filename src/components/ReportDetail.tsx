@@ -42,9 +42,12 @@ import { AIDetectionReport } from "@/components/AIDetectionReport";
 import { MediaPreview } from "@/components/MediaPreview";
 import { BulkDeleteByKind } from "@/components/BulkDeleteByKind";
 import { CATEGORY_LABELS } from "@/lib/constants";
-import { UserX, UserCheck, Tag, Flag, Trash2, CheckCircle, Video, History, Ban, ShieldX, Link2, User, FileText, Unlock, Repeat2, FileCode, Loader2, XCircle, RefreshCw, Undo2 } from "lucide-react";
+import { UserX, UserCheck, Tag, Flag, Trash2, CheckCircle, Video, History, Ban, ShieldX, Link2, User, FileText, Unlock, Repeat2, FileCode, Loader2, XCircle, RefreshCw, Undo2, EyeOff, Eye } from "lucide-react";
 import { CopyableId, CopyableTags } from "@/components/CopyableId";
 import type { NostrEvent } from "@nostrify/nostrify";
+
+// High-priority categories - media should be hidden by default for moderator safety
+const HIGH_PRIORITY_CATEGORIES = ['sexual_minors', 'csam', 'NS-csam', 'nonconsensual_sexual_content', 'terrorism_extremism', 'credible_threats'];
 
 function getReportCategory(event: NostrEvent): string {
   const reportTag = event.tags.find(t => t[0] === 'report');
@@ -164,6 +167,10 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   const isUserBanned = moderationStatus.isBanned;
   const isEventDeleted = moderationStatus.isDeleted;
   const isResolved = decisionLog.hasDecisions || pubkeyDecisionLog.hasDecisions || isUserBanned || isEventDeleted;
+
+  // Auto-hide specific status
+  const isPendingReview = decisionLog.isPendingReview;
+  const isAutoHidden = decisionLog.isAutoHidden;
 
   // Find related reports: reports on this user AND reports on their events
   const relatedReports = useMemo(() => {
@@ -539,6 +546,16 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   // Check media status from moderation service
   const mediaStatus = useMediaStatus(mediaHashes);
 
+  // Check if any report on this target has a high-priority category (CSAM, etc.)
+  // Used to collapse media preview by default to protect moderators
+  const hasHighPriorityReports = useMemo(() => {
+    if (!allReportsForTarget?.length) return false;
+    return allReportsForTarget.some(r => {
+      const cat = getReportCategory(r);
+      return HIGH_PRIORITY_CATEGORIES.includes(cat);
+    });
+  }, [allReportsForTarget]);
+
   const unblockMediaMutation = useMutation({
     mutationFn: async ({ hashes, reason }: { hashes: string[]; reason: string }) => {
       // Unblock all media hashes
@@ -655,6 +672,64 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     },
   });
 
+  // Confirm auto-hidden content (approve the auto-hide decision)
+  const confirmAutoHideMutation = useMutation({
+    mutationFn: async ({ targetId, targetType }: { targetId: string; targetType: 'event' | 'pubkey' }) => {
+      await logDecision({
+        targetType,
+        targetId,
+        action: 'auto_hide_confirmed',
+        reason: 'Auto-hide confirmed by moderator',
+        reportId: report?.id,
+      });
+      return targetId;
+    },
+    onSuccess: async () => {
+      queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      queryClient.invalidateQueries({ queryKey: ['all-decisions'] });
+      decisionLog.refetch();
+      toast({ title: "Auto-hide confirmed", description: "Content will remain hidden" });
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Failed to confirm auto-hide",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  // Restore auto-hidden content (reverse the auto-hide)
+  const restoreAutoHideMutation = useMutation({
+    mutationFn: async ({ eventId }: { eventId: string }) => {
+      await callRelayRpc('allowevent', [eventId]);
+      await logDecision({
+        targetType: 'event',
+        targetId: eventId,
+        action: 'auto_hide_restored',
+        reason: 'Auto-hide reversed by moderator',
+        reportId: report?.id,
+      });
+      return eventId;
+    },
+    onSuccess: async () => {
+      queryClient.invalidateQueries({ queryKey: ['reports'] });
+      queryClient.invalidateQueries({ queryKey: ['banned-events'] });
+      queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      queryClient.invalidateQueries({ queryKey: ['all-decisions'] });
+      moderationStatus.refetch();
+      decisionLog.refetch();
+      toast({ title: "Content restored", description: "Auto-hide has been reversed" });
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Failed to restore content",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
   // Combined action: Block media AND delete event
   const blockAndDeleteMutation = useMutation({
     mutationFn: async ({ eventId, hashes, reason }: { eventId: string; hashes: string[]; reason: string }) => {
@@ -763,6 +838,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
 
   const category = getReportCategory(report);
   const categoryLabel = CATEGORY_LABELS[category] || category;
+  const isHighPriorityCategory = HIGH_PRIORITY_CATEGORIES.includes(category);
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
@@ -1088,8 +1164,69 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             </div>
           )}
 
-          {/* Resolved Banner - prominently show when already handled */}
-          {isResolved && (
+          {/* Pending Review Banner - for auto-hidden items awaiting human review */}
+          {isPendingReview && (
+            <div className="bg-orange-100 dark:bg-orange-950/50 border border-orange-300 dark:border-orange-800 rounded-lg p-3">
+              <div className="flex items-center gap-3 mb-3">
+                <EyeOff className="h-6 w-6 text-orange-600" />
+                <div className="flex-1">
+                  <p className="font-medium text-orange-800 dark:text-orange-300">
+                    Auto-Hidden — Pending Review
+                  </p>
+                  <p className="text-sm text-orange-600 dark:text-orange-400">
+                    This content was automatically hidden based on a report. Please review and confirm or restore.
+                  </p>
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="default"
+                      className="bg-green-600 hover:bg-green-700"
+                      onClick={() => {
+                        if (context.target) {
+                          confirmAutoHideMutation.mutate({
+                            targetId: context.target.value,
+                            targetType: context.target.type,
+                          });
+                        }
+                      }}
+                      disabled={confirmAutoHideMutation.isPending}
+                    >
+                      <CheckCircle className="h-4 w-4 mr-1" />
+                      {confirmAutoHideMutation.isPending ? 'Confirming...' : 'Confirm Hide'}
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" className="max-w-xs">
+                    <p>Confirm this auto-hide decision. The content will remain hidden.</p>
+                  </TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="outline"
+                      onClick={() => {
+                        if (context.target?.type === 'event' && context.target.value) {
+                          restoreAutoHideMutation.mutate({ eventId: context.target.value });
+                        }
+                      }}
+                      disabled={restoreAutoHideMutation.isPending || context.target?.type !== 'event'}
+                    >
+                      <Eye className="h-4 w-4 mr-1" />
+                      {restoreAutoHideMutation.isPending ? 'Restoring...' : 'Restore Content'}
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" className="max-w-xs">
+                    <p>Reverse the auto-hide. The content will be visible again.</p>
+                  </TooltipContent>
+                </Tooltip>
+              </div>
+            </div>
+          )}
+
+          {/* Resolved Banner - prominently show when already handled (but not pending review) */}
+          {isResolved && !isPendingReview && (
             <div className="bg-green-100 dark:bg-green-950/50 border border-green-300 dark:border-green-800 rounded-lg p-3 flex items-center gap-3">
               <CheckCircle className="h-6 w-6 text-green-600" />
               <div className="flex-1">
@@ -1108,7 +1245,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
           {/* Header */}
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 flex-wrap">
-              <Badge variant="outline">{categoryLabel}</Badge>
+              <Badge variant={isHighPriorityCategory ? "destructive" : "outline"}>{categoryLabel}</Badge>
               <Badge variant="secondary">
                 {context.target?.type === 'event' ? 'Event' : 'User'}
               </Badge>
@@ -1122,6 +1259,12 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                 <Badge variant="destructive" className="flex items-center gap-1">
                   <ShieldX className="h-3 w-3" />
                   Event Deleted
+                </Badge>
+              )}
+              {isPendingReview && (
+                <Badge variant="outline" className="flex items-center gap-1 border-orange-500 text-orange-600">
+                  <EyeOff className="h-3 w-3" />
+                  Auto-Hidden
                 </Badge>
               )}
             </div>
@@ -1286,7 +1429,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                     {/* Media in original post */}
                     <MediaPreview
                       event={context.thread.repostedEvent}
-                      showByDefault={true}
+                      showByDefault={!hasHighPriorityReports}
                       maxItems={6}
                     />
                   </div>
@@ -1303,7 +1446,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
           {context.thread?.event && (
             <MediaPreview
               event={context.thread.event}
-              showByDefault={true}
+              showByDefault={!hasHighPriorityReports}
               maxItems={6}
             />
           )}
