@@ -45,8 +45,12 @@ const RECONNECT_BACKOFF_MULTIPLIER = 2;
 // Alarm interval for connection health checks
 const HEALTH_CHECK_INTERVAL_MS = 30000;
 
-// Categories that trigger auto-hide (MVP: only sexual_minors)
-const AUTO_HIDE_CATEGORIES = ['sexual_minors'];
+// Categories that trigger auto-hide (MVP: CSAM-related categories)
+// Maps various client formats to a normalized category for auto-hide
+// - 'sexual_minors' - NIP-56 standard
+// - 'csam' - Divine mobile/web app format
+// - 'NS-csam' - Divine web app with NIP-32 prefix
+const AUTO_HIDE_CATEGORIES = ['sexual_minors', 'csam', 'NS-csam'];
 
 /**
  * ReportWatcher Durable Object
@@ -400,16 +404,27 @@ export class ReportWatcher implements DurableObject {
     this.eventsProcessed++;
 
     // Extract report category from tags
-    // NIP-56 supports two formats:
-    // 1. ["report", "<category>"] - direct report tag
-    // 2. ["l", "<category>", "MOD"] - NIP-32 label tag with MOD namespace
+    // Support multiple formats used by Divine clients:
+    // 1. ["report", "<category>"] - Divine mobile app format (NIP-56)
+    // 2. ["l", "NS-<category>", "social.nos.ontology"] - Divine web app format (NIP-32)
+    // 3. ["l", "<category>", "MOD"] - Generic NIP-32 MOD namespace
+    // 4. ["e", "<id>", "<category>"] or ["p", "<id>", "<category>"] - category in target tag
     const reportTag = event.tags.find(t => t[0] === 'report');
-    const labelTag = event.tags.find(t => t[0] === 'l' && t[2] === 'MOD');
-    const category = reportTag?.[1] || labelTag?.[1] || 'unknown';
+    const labelTagNos = event.tags.find(t => t[0] === 'l' && t[2] === 'social.nos.ontology');
+    const labelTagMod = event.tags.find(t => t[0] === 'l' && t[2] === 'MOD');
 
     // Extract target (e tag for event, p tag for pubkey)
     const targetEventTag = event.tags.find(t => t[0] === 'e');
     const targetPubkeyTag = event.tags.find(t => t[0] === 'p');
+
+    // Get category from first available source
+    // Priority: report tag > NIP-32 label > e/p tag third element
+    let category = reportTag?.[1]
+      || labelTagNos?.[1]
+      || labelTagMod?.[1]
+      || targetEventTag?.[2]
+      || targetPubkeyTag?.[2]
+      || 'unknown';
 
     const targetType = targetEventTag ? 'event' : targetPubkeyTag ? 'pubkey' : 'unknown';
     const targetId = targetEventTag?.[1] || targetPubkeyTag?.[1] || 'unknown';

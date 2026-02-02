@@ -1,6 +1,7 @@
 // ABOUTME: Main relay administration interface with tabs for events, users, reports, and labels
 // ABOUTME: Integrates all NIP-86 moderation tools into a unified dashboard with URL routing
 
+import { useState, useEffect, useCallback } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { EventsList } from "@/components/EventsList";
 import { UserManagement } from "@/components/UserManagement";
@@ -11,8 +12,50 @@ import { SettingsDashboard } from "@/components/SettingsDashboard";
 import { EnvironmentSelector } from "@/components/EnvironmentSelector";
 import { Card } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Server, FileText, Users, Settings, Flag, Tag, Bug } from "lucide-react";
+import { Server, FileText, Users, Settings, Flag, Tag, Bug, GripVertical } from "lucide-react";
 import { useAppContext } from "@/hooks/useAppContext";
+
+// Tab definitions in default order (Reports first for moderation workflow)
+const TAB_DEFINITIONS = [
+  { id: 'reports', label: 'Reports', icon: Flag },
+  { id: 'events', label: 'Events', icon: FileText },
+  { id: 'users', label: 'Users', icon: Users },
+  { id: 'labels', label: 'Labels', icon: Tag },
+  { id: 'settings', label: 'Settings', icon: Settings },
+  { id: 'debug', label: 'Debug', icon: Bug },
+] as const;
+
+type TabId = typeof TAB_DEFINITIONS[number]['id'];
+
+const DEFAULT_TAB_ORDER: TabId[] = TAB_DEFINITIONS.map(t => t.id);
+const STORAGE_KEY = 'divine-relay-manager:tab-order';
+
+function loadTabOrder(): TabId[] {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    if (stored) {
+      const parsed = JSON.parse(stored) as TabId[];
+      // Validate: must contain all tab IDs exactly once
+      if (
+        parsed.length === DEFAULT_TAB_ORDER.length &&
+        DEFAULT_TAB_ORDER.every(id => parsed.includes(id))
+      ) {
+        return parsed;
+      }
+    }
+  } catch {
+    // Ignore parse errors
+  }
+  return DEFAULT_TAB_ORDER;
+}
+
+function saveTabOrder(order: TabId[]): void {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(order));
+  } catch {
+    // Ignore storage errors
+  }
+}
 
 // Map URL paths to tab values
 function getTabFromPath(pathname: string): string {
@@ -33,10 +76,72 @@ export function RelayManager() {
 
   const currentTab = getTabFromPath(location.pathname);
 
+  // Tab order state with localStorage persistence
+  const [tabOrder, setTabOrder] = useState<TabId[]>(loadTabOrder);
+  const [draggedTab, setDraggedTab] = useState<TabId | null>(null);
+  const [dragOverTab, setDragOverTab] = useState<TabId | null>(null);
+
+  // Save tab order when it changes
+  useEffect(() => {
+    saveTabOrder(tabOrder);
+  }, [tabOrder]);
+
   // Handle tab changes - navigate to the new route
   const handleTabChange = (value: string) => {
     navigate(`/${value}`);
   };
+
+  // Drag and drop handlers
+  const handleDragStart = useCallback((e: React.DragEvent, tabId: TabId) => {
+    setDraggedTab(tabId);
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', tabId);
+    // Add a slight delay to show the drag styling
+    requestAnimationFrame(() => {
+      (e.target as HTMLElement).style.opacity = '0.5';
+    });
+  }, []);
+
+  const handleDragEnd = useCallback((e: React.DragEvent) => {
+    (e.target as HTMLElement).style.opacity = '1';
+    setDraggedTab(null);
+    setDragOverTab(null);
+  }, []);
+
+  const handleDragOver = useCallback((e: React.DragEvent, tabId: TabId) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    if (draggedTab && tabId !== draggedTab) {
+      setDragOverTab(tabId);
+    }
+  }, [draggedTab]);
+
+  const handleDragLeave = useCallback(() => {
+    setDragOverTab(null);
+  }, []);
+
+  const handleDrop = useCallback((e: React.DragEvent, targetTabId: TabId) => {
+    e.preventDefault();
+    if (!draggedTab || draggedTab === targetTabId) return;
+
+    setTabOrder(prevOrder => {
+      const newOrder = [...prevOrder];
+      const draggedIndex = newOrder.indexOf(draggedTab);
+      const targetIndex = newOrder.indexOf(targetTabId);
+
+      // Remove dragged item and insert at target position
+      newOrder.splice(draggedIndex, 1);
+      newOrder.splice(targetIndex, 0, draggedTab);
+
+      return newOrder;
+    });
+
+    setDraggedTab(null);
+    setDragOverTab(null);
+  }, [draggedTab]);
+
+  // Get ordered tabs
+  const orderedTabs = tabOrder.map(id => TAB_DEFINITIONS.find(t => t.id === id)!);
 
   return (
     <div className="h-screen flex flex-col overflow-hidden bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800">
@@ -61,30 +166,29 @@ export function RelayManager() {
       <div className="flex-1 min-h-0 overflow-hidden container mx-auto px-4 py-4">
         <Tabs value={currentTab} onValueChange={handleTabChange} className="h-full flex flex-col">
           <TabsList className="shrink-0 grid w-full grid-cols-6">
-            <TabsTrigger value="events" className="flex items-center space-x-2">
-              <FileText className="h-4 w-4" />
-              <span>Events</span>
-            </TabsTrigger>
-            <TabsTrigger value="users" className="flex items-center space-x-2">
-              <Users className="h-4 w-4" />
-              <span>Users</span>
-            </TabsTrigger>
-            <TabsTrigger value="reports" className="flex items-center space-x-2">
-              <Flag className="h-4 w-4" />
-              <span>Reports</span>
-            </TabsTrigger>
-            <TabsTrigger value="labels" className="flex items-center space-x-2">
-              <Tag className="h-4 w-4" />
-              <span>Labels</span>
-            </TabsTrigger>
-            <TabsTrigger value="settings" className="flex items-center space-x-2">
-              <Settings className="h-4 w-4" />
-              <span>Settings</span>
-            </TabsTrigger>
-            <TabsTrigger value="debug" className="flex items-center space-x-2">
-              <Bug className="h-4 w-4" />
-              <span>Debug</span>
-            </TabsTrigger>
+            {orderedTabs.map((tab) => {
+              const Icon = tab.icon;
+              const isDragOver = dragOverTab === tab.id;
+              return (
+                <TabsTrigger
+                  key={tab.id}
+                  value={tab.id}
+                  className={`flex items-center space-x-1 cursor-grab active:cursor-grabbing transition-all ${
+                    isDragOver ? 'ring-2 ring-blue-500 ring-offset-1' : ''
+                  }`}
+                  draggable
+                  onDragStart={(e) => handleDragStart(e, tab.id)}
+                  onDragEnd={handleDragEnd}
+                  onDragOver={(e) => handleDragOver(e, tab.id)}
+                  onDragLeave={handleDragLeave}
+                  onDrop={(e) => handleDrop(e, tab.id)}
+                >
+                  <GripVertical className="h-3 w-3 opacity-40 shrink-0" />
+                  <Icon className="h-4 w-4 shrink-0" />
+                  <span className="truncate">{tab.label}</span>
+                </TabsTrigger>
+              );
+            })}
           </TabsList>
 
           <TabsContent value="events" className="flex-1 min-h-0 overflow-hidden mt-4">
