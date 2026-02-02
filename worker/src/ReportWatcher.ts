@@ -466,6 +466,12 @@ export class ReportWatcher implements DurableObject {
       return;
     }
 
+    // Check if this event was already auto-hidden (deduplication)
+    if (await this.isAlreadyAutoHidden(targetEventId)) {
+      console.log(`[ReportWatcher] Event ${targetEventId.slice(0, 8)}... already auto-hidden, skipping`);
+      return;
+    }
+
     console.log(`[ReportWatcher] Processing auto-hide for event ${targetEventId.slice(0, 8)}...`);
 
     // Call banevent RPC to hide the content
@@ -498,6 +504,33 @@ export class ReportWatcher implements DurableObject {
         reportId: event.id,
         reporterPubkey: event.pubkey,
       });
+    }
+  }
+
+  /**
+   * Check if an event was already auto-hidden (for deduplication)
+   */
+  private async isAlreadyAutoHidden(targetEventId: string): Promise<boolean> {
+    if (!this.env.DB) {
+      // No D1 available - can't dedupe, allow processing
+      console.warn('[ReportWatcher] D1 not available for deduplication check');
+      return false;
+    }
+
+    try {
+      const result = await this.env.DB.prepare(`
+        SELECT 1 FROM moderation_decisions
+        WHERE target_type = 'event'
+          AND target_id = ?
+          AND action IN ('auto_hidden', 'auto_hide_confirmed')
+        LIMIT 1
+      `).bind(targetEventId).first();
+
+      return result !== null;
+    } catch (error) {
+      console.error('[ReportWatcher] Failed to check auto-hide status:', error);
+      // On error, allow processing (fail open for enforcement)
+      return false;
     }
   }
 
