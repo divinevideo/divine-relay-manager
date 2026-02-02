@@ -392,7 +392,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   });
 
   // Query all moderation decisions from our D1 database
-  const { data: allDecisions, error: decisionsError } = useQuery({
+  const { data: allDecisions, error: decisionsError, isLoading: decisionsLoading } = useQuery({
     queryKey: ['all-decisions'],
     queryFn: async () => {
       try {
@@ -740,7 +740,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     }
   };
 
-  if (isLoading) {
+  // Wait for both reports AND decisions to load before rendering
+  // This prevents auto-hidden CSAM from briefly appearing in default view
+  if (isLoading || decisionsLoading) {
     return (
       <Card className="h-[calc(100vh-200px)]">
         <CardHeader>
