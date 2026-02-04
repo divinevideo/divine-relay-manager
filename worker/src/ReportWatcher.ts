@@ -419,7 +419,7 @@ export class ReportWatcher implements DurableObject {
 
     // Get category from first available source
     // Priority: report tag > NIP-32 label > e/p tag third element
-    let category = reportTag?.[1]
+    const category = reportTag?.[1]
       || labelTagNos?.[1]
       || labelTagMod?.[1]
       || targetEventTag?.[2]

@@ -33,7 +33,6 @@ import { HiveAIReport } from "@/components/HiveAIReport";
 import { AIDetectionReport } from "@/components/AIDetectionReport";
 import { ReporterList } from "@/components/ReporterCard";
 import { MediaPreview } from "@/components/MediaPreview";
-import { CATEGORY_LABELS } from "@/lib/constants";
 import {
   User,
   Hash,
