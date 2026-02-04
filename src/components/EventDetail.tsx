@@ -36,7 +36,6 @@ import { TranscriptAnalysis } from "@/components/TranscriptAnalysis";
 import { ReporterList } from "@/components/ReporterCard";
 import { extractMediaHashes } from "@/lib/adminApi";
 import { MediaPreview } from "@/components/MediaPreview";
-import { CATEGORY_LABELS } from "@/lib/constants";
 import {
   User,
   Hash,

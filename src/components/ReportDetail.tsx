@@ -170,7 +170,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
 
   // Auto-hide specific status
   const isPendingReview = decisionLog.isPendingReview;
-  const isAutoHidden = decisionLog.isAutoHidden;
+  const _isAutoHidden = decisionLog.isAutoHidden;
 
   // Find related reports: reports on this user AND reports on their events
   const relatedReports = useMemo(() => {

@@ -53,7 +53,7 @@ async function banEvent(eventId: string): Promise<boolean> {
   }
 }
 
-async function clearD1(): Promise<boolean> {
+async function _clearD1(): Promise<boolean> {
   try {
     // We can't directly call D1 from here, but we can delete via the API
     // Actually, let's just use wrangler CLI for this
