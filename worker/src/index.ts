@@ -1514,6 +1514,11 @@ async function handleZendeskRoutes(
     return handleParseReport(request, env, corsHeaders);
   }
 
+  // Mobile JWT endpoint - generates JWTs for mobile app users (no auth required, pubkey is public)
+  if (subPath === '/mobile-jwt' && request.method === 'POST') {
+    return handleMobileJwt(request, env, corsHeaders);
+  }
+
   // All other Zendesk endpoints require JWT auth
   const authResult = await verifyZendeskJWT(request, env);
   if (!authResult.valid) {
@@ -1827,6 +1832,149 @@ async function handleParseReport(
     return jsonResponse({ success: true, ticket_id, event_id, author_pubkey, violation_type }, 200, corsHeaders);
   } catch (error) {
     console.error('[handleParseReport] Error:', error);
+    return jsonResponse(
+      { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+      500,
+      corsHeaders
+    );
+  }
+}
+
+// Generate JWT for mobile app users to authenticate with Zendesk SDK
+// This enables "View Past Messages" and push notifications
+async function handleMobileJwt(
+  request: Request,
+  env: Env,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  try {
+    if (!env.ZENDESK_JWT_SECRET) {
+      return jsonResponse({ success: false, error: 'ZENDESK_JWT_SECRET not configured' }, 500, corsHeaders);
+    }
+
+    let pubkey: string | undefined;
+    let name: string | undefined;
+    let email: string | undefined;
+
+    const contentType = request.headers.get('content-type') || '';
+
+    if (contentType.includes('application/x-www-form-urlencoded')) {
+      // Zendesk callback format - extract user_token which contains the external_id (npub)
+      const formData = await request.formData();
+      const userToken = formData.get('user_token') as string | null;
+
+      console.log('[handleMobileJwt] Zendesk callback with user_token:', userToken?.substring(0, 20) + '...');
+
+      if (userToken) {
+        // user_token should be the npub (external_id) we set earlier
+        // If it's an npub, decode it to get the hex pubkey
+        if (userToken.startsWith('npub1')) {
+          try {
+            const decoded = nip19.decode(userToken);
+            if (decoded.type === 'npub') {
+              pubkey = decoded.data as string;
+            }
+          } catch (e) {
+            console.log('[handleMobileJwt] Failed to decode npub:', e);
+          }
+        } else if (/^[a-f0-9]{64}$/i.test(userToken)) {
+          // It's already a hex pubkey
+          pubkey = userToken;
+        }
+      }
+
+      // Also check for name/email in form data
+      name = formData.get('name') as string | null || undefined;
+      email = formData.get('email') as string | null || undefined;
+    } else {
+      // JSON format from mobile app
+      const body = await request.json() as {
+        pubkey?: string;
+        name?: string;
+        email?: string;
+      };
+      pubkey = body.pubkey;
+      name = body.name;
+      email = body.email;
+    }
+
+    // Validate pubkey (required, 64 hex chars)
+    if (!pubkey || !/^[a-f0-9]{64}$/i.test(pubkey)) {
+      return jsonResponse({ success: false, error: 'Missing or invalid pubkey (must be 64 hex chars)' }, 400, corsHeaders);
+    }
+
+    pubkey = pubkey.toLowerCase();
+    const now = Math.floor(Date.now() / 1000);
+    const exp = now + 3600; // 1 hour expiry
+
+    // Convert hex pubkey to npub (bech32) for consistent user identification
+    // This matches the pattern used in divine-mobile's zendesk_support_service
+    const npub = nip19.npubEncode(pubkey);
+
+    // Build JWT payload
+    // external_id uses npub to link REST API tickets to SDK identity
+    const payload = {
+      iss: 'divine.video',
+      iat: now,
+      exp: exp,
+      jti: crypto.randomUUID(),
+      external_id: npub,
+      name: name || `Divine User`,
+      email: email || `${npub}@divine.video`,
+    };
+
+    // Build JWT header
+    const header = {
+      alg: 'HS256',
+      typ: 'JWT',
+    };
+
+    // Base64URL encode helper
+    const base64UrlEncode = (data: string): string => {
+      return btoa(data)
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=+$/, '');
+    };
+
+    // Encode header and payload
+    const headerB64 = base64UrlEncode(JSON.stringify(header));
+    const payloadB64 = base64UrlEncode(JSON.stringify(payload));
+    const dataToSign = `${headerB64}.${payloadB64}`;
+
+    // Sign with HMAC-SHA256
+    const key = await crypto.subtle.importKey(
+      'raw',
+      new TextEncoder().encode(env.ZENDESK_JWT_SECRET),
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['sign']
+    );
+
+    const signatureBytes = await crypto.subtle.sign(
+      'HMAC',
+      key,
+      new TextEncoder().encode(dataToSign)
+    );
+
+    const signatureB64 = base64UrlEncode(
+      String.fromCharCode(...new Uint8Array(signatureBytes))
+    );
+
+    const jwt = `${dataToSign}.${signatureB64}`;
+
+    console.log(`[handleMobileJwt] Generated JWT for npub: ${npub.substring(0, 16)}...`);
+
+    return new Response(JSON.stringify({
+      success: true,
+      jwt,
+      expires_at: exp,
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders },
+    });
+  } catch (error) {
+    console.error('[handleMobileJwt] Error:', error);
     return jsonResponse(
       { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
       500,
