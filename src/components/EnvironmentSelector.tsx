@@ -16,6 +16,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useAppContext } from "@/hooks/useAppContext";
 import { environments, getCurrentEnvironment, type Environment } from "@/lib/environments";
 import { Badge } from "@/components/ui/badge";
@@ -26,6 +27,7 @@ interface EnvironmentSelectorProps {
 
 export function EnvironmentSelector({ className }: EnvironmentSelectorProps) {
   const { config, updateConfig } = useAppContext();
+  const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
 
   const currentEnvironment = getCurrentEnvironment(config.relayUrl, config.apiUrl);
@@ -36,6 +38,9 @@ export function EnvironmentSelector({ className }: EnvironmentSelectorProps) {
       relayUrl: env.relayUrl,
       apiUrl: env.apiUrl,
     }));
+    // Clear and refetch all queries to force fresh data for new environment
+    queryClient.clear();
+    queryClient.refetchQueries();
     setOpen(false);
   };
 
