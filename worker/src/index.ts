@@ -17,9 +17,9 @@ interface Env {
   RELAY_URL: string;
   ALLOWED_ORIGINS: string;
   ANTHROPIC_API_KEY?: string;
-  // Optional Cloudflare Access token for private moderation hosts.
-  CF_ACCESS_CLIENT_ID?: string;
-  CF_ACCESS_CLIENT_SECRET?: string;
+  // Cloudflare Access Service Token for moderation.admin.divine.video
+  CF_ACCESS_CLIENT_ID?: string | SecretStoreSecret;
+  CF_ACCESS_CLIENT_SECRET?: string | SecretStoreSecret;
   // Service binding to divine-realness worker (bypasses CF Access)
   REALNESS?: Fetcher;
   // Service binding to divine-moderation-api worker for public moderation lookups
@@ -64,6 +64,23 @@ const DEFAULT_REALNESS_API_URL = 'https://realness.admin.divine.video';
  */
 function getModerationServiceUrl(env: Env): string {
   return env.MODERATION_SERVICE_URL || DEFAULT_MODERATION_SERVICE_URL;
+}
+
+/**
+ * Resolve CF Access credentials from env (supports both plain strings and SecretStoreSecret bindings).
+ */
+async function getCfAccessCredentials(env: Env): Promise<{ clientId: string; clientSecret: string } | null> {
+  if (!env.CF_ACCESS_CLIENT_ID || !env.CF_ACCESS_CLIENT_SECRET) return null;
+
+  const clientId = typeof env.CF_ACCESS_CLIENT_ID === 'string'
+    ? env.CF_ACCESS_CLIENT_ID
+    : await env.CF_ACCESS_CLIENT_ID.get();
+  const clientSecret = typeof env.CF_ACCESS_CLIENT_SECRET === 'string'
+    ? env.CF_ACCESS_CLIENT_SECRET
+    : await env.CF_ACCESS_CLIENT_SECRET.get();
+
+  if (!clientId || !clientSecret) return null;
+  return { clientId, clientSecret };
 }
 
 function getAllowedOrigin(requestOrigin: string | null, allowedOriginsEnv: string | undefined): string {
@@ -852,9 +869,10 @@ async function handleCheckResult(
       'Content-Type': 'application/json',
     };
 
-    if (env.CF_ACCESS_CLIENT_ID && env.CF_ACCESS_CLIENT_SECRET) {
-      headers['CF-Access-Client-Id'] = env.CF_ACCESS_CLIENT_ID;
-      headers['CF-Access-Client-Secret'] = env.CF_ACCESS_CLIENT_SECRET;
+    const cfAccess = await getCfAccessCredentials(env);
+    if (cfAccess) {
+      headers['CF-Access-Client-Id'] = cfAccess.clientId;
+      headers['CF-Access-Client-Secret'] = cfAccess.clientSecret;
     }
 
     const moderationRequest = new Request(`${getModerationServiceUrl(env)}/check-result/${sha256}`, {
@@ -915,15 +933,16 @@ async function handleModerateMedia(
     }
 
     // Require Zero Trust credentials for moderation service
-    if (!env.CF_ACCESS_CLIENT_ID || !env.CF_ACCESS_CLIENT_SECRET) {
+    const cfAccess = await getCfAccessCredentials(env);
+    if (!cfAccess) {
       return jsonResponse({ success: false, error: 'CF_ACCESS credentials not configured' }, 500, corsHeaders);
     }
 
     // Build headers with Cloudflare Access service token
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
-      'CF-Access-Client-Id': env.CF_ACCESS_CLIENT_ID,
-      'CF-Access-Client-Secret': env.CF_ACCESS_CLIENT_SECRET,
+      'CF-Access-Client-Id': cfAccess.clientId,
+      'CF-Access-Client-Secret': cfAccess.clientSecret,
     };
 
     const response = await fetch(`${getModerationServiceUrl(env)}/api/v1/moderate`, {
@@ -1401,14 +1420,15 @@ async function handleRealnessViaHTTP(
   const realnessUrl = env.REALNESS_API_URL || DEFAULT_REALNESS_API_URL;
 
   // Check CF Access credentials
-  if (!env.CF_ACCESS_CLIENT_ID || !env.CF_ACCESS_CLIENT_SECRET) {
+  const cfAccess = await getCfAccessCredentials(env);
+  if (!cfAccess) {
     return jsonResponse({ success: false, error: 'CF_ACCESS credentials not configured (and no service binding)' }, 500, corsHeaders);
   }
 
   // Build headers with CF Access auth
   const headers: Record<string, string> = {
-    'CF-Access-Client-Id': env.CF_ACCESS_CLIENT_ID,
-    'CF-Access-Client-Secret': env.CF_ACCESS_CLIENT_SECRET,
+    'CF-Access-Client-Id': cfAccess.clientId,
+    'CF-Access-Client-Secret': cfAccess.clientSecret,
     'Accept': 'application/json',
   };
 
