@@ -23,13 +23,27 @@ interface BannedUserCardProps {
   onUnban?: () => void;
 }
 
-export function BannedUserCard({ pubkey, reason, onUnban }: BannedUserCardProps) {
+export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban }: BannedUserCardProps) {
   const { nostr } = useNostr();
   const [isOpen, setIsOpen] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  // Convert to npub
-  const npub = nip19.npubEncode(pubkey);
+  // Normalize: if an npub was stored, decode to hex; otherwise use as-is
+  let pubkey = rawPubkey;
+  if (rawPubkey.startsWith('npub1')) {
+    try {
+      const decoded = nip19.decode(rawPubkey);
+      if (decoded.type === 'npub') pubkey = decoded.data;
+    } catch { /* keep rawPubkey */ }
+  }
+
+  // Convert to npub for display
+  let npub: string;
+  try {
+    npub = nip19.npubEncode(pubkey);
+  } catch {
+    npub = pubkey; // fallback if hex is somehow invalid
+  }
   const shortNpub = npub.slice(0, 12) + '...' + npub.slice(-8);
 
   // Fetch user profile
@@ -68,6 +82,7 @@ export function BannedUserCard({ pubkey, reason, onUnban }: BannedUserCardProps)
 
   const displayName = profile?.name || profile?.display_name || shortNpub;
   const njumpUrl = `https://njump.me/${npub}`;
+  const profileUrl = `https://divine.video/profile/${npub}`;
 
   const copyNpub = () => {
     navigator.clipboard.writeText(npub);
@@ -84,12 +99,14 @@ export function BannedUserCard({ pubkey, reason, onUnban }: BannedUserCardProps)
             {profileLoading ? (
               <Skeleton className="h-12 w-12 rounded-full" />
             ) : (
-              <Avatar className="h-12 w-12">
-                <AvatarImage src={profile?.picture} />
-                <AvatarFallback>
-                  {displayName.slice(0, 2).toUpperCase()}
-                </AvatarFallback>
-              </Avatar>
+              <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80 shrink-0">
+                <Avatar className="h-12 w-12">
+                  <AvatarImage src={profile?.picture} />
+                  <AvatarFallback>
+                    {displayName.slice(0, 2).toUpperCase()}
+                  </AvatarFallback>
+                </Avatar>
+              </a>
             )}
 
             {/* User Info */}
@@ -98,7 +115,9 @@ export function BannedUserCard({ pubkey, reason, onUnban }: BannedUserCardProps)
                 {profileLoading ? (
                   <Skeleton className="h-5 w-32" />
                 ) : (
-                  <h3 className="font-semibold truncate">{displayName}</h3>
+                  <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80">
+                    <h3 className="font-semibold truncate">{displayName}</h3>
+                  </a>
                 )}
                 {profile?.nip05 && (
                   <Badge variant="secondary" className="text-xs">

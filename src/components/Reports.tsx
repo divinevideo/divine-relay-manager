@@ -35,6 +35,7 @@ import {
   FileText,
   AlertTriangle,
   X,
+  EyeOff,
 } from "lucide-react";
 import { ReportDetail } from "@/components/ReportDetail";
 import { UserDisplayName } from "@/components/UserIdentifier";
@@ -57,7 +58,8 @@ const SORT_OPTIONS: { value: SortOption; label: string }[] = [
 ];
 
 // High-priority categories that need immediate attention (CSAM, illegal content)
-const HIGH_PRIORITY_CATEGORIES = ['sexual_minors', 'nonconsensual_sexual_content', 'terrorism_extremism', 'credible_threats'];
+// Includes both NIP-56 standard names and Divine client variations
+const HIGH_PRIORITY_CATEGORIES = ['sexual_minors', 'csam', 'NS-csam', 'nonconsensual_sexual_content', 'terrorism_extremism', 'credible_threats'];
 const MEDIUM_PRIORITY_CATEGORIES = ['doxxing_pii', 'malware_scam', 'illegal_goods'];
 
 // Category priority for sorting
@@ -225,7 +227,7 @@ function ConsolidatedReportItem({
         {/* Target ID - show name for users, note ID for events */}
         {consolidated.target.type === 'pubkey' ? (
           <div className="text-xs text-muted-foreground truncate">
-            <UserDisplayName pubkey={consolidated.target.value} fallbackLength={16} />
+            <UserDisplayName pubkey={consolidated.target.value} fallbackLength={16} linkToProfile />
           </div>
         ) : (
           <CopyableId
@@ -298,7 +300,7 @@ function IndividualReportItem({
         {target && (
           target.type === 'pubkey' ? (
             <div className="text-xs text-muted-foreground truncate">
-              <UserDisplayName pubkey={target.value} fallbackLength={16} />
+              <UserDisplayName pubkey={target.value} fallbackLength={16} linkToProfile />
             </div>
           ) : (
             <CopyableId
@@ -324,12 +326,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const [selectedReport, setSelectedReport] = useState<NostrEvent | null>(null);
   const [viewMode, setViewMode] = useState<'consolidated' | 'individual'>('consolidated');
   const [hideResolved, setHideResolved] = useState(true);
+  const [showPendingReview, setShowPendingReview] = useState(false);
   const [sortBy, setSortBy] = useState<SortOption>('reports');
   const [filterCategory, setFilterCategory] = useState<string | null>(null);
   const [filterTargetType, setFilterTargetType] = useState<'all' | 'event' | 'pubkey'>('all');
-  // Track if we've processed deep link params to avoid re-processing
-  const [deepLinkProcessed, setDeepLinkProcessed] = useState(false);
-
   // Check for deep link params to force fresh data fetch
   const hasDeepLinkParams = !!(searchParams.get('event') || searchParams.get('pubkey'));
 
@@ -372,7 +372,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         return [];
       }
     },
-    staleTime: hasDeepLinkParams && !deepLinkProcessed ? 0 : 30 * 1000,
+    staleTime: hasDeepLinkParams ? 0 : 30 * 1000,
     refetchInterval: 15 * 1000,
   });
 
@@ -392,7 +392,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   });
 
   // Query all moderation decisions from our D1 database
-  const { data: allDecisions, error: decisionsError } = useQuery({
+  const { data: allDecisions, error: decisionsError, isLoading: decisionsLoading } = useQuery({
     queryKey: ['all-decisions'],
     queryFn: async () => {
       try {
@@ -492,6 +492,35 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     return resolved;
   }, [resolutionLabels, bannedPubkeys, bannedEvents, allDecisions]);
 
+  // Build set of targets pending review (auto-hidden but not yet confirmed/restored)
+  const pendingReviewTargets = useMemo(() => {
+    const pending = new Set<string>();
+    if (!allDecisions) return pending;
+
+    // Group decisions by target to check status
+    const targetDecisions = new Map<string, string[]>();
+    for (const decision of allDecisions) {
+      const key = `${decision.target_type}:${decision.target_id}`;
+      if (!targetDecisions.has(key)) {
+        targetDecisions.set(key, []);
+      }
+      targetDecisions.get(key)!.push(decision.action);
+    }
+
+    // Target is pending review if auto_hidden but not confirmed/restored
+    for (const [key, actions] of targetDecisions) {
+      const isAutoHidden = actions.includes('auto_hidden');
+      const isConfirmed = actions.includes('auto_hide_confirmed');
+      const isRestored = actions.includes('auto_hide_restored');
+      if (isAutoHidden && !isConfirmed && !isRestored) {
+        pending.add(key);
+      }
+    }
+
+    console.log('[Reports] Pending review targets:', pending.size);
+    return pending;
+  }, [allDecisions]);
+
   // Get all unique categories from reports for filter chips
   const availableCategories = useMemo(() => {
     if (!reports) return [];
@@ -506,9 +535,16 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     if (!reports) return [];
     let items = consolidateReports(reports);
 
-    // Filter out resolved if toggle is on
-    if (hideResolved) {
-      items = items.filter(c => !resolvedTargets.has(`${c.target.type}:${c.target.value}`));
+    // If showing pending review, only show items pending review (auto-hidden CSAM queue)
+    if (showPendingReview) {
+      items = items.filter(c => pendingReviewTargets.has(`${c.target.type}:${c.target.value}`));
+    } else {
+      // Default view: EXCLUDE auto-hidden items (moderators don't see CSAM unless they opt in)
+      items = items.filter(c => !pendingReviewTargets.has(`${c.target.type}:${c.target.value}`));
+      // Also filter out resolved if toggle is on
+      if (hideResolved) {
+        items = items.filter(c => !resolvedTargets.has(`${c.target.type}:${c.target.value}`));
+      }
     }
 
     // Filter by category
@@ -563,7 +599,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     });
 
     return items;
-  }, [reports, hideResolved, resolvedTargets, filterCategory, filterTargetType, sortBy]);
+  }, [reports, hideResolved, showPendingReview, resolvedTargets, pendingReviewTargets, filterCategory, filterTargetType, sortBy]);
 
   const allConsolidated = useMemo(() => {
     if (!reports) return [];
@@ -575,13 +611,28 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     if (!reports) return [];
     let items = [...reports];
 
-    // Filter resolved
-    if (hideResolved) {
+    // If showing pending review, only show items pending review (auto-hidden CSAM queue)
+    if (showPendingReview) {
+      items = items.filter(report => {
+        const target = getReportTarget(report);
+        if (!target) return false;
+        return pendingReviewTargets.has(`${target.type}:${target.value}`);
+      });
+    } else {
+      // Default view: EXCLUDE auto-hidden items (moderators don't see CSAM unless they opt in)
       items = items.filter(report => {
         const target = getReportTarget(report);
         if (!target) return true; // Keep reports without targets
-        return !resolvedTargets.has(`${target.type}:${target.value}`);
+        return !pendingReviewTargets.has(`${target.type}:${target.value}`);
       });
+      // Also filter resolved if toggle is on
+      if (hideResolved) {
+        items = items.filter(report => {
+          const target = getReportTarget(report);
+          if (!target) return true; // Keep reports without targets
+          return !resolvedTargets.has(`${target.type}:${target.value}`);
+        });
+      }
     }
 
     // Filter by category
@@ -619,9 +670,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     });
 
     return items;
-  }, [reports, hideResolved, resolvedTargets, filterCategory, filterTargetType, sortBy]);
+  }, [reports, hideResolved, showPendingReview, resolvedTargets, pendingReviewTargets, filterCategory, filterTargetType, sortBy]);
 
   const uniqueTargets = consolidated.length;
+  const pendingReviewCount = pendingReviewTargets.size;
   const totalTargets = allConsolidated.length;
   const totalReports = reports?.length || 0;
   const filteredReportsCount = filteredReports.length;
@@ -642,9 +694,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     const eventParam = searchParams.get('event');
     const pubkeyParam = searchParams.get('pubkey');
 
-    // Skip if no params or already processed
+    // Skip if no params
     if (!eventParam && !pubkeyParam) return;
-    if (deepLinkProcessed) return;
     if (!allConsolidated || allConsolidated.length === 0) return;
 
     // Wait for fresh ban data before processing deep link
@@ -673,12 +724,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       setSelectedReport(targetReport.latestReport);
       navigate(`/reports/${targetReport.latestReport.id}`, { replace: true });
 
-      // Only mark as processed and clear params once we've found the report
-      setDeepLinkProcessed(true);
+      // Clear params from URL now that we've navigated
       setSearchParams({}, { replace: true });
     }
     // If report not found, keep params — effect will re-run when more data loads
-  }, [allConsolidated, searchParams, deepLinkProcessed, hideResolved, resolvedTargets, navigate, setSearchParams, isFetchingBanned]);
+  }, [allConsolidated, searchParams, hideResolved, resolvedTargets, navigate, setSearchParams, isFetchingBanned]);
 
   // Update URL when report selection changes
   const handleSelectReport = (report: NostrEvent | null) => {
@@ -690,7 +740,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     }
   };
 
-  if (isLoading) {
+  // Wait for both reports AND decisions to load before rendering
+  // This prevents auto-hidden CSAM from briefly appearing in default view
+  if (isLoading || decisionsLoading) {
     return (
       <Card className="h-[calc(100vh-200px)]">
         <CardHeader>
@@ -722,10 +774,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
   return (
     <>
-      <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 h-[calc(100vh-200px)]">
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 h-full">
         {/* Left Pane - Report List */}
-        <Card className="lg:col-span-2">
-        <CardHeader className="pb-3">
+        <Card className="lg:col-span-2 h-full overflow-hidden flex flex-col">
+        <CardHeader className="pb-3 shrink-0">
           <div className="flex items-center justify-between">
             <div>
               <CardTitle className="flex items-center gap-2 text-lg">
@@ -855,6 +907,28 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
               </div>
             )}
 
+            {/* Pending review filter */}
+            {pendingReviewCount > 0 && (
+              <div className="flex items-center justify-between pt-2 border-t">
+                <Label htmlFor="pending-review" className="text-xs text-muted-foreground flex items-center gap-1.5">
+                  <EyeOff className="h-3 w-3 text-orange-500" />
+                  Pending review (auto-hidden)
+                  <Badge variant="secondary" className="ml-1 text-xs px-1.5 py-0">
+                    {pendingReviewCount}
+                  </Badge>
+                </Label>
+                <Switch
+                  id="pending-review"
+                  checked={showPendingReview}
+                  onCheckedChange={(checked) => {
+                    setShowPendingReview(checked);
+                    // When showing pending review, turn off hide resolved
+                    if (checked) setHideResolved(false);
+                  }}
+                />
+              </div>
+            )}
+
             {/* Hide resolved toggle */}
             <div className="flex items-center justify-between pt-2 border-t">
               <Label htmlFor="hide-resolved" className="text-xs text-muted-foreground flex items-center gap-1.5">
@@ -864,13 +938,18 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
               <Switch
                 id="hide-resolved"
                 checked={hideResolved}
-                onCheckedChange={setHideResolved}
+                onCheckedChange={(checked) => {
+                  setHideResolved(checked);
+                  // When hiding resolved, turn off pending review filter
+                  if (checked) setShowPendingReview(false);
+                }}
+                disabled={showPendingReview}
               />
             </div>
           </div>
         </CardHeader>
-        <CardContent className="p-0">
-          <ScrollArea className="h-[calc(100vh-520px)]">
+        <CardContent className="p-0 flex-1 min-h-0">
+          <ScrollArea className="h-full">
             <div className="space-y-2 p-4 pt-0">
               {viewMode === 'consolidated' ? (
                 !consolidated || consolidated.length === 0 ? (
@@ -912,7 +991,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
         {/* Right Pane - Report Detail (Desktop) */}
         {!isMobile && (
-          <Card className="lg:col-span-3 overflow-hidden">
+          <Card className="lg:col-span-3 overflow-hidden h-full">
             <ReportDetail
               report={selectedReport}
               allReportsForTarget={

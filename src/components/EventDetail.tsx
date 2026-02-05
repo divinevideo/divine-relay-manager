@@ -1,7 +1,7 @@
 // ABOUTME: Comprehensive event detail view showing all event information
 // ABOUTME: Includes raw JSON, linked events, author profile, user stats, related reports, and moderation actions
 
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNostr } from "@/hooks/useNostr";
 import { useAuthor } from "@/hooks/useAuthor";
@@ -32,6 +32,7 @@ import {
 import { HiveAIReport } from "@/components/HiveAIReport";
 import { AIDetectionReport } from "@/components/AIDetectionReport";
 import { ReporterList } from "@/components/ReporterCard";
+import { MediaPreview } from "@/components/MediaPreview";
 import {
   User,
   Hash,
@@ -41,14 +42,14 @@ import {
   Copy,
   ExternalLink,
   AtSign,
-  Image,
-  Video,
   MessageSquare,
   Flag,
   FileText,
-  Trash2,
+  ShieldX,
   UserX,
+  UserCheck,
   ShieldAlert,
+  Undo2,
   AlertTriangle,
   Loader2,
   CheckCircle,
@@ -56,6 +57,18 @@ import {
 } from "lucide-react";
 import type { NostrEvent } from "@nostrify/nostrify";
 import { nip19 } from "nostr-tools";
+
+// High-priority categories - media should be hidden by default for moderator safety
+const HIGH_PRIORITY_CATEGORIES = ['sexual_minors', 'csam', 'NS-csam', 'nonconsensual_sexual_content', 'terrorism_extremism', 'credible_threats'];
+
+// Extract category from a report event
+function getReportCategory(event: NostrEvent): string {
+  const reportTag = event.tags.find(t => t[0] === 'report');
+  if (reportTag && reportTag[1]) return reportTag[1];
+  const lTag = event.tags.find(t => t[0] === 'l');
+  if (lTag && lTag[1]) return lTag[1];
+  return 'other';
+}
 
 interface EventDetailProps {
   event: NostrEvent;
@@ -80,47 +93,6 @@ function isMediaUrl(url: string): 'image' | 'video' | null {
   return null;
 }
 
-// Extract media URLs from NIP-71/NIP-92 imeta tags
-function extractImetaMedia(tags: string[][]): { url: string; type: 'image' | 'video'; thumbnail?: string }[] {
-  const media: { url: string; type: 'image' | 'video'; thumbnail?: string }[] = [];
-
-  for (const tag of tags) {
-    if (tag[0] !== 'imeta') continue;
-
-    let url: string | undefined;
-    let mimeType: string | undefined;
-    let thumbnail: string | undefined;
-
-    // Parse imeta tag parts (format: "key value")
-    for (let i = 1; i < tag.length; i++) {
-      const part = tag[i];
-      if (part.startsWith('url ')) {
-        url = part.slice(4);
-      } else if (part.startsWith('m ')) {
-        mimeType = part.slice(2);
-      } else if (part.startsWith('image ')) {
-        thumbnail = part.slice(6);
-      }
-    }
-
-    if (url) {
-      // Determine type from mime type or URL
-      let type: 'image' | 'video' = 'video'; // Default to video for NIP-71
-      if (mimeType) {
-        if (mimeType.startsWith('image/')) type = 'image';
-        else if (mimeType.startsWith('video/')) type = 'video';
-      } else {
-        const urlType = isMediaUrl(url);
-        if (urlType) type = urlType;
-      }
-
-      media.push({ url, type, thumbnail });
-    }
-  }
-
-  return media;
-}
-
 // Format pubkey for display
 function formatPubkey(pubkey: string): string {
   try {
@@ -137,6 +109,107 @@ function formatEventId(id: string): string {
   } catch {
     return id.slice(0, 16) + '...';
   }
+}
+
+function ProfileMetadataCard({ content }: { content: string }) {
+  let metadata: Record<string, unknown>;
+  try {
+    metadata = JSON.parse(content);
+  } catch {
+    // If it's not valid JSON, fall back to raw display
+    return (
+      <Card>
+        <CardHeader className="py-2 px-3">
+          <CardTitle className="text-sm flex items-center gap-2">
+            <User className="h-4 w-4" />
+            Profile Metadata
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="py-2 px-3">
+          <div className="whitespace-pre-wrap break-words text-sm max-h-96 overflow-y-auto">
+            {content}
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  const name = metadata.name as string | undefined;
+  const displayName = metadata.display_name as string | undefined;
+  const about = metadata.about as string | undefined;
+  const picture = metadata.picture as string | undefined;
+  const banner = metadata.banner as string | undefined;
+  const nip05 = metadata.nip05 as string | undefined;
+  const website = metadata.website as string | undefined;
+  const lud16 = metadata.lud16 as string | undefined;
+  const bot = metadata.bot as boolean | undefined;
+
+  return (
+    <Card>
+      <CardHeader className="py-2 px-3">
+        <CardTitle className="text-sm flex items-center gap-2">
+          <User className="h-4 w-4" />
+          Profile Metadata
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="py-2 px-3 space-y-3">
+        {/* Banner */}
+        {banner && (
+          <div className="relative -mx-3 -mt-3 h-24 overflow-hidden rounded-t">
+            <img src={banner} alt="" className="w-full h-full object-cover" />
+          </div>
+        )}
+
+        {/* Avatar + Name */}
+        <div className="flex items-center gap-3">
+          {picture && (
+            <img
+              src={picture}
+              alt={displayName || name || ''}
+              className="h-12 w-12 rounded-full object-cover"
+            />
+          )}
+          <div className="min-w-0">
+            {displayName && (
+              <p className="font-semibold truncate">{displayName}</p>
+            )}
+            {name && name !== displayName && (
+              <p className="text-sm text-muted-foreground">@{name}</p>
+            )}
+            {nip05 && (
+              <p className="text-xs text-muted-foreground">{nip05}</p>
+            )}
+          </div>
+          {bot && (
+            <Badge variant="secondary" className="text-xs shrink-0">Bot</Badge>
+          )}
+        </div>
+
+        {/* Bio */}
+        {about && (
+          <p className="text-sm whitespace-pre-wrap break-words">{about}</p>
+        )}
+
+        {/* Links */}
+        {(website || lud16) && (
+          <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+            {website && (
+              <a href={website} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 hover:text-foreground">
+                <Link className="h-3 w-3" />
+                {website.replace(/^https?:\/\//, '')}
+              </a>
+            )}
+            {lud16 && (
+              <span className="flex items-center gap-1">
+                <AtSign className="h-3 w-3" />
+                {lud16}
+              </span>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
 }
 
 function AuthorCard({ pubkey }: { pubkey: string }) {
@@ -293,7 +366,7 @@ function TagsTable({ tags }: { tags: string[][] }) {
 export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReports }: EventDetailProps) {
   const { nostr } = useNostr();
   const { toast } = useToast();
-  const { banPubkey, deleteEvent, verifyPubkeyBanned, verifyEventDeleted } = useAdminApi();
+  const { banPubkey, deleteEvent, unbanPubkey, verifyPubkeyBanned, verifyPubkeyUnbanned, verifyEventDeleted, callRelayRpc, logDecision } = useAdminApi();
   const queryClient = useQueryClient();
 
   const [_showRawJson, _setShowRawJson] = useState(false);
@@ -452,6 +525,79 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
     },
   });
 
+  const unbanMutation = useMutation({
+    mutationFn: async ({ pubkey }: { pubkey: string }) => {
+      await unbanPubkey(pubkey);
+      await logDecision({
+        targetType: 'pubkey',
+        targetId: pubkey,
+        action: 'unban_user',
+        reason: 'Unbanned from event viewer',
+      });
+      return pubkey;
+    },
+    onSuccess: async (pubkey) => {
+      queryClient.invalidateQueries({ queryKey: ['banned-users'] });
+      queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
+      moderationStatus.refetch();
+      toast({ title: "User unbanned", description: "Verifying..." });
+
+      setIsVerifying(true);
+      setVerificationResult(null);
+      try {
+        const verified = await verifyPubkeyUnbanned(pubkey);
+        setVerificationResult({
+          type: 'ban',
+          success: verified,
+          message: verified
+            ? 'Unban verified - user is no longer in banned list'
+            : 'Warning: User may still be banned',
+        });
+      } catch {
+        setVerificationResult({
+          type: 'ban',
+          success: false,
+          message: 'Could not verify unban status',
+        });
+      } finally {
+        setIsVerifying(false);
+      }
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Failed to unban user",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  const restoreMutation = useMutation({
+    mutationFn: async ({ eventId }: { eventId: string }) => {
+      await callRelayRpc('allowevent', [eventId]);
+      await logDecision({
+        targetType: 'event',
+        targetId: eventId,
+        action: 'restore_event',
+        reason: 'Restored from event viewer',
+      });
+      return eventId;
+    },
+    onSuccess: async () => {
+      queryClient.invalidateQueries({ queryKey: ['relay-events'] });
+      queryClient.invalidateQueries({ queryKey: ['banned-events'] });
+      moderationStatus.refetch();
+      toast({ title: "Event restored" });
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Failed to restore event",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
   // Manual re-verification function
   const handleReVerify = async (type: 'ban' | 'delete') => {
     setIsVerifying(true);
@@ -492,21 +638,19 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
   const linkedPubkeys = event.tags.filter(t => t[0] === 'p').map(t => t[1]);
   const linkedAddresses = event.tags.filter(t => t[0] === 'a');
 
-  // Extract URLs from content
+  // Extract URLs from content (non-media URLs for external links section)
   const urls = extractUrls(event.content || '');
-  const contentMediaUrls = urls.filter(u => isMediaUrl(u));
   const otherUrls = urls.filter(u => !isMediaUrl(u));
 
-  // Extract media from NIP-71/NIP-92 imeta tags
-  const imetaMedia = extractImetaMedia(event.tags);
-
-  // Combine content media URLs and imeta media (imeta takes priority for NIP-71 video events)
-  const allMedia = imetaMedia.length > 0
-    ? imetaMedia
-    : contentMediaUrls.map(url => ({ url, type: isMediaUrl(url) as 'image' | 'video', thumbnail: undefined }));
-
-  // For backwards compat, keep mediaUrls as string array (used for URL display)
-  const _mediaUrls = allMedia.map(m => m.url);
+  // Check if any related report has a high-priority category (CSAM, etc.)
+  // Used to collapse media preview by default to protect moderators
+  const hasHighPriorityReports = useMemo(() => {
+    if (!relatedReports?.length) return false;
+    return relatedReports.some(r => {
+      const cat = getReportCategory(r);
+      return HIGH_PRIORITY_CATEGORIES.includes(cat);
+    });
+  }, [relatedReports]);
 
   return (
     <>
@@ -517,7 +661,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
             <AlertDialogTitle>Ban User?</AlertDialogTitle>
             <AlertDialogDescription asChild>
               <div className="space-y-3">
-                <p>This will permanently ban this user from the relay.</p>
+                <p>This will ban this user from the relay. This can be reversed.</p>
 
                 {/* User Identifier */}
                 <div className="bg-muted px-3 py-2 rounded">
@@ -526,6 +670,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
                     showAvatar
                     avatarSize="md"
                     variant="block"
+                    linkToProfile
                   />
                 </div>
 
@@ -581,9 +726,9 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
       <AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete Event?</AlertDialogTitle>
+            <AlertDialogTitle>Ban Event?</AlertDialogTitle>
             <AlertDialogDescription>
-              This will remove this event from the relay. The content will no longer be served.
+              This will remove this event from the relay. The content will no longer be served. This can be reversed.
               <br />
               <code className="text-xs bg-muted px-1 py-0.5 rounded mt-2 inline-block">
                 {event.id?.slice(0, 24)}...
@@ -604,13 +749,14 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
               disabled={deleteMutation.isPending}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
-              {deleteMutation.isPending ? 'Deleting...' : 'Delete Event'}
+              {deleteMutation.isPending ? 'Banning...' : 'Ban Event'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
 
-    <ScrollArea className="h-full">
+    <div className="h-full flex flex-col overflow-hidden">
+    <ScrollArea className="flex-1 min-h-0">
       <div className="p-4 space-y-4">
         {/* Moderation Status Banner */}
         {(moderationStatus.isBanned || moderationStatus.isDeleted) && (
@@ -723,58 +869,31 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
 
         {/* Content */}
         {event.content && (
-          <Card>
-            <CardHeader className="py-2 px-3">
-              <CardTitle className="text-sm flex items-center gap-2">
-                <MessageSquare className="h-4 w-4" />
-                Content
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="py-2 px-3">
-              <div className="whitespace-pre-wrap break-words text-sm max-h-96 overflow-y-auto">
-                {event.content}
-              </div>
-            </CardContent>
-          </Card>
+          event.kind === 0 ? (
+            <ProfileMetadataCard content={event.content} />
+          ) : (
+            <Card>
+              <CardHeader className="py-2 px-3">
+                <CardTitle className="text-sm flex items-center gap-2">
+                  <MessageSquare className="h-4 w-4" />
+                  Content
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="py-2 px-3">
+                <div className="whitespace-pre-wrap break-words text-sm max-h-96 overflow-y-auto">
+                  {event.content}
+                </div>
+              </CardContent>
+            </Card>
+          )
         )}
 
-        {/* Media Preview */}
-        {allMedia.length > 0 && (
-          <Card>
-            <CardHeader className="py-2 px-3">
-              <CardTitle className="text-sm flex items-center gap-2">
-                {allMedia.some(m => m.type === 'video') ? (
-                  <Video className="h-4 w-4" />
-                ) : (
-                  <Image className="h-4 w-4" />
-                )}
-                Media ({allMedia.length})
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="py-2 px-3">
-              <div className="grid grid-cols-1 gap-2">
-                {allMedia.slice(0, 4).map((media, idx) => (
-                  <div key={idx} className="relative aspect-video bg-muted rounded overflow-hidden">
-                    {media.type === 'image' ? (
-                      <img src={media.url} alt="" className="w-full h-full object-cover" />
-                    ) : (
-                      <video
-                        src={media.url}
-                        poster={media.thumbnail}
-                        controls
-                        className="w-full h-full object-contain bg-black"
-                        preload="metadata"
-                      />
-                    )}
-                  </div>
-                ))}
-              </div>
-              {allMedia.length > 4 && (
-                <p className="text-xs text-muted-foreground mt-2">+{allMedia.length - 4} more</p>
-              )}
-            </CardContent>
-          </Card>
-        )}
+        {/* Media Preview - collapsed by default if event has high-priority reports */}
+        <MediaPreview
+          event={event}
+          showByDefault={!hasHighPriorityReports}
+          maxItems={4}
+        />
 
         {/* Hive AI Content Moderation */}
         <HiveAIReport eventTags={event.tags} />
@@ -988,9 +1107,11 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
           </CardContent>
         </Card>
 
-        {/* Action Buttons */}
-        <Separator />
-        <div className="space-y-3">
+      </div>
+    </ScrollArea>
+
+      {/* Action Buttons - fixed at bottom */}
+      <div className="border-t bg-background p-4 space-y-3 shrink-0">
           {/* Navigation actions */}
           <div className="flex flex-wrap gap-2">
             {onSelectPubkey && (
@@ -1017,28 +1138,57 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
 
           {/* Enforcement actions */}
           <div className="flex flex-wrap gap-2">
-            <Button
-              variant="destructive"
-              size="sm"
-              onClick={() => setConfirmDelete(true)}
-              disabled={deleteMutation.isPending}
-            >
-              <Trash2 className="h-4 w-4 mr-1" />
-              Delete Event
-            </Button>
-            <Button
-              variant="destructive"
-              size="sm"
-              onClick={() => setConfirmBan(true)}
-              disabled={banMutation.isPending}
-            >
-              <UserX className="h-4 w-4 mr-1" />
-              Ban User
-            </Button>
+            {moderationStatus.isDeleted ? (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  if (event.id) restoreMutation.mutate({ eventId: event.id });
+                }}
+                disabled={restoreMutation.isPending}
+                title="Restore this event to the relay. This reverses the ban."
+              >
+                <Undo2 className="h-4 w-4 mr-1" />
+                {restoreMutation.isPending ? 'Restoring...' : 'Restore Event'}
+              </Button>
+            ) : (
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={() => setConfirmDelete(true)}
+                disabled={deleteMutation.isPending}
+                title="Ban this event from the relay. This can be reversed."
+              >
+                <ShieldX className="h-4 w-4 mr-1" />
+                Ban Event
+              </Button>
+            )}
+            {moderationStatus.isBanned ? (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => unbanMutation.mutate({ pubkey: event.pubkey })}
+                disabled={unbanMutation.isPending}
+                title="Unban this user from the relay. This reverses the ban."
+              >
+                <UserCheck className="h-4 w-4 mr-1" />
+                {unbanMutation.isPending ? 'Unbanning...' : 'Unban User'}
+              </Button>
+            ) : (
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={() => setConfirmBan(true)}
+                disabled={banMutation.isPending}
+                title="Ban this user from the relay. This can be reversed."
+              >
+                <UserX className="h-4 w-4 mr-1" />
+                Ban User
+              </Button>
+            )}
           </div>
-        </div>
       </div>
-    </ScrollArea>
+    </div>
     </>
   );
 }

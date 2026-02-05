@@ -1,4 +1,11 @@
-# ABOUTME: Cloudflare Worker for Divine Relay Admin API
+# ⚠️  DEPRECATED — Use wrangler.prod.toml or wrangler.staging.toml instead
+#
+# This legacy config deploys to api-relay.divine.video with the old D1 database
+# (blossom-webhook-events). New deployments should use:
+#   - Production: npx wrangler deploy --config wrangler.prod.toml
+#   - Staging:    npx wrangler deploy --config wrangler.staging.toml
+#
+# ABOUTME: Cloudflare Worker for Divine Relay Admin API (LEGACY)
 # ABOUTME: Handles NIP-86 signing and publishing
 
 name = "divine-relay-admin-api"
@@ -17,6 +24,7 @@ routes = [
 
 [vars]
 RELAY_URL = "wss://relay.divine.video"
+AUTO_HIDE_ENABLED = "false"
 # Path for NIP-86 management API (appended to relay URL converted to HTTPS)
 MANAGEMENT_PATH = "/"
 # URL for media moderation service
@@ -37,3 +45,13 @@ database_id = "829f06cf-294b-4491-8611-30fc53df2589"
 [[services]]
 binding = "REALNESS"
 service = "divine-ai-detector"
+
+# Durable Objects for persistent state (needed for local dev)
+[durable_objects]
+bindings = [
+  { name = "REPORT_WATCHER", class_name = "ReportWatcher" }
+]
+
+[[migrations]]
+tag = "v1"
+new_classes = ["ReportWatcher"]

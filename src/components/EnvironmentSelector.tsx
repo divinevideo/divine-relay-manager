@@ -42,7 +42,16 @@ export function EnvironmentSelector({ className }: EnvironmentSelectorProps) {
   // Determine badge variant based on environment
   const getBadgeVariant = (envId: string): "default" | "secondary" | "destructive" | "outline" => {
     if (envId === 'production') return 'destructive';
+    if (envId === 'legacy') return 'outline';
     return 'secondary';
+  };
+
+  // Get badge label for environment
+  const getBadgeLabel = (envId: string): string => {
+    if (envId === 'production') return 'PROD';
+    if (envId === 'staging') return 'STG';
+    if (envId === 'legacy') return 'LEGACY';
+    return envId.toUpperCase();
   };
 
   return (
@@ -61,7 +70,7 @@ export function EnvironmentSelector({ className }: EnvironmentSelectorProps) {
             </span>
             {currentEnvironment && (
               <Badge variant={getBadgeVariant(currentEnvironment.id)} className="ml-1 text-xs">
-                {currentEnvironment.id === 'production' ? 'PROD' : 'STG'}
+                {getBadgeLabel(currentEnvironment.id)}
               </Badge>
             )}
           </div>
@@ -89,7 +98,7 @@ export function EnvironmentSelector({ className }: EnvironmentSelectorProps) {
                     <div className="flex items-center gap-2">
                       <span className="font-medium">{env.name}</span>
                       <Badge variant={getBadgeVariant(env.id)} className="text-xs">
-                        {env.id === 'production' ? 'PROD' : 'STG'}
+                        {getBadgeLabel(env.id)}
                       </Badge>
                     </div>
                     <span className="text-xs text-muted-foreground">

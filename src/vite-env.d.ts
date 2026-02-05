@@ -1,5 +1,19 @@
 /// <reference types="vite/client" />
 
+// Environment variables (see .env.example for documentation)
+interface ImportMetaEnv {
+  readonly VITE_PROD_RELAY_URL?: string;
+  readonly VITE_PROD_API_URL?: string;
+  readonly VITE_STAGING_RELAY_URL?: string;
+  readonly VITE_STAGING_API_URL?: string;
+  readonly VITE_LEGACY_RELAY_URL?: string;
+  readonly VITE_LEGACY_API_URL?: string;
+}
+
+interface ImportMeta {
+  readonly env: ImportMetaEnv;
+}
+
 // NIP-07 window.nostr interface
 interface NostrEvent {
   id?: string;

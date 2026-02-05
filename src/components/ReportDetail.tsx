@@ -29,8 +29,7 @@ import { useModerationStatus } from "@/hooks/useModerationStatus";
 import { ThreadContext } from "@/components/ThreadContext";
 import { UserProfileCard } from "@/components/UserProfileCard";
 import { UserIdentifier } from "@/components/UserIdentifier";
-import { ReporterInfo } from "@/components/ReporterInfo";
-import { ReporterList, ReporterInline } from "@/components/ReporterCard";
+import { ReporterInline } from "@/components/ReporterCard";
 import { AISummary } from "@/components/AISummary";
 import { LabelPublisherInline } from "@/components/LabelPublisher";
 import { ThreadModal } from "@/components/ThreadModal";
@@ -43,9 +42,12 @@ import { AIDetectionReport } from "@/components/AIDetectionReport";
 import { MediaPreview } from "@/components/MediaPreview";
 import { BulkDeleteByKind } from "@/components/BulkDeleteByKind";
 import { CATEGORY_LABELS } from "@/lib/constants";
-import { UserX, Tag, Flag, Trash2, CheckCircle, Video, History, Ban, ShieldX, Link2, User, FileText, Unlock, Repeat2, FileCode, Loader2, XCircle, RefreshCw } from "lucide-react";
+import { UserX, UserCheck, Tag, Flag, Trash2, CheckCircle, Video, History, Ban, ShieldX, Link2, User, FileText, Unlock, Repeat2, FileCode, Loader2, XCircle, RefreshCw, Undo2, EyeOff, Eye } from "lucide-react";
 import { CopyableId, CopyableTags } from "@/components/CopyableId";
 import type { NostrEvent } from "@nostrify/nostrify";
+
+// High-priority categories - media should be hidden by default for moderator safety
+const HIGH_PRIORITY_CATEGORIES = ['sexual_minors', 'csam', 'NS-csam', 'nonconsensual_sexual_content', 'terrorism_extremism', 'credible_threats'];
 
 function getReportCategory(event: NostrEvent): string {
   const reportTag = event.tags.find(t => t[0] === 'report');
@@ -77,7 +79,8 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   const {
     banPubkey, deleteEvent, markAsReviewed, moderateMedia, unblockMedia,
     logDecision, deleteDecisions, verifyModerationAction, verifyPubkeyBanned,
-    verifyEventDeleted, verifyMediaBlocked,
+    verifyPubkeyUnbanned, verifyEventDeleted, verifyMediaBlocked,
+    unbanPubkey, callRelayRpc,
   } = useAdminApi();
   const navigate = useNavigate();
   const [showThreadModal, setShowThreadModal] = useState(false);
@@ -164,6 +167,10 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   const isUserBanned = moderationStatus.isBanned;
   const isEventDeleted = moderationStatus.isDeleted;
   const isResolved = decisionLog.hasDecisions || pubkeyDecisionLog.hasDecisions || isUserBanned || isEventDeleted;
+
+  // Auto-hide specific status
+  const isPendingReview = decisionLog.isPendingReview;
+  const _isAutoHidden = decisionLog.isAutoHidden;
 
   // Find related reports: reports on this user AND reports on their events
   const relatedReports = useMemo(() => {
@@ -539,6 +546,16 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   // Check media status from moderation service
   const mediaStatus = useMediaStatus(mediaHashes);
 
+  // Check if any report on this target has a high-priority category (CSAM, etc.)
+  // Used to collapse media preview by default to protect moderators
+  const hasHighPriorityReports = useMemo(() => {
+    if (!allReportsForTarget?.length) return false;
+    return allReportsForTarget.some(r => {
+      const cat = getReportCategory(r);
+      return HIGH_PRIORITY_CATEGORIES.includes(cat);
+    });
+  }, [allReportsForTarget]);
+
   const unblockMediaMutation = useMutation({
     mutationFn: async ({ hashes, reason }: { hashes: string[]; reason: string }) => {
       // Unblock all media hashes
@@ -570,6 +587,143 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     onError: (error: Error) => {
       toast({
         title: "Failed to unblock media",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  const unbanUserMutation = useMutation({
+    mutationFn: async ({ pubkey }: { pubkey: string }) => {
+      await unbanPubkey(pubkey);
+      await logDecision({
+        targetType: 'pubkey',
+        targetId: pubkey,
+        action: 'unban_user',
+        reason: 'Unbanned from report viewer',
+        reportId: report?.id,
+      });
+      return pubkey;
+    },
+    onSuccess: async (pubkey) => {
+      queryClient.invalidateQueries({ queryKey: ['banned-users'] });
+      queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
+      queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      moderationStatus.refetch();
+      decisionLog.refetch();
+      toast({ title: "User unbanned", description: "Verifying..." });
+
+      setIsVerifying(true);
+      setVerificationResult(null);
+      try {
+        const verified = await verifyPubkeyUnbanned(pubkey);
+        setVerificationResult({
+          type: 'ban',
+          success: verified,
+          message: verified
+            ? 'Unban verified - user is no longer in banned list'
+            : 'Warning: User may still be banned',
+        });
+      } catch {
+        setVerificationResult({
+          type: 'ban',
+          success: false,
+          message: 'Could not verify unban status',
+        });
+      } finally {
+        setIsVerifying(false);
+      }
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Failed to unban user",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  const restoreEventMutation = useMutation({
+    mutationFn: async ({ eventId }: { eventId: string }) => {
+      await callRelayRpc('allowevent', [eventId]);
+      await logDecision({
+        targetType: 'event',
+        targetId: eventId,
+        action: 'restore_event',
+        reason: 'Restored from report viewer',
+        reportId: report?.id,
+      });
+      return eventId;
+    },
+    onSuccess: async () => {
+      queryClient.invalidateQueries({ queryKey: ['reports'] });
+      queryClient.invalidateQueries({ queryKey: ['banned-events'] });
+      queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      moderationStatus.refetch();
+      decisionLog.refetch();
+      toast({ title: "Event restored" });
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Failed to restore event",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  // Confirm auto-hidden content (approve the auto-hide decision)
+  const confirmAutoHideMutation = useMutation({
+    mutationFn: async ({ targetId, targetType }: { targetId: string; targetType: 'event' | 'pubkey' }) => {
+      await logDecision({
+        targetType,
+        targetId,
+        action: 'auto_hide_confirmed',
+        reason: 'Auto-hide confirmed by moderator',
+        reportId: report?.id,
+      });
+      return targetId;
+    },
+    onSuccess: async () => {
+      queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      queryClient.invalidateQueries({ queryKey: ['all-decisions'] });
+      decisionLog.refetch();
+      toast({ title: "Auto-hide confirmed", description: "Content will remain hidden" });
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Failed to confirm auto-hide",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  // Restore auto-hidden content (reverse the auto-hide)
+  const restoreAutoHideMutation = useMutation({
+    mutationFn: async ({ eventId }: { eventId: string }) => {
+      await callRelayRpc('allowevent', [eventId]);
+      await logDecision({
+        targetType: 'event',
+        targetId: eventId,
+        action: 'auto_hide_restored',
+        reason: 'Auto-hide reversed by moderator',
+        reportId: report?.id,
+      });
+      return eventId;
+    },
+    onSuccess: async () => {
+      queryClient.invalidateQueries({ queryKey: ['reports'] });
+      queryClient.invalidateQueries({ queryKey: ['banned-events'] });
+      queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      queryClient.invalidateQueries({ queryKey: ['all-decisions'] });
+      moderationStatus.refetch();
+      decisionLog.refetch();
+      toast({ title: "Content restored", description: "Auto-hide has been reversed" });
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Failed to restore content",
         description: error.message,
         variant: "destructive",
       });
@@ -684,9 +838,11 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
 
   const category = getReportCategory(report);
   const categoryLabel = CATEGORY_LABELS[category] || category;
+  const isHighPriorityCategory = HIGH_PRIORITY_CATEGORIES.includes(category);
 
   return (
-    <>
+    <div className="h-full flex flex-col overflow-hidden">
+      {/* Dialogs - rendered as portals, don't affect flex layout */}
       {/* Ban Confirmation Dialog */}
       <AlertDialog open={confirmBan} onOpenChange={setConfirmBan}>
         <AlertDialogContent>
@@ -694,7 +850,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             <AlertDialogTitle>Ban User?</AlertDialogTitle>
             <AlertDialogDescription asChild>
               <div className="space-y-3">
-                <p>This will permanently ban this user from the relay.</p>
+                <p>This will ban this user from the relay. This can be reversed.</p>
                 {context.reportedUser.pubkey && (
                   <div className="bg-muted px-2 py-1.5 rounded">
                     <UserIdentifier
@@ -702,6 +858,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                       showAvatar
                       avatarSize="sm"
                       variant="block"
+                      linkToProfile
                     />
                   </div>
                 )}
@@ -761,10 +918,10 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
       <AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete Event?</AlertDialogTitle>
+            <AlertDialogTitle>Ban Event?</AlertDialogTitle>
             <AlertDialogDescription asChild>
               <div>
-                <p>This will remove this event from the relay. The content will no longer be served.</p>
+                <p>This will remove this event from the relay. The content will no longer be served. This can be reversed.</p>
                 {context.target?.value && (
                   <div className="mt-2">
                     <CopyableId
@@ -793,7 +950,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
               disabled={deleteMutation.isPending}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
-              {deleteMutation.isPending ? 'Deleting...' : 'Delete Event'}
+              {deleteMutation.isPending ? 'Banning...' : 'Ban Event'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -806,7 +963,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             <AlertDialogTitle>Block Media?</AlertDialogTitle>
             <AlertDialogDescription asChild>
               <div>
-                <p>This will permanently ban {mediaHashes.length} media file(s) from being served.</p>
+                <p>This will ban {mediaHashes.length} media file(s) from being served. This can be reversed.</p>
                 <div className="mt-2 space-y-1">
                   {mediaHashes.map(hash => (
                     <CopyableId
@@ -850,7 +1007,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
               <div className="space-y-2">
                 <p>This will:</p>
                 <ul className="list-disc list-inside space-y-1 text-sm">
-                  <li>Permanently ban {mediaHashes.length} media file(s)</li>
+                  <li>Ban {mediaHashes.length} media file(s)</li>
                   <li>Delete the event from the relay</li>
                 </ul>
               </div>
@@ -886,7 +1043,8 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
         />
       )}
 
-      <ScrollArea className="h-full">
+      {/* Scrollable content area */}
+      <ScrollArea className="flex-1 min-h-0">
         <div className="p-4 space-y-4 overflow-hidden">
           {/* Live Status Check - Verify current moderation state */}
           <Card className="border-blue-200 bg-blue-50/50 dark:bg-blue-950/20">
@@ -1006,8 +1164,69 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             </div>
           )}
 
-          {/* Resolved Banner - prominently show when already handled */}
-          {isResolved && (
+          {/* Pending Review Banner - for auto-hidden items awaiting human review */}
+          {isPendingReview && (
+            <div className="bg-orange-100 dark:bg-orange-950/50 border border-orange-300 dark:border-orange-800 rounded-lg p-3">
+              <div className="flex items-center gap-3 mb-3">
+                <EyeOff className="h-6 w-6 text-orange-600" />
+                <div className="flex-1">
+                  <p className="font-medium text-orange-800 dark:text-orange-300">
+                    Auto-Hidden — Pending Review
+                  </p>
+                  <p className="text-sm text-orange-600 dark:text-orange-400">
+                    This content was automatically hidden based on a report. Please review and confirm or restore.
+                  </p>
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="default"
+                      className="bg-green-600 hover:bg-green-700"
+                      onClick={() => {
+                        if (context.target) {
+                          confirmAutoHideMutation.mutate({
+                            targetId: context.target.value,
+                            targetType: context.target.type,
+                          });
+                        }
+                      }}
+                      disabled={confirmAutoHideMutation.isPending}
+                    >
+                      <CheckCircle className="h-4 w-4 mr-1" />
+                      {confirmAutoHideMutation.isPending ? 'Confirming...' : 'Confirm Hide'}
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" className="max-w-xs">
+                    <p>Confirm this auto-hide decision. The content will remain hidden.</p>
+                  </TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="outline"
+                      onClick={() => {
+                        if (context.target?.type === 'event' && context.target.value) {
+                          restoreAutoHideMutation.mutate({ eventId: context.target.value });
+                        }
+                      }}
+                      disabled={restoreAutoHideMutation.isPending || context.target?.type !== 'event'}
+                    >
+                      <Eye className="h-4 w-4 mr-1" />
+                      {restoreAutoHideMutation.isPending ? 'Restoring...' : 'Restore Content'}
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" className="max-w-xs">
+                    <p>Reverse the auto-hide. The content will be visible again.</p>
+                  </TooltipContent>
+                </Tooltip>
+              </div>
+            </div>
+          )}
+
+          {/* Resolved Banner - prominently show when already handled (but not pending review) */}
+          {isResolved && !isPendingReview && (
             <div className="bg-green-100 dark:bg-green-950/50 border border-green-300 dark:border-green-800 rounded-lg p-3 flex items-center gap-3">
               <CheckCircle className="h-6 w-6 text-green-600" />
               <div className="flex-1">
@@ -1026,7 +1245,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
           {/* Header */}
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 flex-wrap">
-              <Badge variant="outline">{categoryLabel}</Badge>
+              <Badge variant={isHighPriorityCategory ? "destructive" : "outline"}>{categoryLabel}</Badge>
               <Badge variant="secondary">
                 {context.target?.type === 'event' ? 'Event' : 'User'}
               </Badge>
@@ -1042,9 +1261,22 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                   Event Deleted
                 </Badge>
               )}
+              {isPendingReview && (
+                <Badge variant="outline" className="flex items-center gap-1 border-orange-500 text-orange-600">
+                  <EyeOff className="h-3 w-3" />
+                  Auto-Hidden
+                </Badge>
+              )}
             </div>
             <span className="text-xs text-muted-foreground">
-              {new Date(report.created_at * 1000).toLocaleString()}
+              Reported: {new Date(report.created_at * 1000).toLocaleString(undefined, {
+                year: 'numeric',
+                month: 'short',
+                day: 'numeric',
+                hour: 'numeric',
+                minute: '2-digit',
+                timeZoneName: 'short'
+              })}
             </span>
           </div>
 
@@ -1147,64 +1379,10 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             </Card>
           )}
 
-          {/* Event Metadata - Show IDs and tags for copying */}
-          <Card>
-            <CardHeader className="py-3">
-              <CardTitle className="text-sm flex items-center gap-2">
-                <FileCode className="h-4 w-4" />
-                Event Details
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="py-0 pb-3 space-y-3">
-              {/* Report Event ID */}
-              <div className="space-y-1">
-                <span className="text-xs font-medium text-muted-foreground">Report Event</span>
-                <div className="flex flex-col gap-1">
-                  <CopyableId value={report.id} type="note" label="ID:" size="xs" />
-                  <CopyableId value={report.pubkey} type="npub" label="Reporter:" size="xs" />
-                </div>
-              </div>
+          {/* Section: Reported Content */}
+          <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Reported Content</h4>
 
-              {/* Reported Target */}
-              {context.target && (
-                <div className="space-y-1">
-                  <span className="text-xs font-medium text-muted-foreground">
-                    Reported {context.target.type === 'event' ? 'Event' : 'User'}
-                  </span>
-                  <div className="flex flex-col gap-1">
-                    <CopyableId
-                      value={context.target.value}
-                      type={context.target.type === 'event' ? 'note' : 'npub'}
-                      label={context.target.type === 'event' ? 'ID:' : 'npub:'}
-                      size="xs"
-                    />
-                    {context.reportedUser.pubkey && context.target.type === 'event' && (
-                      <CopyableId value={context.reportedUser.pubkey} type="npub" label="Author:" size="xs" />
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {/* Report Tags */}
-              {report.tags.length > 0 && (
-                <CopyableTags tags={report.tags} maxTags={8} />
-              )}
-
-              {/* Reported Event Tags (if different from report) */}
-              {context.thread?.event && context.thread.event.tags.length > 0 && (
-                <div className="pt-2 border-t">
-                  <span className="text-xs font-medium text-muted-foreground block mb-1">
-                    Reported Event Tags
-                  </span>
-                  <CopyableTags tags={context.thread.event.tags} maxTags={8} />
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
-          <Separator />
-
-          {/* Thread Context */}
+          {/* Thread Context - the text content being reported */}
           {context.target?.type === 'event' && (
             <ThreadContext
               ancestors={context.thread?.ancestors || []}
@@ -1234,6 +1412,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                         showAvatar
                         avatarSize="sm"
                         variant="inline"
+                        linkToProfile
                       />
                     </div>
                     {/* Original content */}
@@ -1250,7 +1429,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                     {/* Media in original post */}
                     <MediaPreview
                       event={context.thread.repostedEvent}
-                      showByDefault={true}
+                      showByDefault={!hasHighPriorityReports}
                       maxItems={6}
                     />
                   </div>
@@ -1267,10 +1446,23 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
           {context.thread?.event && (
             <MediaPreview
               event={context.thread.event}
-              showByDefault={true}
+              showByDefault={!hasHighPriorityReports}
               maxItems={6}
             />
           )}
+
+          {/* Reported User - who created the reported content */}
+          <UserProfileCard
+            profile={context.reportedUser.profile}
+            pubkey={context.reportedUser.pubkey}
+            stats={context.userStats}
+            isLoading={context.isLoading}
+          />
+
+          <Separator />
+
+          {/* Section: Investigation Helpers */}
+          <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Investigation Helpers</h4>
 
           {/* Hive AI Content Moderation */}
           {context.thread?.event && (
@@ -1285,16 +1477,6 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             />
           )}
 
-          <Separator />
-
-          {/* Reported User */}
-          <UserProfileCard
-            profile={context.reportedUser.profile}
-            pubkey={context.reportedUser.pubkey}
-            stats={context.userStats}
-            isLoading={context.isLoading}
-          />
-
           {/* AI Summary */}
           <AISummary
             summary={summary.data?.summary}
@@ -1302,6 +1484,8 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             isLoading={summary.isLoading}
             error={summary.error as Error | null}
           />
+
+          <Separator />
 
           {/* Related Reports - show reports on this user AND their events */}
           {(relatedReports.userReports.length > 0 || relatedReports.eventReports.length > 0) && (
@@ -1381,33 +1565,74 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             </Card>
           )}
 
-          <Separator />
+          {/* Section: Technical Details */}
+          <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Technical Details</h4>
 
-          {/* All Reports Section - when consolidated */}
-          {allReportsForTarget && allReportsForTarget.length > 1 ? (
-            <Card>
-              <CardHeader className="py-3">
-                <CardTitle className="text-sm flex items-center gap-2">
-                  <Flag className="h-4 w-4" />
-                  {allReportsForTarget.length} Reports on this Target
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="py-0 pb-3">
-                <ReporterList
-                  reports={allReportsForTarget}
-                  maxVisible={5}
-                />
-              </CardContent>
-            </Card>
-          ) : (
-            /* Single Reporter Info */
-            <ReporterInfo
-              profile={context.reporter.profile}
-              pubkey={context.reporter.pubkey}
-              reportCount={context.reporter.reportCount}
-              isLoading={context.isLoading}
-            />
-          )}
+          {/* Event Metadata - Show IDs and tags for copying */}
+          <Card>
+            <CardHeader className="py-3">
+              <CardTitle className="text-sm flex items-center gap-2">
+                <FileCode className="h-4 w-4" />
+                Reported Event Details
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="py-0 pb-3 space-y-3">
+              {/* Report Event ID */}
+              <div className="space-y-1">
+                <span className="text-xs font-medium text-muted-foreground">Report Event</span>
+                <div className="flex flex-col gap-1">
+                  <CopyableId value={report.id} type="note" label="ID:" size="xs" />
+                  <CopyableId value={report.pubkey} type="npub" label="Reporter:" size="xs" />
+                </div>
+              </div>
+
+              {/* Reported Target */}
+              {context.target && (
+                <div className="space-y-1">
+                  <span className="text-xs font-medium text-muted-foreground">
+                    Reported {context.target.type === 'event' ? 'Event' : 'User'}
+                  </span>
+                  <div className="flex flex-col gap-1">
+                    <CopyableId
+                      value={context.target.value}
+                      type={context.target.type === 'event' ? 'note' : 'npub'}
+                      label={context.target.type === 'event' ? 'ID:' : 'npub:'}
+                      size="xs"
+                    />
+                    {context.reportedUser.pubkey && context.target.type === 'event' && (
+                      <CopyableId value={context.reportedUser.pubkey} type="npub" label="Author:" size="xs" />
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Report Tags */}
+              {report.tags.length > 0 && (
+                <CopyableTags tags={report.tags} maxTags={8} />
+              )}
+
+              {/* Reported Event Tags (if different from report) */}
+              {context.thread?.event && context.thread.event.tags.length > 0 && (
+                <div className="pt-2 border-t">
+                  <span className="text-xs font-medium text-muted-foreground block mb-1">
+                    Reported Event Tags
+                  </span>
+                  <CopyableTags tags={context.thread.event.tags} maxTags={8} />
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {/*
+            REMOVED: Redundant reporter section (Jan 2026)
+            - Was showing ReporterList (multiple) or ReporterInfo (single) here
+            - Now redundant because "Why This Was Reported" section above shows reporters
+              with trust level badges via ReporterInline component
+            - To restore: use <ReporterList reports={allReportsForTarget} maxVisible={5} />
+              for multiple reports, or <ReporterInfo profile={context.reporter.profile}
+              pubkey={context.reporter.pubkey} reportCount={context.reporter.reportCount} />
+              for single reporter
+          */}
 
           <Separator />
 
@@ -1421,8 +1646,11 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             />
           )}
 
-          {/* Action Buttons */}
-          <div className="space-y-3 pt-2">
+        </div>
+      </ScrollArea>
+
+      {/* Action Buttons - fixed at bottom */}
+      <div className="border-t bg-background p-4 space-y-3 shrink-0">
             {/* Resolution actions - dismiss or reopen */}
             <div className="flex flex-wrap gap-2">
               {(decisionLog.hasDecisions || pubkeyDecisionLog.hasDecisions) && !isUserBanned && !isEventDeleted ? (
@@ -1454,7 +1682,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                       disabled={reviewMutation.isPending || isResolved}
                     >
                       <CheckCircle className="h-4 w-4 mr-1" />
-                      {reviewMutation.isPending ? 'Dismissing...' : 'Dismiss'}
+                      {reviewMutation.isPending ? 'Dismissing...' : 'Dismiss Report'}
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent side="bottom" className="max-w-xs">
@@ -1477,11 +1705,11 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                       disabled={blockAndDeleteMutation.isPending || mediaStatus.isLoading || isVerifying}
                     >
                       <Trash2 className="h-4 w-4 mr-2" />
-                      {blockAndDeleteMutation.isPending ? 'Removing...' : isVerifying ? 'Verifying...' : mediaStatus.isLoading ? 'Checking media...' : `Block Media & Delete Event`}
+                      {blockAndDeleteMutation.isPending ? 'Removing...' : isVerifying ? 'Verifying...' : mediaStatus.isLoading ? 'Checking media...' : `Block Media & Ban Event`}
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent side="bottom" className="max-w-xs">
-                    <p>Permanently block all media files (images/videos) AND delete the event from the relay. The media will be blocked by hash so re-uploads are prevented.</p>
+                    <p>Block all media files (images/videos) AND ban the event from the relay. The media will be blocked by hash so re-uploads are prevented. Both actions can be reversed.</p>
                   </TooltipContent>
                 </Tooltip>
               </div>
@@ -1493,13 +1721,21 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                 isEventDeleted ? (
                   <Tooltip>
                     <TooltipTrigger asChild>
-                      <Button variant="outline" disabled className="border-green-500 text-green-600">
-                        <CheckCircle className="h-4 w-4 mr-1" />
-                        Event Deleted
+                      <Button
+                        variant="outline"
+                        onClick={() => {
+                          if (context.target?.type === 'event' && context.target.value) {
+                            restoreEventMutation.mutate({ eventId: context.target.value });
+                          }
+                        }}
+                        disabled={restoreEventMutation.isPending}
+                      >
+                        <Undo2 className="h-4 w-4 mr-1" />
+                        {restoreEventMutation.isPending ? 'Restoring...' : 'Restore Event'}
                       </Button>
                     </TooltipTrigger>
                     <TooltipContent side="bottom" className="max-w-xs">
-                      <p>This event has already been deleted from the relay.</p>
+                      <p>Restore this event to the relay. This reverses the ban and allows the content to be served again.</p>
                     </TooltipContent>
                   </Tooltip>
                 ) : (
@@ -1510,12 +1746,12 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                         onClick={() => setConfirmDelete(true)}
                         disabled={deleteMutation.isPending}
                       >
-                        <Trash2 className="h-4 w-4 mr-1" />
-                        Delete Event
+                        <ShieldX className="h-4 w-4 mr-1" />
+                        Ban Event
                       </Button>
                     </TooltipTrigger>
                     <TooltipContent side="bottom" className="max-w-xs">
-                      <p>Delete this event from the relay. The event will no longer be served, but the user can still post new content.</p>
+                      <p>Ban this event from the relay. The event will no longer be served, but the user can still post new content. This can be reversed.</p>
                     </TooltipContent>
                   </Tooltip>
                 )
@@ -1559,7 +1795,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                       </Button>
                     </TooltipTrigger>
                     <TooltipContent side="bottom" className="max-w-xs">
-                      <p>Permanently block media files by their hash. They won't be served and re-uploads of the same file will be blocked.</p>
+                      <p>Block media files by their hash. They won't be served and re-uploads of the same file will be blocked. This can be reversed.</p>
                     </TooltipContent>
                   </Tooltip>
                 )
@@ -1568,13 +1804,21 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                 isUserBanned ? (
                   <Tooltip>
                     <TooltipTrigger asChild>
-                      <Button variant="outline" disabled className="border-green-500 text-green-600">
-                        <CheckCircle className="h-4 w-4 mr-1" />
-                        User Banned
+                      <Button
+                        variant="outline"
+                        onClick={() => {
+                          if (context.reportedUser.pubkey) {
+                            unbanUserMutation.mutate({ pubkey: context.reportedUser.pubkey });
+                          }
+                        }}
+                        disabled={unbanUserMutation.isPending}
+                      >
+                        <UserCheck className="h-4 w-4 mr-1" />
+                        {unbanUserMutation.isPending ? 'Unbanning...' : 'Unban User'}
                       </Button>
                     </TooltipTrigger>
                     <TooltipContent side="bottom" className="max-w-xs">
-                      <p>This user has already been banned from the relay.</p>
+                      <p>Unban this user from the relay. They will be able to post new content again. This reverses the ban.</p>
                     </TooltipContent>
                   </Tooltip>
                 ) : (
@@ -1590,7 +1834,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                       </Button>
                     </TooltipTrigger>
                     <TooltipContent side="bottom" className="max-w-xs">
-                      <p>Permanently ban this user from the relay. They won't be able to post new content. Optionally delete all their events and block their media.</p>
+                      <p>Ban this user from the relay. They won't be able to post new content. Optionally delete all their events and block their media. This can be reversed.</p>
                     </TooltipContent>
                   </Tooltip>
                 )
@@ -1629,9 +1873,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                 </Tooltip>
               )}
             </div>
-          </div>
         </div>
-      </ScrollArea>
-    </>
+    </div>
   );
 }

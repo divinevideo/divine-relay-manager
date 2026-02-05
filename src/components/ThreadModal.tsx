@@ -72,6 +72,13 @@ function ThreadPost({
   const avatar = author.data?.metadata?.picture;
   const date = new Date(node.event.created_at * 1000);
   const isHighlighted = node.event.id === highlightId;
+  const profileUrl = (() => {
+    try {
+      return `https://divine.video/profile/${nip19.npubEncode(node.event.pubkey)}`;
+    } catch {
+      return undefined;
+    }
+  })();
 
   return (
     <div className={`${node.depth > 0 ? 'ml-4 border-l-2 border-muted pl-3' : ''}`}>
@@ -83,15 +90,19 @@ function ThreadPost({
         }`}
       >
         <div className="flex items-start gap-2">
-          <Avatar className="h-6 w-6">
-            <AvatarImage src={avatar} />
-            <AvatarFallback className="text-xs">
-              {displayName.slice(0, 2).toUpperCase()}
-            </AvatarFallback>
-          </Avatar>
+          <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80 shrink-0">
+            <Avatar className="h-6 w-6">
+              <AvatarImage src={avatar} />
+              <AvatarFallback className="text-xs">
+                {displayName.slice(0, 2).toUpperCase()}
+              </AvatarFallback>
+            </Avatar>
+          </a>
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-sm font-medium">{displayName}</span>
+              <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80">
+                <span className="text-sm font-medium">{displayName}</span>
+              </a>
               <span className="text-xs text-muted-foreground">
                 {date.toLocaleString()}
               </span>

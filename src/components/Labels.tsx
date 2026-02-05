@@ -255,6 +255,7 @@ export function Labels({ relayUrl }: LabelsProps) {
                         showAvatar
                         avatarSize="md"
                         variant="block"
+                        linkToProfile
                       />
                     </div>
 
@@ -404,7 +405,7 @@ export function Labels({ relayUrl }: LabelsProps) {
                             {target && (
                               target.type === 'pubkey' ? (
                                 <div className="text-sm text-muted-foreground">
-                                  <UserDisplayName pubkey={target.value} fallbackLength={16} />
+                                  <UserDisplayName pubkey={target.value} fallbackLength={16} linkToProfile />
                                 </div>
                               ) : (
                                 <p className="text-sm text-muted-foreground font-mono">
@@ -511,7 +512,7 @@ export function Labels({ relayUrl }: LabelsProps) {
                             </Badge>
                             {target.type === 'pubkey' ? (
                               <div className="text-sm">
-                                <UserDisplayName pubkey={target.value} fallbackLength={20} />
+                                <UserDisplayName pubkey={target.value} fallbackLength={20} linkToProfile />
                               </div>
                             ) : (
                               <p className="font-mono text-sm">
