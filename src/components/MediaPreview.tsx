@@ -150,7 +150,7 @@ export function MediaPreview({
   }, [showByDefault]);
 
   const content = propContent ?? event?.content ?? '';
-  const tags = propTags ?? event?.tags ?? [];
+  const tags = useMemo(() => propTags ?? event?.tags ?? [], [propTags, event?.tags]);
 
   const mediaItems = useMemo(() => extractMediaItems(content, tags), [content, tags]);
 
