@@ -56,6 +56,9 @@ async function apiRequest<T>(
   method: 'GET' | 'POST' | 'DELETE',
   body?: object
 ): Promise<T> {
+  if (!apiUrl) {
+    throw new ApiError('No relay selected. Go to Settings to choose an environment.');
+  }
   const response = await fetch(`${apiUrl}${endpoint}`, {
     method,
     headers: {
@@ -132,6 +135,9 @@ export async function callRelayRpc<T = unknown>(
   method: string,
   params: (string | number | undefined)[] = []
 ): Promise<T> {
+  if (!apiUrl) {
+    throw new ApiError('No relay selected. Go to Settings to choose an environment.');
+  }
   const response = await fetch(`${apiUrl}/api/relay-rpc`, {
     method: 'POST',
     headers: {
