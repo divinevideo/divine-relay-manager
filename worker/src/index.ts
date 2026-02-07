@@ -2111,7 +2111,8 @@ async function syncZendeskAfterAction(
     }
 
     // Determine if this is a resolution action (should solve ticket)
-    const resolutionActions = ['reviewed', 'dismissed', 'no-action', 'false-positive'];
+    // Note: ban_user is Zendesk webhook naming, ban_pubkey is UI naming - same effect
+    const resolutionActions = ['reviewed', 'dismissed', 'no-action', 'false-positive', 'delete_event', 'ban_pubkey', 'ban_user'];
     const isResolution = resolutionActions.includes(action);
 
     // Build note
