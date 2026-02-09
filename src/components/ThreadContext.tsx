@@ -11,6 +11,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useAuthor } from "@/hooks/useAuthor";
 import { MessageSquare, ExternalLink } from "lucide-react";
 import type { NostrEvent } from "@nostrify/nostrify";
+import { getDivineProfileUrl } from "@/lib/constants";
 
 interface ThreadContextProps {
   ancestors: NostrEvent[];
@@ -41,7 +42,7 @@ function PostCard({
   const date = new Date(event.created_at * 1000);
   const profileUrl = (() => {
     try {
-      return `https://divine.video/profile/${nip19.npubEncode(event.pubkey)}`;
+      return getDivineProfileUrl(nip19.npubEncode(event.pubkey));
     } catch {
       return undefined;
     }
