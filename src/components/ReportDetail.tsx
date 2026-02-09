@@ -41,21 +41,10 @@ import { HiveAIReport } from "@/components/HiveAIReport";
 import { AIDetectionReport } from "@/components/AIDetectionReport";
 import { MediaPreview } from "@/components/MediaPreview";
 import { BulkDeleteByKind } from "@/components/BulkDeleteByKind";
-import { CATEGORY_LABELS } from "@/lib/constants";
+import { CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, getReportCategory } from "@/lib/constants";
 import { UserX, UserCheck, Tag, Flag, Trash2, CheckCircle, Video, History, Ban, ShieldX, Link2, User, FileText, Unlock, Repeat2, FileCode, Loader2, XCircle, RefreshCw, Undo2, EyeOff, Eye } from "lucide-react";
 import { CopyableId, CopyableTags } from "@/components/CopyableId";
 import type { NostrEvent } from "@nostrify/nostrify";
-
-// High-priority categories - media should be hidden by default for moderator safety
-const HIGH_PRIORITY_CATEGORIES = ['sexual_minors', 'csam', 'NS-csam', 'nonconsensual_sexual_content', 'terrorism_extremism', 'credible_threats'];
-
-function getReportCategory(event: NostrEvent): string {
-  const reportTag = event.tags.find(t => t[0] === 'report');
-  if (reportTag && reportTag[1]) return reportTag[1];
-  const lTag = event.tags.find(t => t[0] === 'l');
-  if (lTag && lTag[1]) return lTag[1];
-  return 'other';
-}
 
 interface ReportDetailProps {
   report: NostrEvent | null;

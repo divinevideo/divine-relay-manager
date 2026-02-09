@@ -100,14 +100,10 @@ export function BulkDeleteByKind({ pubkey, onComplete, variant = "button" }: Bul
       const timeout = AbortSignal.timeout(10000);
       const combinedSignal = AbortSignal.any([signal, timeout]);
 
-      console.log('[BulkDeleteByKind] Querying:', { kind, pubkey, limit: 500 });
-
       const events = await nostr.query(
         [{ kinds: [kind], authors: [pubkey], limit: 500 }],
         { signal: combinedSignal }
       );
-
-      console.log('[BulkDeleteByKind] Found events:', events.length, events.map(e => e.id?.slice(0, 8)));
 
       return events;
     },

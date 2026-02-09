@@ -35,7 +35,30 @@ export const CATEGORY_LABELS: Record<string, string> = {
 export const RESOLUTION_STATUSES = ['reviewed', 'dismissed', 'no-action', 'false-positive'] as const;
 export type ResolutionStatus = typeof RESOLUTION_STATUSES[number];
 
+// Categories where media should be hidden by default for moderator safety
+export const HIGH_PRIORITY_CATEGORIES = [
+  'sexual_minors', 'csam', 'NS-csam',
+  'nonconsensual_sexual_content', 'terrorism_extremism', 'credible_threats',
+];
+
 // Helper to get label with fallback
 export function getCategoryLabel(category: string): string {
   return CATEGORY_LABELS[category] || category;
+}
+
+// Extract category from a report event's tags
+export function getReportCategory(event: { tags: string[][] }): string {
+  const reportTag = event.tags.find(t => t[0] === 'report');
+  if (reportTag && reportTag[1]) return reportTag[1];
+  const lTag = event.tags.find(t => t[0] === 'l');
+  if (lTag && lTag[1]) return lTag[1];
+  return 'other';
+}
+
+// Divine profile URL base
+export const DIVINE_PROFILE_URL = "https://divine.video/profile";
+
+// Build a full profile URL from an npub
+export function getDivineProfileUrl(npub: string): string {
+  return `${DIVINE_PROFILE_URL}/${npub}`;
 }

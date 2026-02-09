@@ -14,8 +14,7 @@ import {
 } from "@/components/ui/tooltip";
 import { useAuthor } from "@/hooks/useAuthor";
 import { cn } from "@/lib/utils";
-
-const DIVINE_PROFILE_URL = "https://divine.video/profile";
+import { getDivineProfileUrl } from "@/lib/constants";
 
 interface UserIdentifierProps {
   pubkey: string;
@@ -84,7 +83,7 @@ export function UserIdentifier({
   // Truncated npub for display (npub1abc...xyz)
   const truncatedNpub = `${npub.slice(0, 8)}...${npub.slice(-4)}`;
 
-  const profileUrl = `${DIVINE_PROFILE_URL}/${npub}`;
+  const profileUrl = getDivineProfileUrl(npub);
 
   if (variant === "compact") {
     const content = (
@@ -326,7 +325,7 @@ export function UserDisplayName({
   if (linkToProfile) {
     return (
       <a
-        href={`${DIVINE_PROFILE_URL}/${npub}`}
+        href={getDivineProfileUrl(npub)}
         target="_blank"
         rel="noopener noreferrer"
         className="hover:opacity-80"

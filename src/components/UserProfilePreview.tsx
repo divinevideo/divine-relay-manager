@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { User, Bot, Calendar, MessageSquare, AlertTriangle } from "lucide-react";
 import { nip19 } from "nostr-tools";
+import { getDivineProfileUrl } from "@/lib/constants";
 
 interface UserProfilePreviewProps {
   pubkey: string;
@@ -36,7 +37,7 @@ export function UserProfilePreview({ pubkey, className }: UserProfilePreviewProp
   const metadata = author?.metadata;
   const npub = nip19.npubEncode(pubkey);
   const isBot = metadata?.bot;
-  const profileUrl = `https://divine.video/profile/${npub}`;
+  const profileUrl = getDivineProfileUrl(npub);
 
   if (loadingProfile) {
     return (
