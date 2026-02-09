@@ -11,6 +11,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { User, FileText, Flag, Tag, CheckCircle, ChevronDown, ChevronUp, Video, ExternalLink, Copy, Check, ArrowUpRight } from "lucide-react";
 import type { NostrEvent, NostrMetadata } from "@nostrify/nostrify";
 import type { UserStats } from "@/hooks/useUserStats";
+import { getDivineProfileUrl } from "@/lib/constants";
 
 // Label category colors
 const LABEL_COLORS: Record<string, string> = {
@@ -161,7 +162,7 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading }: UserProfi
   const displayName = profile?.display_name || profile?.name || `${npub.slice(0, 12)}...`;
   const nip05 = profile?.nip05;
   const truncatedNpub = `${npub.slice(0, 12)}...${npub.slice(-6)}`;
-  const profileUrl = `https://divine.video/profile/${npub}`;
+  const profileUrl = getDivineProfileUrl(npub);
 
   // Extract unique labels from label events
   const labelCounts = new Map<string, number>();
