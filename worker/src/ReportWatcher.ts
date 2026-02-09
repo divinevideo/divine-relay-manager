@@ -9,6 +9,7 @@ import { type Nip86Env, banEvent } from './nip86';
 export interface ReportWatcherEnv extends Nip86Env {
   DB?: D1Database;
   AUTO_HIDE_ENABLED?: string;
+  TRUSTED_CLIENTS?: string;
 }
 
 /**
@@ -463,6 +464,24 @@ export class ReportWatcher implements DurableObject {
     // Check if category qualifies for auto-hide
     if (!AUTO_HIDE_CATEGORIES.includes(category)) {
       console.log(`[ReportWatcher] Category '${category}' not in auto-hide list, skipping`);
+      return;
+    }
+
+    // Check if report is from a trusted client (Divine apps)
+    const trustedClients = (this.env.TRUSTED_CLIENTS || 'diVine,divine-web,divine-mobile').split(',');
+    const clientTag = event.tags.find((t: string[]) => t[0] === 'client');
+    const clientName = clientTag?.[1];
+
+    if (!clientName || !trustedClients.includes(clientName)) {
+      console.log(`[ReportWatcher] Report from untrusted client '${clientName || 'none'}', skipping auto-hide`);
+      await this.logDecision({
+        targetType: 'event',
+        targetId: targetEventId,
+        action: 'auto_hide_skipped',
+        reason: `${category}: untrusted client (${clientName || 'no client tag'})`,
+        reportId: event.id,
+        reporterPubkey: event.pubkey,
+      });
       return;
     }
 
