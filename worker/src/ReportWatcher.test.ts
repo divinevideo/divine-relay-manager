@@ -538,7 +538,7 @@ describe('ReportWatcher', () => {
       expect(mockFetch).not.toHaveBeenCalled();
     });
 
-    it('should call banevent when enabled for qualifying category', async () => {
+    it('should call banevent when enabled for qualifying category from trusted client', async () => {
       mockEnv.AUTO_HIDE_ENABLED = 'true';
 
       await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
@@ -553,6 +553,7 @@ describe('ReportWatcher', () => {
         tags: [
           ['e', 'target_event_id_12345'],
           ['report', 'sexual_minors'],
+          ['client', 'diVine'],
         ],
         created_at: Math.floor(Date.now() / 1000),
       };
@@ -587,6 +588,7 @@ describe('ReportWatcher', () => {
         tags: [
           ['e', 'target_event_xyz'],
           ['l', 'sexual_minors', 'MOD'],
+          ['client', 'diVine'],
         ],
         created_at: Math.floor(Date.now() / 1000),
       };
@@ -616,6 +618,7 @@ describe('ReportWatcher', () => {
         tags: [
           ['e', 'target_event'],
           ['report', 'sexual_minors'],
+          ['client', 'diVine'],
         ],
         created_at: Math.floor(Date.now() / 1000),
       };
@@ -650,6 +653,7 @@ describe('ReportWatcher', () => {
         tags: [
           ['e', 'target_event'],
           ['report', 'sexual_minors'],
+          ['client', 'diVine'],
         ],
         created_at: Math.floor(Date.now() / 1000),
       };
@@ -691,6 +695,7 @@ describe('ReportWatcher', () => {
         tags: [
           ['e', 'already_hidden_event'],
           ['report', 'sexual_minors'],
+          ['client', 'diVine'],
         ],
         created_at: Math.floor(Date.now() / 1000),
       };
@@ -705,6 +710,143 @@ describe('ReportWatcher', () => {
       const response = await watcher.fetch(new Request('https://do/status', { method: 'GET' }));
       const body = await response.json() as { status: { eventsAutoHidden: number } };
       expect(body.status.eventsAutoHidden).toBe(0);
+    });
+
+    it('should skip auto-hide for reports without a client tag', async () => {
+      mockEnv.AUTO_HIDE_ENABLED = 'true';
+
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const ws = getLastMockWebSocket();
+      const reportEvent: ReportEvent = {
+        id: 'no_client_report',
+        pubkey: 'reporter',
+        kind: 1984,
+        content: 'CSAM report without client tag',
+        tags: [
+          ['e', 'target_event'],
+          ['report', 'sexual_minors'],
+          // No client tag
+        ],
+        created_at: Math.floor(Date.now() / 1000),
+      };
+
+      ws!.simulateMessage(JSON.stringify(['EVENT', 'auto-hide-reports', reportEvent]));
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      // Should NOT have called fetch (banevent)
+      expect(mockFetch).not.toHaveBeenCalled();
+
+      // Should have logged a skip decision to D1
+      expect(mockDbRun).toHaveBeenCalled();
+    });
+
+    it('should skip auto-hide for reports from untrusted clients', async () => {
+      mockEnv.AUTO_HIDE_ENABLED = 'true';
+
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const ws = getLastMockWebSocket();
+      const reportEvent: ReportEvent = {
+        id: 'untrusted_client_report',
+        pubkey: 'reporter',
+        kind: 1984,
+        content: 'CSAM report from unknown client',
+        tags: [
+          ['e', 'target_event'],
+          ['report', 'sexual_minors'],
+          ['client', 'some-random-app'],
+        ],
+        created_at: Math.floor(Date.now() / 1000),
+      };
+
+      ws!.simulateMessage(JSON.stringify(['EVENT', 'auto-hide-reports', reportEvent]));
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      // Should NOT have called fetch (banevent)
+      expect(mockFetch).not.toHaveBeenCalled();
+
+      // Should have logged a skip decision to D1
+      expect(mockDbRun).toHaveBeenCalled();
+    });
+
+    it('should accept reports from all configured trusted clients', async () => {
+      mockEnv.AUTO_HIDE_ENABLED = 'true';
+
+      for (const clientName of ['diVine', 'divine-web', 'divine-mobile']) {
+        // Reset mocks for each iteration
+        mockFetch.mockClear();
+        mockFetch.mockResolvedValue({
+          ok: true,
+          json: async () => ({ result: true }),
+        });
+        mockDbRun.mockClear();
+        mockEnv.DB = {
+          prepare: vi.fn().mockReturnValue({
+            bind: vi.fn().mockReturnValue({
+              run: mockDbRun,
+              first: vi.fn().mockResolvedValue(null),
+            }),
+          }),
+        } as unknown as D1Database;
+
+        // Create fresh watcher for each client
+        watcher = new ReportWatcher(mockState, mockEnv);
+        await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+        await new Promise(resolve => setTimeout(resolve, 10));
+
+        const ws = getLastMockWebSocket();
+        const reportEvent: ReportEvent = {
+          id: `report_${clientName}`,
+          pubkey: 'reporter',
+          kind: 1984,
+          content: 'CSAM report',
+          tags: [
+            ['e', `target_${clientName}`],
+            ['report', 'sexual_minors'],
+            ['client', clientName],
+          ],
+          created_at: Math.floor(Date.now() / 1000),
+        };
+
+        ws!.simulateMessage(JSON.stringify(['EVENT', 'auto-hide-reports', reportEvent]));
+        await new Promise(resolve => setTimeout(resolve, 50));
+
+        // Should have called fetch (banevent) for each trusted client
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+      }
+    });
+
+    it('should respect custom TRUSTED_CLIENTS config', async () => {
+      mockEnv.AUTO_HIDE_ENABLED = 'true';
+      mockEnv.TRUSTED_CLIENTS = 'custom-app,another-app';
+
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const ws = getLastMockWebSocket();
+
+      // Report from default client (diVine) should be rejected with custom config
+      const reportEvent: ReportEvent = {
+        id: 'divine_report',
+        pubkey: 'reporter',
+        kind: 1984,
+        content: 'CSAM',
+        tags: [
+          ['e', 'target_event'],
+          ['report', 'sexual_minors'],
+          ['client', 'diVine'],
+        ],
+        created_at: Math.floor(Date.now() / 1000),
+      };
+
+      ws!.simulateMessage(JSON.stringify(['EVENT', 'auto-hide-reports', reportEvent]));
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      // diVine is NOT in custom trusted list
+      expect(mockFetch).not.toHaveBeenCalled();
     });
   });
 });

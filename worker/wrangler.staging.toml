@@ -31,6 +31,8 @@ secret_name = "CF-Access-Client-Secret"
 RELAY_URL = "wss://relay.staging.divine.video"
 # Auto-hide feature flag (set to "true" to enable automatic content hiding)
 AUTO_HIDE_ENABLED = "true"
+# Comma-separated list of trusted client names for auto-hide (must match client tag on kind 1984 events)
+TRUSTED_CLIENTS = "diVine,divine-web,divine-mobile"
 # Path for NIP-86 management API
 MANAGEMENT_PATH = "/"
 # URL for media moderation service
