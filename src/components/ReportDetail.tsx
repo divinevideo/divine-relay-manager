@@ -1371,7 +1371,9 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
           )}
 
           {/* Section: Reported Content */}
-          <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Reported Content</h4>
+          <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+            Reported Content{context.target?.type === 'event' ? ': Event' : context.target?.type === 'pubkey' ? ': User' : ''}
+          </h4>
 
           {/* Thread Context - the text content being reported */}
           {context.target?.type === 'event' && (
