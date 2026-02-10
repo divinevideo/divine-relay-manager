@@ -8,7 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { User, FileText, Flag, Tag, CheckCircle, ChevronDown, ChevronUp, Video, ExternalLink, Copy, Check, ArrowUpRight } from "lucide-react";
+import { User, FileText, Flag, Tag, CheckCircle, ChevronDown, ChevronUp, Video, ExternalLink, Copy, Check, ArrowUpRight, Trash2 } from "lucide-react";
 import type { NostrEvent, NostrMetadata } from "@nostrify/nostrify";
 import type { UserStats } from "@/hooks/useUserStats";
 import { getDivineProfileUrl } from "@/lib/constants";
@@ -102,9 +102,10 @@ interface UserProfileCardProps {
   pubkey?: string | null;
   stats?: UserStats;
   isLoading?: boolean;
+  onDeleteEvent?: (eventId: string) => void;
 }
 
-export function UserProfileCard({ profile, pubkey, stats, isLoading }: UserProfileCardProps) {
+export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEvent }: UserProfileCardProps) {
   const [copied, setCopied] = useState(false);
 
   // Convert hex pubkey to npub
@@ -261,7 +262,7 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading }: UserProfi
 
         {/* Recent Posts */}
         {stats?.recentPosts && stats.recentPosts.length > 0 && (
-          <RecentPostsSection posts={stats.recentPosts} />
+          <RecentPostsSection posts={stats.recentPosts} onDeleteEvent={onDeleteEvent} />
         )}
       </CardContent>
     </Card>
@@ -269,7 +270,7 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading }: UserProfi
 }
 
 // Separate component for recent posts with expand/collapse
-function RecentPostsSection({ posts }: { posts: NostrEvent[] }) {
+function RecentPostsSection({ posts, onDeleteEvent }: { posts: NostrEvent[]; onDeleteEvent?: (eventId: string) => void }) {
   const [expanded, setExpanded] = useState(true);
   const [showAll, setShowAll] = useState(false);
 
@@ -350,12 +351,25 @@ function RecentPostsSection({ posts }: { posts: NostrEvent[] }) {
                   <p className="text-xs text-muted-foreground">+{media.length - 4} more media</p>
                 )}
 
-                {/* Timestamp and kind */}
+                {/* Timestamp, kind, and delete */}
                 <div className="flex items-center justify-between text-xs text-muted-foreground">
                   <span>{new Date(post.created_at * 1000).toLocaleString()}</span>
-                  <Badge variant="outline" className="text-xs">
-                    {post.kind === 1 ? 'Note' : post.kind === 1063 ? 'Video' : `Kind ${post.kind}`}
-                  </Badge>
+                  <div className="flex items-center gap-1.5">
+                    <Badge variant="outline" className="text-xs">
+                      {post.kind === 1 ? 'Note' : post.kind === 1063 ? 'Video' : `Kind ${post.kind}`}
+                    </Badge>
+                    {onDeleteEvent && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 w-6 p-0 text-muted-foreground hover:text-destructive"
+                        onClick={() => onDeleteEvent(post.id)}
+                        title="Delete this event"
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </Button>
+                    )}
+                  </div>
                 </div>
               </div>
             );

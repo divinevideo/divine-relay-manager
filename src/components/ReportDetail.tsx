@@ -23,6 +23,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useToast } from "@/hooks/useToast";
+import { ToastAction } from "@/components/ui/toast";
 import { useReportContext } from "@/hooks/useReportContext";
 import { useUserSummary } from "@/hooks/useUserSummary";
 import { useModerationStatus } from "@/hooks/useModerationStatus";
@@ -1447,6 +1448,21 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             pubkey={context.reportedUser.pubkey}
             stats={context.userStats}
             isLoading={context.isLoading}
+            onDeleteEvent={(eventId) => {
+              deleteMutation.mutate({ eventId, reason: 'Deleted from report review' }, {
+                onSuccess: (deletedId) => {
+                  toast({
+                    title: "Event deleted",
+                    description: "The event has been removed from the relay.",
+                    action: (
+                      <ToastAction altText="Undo delete" onClick={() => restoreEventMutation.mutate({ eventId: deletedId })}>
+                        Undo
+                      </ToastAction>
+                    ),
+                  });
+                },
+              });
+            }}
           />
 
           <Separator />
