@@ -10,6 +10,13 @@ import {
 } from './nip86';
 import { ensureSchema } from './db';
 
+let schemaReady = false;
+async function ensureSchemaOnce(db: D1Database): Promise<void> {
+  if (schemaReady) return;
+  await ensureSchema(db);
+  schemaReady = true;
+}
+
 // Re-export ReportWatcher Durable Object for wrangler
 export { ReportWatcher } from './ReportWatcher';
 
@@ -667,7 +674,7 @@ async function handleLogDecision(
       return jsonResponse({ success: false, error: 'Missing required fields' }, 400, corsHeaders);
     }
 
-    await ensureSchema(env.DB);
+    await ensureSchemaOnce(env.DB);
 
     await env.DB.prepare(`
       INSERT INTO moderation_decisions (target_type, target_id, action, reason, moderator_pubkey, report_id)
@@ -706,7 +713,7 @@ async function handleGetAllDecisions(
       return jsonResponse({ success: false, error: 'Database not configured' }, 500, corsHeaders);
     }
 
-    await ensureSchema(env.DB);
+    await ensureSchemaOnce(env.DB);
 
     // Get all decisions, ordered by most recent first
     const decisions = await env.DB.prepare(`
@@ -742,7 +749,7 @@ async function handleGetDecisions(
       return jsonResponse({ success: false, error: 'Database not configured' }, 500, corsHeaders);
     }
 
-    await ensureSchema(env.DB);
+    await ensureSchemaOnce(env.DB);
 
     // Get all decisions for this target (could be event ID, pubkey, or media hash)
     const decisions = await env.DB.prepare(`
@@ -778,7 +785,7 @@ async function handleDeleteDecisions(
       return jsonResponse({ success: false, error: 'Database not configured' }, 500, corsHeaders);
     }
 
-    await ensureSchema(env.DB);
+    await ensureSchemaOnce(env.DB);
 
     let labelsDeleted = 0;
 
@@ -1740,7 +1747,7 @@ async function handleZendeskWebhook(
 
     // Log the decision
     if (env.DB && actionResult.success) {
-      await ensureSchema(env.DB);
+      await ensureSchemaOnce(env.DB);
       await env.DB.prepare(`
         INSERT INTO moderation_decisions (target_type, target_id, action, reason, moderator_pubkey, report_id)
         VALUES (?, ?, ?, ?, ?, ?)
@@ -2174,7 +2181,7 @@ async function handleZendeskContext(
 
     // Get decision history
     if (env.DB) {
-      await ensureSchema(env.DB);
+      await ensureSchemaOnce(env.DB);
       const targetId = eventId || pubkey;
       const decisions = await env.DB.prepare(`
         SELECT * FROM moderation_decisions
@@ -2339,7 +2346,7 @@ async function handleZendeskAction(
 
     // Log the decision
     if (env.DB && actionResult.success) {
-      await ensureSchema(env.DB);
+      await ensureSchemaOnce(env.DB);
       await env.DB.prepare(`
         INSERT INTO moderation_decisions (target_type, target_id, action, reason, moderator_pubkey, report_id)
         VALUES (?, ?, ?, ?, ?, ?)
