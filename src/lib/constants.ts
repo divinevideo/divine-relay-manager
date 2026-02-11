@@ -29,6 +29,11 @@ export const CATEGORY_LABELS: Record<string, string> = {
   'aiGenerated': 'AI Generated',
   'ai-generated': 'AI Generated',
   'NS-ai-generated': 'AI Generated',
+  'violence': 'Violence',
+  'sexual-content': 'Sexual Content',
+  'sexualContent': 'Sexual Content',
+  'false-info': 'Misinformation',
+  'falseInformation': 'Misinformation',
   'other': 'Other',
 };
 
@@ -61,4 +66,10 @@ export const DIVINE_PROFILE_URL = "https://divine.video/profile";
 // Build a full profile URL from an npub
 export function getDivineProfileUrl(npub: string): string {
   return `${DIVINE_PROFILE_URL}/${npub}`;
+}
+
+// Build a reason string for moderation decisions from a category key + optional note
+export function buildReasonString(categoryKey: string, note?: string): string {
+  const label = CATEGORY_LABELS[categoryKey] || categoryKey;
+  return note?.trim() ? `${label}: ${note.trim()}` : label;
 }
