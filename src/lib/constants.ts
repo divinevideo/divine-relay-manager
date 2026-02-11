@@ -70,6 +70,6 @@ export function getDivineProfileUrl(npub: string): string {
 
 // Build a reason string for moderation decisions from a category key + optional note
 export function buildReasonString(categoryKey: string, note?: string): string {
-  const label = CATEGORY_LABELS[categoryKey] || categoryKey;
+  const label = getCategoryLabel(categoryKey);
   return note?.trim() ? `${label}: ${note.trim()}` : label;
 }
