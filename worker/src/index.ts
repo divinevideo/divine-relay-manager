@@ -299,6 +299,10 @@ async function handlePublish(
       console.log('[handlePublish] Resolution label details:', { status, targetType, targetId });
 
       if (status && targetType && targetId) {
+        if (env.DB) {
+          await markHumanReviewed(env.DB, targetType, targetId);
+        }
+
         // Use waitUntil to ensure sync completes even after response is sent
         const syncPromise = syncZendeskAfterAction(
           env,
@@ -372,6 +376,10 @@ async function handleModerate(
           return jsonResponse({ success: false, error: rpcResult.error || 'banevent RPC failed' }, 500, corsHeaders);
         }
 
+        if (env.DB) {
+          await markHumanReviewed(env.DB, 'event', body.eventId);
+        }
+
         // Sync any linked Zendesk tickets
         syncZendeskAfterAction(
           env,
@@ -430,6 +438,10 @@ async function handleModerate(
 
   if (!publishResult.success) {
     return jsonResponse({ success: false, error: publishResult.error }, 500, corsHeaders);
+  }
+
+  if (env.DB && body.pubkey) {
+    await markHumanReviewed(env.DB, 'pubkey', body.pubkey);
   }
 
   // Sync any linked Zendesk tickets (delete_event syncs in its own early return)
@@ -611,6 +623,26 @@ async function ensureDecisionsTable(db: D1Database): Promise<void> {
   } catch {
     // Index might already exist
   }
+
+  // Per-target state — separated from the append-only decision log.
+  // DEPLOY NOTE: After first deploy, backfill from existing decisions:
+  //   wrangler d1 execute <db-name> --remote --config <wrangler.toml> --command "INSERT INTO moderation_targets (target_id, target_type, ever_human_reviewed) SELECT DISTINCT target_id, target_type, 1 FROM moderation_decisions WHERE action != 'auto_hidden' ON CONFLICT(target_id) DO UPDATE SET ever_human_reviewed = 1;"
+  //   Staging: done 2026-02-11. Production: pending.
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS moderation_targets (
+      target_id TEXT PRIMARY KEY,
+      target_type TEXT NOT NULL,
+      ever_human_reviewed INTEGER DEFAULT 0
+    )
+  `).run();
+}
+
+async function markHumanReviewed(db: D1Database, targetType: string, targetId: string): Promise<void> {
+  await db.prepare(`
+    INSERT INTO moderation_targets (target_id, target_type, ever_human_reviewed)
+    VALUES (?, ?, 1)
+    ON CONFLICT(target_id) DO UPDATE SET ever_human_reviewed = 1
+  `).bind(targetId, targetType).run();
 }
 
 // Ensure zendesk_tickets table exists for tracking Zendesk ↔ Nostr mappings
@@ -685,6 +717,8 @@ async function handleLogDecision(
       body.moderatorPubkey || null,
       body.reportId || null
     ).run();
+
+    await markHumanReviewed(env.DB, body.targetType, body.targetId);
 
     return new Response(JSON.stringify({ success: true }), {
       status: 200,
@@ -822,7 +856,8 @@ async function handleDeleteDecisions(
       }
     }
 
-    // Delete all decisions for this target from D1 (reopens the report)
+    // Delete all decisions for this target from D1 (reopens the report).
+    // moderation_targets.ever_human_reviewed is NOT cleared — prevents re-auto-hide.
     const result = await env.DB.prepare(`
       DELETE FROM moderation_decisions
       WHERE target_id = ?
@@ -1755,6 +1790,10 @@ async function handleZendeskWebhook(
         `zendesk:${body.ticket_id}`
       ).run();
 
+      const targetType = body.nostr_event_id ? 'event' : 'pubkey';
+      const targetId = body.nostr_event_id || body.nostr_pubkey || '';
+      await markHumanReviewed(env.DB, targetType, targetId);
+
       // Sync any linked Zendesk tickets (via our mapping table)
       syncZendeskAfterAction(
         env,
@@ -2349,6 +2388,10 @@ async function handleZendeskAction(
         user.email,
         body.ticket_id ? `zendesk:${body.ticket_id}` : null
       ).run();
+
+      const ztargetType = body.event_id ? 'event' : 'pubkey';
+      const ztargetId = body.event_id || body.pubkey || '';
+      await markHumanReviewed(env.DB, ztargetType, ztargetId);
     }
 
     // Sync any linked Zendesk tickets
