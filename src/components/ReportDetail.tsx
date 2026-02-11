@@ -65,14 +65,21 @@ function getReportTarget(event: NostrEvent): { type: 'event' | 'pubkey'; value: 
   return null;
 }
 
-// Deduplicated category labels for the reason selector dropdown
-const UNIQUE_CATEGORY_ENTRIES = (() => {
-  const seen = new Set<string>();
-  return Object.entries(CATEGORY_LABELS).filter(([, label]) => {
-    if (seen.has(label)) return false;
-    seen.add(label);
-    return true;
-  });
+// Deduplicated category labels for the reason selector dropdown.
+// Also builds a map from any raw key to its canonical (first-seen) key,
+// so getReportCategory() values always match a SelectItem.
+const { UNIQUE_CATEGORY_ENTRIES, CANONICAL_KEY } = (() => {
+  const seen = new Map<string, string>(); // label → first key
+  const entries: [string, string][] = [];
+  const canonical: Record<string, string> = {};
+  for (const [key, label] of Object.entries(CATEGORY_LABELS)) {
+    if (!seen.has(label)) {
+      seen.set(label, key);
+      entries.push([key, label]);
+    }
+    canonical[key] = seen.get(label)!;
+  }
+  return { UNIQUE_CATEGORY_ENTRIES: entries, CANONICAL_KEY: canonical };
 })();
 
 export function ReportDetail({ report, allReportsForTarget, allReports = [], onDismiss }: ReportDetailProps) {
@@ -96,12 +103,13 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   const [actionNote, setActionNote] = useState('');
 
   // Initialize reason from report category when report changes
+  const defaultReason = report ? (CANONICAL_KEY[getReportCategory(report)] || getReportCategory(report)) : '';
   useEffect(() => {
     if (report) {
-      setActionReason(getReportCategory(report));
+      setActionReason(defaultReason);
       setActionNote('');
     }
-  }, [report]);
+  }, [report, defaultReason]);
 
   const reasonSelector = (
     <div className="space-y-2 pt-2 border-t">
@@ -121,6 +129,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
         value={actionNote}
         onChange={(e) => setActionNote(e.target.value)}
         rows={2}
+        maxLength={500}
       />
     </div>
   );
@@ -880,7 +889,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     <div className="h-full flex flex-col overflow-hidden">
       {/* Dialogs - rendered as portals, don't affect flex layout */}
       {/* Ban Confirmation Dialog */}
-      <AlertDialog open={confirmBan} onOpenChange={(open) => { setConfirmBan(open); if (!open) setActionNote(''); }}>
+      <AlertDialog open={confirmBan} onOpenChange={(open) => { setConfirmBan(open); if (!open) { setActionNote(''); setActionReason(defaultReason); } }}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Ban User?</AlertDialogTitle>
@@ -953,7 +962,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
       </AlertDialog>
 
       {/* Delete Event Confirmation Dialog */}
-      <AlertDialog open={confirmDelete} onOpenChange={(open) => { setConfirmDelete(open); if (!open) setActionNote(''); }}>
+      <AlertDialog open={confirmDelete} onOpenChange={(open) => { setConfirmDelete(open); if (!open) { setActionNote(''); setActionReason(defaultReason); } }}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Ban Event?</AlertDialogTitle>
@@ -997,7 +1006,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
       </AlertDialog>
 
       {/* Block Media Confirmation Dialog */}
-      <AlertDialog open={confirmBlockMedia} onOpenChange={(open) => { setConfirmBlockMedia(open); if (!open) setActionNote(''); }}>
+      <AlertDialog open={confirmBlockMedia} onOpenChange={(open) => { setConfirmBlockMedia(open); if (!open) { setActionNote(''); setActionReason(defaultReason); } }}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Block Media?</AlertDialogTitle>
@@ -1041,7 +1050,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
       </AlertDialog>
 
       {/* Block Media AND Delete Event Combined Confirmation Dialog */}
-      <AlertDialog open={confirmBlockAndDelete} onOpenChange={(open) => { setConfirmBlockAndDelete(open); if (!open) setActionNote(''); }}>
+      <AlertDialog open={confirmBlockAndDelete} onOpenChange={(open) => { setConfirmBlockAndDelete(open); if (!open) { setActionNote(''); setActionReason(defaultReason); } }}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Remove Content?</AlertDialogTitle>
