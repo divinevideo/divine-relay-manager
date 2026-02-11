@@ -8,6 +8,7 @@ import {
   callNip86Rpc,
   type SecretStoreSecret,
 } from './nip86';
+import { ensureSchema } from './db';
 
 // Re-export ReportWatcher Durable Object for wrangler
 export { ReportWatcher } from './ReportWatcher';
@@ -595,48 +596,6 @@ Respond with JSON only:
   }
 }
 
-// Ensure moderation_decisions table exists
-async function ensureDecisionsTable(db: D1Database): Promise<void> {
-  // Run each statement separately to avoid issues with D1's exec
-  await db.prepare(`
-    CREATE TABLE IF NOT EXISTS moderation_decisions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      target_type TEXT NOT NULL,
-      target_id TEXT NOT NULL,
-      action TEXT NOT NULL,
-      reason TEXT,
-      moderator_pubkey TEXT,
-      report_id TEXT,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP
-    )
-  `).run();
-
-  // Create indexes in separate statements
-  try {
-    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_decisions_target ON moderation_decisions(target_type, target_id)`).run();
-  } catch {
-    // Index might already exist
-  }
-
-  try {
-    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_decisions_report ON moderation_decisions(report_id)`).run();
-  } catch {
-    // Index might already exist
-  }
-
-  // Per-target state — separated from the append-only decision log.
-  // DEPLOY NOTE: After first deploy, backfill from existing decisions:
-  //   wrangler d1 execute <db-name> --remote --config <wrangler.toml> --command "INSERT INTO moderation_targets (target_id, target_type, ever_human_reviewed) SELECT DISTINCT target_id, target_type, 1 FROM moderation_decisions WHERE action != 'auto_hidden' ON CONFLICT(target_id) DO UPDATE SET ever_human_reviewed = 1;"
-  //   Staging: done 2026-02-11. Production: pending.
-  await db.prepare(`
-    CREATE TABLE IF NOT EXISTS moderation_targets (
-      target_id TEXT PRIMARY KEY,
-      target_type TEXT NOT NULL,
-      ever_human_reviewed INTEGER DEFAULT 0
-    )
-  `).run();
-}
-
 async function markHumanReviewed(db: D1Database, targetType: string, targetId: string): Promise<void> {
   try {
     await db.prepare(`
@@ -708,7 +667,7 @@ async function handleLogDecision(
       return jsonResponse({ success: false, error: 'Missing required fields' }, 400, corsHeaders);
     }
 
-    await ensureDecisionsTable(env.DB);
+    await ensureSchema(env.DB);
 
     await env.DB.prepare(`
       INSERT INTO moderation_decisions (target_type, target_id, action, reason, moderator_pubkey, report_id)
@@ -747,7 +706,7 @@ async function handleGetAllDecisions(
       return jsonResponse({ success: false, error: 'Database not configured' }, 500, corsHeaders);
     }
 
-    await ensureDecisionsTable(env.DB);
+    await ensureSchema(env.DB);
 
     // Get all decisions, ordered by most recent first
     const decisions = await env.DB.prepare(`
@@ -783,7 +742,7 @@ async function handleGetDecisions(
       return jsonResponse({ success: false, error: 'Database not configured' }, 500, corsHeaders);
     }
 
-    await ensureDecisionsTable(env.DB);
+    await ensureSchema(env.DB);
 
     // Get all decisions for this target (could be event ID, pubkey, or media hash)
     const decisions = await env.DB.prepare(`
@@ -819,7 +778,7 @@ async function handleDeleteDecisions(
       return jsonResponse({ success: false, error: 'Database not configured' }, 500, corsHeaders);
     }
 
-    await ensureDecisionsTable(env.DB);
+    await ensureSchema(env.DB);
 
     let labelsDeleted = 0;
 
@@ -1781,7 +1740,7 @@ async function handleZendeskWebhook(
 
     // Log the decision
     if (env.DB && actionResult.success) {
-      await ensureDecisionsTable(env.DB);
+      await ensureSchema(env.DB);
       await env.DB.prepare(`
         INSERT INTO moderation_decisions (target_type, target_id, action, reason, moderator_pubkey, report_id)
         VALUES (?, ?, ?, ?, ?, ?)
@@ -2215,7 +2174,7 @@ async function handleZendeskContext(
 
     // Get decision history
     if (env.DB) {
-      await ensureDecisionsTable(env.DB);
+      await ensureSchema(env.DB);
       const targetId = eventId || pubkey;
       const decisions = await env.DB.prepare(`
         SELECT * FROM moderation_decisions
@@ -2380,7 +2339,7 @@ async function handleZendeskAction(
 
     // Log the decision
     if (env.DB && actionResult.success) {
-      await ensureDecisionsTable(env.DB);
+      await ensureSchema(env.DB);
       await env.DB.prepare(`
         INSERT INTO moderation_decisions (target_type, target_id, action, reason, moderator_pubkey, report_id)
         VALUES (?, ?, ?, ?, ?, ?)
