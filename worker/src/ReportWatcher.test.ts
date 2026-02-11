@@ -673,14 +673,16 @@ describe('ReportWatcher', () => {
     it('should skip processing if event is already auto-hidden (deduplication)', async () => {
       mockEnv.AUTO_HIDE_ENABLED = 'true';
 
-      // Mock D1 to return an existing decision
+      // Mock D1: no human resolution, but already auto-hidden
       mockEnv.DB = {
-        prepare: vi.fn().mockReturnValue({
+        prepare: vi.fn().mockImplementation((sql: string) => ({
           bind: vi.fn().mockReturnValue({
             run: mockDbRun,
-            first: vi.fn().mockResolvedValue({ 1: 1 }), // Existing decision found
+            first: vi.fn().mockResolvedValue(
+              sql.includes('moderation_targets') ? null : { 1: 1 }
+            ),
           }),
-        }),
+        })),
       } as unknown as D1Database;
 
       await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
@@ -817,6 +819,154 @@ describe('ReportWatcher', () => {
         // Should have called fetch (banevent) for each trusted client
         expect(mockFetch).toHaveBeenCalledTimes(1);
       }
+    });
+
+    it('should skip auto-hide when target has human resolution', async () => {
+      mockEnv.AUTO_HIDE_ENABLED = 'true';
+
+      // Mock D1: moderation_targets returns a row (human reviewed),
+      // moderation_decisions returns null (not already auto-hidden)
+      mockEnv.DB = {
+        prepare: vi.fn().mockImplementation((sql: string) => ({
+          bind: vi.fn().mockReturnValue({
+            run: mockDbRun,
+            first: vi.fn().mockResolvedValue(
+              sql.includes('moderation_targets') ? { 1: 1 } : null
+            ),
+          }),
+        })),
+      } as unknown as D1Database;
+
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const ws = getLastMockWebSocket();
+      const reportEvent: ReportEvent = {
+        id: 'report_human_reviewed',
+        pubkey: 'reporter',
+        kind: 1984,
+        content: 'CSAM report on already-reviewed content',
+        tags: [
+          ['e', 'previously_reviewed_event'],
+          ['report', 'sexual_minors'],
+          ['client', 'diVine'],
+        ],
+        created_at: Math.floor(Date.now() / 1000),
+      };
+
+      ws!.simulateMessage(JSON.stringify(['EVENT', 'auto-hide-reports', reportEvent]));
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      // Should NOT have called fetch (banevent) — human decision stands
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('should proceed with auto-hide when no human resolution exists', async () => {
+      mockEnv.AUTO_HIDE_ENABLED = 'true';
+
+      // Mock D1: moderation_targets returns null (no human review),
+      // moderation_decisions returns null (not already auto-hidden)
+      mockEnv.DB = {
+        prepare: vi.fn().mockImplementation((sql: string) => ({
+          bind: vi.fn().mockReturnValue({
+            run: mockDbRun,
+            first: vi.fn().mockResolvedValue(null),
+          }),
+        })),
+      } as unknown as D1Database;
+
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const ws = getLastMockWebSocket();
+      const reportEvent: ReportEvent = {
+        id: 'report_no_human_review',
+        pubkey: 'reporter',
+        kind: 1984,
+        content: 'CSAM report on fresh content',
+        tags: [
+          ['e', 'never_reviewed_event'],
+          ['report', 'sexual_minors'],
+          ['client', 'diVine'],
+        ],
+        created_at: Math.floor(Date.now() / 1000),
+      };
+
+      ws!.simulateMessage(JSON.stringify(['EVENT', 'auto-hide-reports', reportEvent]));
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      // SHOULD have called fetch (banevent) — no human decision, proceed
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('should proceed with auto-hide when DB is unavailable (fail open)', async () => {
+      mockEnv.AUTO_HIDE_ENABLED = 'true';
+      mockEnv.DB = undefined as unknown as D1Database;
+
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const ws = getLastMockWebSocket();
+      const reportEvent: ReportEvent = {
+        id: 'report_no_db',
+        pubkey: 'reporter',
+        kind: 1984,
+        content: 'CSAM report with no DB',
+        tags: [
+          ['e', 'target_no_db'],
+          ['report', 'sexual_minors'],
+          ['client', 'diVine'],
+        ],
+        created_at: Math.floor(Date.now() / 1000),
+      };
+
+      ws!.simulateMessage(JSON.stringify(['EVENT', 'auto-hide-reports', reportEvent]));
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      // Should still call banevent — fail open for enforcement
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('should proceed with auto-hide when hasHumanResolution query fails (fail open)', async () => {
+      mockEnv.AUTO_HIDE_ENABLED = 'true';
+
+      // Mock D1: moderation_targets query throws, moderation_decisions returns null
+      mockEnv.DB = {
+        prepare: vi.fn().mockImplementation((sql: string) => ({
+          bind: vi.fn().mockReturnValue({
+            run: mockDbRun,
+            first: vi.fn().mockImplementation(() => {
+              if (sql.includes('moderation_targets')) {
+                return Promise.reject(new Error('D1 query failed'));
+              }
+              return Promise.resolve(null);
+            }),
+          }),
+        })),
+      } as unknown as D1Database;
+
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const ws = getLastMockWebSocket();
+      const reportEvent: ReportEvent = {
+        id: 'report_db_error',
+        pubkey: 'reporter',
+        kind: 1984,
+        content: 'CSAM report with DB error',
+        tags: [
+          ['e', 'target_db_error'],
+          ['report', 'sexual_minors'],
+          ['client', 'diVine'],
+        ],
+        created_at: Math.floor(Date.now() / 1000),
+      };
+
+      ws!.simulateMessage(JSON.stringify(['EVENT', 'auto-hide-reports', reportEvent]));
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      // Should still call banevent — fail open for enforcement
+      expect(mockFetch).toHaveBeenCalledTimes(1);
     });
 
     it('should respect custom TRUSTED_CLIENTS config', async () => {

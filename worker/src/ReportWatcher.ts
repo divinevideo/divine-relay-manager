@@ -485,6 +485,12 @@ export class ReportWatcher implements DurableObject {
       return;
     }
 
+    // Check if a human has already reviewed this target — their decision stands
+    if (await this.hasHumanResolution(targetEventId)) {
+      console.log(`[ReportWatcher] Event ${targetEventId.slice(0, 8)}... has human resolution, skipping auto-hide`);
+      return;
+    }
+
     // Check if this event was already auto-hidden (deduplication)
     if (await this.isAlreadyAutoHidden(targetEventId)) {
       console.log(`[ReportWatcher] Event ${targetEventId.slice(0, 8)}... already auto-hidden, skipping`);
@@ -548,6 +554,29 @@ export class ReportWatcher implements DurableObject {
       return result !== null;
     } catch (error) {
       console.error('[ReportWatcher] Failed to check auto-hide status:', error);
+      // On error, allow processing (fail open for enforcement)
+      return false;
+    }
+  }
+
+  /**
+   * Check if a human moderator has already made a decision on this target.
+   * Reads from moderation_targets (persistent, survives reopen).
+   */
+  private async hasHumanResolution(targetEventId: string): Promise<boolean> {
+    if (!this.env.DB) {
+      return false;
+    }
+
+    try {
+      const result = await this.env.DB.prepare(`
+        SELECT 1 FROM moderation_targets
+        WHERE target_id = ? AND ever_human_reviewed = 1
+      `).bind(targetEventId).first();
+
+      return result !== null;
+    } catch (error) {
+      console.error('[ReportWatcher] Failed to check human resolution:', error);
       // On error, allow processing (fail open for enforcement)
       return false;
     }
