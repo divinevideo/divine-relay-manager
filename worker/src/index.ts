@@ -638,11 +638,15 @@ async function ensureDecisionsTable(db: D1Database): Promise<void> {
 }
 
 async function markHumanReviewed(db: D1Database, targetType: string, targetId: string): Promise<void> {
-  await db.prepare(`
-    INSERT INTO moderation_targets (target_id, target_type, ever_human_reviewed)
-    VALUES (?, ?, 1)
-    ON CONFLICT(target_id) DO UPDATE SET ever_human_reviewed = 1
-  `).bind(targetId, targetType).run();
+  try {
+    await db.prepare(`
+      INSERT INTO moderation_targets (target_id, target_type, ever_human_reviewed)
+      VALUES (?, ?, 1)
+      ON CONFLICT(target_id) DO UPDATE SET ever_human_reviewed = 1
+    `).bind(targetId, targetType).run();
+  } catch (error) {
+    console.error('[markHumanReviewed] Failed to update moderation_targets:', error);
+  }
 }
 
 // Ensure zendesk_tickets table exists for tracking Zendesk ↔ Nostr mappings
