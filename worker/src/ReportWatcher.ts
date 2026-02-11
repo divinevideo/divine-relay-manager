@@ -2,6 +2,7 @@
 // ABOUTME: Maintains persistent WebSocket to relay for auto-hide functionality
 
 import { type Nip86Env, banEvent } from './nip86';
+import { ensureSchema } from './db';
 
 /**
  * Extended environment for ReportWatcher DO
@@ -66,6 +67,7 @@ export class ReportWatcher implements DurableObject {
   private env: ReportWatcherEnv;
 
   // Runtime state (not persisted across restarts)
+  private schemaReady: boolean = false;
   private running: boolean = false;
   private ws: WebSocket | null = null;
   private connectedAt: number | null = null;
@@ -455,6 +457,16 @@ export class ReportWatcher implements DurableObject {
     category: string,
     targetEventId: string
   ): Promise<void> {
+    // Ensure D1 schema exists before any DB access
+    if (!this.schemaReady && this.env.DB) {
+      try {
+        await ensureSchema(this.env.DB);
+        this.schemaReady = true;
+      } catch (error) {
+        console.error('[ReportWatcher] Failed to ensure schema:', error);
+      }
+    }
+
     // Check if auto-hide is enabled
     if (this.env.AUTO_HIDE_ENABLED !== 'true') {
       console.log('[ReportWatcher] Auto-hide disabled, skipping');
