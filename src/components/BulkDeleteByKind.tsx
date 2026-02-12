@@ -90,7 +90,11 @@ export function BulkDeleteByKind({ pubkey, onComplete, variant = "button" }: Bul
     return counts;
   }, [allUserEvents]);
 
-  // Query events of selected kind from this user
+  // Query events of selected kind from this user.
+  // Intentionally a separate relay query rather than client-side filtering of
+  // allUserEvents — the first query has limit: 500 and may truncate, so the relay
+  // applying the kind filter server-side gives a more complete picture. Correctness
+  // matters more than efficiency for a moderation tool. See #79.
   const { data: events, isLoading: loadingEvents, error: queryError } = useQuery({
     queryKey: ['bulk-delete-events', pubkey, selectedKind],
     queryFn: async ({ signal }) => {
@@ -110,7 +114,6 @@ export function BulkDeleteByKind({ pubkey, onComplete, variant = "button" }: Bul
     enabled: !!pubkey && !!selectedKind,
   });
 
-  // Debug: log query errors
   if (queryError) {
     console.error('[BulkDeleteByKind] Query error:', queryError);
   }

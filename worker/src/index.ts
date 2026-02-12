@@ -943,7 +943,10 @@ async function handleModerateMedia(
   }
 }
 
-// Query relay for events matching a filter
+// Query relay for events matching a filter.
+// Opens a fresh WebSocket per call. Connection reuse isn't practical in CF Workers
+// (stateless request context, no persistent connection pool). Only called in
+// handleDeleteDecisions for label cleanup (2 sequential calls). See #79.
 async function queryRelay(
   filter: object,
   relayUrl: string
