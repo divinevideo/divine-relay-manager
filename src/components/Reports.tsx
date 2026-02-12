@@ -24,7 +24,6 @@ import {
 } from "@/components/ui/select";
 import {
   Flag,
-  RefreshCw,
   Clock,
   Users,
   Layers,
@@ -37,6 +36,8 @@ import {
   X,
   EyeOff,
 } from "lucide-react";
+import { TruncationWarning } from "@/components/ui/truncation-warning";
+import { DataFreshness } from "@/components/ui/data-freshness";
 import { ReportDetail } from "@/components/ReportDetail";
 import { UserDisplayName } from "@/components/UserIdentifier";
 import { CopyableId } from "@/components/CopyableId";
@@ -415,27 +416,6 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     }
   }, [decisionsError]);
 
-  // Track relative time since last data update for freshness indicator
-  const [lastUpdatedText, setLastUpdatedText] = useState<string>('');
-  useEffect(() => {
-    if (!dataUpdatedAt) return;
-
-    const updateRelativeTime = () => {
-      const seconds = Math.floor((Date.now() - dataUpdatedAt) / 1000);
-      if (seconds < 5) {
-        setLastUpdatedText('just now');
-      } else if (seconds < 60) {
-        setLastUpdatedText(`${seconds}s ago`);
-      } else {
-        const minutes = Math.floor(seconds / 60);
-        setLastUpdatedText(`${minutes}m ago`);
-      }
-    };
-
-    updateRelativeTime();
-    const interval = setInterval(updateRelativeTime, 5000);
-    return () => clearInterval(interval);
-  }, [dataUpdatedAt]);
 
   // Build set of resolved target keys (from labels, bans, deletions, and decisions)
   const resolvedTargets = useMemo(() => {
@@ -789,24 +769,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                   <span className="text-green-600"> ({resolvedCount} resolved)</span>
                 )}
               </CardDescription>
+              <TruncationWarning count={reports?.length ?? 0} limit={200} noun="reports" />
+              <TruncationWarning count={resolutionLabels?.length ?? 0} limit={500} noun="resolution labels" />
             </div>
-            <div className="flex items-center gap-2">
-              {lastUpdatedText && (
-                <span className="text-xs text-muted-foreground hidden sm:inline">
-                  {lastUpdatedText}
-                </span>
-              )}
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => refetch()}
-                disabled={isFetching}
-                title={lastUpdatedText ? `Last updated ${lastUpdatedText}` : 'Refresh'}
-                className="min-w-[44px] min-h-[44px] sm:min-w-0 sm:min-h-0"
-              >
-                <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
-              </Button>
-            </div>
+            <DataFreshness
+              dataUpdatedAt={dataUpdatedAt}
+              onRefresh={() => refetch()}
+              isRefetching={isFetching}
+            />
           </div>
 
           {/* View mode toggle */}

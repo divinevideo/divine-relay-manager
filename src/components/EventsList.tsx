@@ -22,6 +22,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Textarea } from "@/components/ui/textarea";
 import { EventDetail } from "@/components/EventDetail";
 import { BulkDeleteByKind } from "@/components/BulkDeleteByKind";
+import { getDivineProfileUrl } from "@/lib/constants";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   FileText,
@@ -45,6 +46,7 @@ import {
   Loader2,
   XCircle,
 } from "lucide-react";
+import { TruncationWarning } from "@/components/ui/truncation-warning";
 import type { NostrEvent } from "@nostrify/nostrify";
 
 interface EventsListProps {
@@ -78,7 +80,7 @@ function EventCard({
   const profileImage = metadata?.picture;
   const profileUrl = (() => {
     try {
-      return `https://divine.video/profile/${nip19.npubEncode(event.pubkey)}`;
+      return getDivineProfileUrl(nip19.npubEncode(event.pubkey));
     } catch {
       return undefined;
     }
@@ -716,14 +718,19 @@ export function EventsList({ relayUrl }: EventsListProps) {
 
           {/* Smart Filters */}
           <div className="flex flex-wrap gap-4">
-            <label className="flex items-center gap-2 text-sm cursor-pointer">
-              <Checkbox
-                checked={filterHasReports}
-                onCheckedChange={(checked) => setFilterHasReports(checked === true)}
-              />
-              <Flag className="h-4 w-4 text-muted-foreground" />
-              Has reports
-            </label>
+            <div className="space-y-1">
+              <label className="flex items-center gap-2 text-sm cursor-pointer">
+                <Checkbox
+                  checked={filterHasReports}
+                  onCheckedChange={(checked) => setFilterHasReports(checked === true)}
+                />
+                <Flag className="h-4 w-4 text-muted-foreground" />
+                Has reports
+              </label>
+              {filterHasReports && (
+                <TruncationWarning count={allReports?.length ?? 0} limit={500} noun="reports" />
+              )}
+            </div>
             <label className="flex items-center gap-2 text-sm cursor-pointer">
               <Checkbox
                 checked={filterNewUsers}
