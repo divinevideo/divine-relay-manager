@@ -22,7 +22,9 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Tag, UserX, Clock, Filter, ChevronDown, ChevronRight, Eye, Loader2, CheckCircle, XCircle } from "lucide-react";
+import { Tag, UserX, Clock, Filter, ChevronDown, ChevronRight, Eye, Loader2, CheckCircle, XCircle, RefreshCw } from "lucide-react";
+import { TruncationWarning } from "@/components/ui/truncation-warning";
+import { DataFreshness } from "@/components/ui/data-freshness";
 import { useToast } from "@/hooks/useToast";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { LabelPublisher } from "@/components/LabelPublisher";
@@ -113,7 +115,7 @@ export function Labels({ relayUrl }: LabelsProps) {
   };
 
   // Query for kind 1985 labels
-  const { data: labels, isLoading, error } = useQuery({
+  const { data: labels, isLoading, error, refetch, isFetching, dataUpdatedAt } = useQuery({
     queryKey: ['labels', relayUrl],
     queryFn: async ({ signal }) => {
       const events = await nostr.query(
@@ -330,8 +332,14 @@ export function Labels({ relayUrl }: LabelsProps) {
               <CardDescription>
                 Content labels from trust & safety sources. {labels?.length || 0} labels found.
               </CardDescription>
+              <TruncationWarning count={labels?.length ?? 0} limit={200} noun="labels" />
             </div>
             <div className="flex items-center gap-3">
+              <DataFreshness
+                dataUpdatedAt={dataUpdatedAt}
+                onRefresh={() => refetch()}
+                isRefetching={isFetching}
+              />
               {namespaces.length > 0 && (
                 <div className="flex items-center gap-2">
                   <Filter className="h-4 w-4 text-muted-foreground" />
