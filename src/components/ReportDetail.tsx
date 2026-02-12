@@ -23,6 +23,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useToast } from "@/hooks/useToast";
+import { ToastAction } from "@/components/ui/toast";
 import { useReportContext } from "@/hooks/useReportContext";
 import { useUserSummary } from "@/hooks/useUserSummary";
 import { useModerationStatus } from "@/hooks/useModerationStatus";
@@ -41,21 +42,10 @@ import { HiveAIReport } from "@/components/HiveAIReport";
 import { AIDetectionReport } from "@/components/AIDetectionReport";
 import { MediaPreview } from "@/components/MediaPreview";
 import { BulkDeleteByKind } from "@/components/BulkDeleteByKind";
-import { CATEGORY_LABELS } from "@/lib/constants";
+import { CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, getReportCategory } from "@/lib/constants";
 import { UserX, UserCheck, Tag, Flag, Trash2, CheckCircle, Video, History, Ban, ShieldX, Link2, User, FileText, Unlock, Repeat2, FileCode, Loader2, XCircle, RefreshCw, Undo2, EyeOff, Eye } from "lucide-react";
 import { CopyableId, CopyableTags } from "@/components/CopyableId";
 import type { NostrEvent } from "@nostrify/nostrify";
-
-// High-priority categories - media should be hidden by default for moderator safety
-const HIGH_PRIORITY_CATEGORIES = ['sexual_minors', 'csam', 'NS-csam', 'nonconsensual_sexual_content', 'terrorism_extremism', 'credible_threats'];
-
-function getReportCategory(event: NostrEvent): string {
-  const reportTag = event.tags.find(t => t[0] === 'report');
-  if (reportTag && reportTag[1]) return reportTag[1];
-  const lTag = event.tags.find(t => t[0] === 'l');
-  if (lTag && lTag[1]) return lTag[1];
-  return 'other';
-}
 
 interface ReportDetailProps {
   report: NostrEvent | null;
@@ -1381,7 +1371,9 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
           )}
 
           {/* Section: Reported Content */}
-          <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Reported Content</h4>
+          <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+            Reported Content{context.target?.type === 'event' ? ': Event' : context.target?.type === 'pubkey' ? ': User' : ''}
+          </h4>
 
           {/* Thread Context - the text content being reported */}
           {context.target?.type === 'event' && (
@@ -1458,6 +1450,21 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             pubkey={context.reportedUser.pubkey}
             stats={context.userStats}
             isLoading={context.isLoading}
+            onDeleteEvent={(eventId) => {
+              deleteMutation.mutate({ eventId, reason: 'Deleted from report review' }, {
+                onSuccess: (deletedId) => {
+                  toast({
+                    title: "Event deleted",
+                    description: "The event has been removed from the relay.",
+                    action: (
+                      <ToastAction altText="Undo delete" onClick={() => restoreEventMutation.mutate({ eventId: deletedId })}>
+                        Undo
+                      </ToastAction>
+                    ),
+                  });
+                },
+              });
+            }}
           />
 
           <Separator />

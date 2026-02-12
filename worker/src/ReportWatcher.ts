@@ -2,6 +2,7 @@
 // ABOUTME: Maintains persistent WebSocket to relay for auto-hide functionality
 
 import { type Nip86Env, banEvent } from './nip86';
+import { ensureSchema } from './db';
 
 /**
  * Extended environment for ReportWatcher DO
@@ -9,6 +10,7 @@ import { type Nip86Env, banEvent } from './nip86';
 export interface ReportWatcherEnv extends Nip86Env {
   DB?: D1Database;
   AUTO_HIDE_ENABLED?: string;
+  TRUSTED_CLIENTS?: string;
 }
 
 /**
@@ -65,6 +67,7 @@ export class ReportWatcher implements DurableObject {
   private env: ReportWatcherEnv;
 
   // Runtime state (not persisted across restarts)
+  private schemaReady: boolean = false;
   private running: boolean = false;
   private ws: WebSocket | null = null;
   private connectedAt: number | null = null;
@@ -454,6 +457,16 @@ export class ReportWatcher implements DurableObject {
     category: string,
     targetEventId: string
   ): Promise<void> {
+    // Ensure D1 schema exists before any DB access
+    if (!this.schemaReady && this.env.DB) {
+      try {
+        await ensureSchema(this.env.DB);
+        this.schemaReady = true;
+      } catch (error) {
+        console.error('[ReportWatcher] Failed to ensure schema:', error);
+      }
+    }
+
     // Check if auto-hide is enabled
     if (this.env.AUTO_HIDE_ENABLED !== 'true') {
       console.log('[ReportWatcher] Auto-hide disabled, skipping');
@@ -463,6 +476,30 @@ export class ReportWatcher implements DurableObject {
     // Check if category qualifies for auto-hide
     if (!AUTO_HIDE_CATEGORIES.includes(category)) {
       console.log(`[ReportWatcher] Category '${category}' not in auto-hide list, skipping`);
+      return;
+    }
+
+    // Check if report is from a trusted client (Divine apps)
+    const trustedClients = (this.env.TRUSTED_CLIENTS || 'diVine,divine-web,divine-mobile').split(',');
+    const clientTag = event.tags.find((t: string[]) => t[0] === 'client');
+    const clientName = clientTag?.[1];
+
+    if (!clientName || !trustedClients.includes(clientName)) {
+      console.log(`[ReportWatcher] Report from untrusted client '${clientName || 'none'}', skipping auto-hide`);
+      await this.logDecision({
+        targetType: 'event',
+        targetId: targetEventId,
+        action: 'auto_hide_skipped',
+        reason: `${category}: untrusted client (${clientName || 'no client tag'})`,
+        reportId: event.id,
+        reporterPubkey: event.pubkey,
+      });
+      return;
+    }
+
+    // Check if a human has already reviewed this target — their decision stands
+    if (await this.hasHumanResolution(targetEventId)) {
+      console.log(`[ReportWatcher] Event ${targetEventId.slice(0, 8)}... has human resolution, skipping auto-hide`);
       return;
     }
 
@@ -529,6 +566,29 @@ export class ReportWatcher implements DurableObject {
       return result !== null;
     } catch (error) {
       console.error('[ReportWatcher] Failed to check auto-hide status:', error);
+      // On error, allow processing (fail open for enforcement)
+      return false;
+    }
+  }
+
+  /**
+   * Check if a human moderator has already made a decision on this target.
+   * Reads from moderation_targets (persistent, survives reopen).
+   */
+  private async hasHumanResolution(targetEventId: string): Promise<boolean> {
+    if (!this.env.DB) {
+      return false;
+    }
+
+    try {
+      const result = await this.env.DB.prepare(`
+        SELECT 1 FROM moderation_targets
+        WHERE target_id = ? AND ever_human_reviewed = 1
+      `).bind(targetEventId).first();
+
+      return result !== null;
+    } catch (error) {
+      console.error('[ReportWatcher] Failed to check human resolution:', error);
       // On error, allow processing (fail open for enforcement)
       return false;
     }

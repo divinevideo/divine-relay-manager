@@ -17,6 +17,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useAuthor } from "@/hooks/useAuthor";
 import { MessageSquare } from "lucide-react";
 import type { NostrEvent } from "@nostrify/nostrify";
+import { getDivineProfileUrl } from "@/lib/constants";
 
 interface ThreadModalProps {
   eventId: string;
@@ -74,7 +75,7 @@ function ThreadPost({
   const isHighlighted = node.event.id === highlightId;
   const profileUrl = (() => {
     try {
-      return `https://divine.video/profile/${nip19.npubEncode(node.event.pubkey)}`;
+      return getDivineProfileUrl(nip19.npubEncode(node.event.pubkey));
     } catch {
       return undefined;
     }

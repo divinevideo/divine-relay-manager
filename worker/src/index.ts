@@ -1,13 +1,21 @@
 // ABOUTME: CF Worker that signs and publishes Nostr events for Divine Relay Admin
 // ABOUTME: Holds the relay admin nsec in secrets and handles NIP-86 moderation actions
 
-import { finalizeEvent, nip19, getPublicKey } from 'nostr-tools';
+import { finalizeEvent, nip19, getPublicKey, verifyEvent } from 'nostr-tools';
 import {
   getSecretKey,
   getManagementUrl,
   callNip86Rpc,
   type SecretStoreSecret,
 } from './nip86';
+import { ensureSchema } from './db';
+
+let schemaReady = false;
+async function ensureSchemaOnce(db: D1Database): Promise<void> {
+  if (schemaReady) return;
+  await ensureSchema(db);
+  schemaReady = true;
+}
 
 // Re-export ReportWatcher Durable Object for wrangler
 export { ReportWatcher } from './ReportWatcher';
@@ -299,6 +307,10 @@ async function handlePublish(
       console.log('[handlePublish] Resolution label details:', { status, targetType, targetId });
 
       if (status && targetType && targetId) {
+        if (env.DB) {
+          await markHumanReviewed(env.DB, targetType, targetId);
+        }
+
         // Use waitUntil to ensure sync completes even after response is sent
         const syncPromise = syncZendeskAfterAction(
           env,
@@ -372,6 +384,10 @@ async function handleModerate(
           return jsonResponse({ success: false, error: rpcResult.error || 'banevent RPC failed' }, 500, corsHeaders);
         }
 
+        if (env.DB) {
+          await markHumanReviewed(env.DB, 'event', body.eventId);
+        }
+
         // Sync any linked Zendesk tickets
         syncZendeskAfterAction(
           env,
@@ -430,6 +446,10 @@ async function handleModerate(
 
   if (!publishResult.success) {
     return jsonResponse({ success: false, error: publishResult.error }, 500, corsHeaders);
+  }
+
+  if (env.DB && body.pubkey) {
+    await markHumanReviewed(env.DB, 'pubkey', body.pubkey);
   }
 
   // Sync any linked Zendesk tickets (delete_event syncs in its own early return)
@@ -583,33 +603,15 @@ Respond with JSON only:
   }
 }
 
-// Ensure moderation_decisions table exists
-async function ensureDecisionsTable(db: D1Database): Promise<void> {
-  // Run each statement separately to avoid issues with D1's exec
-  await db.prepare(`
-    CREATE TABLE IF NOT EXISTS moderation_decisions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      target_type TEXT NOT NULL,
-      target_id TEXT NOT NULL,
-      action TEXT NOT NULL,
-      reason TEXT,
-      moderator_pubkey TEXT,
-      report_id TEXT,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP
-    )
-  `).run();
-
-  // Create indexes in separate statements
+async function markHumanReviewed(db: D1Database, targetType: string, targetId: string): Promise<void> {
   try {
-    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_decisions_target ON moderation_decisions(target_type, target_id)`).run();
-  } catch {
-    // Index might already exist
-  }
-
-  try {
-    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_decisions_report ON moderation_decisions(report_id)`).run();
-  } catch {
-    // Index might already exist
+    await db.prepare(`
+      INSERT INTO moderation_targets (target_id, target_type, ever_human_reviewed)
+      VALUES (?, ?, 1)
+      ON CONFLICT(target_id) DO UPDATE SET ever_human_reviewed = 1
+    `).bind(targetId, targetType).run();
+  } catch (error) {
+    console.error('[markHumanReviewed] Failed to update moderation_targets:', error);
   }
 }
 
@@ -672,7 +674,7 @@ async function handleLogDecision(
       return jsonResponse({ success: false, error: 'Missing required fields' }, 400, corsHeaders);
     }
 
-    await ensureDecisionsTable(env.DB);
+    await ensureSchemaOnce(env.DB);
 
     await env.DB.prepare(`
       INSERT INTO moderation_decisions (target_type, target_id, action, reason, moderator_pubkey, report_id)
@@ -685,6 +687,8 @@ async function handleLogDecision(
       body.moderatorPubkey || null,
       body.reportId || null
     ).run();
+
+    await markHumanReviewed(env.DB, body.targetType, body.targetId);
 
     return new Response(JSON.stringify({ success: true }), {
       status: 200,
@@ -709,7 +713,7 @@ async function handleGetAllDecisions(
       return jsonResponse({ success: false, error: 'Database not configured' }, 500, corsHeaders);
     }
 
-    await ensureDecisionsTable(env.DB);
+    await ensureSchemaOnce(env.DB);
 
     // Get all decisions, ordered by most recent first
     const decisions = await env.DB.prepare(`
@@ -745,7 +749,7 @@ async function handleGetDecisions(
       return jsonResponse({ success: false, error: 'Database not configured' }, 500, corsHeaders);
     }
 
-    await ensureDecisionsTable(env.DB);
+    await ensureSchemaOnce(env.DB);
 
     // Get all decisions for this target (could be event ID, pubkey, or media hash)
     const decisions = await env.DB.prepare(`
@@ -781,7 +785,7 @@ async function handleDeleteDecisions(
       return jsonResponse({ success: false, error: 'Database not configured' }, 500, corsHeaders);
     }
 
-    await ensureDecisionsTable(env.DB);
+    await ensureSchemaOnce(env.DB);
 
     let labelsDeleted = 0;
 
@@ -822,7 +826,8 @@ async function handleDeleteDecisions(
       }
     }
 
-    // Delete all decisions for this target from D1 (reopens the report)
+    // Delete all decisions for this target from D1 (reopens the report).
+    // moderation_targets.ever_human_reviewed is NOT cleared — prevents re-auto-hide.
     const result = await env.DB.prepare(`
       DELETE FROM moderation_decisions
       WHERE target_id = ?
@@ -1228,6 +1233,63 @@ async function verifyZendeskWebhook(
   const expectedSig = btoa(String.fromCharCode(...new Uint8Array(signatureBytes)));
 
   return signature === expectedSig;
+}
+
+// Verify NIP-98 HTTP Auth (kind 27235)
+// Returns the authenticated pubkey or an error
+interface Nip98Result {
+  valid: boolean;
+  pubkey?: string;
+  error?: string;
+}
+
+async function verifyNip98Auth(
+  request: Request,
+  expectedUrl: string
+): Promise<Nip98Result> {
+  const authHeader = request.headers.get('Authorization');
+  if (!authHeader || !authHeader.startsWith('Nostr ')) {
+    return { valid: false, error: 'Missing or invalid Authorization header (expected: Nostr <base64>)' };
+  }
+
+  try {
+    const base64Event = authHeader.slice(6); // Remove "Nostr " prefix
+    const eventJson = atob(base64Event);
+    const event = JSON.parse(eventJson);
+
+    // Verify event structure
+    if (event.kind !== 27235) {
+      return { valid: false, error: 'Invalid event kind (expected 27235)' };
+    }
+
+    // Verify signature
+    if (!verifyEvent(event)) {
+      return { valid: false, error: 'Invalid event signature' };
+    }
+
+    // Check timestamp (allow 60 seconds clock skew)
+    const now = Math.floor(Date.now() / 1000);
+    if (Math.abs(event.created_at - now) > 60) {
+      return { valid: false, error: 'Event timestamp too old or in future' };
+    }
+
+    // Verify URL tag
+    const urlTag = event.tags.find((t: string[]) => t[0] === 'u');
+    if (!urlTag || urlTag[1] !== expectedUrl) {
+      return { valid: false, error: `URL mismatch (expected ${expectedUrl})` };
+    }
+
+    // Verify method tag
+    const methodTag = event.tags.find((t: string[]) => t[0] === 'method');
+    if (!methodTag || methodTag[1].toUpperCase() !== request.method) {
+      return { valid: false, error: 'Method mismatch' };
+    }
+
+    return { valid: true, pubkey: event.pubkey };
+  } catch (e) {
+    console.error('[verifyNip98Auth] Error:', e);
+    return { valid: false, error: 'Failed to parse auth event' };
+  }
 }
 
 // Update Zendesk ticket with action result and internal note
@@ -1685,7 +1747,7 @@ async function handleZendeskWebhook(
 
     // Log the decision
     if (env.DB && actionResult.success) {
-      await ensureDecisionsTable(env.DB);
+      await ensureSchemaOnce(env.DB);
       await env.DB.prepare(`
         INSERT INTO moderation_decisions (target_type, target_id, action, reason, moderator_pubkey, report_id)
         VALUES (?, ?, ?, ?, ?, ?)
@@ -1697,6 +1759,10 @@ async function handleZendeskWebhook(
         body.agent_email || null,
         `zendesk:${body.ticket_id}`
       ).run();
+
+      const targetType = body.nostr_event_id ? 'event' : 'pubkey';
+      const targetId = body.nostr_event_id || body.nostr_pubkey || '';
+      await markHumanReviewed(env.DB, targetType, targetId);
 
       // Sync any linked Zendesk tickets (via our mapping table)
       syncZendeskAfterAction(
@@ -1907,15 +1973,25 @@ async function handleMobileJwt(
       name = formData.get('name') as string | null || undefined;
       email = formData.get('email') as string | null || undefined;
     } else {
-      // JSON format from mobile app
-      const body = await request.json() as {
-        pubkey?: string;
-        name?: string;
-        email?: string;
-      };
-      pubkey = body.pubkey;
-      name = body.name;
-      email = body.email;
+      // JSON format from mobile app - requires NIP-98 auth
+      const authResult = await verifyNip98Auth(request, request.url);
+      if (!authResult.valid) {
+        return jsonResponse(
+          { success: false, error: `NIP-98 auth required: ${authResult.error}` },
+          401,
+          corsHeaders
+        );
+      }
+      pubkey = authResult.pubkey;
+
+      // Optional name/email can still come from body
+      try {
+        const body = await request.json() as { name?: string; email?: string };
+        name = body.name;
+        email = body.email;
+      } catch {
+        // Body is optional for NIP-98 auth path
+      }
     }
 
     // Validate pubkey (required, 64 hex chars)
@@ -2044,7 +2120,8 @@ async function syncZendeskAfterAction(
     }
 
     // Determine if this is a resolution action (should solve ticket)
-    const resolutionActions = ['reviewed', 'dismissed', 'no-action', 'false-positive'];
+    // Note: ban_user is Zendesk webhook naming, ban_pubkey is UI naming - same effect
+    const resolutionActions = ['reviewed', 'dismissed', 'no-action', 'false-positive', 'delete_event', 'ban_pubkey', 'ban_user'];
     const isResolution = resolutionActions.includes(action);
 
     // Build note
@@ -2104,7 +2181,7 @@ async function handleZendeskContext(
 
     // Get decision history
     if (env.DB) {
-      await ensureDecisionsTable(env.DB);
+      await ensureSchemaOnce(env.DB);
       const targetId = eventId || pubkey;
       const decisions = await env.DB.prepare(`
         SELECT * FROM moderation_decisions
@@ -2269,7 +2346,7 @@ async function handleZendeskAction(
 
     // Log the decision
     if (env.DB && actionResult.success) {
-      await ensureDecisionsTable(env.DB);
+      await ensureSchemaOnce(env.DB);
       await env.DB.prepare(`
         INSERT INTO moderation_decisions (target_type, target_id, action, reason, moderator_pubkey, report_id)
         VALUES (?, ?, ?, ?, ?, ?)
@@ -2281,6 +2358,10 @@ async function handleZendeskAction(
         user.email,
         body.ticket_id ? `zendesk:${body.ticket_id}` : null
       ).run();
+
+      const ztargetType = body.event_id ? 'event' : 'pubkey';
+      const ztargetId = body.event_id || body.pubkey || '';
+      await markHumanReviewed(env.DB, ztargetType, ztargetId);
     }
 
     // Sync any linked Zendesk tickets
