@@ -57,18 +57,7 @@ import {
 } from "lucide-react";
 import type { NostrEvent } from "@nostrify/nostrify";
 import { nip19 } from "nostr-tools";
-
-// High-priority categories - media should be hidden by default for moderator safety
-const HIGH_PRIORITY_CATEGORIES = ['sexual_minors', 'csam', 'NS-csam', 'nonconsensual_sexual_content', 'terrorism_extremism', 'credible_threats'];
-
-// Extract category from a report event
-function getReportCategory(event: NostrEvent): string {
-  const reportTag = event.tags.find(t => t[0] === 'report');
-  if (reportTag && reportTag[1]) return reportTag[1];
-  const lTag = event.tags.find(t => t[0] === 'l');
-  if (lTag && lTag[1]) return lTag[1];
-  return 'other';
-}
+import { HIGH_PRIORITY_CATEGORIES, getReportCategory } from "@/lib/constants";
 
 interface EventDetailProps {
   event: NostrEvent;

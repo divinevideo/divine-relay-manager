@@ -1,7 +1,7 @@
 // ABOUTME: CF Worker that signs and publishes Nostr events for Divine Relay Admin
 // ABOUTME: Holds the relay admin nsec in secrets and handles NIP-86 moderation actions
 
-import { finalizeEvent, nip19, getPublicKey } from 'nostr-tools';
+import { finalizeEvent, nip19, getPublicKey, verifyEvent } from 'nostr-tools';
 import {
   getSecretKey,
   getManagementUrl,
@@ -1230,6 +1230,63 @@ async function verifyZendeskWebhook(
   return signature === expectedSig;
 }
 
+// Verify NIP-98 HTTP Auth (kind 27235)
+// Returns the authenticated pubkey or an error
+interface Nip98Result {
+  valid: boolean;
+  pubkey?: string;
+  error?: string;
+}
+
+async function verifyNip98Auth(
+  request: Request,
+  expectedUrl: string
+): Promise<Nip98Result> {
+  const authHeader = request.headers.get('Authorization');
+  if (!authHeader || !authHeader.startsWith('Nostr ')) {
+    return { valid: false, error: 'Missing or invalid Authorization header (expected: Nostr <base64>)' };
+  }
+
+  try {
+    const base64Event = authHeader.slice(6); // Remove "Nostr " prefix
+    const eventJson = atob(base64Event);
+    const event = JSON.parse(eventJson);
+
+    // Verify event structure
+    if (event.kind !== 27235) {
+      return { valid: false, error: 'Invalid event kind (expected 27235)' };
+    }
+
+    // Verify signature
+    if (!verifyEvent(event)) {
+      return { valid: false, error: 'Invalid event signature' };
+    }
+
+    // Check timestamp (allow 60 seconds clock skew)
+    const now = Math.floor(Date.now() / 1000);
+    if (Math.abs(event.created_at - now) > 60) {
+      return { valid: false, error: 'Event timestamp too old or in future' };
+    }
+
+    // Verify URL tag
+    const urlTag = event.tags.find((t: string[]) => t[0] === 'u');
+    if (!urlTag || urlTag[1] !== expectedUrl) {
+      return { valid: false, error: `URL mismatch (expected ${expectedUrl})` };
+    }
+
+    // Verify method tag
+    const methodTag = event.tags.find((t: string[]) => t[0] === 'method');
+    if (!methodTag || methodTag[1].toUpperCase() !== request.method) {
+      return { valid: false, error: 'Method mismatch' };
+    }
+
+    return { valid: true, pubkey: event.pubkey };
+  } catch (e) {
+    console.error('[verifyNip98Auth] Error:', e);
+    return { valid: false, error: 'Failed to parse auth event' };
+  }
+}
+
 // Update Zendesk ticket with action result and internal note
 async function updateZendeskTicket(
   ticketId: number,
@@ -1907,15 +1964,25 @@ async function handleMobileJwt(
       name = formData.get('name') as string | null || undefined;
       email = formData.get('email') as string | null || undefined;
     } else {
-      // JSON format from mobile app
-      const body = await request.json() as {
-        pubkey?: string;
-        name?: string;
-        email?: string;
-      };
-      pubkey = body.pubkey;
-      name = body.name;
-      email = body.email;
+      // JSON format from mobile app - requires NIP-98 auth
+      const authResult = await verifyNip98Auth(request, request.url);
+      if (!authResult.valid) {
+        return jsonResponse(
+          { success: false, error: `NIP-98 auth required: ${authResult.error}` },
+          401,
+          corsHeaders
+        );
+      }
+      pubkey = authResult.pubkey;
+
+      // Optional name/email can still come from body
+      try {
+        const body = await request.json() as { name?: string; email?: string };
+        name = body.name;
+        email = body.email;
+      } catch {
+        // Body is optional for NIP-98 auth path
+      }
     }
 
     // Validate pubkey (required, 64 hex chars)
@@ -2044,7 +2111,8 @@ async function syncZendeskAfterAction(
     }
 
     // Determine if this is a resolution action (should solve ticket)
-    const resolutionActions = ['reviewed', 'dismissed', 'no-action', 'false-positive'];
+    // Note: ban_user is Zendesk webhook naming, ban_pubkey is UI naming - same effect
+    const resolutionActions = ['reviewed', 'dismissed', 'no-action', 'false-positive', 'delete_event', 'ban_pubkey', 'ban_user'];
     const isResolution = resolutionActions.includes(action);
 
     // Build note

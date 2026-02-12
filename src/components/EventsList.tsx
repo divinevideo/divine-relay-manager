@@ -22,6 +22,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Textarea } from "@/components/ui/textarea";
 import { EventDetail } from "@/components/EventDetail";
 import { BulkDeleteByKind } from "@/components/BulkDeleteByKind";
+import { getDivineProfileUrl } from "@/lib/constants";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   FileText,
@@ -78,7 +79,7 @@ function EventCard({
   const profileImage = metadata?.picture;
   const profileUrl = (() => {
     try {
-      return `https://divine.video/profile/${nip19.npubEncode(event.pubkey)}`;
+      return getDivineProfileUrl(nip19.npubEncode(event.pubkey));
     } catch {
       return undefined;
     }
