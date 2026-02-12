@@ -52,6 +52,7 @@ database_id = "5e694cde-20d4-491d-aed3-aaac47a5a9b5"
 binding = "REALNESS"
 service = "divine-ai-detector"
 
+
 # Durable Objects for persistent state
 [durable_objects]
 bindings = [

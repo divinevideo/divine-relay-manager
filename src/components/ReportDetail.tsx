@@ -730,6 +730,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     },
   });
 
+
   // Combined action: Block media AND delete event
   const blockAndDeleteMutation = useMutation({
     mutationFn: async ({ eventId, hashes, reason }: { eventId: string; hashes: string[]; reason: string }) => {
