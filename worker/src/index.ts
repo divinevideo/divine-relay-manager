@@ -1,12 +1,16 @@
 // ABOUTME: CF Worker that signs and publishes Nostr events for Divine Relay Admin
 // ABOUTME: Holds the relay admin nsec in secrets and handles NIP-86 moderation actions
 
-import { finalizeEvent, nip19, getPublicKey } from 'nostr-tools';
+import { finalizeEvent, nip19, getPublicKey, verifyEvent } from 'nostr-tools';
+import {
+  getSecretKey,
+  getManagementUrl,
+  callNip86Rpc,
+  type SecretStoreSecret,
+} from './nip86';
 
-// Secrets Store secret object (for account-level secrets)
-interface SecretStoreSecret {
-  get(): Promise<string>;
-}
+// Re-export ReportWatcher Durable Object for wrangler
+export { ReportWatcher } from './ReportWatcher';
 
 interface Env {
   NOSTR_NSEC: string | SecretStoreSecret;
@@ -14,8 +18,8 @@ interface Env {
   ALLOWED_ORIGINS: string;
   ANTHROPIC_API_KEY?: string;
   // Cloudflare Access Service Token for moderation.admin.divine.video
-  CF_ACCESS_CLIENT_ID?: string;
-  CF_ACCESS_CLIENT_SECRET?: string;
+  CF_ACCESS_CLIENT_ID?: string | SecretStoreSecret;
+  CF_ACCESS_CLIENT_SECRET?: string | SecretStoreSecret;
   // Service binding to divine-realness worker (bypasses CF Access)
   REALNESS?: Fetcher;
   // Zendesk integration
@@ -34,6 +38,10 @@ interface Env {
   MANAGEMENT_URL?: string;   // Full URL override for NIP-86 management API (for local dev with HTTP)
   MODERATION_SERVICE_URL?: string;  // URL for media moderation service
   REALNESS_API_URL?: string;  // URL for AI detection/realness service
+  // Durable Object bindings
+  REPORT_WATCHER?: DurableObjectNamespace;
+  // Auto-hide feature flag
+  AUTO_HIDE_ENABLED?: string;
 }
 
 // Zendesk JWT payload structure
@@ -50,24 +58,27 @@ const DEFAULT_MODERATION_SERVICE_URL = 'https://moderation.admin.divine.video';
 const DEFAULT_REALNESS_API_URL = 'https://realness.admin.divine.video';
 
 /**
- * Get the NIP-86 management API URL for the configured relay.
- * If MANAGEMENT_URL is set (for local dev with HTTP), use it directly.
- * Otherwise, converts WSS relay URL to HTTPS and appends the management path.
- */
-function getManagementUrl(env: Env): string {
-  if (env.MANAGEMENT_URL) {
-    return env.MANAGEMENT_URL;
-  }
-  const baseUrl = env.RELAY_URL.replace(/^wss?:\/\//, 'https://');
-  const managementPath = env.MANAGEMENT_PATH || '/management';
-  return `${baseUrl}${managementPath}`;
-}
-
-/**
  * Get the moderation service URL from env or use default.
  */
 function getModerationServiceUrl(env: Env): string {
   return env.MODERATION_SERVICE_URL || DEFAULT_MODERATION_SERVICE_URL;
+}
+
+/**
+ * Resolve CF Access credentials from env (supports both plain strings and SecretStoreSecret bindings).
+ */
+async function getCfAccessCredentials(env: Env): Promise<{ clientId: string; clientSecret: string } | null> {
+  if (!env.CF_ACCESS_CLIENT_ID || !env.CF_ACCESS_CLIENT_SECRET) return null;
+
+  const clientId = typeof env.CF_ACCESS_CLIENT_ID === 'string'
+    ? env.CF_ACCESS_CLIENT_ID
+    : await env.CF_ACCESS_CLIENT_ID.get();
+  const clientSecret = typeof env.CF_ACCESS_CLIENT_SECRET === 'string'
+    ? env.CF_ACCESS_CLIENT_SECRET
+    : await env.CF_ACCESS_CLIENT_SECRET.get();
+
+  if (!clientId || !clientSecret) return null;
+  return { clientId, clientSecret };
 }
 
 function getAllowedOrigin(requestOrigin: string | null, allowedOriginsEnv: string | undefined): string {
@@ -180,6 +191,11 @@ export default {
         return handleZendeskRoutes(request, path, env, corsHeaders);
       }
 
+      // Report watcher management endpoints
+      if (path.startsWith('/api/report-watcher/')) {
+        return handleReportWatcherRoutes(request, path, env, corsHeaders);
+      }
+
       // 404 for unknown routes
       return jsonResponse({ success: false, error: 'Not found' }, 404, corsHeaders);
     } catch (error) {
@@ -201,23 +217,6 @@ function jsonResponse(data: ApiResponse, status: number, headers: Record<string,
       ...headers,
     },
   });
-}
-
-async function getSecretKey(env: Env): Promise<Uint8Array> {
-  const nsec = typeof env.NOSTR_NSEC === 'string'
-    ? env.NOSTR_NSEC
-    : await env.NOSTR_NSEC.get();
-
-  if (!nsec) {
-    throw new Error('NOSTR_NSEC secret not configured');
-  }
-
-  const decoded = nip19.decode(nsec);
-  if (decoded.type !== 'nsec') {
-    throw new Error('Invalid NOSTR_NSEC format - must be nsec1...');
-  }
-
-  return decoded.data as Uint8Array;
 }
 
 async function handleInfo(env: Env, corsHeaders: Record<string, string>): Promise<Response> {
@@ -459,51 +458,10 @@ async function handleRelayRpc(
     return jsonResponse({ success: false, error: 'Missing method' }, 400, corsHeaders);
   }
 
-  const secretKey = await getSecretKey(env);
+  // Use shared NIP-86 RPC utility
+  const result = await callNip86Rpc(body.method, body.params || [], env);
 
-  // Build NIP-98 auth event
-  const httpUrl = getManagementUrl(env);
-  const payload = JSON.stringify({ method: body.method, params: body.params || [] });
-  const payloadHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
-  const payloadHashHex = Array.from(new Uint8Array(payloadHash)).map(b => b.toString(16).padStart(2, '0')).join('');
-
-  const authEvent = finalizeEvent(
-    {
-      kind: 27235,
-      content: '',
-      tags: [
-        ['u', httpUrl],
-        ['method', 'POST'],
-        ['payload', payloadHashHex],
-      ],
-      created_at: Math.floor(Date.now() / 1000),
-    },
-    secretKey
-  );
-
-  const authHeader = `Nostr ${btoa(JSON.stringify(authEvent))}`;
-
-  // Call relay RPC
-  const response = await fetch(httpUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/nostr+json+rpc',
-      'Authorization': authHeader,
-    },
-    body: payload,
-  });
-
-  if (!response.ok) {
-    return jsonResponse(
-      { success: false, error: `Relay error: ${response.status} ${response.statusText}` },
-      response.status,
-      corsHeaders
-    );
-  }
-
-  const result = await response.json() as { result?: unknown; error?: string };
-
-  if (result.error) {
+  if (!result.success) {
     return jsonResponse({ success: false, error: result.error }, 400, corsHeaders);
   }
 
@@ -900,9 +858,10 @@ async function handleCheckResult(
       'Content-Type': 'application/json',
     };
 
-    if (env.CF_ACCESS_CLIENT_ID && env.CF_ACCESS_CLIENT_SECRET) {
-      headers['CF-Access-Client-Id'] = env.CF_ACCESS_CLIENT_ID;
-      headers['CF-Access-Client-Secret'] = env.CF_ACCESS_CLIENT_SECRET;
+    const cfAccess = await getCfAccessCredentials(env);
+    if (cfAccess) {
+      headers['CF-Access-Client-Id'] = cfAccess.clientId;
+      headers['CF-Access-Client-Secret'] = cfAccess.clientSecret;
     }
 
     const response = await fetch(`${getModerationServiceUrl(env)}/check-result/${sha256}`, {
@@ -960,15 +919,16 @@ async function handleModerateMedia(
     }
 
     // Require Zero Trust credentials for moderation service
-    if (!env.CF_ACCESS_CLIENT_ID || !env.CF_ACCESS_CLIENT_SECRET) {
+    const cfAccess = await getCfAccessCredentials(env);
+    if (!cfAccess) {
       return jsonResponse({ success: false, error: 'CF_ACCESS credentials not configured' }, 500, corsHeaders);
     }
 
     // Build headers with Cloudflare Access service token
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
-      'CF-Access-Client-Id': env.CF_ACCESS_CLIENT_ID,
-      'CF-Access-Client-Secret': env.CF_ACCESS_CLIENT_SECRET,
+      'CF-Access-Client-Id': cfAccess.clientId,
+      'CF-Access-Client-Secret': cfAccess.clientSecret,
     };
 
     const response = await fetch(`${getModerationServiceUrl(env)}/api/v1/moderate`, {
@@ -1270,6 +1230,63 @@ async function verifyZendeskWebhook(
   return signature === expectedSig;
 }
 
+// Verify NIP-98 HTTP Auth (kind 27235)
+// Returns the authenticated pubkey or an error
+interface Nip98Result {
+  valid: boolean;
+  pubkey?: string;
+  error?: string;
+}
+
+async function verifyNip98Auth(
+  request: Request,
+  expectedUrl: string
+): Promise<Nip98Result> {
+  const authHeader = request.headers.get('Authorization');
+  if (!authHeader || !authHeader.startsWith('Nostr ')) {
+    return { valid: false, error: 'Missing or invalid Authorization header (expected: Nostr <base64>)' };
+  }
+
+  try {
+    const base64Event = authHeader.slice(6); // Remove "Nostr " prefix
+    const eventJson = atob(base64Event);
+    const event = JSON.parse(eventJson);
+
+    // Verify event structure
+    if (event.kind !== 27235) {
+      return { valid: false, error: 'Invalid event kind (expected 27235)' };
+    }
+
+    // Verify signature
+    if (!verifyEvent(event)) {
+      return { valid: false, error: 'Invalid event signature' };
+    }
+
+    // Check timestamp (allow 60 seconds clock skew)
+    const now = Math.floor(Date.now() / 1000);
+    if (Math.abs(event.created_at - now) > 60) {
+      return { valid: false, error: 'Event timestamp too old or in future' };
+    }
+
+    // Verify URL tag
+    const urlTag = event.tags.find((t: string[]) => t[0] === 'u');
+    if (!urlTag || urlTag[1] !== expectedUrl) {
+      return { valid: false, error: `URL mismatch (expected ${expectedUrl})` };
+    }
+
+    // Verify method tag
+    const methodTag = event.tags.find((t: string[]) => t[0] === 'method');
+    if (!methodTag || methodTag[1].toUpperCase() !== request.method) {
+      return { valid: false, error: 'Method mismatch' };
+    }
+
+    return { valid: true, pubkey: event.pubkey };
+  } catch (e) {
+    console.error('[verifyNip98Auth] Error:', e);
+    return { valid: false, error: 'Failed to parse auth event' };
+  }
+}
+
 // Update Zendesk ticket with action result and internal note
 async function updateZendeskTicket(
   ticketId: number,
@@ -1446,14 +1463,15 @@ async function handleRealnessViaHTTP(
   const realnessUrl = env.REALNESS_API_URL || DEFAULT_REALNESS_API_URL;
 
   // Check CF Access credentials
-  if (!env.CF_ACCESS_CLIENT_ID || !env.CF_ACCESS_CLIENT_SECRET) {
+  const cfAccess = await getCfAccessCredentials(env);
+  if (!cfAccess) {
     return jsonResponse({ success: false, error: 'CF_ACCESS credentials not configured (and no service binding)' }, 500, corsHeaders);
   }
 
   // Build headers with CF Access auth
   const headers: Record<string, string> = {
-    'CF-Access-Client-Id': env.CF_ACCESS_CLIENT_ID,
-    'CF-Access-Client-Secret': env.CF_ACCESS_CLIENT_SECRET,
+    'CF-Access-Client-Id': cfAccess.clientId,
+    'CF-Access-Client-Secret': cfAccess.clientSecret,
     'Accept': 'application/json',
   };
 
@@ -1502,6 +1520,58 @@ async function handleRealnessViaHTTP(
   return jsonResponse({ success: false, error: 'Unknown realness endpoint' }, 404, corsHeaders);
 }
 
+// ============================================================================
+// Report Watcher Management
+// ============================================================================
+
+/**
+ * Handle /api/report-watcher/* routes
+ * Proxies requests to the ReportWatcher Durable Object
+ */
+async function handleReportWatcherRoutes(
+  request: Request,
+  path: string,
+  env: Env,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  if (!env.REPORT_WATCHER) {
+    return jsonResponse(
+      { success: false, error: 'Report watcher not configured' },
+      500,
+      corsHeaders
+    );
+  }
+
+  const subPath = path.replace('/api/report-watcher', '');
+
+  // Get the singleton DO instance (using a fixed ID)
+  const id = env.REPORT_WATCHER.idFromName('singleton');
+  const stub = env.REPORT_WATCHER.get(id);
+
+  try {
+    // Forward the request to the DO
+    const doRequest = new Request(`https://do${subPath}`, {
+      method: request.method,
+      headers: request.headers,
+    });
+
+    const response = await stub.fetch(doRequest);
+    const data = await response.json();
+
+    return new Response(JSON.stringify(data), {
+      status: response.status,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders },
+    });
+  } catch (error) {
+    console.error('[handleReportWatcherRoutes] Error:', error);
+    return jsonResponse(
+      { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+      500,
+      corsHeaders
+    );
+  }
+}
+
 // Route handler for all /api/zendesk/* endpoints
 async function handleZendeskRoutes(
   request: Request,
@@ -1519,6 +1589,11 @@ async function handleZendeskRoutes(
   // Parse report endpoint - extracts Nostr IDs from ticket description, stores mapping, adds links
   if (subPath === '/parse-report' && request.method === 'POST') {
     return handleParseReport(request, env, corsHeaders);
+  }
+
+  // Mobile JWT endpoint - generates JWTs for mobile app users (no auth required, pubkey is public)
+  if (subPath === '/mobile-jwt' && request.method === 'POST') {
+    return handleMobileJwt(request, env, corsHeaders);
   }
 
   // All other Zendesk endpoints require JWT auth
@@ -1842,6 +1917,159 @@ async function handleParseReport(
   }
 }
 
+// Generate JWT for mobile app users to authenticate with Zendesk SDK
+// This enables "View Past Messages" and push notifications
+async function handleMobileJwt(
+  request: Request,
+  env: Env,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  try {
+    if (!env.ZENDESK_JWT_SECRET) {
+      return jsonResponse({ success: false, error: 'ZENDESK_JWT_SECRET not configured' }, 500, corsHeaders);
+    }
+
+    let pubkey: string | undefined;
+    let name: string | undefined;
+    let email: string | undefined;
+
+    const contentType = request.headers.get('content-type') || '';
+
+    if (contentType.includes('application/x-www-form-urlencoded')) {
+      // Zendesk callback format - extract user_token which contains the external_id (npub)
+      const formData = await request.formData();
+      const userToken = formData.get('user_token') as string | null;
+
+      console.log('[handleMobileJwt] Zendesk callback with user_token:', userToken?.substring(0, 20) + '...');
+
+      if (userToken) {
+        // user_token should be the npub (external_id) we set earlier
+        // If it's an npub, decode it to get the hex pubkey
+        if (userToken.startsWith('npub1')) {
+          try {
+            const decoded = nip19.decode(userToken);
+            if (decoded.type === 'npub') {
+              pubkey = decoded.data as string;
+            }
+          } catch (e) {
+            console.log('[handleMobileJwt] Failed to decode npub:', e);
+          }
+        } else if (/^[a-f0-9]{64}$/i.test(userToken)) {
+          // It's already a hex pubkey
+          pubkey = userToken;
+        }
+      }
+
+      // Also check for name/email in form data
+      name = formData.get('name') as string | null || undefined;
+      email = formData.get('email') as string | null || undefined;
+    } else {
+      // JSON format from mobile app - requires NIP-98 auth
+      const authResult = await verifyNip98Auth(request, request.url);
+      if (!authResult.valid) {
+        return jsonResponse(
+          { success: false, error: `NIP-98 auth required: ${authResult.error}` },
+          401,
+          corsHeaders
+        );
+      }
+      pubkey = authResult.pubkey;
+
+      // Optional name/email can still come from body
+      try {
+        const body = await request.json() as { name?: string; email?: string };
+        name = body.name;
+        email = body.email;
+      } catch {
+        // Body is optional for NIP-98 auth path
+      }
+    }
+
+    // Validate pubkey (required, 64 hex chars)
+    if (!pubkey || !/^[a-f0-9]{64}$/i.test(pubkey)) {
+      return jsonResponse({ success: false, error: 'Missing or invalid pubkey (must be 64 hex chars)' }, 400, corsHeaders);
+    }
+
+    pubkey = pubkey.toLowerCase();
+    const now = Math.floor(Date.now() / 1000);
+    const exp = now + 3600; // 1 hour expiry
+
+    // Convert hex pubkey to npub (bech32) for consistent user identification
+    // This matches the pattern used in divine-mobile's zendesk_support_service
+    const npub = nip19.npubEncode(pubkey);
+
+    // Build JWT payload
+    // external_id uses npub to link REST API tickets to SDK identity
+    const payload = {
+      iss: 'divine.video',
+      iat: now,
+      exp: exp,
+      jti: crypto.randomUUID(),
+      external_id: npub,
+      name: name || `Divine User`,
+      email: email || `${npub}@divine.video`,
+    };
+
+    // Build JWT header
+    const header = {
+      alg: 'HS256',
+      typ: 'JWT',
+    };
+
+    // Base64URL encode helper
+    const base64UrlEncode = (data: string): string => {
+      return btoa(data)
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=+$/, '');
+    };
+
+    // Encode header and payload
+    const headerB64 = base64UrlEncode(JSON.stringify(header));
+    const payloadB64 = base64UrlEncode(JSON.stringify(payload));
+    const dataToSign = `${headerB64}.${payloadB64}`;
+
+    // Sign with HMAC-SHA256
+    const key = await crypto.subtle.importKey(
+      'raw',
+      new TextEncoder().encode(env.ZENDESK_JWT_SECRET),
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['sign']
+    );
+
+    const signatureBytes = await crypto.subtle.sign(
+      'HMAC',
+      key,
+      new TextEncoder().encode(dataToSign)
+    );
+
+    const signatureB64 = base64UrlEncode(
+      String.fromCharCode(...new Uint8Array(signatureBytes))
+    );
+
+    const jwt = `${dataToSign}.${signatureB64}`;
+
+    console.log(`[handleMobileJwt] Generated JWT for npub: ${npub.substring(0, 16)}...`);
+
+    return new Response(JSON.stringify({
+      success: true,
+      jwt,
+      expires_at: exp,
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders },
+    });
+  } catch (error) {
+    console.error('[handleMobileJwt] Error:', error);
+    return jsonResponse(
+      { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+      500,
+      corsHeaders
+    );
+  }
+}
+
 // Sync Zendesk ticket after moderation action in relay-manager
 async function syncZendeskAfterAction(
   env: Env,
@@ -1883,7 +2111,8 @@ async function syncZendeskAfterAction(
     }
 
     // Determine if this is a resolution action (should solve ticket)
-    const resolutionActions = ['reviewed', 'dismissed', 'no-action', 'false-positive'];
+    // Note: ban_user is Zendesk webhook naming, ban_pubkey is UI naming - same effect
+    const resolutionActions = ['reviewed', 'dismissed', 'no-action', 'false-positive', 'delete_event', 'ban_pubkey', 'ban_user'];
     const isResolution = resolutionActions.includes(action);
 
     // Build note

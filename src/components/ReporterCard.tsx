@@ -12,6 +12,7 @@ import { FileText, Copy, Check, Flag } from "lucide-react";
 import { useState } from "react";
 import { nip19 } from "nostr-tools";
 import type { NostrEvent } from "@nostrify/nostrify";
+import { getDivineProfileUrl } from "@/lib/constants";
 
 interface ReporterCardProps {
   pubkey: string;
@@ -44,7 +45,7 @@ export function ReporterCard({
 
   const displayName = profile?.display_name || profile?.name || `${npub.slice(0, 12)}...`;
   const npubDisplay = `${npub.slice(0, 12)}...${npub.slice(-6)}`;
-  const profileUrl = `https://divine.video/profile/${npub}`;
+  const profileUrl = getDivineProfileUrl(npub);
 
   const copyPubkey = async () => {
     try {
@@ -294,7 +295,7 @@ export function ReporterInline({ pubkey, onViewProfile }: ReporterInlineProps) {
     );
   }
 
-  const profileUrl = `https://divine.video/profile/${npub}`;
+  const profileUrl = getDivineProfileUrl(npub);
 
   return (
     <div className="flex items-center gap-2 flex-wrap">

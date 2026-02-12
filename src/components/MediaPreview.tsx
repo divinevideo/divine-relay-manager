@@ -1,7 +1,7 @@
 // ABOUTME: Displays media (images/videos) from Nostr events with proper handling
 // ABOUTME: Extracts URLs from content and imeta tags, renders with appropriate player
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -141,8 +141,16 @@ export function MediaPreview({
   const [showMedia, setShowMedia] = useState(showByDefault);
   const [failedUrls, setFailedUrls] = useState<Set<string>>(new Set());
 
+  // Collapse media if showByDefault changes to false (e.g., high-priority reports loaded)
+  // This handles the race condition where reports load after initial render
+  useEffect(() => {
+    if (!showByDefault) {
+      setShowMedia(false);
+    }
+  }, [showByDefault]);
+
   const content = propContent ?? event?.content ?? '';
-  const tags = propTags ?? event?.tags ?? [];
+  const tags = useMemo(() => propTags ?? event?.tags ?? [], [propTags, event?.tags]);
 
   const mediaItems = useMemo(() => extractMediaItems(content, tags), [content, tags]);
 

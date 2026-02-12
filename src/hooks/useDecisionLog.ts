@@ -29,6 +29,13 @@ export function useDecisionLog(targetId: string | null | undefined) {
   const isReviewed = data?.some(d => d.action === 'reviewed' || d.action === 'mark_ok');
   const isFalsePositive = data?.some(d => d.action === 'false_positive' || d.action === 'false-positive');
 
+  // Auto-hide specific checks
+  const isAutoHidden = data?.some(d => d.action === 'auto_hidden');
+  const isAutoHideConfirmed = data?.some(d => d.action === 'auto_hide_confirmed');
+  const isAutoHideRestored = data?.some(d => d.action === 'auto_hide_restored');
+  // Pending review = auto-hidden but not yet confirmed or restored
+  const isPendingReview = isAutoHidden && !isAutoHideConfirmed && !isAutoHideRestored;
+
   return {
     decisions: data || [],
     hasDecisions,
@@ -38,6 +45,10 @@ export function useDecisionLog(targetId: string | null | undefined) {
     isMediaBlocked,
     isReviewed,
     isFalsePositive,
+    isAutoHidden,
+    isAutoHideConfirmed,
+    isAutoHideRestored,
+    isPendingReview,
     isLoading,
     error,
     refetch,

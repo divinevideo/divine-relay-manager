@@ -1,7 +1,7 @@
 // ABOUTME: Comprehensive event detail view showing all event information
 // ABOUTME: Includes raw JSON, linked events, author profile, user stats, related reports, and moderation actions
 
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNostr } from "@/hooks/useNostr";
 import { useAuthor } from "@/hooks/useAuthor";
@@ -32,6 +32,7 @@ import {
 import { HiveAIReport } from "@/components/HiveAIReport";
 import { AIDetectionReport } from "@/components/AIDetectionReport";
 import { ReporterList } from "@/components/ReporterCard";
+import { MediaPreview } from "@/components/MediaPreview";
 import {
   User,
   Hash,
@@ -41,8 +42,6 @@ import {
   Copy,
   ExternalLink,
   AtSign,
-  Image,
-  Video,
   MessageSquare,
   Flag,
   FileText,
@@ -58,6 +57,7 @@ import {
 } from "lucide-react";
 import type { NostrEvent } from "@nostrify/nostrify";
 import { nip19 } from "nostr-tools";
+import { HIGH_PRIORITY_CATEGORIES, getReportCategory } from "@/lib/constants";
 
 interface EventDetailProps {
   event: NostrEvent;
@@ -80,47 +80,6 @@ function isMediaUrl(url: string): 'image' | 'video' | null {
   if (/\.(mp4|webm|mov|m3u8|avi)/.test(lower)) return 'video';
   if (lower.includes('divine.video') || lower.includes('youtube') || lower.includes('vimeo')) return 'video';
   return null;
-}
-
-// Extract media URLs from NIP-71/NIP-92 imeta tags
-function extractImetaMedia(tags: string[][]): { url: string; type: 'image' | 'video'; thumbnail?: string }[] {
-  const media: { url: string; type: 'image' | 'video'; thumbnail?: string }[] = [];
-
-  for (const tag of tags) {
-    if (tag[0] !== 'imeta') continue;
-
-    let url: string | undefined;
-    let mimeType: string | undefined;
-    let thumbnail: string | undefined;
-
-    // Parse imeta tag parts (format: "key value")
-    for (let i = 1; i < tag.length; i++) {
-      const part = tag[i];
-      if (part.startsWith('url ')) {
-        url = part.slice(4);
-      } else if (part.startsWith('m ')) {
-        mimeType = part.slice(2);
-      } else if (part.startsWith('image ')) {
-        thumbnail = part.slice(6);
-      }
-    }
-
-    if (url) {
-      // Determine type from mime type or URL
-      let type: 'image' | 'video' = 'video'; // Default to video for NIP-71
-      if (mimeType) {
-        if (mimeType.startsWith('image/')) type = 'image';
-        else if (mimeType.startsWith('video/')) type = 'video';
-      } else {
-        const urlType = isMediaUrl(url);
-        if (urlType) type = urlType;
-      }
-
-      media.push({ url, type, thumbnail });
-    }
-  }
-
-  return media;
 }
 
 // Format pubkey for display
@@ -668,21 +627,19 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
   const linkedPubkeys = event.tags.filter(t => t[0] === 'p').map(t => t[1]);
   const linkedAddresses = event.tags.filter(t => t[0] === 'a');
 
-  // Extract URLs from content
+  // Extract URLs from content (non-media URLs for external links section)
   const urls = extractUrls(event.content || '');
-  const contentMediaUrls = urls.filter(u => isMediaUrl(u));
   const otherUrls = urls.filter(u => !isMediaUrl(u));
 
-  // Extract media from NIP-71/NIP-92 imeta tags
-  const imetaMedia = extractImetaMedia(event.tags);
-
-  // Combine content media URLs and imeta media (imeta takes priority for NIP-71 video events)
-  const allMedia = imetaMedia.length > 0
-    ? imetaMedia
-    : contentMediaUrls.map(url => ({ url, type: isMediaUrl(url) as 'image' | 'video', thumbnail: undefined }));
-
-  // For backwards compat, keep mediaUrls as string array (used for URL display)
-  const _mediaUrls = allMedia.map(m => m.url);
+  // Check if any related report has a high-priority category (CSAM, etc.)
+  // Used to collapse media preview by default to protect moderators
+  const hasHighPriorityReports = useMemo(() => {
+    if (!relatedReports?.length) return false;
+    return relatedReports.some(r => {
+      const cat = getReportCategory(r);
+      return HIGH_PRIORITY_CATEGORIES.includes(cat);
+    });
+  }, [relatedReports]);
 
   return (
     <>
@@ -920,43 +877,12 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
           )
         )}
 
-        {/* Media Preview */}
-        {allMedia.length > 0 && (
-          <Card>
-            <CardHeader className="py-2 px-3">
-              <CardTitle className="text-sm flex items-center gap-2">
-                {allMedia.some(m => m.type === 'video') ? (
-                  <Video className="h-4 w-4" />
-                ) : (
-                  <Image className="h-4 w-4" />
-                )}
-                Media ({allMedia.length})
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="py-2 px-3">
-              <div className="grid grid-cols-1 gap-2">
-                {allMedia.slice(0, 4).map((media, idx) => (
-                  <div key={idx} className="relative aspect-video bg-muted rounded overflow-hidden">
-                    {media.type === 'image' ? (
-                      <img src={media.url} alt="" className="w-full h-full object-cover" />
-                    ) : (
-                      <video
-                        src={media.url}
-                        poster={media.thumbnail}
-                        controls
-                        className="w-full h-full object-contain bg-black"
-                        preload="metadata"
-                      />
-                    )}
-                  </div>
-                ))}
-              </div>
-              {allMedia.length > 4 && (
-                <p className="text-xs text-muted-foreground mt-2">+{allMedia.length - 4} more</p>
-              )}
-            </CardContent>
-          </Card>
-        )}
+        {/* Media Preview - collapsed by default if event has high-priority reports */}
+        <MediaPreview
+          event={event}
+          showByDefault={!hasHighPriorityReports}
+          maxItems={4}
+        />
 
         {/* Hive AI Content Moderation */}
         <HiveAIReport eventTags={event.tags} />
