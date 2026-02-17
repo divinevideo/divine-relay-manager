@@ -50,6 +50,8 @@ interface Env {
   REPORT_WATCHER?: DurableObjectNamespace;
   // Auto-hide feature flag
   AUTO_HIDE_ENABLED?: string;
+  // Environment identifier for deep links (e.g., "production", "staging")
+  ENVIRONMENT?: string;
 }
 
 // Zendesk JWT payload structure
@@ -119,6 +121,18 @@ interface ApiResponse {
   event?: object;
   error?: string;
   pubkey?: string;
+  // Moderation action responses
+  eventId?: string;
+  deleted?: number;
+  labelsDeleted?: number;
+  // Realness proxy pass-through
+  details?: string;
+  // Zendesk parse-report responses
+  ticket_id?: number;
+  event_id?: string | null;
+  author_pubkey?: string | null;
+  violation_type?: string | null;
+  skipped?: boolean;
 }
 
 export default {
@@ -218,6 +232,17 @@ export default {
 };
 
 function jsonResponse(data: ApiResponse, status: number, headers: Record<string, string>): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      'Content-Type': 'application/json',
+      ...headers,
+    },
+  });
+}
+
+/** Forward an upstream JSON response with CORS headers. Separate from jsonResponse to avoid weakening its type guard. */
+function proxyJsonResponse(data: unknown, status: number, headers: Record<string, string>): Response {
   return new Response(JSON.stringify(data), {
     status,
     headers: {
@@ -1452,7 +1477,7 @@ async function handleRealnessViaBinding(
         headers: { 'Accept': 'application/json' },
       });
       const data = await response.json();
-      return jsonResponse(data, response.status, corsHeaders);
+      return proxyJsonResponse(data, response.status, corsHeaders);
     } catch (error) {
       console.error('[realness proxy/binding] jobs error:', error);
       return jsonResponse({ success: false, error: 'Failed to fetch job', details: String(error) }, 500, corsHeaders);
@@ -1469,7 +1494,7 @@ async function handleRealnessViaBinding(
         body,
       });
       const data = await response.json();
-      return jsonResponse(data, response.status, corsHeaders);
+      return proxyJsonResponse(data, response.status, corsHeaders);
     } catch (error) {
       console.error('[realness proxy/binding] analyze error:', error);
       return jsonResponse({ success: false, error: 'Failed to submit analysis', details: String(error) }, 500, corsHeaders);
@@ -1509,7 +1534,7 @@ async function handleRealnessViaHTTP(
       const text = await response.text();
       try {
         const data = JSON.parse(text);
-        return jsonResponse(data, response.status, corsHeaders);
+        return proxyJsonResponse(data, response.status, corsHeaders);
       } catch {
         console.error('[realness proxy/http] jobs non-JSON response:', response.status, text.slice(0, 500));
         return jsonResponse({ success: false, error: `Upstream error: ${response.status}`, details: text.slice(0, 200) }, response.status, corsHeaders);
@@ -1532,7 +1557,7 @@ async function handleRealnessViaHTTP(
       const text = await response.text();
       try {
         const data = JSON.parse(text);
-        return jsonResponse(data, response.status, corsHeaders);
+        return proxyJsonResponse(data, response.status, corsHeaders);
       } catch {
         console.error('[realness proxy/http] analyze non-JSON response:', response.status, text.slice(0, 500));
         return jsonResponse({ success: false, error: `Upstream error: ${response.status}`, details: text.slice(0, 200) }, response.status, corsHeaders);
@@ -1919,19 +1944,20 @@ async function handleParseReport(
     }
 
     // Generate internal note with links
+    const envParam = env.ENVIRONMENT ? `&env=${env.ENVIRONMENT}` : '';
     const lines = ['📋 **Content Report Links**', ''];
     if (violation_type) {
       lines.push(`**Violation Type:** ${violation_type}`, '');
     }
     if (event_id) {
       lines.push('**Reported Event:**');
-      lines.push(`• [View in Relay Admin](https://relay.admin.divine.video/reports?event=${event_id})`);
+      lines.push(`• [View in Relay Admin](https://relay.admin.divine.video/reports?event=${event_id}${envParam})`);
       lines.push(`• Event ID: \`${event_id}\``);
       lines.push('');
     }
     if (author_pubkey) {
       lines.push('**Reported Author:**');
-      lines.push(`• [View in Relay Admin](https://relay.admin.divine.video/reports?pubkey=${author_pubkey})`);
+      lines.push(`• [View in Relay Admin](https://relay.admin.divine.video/reports?pubkey=${author_pubkey}${envParam})`);
       lines.push(`• Pubkey: \`${author_pubkey}\``);
     }
 

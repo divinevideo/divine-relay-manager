@@ -2,7 +2,7 @@
 // ABOUTME: Tests start/stop/status and WebSocket functionality
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ReportWatcher, type ReportWatcherEnv, type ReportEvent } from './ReportWatcher';
+import { ReportWatcher, type ReportWatcherEnv, type ReportEvent, type ReportWatcherStatus } from './ReportWatcher';
 
 // Mock WebSocket instances created during tests
 let mockWebSockets: MockWebSocket[] = [];
@@ -19,7 +19,7 @@ class MockWebSocket {
 
   private listeners: Map<string, Array<(event: unknown) => void>> = new Map();
 
-  constructor(url: string) {
+  constructor(url: string, _protocols?: string | string[]) {
     this.url = url;
     mockWebSockets.push(this);
 
@@ -123,7 +123,8 @@ describe('ReportWatcher', () => {
 
     // Save original WebSocket and replace with mock
     originalWebSocket = globalThis.WebSocket;
-    (globalThis as unknown as { WebSocket: typeof MockWebSocket }).WebSocket = MockWebSocket as unknown as typeof WebSocket;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).WebSocket = MockWebSocket;
 
     mockState = createMockState();
     mockEnv = createMockEnv();
@@ -142,7 +143,7 @@ describe('ReportWatcher', () => {
 
       expect(response.status).toBe(200);
 
-      const body = await response.json() as { success: boolean; status: { running: boolean; connected: boolean } };
+      const body = await response.json() as { success: boolean; status: ReportWatcherStatus };
       expect(body.success).toBe(true);
       expect(body.status.running).toBe(false);
       expect(body.status.connected).toBe(false);
@@ -172,7 +173,7 @@ describe('ReportWatcher', () => {
 
       expect(response.status).toBe(200);
 
-      const body = await response.json() as { success: boolean; message: string; status: { running: boolean } };
+      const body = await response.json() as { success: boolean; message: string; status: ReportWatcherStatus };
       expect(body.success).toBe(true);
       expect(body.message).toBe('Started');
       expect(body.status.running).toBe(true);
@@ -224,7 +225,7 @@ describe('ReportWatcher', () => {
 
       expect(response.status).toBe(200);
 
-      const body = await response.json() as { success: boolean; message: string; status: { running: boolean } };
+      const body = await response.json() as { success: boolean; message: string; status: ReportWatcherStatus };
       expect(body.success).toBe(true);
       expect(body.message).toBe('Stopped');
       expect(body.status.running).toBe(false);
