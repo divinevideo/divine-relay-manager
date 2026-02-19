@@ -69,3 +69,8 @@ bindings = [
 [[migrations]]
 tag = "v1"
 new_classes = ["ReportWatcher"]
+
+# Keep ReportWatcher DO alive — wake it every 5 minutes so the alarm chain
+# can't break permanently after a Cloudflare-initiated eviction.
+[triggers]
+crons = ["*/5 * * * *"]

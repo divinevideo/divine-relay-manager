@@ -231,6 +231,25 @@ export default {
       );
     }
   },
+
+  // Cron keep-alive: wake the ReportWatcher DO every 5 minutes so the alarm
+  // chain can't break permanently after a Cloudflare-initiated eviction.
+  async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext): Promise<void> {
+    if (!env.REPORT_WATCHER) {
+      console.log('[scheduled] REPORT_WATCHER binding not configured, skipping');
+      return;
+    }
+
+    try {
+      const id = env.REPORT_WATCHER.idFromName('singleton');
+      const stub = env.REPORT_WATCHER.get(id);
+      const response = await stub.fetch(new Request('https://do/status'));
+      const status = await response.json() as { status?: { running: boolean } };
+      console.log(`[scheduled] ReportWatcher status: running=${status?.status?.running}`);
+    } catch (error) {
+      console.error('[scheduled] Failed to check ReportWatcher:', error);
+    }
+  },
 };
 
 function jsonResponse(data: ApiResponse, status: number, headers: Record<string, string>): Response {
