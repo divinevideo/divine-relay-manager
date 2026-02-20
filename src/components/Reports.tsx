@@ -3,9 +3,11 @@
 
 import { useState, useMemo, useEffect } from "react";
 
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNostr } from "@nostrify/react";
 import { useNavigate, useSearchParams } from "react-router-dom";
+import { useAppContext } from "@/hooks/useAppContext";
+import { getEnvironmentById, getCurrentEnvironment } from "@/lib/environments";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -322,6 +324,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const { listBannedPubkeys, listBannedEvents, getAllDecisions } = useAdminApi();
+  const { config, updateConfig } = useAppContext();
+  const queryClient = useQueryClient();
   const isMobile = useIsMobile();
   const [selectedReport, setSelectedReport] = useState<NostrEvent | null>(null);
   const [viewMode, setViewMode] = useState<'consolidated' | 'individual'>('consolidated');
@@ -689,13 +693,29 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     }
   }, [selectedReportId, reports, selectedReport]);
 
-  // Handle deep linking via query params (?event=... or ?pubkey=...)
+  // Handle deep linking via query params (?event=... or ?pubkey=... or &env=...)
   useEffect(() => {
     const eventParam = searchParams.get('event');
     const pubkeyParam = searchParams.get('pubkey');
+    const envParam = searchParams.get('env');
 
-    // Skip if no params
+    // Skip if no deep link target
     if (!eventParam && !pubkeyParam) return;
+
+    // Switch environment if deep link specifies one that differs from current
+    if (envParam) {
+      const currentEnv = getCurrentEnvironment(config.relayUrl, config.apiUrl);
+      if (currentEnv?.id !== envParam) {
+        const targetEnv = getEnvironmentById(envParam);
+        if (targetEnv) {
+          updateConfig(c => ({ ...c, relayUrl: targetEnv.relayUrl, apiUrl: targetEnv.apiUrl }));
+          queryClient.clear();
+          queryClient.refetchQueries();
+          return; // Data will reload, effect re-runs with matching environment
+        }
+      }
+    }
+
     if (!allConsolidated || allConsolidated.length === 0) return;
 
     // Wait for fresh ban data before processing deep link
@@ -728,7 +748,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       setSearchParams({}, { replace: true });
     }
     // If report not found, keep params — effect will re-run when more data loads
-  }, [allConsolidated, searchParams, hideResolved, resolvedTargets, navigate, setSearchParams, isFetchingBanned]);
+  }, [allConsolidated, searchParams, hideResolved, resolvedTargets, navigate, setSearchParams, isFetchingBanned, config.relayUrl, config.apiUrl, updateConfig, queryClient]);
 
   // Update URL when report selection changes
   const handleSelectReport = (report: NostrEvent | null) => {

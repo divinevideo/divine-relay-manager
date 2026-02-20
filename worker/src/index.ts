@@ -8,6 +8,14 @@ import {
   callNip86Rpc,
   type SecretStoreSecret,
 } from './nip86';
+import { ensureSchema } from './db';
+
+let schemaReady = false;
+async function ensureSchemaOnce(db: D1Database): Promise<void> {
+  if (schemaReady) return;
+  await ensureSchema(db);
+  schemaReady = true;
+}
 
 // Re-export ReportWatcher Durable Object for wrangler
 export { ReportWatcher } from './ReportWatcher';
@@ -42,6 +50,8 @@ interface Env {
   REPORT_WATCHER?: DurableObjectNamespace;
   // Auto-hide feature flag
   AUTO_HIDE_ENABLED?: string;
+  // Environment identifier for deep links (e.g., "production", "staging")
+  ENVIRONMENT?: string;
 }
 
 // Zendesk JWT payload structure
@@ -111,6 +121,18 @@ interface ApiResponse {
   event?: object;
   error?: string;
   pubkey?: string;
+  // Moderation action responses
+  eventId?: string;
+  deleted?: number;
+  labelsDeleted?: number;
+  // Realness proxy pass-through
+  details?: string;
+  // Zendesk parse-report responses
+  ticket_id?: number;
+  event_id?: string | null;
+  author_pubkey?: string | null;
+  violation_type?: string | null;
+  skipped?: boolean;
 }
 
 export default {
@@ -207,9 +229,39 @@ export default {
       );
     }
   },
+
+  // Cron keep-alive: wake the ReportWatcher DO every 5 minutes so the alarm
+  // chain can't break permanently after a Cloudflare-initiated eviction.
+  async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext): Promise<void> {
+    if (!env.REPORT_WATCHER) {
+      console.log('[scheduled] REPORT_WATCHER binding not configured, skipping');
+      return;
+    }
+
+    try {
+      const id = env.REPORT_WATCHER.idFromName('singleton');
+      const stub = env.REPORT_WATCHER.get(id);
+      const response = await stub.fetch(new Request('https://do/status'));
+      const status = await response.json() as { status?: { running: boolean } };
+      console.log(`[scheduled] ReportWatcher status: running=${status?.status?.running}`);
+    } catch (error) {
+      console.error('[scheduled] Failed to check ReportWatcher:', error);
+    }
+  },
 };
 
 function jsonResponse(data: ApiResponse, status: number, headers: Record<string, string>): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      'Content-Type': 'application/json',
+      ...headers,
+    },
+  });
+}
+
+/** Forward an upstream JSON response with CORS headers. Separate from jsonResponse to avoid weakening its type guard. */
+function proxyJsonResponse(data: unknown, status: number, headers: Record<string, string>): Response {
   return new Response(JSON.stringify(data), {
     status,
     headers: {
@@ -299,6 +351,10 @@ async function handlePublish(
       console.log('[handlePublish] Resolution label details:', { status, targetType, targetId });
 
       if (status && targetType && targetId) {
+        if (env.DB) {
+          await markHumanReviewed(env.DB, targetType, targetId);
+        }
+
         // Use waitUntil to ensure sync completes even after response is sent
         const syncPromise = syncZendeskAfterAction(
           env,
@@ -372,6 +428,10 @@ async function handleModerate(
           return jsonResponse({ success: false, error: rpcResult.error || 'banevent RPC failed' }, 500, corsHeaders);
         }
 
+        if (env.DB) {
+          await markHumanReviewed(env.DB, 'event', body.eventId);
+        }
+
         // Sync any linked Zendesk tickets
         try {
           await syncZendeskAfterAction(
@@ -434,6 +494,10 @@ async function handleModerate(
 
   if (!publishResult.success) {
     return jsonResponse({ success: false, error: publishResult.error }, 500, corsHeaders);
+  }
+
+  if (env.DB && body.pubkey) {
+    await markHumanReviewed(env.DB, 'pubkey', body.pubkey);
   }
 
   // Sync any linked Zendesk tickets (delete_event syncs in its own early return)
@@ -591,33 +655,15 @@ Respond with JSON only:
   }
 }
 
-// Ensure moderation_decisions table exists
-async function ensureDecisionsTable(db: D1Database): Promise<void> {
-  // Run each statement separately to avoid issues with D1's exec
-  await db.prepare(`
-    CREATE TABLE IF NOT EXISTS moderation_decisions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      target_type TEXT NOT NULL,
-      target_id TEXT NOT NULL,
-      action TEXT NOT NULL,
-      reason TEXT,
-      moderator_pubkey TEXT,
-      report_id TEXT,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP
-    )
-  `).run();
-
-  // Create indexes in separate statements
+async function markHumanReviewed(db: D1Database, targetType: string, targetId: string): Promise<void> {
   try {
-    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_decisions_target ON moderation_decisions(target_type, target_id)`).run();
-  } catch {
-    // Index might already exist
-  }
-
-  try {
-    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_decisions_report ON moderation_decisions(report_id)`).run();
-  } catch {
-    // Index might already exist
+    await db.prepare(`
+      INSERT INTO moderation_targets (target_id, target_type, ever_human_reviewed)
+      VALUES (?, ?, 1)
+      ON CONFLICT(target_id) DO UPDATE SET ever_human_reviewed = 1
+    `).bind(targetId, targetType).run();
+  } catch (error) {
+    console.error('[markHumanReviewed] Failed to update moderation_targets:', error);
   }
 }
 
@@ -680,7 +726,7 @@ async function handleLogDecision(
       return jsonResponse({ success: false, error: 'Missing required fields' }, 400, corsHeaders);
     }
 
-    await ensureDecisionsTable(env.DB);
+    await ensureSchemaOnce(env.DB);
 
     await env.DB.prepare(`
       INSERT INTO moderation_decisions (target_type, target_id, action, reason, moderator_pubkey, report_id)
@@ -693,6 +739,8 @@ async function handleLogDecision(
       body.moderatorPubkey || null,
       body.reportId || null
     ).run();
+
+    await markHumanReviewed(env.DB, body.targetType, body.targetId);
 
     return new Response(JSON.stringify({ success: true }), {
       status: 200,
@@ -717,7 +765,7 @@ async function handleGetAllDecisions(
       return jsonResponse({ success: false, error: 'Database not configured' }, 500, corsHeaders);
     }
 
-    await ensureDecisionsTable(env.DB);
+    await ensureSchemaOnce(env.DB);
 
     // Get all decisions, ordered by most recent first
     const decisions = await env.DB.prepare(`
@@ -753,7 +801,7 @@ async function handleGetDecisions(
       return jsonResponse({ success: false, error: 'Database not configured' }, 500, corsHeaders);
     }
 
-    await ensureDecisionsTable(env.DB);
+    await ensureSchemaOnce(env.DB);
 
     // Get all decisions for this target (could be event ID, pubkey, or media hash)
     const decisions = await env.DB.prepare(`
@@ -789,7 +837,7 @@ async function handleDeleteDecisions(
       return jsonResponse({ success: false, error: 'Database not configured' }, 500, corsHeaders);
     }
 
-    await ensureDecisionsTable(env.DB);
+    await ensureSchemaOnce(env.DB);
 
     let labelsDeleted = 0;
 
@@ -830,7 +878,8 @@ async function handleDeleteDecisions(
       }
     }
 
-    // Delete all decisions for this target from D1 (reopens the report)
+    // Delete all decisions for this target from D1 (reopens the report).
+    // moderation_targets.ever_human_reviewed is NOT cleared — prevents re-auto-hide.
     const result = await env.DB.prepare(`
       DELETE FROM moderation_decisions
       WHERE target_id = ?
@@ -1438,7 +1487,7 @@ async function handleRealnessViaBinding(
         headers: { 'Accept': 'application/json' },
       });
       const data = await response.json();
-      return jsonResponse(data, response.status, corsHeaders);
+      return proxyJsonResponse(data, response.status, corsHeaders);
     } catch (error) {
       console.error('[realness proxy/binding] jobs error:', error);
       return jsonResponse({ success: false, error: 'Failed to fetch job', details: String(error) }, 500, corsHeaders);
@@ -1455,7 +1504,7 @@ async function handleRealnessViaBinding(
         body,
       });
       const data = await response.json();
-      return jsonResponse(data, response.status, corsHeaders);
+      return proxyJsonResponse(data, response.status, corsHeaders);
     } catch (error) {
       console.error('[realness proxy/binding] analyze error:', error);
       return jsonResponse({ success: false, error: 'Failed to submit analysis', details: String(error) }, 500, corsHeaders);
@@ -1495,7 +1544,7 @@ async function handleRealnessViaHTTP(
       const text = await response.text();
       try {
         const data = JSON.parse(text);
-        return jsonResponse(data, response.status, corsHeaders);
+        return proxyJsonResponse(data, response.status, corsHeaders);
       } catch {
         console.error('[realness proxy/http] jobs non-JSON response:', response.status, text.slice(0, 500));
         return jsonResponse({ success: false, error: `Upstream error: ${response.status}`, details: text.slice(0, 200) }, response.status, corsHeaders);
@@ -1518,7 +1567,7 @@ async function handleRealnessViaHTTP(
       const text = await response.text();
       try {
         const data = JSON.parse(text);
-        return jsonResponse(data, response.status, corsHeaders);
+        return proxyJsonResponse(data, response.status, corsHeaders);
       } catch {
         console.error('[realness proxy/http] analyze non-JSON response:', response.status, text.slice(0, 500));
         return jsonResponse({ success: false, error: `Upstream error: ${response.status}`, details: text.slice(0, 200) }, response.status, corsHeaders);
@@ -1754,7 +1803,7 @@ async function handleZendeskWebhook(
 
     // Log the decision
     if (env.DB && actionResult.success) {
-      await ensureDecisionsTable(env.DB);
+      await ensureSchemaOnce(env.DB);
       await env.DB.prepare(`
         INSERT INTO moderation_decisions (target_type, target_id, action, reason, moderator_pubkey, report_id)
         VALUES (?, ?, ?, ?, ?, ?)
@@ -1766,6 +1815,10 @@ async function handleZendeskWebhook(
         body.agent_email || null,
         `zendesk:${body.ticket_id}`
       ).run();
+
+      const targetType = body.nostr_event_id ? 'event' : 'pubkey';
+      const targetId = body.nostr_event_id || body.nostr_pubkey || '';
+      await markHumanReviewed(env.DB, targetType, targetId);
 
       // Sync any linked Zendesk tickets (via our mapping table)
       try {
@@ -1901,19 +1954,20 @@ async function handleParseReport(
     }
 
     // Generate internal note with links
+    const envParam = env.ENVIRONMENT ? `&env=${env.ENVIRONMENT}` : '';
     const lines = ['📋 **Content Report Links**', ''];
     if (violation_type) {
       lines.push(`**Violation Type:** ${violation_type}`, '');
     }
     if (event_id) {
       lines.push('**Reported Event:**');
-      lines.push(`• [View in Relay Admin](https://relay.admin.divine.video/reports?event=${event_id})`);
+      lines.push(`• [View in Relay Admin](https://relay.admin.divine.video/reports?event=${event_id}${envParam})`);
       lines.push(`• Event ID: \`${event_id}\``);
       lines.push('');
     }
     if (author_pubkey) {
       lines.push('**Reported Author:**');
-      lines.push(`• [View in Relay Admin](https://relay.admin.divine.video/reports?pubkey=${author_pubkey})`);
+      lines.push(`• [View in Relay Admin](https://relay.admin.divine.video/reports?pubkey=${author_pubkey}${envParam})`);
       lines.push(`• Pubkey: \`${author_pubkey}\``);
     }
 
@@ -2188,7 +2242,7 @@ async function handleZendeskContext(
 
     // Get decision history
     if (env.DB) {
-      await ensureDecisionsTable(env.DB);
+      await ensureSchemaOnce(env.DB);
       const targetId = eventId || pubkey;
       const decisions = await env.DB.prepare(`
         SELECT * FROM moderation_decisions
@@ -2353,7 +2407,7 @@ async function handleZendeskAction(
 
     // Log the decision
     if (env.DB && actionResult.success) {
-      await ensureDecisionsTable(env.DB);
+      await ensureSchemaOnce(env.DB);
       await env.DB.prepare(`
         INSERT INTO moderation_decisions (target_type, target_id, action, reason, moderator_pubkey, report_id)
         VALUES (?, ?, ?, ?, ?, ?)
@@ -2365,6 +2419,10 @@ async function handleZendeskAction(
         user.email,
         body.ticket_id ? `zendesk:${body.ticket_id}` : null
       ).run();
+
+      const ztargetType = body.event_id ? 'event' : 'pubkey';
+      const ztargetId = body.event_id || body.pubkey || '';
+      await markHumanReviewed(env.DB, ztargetType, ztargetId);
     }
 
     // Sync any linked Zendesk tickets
