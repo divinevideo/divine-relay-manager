@@ -373,13 +373,17 @@ async function handleModerate(
         }
 
         // Sync any linked Zendesk tickets
-        syncZendeskAfterAction(
-          env,
-          body.action,
-          'event',
-          body.eventId,
-          getPublicKey(secretKey)
-        ).catch((err) => console.error('[handleModerate] Zendesk sync error:', err));
+        try {
+          await syncZendeskAfterAction(
+            env,
+            body.action,
+            'event',
+            body.eventId,
+            getPublicKey(secretKey)
+          );
+        } catch (err) {
+          console.error('[handleModerate] Zendesk sync error:', err);
+        }
 
         return jsonResponse({ success: true, eventId: body.eventId }, 200, corsHeaders);
       } catch (error) {
@@ -433,13 +437,17 @@ async function handleModerate(
   }
 
   // Sync any linked Zendesk tickets (delete_event syncs in its own early return)
-  syncZendeskAfterAction(
-    env,
-    body.action,
-    body.pubkey ? 'pubkey' : 'event',
-    body.pubkey || '',
-    getPublicKey(secretKey)
-  ).catch((err) => console.error('[handleModerate] Zendesk sync error:', err));
+  try {
+    await syncZendeskAfterAction(
+      env,
+      body.action,
+      body.pubkey ? 'pubkey' : 'event',
+      body.pubkey || '',
+      getPublicKey(secretKey)
+    );
+  } catch (err) {
+    console.error('[handleModerate] Zendesk sync error:', err);
+  }
 
   // Sync any linked Zendesk tickets
   syncZendeskAfterAction(
@@ -965,13 +973,17 @@ async function handleModerateMedia(
     // Sync any linked Zendesk tickets
     // Note: media actions use sha256, but current ticket mapping is by event_id/pubkey
     // This will be a no-op unless ticket mapping is enhanced to track media hashes
-    syncZendeskAfterAction(
-      env,
-      body.action,
-      'media',
-      body.sha256,
-      'relay-manager'
-    ).catch((err) => console.error('[handleModerateMedia] Zendesk sync error:', err));
+    try {
+      await syncZendeskAfterAction(
+        env,
+        body.action,
+        'media',
+        body.sha256,
+        'relay-manager'
+      );
+    } catch (err) {
+      console.error('[handleModerateMedia] Zendesk sync error:', err);
+    }
 
     return new Response(JSON.stringify({ success: true, result }), {
       status: 200,
@@ -1765,13 +1777,17 @@ async function handleZendeskWebhook(
       ).run();
 
       // Sync any linked Zendesk tickets (via our mapping table)
-      syncZendeskAfterAction(
-        env,
-        body.action_requested,
-        body.nostr_event_id ? 'event' : 'pubkey',
-        body.nostr_event_id || body.nostr_pubkey || '',
-        body.agent_email || 'webhook'
-      ).catch((err) => console.error('[handleZendeskWebhook] Zendesk sync error:', err));
+      try {
+        await syncZendeskAfterAction(
+          env,
+          body.action_requested,
+          body.nostr_event_id ? 'event' : 'pubkey',
+          body.nostr_event_id || body.nostr_pubkey || '',
+          body.agent_email || 'webhook'
+        );
+      } catch (err) {
+        console.error('[handleZendeskWebhook] Zendesk sync error:', err);
+      }
     }
 
     // Callback to Zendesk to update ticket status and add internal note
@@ -2362,13 +2378,17 @@ async function handleZendeskAction(
 
     // Sync any linked Zendesk tickets
     if (actionResult.success) {
-      syncZendeskAfterAction(
-        env,
-        body.action,
-        body.event_id ? 'event' : 'pubkey',
-        body.event_id || body.pubkey || '',
-        user.email
-      ).catch((err) => console.error('[handleZendeskAction] Zendesk sync error:', err));
+      try {
+        await syncZendeskAfterAction(
+          env,
+          body.action,
+          body.event_id ? 'event' : 'pubkey',
+          body.event_id || body.pubkey || '',
+          user.email
+        );
+      } catch (err) {
+        console.error('[handleZendeskAction] Zendesk sync error:', err);
+      }
     }
 
     return new Response(JSON.stringify({
