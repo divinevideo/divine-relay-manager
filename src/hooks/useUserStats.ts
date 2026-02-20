@@ -5,6 +5,12 @@ import { useNostr } from "@nostrify/react";
 import { useQuery } from "@tanstack/react-query";
 import type { NostrEvent } from "@nostrify/nostrify";
 
+export const USER_STATS_LIMITS = {
+  recentPosts: 20,
+  existingLabels: 50,
+  previousReports: 50,
+} as const;
+
 export interface UserStats {
   postCount: number;
   reportCount: number;

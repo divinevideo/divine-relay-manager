@@ -70,7 +70,9 @@ export function useThread(eventId: string | undefined, depth: number = 3) {
         }
       }
 
-      // Find ancestors by following reply tags
+      // Sequential walk is intentional — batch-fetching e tags from the initial event
+      // misses intermediate ancestors (NIP-10 only tags root + reply, not full chain).
+      // Low traffic (admin tool), depth capped at 3. See #79.
       const ancestors: NostrEvent[] = [];
       let currentEvent = event;
 

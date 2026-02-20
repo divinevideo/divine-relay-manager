@@ -46,6 +46,7 @@ import {
   Loader2,
   XCircle,
 } from "lucide-react";
+import { TruncationWarning } from "@/components/ui/truncation-warning";
 import type { NostrEvent } from "@nostrify/nostrify";
 
 interface EventsListProps {
@@ -717,14 +718,19 @@ export function EventsList({ relayUrl }: EventsListProps) {
 
           {/* Smart Filters */}
           <div className="flex flex-wrap gap-4">
-            <label className="flex items-center gap-2 text-sm cursor-pointer">
-              <Checkbox
-                checked={filterHasReports}
-                onCheckedChange={(checked) => setFilterHasReports(checked === true)}
-              />
-              <Flag className="h-4 w-4 text-muted-foreground" />
-              Has reports
-            </label>
+            <div className="space-y-1">
+              <label className="flex items-center gap-2 text-sm cursor-pointer">
+                <Checkbox
+                  checked={filterHasReports}
+                  onCheckedChange={(checked) => setFilterHasReports(checked === true)}
+                />
+                <Flag className="h-4 w-4 text-muted-foreground" />
+                Has reports
+              </label>
+              {filterHasReports && (
+                <TruncationWarning count={allReports?.length ?? 0} limit={500} noun="reports" />
+              )}
+            </div>
             <label className="flex items-center gap-2 text-sm cursor-pointer">
               <Checkbox
                 checked={filterNewUsers}

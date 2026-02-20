@@ -29,6 +29,7 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { Trash2, Loader2, AlertTriangle } from "lucide-react";
+import { TruncationWarning } from "@/components/ui/truncation-warning";
 import type { NostrEvent } from "@nostrify/nostrify";
 
 // Video kinds per NIP-71
@@ -90,7 +91,11 @@ export function BulkDeleteByKind({ pubkey, onComplete, variant = "button" }: Bul
     return counts;
   }, [allUserEvents]);
 
-  // Query events of selected kind from this user
+  // Query events of selected kind from this user.
+  // Intentionally a separate relay query rather than client-side filtering of
+  // allUserEvents — the first query has limit: 500 and may truncate, so the relay
+  // applying the kind filter server-side gives a more complete picture. Correctness
+  // matters more than efficiency for a moderation tool. See #79.
   const { data: events, isLoading: loadingEvents, error: queryError } = useQuery({
     queryKey: ['bulk-delete-events', pubkey, selectedKind],
     queryFn: async ({ signal }) => {
@@ -110,7 +115,6 @@ export function BulkDeleteByKind({ pubkey, onComplete, variant = "button" }: Bul
     enabled: !!pubkey && !!selectedKind,
   });
 
-  // Debug: log query errors
   if (queryError) {
     console.error('[BulkDeleteByKind] Query error:', queryError);
   }
@@ -323,16 +327,19 @@ export function BulkDeleteByKind({ pubkey, onComplete, variant = "button" }: Bul
                 </Select>
               </div>
 
-              <div className="p-3 bg-muted rounded-lg">
+              <div className="p-3 bg-muted rounded-lg space-y-1">
                 {loadingEvents ? (
                   <div className="flex items-center gap-2 text-sm">
                     <Loader2 className="h-4 w-4 animate-spin" />
                     Counting events...
                   </div>
                 ) : (
-                  <p className="text-sm">
-                    Found <strong>{eventCount}</strong> {kindName} events to delete
-                  </p>
+                  <>
+                    <p className="text-sm">
+                      Found <strong>{eventCount}</strong> {kindName} events to delete
+                    </p>
+                    <TruncationWarning count={eventCount} limit={500} noun="events" />
+                  </>
                 )}
               </div>
 
@@ -359,6 +366,7 @@ export function BulkDeleteByKind({ pubkey, onComplete, variant = "button" }: Bul
                         </button>
                       ))}
                   </div>
+                  <TruncationWarning count={allUserEvents?.length ?? 0} limit={500} noun="events" />
                 </div>
               )}
 
