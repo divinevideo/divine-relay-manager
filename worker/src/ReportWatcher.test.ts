@@ -123,8 +123,7 @@ describe('ReportWatcher', () => {
 
     // Save original WebSocket and replace with mock
     originalWebSocket = globalThis.WebSocket;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (globalThis as any).WebSocket = MockWebSocket;
+    (globalThis as unknown as Record<string, unknown>).WebSocket = MockWebSocket;
 
     mockState = createMockState();
     mockEnv = createMockEnv();
@@ -676,7 +675,7 @@ describe('ReportWatcher', () => {
 
       // Mock D1: no human resolution, but already auto-hidden
       mockEnv.DB = {
-        prepare: vi.fn().mockImplementation((sql: string) => ({
+        prepare: vi.fn().mockImplementation((_sql: string) => ({
           bind: vi.fn().mockReturnValue({
             run: mockDbRun,
             first: vi.fn().mockResolvedValue(
@@ -828,7 +827,7 @@ describe('ReportWatcher', () => {
       // Mock D1: moderation_targets returns a row (human reviewed),
       // moderation_decisions returns null (not already auto-hidden)
       mockEnv.DB = {
-        prepare: vi.fn().mockImplementation((sql: string) => ({
+        prepare: vi.fn().mockImplementation((_sql: string) => ({
           bind: vi.fn().mockReturnValue({
             run: mockDbRun,
             first: vi.fn().mockResolvedValue(
@@ -868,7 +867,7 @@ describe('ReportWatcher', () => {
       // Mock D1: moderation_targets returns null (no human review),
       // moderation_decisions returns null (not already auto-hidden)
       mockEnv.DB = {
-        prepare: vi.fn().mockImplementation((sql: string) => ({
+        prepare: vi.fn().mockImplementation((_sql: string) => ({
           bind: vi.fn().mockReturnValue({
             run: mockDbRun,
             first: vi.fn().mockResolvedValue(null),
@@ -933,7 +932,7 @@ describe('ReportWatcher', () => {
 
       // Mock D1: moderation_targets query throws, moderation_decisions returns null
       mockEnv.DB = {
-        prepare: vi.fn().mockImplementation((sql: string) => ({
+        prepare: vi.fn().mockImplementation((_sql: string) => ({
           bind: vi.fn().mockReturnValue({
             run: mockDbRun,
             first: vi.fn().mockImplementation(() => {
