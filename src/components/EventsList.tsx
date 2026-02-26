@@ -42,6 +42,7 @@ import {
   Search,
   Flag,
   Image,
+  Video,
   UserPlus,
   Loader2,
   XCircle,
@@ -192,7 +193,7 @@ function EventCard({
           </div>
         </div>
 
-        {event.content && (
+        {event.content ? (
           <p className="text-sm mt-2 text-muted-foreground truncate">
             {event.kind === 0 ? (() => {
               try {
@@ -207,7 +208,24 @@ function EventCard({
               }
             })() : truncateContent(event.content)}
           </p>
-        )}
+        ) : (() => {
+          // For events with no text content, show media/title info from tags
+          const imeta = event.tags.find(t => t[0] === 'imeta');
+          const title = event.tags.find(t => t[0] === 'title')?.[1];
+          const duration = event.tags.find(t => t[0] === 'duration')?.[1];
+          if (imeta) {
+            const mimeType = imeta.find(p => p.startsWith('m '))?.slice(2);
+            const isVideo = mimeType?.startsWith('video/');
+            return (
+              <p className="text-sm mt-2 text-muted-foreground truncate flex items-center gap-1">
+                {isVideo ? <Video className="h-3 w-3 shrink-0" /> : <Image className="h-3 w-3 shrink-0" />}
+                {title || (isVideo ? 'Video' : 'Media')}
+                {duration && <span className="text-xs">({duration}s)</span>}
+              </p>
+            );
+          }
+          return null;
+        })()}
 
         <div className="flex items-center justify-between mt-2 text-xs text-muted-foreground">
           <div className="flex items-center gap-3">
@@ -474,10 +492,12 @@ export function EventsList({ relayUrl }: EventsListProps) {
     }
   }
 
-  // Helper to check if content has media
-  const hasMedia = (content: string): boolean => {
+  // Helper to check if event has media (content URLs or imeta tags)
+  const hasMedia = (content: string, tags?: string[][]): boolean => {
     const mediaPattern = /https?:\/\/[^\s]+\.(jpg|jpeg|png|gif|webp|mp4|webm|mov)/i;
-    return mediaPattern.test(content);
+    if (mediaPattern.test(content)) return true;
+    if (tags?.some(t => t[0] === 'imeta')) return true;
+    return false;
   };
 
   // Helper to check if user is "new" (created within last 7 days based on event timestamp)
@@ -610,7 +630,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
 
       // Has media filter
       if (filterHasMedia) {
-        if (!hasMedia(event.content || '')) return false;
+        if (!hasMedia(event.content || '', event.tags)) return false;
       }
 
       // New users filter
