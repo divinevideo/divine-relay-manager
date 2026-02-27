@@ -497,15 +497,28 @@ export function EventsList({ relayUrl }: EventsListProps) {
   });
 
   // Direct event lookup by ID (separate from infinite scroll)
+  // Tries normal relay query first, then falls back to getbannedevent RPC
   const { data: directEventLookup, isLoading: isLoadingDirectEvent, error: directEventError } = useQuery({
     queryKey: ['event-search', searchMode.type === 'event_id' ? searchMode.hex : null],
     queryFn: async ({ signal }) => {
       if (searchMode.type !== 'event_id') return null;
+
+      // Try normal relay query first
       const events = await nostr.query(
         [{ ids: [searchMode.hex] }],
         { signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]) }
       );
-      return events[0] || null;
+      if (events[0]) return { event: events[0], banned: false };
+
+      // Fallback: check if it's a banned event via management API
+      try {
+        const bannedEvent = await callRelayRpc<NostrEvent>('getbannedevent', [searchMode.hex]);
+        if (bannedEvent) return { event: bannedEvent, banned: true };
+      } catch {
+        // Not banned or RPC failed
+      }
+
+      return null;
     },
     enabled: searchMode.type === 'event_id' && !!nostr,
     staleTime: 60 * 1000,
@@ -513,8 +526,8 @@ export function EventsList({ relayUrl }: EventsListProps) {
 
   // Auto-select found event in detail pane
   useEffect(() => {
-    if (directEventLookup && searchMode.type === 'event_id') {
-      setSelectedEvent(directEventLookup);
+    if (directEventLookup?.event && searchMode.type === 'event_id') {
+      setSelectedEvent(directEventLookup.event);
     }
   }, [directEventLookup, searchMode]);
 
@@ -668,7 +681,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
   };
 
   // Enhanced direct lookup result (for event ID search)
-  const enhancedDirectEvent = directEventLookup ? enhanceEvent(directEventLookup) : null;
+  const enhancedDirectEvent = directEventLookup?.event ? enhanceEvent(directEventLookup.event) : null;
 
   // Enhance events with moderation status and apply filters
   const enhancedEvents: EventWithModeration[] = (events || [])
@@ -787,8 +800,14 @@ export function EventsList({ relayUrl }: EventsListProps) {
                 </>
               ) : directEventLookup ? (
                 <>
-                  <CheckCircle className="h-3 w-3 text-green-600" />
-                  <span className="text-muted-foreground">Event found</span>
+                  {directEventLookup.banned ? (
+                    <Ban className="h-3 w-3 text-red-600" />
+                  ) : (
+                    <CheckCircle className="h-3 w-3 text-green-600" />
+                  )}
+                  <span className="text-muted-foreground">
+                    {directEventLookup.banned ? 'Event found (banned)' : 'Event found'}
+                  </span>
                 </>
               ) : (
                 <>
@@ -991,18 +1010,27 @@ export function EventsList({ relayUrl }: EventsListProps) {
                       </AlertDescription>
                     </Alert>
                   ) : enhancedDirectEvent ? (
-                    <EventCard
-                      event={enhancedDirectEvent}
-                      isSelected={selectedEvent?.id === enhancedDirectEvent.id}
-                      onSelect={() => setSelectedEvent(enhancedDirectEvent)}
-                      onModerate={handleModerateEvent}
-                    />
+                    <div>
+                      {directEventLookup?.banned && (
+                        <div className="flex items-center gap-2 px-3 py-2 mb-2 rounded-md bg-red-50 border border-red-200 dark:bg-red-950/30 dark:border-red-800">
+                          <Ban className="h-4 w-4 text-red-600" />
+                          <span className="text-sm font-medium text-red-700 dark:text-red-400">Banned event</span>
+                          <span className="text-xs text-red-600/70 dark:text-red-400/70">Retrieved via admin API</span>
+                        </div>
+                      )}
+                      <EventCard
+                        event={enhancedDirectEvent}
+                        isSelected={selectedEvent?.id === enhancedDirectEvent.id}
+                        onSelect={() => setSelectedEvent(enhancedDirectEvent)}
+                        onModerate={handleModerateEvent}
+                      />
+                    </div>
                   ) : (
                     <div className="text-center py-8 text-muted-foreground">
                       <Search className="h-8 w-8 mx-auto mb-2 opacity-50" />
                       <p className="text-sm">No event found on relay</p>
                       <p className="text-xs mt-1 font-mono">{searchMode.hex.slice(0, 16)}...</p>
-                      <p className="text-xs mt-2">The event may have been deleted or banned.</p>
+                      <p className="text-xs mt-2">The event may have been deleted.</p>
                       {/^[0-9a-f]{64}$/i.test(committedSearch) && (
                         <Button
                           variant="link"

@@ -25,6 +25,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { useToast } from "@/hooks/useToast";
 import { ToastAction } from "@/components/ui/toast";
 import { useReportContext } from "@/hooks/useReportContext";
+import { useBannedEvent } from "@/hooks/useBannedEvent";
 import { useUserSummary } from "@/hooks/useUserSummary";
 import { useModerationStatus } from "@/hooks/useModerationStatus";
 import { ThreadContext } from "@/components/ThreadContext";
@@ -148,6 +149,18 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   }>({ userBanned: null, eventDeleted: null, checkedAt: null, isChecking: false });
 
   const context = useReportContext(report);
+
+  // Banned event fallback: if thread event is null and target is an event ID, try management API
+  const targetEventId = context.target?.type === 'event' ? context.target.value : undefined;
+  const { data: bannedEvent } = useBannedEvent(
+    targetEventId,
+    !context.isLoading && !context.thread?.event && !!targetEventId
+  );
+
+  // Use banned event as fallback for display
+  const displayEvent = context.thread?.event || bannedEvent;
+  const isDisplayedEventBanned = !context.thread?.event && !!bannedEvent;
+  const isBannedEventLoading = !context.isLoading && !context.thread?.event && !!targetEventId && !bannedEvent;
 
   const summary = useUserSummary(
     context.reportedUser.pubkey || undefined,
@@ -572,9 +585,9 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   const mediaHashes = useMemo(() => {
     const hashes = new Set<string>();
 
-    // From the reported event itself
-    if (context.thread?.event) {
-      const eventHashes = extractMediaHashes(context.thread.event.content, context.thread.event.tags);
+    // From the reported event itself (or banned event fallback)
+    if (displayEvent) {
+      const eventHashes = extractMediaHashes(displayEvent.content, displayEvent.tags);
       eventHashes.forEach(h => hashes.add(h));
     }
 
@@ -585,7 +598,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     }
 
     return Array.from(hashes);
-  }, [context.thread?.event, context.thread?.repostedEvent]);
+  }, [displayEvent, context.thread?.repostedEvent]);
 
   // Check media status from moderation service
   const mediaStatus = useMediaStatus(mediaHashes);
@@ -1438,12 +1451,21 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
 
           {/* Thread Context - the text content being reported */}
           {context.target?.type === 'event' && (
-            <ThreadContext
-              ancestors={context.thread?.ancestors || []}
-              reportedEvent={context.thread?.event || null}
-              onViewFullThread={() => setShowThreadModal(true)}
-              isLoading={context.isLoading}
-            />
+            <>
+              {isDisplayedEventBanned && (
+                <div className="flex items-center gap-2 px-3 py-2 rounded-md bg-red-50 border border-red-200 dark:bg-red-950/30 dark:border-red-800">
+                  <Ban className="h-4 w-4 text-red-600" />
+                  <span className="text-sm font-medium text-red-700 dark:text-red-400">Event is banned on relay</span>
+                  <span className="text-xs text-red-600/70 dark:text-red-400/70">Content retrieved via admin API</span>
+                </div>
+              )}
+              <ThreadContext
+                ancestors={context.thread?.ancestors || []}
+                reportedEvent={displayEvent || null}
+                onViewFullThread={() => setShowThreadModal(true)}
+                isLoading={context.isLoading || isBannedEventLoading}
+              />
+            </>
           )}
 
           {/* Repost Original Content - show when the reported event is a repost */}
@@ -1497,9 +1519,9 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
           )}
 
           {/* Media Preview - show the actual content being reported */}
-          {context.thread?.event && (
+          {displayEvent && (
             <MediaPreview
-              event={context.thread.event}
+              event={displayEvent}
               showByDefault={!hasHighPriorityReports}
               maxItems={6}
             />
@@ -1510,7 +1532,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             profile={context.reportedUser.profile}
             pubkey={context.reportedUser.pubkey}
             stats={context.userStats}
-            isLoading={context.isLoading}
+            isLoading={context.isLoading || isBannedEventLoading}
             onDeleteEvent={(eventId) => {
               deleteMutation.mutate({ eventId, reason: 'Deleted from report review' }, {
                 onSuccess: (deletedId) => {
@@ -1534,15 +1556,15 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
           <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Investigation Helpers</h4>
 
           {/* Hive AI Content Moderation */}
-          {context.thread?.event && (
-            <HiveAIReport eventTags={context.thread.event.tags} />
+          {displayEvent && (
+            <HiveAIReport eventTags={displayEvent.tags} />
           )}
 
           {/* AI Detection (Reality Defender multi-provider) */}
-          {context.thread?.event && (
+          {displayEvent && (
             <AIDetectionReport
-              eventTags={context.thread.event.tags}
-              eventId={context.thread.event.id}
+              eventTags={displayEvent.tags}
+              eventId={displayEvent.id}
             />
           )}
 
@@ -1681,12 +1703,12 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
               )}
 
               {/* Reported Event Tags (if different from report) */}
-              {context.thread?.event && context.thread.event.tags.length > 0 && (
+              {displayEvent && displayEvent.tags.length > 0 && (
                 <div className="pt-2 border-t">
                   <span className="text-xs font-medium text-muted-foreground block mb-1">
                     Reported Event Tags
                   </span>
-                  <CopyableTags tags={context.thread.event.tags} maxTags={8} />
+                  <CopyableTags tags={displayEvent.tags} maxTags={8} />
                 </div>
               )}
             </CardContent>
