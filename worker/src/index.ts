@@ -52,6 +52,9 @@ interface Env {
   AUTO_HIDE_ENABLED?: string;
   // Environment identifier for deep links (e.g., "production", "staging")
   ENVIRONMENT?: string;
+  // Blossom admin bypass (for proxying blocked media to moderators)
+  BLOSSOM_WEBHOOK_SECRET?: string | SecretStoreSecret;
+  CDN_DOMAIN?: string;
 }
 
 // Zendesk JWT payload structure
@@ -146,7 +149,8 @@ export default {
     const corsHeaders = {
       'Access-Control-Allow-Origin': allowedOrigin,
       'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization, Range',
+      'Access-Control-Expose-Headers': 'Content-Range, Accept-Ranges, X-Admin-Proxy, X-Moderation-Status',
     };
 
     // Handle preflight
@@ -201,6 +205,12 @@ export default {
       if (path.startsWith('/api/check-result/') && request.method === 'GET') {
         const sha256 = path.replace('/api/check-result/', '');
         return handleCheckResult(sha256, env, corsHeaders);
+      }
+
+      // Media proxy for blocked content preview (Blossom admin bypass)
+      if (path.startsWith('/api/media-proxy/') && request.method === 'GET') {
+        const sha256 = path.replace('/api/media-proxy/', '').replace(/\.[^.]+$/, '');
+        return handleMediaProxy(request, sha256, env, corsHeaders);
       }
 
       // Realness API proxy (for AI detection behind CF Access)
@@ -1458,6 +1468,82 @@ async function addZendeskInternalNote(
     }
   } catch (error) {
     console.error('[addZendeskInternalNote] Error:', error);
+  }
+}
+
+// Proxy handler for blocked media preview (Blossom admin bypass)
+// Moderators need to see media that Blossom blocks (Banned/Restricted status returns 404 on CDN).
+// This endpoint authenticates against Blossom's admin bypass and streams the content through.
+async function handleMediaProxy(
+  request: Request,
+  sha256: string,
+  env: Env,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  if (!/^[a-f0-9]{64}$/i.test(sha256)) {
+    return jsonResponse({ success: false, error: 'Invalid sha256' }, 400, corsHeaders);
+  }
+
+  if (!env.BLOSSOM_WEBHOOK_SECRET) {
+    return jsonResponse({ success: false, error: 'BLOSSOM_WEBHOOK_SECRET not configured' }, 500, corsHeaders);
+  }
+
+  const secret = typeof env.BLOSSOM_WEBHOOK_SECRET === 'string'
+    ? env.BLOSSOM_WEBHOOK_SECRET
+    : await env.BLOSSOM_WEBHOOK_SECRET.get();
+
+  const cdnDomain = env.CDN_DOMAIN || 'media.divine.video';
+  const upstreamUrl = `https://${cdnDomain}/admin/api/blob/${sha256.toLowerCase()}/content`;
+
+  const headers: Record<string, string> = {
+    'Authorization': `Bearer ${secret}`,
+  };
+
+  // Forward Range header for video seeking
+  const range = request.headers.get('Range');
+  if (range) {
+    headers['Range'] = range;
+  }
+
+  try {
+    const upstream = await fetch(upstreamUrl, { headers });
+
+    if (!upstream.ok && upstream.status !== 206) {
+      return jsonResponse(
+        { success: false, error: `Blossom returned ${upstream.status}` },
+        upstream.status,
+        corsHeaders
+      );
+    }
+
+    // Stream response body through without buffering
+    const responseHeaders: Record<string, string> = {
+      ...corsHeaders,
+      'Cache-Control': 'private, no-cache',
+      'X-Admin-Proxy': 'blossom-admin',
+    };
+
+    // Pass through relevant headers from upstream
+    for (const header of ['Content-Type', 'Content-Length', 'Content-Range', 'Accept-Ranges']) {
+      const value = upstream.headers.get(header);
+      if (value) responseHeaders[header] = value;
+    }
+
+    // Pass through moderation status if present
+    const modStatus = upstream.headers.get('X-Moderation-Status');
+    if (modStatus) responseHeaders['X-Moderation-Status'] = modStatus;
+
+    return new Response(upstream.body, {
+      status: upstream.status,
+      headers: responseHeaders,
+    });
+  } catch (error) {
+    console.error('[handleMediaProxy] Error:', error);
+    return jsonResponse(
+      { success: false, error: error instanceof Error ? error.message : 'Proxy fetch failed' },
+      502,
+      corsHeaders
+    );
   }
 }
 
