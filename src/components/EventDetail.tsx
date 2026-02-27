@@ -31,7 +31,10 @@ import {
 } from "@/components/ui/alert-dialog";
 import { HiveAIReport } from "@/components/HiveAIReport";
 import { AIDetectionReport } from "@/components/AIDetectionReport";
+import { SceneClassification } from "@/components/SceneClassification";
+import { TranscriptAnalysis } from "@/components/TranscriptAnalysis";
 import { ReporterList } from "@/components/ReporterCard";
+import { extractMediaHashes } from "@/lib/adminApi";
 import {
   User,
   Hash,
@@ -684,6 +687,10 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
   // For backwards compat, keep mediaUrls as string array (used for URL display)
   const _mediaUrls = allMedia.map(m => m.url);
 
+  // Extract sha256 hashes for classifier components
+  const mediaHashes = extractMediaHashes(event.content || '', event.tags);
+  const primarySha256 = mediaHashes.length > 0 ? mediaHashes[0] : null;
+
   return (
     <>
       {/* Ban Confirmation Dialog */}
@@ -963,6 +970,12 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
 
         {/* AI Detection (Reality Defender multi-provider) */}
         <AIDetectionReport eventTags={event.tags} eventId={event.id} />
+
+        {/* Scene Classification (VLM) */}
+        {primarySha256 && <SceneClassification sha256={primarySha256} />}
+
+        {/* Transcript / Topic Analysis */}
+        {primarySha256 && <TranscriptAnalysis sha256={primarySha256} />}
 
         {/* Related Reports */}
         {relatedReports && relatedReports.length > 0 && (

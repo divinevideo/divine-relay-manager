@@ -526,6 +526,52 @@ export function extractMediaHashes(content: string, tags: string[][]): string[] 
   return Array.from(hashes);
 }
 
+// Scene classification from VLM
+export interface SceneClassificationData {
+  topics?: string[];
+  setting?: string;
+  objects?: string[];
+  activities?: string[];
+  mood?: string;
+  description?: string;
+  labels?: string[];
+}
+
+// Topic profile from VTT transcript
+export interface TopicProfileData {
+  topics?: Array<{ category: string; confidence: number; keywords_matched?: string[] }>;
+  primary_topic?: string;
+  has_speech?: boolean;
+  language_hint?: string;
+}
+
+// Full classifier data from moderation service
+export interface ClassifierData {
+  rawClassifierData?: Record<string, unknown>;
+  sceneClassification?: SceneClassificationData;
+  topicProfile?: TopicProfileData;
+}
+
+// Fetch classifier data (scene classification + topic profile)
+export async function getClassifierData(apiUrl: string, sha256: string): Promise<ClassifierData | null> {
+  try {
+    const response = await fetch(`${apiUrl}/api/check-classifier/${sha256}`, {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    if (!response.ok) {
+      if (response.status === 404) return null;
+      throw new ApiError(`HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    return await response.json() as ClassifierData;
+  } catch (error) {
+    console.error('Failed to fetch classifier data:', error);
+    return null;
+  }
+}
+
 // AI Detection types (Reality Defender multi-provider aggregation)
 export type AIVerdict = 'AUTHENTIC' | 'UNCERTAIN' | 'LIKELY_AI';
 export type AIProviderStatus = 'pending' | 'processing' | 'complete' | 'error';

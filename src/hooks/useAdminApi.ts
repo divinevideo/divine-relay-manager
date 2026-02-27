@@ -82,6 +82,10 @@ export function useAdminApi() {
     deleteDecisions: (targetId: string) =>
       adminApi.deleteDecisions(apiUrl, targetId),
 
+    // Classifier data (scene classification + topic profile)
+    getClassifierData: (sha256: string) =>
+      adminApi.getClassifierData(apiUrl, sha256),
+
     // AI Detection (proxied through worker to handle CF Access)
     getAIDetectionResult: (eventId: string) =>
       adminApi.getAIDetectionResult(apiUrl, eventId),
