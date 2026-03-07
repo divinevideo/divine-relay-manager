@@ -33,6 +33,7 @@ interface Env {
   // Zendesk integration
   ZENDESK_SUBDOMAIN?: string;
   ZENDESK_JWT_SECRET?: string;
+  ZENDESK_JWT_CALLBACK_SECRET?: string;  // For /api/zendesk/mobile-jwt form-urlencoded callback
   ZENDESK_WEBHOOK_SECRET?: string;  // For /api/zendesk/webhook
   ZENDESK_PARSE_REPORT_SECRET?: string;  // For /api/zendesk/parse-report
   ZENDESK_API_TOKEN?: string;
@@ -50,6 +51,8 @@ interface Env {
   REPORT_WATCHER?: DurableObjectNamespace;
   // Auto-hide feature flag
   AUTO_HIDE_ENABLED?: string;
+  // Admin API key — required on all admin endpoints when request doesn't come through CF Access
+  ADMIN_API_KEY?: string;
   // Environment identifier for deep links (e.g., "production", "staging")
   ENVIRONMENT?: string;
   // Blossom admin bypass (for proxying blocked media to moderators)
@@ -138,6 +141,33 @@ interface ApiResponse {
   skipped?: boolean;
 }
 
+// Verify that the request is authorized for admin API access.
+// Accepts either:
+//   1. Cf-Access-Jwt-Assertion header (request came through CF Access on relay.admin.divine.video)
+//   2. X-Admin-Key header matching ADMIN_API_KEY env var (server-to-server callers)
+// Returns null if authorized, or an error string if not.
+function verifyAdminAccess(request: Request, env: Env): string | null {
+  // CF Access injects this header on authenticated requests
+  if (request.headers.get('Cf-Access-Jwt-Assertion')) {
+    return null;
+  }
+
+  // Server-to-server callers use a shared API key
+  const adminKey = request.headers.get('X-Admin-Key');
+  if (env.ADMIN_API_KEY && adminKey === env.ADMIN_API_KEY) {
+    return null;
+  }
+
+  // Neither auth method present
+  if (!env.ADMIN_API_KEY) {
+    // ADMIN_API_KEY not configured — log warning but allow (backwards compat during rollout)
+    console.warn('[verifyAdminAccess] ADMIN_API_KEY not configured, allowing request. Set this secret to enforce auth.');
+    return null;
+  }
+
+  return 'Unauthorized: admin access requires CF Access or X-Admin-Key header';
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -149,7 +179,7 @@ export default {
     const corsHeaders = {
       'Access-Control-Allow-Origin': allowedOrigin,
       'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization, Range',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization, Range, X-Admin-Key, CF-Access-Client-Id, CF-Access-Client-Secret',
       'Access-Control-Expose-Headers': 'Content-Range, Accept-Ranges, X-Admin-Proxy, X-Moderation-Status',
     };
 
@@ -162,6 +192,17 @@ export default {
       // Route handling
       if (path === '/api/info' && request.method === 'GET') {
         return handleInfo(env, corsHeaders);
+      }
+
+      // Zendesk endpoints have their own auth (HMAC, NIP-98, JWT) — skip admin gate
+      if (path.startsWith('/api/zendesk/')) {
+        return handleZendeskRoutes(request, path, env, corsHeaders);
+      }
+
+      // All other /api/* endpoints require admin access (CF Access or API key)
+      const adminAuthError = verifyAdminAccess(request, env);
+      if (adminAuthError) {
+        return jsonResponse({ success: false, error: adminAuthError }, 401, corsHeaders);
       }
 
       if (path === '/api/publish' && request.method === 'POST') {
@@ -216,11 +257,6 @@ export default {
       // Realness API proxy (for AI detection behind CF Access)
       if (path.startsWith('/api/realness/')) {
         return handleRealnessProxy(request, path, env, corsHeaders);
-      }
-
-      // Zendesk integration endpoints (require JWT auth)
-      if (path.startsWith('/api/zendesk/')) {
-        return handleZendeskRoutes(request, path, env, corsHeaders);
       }
 
       // Report watcher management endpoints
@@ -2101,6 +2137,16 @@ async function handleMobileJwt(
     const contentType = request.headers.get('content-type') || '';
 
     if (contentType.includes('application/x-www-form-urlencoded')) {
+      // Zendesk server-to-server callback — verify shared secret
+      const callbackSecret = request.headers.get('X-Zendesk-Callback-Key');
+      if (!env.ZENDESK_JWT_CALLBACK_SECRET) {
+        console.warn('[handleMobileJwt] ZENDESK_JWT_CALLBACK_SECRET not configured, rejecting form callback');
+        return jsonResponse({ success: false, error: 'Callback auth not configured' }, 500, corsHeaders);
+      }
+      if (!callbackSecret || callbackSecret !== env.ZENDESK_JWT_CALLBACK_SECRET) {
+        return jsonResponse({ success: false, error: 'Invalid callback secret' }, 401, corsHeaders);
+      }
+
       // Zendesk callback format - extract user_token which contains the external_id (npub)
       const formData = await request.formData();
       const userToken = formData.get('user_token') as string | null;
