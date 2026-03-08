@@ -13,11 +13,13 @@ interface Env {
   RELAY_URL: string;
   ALLOWED_ORIGINS: string;
   ANTHROPIC_API_KEY?: string;
-  // Cloudflare Access Service Token for moderation.admin.divine.video
+  // Optional Cloudflare Access token for private moderation hosts.
   CF_ACCESS_CLIENT_ID?: string;
   CF_ACCESS_CLIENT_SECRET?: string;
   // Service binding to divine-realness worker (bypasses CF Access)
   REALNESS?: Fetcher;
+  // Service binding to divine-moderation-api worker for public moderation lookups
+  MODERATION_API?: Fetcher;
   // Zendesk integration
   ZENDESK_SUBDOMAIN?: string;
   ZENDESK_JWT_SECRET?: string;
@@ -46,7 +48,7 @@ interface ZendeskJWTPayload {
   external_id?: string;
 }
 
-const DEFAULT_MODERATION_SERVICE_URL = 'https://moderation.admin.divine.video';
+const DEFAULT_MODERATION_SERVICE_URL = 'https://moderation-api.divine.video';
 const DEFAULT_REALNESS_API_URL = 'https://realness.admin.divine.video';
 
 /**
@@ -905,10 +907,13 @@ async function handleCheckResult(
       headers['CF-Access-Client-Secret'] = env.CF_ACCESS_CLIENT_SECRET;
     }
 
-    const response = await fetch(`${getModerationServiceUrl(env)}/check-result/${sha256}`, {
+    const moderationRequest = new Request(`${getModerationServiceUrl(env)}/check-result/${sha256}`, {
       method: 'GET',
       headers,
     });
+    const response = env.MODERATION_API
+      ? await env.MODERATION_API.fetch(moderationRequest)
+      : await fetch(moderationRequest);
 
     if (!response.ok) {
       if (response.status === 404) {
