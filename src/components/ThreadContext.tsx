@@ -134,12 +134,26 @@ export function ThreadContext({
     <div className="space-y-2">
       <div className="flex items-center justify-between mb-3">
         <h4 className="text-sm font-medium text-muted-foreground">Thread Context</h4>
-        {onViewFullThread && (
-          <Button variant="ghost" size="sm" onClick={onViewFullThread}>
-            <ExternalLink className="h-3 w-3 mr-1" />
-            View Full Thread
-          </Button>
-        )}
+        <div className="flex items-center gap-1">
+          {onViewFullThread && (
+            <Button variant="ghost" size="sm" onClick={onViewFullThread}>
+              <ExternalLink className="h-3 w-3 mr-1" />
+              View Full Thread
+            </Button>
+          )}
+          {reportedEvent && (
+            <a
+              href={`https://divine.video/${nip19.neventEncode({ id: reportedEvent.id })}`}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <Button variant="ghost" size="sm">
+                <ExternalLink className="h-3 w-3 mr-1" />
+                View on Divine
+              </Button>
+            </a>
+          )}
+        </div>
       </div>
 
       {ancestors.map((event, index) => (
