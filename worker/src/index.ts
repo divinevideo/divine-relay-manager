@@ -548,27 +548,19 @@ async function handleModerate(
     await markHumanReviewed(env.DB, 'pubkey', body.pubkey);
   }
 
-  // Sync any linked Zendesk tickets (delete_event syncs in its own early return)
+  // Sync linked Zendesk tickets for both event and pubkey targets if present
+  // (delete_event has its own early-return sync above)
+  const moderator = getPublicKey(secretKey);
   try {
-    await syncZendeskAfterAction(
-      env,
-      body.action,
-      body.pubkey ? 'pubkey' : 'event',
-      body.pubkey || '',
-      getPublicKey(secretKey)
-    );
+    if (body.eventId) {
+      await syncZendeskAfterAction(env, body.action, 'event', body.eventId, moderator);
+    }
+    if (body.pubkey) {
+      await syncZendeskAfterAction(env, body.action, 'pubkey', body.pubkey, moderator);
+    }
   } catch (err) {
     console.error('[handleModerate] Zendesk sync error:', err);
   }
-
-  // Sync any linked Zendesk tickets
-  syncZendeskAfterAction(
-    env,
-    body.action,
-    body.eventId ? 'event' : 'pubkey',
-    body.eventId || body.pubkey || '',
-    getPublicKey(secretKey)
-  ).catch((err) => console.error('[handleModerate] Zendesk sync error:', err));
 
   return jsonResponse({ success: true, event }, 200, corsHeaders);
 }
