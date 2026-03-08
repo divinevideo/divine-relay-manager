@@ -26,7 +26,7 @@ export function useThread(eventId: string | undefined, depth: number = 3) {
         return { ancestors: [], event: null, replies: [], repostedEvent: null, isRepost: false };
       }
 
-      const timeout = AbortSignal.timeout(5000);
+      const timeout = AbortSignal.timeout(8000);
       const combinedSignal = AbortSignal.any([signal, timeout]);
 
       // Fetch the main event
@@ -44,10 +44,8 @@ export function useThread(eventId: string | undefined, depth: number = 3) {
       const isRepost = REPOST_KINDS.includes(event.kind);
 
       if (isRepost) {
-        // Get the original event ID from 'e' tag
         const originalEventTag = event.tags.find(t => t[0] === 'e');
         if (originalEventTag) {
-          // First try to parse from content (some reposts include the full event JSON)
           if (event.content) {
             try {
               const parsed = JSON.parse(event.content);
@@ -59,7 +57,6 @@ export function useThread(eventId: string | undefined, depth: number = 3) {
             }
           }
 
-          // If we didn't get the event from content, fetch it
           if (!repostedEvent) {
             const [fetchedOriginal] = await nostr.query(
               [{ ids: [originalEventTag[1]], limit: 1 }],
@@ -70,38 +67,49 @@ export function useThread(eventId: string | undefined, depth: number = 3) {
         }
       }
 
-      // Find ancestors by following reply tags
-      const ancestors: NostrEvent[] = [];
-      let currentEvent = event;
+      // Collect ancestor IDs from NIP-10 tags upfront.
+      // NIP-10 events may have a 'root' tag and a 'reply' tag — both point to
+      // ancestors we can fetch in a single batch instead of chasing one at a time.
+      const ancestorIds: string[] = [];
+      const rootTag = event.tags.find(t => t[0] === 'e' && t[3] === 'root');
+      const replyTag = event.tags.find(t => t[0] === 'e' && t[3] === 'reply');
 
-      for (let i = 0; i < depth; i++) {
-        const replyTag = currentEvent.tags.find(
-          t => t[0] === 'e' && (t[3] === 'reply' || t[3] === 'root' || !t[3])
-        );
+      if (rootTag) ancestorIds.push(rootTag[1]);
+      if (replyTag && replyTag[1] !== rootTag?.[1]) ancestorIds.push(replyTag[1]);
 
-        if (!replyTag) break;
-
-        const [parentEvent] = await nostr.query(
-          [{ ids: [replyTag[1]], limit: 1 }],
-          { signal: combinedSignal }
-        );
-
-        if (parentEvent) {
-          ancestors.unshift(parentEvent);
-          currentEvent = parentEvent;
-        } else {
-          break;
+      // Fallback for events without NIP-10 markers: use positional e-tags
+      if (ancestorIds.length === 0) {
+        const eTags = event.tags.filter(t => t[0] === 'e');
+        if (eTags.length > 0) {
+          // First e-tag is conventionally the root/parent
+          ancestorIds.push(eTags[0][1]);
         }
       }
 
-      // Fetch replies to the event
-      const replies = await nostr.query(
-        [{ kinds: [1], '#e': [eventId], limit: 20 }],
-        { signal: combinedSignal }
-      );
+      // Fetch ancestors and replies in parallel
+      const [ancestorEvents, replies] = await Promise.all([
+        ancestorIds.length > 0
+          ? nostr.query(
+              [{ ids: ancestorIds.slice(0, depth), limit: depth }],
+              { signal: combinedSignal }
+            )
+          : Promise.resolve([]),
+        nostr.query(
+          [{ kinds: [1], '#e': [eventId], limit: 20 }],
+          { signal: combinedSignal }
+        ),
+      ]);
+
+      // Order ancestors: root first, then reply (match the order we collected IDs)
+      const ancestorMap = new Map(ancestorEvents.map(e => [e.id, e]));
+      const ancestors = ancestorIds
+        .slice(0, depth)
+        .map(id => ancestorMap.get(id))
+        .filter((e): e is NostrEvent => e !== undefined);
 
       return { ancestors, event, replies, repostedEvent, isRepost };
     },
     enabled: !!eventId,
+    staleTime: 60_000, // Cache thread data for 1 minute when switching between reports
   });
 }
