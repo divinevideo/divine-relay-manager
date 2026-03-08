@@ -8,9 +8,31 @@ import { nip19 } from "nostr-tools";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
-import { AlertTriangle, ExternalLink } from "lucide-react";
+import { AlertTriangle, ExternalLink, Video, Image } from "lucide-react";
 import { HiveAIReport } from "@/components/HiveAIReport";
 import type { NostrEvent } from "@nostrify/nostrify";
+
+// Extract media info from imeta tags
+function extractImetaMedia(tags: string[][]): { url: string; type: 'image' | 'video'; thumbnail?: string }[] {
+  const media: { url: string; type: 'image' | 'video'; thumbnail?: string }[] = [];
+  for (const tag of tags) {
+    if (tag[0] !== 'imeta') continue;
+    let url: string | undefined;
+    let mimeType: string | undefined;
+    let thumbnail: string | undefined;
+    for (let i = 1; i < tag.length; i++) {
+      const part = tag[i];
+      if (part.startsWith('url ')) url = part.slice(4);
+      else if (part.startsWith('m ')) mimeType = part.slice(2);
+      else if (part.startsWith('image ')) thumbnail = part.slice(6);
+    }
+    if (url) {
+      const type = mimeType?.startsWith('image/') ? 'image' as const : 'video' as const;
+      media.push({ url, type, thumbnail });
+    }
+  }
+  return media;
+}
 
 interface EventContentPreviewProps {
   eventId: string;
@@ -66,6 +88,8 @@ export function EventContent({ event, className }: EventContentProps) {
   // Extract image URLs from content
   const imageUrls = extractImageUrls(event.content);
   const textContent = removeImageUrls(event.content);
+  const imetaMedia = extractImetaMedia(event.tags);
+  const title = event.tags.find(t => t[0] === 'title')?.[1];
 
   // Get event kind label
   const kindLabel = getKindLabel(event.kind);
@@ -112,7 +136,7 @@ export function EventContent({ event, className }: EventContentProps) {
           </div>
         )}
 
-        {/* Image previews */}
+        {/* Image previews from content URLs */}
         {imageUrls.length > 0 && (
           <div className="flex flex-wrap gap-2 mt-2">
             {imageUrls.slice(0, 4).map((url, idx) => (
@@ -143,8 +167,48 @@ export function EventContent({ event, className }: EventContentProps) {
           </div>
         )}
 
+        {/* Media from imeta tags (videos/images with no content URL) */}
+        {imetaMedia.length > 0 && imageUrls.length === 0 && (
+          <div className="space-y-2 mt-2">
+            {title && (
+              <p className="text-sm font-medium">{title}</p>
+            )}
+            <div className="flex flex-wrap gap-2">
+              {imetaMedia.slice(0, 4).map((m, idx) => (
+                <div key={idx} className="relative group">
+                  {m.thumbnail ? (
+                    <img
+                      src={m.thumbnail}
+                      alt={title || `Media ${idx + 1}`}
+                      className="h-20 w-32 object-cover rounded border"
+                      onError={(e) => { e.currentTarget.style.display = 'none'; }}
+                    />
+                  ) : (
+                    <div className="h-20 w-32 rounded border bg-muted flex items-center justify-center">
+                      {m.type === 'video' ? <Video className="h-6 w-6 text-muted-foreground" /> : <Image className="h-6 w-6 text-muted-foreground" />}
+                    </div>
+                  )}
+                  <a
+                    href={m.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 flex items-center justify-center rounded transition-opacity"
+                  >
+                    <ExternalLink className="h-4 w-4 text-white" />
+                  </a>
+                  {m.type === 'video' && m.thumbnail && (
+                    <div className="absolute bottom-1 left-1 bg-black/70 rounded px-1">
+                      <Video className="h-3 w-3 text-white" />
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* No content indicator */}
-        {!textContent && imageUrls.length === 0 && (
+        {!textContent && imageUrls.length === 0 && imetaMedia.length === 0 && (
           <div className="text-sm text-muted-foreground italic">
             No text content
           </div>
@@ -175,10 +239,13 @@ function getKindLabel(kind: number): string | null {
     5: 'Delete',
     6: 'Repost',
     7: 'Reaction',
+    21: 'Video',
     1984: 'Report',
     1985: 'Label',
     30023: 'Article',
     30024: 'Draft',
+    34235: 'Video',
+    34236: 'Short Video',
   };
   return kindLabels[kind] || null;
 }

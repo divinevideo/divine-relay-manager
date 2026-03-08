@@ -41,6 +41,16 @@ function buildEnvironments(): Environment[] {
     });
   }
 
+  // Local (dev only)
+  if (import.meta.env.VITE_LOCAL_RELAY_URL && import.meta.env.VITE_LOCAL_API_URL) {
+    envs.push({
+      id: 'local',
+      name: 'Local',
+      relayUrl: import.meta.env.VITE_LOCAL_RELAY_URL,
+      apiUrl: import.meta.env.VITE_LOCAL_API_URL,
+    });
+  }
+
   return envs;
 }
 

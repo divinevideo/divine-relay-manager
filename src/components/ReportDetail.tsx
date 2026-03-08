@@ -1,7 +1,7 @@
 // ABOUTME: Full detail view for a selected report in the split-pane layout
 // ABOUTME: Combines thread context, user profile, AI summary, and action buttons
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -23,7 +23,9 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useToast } from "@/hooks/useToast";
+import { ToastAction } from "@/components/ui/toast";
 import { useReportContext } from "@/hooks/useReportContext";
+import { useBannedEvent } from "@/hooks/useBannedEvent";
 import { useUserSummary } from "@/hooks/useUserSummary";
 import { useModerationStatus } from "@/hooks/useModerationStatus";
 import { ThreadContext } from "@/components/ThreadContext";
@@ -41,18 +43,12 @@ import { HiveAIReport } from "@/components/HiveAIReport";
 import { AIDetectionReport } from "@/components/AIDetectionReport";
 import { MediaPreview } from "@/components/MediaPreview";
 import { BulkDeleteByKind } from "@/components/BulkDeleteByKind";
-import { CATEGORY_LABELS } from "@/lib/constants";
-import { UserX, UserCheck, Tag, Flag, Trash2, CheckCircle, Video, History, Ban, ShieldX, Link2, User, FileText, Unlock, Repeat2, FileCode, Loader2, XCircle, RefreshCw, Undo2 } from "lucide-react";
+import { CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, getReportCategory, buildReasonString } from "@/lib/constants";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
+import { UserX, UserCheck, Tag, Flag, Trash2, CheckCircle, Video, History, Ban, ShieldX, Link2, User, FileText, Unlock, Repeat2, FileCode, Loader2, XCircle, RefreshCw, Undo2, EyeOff, Eye } from "lucide-react";
 import { CopyableId, CopyableTags } from "@/components/CopyableId";
 import type { NostrEvent } from "@nostrify/nostrify";
-
-function getReportCategory(event: NostrEvent): string {
-  const reportTag = event.tags.find(t => t[0] === 'report');
-  if (reportTag && reportTag[1]) return reportTag[1];
-  const lTag = event.tags.find(t => t[0] === 'l');
-  if (lTag && lTag[1]) return lTag[1];
-  return 'other';
-}
 
 interface ReportDetailProps {
   report: NostrEvent | null;
@@ -69,6 +65,23 @@ function getReportTarget(event: NostrEvent): { type: 'event' | 'pubkey'; value: 
   if (pTag) return { type: 'pubkey', value: pTag[1] };
   return null;
 }
+
+// Deduplicated category labels for the reason selector dropdown.
+// Also builds a map from any raw key to its canonical (first-seen) key,
+// so getReportCategory() values always match a SelectItem.
+const { UNIQUE_CATEGORY_ENTRIES, CANONICAL_KEY } = (() => {
+  const seen = new Map<string, string>(); // label → first key
+  const entries: [string, string][] = [];
+  const canonical: Record<string, string> = {};
+  for (const [key, label] of Object.entries(CATEGORY_LABELS)) {
+    if (!seen.has(label)) {
+      seen.set(label, key);
+      entries.push([key, label]);
+    }
+    canonical[key] = seen.get(label)!;
+  }
+  return { UNIQUE_CATEGORY_ENTRIES: entries, CANONICAL_KEY: canonical };
+})();
 
 export function ReportDetail({ report, allReportsForTarget, allReports = [], onDismiss }: ReportDetailProps) {
   const { toast } = useToast();
@@ -87,6 +100,41 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   const [confirmBlockMedia, setConfirmBlockMedia] = useState(false);
   const [confirmBlockAndDelete, setConfirmBlockAndDelete] = useState(false);
   const [banOptions, setBanOptions] = useState({ deleteEvents: true, blockMedia: true });
+  const [actionReason, setActionReason] = useState('');
+  const [actionNote, setActionNote] = useState('');
+
+  // Initialize reason from report category when report changes
+  const defaultReason = report ? (CANONICAL_KEY[getReportCategory(report)] || getReportCategory(report)) : '';
+  useEffect(() => {
+    if (report) {
+      setActionReason(defaultReason);
+      setActionNote('');
+    }
+  }, [report, defaultReason]);
+
+  const reasonSelector = (
+    <div className="space-y-2 pt-2 border-t">
+      <Label className="text-sm font-medium">Reason</Label>
+      <Select value={actionReason} onValueChange={setActionReason}>
+        <SelectTrigger>
+          <SelectValue placeholder="Select reason..." />
+        </SelectTrigger>
+        <SelectContent>
+          {UNIQUE_CATEGORY_ENTRIES.map(([key, label]) => (
+            <SelectItem key={key} value={key}>{label}</SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      <Textarea
+        placeholder="Add a note (optional)..."
+        value={actionNote}
+        onChange={(e) => setActionNote(e.target.value)}
+        rows={2}
+        maxLength={500}
+      />
+    </div>
+  );
+
   const [isVerifying, setIsVerifying] = useState(false);
   const [verificationResult, setVerificationResult] = useState<{
     type: 'ban' | 'delete' | 'media';
@@ -101,6 +149,18 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   }>({ userBanned: null, eventDeleted: null, checkedAt: null, isChecking: false });
 
   const context = useReportContext(report);
+
+  // Banned event fallback: if thread event is null and target is an event ID, try management API
+  const targetEventId = context.target?.type === 'event' ? context.target.value : undefined;
+  const { data: bannedEvent } = useBannedEvent(
+    targetEventId,
+    !context.isLoading && !context.thread?.event && !!targetEventId
+  );
+
+  // Use banned event as fallback for display
+  const displayEvent = context.thread?.event || bannedEvent;
+  const isDisplayedEventBanned = !context.thread?.event && !!bannedEvent;
+  const isBannedEventLoading = !context.isLoading && !context.thread?.event && !!targetEventId && !bannedEvent;
 
   const summary = useUserSummary(
     context.reportedUser.pubkey || undefined,
@@ -164,6 +224,10 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   const isUserBanned = moderationStatus.isBanned;
   const isEventDeleted = moderationStatus.isDeleted;
   const isResolved = decisionLog.hasDecisions || pubkeyDecisionLog.hasDecisions || isUserBanned || isEventDeleted;
+
+  // Auto-hide specific status
+  const isPendingReview = decisionLog.isPendingReview;
+  const _isAutoHidden = decisionLog.isAutoHidden;
 
   // Find related reports: reports on this user AND reports on their events
   const relatedReports = useMemo(() => {
@@ -521,9 +585,9 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   const mediaHashes = useMemo(() => {
     const hashes = new Set<string>();
 
-    // From the reported event itself
-    if (context.thread?.event) {
-      const eventHashes = extractMediaHashes(context.thread.event.content, context.thread.event.tags);
+    // From the reported event itself (or banned event fallback)
+    if (displayEvent) {
+      const eventHashes = extractMediaHashes(displayEvent.content, displayEvent.tags);
       eventHashes.forEach(h => hashes.add(h));
     }
 
@@ -534,10 +598,20 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     }
 
     return Array.from(hashes);
-  }, [context.thread?.event, context.thread?.repostedEvent]);
+  }, [displayEvent, context.thread?.repostedEvent]);
 
   // Check media status from moderation service
   const mediaStatus = useMediaStatus(mediaHashes);
+
+  // Check if any report on this target has a high-priority category (CSAM, etc.)
+  // Used to collapse media preview by default to protect moderators
+  const hasHighPriorityReports = useMemo(() => {
+    if (!allReportsForTarget?.length) return false;
+    return allReportsForTarget.some(r => {
+      const cat = getReportCategory(r);
+      return HIGH_PRIORITY_CATEGORIES.includes(cat);
+    });
+  }, [allReportsForTarget]);
 
   const unblockMediaMutation = useMutation({
     mutationFn: async ({ hashes, reason }: { hashes: string[]; reason: string }) => {
@@ -655,6 +729,64 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     },
   });
 
+  // Confirm auto-hidden content (approve the auto-hide decision)
+  const confirmAutoHideMutation = useMutation({
+    mutationFn: async ({ targetId, targetType }: { targetId: string; targetType: 'event' | 'pubkey' }) => {
+      await logDecision({
+        targetType,
+        targetId,
+        action: 'auto_hide_confirmed',
+        reason: 'Auto-hide confirmed by moderator',
+        reportId: report?.id,
+      });
+      return targetId;
+    },
+    onSuccess: async () => {
+      queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      queryClient.invalidateQueries({ queryKey: ['all-decisions'] });
+      decisionLog.refetch();
+      toast({ title: "Auto-hide confirmed", description: "Content will remain hidden" });
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Failed to confirm auto-hide",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  // Restore auto-hidden content (reverse the auto-hide)
+  const restoreAutoHideMutation = useMutation({
+    mutationFn: async ({ eventId }: { eventId: string }) => {
+      await callRelayRpc('allowevent', [eventId]);
+      await logDecision({
+        targetType: 'event',
+        targetId: eventId,
+        action: 'auto_hide_restored',
+        reason: 'Auto-hide reversed by moderator',
+        reportId: report?.id,
+      });
+      return eventId;
+    },
+    onSuccess: async () => {
+      queryClient.invalidateQueries({ queryKey: ['reports'] });
+      queryClient.invalidateQueries({ queryKey: ['banned-events'] });
+      queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      queryClient.invalidateQueries({ queryKey: ['all-decisions'] });
+      moderationStatus.refetch();
+      decisionLog.refetch();
+      toast({ title: "Content restored", description: "Auto-hide has been reversed" });
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Failed to restore content",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
   // Combined action: Block media AND delete event
   const blockAndDeleteMutation = useMutation({
     mutationFn: async ({ eventId, hashes, reason }: { eventId: string; hashes: string[]; reason: string }) => {
@@ -763,12 +895,13 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
 
   const category = getReportCategory(report);
   const categoryLabel = CATEGORY_LABELS[category] || category;
+  const isHighPriorityCategory = HIGH_PRIORITY_CATEGORIES.includes(category);
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
       {/* Dialogs - rendered as portals, don't affect flex layout */}
       {/* Ban Confirmation Dialog */}
-      <AlertDialog open={confirmBan} onOpenChange={setConfirmBan}>
+      <AlertDialog open={confirmBan} onOpenChange={(open) => { setConfirmBan(open); if (!open) { setActionNote(''); setActionReason(defaultReason); } }}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Ban User?</AlertDialogTitle>
@@ -813,6 +946,8 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                     </Label>
                   </div>
                 </div>
+
+                {reasonSelector}
               </div>
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -823,7 +958,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                 if (context.reportedUser.pubkey) {
                   banMutation.mutate({
                     pubkey: context.reportedUser.pubkey,
-                    reason: `Report: ${categoryLabel}`,
+                    reason: buildReasonString(actionReason, actionNote),
                     deleteEvents: banOptions.deleteEvents,
                     blockMedia: banOptions.blockMedia,
                   });
@@ -839,7 +974,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
       </AlertDialog>
 
       {/* Delete Event Confirmation Dialog */}
-      <AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}>
+      <AlertDialog open={confirmDelete} onOpenChange={(open) => { setConfirmDelete(open); if (!open) { setActionNote(''); setActionReason(defaultReason); } }}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Ban Event?</AlertDialogTitle>
@@ -857,6 +992,8 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                     />
                   </div>
                 )}
+
+                {reasonSelector}
               </div>
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -867,7 +1004,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                 if (context.target?.type === 'event' && context.target.value) {
                   deleteMutation.mutate({
                     eventId: context.target.value,
-                    reason: `Report: ${categoryLabel}`,
+                    reason: buildReasonString(actionReason, actionNote),
                   });
                 }
               }}
@@ -881,7 +1018,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
       </AlertDialog>
 
       {/* Block Media Confirmation Dialog */}
-      <AlertDialog open={confirmBlockMedia} onOpenChange={setConfirmBlockMedia}>
+      <AlertDialog open={confirmBlockMedia} onOpenChange={(open) => { setConfirmBlockMedia(open); if (!open) { setActionNote(''); setActionReason(defaultReason); } }}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Block Media?</AlertDialogTitle>
@@ -900,6 +1037,8 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                     />
                   ))}
                 </div>
+
+                {reasonSelector}
               </div>
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -910,7 +1049,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                 blockMediaMutation.mutate({
                   hashes: mediaHashes,
                   action: 'PERMANENT_BAN',
-                  reason: `Report: ${categoryLabel}`,
+                  reason: buildReasonString(actionReason, actionNote),
                 });
               }}
               disabled={blockMediaMutation.isPending}
@@ -923,7 +1062,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
       </AlertDialog>
 
       {/* Block Media AND Delete Event Combined Confirmation Dialog */}
-      <AlertDialog open={confirmBlockAndDelete} onOpenChange={setConfirmBlockAndDelete}>
+      <AlertDialog open={confirmBlockAndDelete} onOpenChange={(open) => { setConfirmBlockAndDelete(open); if (!open) { setActionNote(''); setActionReason(defaultReason); } }}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Remove Content?</AlertDialogTitle>
@@ -934,6 +1073,8 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                   <li>Ban {mediaHashes.length} media file(s)</li>
                   <li>Delete the event from the relay</li>
                 </ul>
+
+                {reasonSelector}
               </div>
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -945,7 +1086,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                   blockAndDeleteMutation.mutate({
                     eventId: context.target.value,
                     hashes: mediaHashes,
-                    reason: `Report: ${categoryLabel}`,
+                    reason: buildReasonString(actionReason, actionNote),
                   });
                 }
               }}
@@ -1088,8 +1229,69 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             </div>
           )}
 
-          {/* Resolved Banner - prominently show when already handled */}
-          {isResolved && (
+          {/* Pending Review Banner - for auto-hidden items awaiting human review */}
+          {isPendingReview && (
+            <div className="bg-orange-100 dark:bg-orange-950/50 border border-orange-300 dark:border-orange-800 rounded-lg p-3">
+              <div className="flex items-center gap-3 mb-3">
+                <EyeOff className="h-6 w-6 text-orange-600" />
+                <div className="flex-1">
+                  <p className="font-medium text-orange-800 dark:text-orange-300">
+                    Auto-Hidden — Pending Review
+                  </p>
+                  <p className="text-sm text-orange-600 dark:text-orange-400">
+                    This content was automatically hidden based on a report. Please review and confirm or restore.
+                  </p>
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="default"
+                      className="bg-green-600 hover:bg-green-700"
+                      onClick={() => {
+                        if (context.target) {
+                          confirmAutoHideMutation.mutate({
+                            targetId: context.target.value,
+                            targetType: context.target.type,
+                          });
+                        }
+                      }}
+                      disabled={confirmAutoHideMutation.isPending}
+                    >
+                      <CheckCircle className="h-4 w-4 mr-1" />
+                      {confirmAutoHideMutation.isPending ? 'Confirming...' : 'Confirm Hide'}
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" className="max-w-xs">
+                    <p>Confirm this auto-hide decision. The content will remain hidden.</p>
+                  </TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="outline"
+                      onClick={() => {
+                        if (context.target?.type === 'event' && context.target.value) {
+                          restoreAutoHideMutation.mutate({ eventId: context.target.value });
+                        }
+                      }}
+                      disabled={restoreAutoHideMutation.isPending || context.target?.type !== 'event'}
+                    >
+                      <Eye className="h-4 w-4 mr-1" />
+                      {restoreAutoHideMutation.isPending ? 'Restoring...' : 'Restore Content'}
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" className="max-w-xs">
+                    <p>Reverse the auto-hide. The content will be visible again.</p>
+                  </TooltipContent>
+                </Tooltip>
+              </div>
+            </div>
+          )}
+
+          {/* Resolved Banner - prominently show when already handled (but not pending review) */}
+          {isResolved && !isPendingReview && (
             <div className="bg-green-100 dark:bg-green-950/50 border border-green-300 dark:border-green-800 rounded-lg p-3 flex items-center gap-3">
               <CheckCircle className="h-6 w-6 text-green-600" />
               <div className="flex-1">
@@ -1108,7 +1310,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
           {/* Header */}
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 flex-wrap">
-              <Badge variant="outline">{categoryLabel}</Badge>
+              <Badge variant={isHighPriorityCategory ? "destructive" : "outline"}>{categoryLabel}</Badge>
               <Badge variant="secondary">
                 {context.target?.type === 'event' ? 'Event' : 'User'}
               </Badge>
@@ -1122,6 +1324,12 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                 <Badge variant="destructive" className="flex items-center gap-1">
                   <ShieldX className="h-3 w-3" />
                   Event Deleted
+                </Badge>
+              )}
+              {isPendingReview && (
+                <Badge variant="outline" className="flex items-center gap-1 border-orange-500 text-orange-600">
+                  <EyeOff className="h-3 w-3" />
+                  Auto-Hidden
                 </Badge>
               )}
             </div>
@@ -1237,16 +1445,27 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
           )}
 
           {/* Section: Reported Content */}
-          <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Reported Content</h4>
+          <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+            Reported Content{context.target?.type === 'event' ? ': Event' : context.target?.type === 'pubkey' ? ': User' : ''}
+          </h4>
 
           {/* Thread Context - the text content being reported */}
           {context.target?.type === 'event' && (
-            <ThreadContext
-              ancestors={context.thread?.ancestors || []}
-              reportedEvent={context.thread?.event || null}
-              onViewFullThread={() => setShowThreadModal(true)}
-              isLoading={context.isLoading}
-            />
+            <>
+              {isDisplayedEventBanned && (
+                <div className="flex items-center gap-2 px-3 py-2 rounded-md bg-red-50 border border-red-200 dark:bg-red-950/30 dark:border-red-800">
+                  <Ban className="h-4 w-4 text-red-600" />
+                  <span className="text-sm font-medium text-red-700 dark:text-red-400">Event is banned on relay</span>
+                  <span className="text-xs text-red-600/70 dark:text-red-400/70">Content retrieved via admin API</span>
+                </div>
+              )}
+              <ThreadContext
+                ancestors={context.thread?.ancestors || []}
+                reportedEvent={displayEvent || null}
+                onViewFullThread={() => setShowThreadModal(true)}
+                isLoading={context.isLoading || isBannedEventLoading}
+              />
+            </>
           )}
 
           {/* Repost Original Content - show when the reported event is a repost */}
@@ -1286,7 +1505,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                     {/* Media in original post */}
                     <MediaPreview
                       event={context.thread.repostedEvent}
-                      showByDefault={true}
+                      showByDefault={!hasHighPriorityReports}
                       maxItems={6}
                     />
                   </div>
@@ -1300,10 +1519,10 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
           )}
 
           {/* Media Preview - show the actual content being reported */}
-          {context.thread?.event && (
+          {displayEvent && (
             <MediaPreview
-              event={context.thread.event}
-              showByDefault={true}
+              event={displayEvent}
+              showByDefault={!hasHighPriorityReports}
               maxItems={6}
             />
           )}
@@ -1313,7 +1532,22 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             profile={context.reportedUser.profile}
             pubkey={context.reportedUser.pubkey}
             stats={context.userStats}
-            isLoading={context.isLoading}
+            isLoading={context.isLoading || isBannedEventLoading}
+            onDeleteEvent={(eventId) => {
+              deleteMutation.mutate({ eventId, reason: 'Deleted from report review' }, {
+                onSuccess: (deletedId) => {
+                  toast({
+                    title: "Event deleted",
+                    description: "The event has been removed from the relay.",
+                    action: (
+                      <ToastAction altText="Undo delete" onClick={() => restoreEventMutation.mutate({ eventId: deletedId })}>
+                        Undo
+                      </ToastAction>
+                    ),
+                  });
+                },
+              });
+            }}
           />
 
           <Separator />
@@ -1322,15 +1556,15 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
           <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Investigation Helpers</h4>
 
           {/* Hive AI Content Moderation */}
-          {context.thread?.event && (
-            <HiveAIReport eventTags={context.thread.event.tags} />
+          {displayEvent && (
+            <HiveAIReport eventTags={displayEvent.tags} />
           )}
 
           {/* AI Detection (Reality Defender multi-provider) */}
-          {context.thread?.event && (
+          {displayEvent && (
             <AIDetectionReport
-              eventTags={context.thread.event.tags}
-              eventId={context.thread.event.id}
+              eventTags={displayEvent.tags}
+              eventId={displayEvent.id}
             />
           )}
 
@@ -1469,12 +1703,12 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
               )}
 
               {/* Reported Event Tags (if different from report) */}
-              {context.thread?.event && context.thread.event.tags.length > 0 && (
+              {displayEvent && displayEvent.tags.length > 0 && (
                 <div className="pt-2 border-t">
                   <span className="text-xs font-medium text-muted-foreground block mb-1">
                     Reported Event Tags
                   </span>
-                  <CopyableTags tags={context.thread.event.tags} maxTags={8} />
+                  <CopyableTags tags={displayEvent.tags} maxTags={8} />
                 </div>
               )}
             </CardContent>

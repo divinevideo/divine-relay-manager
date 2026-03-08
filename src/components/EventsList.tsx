@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery, useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNostr } from "@/hooks/useNostr";
@@ -22,6 +22,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Textarea } from "@/components/ui/textarea";
 import { EventDetail } from "@/components/EventDetail";
 import { BulkDeleteByKind } from "@/components/BulkDeleteByKind";
+import { getDivineProfileUrl } from "@/lib/constants";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   FileText,
@@ -41,6 +42,7 @@ import {
   Search,
   Flag,
   Image,
+  Video,
   UserPlus,
   Loader2,
   XCircle,
@@ -54,6 +56,51 @@ interface EventsListProps {
 interface EventWithModeration extends NostrEvent {
   moderationStatus?: 'pending' | 'approved' | 'banned';
   moderationReason?: string;
+}
+
+type SearchMode =
+  | { type: 'none' }
+  | { type: 'event_id'; hex: string }
+  | { type: 'pubkey'; hex: string }
+  | { type: 'text'; query: string };
+
+function parseSearchInput(input: string): SearchMode {
+  const trimmed = input.trim();
+  if (!trimmed) return { type: 'none' };
+
+  // NIP-19 encoded identifiers
+  if (trimmed.startsWith('note1') || trimmed.startsWith('nevent1')) {
+    try {
+      const decoded = nip19.decode(trimmed);
+      if (decoded.type === 'note') {
+        return { type: 'event_id', hex: decoded.data };
+      } else if (decoded.type === 'nevent') {
+        return { type: 'event_id', hex: decoded.data.id };
+      }
+    } catch {
+      // Invalid encoding, fall through to text search
+    }
+  }
+
+  if (trimmed.startsWith('npub1') || trimmed.startsWith('nprofile1')) {
+    try {
+      const decoded = nip19.decode(trimmed);
+      if (decoded.type === 'npub') {
+        return { type: 'pubkey', hex: decoded.data };
+      } else if (decoded.type === 'nprofile') {
+        return { type: 'pubkey', hex: decoded.data.pubkey };
+      }
+    } catch {
+      // Invalid encoding, fall through to text search
+    }
+  }
+
+  // 64-char hex defaults to event ID lookup
+  if (/^[0-9a-f]{64}$/i.test(trimmed)) {
+    return { type: 'event_id', hex: trimmed.toLowerCase() };
+  }
+
+  return { type: 'text', query: trimmed };
 }
 
 
@@ -78,7 +125,7 @@ function EventCard({
   const profileImage = metadata?.picture;
   const profileUrl = (() => {
     try {
-      return `https://divine.video/profile/${nip19.npubEncode(event.pubkey)}`;
+      return getDivineProfileUrl(nip19.npubEncode(event.pubkey));
     } catch {
       return undefined;
     }
@@ -191,7 +238,7 @@ function EventCard({
           </div>
         </div>
 
-        {event.content && (
+        {event.content ? (
           <p className="text-sm mt-2 text-muted-foreground truncate">
             {event.kind === 0 ? (() => {
               try {
@@ -206,7 +253,24 @@ function EventCard({
               }
             })() : truncateContent(event.content)}
           </p>
-        )}
+        ) : (() => {
+          // For events with no text content, show media/title info from tags
+          const imeta = event.tags.find(t => t[0] === 'imeta');
+          const title = event.tags.find(t => t[0] === 'title')?.[1];
+          const duration = event.tags.find(t => t[0] === 'duration')?.[1];
+          if (imeta) {
+            const mimeType = imeta.find(p => p.startsWith('m '))?.slice(2);
+            const isVideo = mimeType?.startsWith('video/');
+            return (
+              <p className="text-sm mt-2 text-muted-foreground truncate flex items-center gap-1">
+                {isVideo ? <Video className="h-3 w-3 shrink-0" /> : <Image className="h-3 w-3 shrink-0" />}
+                {title || (isVideo ? 'Video' : 'Media')}
+                {duration && <span className="text-xs">({duration}s)</span>}
+              </p>
+            );
+          }
+          return null;
+        })()}
 
         <div className="flex items-center justify-between mt-2 text-xs text-muted-foreground">
           <div className="flex items-center gap-3">
@@ -330,6 +394,8 @@ export function EventsList({ relayUrl }: EventsListProps) {
   const [customKind, setCustomKind] = useState('');
   const [selectedEvent, setSelectedEvent] = useState<NostrEvent | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [committedSearch, setCommittedSearch] = useState('');
+  const searchMode = useMemo(() => parseSearchInput(committedSearch), [committedSearch]);
   const [filterHasReports, setFilterHasReports] = useState(false);
   const [filterNewUsers, setFilterNewUsers] = useState(false);
   const [filterHasMedia, setFilterHasMedia] = useState(false);
@@ -353,6 +419,23 @@ export function EventsList({ relayUrl }: EventsListProps) {
     } else {
       setSearchParams({});
     }
+  };
+
+  const commitSearch = () => {
+    const parsed = parseSearchInput(searchQuery);
+    if (parsed.type === 'pubkey') {
+      // Route pubkey search through the existing filter mechanism
+      updatePubkeyFilter(parsed.hex);
+      setSearchQuery('');
+      setCommittedSearch('');
+    } else {
+      setCommittedSearch(searchQuery);
+    }
+  };
+
+  const clearSearch = () => {
+    setSearchQuery('');
+    setCommittedSearch('');
   };
 
   // Ref for scroll viewport (infinite scroll)
@@ -412,6 +495,41 @@ export function EventsList({ relayUrl }: EventsListProps) {
     enabled: !!relayUrl && !!nostr,
     refetchInterval: 30000, // Refresh every 30 seconds
   });
+
+  // Direct event lookup by ID (separate from infinite scroll)
+  // Tries normal relay query first, then falls back to getbannedevent RPC
+  const { data: directEventLookup, isLoading: isLoadingDirectEvent, error: directEventError } = useQuery({
+    queryKey: ['event-search', searchMode.type === 'event_id' ? searchMode.hex : null],
+    queryFn: async ({ signal }) => {
+      if (searchMode.type !== 'event_id') return null;
+
+      // Try normal relay query first
+      const events = await nostr.query(
+        [{ ids: [searchMode.hex] }],
+        { signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]) }
+      );
+      if (events[0]) return { event: events[0], banned: false };
+
+      // Fallback: check if it's a banned event via management API
+      try {
+        const bannedEvent = await callRelayRpc<NostrEvent>('getbannedevent', [searchMode.hex]);
+        if (bannedEvent) return { event: bannedEvent, banned: true };
+      } catch {
+        // Not banned or RPC failed
+      }
+
+      return null;
+    },
+    enabled: searchMode.type === 'event_id' && !!nostr,
+    staleTime: 60 * 1000,
+  });
+
+  // Auto-select found event in detail pane
+  useEffect(() => {
+    if (directEventLookup?.event && searchMode.type === 'event_id') {
+      setSelectedEvent(directEventLookup.event);
+    }
+  }, [directEventLookup, searchMode]);
 
   // Flatten all pages into a single events array
   const events = eventsData?.pages.flat() ?? [];
@@ -473,10 +591,12 @@ export function EventsList({ relayUrl }: EventsListProps) {
     }
   }
 
-  // Helper to check if content has media
-  const hasMedia = (content: string): boolean => {
+  // Helper to check if event has media (content URLs or imeta tags)
+  const hasMedia = (content: string, tags?: string[][]): boolean => {
     const mediaPattern = /https?:\/\/[^\s]+\.(jpg|jpeg|png|gif|webp|mp4|webm|mov)/i;
-    return mediaPattern.test(content);
+    if (mediaPattern.test(content)) return true;
+    if (tags?.some(t => t[0] === 'imeta')) return true;
+    return false;
   };
 
   // Helper to check if user is "new" (created within last 7 days based on event timestamp)
@@ -548,19 +668,24 @@ export function EventsList({ relayUrl }: EventsListProps) {
     moderateEventMutation.mutate({ eventId, action, reason });
   };
 
+  // Enhance a single event with moderation status
+  const enhanceEvent = (event: NostrEvent): EventWithModeration => {
+    const isBanned = bannedEvents?.some((banned: { id: string }) => banned.id === event.id);
+    const needsModeration = eventsNeedingModeration?.some((pending: { id: string }) => pending.id === event.id);
+    return {
+      ...event,
+      moderationStatus: (isBanned ? 'banned' : needsModeration ? 'pending' : undefined) as "pending" | "approved" | "banned" | undefined,
+      moderationReason: isBanned ? bannedEvents?.find((banned: { id: string; reason?: string }) => banned.id === event.id)?.reason :
+                       needsModeration ? eventsNeedingModeration?.find((pending: { id: string; reason?: string }) => pending.id === event.id)?.reason : undefined,
+    };
+  };
+
+  // Enhanced direct lookup result (for event ID search)
+  const enhancedDirectEvent = directEventLookup?.event ? enhanceEvent(directEventLookup.event) : null;
+
   // Enhance events with moderation status and apply filters
   const enhancedEvents: EventWithModeration[] = (events || [])
-    .map(event => {
-      const isBanned = bannedEvents?.some((banned: { id: string }) => banned.id === event.id);
-      const needsModeration = eventsNeedingModeration?.some((pending: { id: string }) => pending.id === event.id);
-
-      return {
-        ...event,
-        moderationStatus: (isBanned ? 'banned' : needsModeration ? 'pending' : undefined) as "pending" | "approved" | "banned" | undefined,
-        moderationReason: isBanned ? bannedEvents?.find((banned: { id: string; reason?: string }) => banned.id === event.id)?.reason :
-                         needsModeration ? eventsNeedingModeration?.find((pending: { id: string; reason?: string }) => pending.id === event.id)?.reason : undefined,
-      };
-    })
+    .map(enhanceEvent)
     .filter(event => {
       // Filter out banned events (relay filters these, but NPool cache may be stale)
       if (event.moderationStatus === 'banned') {
@@ -572,31 +697,12 @@ export function EventsList({ relayUrl }: EventsListProps) {
         return false;
       }
 
-      // Search filter - check content and pubkey
-      if (searchQuery.trim()) {
+      // Client-side content/pubkey substring search (instant, no Enter needed)
+      // Skip when in event_id mode (results come from dedicated query)
+      if (searchQuery.trim() && searchMode.type !== 'event_id') {
         const query = searchQuery.toLowerCase();
-        const matchesContent = event.content?.toLowerCase().includes(query);
-
-        // Try to decode npub/nprofile to hex for pubkey matching
-        let searchPubkeyHex: string | null = null;
-        if (query.startsWith('npub1') || query.startsWith('nprofile1')) {
-          try {
-            const decoded = nip19.decode(query);
-            if (decoded.type === 'npub') {
-              searchPubkeyHex = decoded.data;
-            } else if (decoded.type === 'nprofile') {
-              searchPubkeyHex = decoded.data.pubkey;
-            }
-          } catch {
-            // Invalid nip19, fall back to direct string matching
-          }
-        }
-
-        const matchesPubkey = searchPubkeyHex
-          ? event.pubkey === searchPubkeyHex
-          : event.pubkey.toLowerCase().includes(query);
-
-        if (!matchesContent && !matchesPubkey) {
+        if (!event.content?.toLowerCase().includes(query) &&
+            !event.pubkey.toLowerCase().includes(query)) {
           return false;
         }
       }
@@ -609,7 +715,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
 
       // Has media filter
       if (filterHasMedia) {
-        if (!hasMedia(event.content || '')) return false;
+        if (!hasMedia(event.content || '', event.tags)) return false;
       }
 
       // New users filter
@@ -659,12 +765,77 @@ export function EventsList({ relayUrl }: EventsListProps) {
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
             <Input
-              placeholder="Search by content or pubkey..."
+              placeholder="Search by event ID, pubkey, or content..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-9 h-9"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  commitSearch();
+                }
+              }}
+              className="pl-9 pr-9 h-9"
             />
+            {searchQuery && (
+              <button
+                onClick={clearSearch}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+              >
+                <XCircle className="h-4 w-4" />
+              </button>
+            )}
           </div>
+          {/* Search hints and status */}
+          {searchMode.type === 'event_id' ? (
+            <div className="flex items-center gap-2 text-xs px-1">
+              {isLoadingDirectEvent ? (
+                <>
+                  <Loader2 className="h-3 w-3 animate-spin text-primary" />
+                  <span className="text-muted-foreground">Searching relay for event <code className="font-mono">{searchMode.hex.slice(0, 12)}...</code></span>
+                </>
+              ) : directEventError ? (
+                <>
+                  <AlertTriangle className="h-3 w-3 text-destructive" />
+                  <span className="text-destructive">Search failed: {directEventError.message}</span>
+                </>
+              ) : directEventLookup ? (
+                <>
+                  {directEventLookup.banned ? (
+                    <Ban className="h-3 w-3 text-red-600" />
+                  ) : (
+                    <CheckCircle className="h-3 w-3 text-green-600" />
+                  )}
+                  <span className="text-muted-foreground">
+                    {directEventLookup.banned ? 'Event found (banned)' : 'Event found'}
+                  </span>
+                </>
+              ) : (
+                <>
+                  <XCircle className="h-3 w-3 text-muted-foreground" />
+                  <span className="text-muted-foreground">No event found on relay</span>
+                </>
+              )}
+            </div>
+          ) : (() => {
+            const preview = parseSearchInput(searchQuery);
+            if (preview.type === 'event_id') {
+              return (
+                <div className="flex items-center gap-2 text-xs text-muted-foreground px-1">
+                  <Search className="h-3 w-3" />
+                  <span>Press <kbd className="px-1 py-0.5 rounded border bg-muted text-[10px]">Enter</kbd> to look up this event on the relay</span>
+                </div>
+              );
+            }
+            if (preview.type === 'pubkey') {
+              return (
+                <div className="flex items-center gap-2 text-xs text-muted-foreground px-1">
+                  <User className="h-3 w-3" />
+                  <span>Press <kbd className="px-1 py-0.5 rounded border bg-muted text-[10px]">Enter</kbd> to filter by this pubkey</span>
+                </div>
+              );
+            }
+            return null;
+          })()}
 
           {/* Filter Row */}
           <div className="flex flex-wrap items-end gap-3">
@@ -823,7 +994,59 @@ export function EventsList({ relayUrl }: EventsListProps) {
           <CardContent className="p-0 flex-1 min-h-0">
             <ScrollArea className="h-full" viewportRef={scrollViewportRef}>
               <div className="p-3 pr-4">
-                {loadingEvents ? (
+                {searchMode.type === 'event_id' ? (
+                  // Event ID lookup mode
+                  isLoadingDirectEvent ? (
+                    <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
+                      <Loader2 className="h-8 w-8 animate-spin mb-3" />
+                      <p className="text-sm">Searching relay...</p>
+                      <p className="text-xs mt-1 font-mono">{searchMode.hex.slice(0, 16)}...</p>
+                    </div>
+                  ) : directEventError ? (
+                    <Alert variant="destructive" className="mt-2">
+                      <AlertTriangle className="h-4 w-4" />
+                      <AlertDescription>
+                        Search failed: {directEventError.message}
+                      </AlertDescription>
+                    </Alert>
+                  ) : enhancedDirectEvent ? (
+                    <div>
+                      {directEventLookup?.banned && (
+                        <div className="flex items-center gap-2 px-3 py-2 mb-2 rounded-md bg-red-50 border border-red-200 dark:bg-red-950/30 dark:border-red-800">
+                          <Ban className="h-4 w-4 text-red-600" />
+                          <span className="text-sm font-medium text-red-700 dark:text-red-400">Banned event</span>
+                          <span className="text-xs text-red-600/70 dark:text-red-400/70">Retrieved via admin API</span>
+                        </div>
+                      )}
+                      <EventCard
+                        event={enhancedDirectEvent}
+                        isSelected={selectedEvent?.id === enhancedDirectEvent.id}
+                        onSelect={() => setSelectedEvent(enhancedDirectEvent)}
+                        onModerate={handleModerateEvent}
+                      />
+                    </div>
+                  ) : (
+                    <div className="text-center py-8 text-muted-foreground">
+                      <Search className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                      <p className="text-sm">No event found on relay</p>
+                      <p className="text-xs mt-1 font-mono">{searchMode.hex.slice(0, 16)}...</p>
+                      <p className="text-xs mt-2">The event may have been deleted.</p>
+                      {/^[0-9a-f]{64}$/i.test(committedSearch) && (
+                        <Button
+                          variant="link"
+                          size="sm"
+                          className="mt-1 text-xs"
+                          onClick={() => {
+                            updatePubkeyFilter(searchMode.hex);
+                            clearSearch();
+                          }}
+                        >
+                          Try as author pubkey instead?
+                        </Button>
+                      )}
+                    </div>
+                  )
+                ) : loadingEvents ? (
                   <div className="space-y-2">
                     {[...Array(5)].map((_, i) => (
                       <Skeleton key={i} className="h-20 w-full" />
@@ -883,7 +1106,8 @@ export function EventsList({ relayUrl }: EventsListProps) {
               event={selectedEvent}
               onClose={() => setSelectedEvent(null)}
               onSelectEvent={(eventId) => {
-                const found = enhancedEvents.find(e => e.id === eventId);
+                const found = enhancedEvents.find(e => e.id === eventId)
+                  || (enhancedDirectEvent?.id === eventId ? enhancedDirectEvent : null);
                 if (found) setSelectedEvent(found);
               }}
               onSelectPubkey={(pubkey) => {

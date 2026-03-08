@@ -3,9 +3,11 @@
 
 import { useState, useMemo, useEffect } from "react";
 
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNostr } from "@nostrify/react";
 import { useNavigate, useSearchParams } from "react-router-dom";
+import { useAppContext } from "@/hooks/useAppContext";
+import { getEnvironmentById, getCurrentEnvironment } from "@/lib/environments";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -35,6 +37,7 @@ import {
   FileText,
   AlertTriangle,
   X,
+  EyeOff,
 } from "lucide-react";
 import { ReportDetail } from "@/components/ReportDetail";
 import { UserDisplayName } from "@/components/UserIdentifier";
@@ -57,7 +60,8 @@ const SORT_OPTIONS: { value: SortOption; label: string }[] = [
 ];
 
 // High-priority categories that need immediate attention (CSAM, illegal content)
-const HIGH_PRIORITY_CATEGORIES = ['sexual_minors', 'nonconsensual_sexual_content', 'terrorism_extremism', 'credible_threats'];
+// Includes both NIP-56 standard names and Divine client variations
+const HIGH_PRIORITY_CATEGORIES = ['sexual_minors', 'csam', 'NS-csam', 'nonconsensual_sexual_content', 'terrorism_extremism', 'credible_threats'];
 const MEDIUM_PRIORITY_CATEGORIES = ['doxxing_pii', 'malware_scam', 'illegal_goods'];
 
 // Category priority for sorting
@@ -320,10 +324,13 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const { listBannedPubkeys, listBannedEvents, getAllDecisions } = useAdminApi();
+  const { config, updateConfig } = useAppContext();
+  const queryClient = useQueryClient();
   const isMobile = useIsMobile();
   const [selectedReport, setSelectedReport] = useState<NostrEvent | null>(null);
   const [viewMode, setViewMode] = useState<'consolidated' | 'individual'>('consolidated');
   const [hideResolved, setHideResolved] = useState(true);
+  const [showPendingReview, setShowPendingReview] = useState(false);
   const [sortBy, setSortBy] = useState<SortOption>('reports');
   const [filterCategory, setFilterCategory] = useState<string | null>(null);
   const [filterTargetType, setFilterTargetType] = useState<'all' | 'event' | 'pubkey'>('all');
@@ -389,7 +396,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   });
 
   // Query all moderation decisions from our D1 database
-  const { data: allDecisions, error: decisionsError } = useQuery({
+  const { data: allDecisions, error: decisionsError, isLoading: decisionsLoading } = useQuery({
     queryKey: ['all-decisions'],
     queryFn: async () => {
       try {
@@ -489,6 +496,35 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     return resolved;
   }, [resolutionLabels, bannedPubkeys, bannedEvents, allDecisions]);
 
+  // Build set of targets pending review (auto-hidden but not yet confirmed/restored)
+  const pendingReviewTargets = useMemo(() => {
+    const pending = new Set<string>();
+    if (!allDecisions) return pending;
+
+    // Group decisions by target to check status
+    const targetDecisions = new Map<string, string[]>();
+    for (const decision of allDecisions) {
+      const key = `${decision.target_type}:${decision.target_id}`;
+      if (!targetDecisions.has(key)) {
+        targetDecisions.set(key, []);
+      }
+      targetDecisions.get(key)!.push(decision.action);
+    }
+
+    // Target is pending review if auto_hidden but not confirmed/restored
+    for (const [key, actions] of targetDecisions) {
+      const isAutoHidden = actions.includes('auto_hidden');
+      const isConfirmed = actions.includes('auto_hide_confirmed');
+      const isRestored = actions.includes('auto_hide_restored');
+      if (isAutoHidden && !isConfirmed && !isRestored) {
+        pending.add(key);
+      }
+    }
+
+    console.log('[Reports] Pending review targets:', pending.size);
+    return pending;
+  }, [allDecisions]);
+
   // Get all unique categories from reports for filter chips
   const availableCategories = useMemo(() => {
     if (!reports) return [];
@@ -503,9 +539,16 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     if (!reports) return [];
     let items = consolidateReports(reports);
 
-    // Filter out resolved if toggle is on
-    if (hideResolved) {
-      items = items.filter(c => !resolvedTargets.has(`${c.target.type}:${c.target.value}`));
+    // If showing pending review, only show items pending review (auto-hidden CSAM queue)
+    if (showPendingReview) {
+      items = items.filter(c => pendingReviewTargets.has(`${c.target.type}:${c.target.value}`));
+    } else {
+      // Default view: EXCLUDE auto-hidden items (moderators don't see CSAM unless they opt in)
+      items = items.filter(c => !pendingReviewTargets.has(`${c.target.type}:${c.target.value}`));
+      // Also filter out resolved if toggle is on
+      if (hideResolved) {
+        items = items.filter(c => !resolvedTargets.has(`${c.target.type}:${c.target.value}`));
+      }
     }
 
     // Filter by category
@@ -560,7 +603,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     });
 
     return items;
-  }, [reports, hideResolved, resolvedTargets, filterCategory, filterTargetType, sortBy]);
+  }, [reports, hideResolved, showPendingReview, resolvedTargets, pendingReviewTargets, filterCategory, filterTargetType, sortBy]);
 
   const allConsolidated = useMemo(() => {
     if (!reports) return [];
@@ -572,13 +615,28 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     if (!reports) return [];
     let items = [...reports];
 
-    // Filter resolved
-    if (hideResolved) {
+    // If showing pending review, only show items pending review (auto-hidden CSAM queue)
+    if (showPendingReview) {
+      items = items.filter(report => {
+        const target = getReportTarget(report);
+        if (!target) return false;
+        return pendingReviewTargets.has(`${target.type}:${target.value}`);
+      });
+    } else {
+      // Default view: EXCLUDE auto-hidden items (moderators don't see CSAM unless they opt in)
       items = items.filter(report => {
         const target = getReportTarget(report);
         if (!target) return true; // Keep reports without targets
-        return !resolvedTargets.has(`${target.type}:${target.value}`);
+        return !pendingReviewTargets.has(`${target.type}:${target.value}`);
       });
+      // Also filter resolved if toggle is on
+      if (hideResolved) {
+        items = items.filter(report => {
+          const target = getReportTarget(report);
+          if (!target) return true; // Keep reports without targets
+          return !resolvedTargets.has(`${target.type}:${target.value}`);
+        });
+      }
     }
 
     // Filter by category
@@ -616,9 +674,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     });
 
     return items;
-  }, [reports, hideResolved, resolvedTargets, filterCategory, filterTargetType, sortBy]);
+  }, [reports, hideResolved, showPendingReview, resolvedTargets, pendingReviewTargets, filterCategory, filterTargetType, sortBy]);
 
   const uniqueTargets = consolidated.length;
+  const pendingReviewCount = pendingReviewTargets.size;
   const totalTargets = allConsolidated.length;
   const totalReports = reports?.length || 0;
   const filteredReportsCount = filteredReports.length;
@@ -634,13 +693,29 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     }
   }, [selectedReportId, reports, selectedReport]);
 
-  // Handle deep linking via query params (?event=... or ?pubkey=...)
+  // Handle deep linking via query params (?event=... or ?pubkey=... or &env=...)
   useEffect(() => {
     const eventParam = searchParams.get('event');
     const pubkeyParam = searchParams.get('pubkey');
+    const envParam = searchParams.get('env');
 
-    // Skip if no params
+    // Skip if no deep link target
     if (!eventParam && !pubkeyParam) return;
+
+    // Switch environment if deep link specifies one that differs from current
+    if (envParam) {
+      const currentEnv = getCurrentEnvironment(config.relayUrl, config.apiUrl);
+      if (currentEnv?.id !== envParam) {
+        const targetEnv = getEnvironmentById(envParam);
+        if (targetEnv) {
+          updateConfig(c => ({ ...c, relayUrl: targetEnv.relayUrl, apiUrl: targetEnv.apiUrl }));
+          queryClient.clear();
+          queryClient.refetchQueries();
+          return; // Data will reload, effect re-runs with matching environment
+        }
+      }
+    }
+
     if (!allConsolidated || allConsolidated.length === 0) return;
 
     // Wait for fresh ban data before processing deep link
@@ -673,7 +748,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       setSearchParams({}, { replace: true });
     }
     // If report not found, keep params — effect will re-run when more data loads
-  }, [allConsolidated, searchParams, hideResolved, resolvedTargets, navigate, setSearchParams, isFetchingBanned]);
+  }, [allConsolidated, searchParams, hideResolved, resolvedTargets, navigate, setSearchParams, isFetchingBanned, config.relayUrl, config.apiUrl, updateConfig, queryClient]);
 
   // Update URL when report selection changes
   const handleSelectReport = (report: NostrEvent | null) => {
@@ -685,7 +760,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     }
   };
 
-  if (isLoading) {
+  // Wait for both reports AND decisions to load before rendering
+  // This prevents auto-hidden CSAM from briefly appearing in default view
+  if (isLoading || decisionsLoading) {
     return (
       <Card className="h-[calc(100vh-200px)]">
         <CardHeader>
@@ -850,6 +927,28 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
               </div>
             )}
 
+            {/* Pending review filter */}
+            {pendingReviewCount > 0 && (
+              <div className="flex items-center justify-between pt-2 border-t">
+                <Label htmlFor="pending-review" className="text-xs text-muted-foreground flex items-center gap-1.5">
+                  <EyeOff className="h-3 w-3 text-orange-500" />
+                  Pending review (auto-hidden)
+                  <Badge variant="secondary" className="ml-1 text-xs px-1.5 py-0">
+                    {pendingReviewCount}
+                  </Badge>
+                </Label>
+                <Switch
+                  id="pending-review"
+                  checked={showPendingReview}
+                  onCheckedChange={(checked) => {
+                    setShowPendingReview(checked);
+                    // When showing pending review, turn off hide resolved
+                    if (checked) setHideResolved(false);
+                  }}
+                />
+              </div>
+            )}
+
             {/* Hide resolved toggle */}
             <div className="flex items-center justify-between pt-2 border-t">
               <Label htmlFor="hide-resolved" className="text-xs text-muted-foreground flex items-center gap-1.5">
@@ -859,7 +958,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
               <Switch
                 id="hide-resolved"
                 checked={hideResolved}
-                onCheckedChange={setHideResolved}
+                onCheckedChange={(checked) => {
+                  setHideResolved(checked);
+                  // When hiding resolved, turn off pending review filter
+                  if (checked) setShowPendingReview(false);
+                }}
+                disabled={showPendingReview}
               />
             </div>
           </div>

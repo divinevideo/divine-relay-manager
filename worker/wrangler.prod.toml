@@ -29,12 +29,19 @@ secret_name = "CF-Access-Client-Secret"
 
 [vars]
 RELAY_URL = "wss://relay.divine.video"
+ENVIRONMENT = "production"
+# Auto-hide feature flag (set to "true" to enable automatic content hiding)
+AUTO_HIDE_ENABLED = "true"
+# Comma-separated list of trusted client names for auto-hide (must match client tag on kind 1984 events)
+TRUSTED_CLIENTS = "diVine,divine-web,divine-mobile"
 # Path for NIP-86 management API (Funnelcake uses /management)
 MANAGEMENT_PATH = "/"
 # URL for media moderation service
 MODERATION_SERVICE_URL = "https://moderation.admin.divine.video"
 # Allow both the main frontend and Cloudflare Pages preview deployments
 ALLOWED_ORIGINS = "https://relay.admin.divine.video,*.divine-relay-manager.pages.dev,*.divine-relay-admin.pages.dev"
+# CDN domain for media proxy (Blossom admin bypass for blocked content preview)
+CDN_DOMAIN = "media.divine.video"
 # Zendesk custom field IDs for webhook callback
 ZENDESK_FIELD_ACTION_STATUS = "14545793289743"
 ZENDESK_FIELD_ACTION_REQUESTED = "14545826900367"
@@ -49,3 +56,19 @@ database_id = "d000fe55-dfac-4f54-a348-5c57241c2453"
 [[services]]
 binding = "REALNESS"
 service = "divine-ai-detector"
+
+# Durable Objects for persistent state
+[durable_objects]
+bindings = [
+  { name = "REPORT_WATCHER", class_name = "ReportWatcher" }
+]
+
+# DO migrations
+[[migrations]]
+tag = "v1"
+new_classes = ["ReportWatcher"]
+
+# Keep ReportWatcher DO alive — wake it every 5 minutes so the alarm chain
+# can't break permanently after a Cloudflare-initiated eviction.
+[triggers]
+crons = ["*/5 * * * *"]
