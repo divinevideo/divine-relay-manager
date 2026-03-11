@@ -2183,7 +2183,7 @@ async function handleZendeskPreAuth(
   } catch (error) {
     console.error('[handleZendeskPreAuth] Error:', error);
     return jsonResponse(
-      { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+      { success: false, error: 'Internal server error' },
       500,
       corsHeaders
     );
@@ -2254,7 +2254,7 @@ async function handleMobileJwt(
         return jsonResponse({ success: false, error: 'Server configuration error' }, 500, corsHeaders);
       }
       const deleteResult = await env.DB.prepare(
-        'DELETE FROM zendesk_preauth_nonces WHERE nonce = ? AND pubkey = ? RETURNING *'
+        'DELETE FROM zendesk_preauth_nonces WHERE nonce = ? AND pubkey = ? AND expires_at >= unixepoch() RETURNING *'
       ).bind(verifyResult.nonce, verifyResult.pubkey).first();
 
       if (!deleteResult) {
@@ -2359,7 +2359,7 @@ async function handleMobileJwt(
   } catch (error) {
     console.error('[handleMobileJwt] Error:', error);
     return jsonResponse(
-      { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+      { success: false, error: 'Internal server error' },
       500,
       corsHeaders
     );
