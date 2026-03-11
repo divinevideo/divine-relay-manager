@@ -2233,12 +2233,12 @@ async function handleMobileJwt(
         const verifyResult = await verifyPreAuthToken(userToken, env.ZENDESK_PREAUTH_SECRET);
         if (!verifyResult.valid) {
           console.warn(`[handleMobileJwt] Pre-auth token rejected: ${verifyResult.error}`);
-          return jsonResponse({ success: false, error: `Invalid pre-auth token: ${verifyResult.error}` }, 401, corsHeaders);
+          return jsonResponse({ success: false, error: 'Invalid or expired token' }, 401, corsHeaders);
         }
 
         // Atomically consume the nonce — prevents replay
         if (!env.DB) {
-          return jsonResponse({ success: false, error: 'D1 database not configured' }, 500, corsHeaders);
+          return jsonResponse({ success: false, error: 'Server configuration error' }, 500, corsHeaders);
         }
         const deleteResult = await env.DB.prepare(
           'DELETE FROM zendesk_preauth_nonces WHERE nonce = ? AND pubkey = ? RETURNING *'
@@ -2246,7 +2246,7 @@ async function handleMobileJwt(
 
         if (!deleteResult) {
           console.warn(`[handleMobileJwt] Nonce not found or already consumed: ${verifyResult.nonce}`);
-          return jsonResponse({ success: false, error: 'Nonce already consumed or not found' }, 401, corsHeaders);
+          return jsonResponse({ success: false, error: 'Invalid or expired token' }, 401, corsHeaders);
         }
 
         pubkey = verifyResult.pubkey;
