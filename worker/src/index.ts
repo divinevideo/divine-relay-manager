@@ -1801,7 +1801,8 @@ async function handleZendeskRoutes(
   }
 
   // Mobile JWT endpoint - generates JWTs for mobile app users via Zendesk callback
-  if (subPath === '/mobile-jwt' && request.method === 'POST') {
+  // Accept both GET (Zendesk SDK sends GET with ?user_token=) and POST (form-encoded)
+  if (subPath === '/mobile-jwt' && (request.method === 'GET' || request.method === 'POST')) {
     return handleMobileJwt(request, env, corsHeaders);
   }
 
@@ -2205,79 +2206,79 @@ async function handleMobileJwt(
     let name: string | undefined;
     let email: string | undefined;
 
+    // Zendesk server-to-server callback — Zendesk does not send any auth
+    // headers on JWT callbacks (confirmed via Zendesk developer docs).
+    //
+    // Security analysis — why no request-level auth is acceptable:
+    //   1. Endpoint URL is private to Zendesk admin config (not in client code)
+    //   2. HTTPS protects the request in transit
+    //   3. The returned JWT is only verifiable by Zendesk (signed with their shared secret)
+    //   4. JWT payload contains only public data (npub, which is public by definition)
+    //   5. JWT expires in 1 hour and cannot authenticate to any Divine service
+    //      (relay, Keycast, blossom, relay-manager)
+    //   6. Worst case: attacker with a known npub could view/create Zendesk support
+    //      tickets as that user — a Zendesk-scoped nuisance, not a Divine security issue
+
+    // Extract user_token from GET query param or POST form body
+    let userToken: string | null = null;
     const contentType = request.headers.get('content-type') || '';
 
-    if (contentType.includes('application/x-www-form-urlencoded')) {
-      // Zendesk server-to-server callback — Zendesk does not send any auth
-      // headers on JWT callbacks (confirmed via Zendesk developer docs).
-      //
-      // Security analysis — why no request-level auth is acceptable:
-      //   1. Endpoint URL is private to Zendesk admin config (not in client code)
-      //   2. HTTPS protects the request in transit
-      //   3. The returned JWT is only verifiable by Zendesk (signed with their shared secret)
-      //   4. JWT payload contains only public data (npub, which is public by definition)
-      //   5. JWT expires in 1 hour and cannot authenticate to any Divine service
-      //      (relay, Keycast, blossom, relay-manager)
-      //   6. Worst case: attacker with a known npub could view/create Zendesk support
-      //      tickets as that user — a Zendesk-scoped nuisance, not a Divine security issue
-
-      // Zendesk callback format - extract user_token
+    if (request.method === 'GET') {
+      const url = new URL(request.url);
+      userToken = url.searchParams.get('user_token');
+    } else if (contentType.includes('application/x-www-form-urlencoded')) {
       const formData = await request.formData();
-      const userToken = formData.get('user_token') as string | null;
-
-      console.log('[handleMobileJwt] Zendesk callback with user_token:', userToken?.substring(0, 20) + '...');
-
-      if (userToken && userToken.includes('.')) {
-        // Pre-auth token path: nonce-bound HMAC-signed token
-        if (!env.ZENDESK_PREAUTH_SECRET) {
-          return jsonResponse({ success: false, error: 'ZENDESK_PREAUTH_SECRET not configured' }, 500, corsHeaders);
-        }
-
-        const verifyResult = await verifyPreAuthToken(userToken, env.ZENDESK_PREAUTH_SECRET);
-        if (!verifyResult.valid) {
-          console.warn(`[handleMobileJwt] Pre-auth token rejected: ${verifyResult.error}`);
-          return jsonResponse({ success: false, error: 'Invalid or expired token' }, 401, corsHeaders);
-        }
-
-        // Atomically consume the nonce — prevents replay
-        if (!env.DB) {
-          return jsonResponse({ success: false, error: 'Server configuration error' }, 500, corsHeaders);
-        }
-        const deleteResult = await env.DB.prepare(
-          'DELETE FROM zendesk_preauth_nonces WHERE nonce = ? AND pubkey = ? RETURNING *'
-        ).bind(verifyResult.nonce, verifyResult.pubkey).first();
-
-        if (!deleteResult) {
-          console.warn(`[handleMobileJwt] Nonce not found or already consumed: ${verifyResult.nonce}`);
-          return jsonResponse({ success: false, error: 'Invalid or expired token' }, 401, corsHeaders);
-        }
-
-        pubkey = verifyResult.pubkey;
-        console.log(`[handleMobileJwt] Pre-auth token verified for pubkey: ${pubkey?.substring(0, 16)}...`);
-      } else if (userToken) {
-        // Legacy path: raw npub or hex pubkey (migration period)
-        console.warn('[handleMobileJwt] Legacy user_token format (no pre-auth token). This path will be removed in a future release.');
-        if (userToken.startsWith('npub1')) {
-          try {
-            const decoded = nip19.decode(userToken);
-            if (decoded.type === 'npub') {
-              pubkey = decoded.data as string;
-            }
-          } catch (e) {
-            console.log('[handleMobileJwt] Failed to decode npub:', e);
-          }
-        } else if (/^[a-f0-9]{64}$/i.test(userToken)) {
-          pubkey = userToken;
-        }
-      }
-
-      // Also check for name/email in form data
+      userToken = formData.get('user_token') as string | null;
       name = formData.get('name') as string | null || undefined;
       email = formData.get('email') as string | null || undefined;
     } else {
-      // Non-form-urlencoded requests are not supported
-      // (The NIP-98 JSON path was removed — the pre-auth flow replaces direct app→JWT calls)
-      return jsonResponse({ success: false, error: 'Unsupported content type' }, 400, corsHeaders);
+      return jsonResponse({ success: false, error: 'Unsupported request format' }, 400, corsHeaders);
+    }
+
+    console.log('[handleMobileJwt] Zendesk callback with user_token:', userToken ? '(present)' : '(missing)');
+
+    if (userToken && userToken.includes('.')) {
+      // Pre-auth token path: nonce-bound HMAC-signed token
+      if (!env.ZENDESK_PREAUTH_SECRET) {
+        return jsonResponse({ success: false, error: 'ZENDESK_PREAUTH_SECRET not configured' }, 500, corsHeaders);
+      }
+
+      const verifyResult = await verifyPreAuthToken(userToken, env.ZENDESK_PREAUTH_SECRET);
+      if (!verifyResult.valid) {
+        console.warn(`[handleMobileJwt] Pre-auth token rejected: ${verifyResult.error}`);
+        return jsonResponse({ success: false, error: 'Invalid or expired token' }, 401, corsHeaders);
+      }
+
+      // Atomically consume the nonce — prevents replay
+      if (!env.DB) {
+        return jsonResponse({ success: false, error: 'Server configuration error' }, 500, corsHeaders);
+      }
+      const deleteResult = await env.DB.prepare(
+        'DELETE FROM zendesk_preauth_nonces WHERE nonce = ? AND pubkey = ? RETURNING *'
+      ).bind(verifyResult.nonce, verifyResult.pubkey).first();
+
+      if (!deleteResult) {
+        console.warn(`[handleMobileJwt] Nonce not found or already consumed: ${verifyResult.nonce}`);
+        return jsonResponse({ success: false, error: 'Invalid or expired token' }, 401, corsHeaders);
+      }
+
+      pubkey = verifyResult.pubkey;
+      console.log(`[handleMobileJwt] Pre-auth token verified for pubkey: ${pubkey?.substring(0, 16)}...`);
+    } else if (userToken) {
+      // Legacy path: raw npub or hex pubkey (migration period)
+      console.warn('[handleMobileJwt] Legacy user_token format (no pre-auth token). This path will be removed in a future release.');
+      if (userToken.startsWith('npub1')) {
+        try {
+          const decoded = nip19.decode(userToken);
+          if (decoded.type === 'npub') {
+            pubkey = decoded.data as string;
+          }
+        } catch (e) {
+          console.log('[handleMobileJwt] Failed to decode npub:', e);
+        }
+      } else if (/^[a-f0-9]{64}$/i.test(userToken)) {
+        pubkey = userToken;
+      }
     }
 
     // Validate pubkey (required, 64 hex chars)
