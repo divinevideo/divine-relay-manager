@@ -9,6 +9,7 @@ import {
   type SecretStoreSecret,
 } from './nip86';
 import { ensureSchema } from './db';
+import { generatePreAuthToken, verifyPreAuthToken } from './zendesk-preauth';
 
 let schemaReady = false;
 async function ensureSchemaOnce(db: D1Database): Promise<void> {
@@ -35,7 +36,7 @@ interface Env {
   // Zendesk integration
   ZENDESK_SUBDOMAIN?: string;
   ZENDESK_JWT_SECRET?: string;
-  ZENDESK_JWT_CALLBACK_SECRET?: string;  // For /api/zendesk/mobile-jwt form-urlencoded callback
+  ZENDESK_PREAUTH_SECRET?: string;  // HMAC secret for pre-auth token generation/verification
   ZENDESK_WEBHOOK_SECRET?: string;  // For /api/zendesk/webhook
   ZENDESK_PARSE_REPORT_SECRET?: string;  // For /api/zendesk/parse-report
   ZENDESK_API_TOKEN?: string;
@@ -294,6 +295,20 @@ export default {
       console.log(`[scheduled] ReportWatcher status: running=${status?.status?.running}`);
     } catch (error) {
       console.error('[scheduled] Failed to check ReportWatcher:', error);
+    }
+
+    // Clean up expired pre-auth nonces
+    if (env.DB) {
+      try {
+        const result = await env.DB.prepare(
+          'DELETE FROM zendesk_preauth_nonces WHERE expires_at < unixepoch()'
+        ).run();
+        if (result.meta.changes > 0) {
+          console.log(`[scheduled] Cleaned up ${result.meta.changes} expired pre-auth nonces`);
+        }
+      } catch (error) {
+        console.error('[scheduled] Failed to clean up pre-auth nonces:', error);
+      }
     }
   },
 };
@@ -1780,7 +1795,12 @@ async function handleZendeskRoutes(
     return handleParseReport(request, env, corsHeaders);
   }
 
-  // Mobile JWT endpoint - generates JWTs for mobile app users (no auth required, pubkey is public)
+  // Pre-auth endpoint - generates nonce-bound HMAC tokens for Zendesk JWT hardening
+  if (subPath === '/pre-auth' && request.method === 'POST') {
+    return handleZendeskPreAuth(request, env, corsHeaders);
+  }
+
+  // Mobile JWT endpoint - generates JWTs for mobile app users via Zendesk callback
   if (subPath === '/mobile-jwt' && request.method === 'POST') {
     return handleMobileJwt(request, env, corsHeaders);
   }
@@ -2115,6 +2135,60 @@ async function handleParseReport(
   }
 }
 
+// Generate a pre-auth token for Zendesk JWT hardening
+// Requires NIP-98 auth to prove identity, returns a nonce-bound HMAC-signed token
+async function handleZendeskPreAuth(
+  request: Request,
+  env: Env,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  try {
+    if (!env.ZENDESK_PREAUTH_SECRET) {
+      return jsonResponse({ success: false, error: 'ZENDESK_PREAUTH_SECRET not configured' }, 500, corsHeaders);
+    }
+    if (!env.DB) {
+      return jsonResponse({ success: false, error: 'D1 database not configured' }, 500, corsHeaders);
+    }
+
+    // Verify NIP-98 auth
+    const authResult = await verifyNip98Auth(request, request.url);
+    if (!authResult.valid) {
+      return jsonResponse(
+        { success: false, error: `NIP-98 auth required: ${authResult.error}` },
+        401,
+        corsHeaders
+      );
+    }
+
+    const pubkey = authResult.pubkey!;
+
+    // Generate pre-auth token
+    const { token, nonce, expiresAt } = await generatePreAuthToken(pubkey, env.ZENDESK_PREAUTH_SECRET);
+
+    // Store nonce in D1 for single-use verification
+    await env.DB.prepare(
+      'INSERT INTO zendesk_preauth_nonces (nonce, pubkey, expires_at) VALUES (?, ?, ?)'
+    ).bind(nonce, pubkey, expiresAt).run();
+
+    console.log(`[handleZendeskPreAuth] Issued pre-auth token for pubkey: ${pubkey.substring(0, 16)}...`);
+
+    return new Response(JSON.stringify({
+      success: true,
+      token,
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders },
+    });
+  } catch (error) {
+    console.error('[handleZendeskPreAuth] Error:', error);
+    return jsonResponse(
+      { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+      500,
+      corsHeaders
+    );
+  }
+}
+
 // Generate JWT for mobile app users to authenticate with Zendesk SDK
 // This enables "View Past Messages" and push notifications
 async function handleMobileJwt(
@@ -2144,15 +2218,42 @@ async function handleMobileJwt(
         return jsonResponse({ success: false, error: 'Invalid callback secret' }, 401, corsHeaders);
       }
 
-      // Zendesk callback format - extract user_token which contains the external_id (npub)
+      // Zendesk callback format - extract user_token
       const formData = await request.formData();
       const userToken = formData.get('user_token') as string | null;
 
       console.log('[handleMobileJwt] Zendesk callback with user_token:', userToken?.substring(0, 20) + '...');
 
-      if (userToken) {
-        // user_token should be the npub (external_id) we set earlier
-        // If it's an npub, decode it to get the hex pubkey
+      if (userToken && userToken.includes('.')) {
+        // Pre-auth token path: nonce-bound HMAC-signed token
+        if (!env.ZENDESK_PREAUTH_SECRET) {
+          return jsonResponse({ success: false, error: 'ZENDESK_PREAUTH_SECRET not configured' }, 500, corsHeaders);
+        }
+
+        const verifyResult = await verifyPreAuthToken(userToken, env.ZENDESK_PREAUTH_SECRET);
+        if (!verifyResult.valid) {
+          console.warn(`[handleMobileJwt] Pre-auth token rejected: ${verifyResult.error}`);
+          return jsonResponse({ success: false, error: `Invalid pre-auth token: ${verifyResult.error}` }, 401, corsHeaders);
+        }
+
+        // Atomically consume the nonce — prevents replay
+        if (!env.DB) {
+          return jsonResponse({ success: false, error: 'D1 database not configured' }, 500, corsHeaders);
+        }
+        const deleteResult = await env.DB.prepare(
+          'DELETE FROM zendesk_preauth_nonces WHERE nonce = ? AND pubkey = ? RETURNING *'
+        ).bind(verifyResult.nonce, verifyResult.pubkey).first();
+
+        if (!deleteResult) {
+          console.warn(`[handleMobileJwt] Nonce not found or already consumed: ${verifyResult.nonce}`);
+          return jsonResponse({ success: false, error: 'Nonce already consumed or not found' }, 401, corsHeaders);
+        }
+
+        pubkey = verifyResult.pubkey;
+        console.log(`[handleMobileJwt] Pre-auth token verified for pubkey: ${pubkey?.substring(0, 16)}...`);
+      } else if (userToken) {
+        // Legacy path: raw npub or hex pubkey (migration period)
+        console.warn('[handleMobileJwt] Legacy user_token format (no pre-auth token). This path will be removed in a future release.');
         if (userToken.startsWith('npub1')) {
           try {
             const decoded = nip19.decode(userToken);
@@ -2163,7 +2264,6 @@ async function handleMobileJwt(
             console.log('[handleMobileJwt] Failed to decode npub:', e);
           }
         } else if (/^[a-f0-9]{64}$/i.test(userToken)) {
-          // It's already a hex pubkey
           pubkey = userToken;
         }
       }
@@ -2172,25 +2272,9 @@ async function handleMobileJwt(
       name = formData.get('name') as string | null || undefined;
       email = formData.get('email') as string | null || undefined;
     } else {
-      // JSON format from mobile app - requires NIP-98 auth
-      const authResult = await verifyNip98Auth(request, request.url);
-      if (!authResult.valid) {
-        return jsonResponse(
-          { success: false, error: `NIP-98 auth required: ${authResult.error}` },
-          401,
-          corsHeaders
-        );
-      }
-      pubkey = authResult.pubkey;
-
-      // Optional name/email can still come from body
-      try {
-        const body = await request.json() as { name?: string; email?: string };
-        name = body.name;
-        email = body.email;
-      } catch {
-        // Body is optional for NIP-98 auth path
-      }
+      // Non-form-urlencoded requests are not supported
+      // (The NIP-98 JSON path was removed — the pre-auth flow replaces direct app→JWT calls)
+      return jsonResponse({ success: false, error: 'Unsupported content type' }, 400, corsHeaders);
     }
 
     // Validate pubkey (required, 64 hex chars)
