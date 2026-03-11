@@ -2151,6 +2151,9 @@ async function handleZendeskPreAuth(
       return jsonResponse({ success: false, error: 'D1 database not configured' }, 500, corsHeaders);
     }
 
+    // Ensure nonce table exists
+    await ensureSchemaOnce(env.DB);
+
     // Verify NIP-98 auth
     const authResult = await verifyNip98Auth(request, request.url);
     if (!authResult.valid) {
