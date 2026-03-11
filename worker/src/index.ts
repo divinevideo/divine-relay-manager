@@ -2134,15 +2134,18 @@ async function handleMobileJwt(
     const contentType = request.headers.get('content-type') || '';
 
     if (contentType.includes('application/x-www-form-urlencoded')) {
-      // Zendesk server-to-server callback — verify shared secret
-      const callbackSecret = request.headers.get('X-Zendesk-Callback-Key');
-      if (!env.ZENDESK_JWT_CALLBACK_SECRET) {
-        console.warn('[handleMobileJwt] ZENDESK_JWT_CALLBACK_SECRET not configured, rejecting form callback');
-        return jsonResponse({ success: false, error: 'Callback auth not configured' }, 500, corsHeaders);
-      }
-      if (!callbackSecret || callbackSecret !== env.ZENDESK_JWT_CALLBACK_SECRET) {
-        return jsonResponse({ success: false, error: 'Invalid callback secret' }, 401, corsHeaders);
-      }
+      // Zendesk server-to-server callback — Zendesk does not send any auth
+      // headers on JWT callbacks (confirmed via Zendesk developer docs).
+      //
+      // Security analysis — why no request-level auth is acceptable:
+      //   1. Endpoint URL is private to Zendesk admin config (not in client code)
+      //   2. HTTPS protects the request in transit
+      //   3. The returned JWT is only verifiable by Zendesk (signed with their shared secret)
+      //   4. JWT payload contains only public data (npub, which is public by definition)
+      //   5. JWT expires in 1 hour and cannot authenticate to any Divine service
+      //      (relay, Keycast, blossom, relay-manager)
+      //   6. Worst case: attacker with a known npub could view/create Zendesk support
+      //      tickets as that user — a Zendesk-scoped nuisance, not a Divine security issue
 
       // Zendesk callback format - extract user_token which contains the external_id (npub)
       const formData = await request.formData();

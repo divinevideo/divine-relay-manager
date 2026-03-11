@@ -57,9 +57,11 @@ database_id = "d000fe55-dfac-4f54-a348-5c57241c2453"
 binding = "REALNESS"
 service = "divine-ai-detector"
 
-[[services]]
-binding = "MODERATION_API"
-service = "divine-moderation-api"
+# Commented out: divine-moderation-api worker not yet deployed to Cloudflare
+# Restore when it exists — code falls back to fetch() with CF Access headers
+# [[services]]
+# binding = "MODERATION_API"
+# service = "divine-moderation-api"
 
 # Durable Objects for persistent state
 [durable_objects]
