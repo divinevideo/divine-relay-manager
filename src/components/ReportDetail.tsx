@@ -219,9 +219,28 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
         reportId: report?.id,
       });
 
-      // Optionally delete all their events
+      // Always delete the reported event when banning a user
+      if (context.target?.type === 'event' && context.target.value) {
+        try {
+          await deleteEvent(context.target.value, `User banned: ${reason}`);
+          await logDecision({
+            targetType: 'event',
+            targetId: context.target.value,
+            action: 'delete_event',
+            reason: `User banned: ${reason}`,
+            reportId: report?.id,
+          });
+          results.eventsDeleted++;
+        } catch {
+          // Continue even if this fails
+        }
+      }
+
+      // Optionally delete all their other events
       if (deleteEvents && context.userStats?.recentPosts) {
+        const alreadyDeleted = context.target?.type === 'event' ? context.target.value : null;
         for (const event of context.userStats.recentPosts) {
+          if (event.id === alreadyDeleted) continue; // Already deleted above
           try {
             await deleteEvent(event.id, `User banned: ${reason}`);
             await logDecision({
@@ -239,11 +258,23 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
       }
 
       // Optionally block all their media
-      if (blockMedia && context.userStats?.recentPosts) {
+      if (blockMedia) {
         const allHashes = new Set<string>();
-        for (const event of context.userStats.recentPosts) {
-          const hashes = extractMediaHashes(event.content, event.tags);
+        // Include media from the reported event
+        if (context.thread?.event) {
+          const hashes = extractMediaHashes(context.thread.event.content, context.thread.event.tags);
           hashes.forEach(h => allHashes.add(h));
+        }
+        if (context.thread?.repostedEvent) {
+          const hashes = extractMediaHashes(context.thread.repostedEvent.content, context.thread.repostedEvent.tags);
+          hashes.forEach(h => allHashes.add(h));
+        }
+        // Include media from other recent posts
+        if (context.userStats?.recentPosts) {
+          for (const event of context.userStats.recentPosts) {
+            const hashes = extractMediaHashes(event.content, event.tags);
+            hashes.forEach(h => allHashes.add(h));
+          }
         }
         for (const hash of allHashes) {
           try {
