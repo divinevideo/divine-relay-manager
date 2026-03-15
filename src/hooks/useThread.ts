@@ -1,9 +1,10 @@
 // ABOUTME: Fetches complete thread context for a Nostr event
-// ABOUTME: Traverses reply tags to build thread ancestry and fetch full conversation
+// ABOUTME: Tries Funnelcake REST API first for speed, falls back to WebSocket
 
 import { useNostr } from "@nostrify/react";
 import { useQuery } from "@tanstack/react-query";
 import type { NostrEvent } from "@nostrify/nostrify";
+import { fetchFunnelcakeEvent } from "@/lib/funnelcakeApi";
 
 interface ThreadResult {
   ancestors: NostrEvent[];  // ordered from root to parent
@@ -16,11 +17,11 @@ interface ThreadResult {
 // Kind 6 = repost of kind 1, Kind 16 = generic repost
 const REPOST_KINDS = [6, 16];
 
-export function useThread(eventId: string | undefined, depth: number = 3) {
+export function useThread(eventId: string | undefined, depth: number = 3, apiUrl?: string) {
   const { nostr } = useNostr();
 
   return useQuery<ThreadResult>({
-    queryKey: ['thread', eventId, depth],
+    queryKey: ['thread', eventId, depth, apiUrl],
     queryFn: async ({ signal }) => {
       if (!eventId) {
         return { ancestors: [], event: null, replies: [], repostedEvent: null, isRepost: false };
@@ -29,11 +30,19 @@ export function useThread(eventId: string | undefined, depth: number = 3) {
       const timeout = AbortSignal.timeout(8000);
       const combinedSignal = AbortSignal.any([signal, timeout]);
 
-      // Fetch the main event
-      const [event] = await nostr.query(
-        [{ ids: [eventId], limit: 1 }],
-        { signal: combinedSignal }
-      );
+      // Fetch the main event -- try REST first for speed, fall back to WebSocket
+      let event: NostrEvent | undefined;
+      if (apiUrl) {
+        const restEvent = await fetchFunnelcakeEvent(apiUrl, eventId);
+        if (restEvent) event = restEvent;
+      }
+      if (!event) {
+        const [wsEvent] = await nostr.query(
+          [{ ids: [eventId], limit: 1 }],
+          { signal: combinedSignal }
+        );
+        event = wsEvent;
+      }
 
       if (!event) {
         return { ancestors: [], event: null, replies: [], repostedEvent: null, isRepost: false };
@@ -58,11 +67,16 @@ export function useThread(eventId: string | undefined, depth: number = 3) {
           }
 
           if (!repostedEvent) {
-            const [fetchedOriginal] = await nostr.query(
-              [{ ids: [originalEventTag[1]], limit: 1 }],
-              { signal: combinedSignal }
-            );
-            repostedEvent = fetchedOriginal || null;
+            if (apiUrl) {
+              repostedEvent = await fetchFunnelcakeEvent(apiUrl, originalEventTag[1]) || null;
+            }
+            if (!repostedEvent) {
+              const [fetchedOriginal] = await nostr.query(
+                [{ ids: [originalEventTag[1]], limit: 1 }],
+                { signal: combinedSignal }
+              );
+              repostedEvent = fetchedOriginal || null;
+            }
           }
         }
       }
@@ -94,19 +108,33 @@ export function useThread(eventId: string | undefined, depth: number = 3) {
         }
       }
 
-      // Fetch ancestors and replies in parallel
-      const [ancestorEvents, replies] = await Promise.all([
-        ancestorIds.length > 0
-          ? nostr.query(
-              [{ ids: ancestorIds.slice(0, depth), limit: depth }],
-              { signal: combinedSignal }
-            )
-          : Promise.resolve([]),
-        nostr.query(
-          [{ kinds: [1], '#e': [eventId], limit: 20 }],
-          { signal: combinedSignal }
-        ),
-      ]);
+      // Fetch ancestors -- try REST in parallel, fall back to WebSocket batch
+      let ancestorEvents: NostrEvent[] = [];
+      if (apiUrl && ancestorIds.length > 0) {
+        const restResults = await Promise.all(
+          ancestorIds.slice(0, depth).map(id => fetchFunnelcakeEvent(apiUrl, id))
+        );
+        ancestorEvents = restResults.filter((e): e is NostrEvent => e !== null);
+      }
+      // Fall back to WebSocket if REST didn't return all ancestors
+      if (ancestorEvents.length < ancestorIds.slice(0, depth).length) {
+        const missingIds = ancestorIds.slice(0, depth).filter(
+          id => !ancestorEvents.find(e => e.id === id)
+        );
+        if (missingIds.length > 0) {
+          const wsAncestors = await nostr.query(
+            [{ ids: missingIds, limit: missingIds.length }],
+            { signal: combinedSignal }
+          );
+          ancestorEvents = [...ancestorEvents, ...wsAncestors];
+        }
+      }
+
+      // Replies stay on WebSocket for now (Phase 2)
+      const replies = await nostr.query(
+        [{ kinds: [1], '#e': [eventId], limit: 20 }],
+        { signal: combinedSignal }
+      );
 
       // Order ancestors: root first, then reply (match the order we collected IDs)
       const ancestorMap = new Map(ancestorEvents.map(e => [e.id, e]));

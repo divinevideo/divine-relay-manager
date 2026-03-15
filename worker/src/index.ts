@@ -10,6 +10,7 @@ import {
 } from './nip86';
 import { ensureSchema } from './db';
 import { generatePreAuthToken, verifyPreAuthToken } from './zendesk-preauth';
+import { deriveFunnelcakeApiUrl, proxyFunnelcakeRequest } from './funnelcake-proxy';
 
 let schemaReady = false;
 async function ensureSchemaOnce(db: D1Database): Promise<void> {
@@ -50,6 +51,7 @@ interface Env {
   MANAGEMENT_URL?: string;   // Full URL override for NIP-86 management API (for local dev with HTTP)
   MODERATION_SERVICE_URL?: string;  // URL for media moderation service
   REALNESS_API_URL?: string;  // URL for AI detection/realness service
+  FUNNELCAKE_API_URL?: string;  // Explicit Funnelcake REST API URL (derived from RELAY_URL if not set)
   // Durable Object bindings
   REPORT_WATCHER?: DurableObjectNamespace;
   // Auto-hide feature flag
@@ -265,6 +267,11 @@ export default {
       // Report watcher management endpoints
       if (path.startsWith('/api/report-watcher/')) {
         return handleReportWatcherRoutes(request, path, env, corsHeaders);
+      }
+
+      // Funnelcake REST API proxy -- fast ClickHouse-backed reads
+      if (path.startsWith('/api/funnelcake/')) {
+        return handleFunnelcakeProxy(path, env, corsHeaders);
       }
 
       // 404 for unknown routes
@@ -1597,6 +1604,35 @@ async function handleMediaProxy(
 
 // Proxy handler for realness API (AI detection)
 // Uses service binding if available (preferred), falls back to HTTP with CF Access
+// Funnelcake REST API proxy -- fast reads via ClickHouse
+async function handleFunnelcakeProxy(
+  path: string,
+  env: Env,
+  corsHeaders: Record<string, string>,
+): Promise<Response> {
+  const funnelcakeUrl = deriveFunnelcakeApiUrl(
+    env.RELAY_URL || 'wss://relay.divine.video',
+    env.FUNNELCAKE_API_URL,
+  );
+
+  // /api/funnelcake/event/{id} → /api/event/{id}
+  const eventMatch = path.match(/^\/api\/funnelcake\/event\/([a-f0-9]{64})$/i);
+  if (eventMatch) {
+    return proxyFunnelcakeRequest(funnelcakeUrl, `/api/event/${eventMatch[1]}`, corsHeaders);
+  }
+
+  // /api/funnelcake/users/{pubkey} → /api/users/{pubkey}
+  const userMatch = path.match(/^\/api\/funnelcake\/users\/([a-f0-9]{64})$/i);
+  if (userMatch) {
+    return proxyFunnelcakeRequest(funnelcakeUrl, `/api/users/${userMatch[1]}`, corsHeaders);
+  }
+
+  return new Response(JSON.stringify({ error: 'Not found' }), {
+    status: 404,
+    headers: { 'Content-Type': 'application/json', ...corsHeaders },
+  });
+}
+
 async function handleRealnessProxy(
   request: Request,
   path: string,

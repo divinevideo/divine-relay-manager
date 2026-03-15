@@ -6,6 +6,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useAuthor } from "@/hooks/useAuthor";
 import { useThread } from "@/hooks/useThread";
 import { useUserStats } from "@/hooks/useUserStats";
+import { useAppContext } from "@/hooks/useAppContext";
 import type { NostrEvent } from "@nostrify/nostrify";
 
 interface ReportTarget {
@@ -33,6 +34,8 @@ function getReportedPubkey(event: NostrEvent): string | null {
 
 export function useReportContext(report: NostrEvent | null) {
   const { nostr } = useNostr();
+  const { config } = useAppContext();
+  const apiUrl = config.apiUrl;
 
   const target = report ? getReportTarget(report) : null;
   const reportedEventId = target?.type === 'event' ? target.value : undefined;
@@ -40,13 +43,13 @@ export function useReportContext(report: NostrEvent | null) {
   const reporterPubkey = report?.pubkey;
 
   // Get thread context if report is about an event
-  const thread = useThread(reportedEventId, 3);
+  const thread = useThread(reportedEventId, 3, apiUrl);
 
   // Get the pubkey of the reported user (from event author or direct p tag)
   const targetPubkey = thread.data?.event?.pubkey || reportedPubkey;
 
   // Get reported user's profile and stats
-  const reportedUser = useAuthor(targetPubkey || undefined);
+  const reportedUser = useAuthor(targetPubkey || undefined, apiUrl);
   const userStats = useUserStats(targetPubkey || undefined);
 
   // Get reporter's profile
