@@ -36,6 +36,7 @@ import { AISummary } from "@/components/AISummary";
 import { LabelPublisherInline } from "@/components/LabelPublisher";
 import { ThreadModal } from "@/components/ThreadModal";
 import { useAdminApi } from "@/hooks/useAdminApi";
+import { useAppContext } from "@/hooks/useAppContext";
 import { extractMediaHashes, type ResolutionStatus, type ModerationAction } from "@/lib/adminApi";
 import { useMediaStatus } from "@/hooks/useMediaStatus";
 import { useDecisionLog } from "@/hooks/useDecisionLog";
@@ -92,6 +93,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     verifyPubkeyUnbanned, verifyEventDeleted, verifyMediaBlocked,
     unbanPubkey, callRelayRpc,
   } = useAdminApi();
+  const { config } = useAppContext();
   const navigate = useNavigate();
   const [showThreadModal, setShowThreadModal] = useState(false);
   const [showLabelForm, setShowLabelForm] = useState(false);
@@ -1463,6 +1465,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                 reportedEvent={displayEvent || null}
                 onViewFullThread={() => setShowThreadModal(true)}
                 isLoading={context.isLoading || isBannedEventLoading}
+                apiUrl={config.apiUrl}
               />
             </>
           )}

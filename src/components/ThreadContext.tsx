@@ -18,6 +18,7 @@ interface ThreadContextProps {
   reportedEvent: NostrEvent | null;
   onViewFullThread?: () => void;
   isLoading?: boolean;
+  apiUrl?: string;
 }
 
 // NIP-71 video kinds. Divine primarily uses 34235 (addressable video),
@@ -27,14 +28,16 @@ const VIDEO_KINDS = [21, 22, 34235, 34236];
 function PostCard({
   event,
   isReported = false,
-  depth = 0
+  depth = 0,
+  apiUrl,
 }: {
   event: NostrEvent;
   isReported?: boolean;
   depth?: number;
+  apiUrl?: string;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const author = useAuthor(event.pubkey);
+  const author = useAuthor(event.pubkey, apiUrl);
   const npubFallback = (() => {
     try {
       return nip19.npubEncode(event.pubkey).slice(0, 12) + '...';
@@ -131,7 +134,8 @@ export function ThreadContext({
   ancestors,
   reportedEvent,
   onViewFullThread,
-  isLoading
+  isLoading,
+  apiUrl,
 }: ThreadContextProps) {
   if (isLoading) {
     return (
@@ -167,13 +171,14 @@ export function ThreadContext({
       </div>
 
       {ancestors.map((event, index) => (
-        <PostCard key={event.id} event={event} depth={index} />
+        <PostCard key={event.id} event={event} depth={index} apiUrl={apiUrl} />
       ))}
 
       <PostCard
         event={reportedEvent}
         isReported
         depth={ancestors.length}
+        apiUrl={apiUrl}
       />
     </div>
   );
