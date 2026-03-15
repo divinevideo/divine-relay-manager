@@ -57,9 +57,10 @@ database_id = "d000fe55-dfac-4f54-a348-5c57241c2453"
 binding = "REALNESS"
 service = "divine-ai-detector"
 
-[[services]]
-binding = "MODERATION_API"
-service = "divine-moderation-api"
+# divine-moderation-api not yet deployed to Cloudflare — code falls back to fetch()
+# [[services]]
+# binding = "MODERATION_API"
+# service = "divine-moderation-api"
 
 # Durable Objects for persistent state
 [durable_objects]
