@@ -86,6 +86,14 @@ export function useThread(eventId: string | undefined, depth: number = 3) {
         }
       }
 
+      // NIP-22 kind 1111 comments may use uppercase E tags to reference parents
+      if (ancestorIds.length === 0) {
+        const upperETags = event.tags.filter(t => t[0] === 'E');
+        if (upperETags.length > 0) {
+          ancestorIds.push(upperETags[0][1]);
+        }
+      }
+
       // Fetch ancestors and replies in parallel
       const [ancestorEvents, replies] = await Promise.all([
         ancestorIds.length > 0
