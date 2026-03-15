@@ -66,6 +66,7 @@ export function useReportContext(report: NostrEvent | null) {
       return { reportCount: reports.length };
     },
     enabled: !!reporterPubkey,
+    staleTime: 5 * 60_000, // Reporter history is stable; cache for 5 minutes
   });
 
   const isLoading = thread.isLoading || reportedUser.isLoading ||

@@ -2,15 +2,16 @@
 // ABOUTME: Shows grandparent -> parent -> reported post with visual hierarchy
 
 import { nip19 } from "nostr-tools";
-import { Link } from "react-router-dom";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAuthor } from "@/hooks/useAuthor";
-import { MessageSquare, ExternalLink } from "lucide-react";
+import { MessageSquare, ExternalLink, ChevronDown, ChevronUp } from "lucide-react";
+import { useState } from "react";
 import type { NostrEvent } from "@nostrify/nostrify";
+import { getDivineProfileUrl } from "@/lib/constants";
 
 interface ThreadContextProps {
   ancestors: NostrEvent[];
@@ -18,6 +19,10 @@ interface ThreadContextProps {
   onViewFullThread?: () => void;
   isLoading?: boolean;
 }
+
+// NIP-71 video kinds. Divine primarily uses 34235 (addressable video),
+// but we check all video kinds to handle edge cases.
+const VIDEO_KINDS = [21, 22, 34235, 34236];
 
 function PostCard({
   event,
@@ -28,6 +33,7 @@ function PostCard({
   isReported?: boolean;
   depth?: number;
 }) {
+  const [expanded, setExpanded] = useState(false);
   const author = useAuthor(event.pubkey);
   const npubFallback = (() => {
     try {
@@ -41,11 +47,12 @@ function PostCard({
   const date = new Date(event.created_at * 1000);
   const profileUrl = (() => {
     try {
-      return `https://divine.video/profile/${nip19.npubEncode(event.pubkey)}`;
+      return getDivineProfileUrl(nip19.npubEncode(event.pubkey));
     } catch {
       return undefined;
     }
   })();
+  const isLong = event.content.length > 500;
 
   return (
     <div
@@ -73,29 +80,45 @@ function PostCard({
                 )}
               </div>
               <div className="text-sm mt-1 whitespace-pre-wrap break-all">
-                {event.content.length > 500 ? (
+                {isLong && !expanded ? (
                   <>
                     {event.content.slice(0, 500)}
                     {' ... '}
-                    <Link
-                      to={`/${(() => {
-                        try {
-                          return nip19.noteEncode(event.id);
-                        } catch {
-                          return `note1${event.id.slice(0, 8)}...`;
-                        }
-                      })()}`}
+                    <button
                       className="text-blue-500 hover:underline inline-flex items-center gap-1"
-                      onClick={(e) => e.stopPropagation()}
+                      onClick={() => setExpanded(true)}
                     >
-                      <span>View full content</span>
-                      <ExternalLink className="h-3 w-3" />
-                    </Link>
+                      <span>Show more</span>
+                      <ChevronDown className="h-3 w-3" />
+                    </button>
+                  </>
+                ) : isLong && expanded ? (
+                  <>
+                    {event.content}
+                    {' '}
+                    <button
+                      className="text-blue-500 hover:underline inline-flex items-center gap-1"
+                      onClick={() => setExpanded(false)}
+                    >
+                      <span>Show less</span>
+                      <ChevronUp className="h-3 w-3" />
+                    </button>
                   </>
                 ) : (
                   event.content
                 )}
               </div>
+              {!isReported && (
+                <a
+                  href={`https://divine.video/${nip19.neventEncode({ id: event.id })}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1 mt-1"
+                >
+                  {VIDEO_KINDS.includes(event.kind) ? 'View video' : 'View'} on Divine
+                  <ExternalLink className="h-3 w-3" />
+                </a>
+              )}
             </div>
           </div>
         </CardContent>
@@ -133,12 +156,14 @@ export function ThreadContext({
     <div className="space-y-2">
       <div className="flex items-center justify-between mb-3">
         <h4 className="text-sm font-medium text-muted-foreground">Thread Context</h4>
-        {onViewFullThread && (
-          <Button variant="ghost" size="sm" onClick={onViewFullThread}>
-            <ExternalLink className="h-3 w-3 mr-1" />
-            View Full Thread
-          </Button>
-        )}
+        <div className="flex items-center gap-1">
+          {onViewFullThread && (
+            <Button variant="ghost" size="sm" onClick={onViewFullThread}>
+              <ExternalLink className="h-3 w-3 mr-1" />
+              View Full Thread
+            </Button>
+          )}
+        </div>
       </div>
 
       {ancestors.map((event, index) => (

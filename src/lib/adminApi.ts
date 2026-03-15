@@ -2,6 +2,22 @@
 // ABOUTME: Handles signing, publishing events, and NIP-86 relay management via the server-side Worker
 // ABOUTME: All functions accept apiUrl as first parameter to support environment switching
 
+// Build headers with CF Access service token for cross-origin API requests.
+// The service token authenticates the frontend to CF Access policies on api-relay-* domains.
+export function getApiHeaders(contentType = 'application/json'): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (contentType) {
+    headers['Content-Type'] = contentType;
+  }
+  if (import.meta.env.VITE_CF_ACCESS_CLIENT_ID) {
+    headers['CF-Access-Client-Id'] = import.meta.env.VITE_CF_ACCESS_CLIENT_ID;
+  }
+  if (import.meta.env.VITE_CF_ACCESS_CLIENT_SECRET) {
+    headers['CF-Access-Client-Secret'] = import.meta.env.VITE_CF_ACCESS_CLIENT_SECRET;
+  }
+  return headers;
+}
+
 export interface UnsignedEvent {
   kind: number;
   content: string;
@@ -61,9 +77,7 @@ async function apiRequest<T>(
   }
   const response = await fetch(`${apiUrl}${endpoint}`, {
     method,
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: getApiHeaders(),
     body: body ? JSON.stringify(body) : undefined,
   });
 
@@ -140,9 +154,7 @@ export async function callRelayRpc<T = unknown>(
   }
   const response = await fetch(`${apiUrl}/api/relay-rpc`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: getApiHeaders(),
     body: JSON.stringify({ method, params }),
   });
 
@@ -287,7 +299,7 @@ export async function checkMediaStatus(apiUrl: string, sha256: string): Promise<
   try {
     const response = await fetch(`${apiUrl}/api/check-result/${sha256}`, {
       method: 'GET',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getApiHeaders(),
     });
 
     if (!response.ok) {
@@ -557,7 +569,7 @@ export async function getClassifierData(apiUrl: string, sha256: string): Promise
   try {
     const response = await fetch(`${apiUrl}/api/check-classifier/${sha256}`, {
       method: 'GET',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getApiHeaders(),
     });
 
     if (!response.ok) {
@@ -644,7 +656,7 @@ export async function getAIDetectionResult(apiUrl: string, eventId: string): Pro
   try {
     const response = await fetch(`${apiUrl}/api/realness/jobs/${eventId}`, {
       method: 'GET',
-      headers: { 'Accept': 'application/json' },
+      headers: { ...getApiHeaders(''), 'Accept': 'application/json' },
     });
 
     if (!response.ok) {
@@ -672,7 +684,7 @@ export async function submitAIDetection(
   try {
     const response = await fetch(`${apiUrl}/api/realness/analyze`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getApiHeaders(),
       body: JSON.stringify({
         videoUrl,
         mediaHash: sha256,
