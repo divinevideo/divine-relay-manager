@@ -2,14 +2,14 @@
 // ABOUTME: Shows grandparent -> parent -> reported post with visual hierarchy
 
 import { nip19 } from "nostr-tools";
-import { Link } from "react-router-dom";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAuthor } from "@/hooks/useAuthor";
-import { MessageSquare, ExternalLink } from "lucide-react";
+import { MessageSquare, ExternalLink, ChevronDown, ChevronUp } from "lucide-react";
+import { useState } from "react";
 import type { NostrEvent } from "@nostrify/nostrify";
 import { getDivineProfileUrl } from "@/lib/constants";
 
@@ -29,6 +29,7 @@ function PostCard({
   isReported?: boolean;
   depth?: number;
 }) {
+  const [expanded, setExpanded] = useState(false);
   const author = useAuthor(event.pubkey);
   const npubFallback = (() => {
     try {
@@ -47,6 +48,7 @@ function PostCard({
       return undefined;
     }
   })();
+  const isLong = event.content.length > 500;
 
   return (
     <div
@@ -74,24 +76,29 @@ function PostCard({
                 )}
               </div>
               <div className="text-sm mt-1 whitespace-pre-wrap break-all">
-                {event.content.length > 500 ? (
+                {isLong && !expanded ? (
                   <>
                     {event.content.slice(0, 500)}
                     {' ... '}
-                    <Link
-                      to={`/${(() => {
-                        try {
-                          return nip19.noteEncode(event.id);
-                        } catch {
-                          return `note1${event.id.slice(0, 8)}...`;
-                        }
-                      })()}`}
+                    <button
                       className="text-blue-500 hover:underline inline-flex items-center gap-1"
-                      onClick={(e) => e.stopPropagation()}
+                      onClick={() => setExpanded(true)}
                     >
-                      <span>View full content</span>
-                      <ExternalLink className="h-3 w-3" />
-                    </Link>
+                      <span>Show more</span>
+                      <ChevronDown className="h-3 w-3" />
+                    </button>
+                  </>
+                ) : isLong && expanded ? (
+                  <>
+                    {event.content}
+                    {' '}
+                    <button
+                      className="text-blue-500 hover:underline inline-flex items-center gap-1"
+                      onClick={() => setExpanded(false)}
+                    >
+                      <span>Show less</span>
+                      <ChevronUp className="h-3 w-3" />
+                    </button>
                   </>
                 ) : (
                   event.content
@@ -140,18 +147,6 @@ export function ThreadContext({
               <ExternalLink className="h-3 w-3 mr-1" />
               View Full Thread
             </Button>
-          )}
-          {reportedEvent && (
-            <a
-              href={`https://divine.video/${nip19.neventEncode({ id: reportedEvent.id })}`}
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              <Button variant="ghost" size="sm">
-                <ExternalLink className="h-3 w-3 mr-1" />
-                View on Divine
-              </Button>
-            </a>
           )}
         </div>
       </div>
