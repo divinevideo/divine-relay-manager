@@ -177,8 +177,8 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
 
   return (
     <Card className="overflow-hidden">
-      <CardHeader className="pb-3">
-        <div className="flex items-center gap-3">
+      <CardHeader className="pb-3 overflow-hidden">
+        <div className="flex items-center gap-3 min-w-0">
           <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80 shrink-0">
             <Avatar className="h-12 w-12">
               <AvatarImage src={profile?.picture} />
@@ -186,7 +186,7 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
             </Avatar>
           </a>
           <div className="flex-1 min-w-0">
-            <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80">
+            <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80 block min-w-0">
               <CardTitle className="text-base flex items-center gap-1 min-w-0">
                 <span className="truncate">{displayName}</span>
                 <ArrowUpRight className="h-3 w-3 text-muted-foreground shrink-0" />

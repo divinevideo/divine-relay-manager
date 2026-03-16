@@ -1461,12 +1461,12 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             </Card>
           )}
 
-          {/* Section: Reported Content */}
-          <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-            {context.target?.type === 'pubkey' && 'Reported User'}
-            {context.target?.type === 'event' && displayEvent && `Reported ${getKindLabel(displayEvent.kind)}`}
-            {context.target?.type === 'event' && !displayEvent && 'Reported Content'}
-          </h4>
+          {/* Section: Reported Content (event reports only; user reports skip to profile card) */}
+          {context.target?.type === 'event' && (
+            <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+              {displayEvent ? `Reported ${getKindLabel(displayEvent.kind)}` : 'Reported Content'}
+            </h4>
+          )}
 
           {/* Thread Context - the text content being reported */}
           {context.target?.type === 'event' && (

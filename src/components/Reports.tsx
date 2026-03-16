@@ -228,7 +228,7 @@ function ConsolidatedReportItem({
 
         {/* Target ID - show name for users, note ID for events */}
         {consolidated.target.type === 'pubkey' ? (
-          <div className="text-xs text-muted-foreground truncate">
+          <div className="text-xs text-muted-foreground truncate min-w-0 overflow-hidden">
             <UserDisplayName pubkey={consolidated.target.value} fallbackLength={16} linkToProfile />
           </div>
         ) : (
@@ -301,7 +301,7 @@ function IndividualReportItem({
         </div>
         {target && (
           target.type === 'pubkey' ? (
-            <div className="text-xs text-muted-foreground truncate">
+            <div className="text-xs text-muted-foreground truncate min-w-0 overflow-hidden">
               <UserDisplayName pubkey={target.value} fallbackLength={16} linkToProfile />
             </div>
           ) : (
