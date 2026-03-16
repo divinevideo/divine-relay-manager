@@ -2297,6 +2297,27 @@ async function handleMobileJwt(
     // This matches the pattern used in divine-mobile's zendesk_support_service
     const npub = nip19.npubEncode(pubkey);
 
+    // Enrich name from Funnelcake profile if not already provided
+    if (!name && env.RELAY_URL) {
+      try {
+        const apiBase = env.RELAY_URL.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:').replace(/\/$/, '');
+        const profileRes = await fetch(`${apiBase}/api/users/${pubkey}`, {
+          headers: { 'Accept': 'application/json' },
+          signal: AbortSignal.timeout(3000),
+        });
+        if (profileRes.ok) {
+          const userData = await profileRes.json() as { profile?: { display_name?: string; name?: string } };
+          const displayName = userData.profile?.display_name || userData.profile?.name;
+          if (displayName) {
+            name = displayName;
+            console.log(`[handleMobileJwt] Resolved display name: ${name}`);
+          }
+        }
+      } catch (e) {
+        console.log(`[handleMobileJwt] Profile lookup failed (non-fatal): ${e}`);
+      }
+    }
+
     // Build JWT payload
     // external_id uses npub to link REST API tickets to SDK identity
     const payload = {
