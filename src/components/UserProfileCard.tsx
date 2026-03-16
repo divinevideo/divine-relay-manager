@@ -187,8 +187,8 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
           </a>
           <div className="flex-1 min-w-0">
             <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80">
-              <CardTitle className="text-base truncate flex items-center gap-1">
-                {displayName}
+              <CardTitle className="text-base flex items-center gap-1 min-w-0">
+                <span className="truncate">{displayName}</span>
                 <ArrowUpRight className="h-3 w-3 text-muted-foreground shrink-0" />
               </CardTitle>
             </a>

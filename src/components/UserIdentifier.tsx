@@ -194,8 +194,8 @@ export function UserIdentifier({
           {nip05 && showNip05 && (
             <p className="text-xs text-muted-foreground truncate">{nip05}</p>
           )}
-          <div className="flex items-center gap-1">
-            <code className="text-xs font-mono text-muted-foreground truncate">
+          <div className="flex items-center gap-1 min-w-0">
+            <code className="text-xs font-mono text-muted-foreground truncate min-w-0">
               {displayNpub}
             </code>
             {showCopyButton && (

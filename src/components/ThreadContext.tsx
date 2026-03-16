@@ -160,17 +160,17 @@ function ReportTagsFallback({ reportTags, targetEventId }: { reportTags?: string
         <div className="text-sm font-medium text-amber-800 dark:text-amber-300">
           Information from report
         </div>
-        <div className="text-xs space-y-1 text-muted-foreground">
+        <div className="text-xs space-y-1 text-muted-foreground overflow-hidden">
           {targetEventId && (
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 min-w-0">
               <span className="font-medium w-20 shrink-0">Event ID:</span>
-              <code className="bg-muted px-1 rounded truncate">{targetEventId}</code>
+              <code className="bg-muted px-1 rounded truncate min-w-0">{targetEventId}</code>
             </div>
           )}
           {reportedPubkey && (
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 min-w-0">
               <span className="font-medium w-20 shrink-0">Author:</span>
-              <code className="bg-muted px-1 rounded truncate">
+              <code className="bg-muted px-1 rounded truncate min-w-0">
                 {(() => { try { return nip19.npubEncode(reportedPubkey); } catch { return reportedPubkey; } })()}
               </code>
             </div>
