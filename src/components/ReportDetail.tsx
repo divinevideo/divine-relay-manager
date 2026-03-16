@@ -165,17 +165,20 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
 
   const context = useReportContext(report);
 
-  // Banned event fallback: if thread event is null and target is an event ID, try management API
+  // Banned event fallback: if thread found no event and target is an event ID, try management API
   const targetEventId = context.target?.type === 'event' ? context.target.value : undefined;
-  const { data: bannedEvent } = useBannedEvent(
+  const shouldCheckBanned = !context.threadLoading && !context.thread?.event && !!targetEventId;
+  const { data: bannedEvent, isLoading: bannedEventQueryLoading } = useBannedEvent(
     targetEventId,
-    !context.isLoading && !context.thread?.event && !!targetEventId
+    shouldCheckBanned,
   );
 
   // Use banned event as fallback for display
   const displayEvent = context.thread?.event || bannedEvent;
   const isDisplayedEventBanned = !context.thread?.event && !!bannedEvent;
-  const isBannedEventLoading = !context.isLoading && !context.thread?.event && !!targetEventId && !bannedEvent;
+  // True from the moment thread finishes with no event, until banned check completes.
+  // Uses both: query hasn't settled yet OR query hasn't even started (enabled just flipped).
+  const isBannedEventLoading = shouldCheckBanned && (bannedEventQueryLoading || bannedEvent === undefined);
 
   const summary = useUserSummary(
     context.reportedUser.pubkey || undefined,
