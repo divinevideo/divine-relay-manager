@@ -10,7 +10,7 @@ export function useAuthor(pubkey: string | undefined, apiUrl?: string) {
   const { nostr } = useNostr();
 
   return useQuery<{ event?: NostrEvent; metadata?: NostrMetadata }>({
-    queryKey: ['author', pubkey ?? '', apiUrl],
+    queryKey: ['author', pubkey ?? ''],
     queryFn: async ({ signal }) => {
       if (!pubkey) {
         return {};
@@ -31,7 +31,9 @@ export function useAuthor(pubkey: string | undefined, apiUrl?: string) {
       );
 
       if (!event) {
-        throw new Error('No event found');
+        // No kind 0 metadata event — user exists but hasn't published a profile.
+        // Return empty rather than throwing, to avoid error states in profile cards.
+        return {};
       }
 
       try {
@@ -41,7 +43,7 @@ export function useAuthor(pubkey: string | undefined, apiUrl?: string) {
         return { event };
       }
     },
-    retry: 1,
-    staleTime: 5 * 60_000,
+    retry: 1, // Most failures are missing profiles, not transient errors
+    staleTime: 5 * 60_000, // Cache author profiles for 5 minutes
   });
 }

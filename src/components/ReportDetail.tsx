@@ -47,6 +47,11 @@ import { MediaPreview } from "@/components/MediaPreview";
 import { BulkDeleteByKind } from "@/components/BulkDeleteByKind";
 import { CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, getReportCategory, buildReasonString } from "@/lib/constants";
 import { KIND_NAMES } from "@/lib/kindNames";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
+import { UserX, UserCheck, Tag, Flag, Trash2, CheckCircle, Video, History, Ban, ShieldX, Link2, User, FileText, Unlock, Repeat2, FileCode, Loader2, XCircle, RefreshCw, Undo2, EyeOff, Eye } from "lucide-react";
+import { CopyableId, CopyableTags } from "@/components/CopyableId";
+import type { NostrEvent } from "@nostrify/nostrify";
 
 function getKindLabel(kind: number): string {
   const entry = KIND_NAMES[kind];
@@ -59,11 +64,6 @@ function getKindLabel(kind: number): string {
   if (kind === 0) return 'Profile';
   return entry.name;
 }
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Textarea } from "@/components/ui/textarea";
-import { UserX, UserCheck, Tag, Flag, Trash2, CheckCircle, Video, History, Ban, ShieldX, Link2, User, FileText, Unlock, Repeat2, FileCode, Loader2, XCircle, RefreshCw, Undo2, EyeOff, Eye } from "lucide-react";
-import { CopyableId, CopyableTags } from "@/components/CopyableId";
-import type { NostrEvent } from "@nostrify/nostrify";
 
 interface ReportDetailProps {
   report: NostrEvent | null;
@@ -1104,7 +1104,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             <AlertDialogAction
               onClick={() => {
                 reviewMutation.mutate({
-                  status: 'reviewed',
+                  status: 'dismissed' as ResolutionStatus,
                   comment: dismissReason.trim() || 'Dismissed - no action needed',
                 });
                 setConfirmDismiss(false);

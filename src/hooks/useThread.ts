@@ -33,17 +33,18 @@ async function fetchFromExternalRelay(
   relayUrl: string,
   eventId: string,
 ): Promise<NostrEvent | null> {
+  const relay = new NRelay1(relayUrl);
   try {
-    const relay = new NRelay1(relayUrl);
     const timeout = AbortSignal.timeout(5000);
     const events = await relay.query(
       [{ ids: [eventId], limit: 1 }],
       { signal: timeout },
     );
-    relay.close();
     return events[0] || null;
   } catch {
     return null;
+  } finally {
+    relay.close();
   }
 }
 
