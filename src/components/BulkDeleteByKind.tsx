@@ -28,6 +28,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
+import { Input } from "@/components/ui/input";
 import { Trash2, Loader2, AlertTriangle } from "lucide-react";
 import type { NostrEvent } from "@nostrify/nostrify";
 
@@ -52,9 +53,19 @@ interface BulkDeleteByKindProps {
   pubkey: string;
   onComplete?: () => void;
   variant?: "button" | "inline";
+  /** Log a moderation decision for each deleted event */
+  logDecision?: (params: {
+    targetType: string;
+    targetId: string;
+    action: string;
+    reason?: string;
+    reportId?: string;
+  }) => Promise<void>;
+  /** Report ID for decision logging */
+  reportId?: string;
 }
 
-export function BulkDeleteByKind({ pubkey, onComplete, variant = "button" }: BulkDeleteByKindProps) {
+export function BulkDeleteByKind({ pubkey, onComplete, variant = "button", logDecision, reportId }: BulkDeleteByKindProps) {
   const { nostr } = useNostr();
   const { deleteEvent } = useAdminApi();
   const { toast } = useToast();
@@ -64,6 +75,7 @@ export function BulkDeleteByKind({ pubkey, onComplete, variant = "button" }: Bul
   const [dialogOpen, setDialogOpen] = useState(false);
   const [deleteProgress, setDeleteProgress] = useState(0);
   const [deletedCount, setDeletedCount] = useState(0);
+  const [reason, setReason] = useState("");
 
   // Query ALL events from this user to show kind breakdown
   const { data: allUserEvents } = useQuery({
@@ -121,10 +133,25 @@ export function BulkDeleteByKind({ pubkey, onComplete, variant = "button" }: Bul
       const total = eventsToDelete.length;
       let deleted = 0;
       const errors: string[] = [];
+      const deleteReason = reason.trim() || `Bulk delete: kind ${selectedKind}`;
 
       for (const event of eventsToDelete) {
         try {
-          await deleteEvent(event.id, `Bulk delete: kind ${selectedKind}`);
+          await deleteEvent(event.id, deleteReason);
+          // Log decision for audit trail
+          if (logDecision) {
+            try {
+              await logDecision({
+                targetType: 'event',
+                targetId: event.id,
+                action: 'delete_event',
+                reason: deleteReason,
+                reportId,
+              });
+            } catch (e) {
+              console.warn(`Failed to log decision for ${event.id}:`, e);
+            }
+          }
           deleted++;
           setDeletedCount(deleted);
           setDeleteProgress((deleted / total) * 100);
@@ -155,6 +182,7 @@ export function BulkDeleteByKind({ pubkey, onComplete, variant = "button" }: Bul
       // Reset state
       setDeleteProgress(0);
       setDeletedCount(0);
+      setReason("");
       setDialogOpen(false);
 
       // Invalidate queries
@@ -243,6 +271,17 @@ export function BulkDeleteByKind({ pubkey, onComplete, variant = "button" }: Bul
                       This will permanently delete <strong>{eventCount} {kindName}</strong> events
                       from this user on the relay.
                     </p>
+                    <div>
+                      <Label htmlFor="inline-bulk-reason" className="text-sm">Reason</Label>
+                      <Input
+                        id="inline-bulk-reason"
+                        placeholder="e.g. Spam content, policy violation..."
+                        value={reason}
+                        onChange={(e) => setReason(e.target.value)}
+                        disabled={isDeleting}
+                        className="mt-1"
+                      />
+                    </div>
                     {isDeleting && (
                       <div className="space-y-2">
                         <Progress value={deleteProgress} />
@@ -361,6 +400,18 @@ export function BulkDeleteByKind({ pubkey, onComplete, variant = "button" }: Bul
                   </div>
                 </div>
               )}
+
+              <div>
+                <Label htmlFor="bulk-delete-reason" className="text-sm">Reason</Label>
+                <Input
+                  id="bulk-delete-reason"
+                  placeholder="e.g. Spam content, policy violation..."
+                  value={reason}
+                  onChange={(e) => setReason(e.target.value)}
+                  disabled={isDeleting}
+                  className="mt-1"
+                />
+              </div>
 
               {isDeleting && (
                 <div className="space-y-2">

@@ -108,21 +108,22 @@ export function useModerationStatus(
     }
   }, [pubkey, eventId, verifyPubkeyBanned, verifyEventDeleted, bannedPubkeys, bannedEvents]);
 
-  // Auto-check when event not found and ban lists have loaded
+  // Auto-check: for events when not found, for users always (just a ban list refresh)
   useEffect(() => {
     const checkKey = `${eventId || ''}:${pubkey || ''}`;
+    if (autoCheckedRef.current === checkKey || banListsLoading || wsResult.isChecking) return;
 
-    if (
-      eventNotFound &&
-      eventId &&
-      !banListsLoading &&
-      !wsResult.isChecking &&
-      autoCheckedRef.current !== checkKey
-    ) {
+    const shouldAutoCheck =
+      // Event not found via normal queries: run WebSocket verification
+      (eventNotFound && eventId) ||
+      // User report (no event): check ban status
+      (pubkey && !eventId);
+
+    if (shouldAutoCheck) {
       autoCheckedRef.current = checkKey;
       runCheck();
     }
-  }, [eventNotFound, eventId, banListsLoading, wsResult.isChecking, runCheck]);
+  }, [eventNotFound, eventId, pubkey, banListsLoading, wsResult.isChecking, runCheck]);
 
   // Reset when report changes
   useEffect(() => {

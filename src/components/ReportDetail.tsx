@@ -20,6 +20,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useToast } from "@/hooks/useToast";
@@ -112,6 +113,8 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   const [showLabelForm, setShowLabelForm] = useState(false);
   const [confirmBan, setConfirmBan] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmDismiss, setConfirmDismiss] = useState(false);
+  const [dismissReason, setDismissReason] = useState("");
   const [confirmBlockMedia, setConfirmBlockMedia] = useState(false);
   const [confirmBlockAndDelete, setConfirmBlockAndDelete] = useState(false);
   const [banOptions, setBanOptions] = useState({ deleteEvents: true, blockMedia: true });
@@ -1075,6 +1078,47 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
         </AlertDialogContent>
       </AlertDialog>
 
+      {/* Dismiss Report Dialog */}
+      <AlertDialog open={confirmDismiss} onOpenChange={(open) => { setConfirmDismiss(open); if (!open) setDismissReason(''); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Dismiss Report</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-3">
+                <p>No action will be taken. Content stays up, user is not banned.</p>
+                <div>
+                  <Label htmlFor="dismiss-reason" className="text-sm">Reason (optional)</Label>
+                  <Input
+                    id="dismiss-reason"
+                    placeholder="e.g. Not a violation, duplicate report, context misunderstood..."
+                    value={dismissReason}
+                    onChange={(e) => setDismissReason(e.target.value)}
+                    className="mt-1"
+                  />
+                </div>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={reviewMutation.isPending}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                reviewMutation.mutate({
+                  status: 'reviewed',
+                  comment: dismissReason.trim() || 'Dismissed - no action needed',
+                });
+                setConfirmDismiss(false);
+                setDismissReason('');
+              }}
+              disabled={reviewMutation.isPending}
+              className="bg-green-600 text-white hover:bg-green-700"
+            >
+              {reviewMutation.isPending ? 'Dismissing...' : 'Dismiss Report'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       {/* Thread Modal */}
       {context.target?.type === 'event' && (
         <ThreadModal
@@ -1427,6 +1471,44 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             />
           )}
 
+          {/* User moderation status - for user reports where there's no ThreadContext to show it */}
+          {context.target?.type === 'pubkey' && (moderationStatus.checkedAt || moderationStatus.isChecking) && (
+            <div className="rounded-md border bg-muted/30 p-3 space-y-2">
+              {moderationStatus.isUserBanned ? (
+                <div className="flex items-center gap-2 p-2 rounded bg-green-100 dark:bg-green-950/50">
+                  <Ban className="h-4 w-4 text-green-600 shrink-0" />
+                  <span className="text-sm font-medium text-green-700 dark:text-green-400">
+                    User is banned on the relay
+                  </span>
+                </div>
+              ) : moderationStatus.checkedAt ? (
+                <div className="flex items-center gap-2 p-2 rounded bg-yellow-100 dark:bg-yellow-950/50">
+                  <User className="h-4 w-4 text-yellow-600 shrink-0" />
+                  <span className="text-sm font-medium text-yellow-700 dark:text-yellow-400">
+                    User is not banned
+                  </span>
+                </div>
+              ) : null}
+              <div className="flex items-center justify-between">
+                {moderationStatus.checkedAt && (
+                  <span className="text-xs text-muted-foreground">
+                    Checked: {moderationStatus.checkedAt.toLocaleTimeString()}
+                  </span>
+                )}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={moderationStatus.recheck}
+                  disabled={moderationStatus.isChecking}
+                  className="h-6 text-xs px-2"
+                >
+                  <RefreshCw className={`h-3 w-3 mr-1 ${moderationStatus.isChecking ? 'animate-spin' : ''}`} />
+                  {moderationStatus.isChecking ? 'Checking...' : 'Re-check'}
+                </Button>
+              </div>
+            </div>
+          )}
+
           {/* Reported User - who created the reported content. Don't show skeleton while still searching for event. */}
           {(context.reportedUser.pubkey || (!context.isLoading && !isBannedEventLoading)) && (
           <>
@@ -1479,6 +1561,10 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                 error={summary.error as Error | null}
               />
             </>
+          ) : context.target?.type === 'pubkey' ? (
+            <p className="text-sm text-muted-foreground">
+              User report. AI analysis is only available for reported content events.
+            </p>
           ) : context.isLoading || isBannedEventLoading ? (
             <p className="text-sm text-muted-foreground">Waiting for content to load...</p>
           ) : (
@@ -1849,8 +1935,13 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                     <div>
                       <BulkDeleteByKind
                         pubkey={context.reportedUser.pubkey}
+                        logDecision={logDecision}
+                        reportId={report?.id}
                         onComplete={() => {
                           queryClient.invalidateQueries({ queryKey: ['user-stats', context.reportedUser.pubkey] });
+                          queryClient.invalidateQueries({ queryKey: ['decisions'] });
+                          decisionLog.refetch();
+                          moderationStatus.recheck();
                         }}
                       />
                     </div>
