@@ -45,6 +45,19 @@ import { AIDetectionReport } from "@/components/AIDetectionReport";
 import { MediaPreview } from "@/components/MediaPreview";
 import { BulkDeleteByKind } from "@/components/BulkDeleteByKind";
 import { CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, getReportCategory, buildReasonString } from "@/lib/constants";
+import { KIND_NAMES } from "@/lib/kindNames";
+
+function getKindLabel(kind: number): string {
+  const entry = KIND_NAMES[kind];
+  if (!entry) return `Event (kind ${kind})`;
+  // Use short, moderator-friendly names
+  if ([34235, 34236].includes(kind)) return 'Video';
+  if (kind === 1111) return 'Comment';
+  if (kind === 1) return 'Note';
+  if (kind === 6 || kind === 16) return 'Repost';
+  if (kind === 0) return 'Profile';
+  return entry.name;
+}
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { UserX, UserCheck, Tag, Flag, Trash2, CheckCircle, Video, History, Ban, ShieldX, Link2, User, FileText, Unlock, Repeat2, FileCode, Loader2, XCircle, RefreshCw, Undo2, EyeOff, Eye } from "lucide-react";
@@ -1447,7 +1460,10 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
 
           {/* Section: Reported Content */}
           <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-            Reported Content{context.target?.type === 'event' ? ': Event' : context.target?.type === 'pubkey' ? ': User' : ''}
+            Reported Content
+            {context.target?.type === 'pubkey' ? ': User' : ''}
+            {context.target?.type === 'event' && displayEvent ? `: ${getKindLabel(displayEvent.kind)}` : ''}
+            {context.target?.type === 'event' && !displayEvent && !context.isLoading && !isBannedEventLoading ? '' : ''}
           </h4>
 
           {/* Thread Context - the text content being reported */}

@@ -207,7 +207,11 @@ export function ThreadContext({
       <div className="space-y-3">
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           <Search className="h-4 w-4 animate-pulse" />
-          <span>Searching for reported content...</span>
+          <span>
+            Searching for reported content
+            {triedExternalRelay ? <span className="text-xs"> (including {triedExternalRelay})</span> : ''}
+            ...
+          </span>
         </div>
         <Skeleton className="h-24 w-full" />
         <Skeleton className="h-24 w-full ml-6" />
