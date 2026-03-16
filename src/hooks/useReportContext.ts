@@ -25,11 +25,20 @@ function getReportTarget(event: NostrEvent): ReportTarget | null {
 }
 
 function getReportedPubkey(event: NostrEvent): string | null {
-  // If report targets a pubkey directly
   const pTag = event.tags.find(t => t[0] === 'p');
   if (pTag) return pTag[1];
-
   return null;
+}
+
+function getRelayHint(event: NostrEvent): string | undefined {
+  const eTag = event.tags.find(t => t[0] === 'e');
+  // e-tag format: ["e", <event-id>, <relay-url>, <marker>, ...]
+  // relay hint is at index 2 if it looks like a relay URL
+  const hint = eTag?.[2];
+  if (hint && (hint.startsWith('wss://') || hint.startsWith('ws://'))) {
+    return hint;
+  }
+  return undefined;
 }
 
 export function useReportContext(report: NostrEvent | null) {
@@ -41,9 +50,10 @@ export function useReportContext(report: NostrEvent | null) {
   const reportedEventId = target?.type === 'event' ? target.value : undefined;
   const reportedPubkey = report ? getReportedPubkey(report) : null;
   const reporterPubkey = report?.pubkey;
+  const relayHint = report ? getRelayHint(report) : undefined;
 
   // Get thread context if report is about an event
-  const thread = useThread(reportedEventId, 3, apiUrl);
+  const thread = useThread(reportedEventId, 3, apiUrl, relayHint);
 
   // Get the pubkey of the reported user (from event author or direct p tag)
   const targetPubkey = thread.data?.event?.pubkey || reportedPubkey;
@@ -69,7 +79,7 @@ export function useReportContext(report: NostrEvent | null) {
       return { reportCount: reports.length };
     },
     enabled: !!reporterPubkey,
-    staleTime: 5 * 60_000, // Reporter history is stable; cache for 5 minutes
+    staleTime: 5 * 60_000,
   });
 
   const isLoading = thread.isLoading || reportedUser.isLoading ||
@@ -93,5 +103,9 @@ export function useReportContext(report: NostrEvent | null) {
     },
     isLoading,
     error,
+    /** Relay hint from the report's e-tag, if present */
+    relayHint,
+    /** The report event's tags, for fallback display when content is unavailable */
+    reportTags: report?.tags,
   };
 }
