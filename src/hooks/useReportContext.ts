@@ -91,6 +91,8 @@ export function useReportContext(report: NostrEvent | null) {
   return {
     target,
     thread: thread.data,
+    /** True only while the thread (event + ancestors) is loading */
+    threadLoading: thread.isLoading,
     reportedUser: {
       profile: reportedUser.data?.metadata,
       pubkey: targetPubkey,
