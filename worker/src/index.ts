@@ -1911,14 +1911,35 @@ async function handleZendeskWebhook(
         break;
 
       case 'delete_event':
+        // Use banevent RPC instead of kind 5. NIP-09 kind 5 only allows
+        // authors to delete their own events; the admin key can't delete
+        // other users' events via kind 5 (relay silently ignores it).
+        // NOTE: Zendesk-originated moderation actions may be dead code —
+        // Aleysha and team use relay.admin.divine.video for moderation,
+        // not Zendesk. Fixing for correctness but monitor for removal.
         if (body.nostr_event_id) {
-          const event = finalizeEvent({
-            kind: 5,
-            content: `Zendesk ticket #${body.ticket_id}`,
-            tags: [['e', body.nostr_event_id]],
+          const httpUrl = getManagementUrl(env);
+          const payload = JSON.stringify({ method: 'banevent', params: [body.nostr_event_id, `Zendesk ticket #${body.ticket_id}`] });
+          const payloadHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
+          const payloadHashHex = Array.from(new Uint8Array(payloadHash)).map(b => b.toString(16).padStart(2, '0')).join('');
+
+          const authEvent = finalizeEvent({
+            kind: 27235,
+            content: '',
+            tags: [['u', httpUrl], ['method', 'POST'], ['payload', payloadHashHex]],
             created_at: Math.floor(Date.now() / 1000),
           }, secretKey);
-          actionResult = await publishToRelay(event, env.RELAY_URL);
+
+          const response = await fetch(httpUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/nostr+json+rpc',
+              'Authorization': `Nostr ${btoa(JSON.stringify(authEvent))}`,
+            },
+            body: payload,
+          });
+
+          actionResult = response.ok ? { success: true } : { success: false, error: `Relay error: ${response.status}` };
         }
         break;
 
@@ -2432,7 +2453,7 @@ async function syncZendeskAfterAction(
 
     // Determine if this is a resolution action (should solve ticket)
     // Note: ban_user is Zendesk webhook naming, ban_pubkey is UI naming - same effect
-    const resolutionActions = ['reviewed', 'dismissed', 'no-action', 'false-positive', 'delete_event', 'ban_pubkey', 'ban_user'];
+    const resolutionActions = ['reviewed', 'dismissed', 'no-action', 'false-positive', 'delete_event', 'ban_pubkey', 'ban_user', 'auto_hide_confirmed', 'auto_hide_restored'];
     const isResolution = resolutionActions.includes(action);
 
     // Build note
@@ -2638,14 +2659,33 @@ async function handleZendeskAction(
         break;
 
       case 'delete_event':
+        // Use banevent RPC instead of kind 5. See handleZendeskWebhook
+        // delete_event comment for rationale.
+        // NOTE: Zendesk-originated moderation may be dead code — monitor
+        // for removal if relay admin tool fully replaces Zendesk actions.
         if (body.event_id) {
-          const event = finalizeEvent({
-            kind: 5,
-            content: reason,
-            tags: [['e', body.event_id]],
+          const httpUrl = getManagementUrl(env);
+          const payload = JSON.stringify({ method: 'banevent', params: [body.event_id, reason] });
+          const payloadHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
+          const payloadHashHex = Array.from(new Uint8Array(payloadHash)).map(b => b.toString(16).padStart(2, '0')).join('');
+
+          const authEvent = finalizeEvent({
+            kind: 27235,
+            content: '',
+            tags: [['u', httpUrl], ['method', 'POST'], ['payload', payloadHashHex]],
             created_at: Math.floor(Date.now() / 1000),
           }, secretKey);
-          actionResult = await publishToRelay(event, env.RELAY_URL);
+
+          const response = await fetch(httpUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/nostr+json+rpc',
+              'Authorization': `Nostr ${btoa(JSON.stringify(authEvent))}`,
+            },
+            body: payload,
+          });
+
+          actionResult = response.ok ? { success: true } : { success: false, error: `Relay error: ${response.status}` };
         } else {
           actionResult = { success: false, error: 'Missing event_id' };
         }
