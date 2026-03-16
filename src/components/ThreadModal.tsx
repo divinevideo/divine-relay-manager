@@ -114,7 +114,7 @@ function ThreadPost({
                 <Badge variant="destructive" className="text-xs">Reported</Badge>
               )}
             </div>
-            <p className="text-sm mt-1 whitespace-pre-wrap break-words">
+            <p className="text-sm mt-1 whitespace-pre-wrap break-all">
               {node.event.content}
             </p>
           </div>
@@ -169,7 +169,7 @@ export function ThreadModal({ eventId, open, onOpenChange, highlightEventId }: T
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl max-h-[80vh]">
+      <DialogContent className="max-w-2xl max-h-[80vh] overflow-hidden">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <MessageSquare className="h-5 w-5" />

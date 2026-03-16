@@ -156,13 +156,6 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     success: boolean;
     message: string;
   } | null>(null);
-  const [liveStatus, setLiveStatus] = useState<{
-    userBanned: boolean | null;
-    eventDeleted: boolean | null;
-    checkedAt: Date | null;
-    isChecking: boolean;
-  }>({ userBanned: null, eventDeleted: null, checkedAt: null, isChecking: false });
-
   const context = useReportContext(report);
 
   // Banned event fallback: if thread found no event and target is an event ID, try management API
@@ -177,7 +170,6 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   const displayEvent = context.thread?.event || bannedEvent;
   const isDisplayedEventBanned = !context.thread?.event && !!bannedEvent;
   // True from the moment thread finishes with no event, until banned check completes.
-  // Uses both: query hasn't settled yet OR query hasn't even started (enabled just flipped).
   const isBannedEventLoading = shouldCheckBanned && (bannedEventQueryLoading || bannedEvent === undefined);
 
   const summary = useUserSummary(
@@ -187,46 +179,13 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     context.userStats?.previousReports
   );
 
-  // Function to check live status from relay
-  const checkLiveStatus = async () => {
-    setLiveStatus(prev => ({ ...prev, isChecking: true }));
-    try {
-      const results: { userBanned: boolean | null; eventDeleted: boolean | null } = {
-        userBanned: null,
-        eventDeleted: null,
-      };
-
-      // Check if user is banned
-      if (context.reportedUser.pubkey) {
-        results.userBanned = await verifyPubkeyBanned(context.reportedUser.pubkey);
-      }
-
-      // Check if event is deleted
-      if (context.target?.type === 'event') {
-        results.eventDeleted = await verifyEventDeleted(context.target.value);
-      }
-
-      setLiveStatus({
-        userBanned: results.userBanned,
-        eventDeleted: results.eventDeleted,
-        checkedAt: new Date(),
-        isChecking: false,
-      });
-    } catch (error) {
-      console.error('Failed to check live status:', error);
-      setLiveStatus(prev => ({ ...prev, isChecking: false }));
-      toast({
-        title: "Failed to check status",
-        description: "Could not verify moderation status from relay",
-        variant: "destructive",
-      });
-    }
-  };
-
-  // Check moderation status (banned/deleted)
+  // Unified moderation status: ban lists + WebSocket verification.
+  // Auto-runs WebSocket check when event is not found via normal queries or banned event lookup.
+  const eventNotFound = !context.threadLoading && !isBannedEventLoading && !displayEvent && !!targetEventId;
   const moderationStatus = useModerationStatus(
     context.reportedUser.pubkey,
-    context.target?.type === 'event' ? context.target.value : null
+    context.target?.type === 'event' ? context.target.value : null,
+    eventNotFound,
   );
 
   // Get decision history for this target
@@ -239,8 +198,8 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
 
   // Relay is source of truth for current ban/delete status
   // D1 decisions are audit log only, not status indicators
-  const isUserBanned = moderationStatus.isBanned;
-  const isEventDeleted = moderationStatus.isDeleted;
+  const isUserBanned = moderationStatus.isUserBanned;
+  const isEventDeleted = moderationStatus.isEventGone;
   const isResolved = decisionLog.hasDecisions || pubkeyDecisionLog.hasDecisions || isUserBanned || isEventDeleted;
 
   // Auto-hide specific status
@@ -350,7 +309,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
       queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
       queryClient.invalidateQueries({ queryKey: ['banned-events'] });
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
-      moderationStatus.refetch();
+      moderationStatus.recheck();
       decisionLog.refetch();
 
       let message = "User banned";
@@ -419,7 +378,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
       queryClient.invalidateQueries({ queryKey: ['reports'] });
       queryClient.invalidateQueries({ queryKey: ['banned-events'] });
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
-      moderationStatus.refetch();
+      moderationStatus.recheck();
       decisionLog.refetch();
       toast({ title: "Event deleted from relay", description: "Verifying..." });
       setConfirmDelete(false);
@@ -683,7 +642,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
       queryClient.invalidateQueries({ queryKey: ['banned-users'] });
       queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
-      moderationStatus.refetch();
+      moderationStatus.recheck();
       decisionLog.refetch();
       toast({ title: "User unbanned", description: "Verifying..." });
 
@@ -733,7 +692,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
       queryClient.invalidateQueries({ queryKey: ['reports'] });
       queryClient.invalidateQueries({ queryKey: ['banned-events'] });
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
-      moderationStatus.refetch();
+      moderationStatus.recheck();
       decisionLog.refetch();
       toast({ title: "Event restored" });
     },
@@ -791,7 +750,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
       queryClient.invalidateQueries({ queryKey: ['banned-events'] });
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
       queryClient.invalidateQueries({ queryKey: ['all-decisions'] });
-      moderationStatus.refetch();
+      moderationStatus.recheck();
       decisionLog.refetch();
       toast({ title: "Content restored", description: "Auto-hide has been reversed" });
     },
@@ -844,7 +803,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
       queryClient.invalidateQueries({ queryKey: ['banned-events'] });
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
       queryClient.invalidateQueries({ queryKey: ['media-status'] });
-      moderationStatus.refetch();
+      moderationStatus.recheck();
       decisionLog.refetch();
       toast({
         title: "Content removed",
@@ -1126,90 +1085,8 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
       )}
 
       {/* Scrollable content area */}
-      <ScrollArea className="flex-1 min-h-0">
+      <ScrollArea className="flex-1 min-h-0 [&>div>div]:!block">
         <div className="p-4 space-y-4 overflow-x-hidden max-w-full">
-          {/* Live Status Check - Verify current moderation state */}
-          <Card className="border-blue-200 bg-blue-50/50 dark:bg-blue-950/20">
-            <CardHeader className="py-3">
-              <div className="flex items-center justify-between">
-                <CardTitle className="text-sm flex items-center gap-2 text-blue-700 dark:text-blue-400">
-                  <RefreshCw className={`h-4 w-4 ${liveStatus.isChecking ? 'animate-spin' : ''}`} />
-                  Live Moderation Status
-                </CardTitle>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={checkLiveStatus}
-                  disabled={liveStatus.isChecking}
-                  className="h-7 text-xs"
-                >
-                  {liveStatus.isChecking ? 'Checking...' : liveStatus.checkedAt ? 'Re-check' : 'Check Now'}
-                </Button>
-              </div>
-            </CardHeader>
-            <CardContent className="py-0 pb-3">
-              {liveStatus.checkedAt ? (
-                <div className="space-y-2">
-                  {/* User ban status */}
-                  {context.reportedUser.pubkey && (
-                    <div className={`flex items-center gap-2 p-2 rounded ${
-                      liveStatus.userBanned
-                        ? 'bg-green-100 dark:bg-green-950/50'
-                        : 'bg-yellow-100 dark:bg-yellow-950/50'
-                    }`}>
-                      {liveStatus.userBanned ? (
-                        <>
-                          <Ban className="h-4 w-4 text-green-600" />
-                          <span className="text-sm font-medium text-green-700 dark:text-green-400">
-                            User IS BANNED on relay
-                          </span>
-                        </>
-                      ) : (
-                        <>
-                          <User className="h-4 w-4 text-yellow-600" />
-                          <span className="text-sm font-medium text-yellow-700 dark:text-yellow-400">
-                            User is NOT banned
-                          </span>
-                        </>
-                      )}
-                    </div>
-                  )}
-                  {/* Event deletion status */}
-                  {context.target?.type === 'event' && (
-                    <div className={`flex items-center gap-2 p-2 rounded ${
-                      liveStatus.eventDeleted
-                        ? 'bg-green-100 dark:bg-green-950/50'
-                        : 'bg-yellow-100 dark:bg-yellow-950/50'
-                    }`}>
-                      {liveStatus.eventDeleted ? (
-                        <>
-                          <ShieldX className="h-4 w-4 text-green-600" />
-                          <span className="text-sm font-medium text-green-700 dark:text-green-400">
-                            Event IS DELETED from relay
-                          </span>
-                        </>
-                      ) : (
-                        <>
-                          <FileText className="h-4 w-4 text-yellow-600" />
-                          <span className="text-sm font-medium text-yellow-700 dark:text-yellow-400">
-                            Event is still on relay
-                          </span>
-                        </>
-                      )}
-                    </div>
-                  )}
-                  <p className="text-xs text-muted-foreground">
-                    Checked: {liveStatus.checkedAt.toLocaleTimeString()}
-                  </p>
-                </div>
-              ) : (
-                <p className="text-sm text-muted-foreground">
-                  Click "Check Now" to verify current moderation status from the relay
-                </p>
-              )}
-            </CardContent>
-          </Card>
-
           {/* Verification Status - for just-completed actions */}
           {(isVerifying || verificationResult) && (
             <div
@@ -1307,20 +1184,13 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             </div>
           )}
 
-          {/* Resolved Banner - prominently show when already handled (but not pending review) */}
-          {isResolved && !isPendingReview && (
-            <div className="bg-green-100 dark:bg-green-950/50 border border-green-300 dark:border-green-800 rounded-lg p-3 flex items-center gap-3">
-              <CheckCircle className="h-6 w-6 text-green-600" />
-              <div className="flex-1">
-                <p className="font-medium text-green-800 dark:text-green-300">
-                  {isUserBanned ? 'User Already Banned' : isEventDeleted ? 'Event Already Deleted' : 'Already Reviewed'}
-                </p>
-                <p className="text-sm text-green-600 dark:text-green-400">
-                  {decisionLog.latestDecision || pubkeyDecisionLog.latestDecision
-                    ? `Last action: ${(decisionLog.latestDecision || pubkeyDecisionLog.latestDecision)?.action.replace(/_/g, ' ')} on ${new Date((decisionLog.latestDecision || pubkeyDecisionLog.latestDecision)?.created_at || '').toLocaleDateString()}`
-                    : 'This target has been moderated'}
-                </p>
-              </div>
+          {/* Decision log banner - show when there's a recorded moderation action (but not pending review) */}
+          {isResolved && !isPendingReview && (decisionLog.latestDecision || pubkeyDecisionLog.latestDecision) && (
+            <div className="bg-green-50 dark:bg-green-950/30 border border-green-200 dark:border-green-800 rounded-lg px-3 py-2 flex items-center gap-2">
+              <CheckCircle className="h-4 w-4 text-green-600 shrink-0" />
+              <p className="text-sm text-green-700 dark:text-green-400">
+                Last action: {(decisionLog.latestDecision || pubkeyDecisionLog.latestDecision)?.action.replace(/_/g, ' ')} on {new Date((decisionLog.latestDecision || pubkeyDecisionLog.latestDecision)?.created_at || '').toLocaleDateString()}
+              </p>
             </div>
           )}
 
@@ -1483,12 +1353,17 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                 reportedEvent={displayEvent || null}
                 onViewFullThread={() => setShowThreadModal(true)}
                 isLoading={context.threadLoading}
-                isCheckingBanned={isBannedEventLoading}
+                isCheckingBanned={isBannedEventLoading || (moderationStatus.isChecking && !displayEvent)}
                 apiUrl={config.apiUrl}
                 fetchSource={context.thread?.fetchSource}
                 triedExternalRelay={context.thread?.triedExternalRelay || context.relayHint}
                 reportTags={context.reportTags}
                 targetEventId={context.target?.type === 'event' ? context.target.value : undefined}
+                isEventDeleted={moderationStatus.isEventGone === true}
+                isUserBanned={moderationStatus.isUserBanned === true}
+                checkedAt={moderationStatus.checkedAt}
+                onRecheck={moderationStatus.recheck}
+                isRechecking={moderationStatus.isChecking}
               />
             </>
           )}

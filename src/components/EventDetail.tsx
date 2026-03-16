@@ -425,7 +425,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
     onSuccess: async (pubkey) => {
       queryClient.invalidateQueries({ queryKey: ['banned-users'] });
       queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
-      moderationStatus.refetch();
+      moderationStatus.recheck();
       toast({ title: "User banned", description: "Verifying..." });
       setConfirmBan(false);
 
@@ -475,7 +475,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
     onSuccess: async (eventId) => {
       queryClient.invalidateQueries({ queryKey: ['relay-events'] });
       queryClient.invalidateQueries({ queryKey: ['banned-events'] });
-      moderationStatus.refetch();
+      moderationStatus.recheck();
       toast({ title: "Event deleted", description: "Verifying..." });
       setConfirmDelete(false);
 
@@ -531,7 +531,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
     onSuccess: async (pubkey) => {
       queryClient.invalidateQueries({ queryKey: ['banned-users'] });
       queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
-      moderationStatus.refetch();
+      moderationStatus.recheck();
       toast({ title: "User unbanned", description: "Verifying..." });
 
       setIsVerifying(true);
@@ -578,7 +578,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
     onSuccess: async () => {
       queryClient.invalidateQueries({ queryKey: ['relay-events'] });
       queryClient.invalidateQueries({ queryKey: ['banned-events'] });
-      moderationStatus.refetch();
+      moderationStatus.recheck();
       toast({ title: "Event restored" });
     },
     onError: (error: Error) => {
@@ -755,14 +755,14 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
     <ScrollArea className="flex-1 min-h-0">
       <div className="p-4 space-y-4">
         {/* Moderation Status Banner */}
-        {(moderationStatus.isBanned || moderationStatus.isDeleted) && (
+        {(moderationStatus.isUserBanned || moderationStatus.isEventGone) && (
           <Alert variant="destructive" className="border-destructive/50 bg-destructive/10">
             <ShieldAlert className="h-4 w-4" />
             <AlertDescription className="flex items-center justify-between">
               <span className="font-medium">
-                {moderationStatus.isBanned && moderationStatus.isDeleted
+                {moderationStatus.isUserBanned && moderationStatus.isEventGone
                   ? 'This user is banned and this event has been deleted from the relay.'
-                  : moderationStatus.isBanned
+                  : moderationStatus.isUserBanned
                     ? 'This user is banned from the relay.'
                     : 'This event has been deleted from the relay.'}
               </span>
@@ -770,7 +770,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => handleReVerify(moderationStatus.isBanned ? 'ban' : 'delete')}
+                  onClick={() => handleReVerify(moderationStatus.isUserBanned ? 'ban' : 'delete')}
                   disabled={isVerifying}
                   className="h-7 text-xs"
                 >
@@ -1140,7 +1140,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
 
           {/* Enforcement actions */}
           <div className="flex flex-wrap gap-2">
-            {moderationStatus.isDeleted ? (
+            {moderationStatus.isEventGone ? (
               <Button
                 variant="outline"
                 size="sm"
@@ -1165,7 +1165,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
                 Ban Event
               </Button>
             )}
-            {moderationStatus.isBanned ? (
+            {moderationStatus.isUserBanned ? (
               <Button
                 variant="outline"
                 size="sm"

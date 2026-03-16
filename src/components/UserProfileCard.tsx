@@ -177,29 +177,29 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
 
   return (
     <Card className="overflow-hidden">
-      <CardHeader className="pb-3 overflow-hidden">
-        <div className="flex items-center gap-3 min-w-0">
+      <CardHeader className="pb-3">
+        <div className="flex items-center gap-3 min-w-0 overflow-hidden">
           <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80 shrink-0">
             <Avatar className="h-12 w-12">
               <AvatarImage src={profile?.picture} />
               <AvatarFallback>{displayName.slice(0, 2).toUpperCase()}</AvatarFallback>
             </Avatar>
           </a>
-          <div className="flex-1 min-w-0">
-            <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80 block min-w-0">
+          <div className="flex-1 min-w-0 overflow-hidden">
+            <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80 block min-w-0 overflow-hidden">
               <CardTitle className="text-base flex items-center gap-1 min-w-0">
-                <span className="truncate">{displayName}</span>
+                <span className="truncate min-w-0">{displayName}</span>
                 <ArrowUpRight className="h-3 w-3 text-muted-foreground shrink-0" />
               </CardTitle>
             </a>
             {nip05 && (
-              <div className="flex items-center gap-1 text-sm text-muted-foreground">
-                <CheckCircle className="h-3 w-3 text-green-500" />
-                <span className="truncate">{nip05}</span>
+              <div className="flex items-center gap-1 text-sm text-muted-foreground min-w-0">
+                <CheckCircle className="h-3 w-3 text-green-500 shrink-0" />
+                <span className="truncate min-w-0">{nip05}</span>
               </div>
             )}
             <div className="flex items-center gap-1 min-w-0">
-              <code className="text-xs text-muted-foreground font-mono truncate min-w-0 flex-1">
+              <code className="text-xs text-muted-foreground font-mono block truncate min-w-0 flex-1">
                 {npub}
               </code>
               <Button

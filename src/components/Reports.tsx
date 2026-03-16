@@ -38,10 +38,11 @@ import {
   AlertTriangle,
   X,
   EyeOff,
+  Copy,
+  Check,
 } from "lucide-react";
+import { nip19 } from "nostr-tools";
 import { ReportDetail } from "@/components/ReportDetail";
-import { UserDisplayName } from "@/components/UserIdentifier";
-import { CopyableId } from "@/components/CopyableId";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { CATEGORY_LABELS } from "@/lib/constants";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -155,6 +156,47 @@ function consolidateReports(reports: NostrEvent[]): ConsolidatedReport[] {
   });
 }
 
+// Full-width bech32 ID with CSS truncation and copy button.
+// Shows as much of the ID as the layout allows, like UserProfileCard's npub row.
+function TargetId({ value, type }: { value: string; type: 'event' | 'pubkey' }) {
+  const [copied, setCopied] = useState(false);
+
+  let displayValue = value;
+  try {
+    displayValue = type === 'pubkey' ? nip19.npubEncode(value) : nip19.noteEncode(value);
+  } catch {
+    // keep hex
+  }
+
+  const handleCopy = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(displayValue);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {}
+  };
+
+  return (
+    <div className="flex items-center gap-1 min-w-0">
+      <code className="text-[10px] text-muted-foreground font-mono block truncate min-w-0 flex-1">
+        {displayValue}
+      </code>
+      <button
+        type="button"
+        onClick={handleCopy}
+        className="shrink-0 text-muted-foreground hover:text-foreground transition-colors"
+      >
+        {copied ? (
+          <Check className="h-3 w-3 text-green-500" />
+        ) : (
+          <Copy className="h-3 w-3 opacity-50" />
+        )}
+      </button>
+    </div>
+  );
+}
+
 function ConsolidatedReportItem({
   consolidated,
   isSelected,
@@ -226,20 +268,8 @@ function ConsolidatedReportItem({
           </span>
         </div>
 
-        {/* Target ID - show name for users, note ID for events */}
-        {consolidated.target.type === 'pubkey' ? (
-          <div className="text-xs text-muted-foreground truncate min-w-0 overflow-hidden">
-            <UserDisplayName pubkey={consolidated.target.value} fallbackLength={16} linkToProfile />
-          </div>
-        ) : (
-          <CopyableId
-            value={consolidated.target.value}
-            type="note"
-            truncateStart={12}
-            truncateEnd={4}
-            size="xs"
-          />
-        )}
+        {/* Target ID - full bech32 with CSS truncation */}
+        <TargetId value={consolidated.target.value} type={consolidated.target.type} />
       </div>
     </div>
   );
@@ -300,19 +330,7 @@ function IndividualReportItem({
           </div>
         </div>
         {target && (
-          target.type === 'pubkey' ? (
-            <div className="text-xs text-muted-foreground truncate min-w-0 overflow-hidden">
-              <UserDisplayName pubkey={target.value} fallbackLength={16} linkToProfile />
-            </div>
-          ) : (
-            <CopyableId
-              value={target.value}
-              type="note"
-              truncateStart={12}
-              truncateEnd={4}
-              size="xs"
-            />
-          )
+          <TargetId value={target.value} type={target.type} />
         )}
       </div>
     </div>

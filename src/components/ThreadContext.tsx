@@ -10,7 +10,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useAuthor } from "@/hooks/useAuthor";
 import {
   MessageSquare, ExternalLink, ChevronDown, ChevronUp,
-  AlertTriangle, Globe, Search, Ban,
+  AlertTriangle, Globe, Search, Ban, RefreshCw, ShieldX, User,
 } from "lucide-react";
 import { useState } from "react";
 import type { NostrEvent } from "@nostrify/nostrify";
@@ -33,6 +33,16 @@ interface ThreadContextProps {
   reportTags?: string[][];
   /** Target event ID from the report */
   targetEventId?: string;
+  /** True when the event is known to be deleted from the relay */
+  isEventDeleted?: boolean;
+  /** True when the user is known to be banned from the relay */
+  isUserBanned?: boolean;
+  /** When the moderation status was last verified */
+  checkedAt?: Date | null;
+  /** Callback to re-check moderation status */
+  onRecheck?: () => void;
+  /** True when a re-check is in progress */
+  isRechecking?: boolean;
 }
 
 // NIP-71 video kinds. Divine primarily uses 34235 (addressable video),
@@ -176,9 +186,9 @@ function ReportTagsFallback({ reportTags, targetEventId }: { reportTags?: string
             </div>
           )}
           {relayHint && (
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 min-w-0">
               <span className="font-medium w-20 shrink-0">Relay hint:</span>
-              <code className="bg-muted px-1 rounded">{relayHint}</code>
+              <code className="bg-muted px-1 rounded truncate min-w-0">{relayHint}</code>
             </div>
           )}
           {marker && (
@@ -204,6 +214,11 @@ export function ThreadContext({
   triedExternalRelay,
   reportTags,
   targetEventId,
+  isEventDeleted,
+  isUserBanned,
+  checkedAt,
+  onRecheck,
+  isRechecking,
 }: ThreadContextProps) {
   if (isLoading) {
     return (
@@ -228,11 +243,65 @@ export function ThreadContext({
         <div className="space-y-2">
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <Search className="h-4 w-4 animate-pulse" />
-            <span>Not found in normal queries. Checking banned content...</span>
+            <span>Not found in normal queries. Checking moderation status...</span>
           </div>
           <div className="h-1 w-full rounded-full bg-muted overflow-hidden">
             <div className="h-full w-1/3 rounded-full bg-primary/40 animate-barber-pole" />
           </div>
+        </div>
+      );
+    }
+
+    if (isEventDeleted || isUserBanned || checkedAt) {
+      return (
+        <div className="space-y-3">
+          {/* Moderation status results */}
+          <div className="rounded-md border bg-muted/30 p-3 space-y-2">
+            {isEventDeleted && (
+              <div className="flex items-center gap-2 p-2 rounded bg-green-100 dark:bg-green-950/50">
+                <ShieldX className="h-4 w-4 text-green-600 shrink-0" />
+                <span className="text-sm font-medium text-green-700 dark:text-green-400">
+                  Event has been deleted from the relay
+                </span>
+              </div>
+            )}
+            {isUserBanned && (
+              <div className="flex items-center gap-2 p-2 rounded bg-green-100 dark:bg-green-950/50">
+                <Ban className="h-4 w-4 text-green-600 shrink-0" />
+                <span className="text-sm font-medium text-green-700 dark:text-green-400">
+                  User is banned on the relay
+                </span>
+              </div>
+            )}
+            {checkedAt && !isEventDeleted && !isUserBanned && (
+              <div className="flex items-center gap-2 p-2 rounded bg-yellow-100 dark:bg-yellow-950/50">
+                <AlertTriangle className="h-4 w-4 text-yellow-600 shrink-0" />
+                <span className="text-sm font-medium text-yellow-700 dark:text-yellow-400">
+                  Event not found on relay. User is not banned.
+                </span>
+              </div>
+            )}
+            <div className="flex items-center justify-between">
+              {checkedAt && (
+                <span className="text-xs text-muted-foreground">
+                  Checked: {checkedAt.toLocaleTimeString()}
+                </span>
+              )}
+              {onRecheck && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={onRecheck}
+                  disabled={isRechecking}
+                  className="h-6 text-xs px-2"
+                >
+                  <RefreshCw className={`h-3 w-3 mr-1 ${isRechecking ? 'animate-spin' : ''}`} />
+                  {isRechecking ? 'Checking...' : 'Re-check'}
+                </Button>
+              )}
+            </div>
+          </div>
+          <ReportTagsFallback reportTags={reportTags} targetEventId={targetEventId} />
         </div>
       );
     }
