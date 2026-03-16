@@ -1768,7 +1768,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                   <Button
                     variant="outline"
                     className="border-green-500 text-green-600 hover:bg-green-50"
-                    onClick={() => setConfirmDismiss(true)}
+                    onClick={() => reviewMutation.mutate({ status: 'reviewed' as ResolutionStatus })}
                     disabled={reviewMutation.isPending}
                   >
                     <CheckCircle className="h-4 w-4 mr-1" />
