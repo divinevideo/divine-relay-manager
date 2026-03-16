@@ -1479,7 +1479,8 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                 ancestors={context.thread?.ancestors || []}
                 reportedEvent={displayEvent || null}
                 onViewFullThread={() => setShowThreadModal(true)}
-                isLoading={context.threadLoading || isBannedEventLoading}
+                isLoading={context.threadLoading}
+                isCheckingBanned={isBannedEventLoading}
                 apiUrl={config.apiUrl}
                 fetchSource={context.thread?.fetchSource}
                 triedExternalRelay={context.thread?.triedExternalRelay || context.relayHint}
