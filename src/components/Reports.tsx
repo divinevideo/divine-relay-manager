@@ -174,7 +174,7 @@ function TargetId({ value, type }: { value: string; type: 'event' | 'pubkey' }) 
       await navigator.clipboard.writeText(displayValue);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-    } catch {}
+    } catch { /* clipboard not available */ }
   };
 
   return (

@@ -299,7 +299,7 @@ interface UserDisplayNameProps {
 
 export function UserDisplayName({
   pubkey,
-  fallbackLength = 8,
+  fallbackLength: _fallbackLength = 8,
   linkToProfile = false,
   className,
 }: UserDisplayNameProps) {

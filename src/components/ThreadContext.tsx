@@ -6,11 +6,10 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Skeleton } from "@/components/ui/skeleton";
 import { useAuthor } from "@/hooks/useAuthor";
 import {
-  MessageSquare, ExternalLink, ChevronDown, ChevronUp,
-  AlertTriangle, Globe, Search, Ban, RefreshCw, ShieldX, User,
+  ExternalLink, ChevronDown, ChevronUp,
+  AlertTriangle, Globe, Search, Ban, RefreshCw, ShieldX,
 } from "lucide-react";
 import { useState } from "react";
 import type { NostrEvent } from "@nostrify/nostrify";
