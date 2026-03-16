@@ -110,7 +110,7 @@ describe('human decision persistence', () => {
 
       const request = new Request('http://localhost/api/decisions', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
         body: JSON.stringify({
           targetType: 'event',
           targetId: 'event_abc123',
@@ -147,7 +147,7 @@ describe('human decision persistence', () => {
 
         const request = new Request('http://localhost/api/decisions', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
           body: JSON.stringify({
             targetType: 'event',
             targetId: `target_${action}`,
@@ -179,6 +179,7 @@ describe('human decision persistence', () => {
 
       const request = new Request('http://localhost/api/decisions/event_abc123', {
         method: 'DELETE',
+        headers: { 'Cf-Access-Jwt-Assertion': 'test' },
       });
 
       const response = await worker.fetch(request, env as never);
@@ -213,7 +214,7 @@ describe('human decision persistence', () => {
 
       const request = new Request('http://localhost/api/publish', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
         body: JSON.stringify({
           kind: 1985,
           content: 'Reviewed',
@@ -249,7 +250,7 @@ describe('human decision persistence', () => {
 
       const request = new Request('http://localhost/api/publish', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
         body: JSON.stringify({
           kind: 1985,
           content: 'Some label',

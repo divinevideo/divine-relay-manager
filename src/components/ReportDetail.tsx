@@ -1,7 +1,7 @@
 // ABOUTME: Full detail view for a selected report in the split-pane layout
 // ABOUTME: Combines thread context, user profile, AI summary, and action buttons
 
-import { useState, useMemo, useEffect, useRef } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -150,18 +150,6 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
 
   const context = useReportContext(report);
 
-  // Temporary perf measurement -- remove after REST API benchmarking
-  const perfStart = useRef(Date.now());
-  useEffect(() => {
-    perfStart.current = Date.now();
-  }, [report?.id]);
-  useEffect(() => {
-    if (report?.id && !context.isLoading) {
-      const elapsed = Date.now() - perfStart.current;
-      console.log(`[perf] Report ${report.id.slice(0, 12)}... context loaded in ${elapsed}ms`);
-    }
-  }, [report?.id, context.isLoading]);
-
   // Banned event fallback: if thread event is null and target is an event ID, try management API
   const targetEventId = context.target?.type === 'event' ? context.target.value : undefined;
   const { data: bannedEvent } = useBannedEvent(
@@ -239,7 +227,6 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
 
   // Auto-hide specific status
   const isPendingReview = decisionLog.isPendingReview;
-  const _isAutoHidden = decisionLog.isAutoHidden;
 
   // Find related reports: reports on this user AND reports on their events
   const relatedReports = useMemo(() => {

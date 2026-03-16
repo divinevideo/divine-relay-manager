@@ -161,13 +161,6 @@ function verifyAdminAccess(request: Request, env: Env): string | null {
     return null;
   }
 
-  // Neither auth method present
-  if (!env.ADMIN_API_KEY) {
-    // ADMIN_API_KEY not configured — log warning but allow (backwards compat during rollout)
-    console.warn('[verifyAdminAccess] ADMIN_API_KEY not configured, allowing request. Set this secret to enforce auth.');
-    return null;
-  }
-
   return 'Unauthorized: admin access requires CF Access or X-Admin-Key header';
 }
 
@@ -2289,20 +2282,13 @@ async function handleMobileJwt(
       pubkey = verifyResult.pubkey;
       console.log(`[handleMobileJwt] Pre-auth token verified for pubkey: ${pubkey?.substring(0, 16)}...`);
     } else if (userToken) {
-      // Legacy path: raw npub or hex pubkey (migration period)
-      console.warn('[handleMobileJwt] Legacy user_token format (no pre-auth token). This path will be removed in a future release.');
-      if (userToken.startsWith('npub1')) {
-        try {
-          const decoded = nip19.decode(userToken);
-          if (decoded.type === 'npub') {
-            pubkey = decoded.data as string;
-          }
-        } catch (e) {
-          console.log('[handleMobileJwt] Failed to decode npub:', e);
-        }
-      } else if (/^[a-f0-9]{64}$/i.test(userToken)) {
-        pubkey = userToken;
-      }
+      // Reject raw npub/hex tokens. Pre-auth HMAC tokens (containing '.')
+      // are the only accepted format. The legacy raw npub path was removed
+      // because setJwtIdentity (which sends pre-auth tokens) was added in
+      // divine-mobile PR #1294 before any app build ever used JWT identity,
+      // so no released build ever sent raw npub as user_token.
+      console.warn('[handleMobileJwt] Rejected non-pre-auth user_token (raw npub/hex not accepted)');
+      return jsonResponse({ success: false, error: 'Invalid token format. Pre-auth token required.' }, 401, corsHeaders);
     }
 
     // Validate pubkey (required, 64 hex chars)
