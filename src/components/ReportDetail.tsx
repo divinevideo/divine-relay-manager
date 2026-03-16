@@ -1603,7 +1603,12 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
           ) : context.isLoading || isBannedEventLoading ? (
             <p className="text-sm text-muted-foreground">Waiting for content to load...</p>
           ) : (
-            <p className="text-sm text-muted-foreground">No AI analysis available. The reported content could not be retrieved.</p>
+            <p className="text-sm text-muted-foreground">
+              No AI analysis available.
+              {context.relayHint
+                ? ` The reported content could not be found on our relay or on ${context.relayHint}.`
+                : ' The reported content could not be found on our relay. No external relay hint was provided in the report.'}
+            </p>
           )}
 
           <Separator />
