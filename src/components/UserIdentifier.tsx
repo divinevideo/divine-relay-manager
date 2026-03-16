@@ -80,8 +80,8 @@ export function UserIdentifier({
     ? displayName.slice(0, 2).toUpperCase()
     : npub.slice(5, 7).toUpperCase();
 
-  // Truncated npub for display (npub1abc...xyz)
-  const truncatedNpub = `${npub.slice(0, 8)}...${npub.slice(-4)}`;
+  // Full npub -- CSS truncation handles overflow based on available space
+  const displayNpub = npub;
 
   const profileUrl = getDivineProfileUrl(npub);
 
@@ -96,8 +96,8 @@ export function UserIdentifier({
             </AvatarFallback>
           </Avatar>
         )}
-        <span className="font-medium">
-          {displayName || truncatedNpub}
+        <span className="font-medium truncate">
+          {displayName || displayNpub}
         </span>
       </>
     );
@@ -196,7 +196,7 @@ export function UserIdentifier({
           )}
           <div className="flex items-center gap-1">
             <code className="text-xs font-mono text-muted-foreground truncate">
-              {truncatedNpub}
+              {displayNpub}
             </code>
             {showCopyButton && (
               <Button
@@ -236,7 +236,7 @@ export function UserIdentifier({
               {displayName ? (
                 <span className="font-medium">{displayName}</span>
               ) : (
-                <code className="text-xs font-mono">{truncatedNpub}</code>
+                <code className="text-xs font-mono">{displayNpub}</code>
               )}
               {nip05 && showNip05 && !displayName && (
                 <span className="text-xs text-muted-foreground">({nip05})</span>
@@ -315,10 +315,10 @@ export function UserDisplayName({
   }
 
   const content = displayName ? (
-    <span className={className}>{displayName}</span>
+    <span className={cn("truncate", className)}>{displayName}</span>
   ) : (
-    <code className={cn("font-mono", className)}>
-      {npub.slice(0, fallbackLength)}...
+    <code className={cn("font-mono truncate", className)}>
+      {npub}
     </code>
   );
 

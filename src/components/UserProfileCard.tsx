@@ -160,9 +160,9 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
     );
   }
 
-  const displayName = profile?.display_name || profile?.name || `${npub.slice(0, 12)}...`;
+  const hasProfile = !!(profile?.display_name || profile?.name);
+  const displayName = profile?.display_name || profile?.name || npub;
   const nip05 = profile?.nip05;
-  const truncatedNpub = `${npub.slice(0, 12)}...${npub.slice(-6)}`;
   const profileUrl = getDivineProfileUrl(npub);
 
   // Extract unique labels from label events
@@ -198,9 +198,9 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
                 <span className="truncate">{nip05}</span>
               </div>
             )}
-            <div className="flex items-center gap-1">
-              <code className="text-xs text-muted-foreground font-mono">
-                {truncatedNpub}
+            <div className="flex items-center gap-1 min-w-0">
+              <code className="text-xs text-muted-foreground font-mono truncate">
+                {npub}
               </code>
               <Button
                 variant="ghost"
@@ -216,6 +216,9 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
                 )}
               </Button>
             </div>
+            {!hasProfile && (
+              <p className="text-xs text-muted-foreground italic">No profile published to this relay</p>
+            )}
           </div>
         </div>
       </CardHeader>
