@@ -315,9 +315,9 @@ export function UserDisplayName({
   }
 
   const content = displayName ? (
-    <span className={cn("truncate", className)}>{displayName}</span>
+    <span className={cn("block truncate", className)}>{displayName}</span>
   ) : (
-    <code className={cn("font-mono truncate", className)}>
+    <code className={cn("block font-mono truncate", className)}>
       {npub}
     </code>
   );
@@ -328,7 +328,7 @@ export function UserDisplayName({
         href={getDivineProfileUrl(npub)}
         target="_blank"
         rel="noopener noreferrer"
-        className="hover:opacity-80"
+        className="block min-w-0 overflow-hidden hover:opacity-80"
       >
         {content}
       </a>

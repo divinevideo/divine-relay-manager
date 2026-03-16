@@ -1031,7 +1031,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       {/* Mobile Sheet - Report Detail */}
       {isMobile && (
         <Sheet open={!!selectedReport} onOpenChange={(open) => !open && handleSelectReport(null)}>
-          <SheetContent side="right" className="!w-full !max-w-[100vw] p-0 overflow-y-auto">
+          <SheetContent side="right" className="!w-full !max-w-[100vw] pt-10 px-0 pb-0 overflow-y-auto">
             <ReportDetail
               report={selectedReport}
               allReportsForTarget={

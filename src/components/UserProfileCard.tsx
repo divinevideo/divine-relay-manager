@@ -199,7 +199,7 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
               </div>
             )}
             <div className="flex items-center gap-1 min-w-0">
-              <code className="text-xs text-muted-foreground font-mono truncate">
+              <code className="text-xs text-muted-foreground font-mono truncate min-w-0 flex-1">
                 {npub}
               </code>
               <Button
