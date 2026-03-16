@@ -1466,6 +1466,10 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                 onViewFullThread={() => setShowThreadModal(true)}
                 isLoading={context.isLoading || isBannedEventLoading}
                 apiUrl={config.apiUrl}
+                fetchSource={context.thread?.fetchSource}
+                triedExternalRelay={context.thread?.triedExternalRelay || context.relayHint}
+                reportTags={context.reportTags}
+                targetEventId={context.target?.type === 'event' ? context.target.value : undefined}
               />
             </>
           )}

@@ -1,5 +1,5 @@
 // ABOUTME: Displays thread ancestry for a reported post (up to 3 levels)
-// ABOUTME: Shows grandparent -> parent -> reported post with visual hierarchy
+// ABOUTME: Shows fetch status, graceful failure states, and external relay indicators
 
 import { nip19 } from "nostr-tools";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -8,10 +8,14 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAuthor } from "@/hooks/useAuthor";
-import { MessageSquare, ExternalLink, ChevronDown, ChevronUp } from "lucide-react";
+import {
+  MessageSquare, ExternalLink, ChevronDown, ChevronUp,
+  AlertTriangle, Globe, Search, Ban,
+} from "lucide-react";
 import { useState } from "react";
 import type { NostrEvent } from "@nostrify/nostrify";
 import { getDivineProfileUrl } from "@/lib/constants";
+import type { FetchSource } from "@/hooks/useThread";
 
 interface ThreadContextProps {
   ancestors: NostrEvent[];
@@ -19,6 +23,14 @@ interface ThreadContextProps {
   onViewFullThread?: () => void;
   isLoading?: boolean;
   apiUrl?: string;
+  /** Where the event was fetched from */
+  fetchSource?: FetchSource | null;
+  /** External relay that was tried (shown when event not found) */
+  triedExternalRelay?: string;
+  /** Report tags for fallback display when event is unavailable */
+  reportTags?: string[][];
+  /** Target event ID from the report */
+  targetEventId?: string;
 }
 
 // NIP-71 video kinds. Divine primarily uses 34235 (addressable video),
@@ -130,28 +142,95 @@ function PostCard({
   );
 }
 
+/** Show what we know from the report tags when the event itself is unavailable */
+function ReportTagsFallback({ reportTags, targetEventId }: { reportTags?: string[][], targetEventId?: string }) {
+  if (!reportTags || reportTags.length === 0) return null;
+
+  const eTag = reportTags.find(t => t[0] === 'e');
+  const pTag = reportTags.find(t => t[0] === 'p');
+  const relayHint = eTag?.[2] && (eTag[2].startsWith('wss://') || eTag[2].startsWith('ws://')) ? eTag[2] : null;
+  const marker = eTag?.[2] && !eTag[2].startsWith('ws') ? eTag[2] : eTag?.[3];
+  const reportedPubkey = pTag?.[1];
+
+  return (
+    <Card className="border-amber-200 bg-amber-50/50 dark:bg-amber-950/20">
+      <CardContent className="p-3 space-y-2">
+        <div className="text-sm font-medium text-amber-800 dark:text-amber-300">
+          Information from report
+        </div>
+        <div className="text-xs space-y-1 text-muted-foreground">
+          {targetEventId && (
+            <div className="flex items-center gap-2">
+              <span className="font-medium w-20 shrink-0">Event ID:</span>
+              <code className="bg-muted px-1 rounded truncate">{targetEventId}</code>
+            </div>
+          )}
+          {reportedPubkey && (
+            <div className="flex items-center gap-2">
+              <span className="font-medium w-20 shrink-0">Author:</span>
+              <code className="bg-muted px-1 rounded truncate">
+                {(() => { try { return nip19.npubEncode(reportedPubkey); } catch { return reportedPubkey; } })()}
+              </code>
+            </div>
+          )}
+          {relayHint && (
+            <div className="flex items-center gap-2">
+              <span className="font-medium w-20 shrink-0">Relay hint:</span>
+              <code className="bg-muted px-1 rounded">{relayHint}</code>
+            </div>
+          )}
+          {marker && (
+            <div className="flex items-center gap-2">
+              <span className="font-medium w-20 shrink-0">Category:</span>
+              <Badge variant="outline" className="text-xs">{marker}</Badge>
+            </div>
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 export function ThreadContext({
   ancestors,
   reportedEvent,
   onViewFullThread,
   isLoading,
   apiUrl,
+  fetchSource,
+  triedExternalRelay,
+  reportTags,
+  targetEventId,
 }: ThreadContextProps) {
   if (isLoading) {
     return (
       <div className="space-y-3">
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <Search className="h-4 w-4 animate-pulse" />
+          <span>Searching for reported content...</span>
+        </div>
         <Skeleton className="h-24 w-full" />
         <Skeleton className="h-24 w-full ml-6" />
-        <Skeleton className="h-24 w-full ml-12" />
       </div>
     );
   }
 
   if (!reportedEvent) {
     return (
-      <div className="text-center py-8 text-muted-foreground">
-        <MessageSquare className="h-8 w-8 mx-auto mb-2 opacity-50" />
-        <p className="text-sm">No event content available</p>
+      <div className="space-y-3">
+        <div className="flex items-center gap-2 px-3 py-2 rounded-md bg-amber-50 border border-amber-200 dark:bg-amber-950/30 dark:border-amber-800">
+          <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />
+          <div className="text-sm">
+            <span className="font-medium text-amber-800 dark:text-amber-300">
+              Content not found.
+            </span>
+            <span className="text-amber-700/80 dark:text-amber-400/80">
+              {' '}Searched our relay{triedExternalRelay ? ` and ${triedExternalRelay}` : ''}.
+              The event may have been deleted or may only exist on relays we can't reach.
+            </span>
+          </div>
+        </div>
+        <ReportTagsFallback reportTags={reportTags} targetEventId={targetEventId} />
       </div>
     );
   }
@@ -159,7 +238,15 @@ export function ThreadContext({
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between mb-3">
-        <h4 className="text-sm font-medium text-muted-foreground">Thread Context</h4>
+        <div className="flex items-center gap-2">
+          <h4 className="text-sm font-medium text-muted-foreground">Thread Context</h4>
+          {fetchSource === 'external-relay' && (
+            <Badge variant="outline" className="text-xs gap-1 text-blue-600 border-blue-300">
+              <Globe className="h-3 w-3" />
+              External relay
+            </Badge>
+          )}
+        </div>
         <div className="flex items-center gap-1">
           {onViewFullThread && (
             <Button variant="ghost" size="sm" onClick={onViewFullThread}>
