@@ -1756,8 +1756,8 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
       <div className="border-t bg-background p-4 space-y-3 shrink-0">
             {/* Resolution actions - dismiss or reopen */}
             <div className="flex flex-wrap gap-2">
-              {(decisionLog.hasDecisions || pubkeyDecisionLog.hasDecisions) && !isUserBanned && !isEventDeleted ? (
-                /* Show Reopen button if dismissed but not banned/deleted */
+              {/* Reopen: only when there are decisions to undo */}
+              {(decisionLog.hasDecisions || pubkeyDecisionLog.hasDecisions) && !isUserBanned && !isEventDeleted && (
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
@@ -1774,25 +1774,24 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                     <p>Reopen this report for review. Removes the dismiss decision and puts it back in the pending queue.</p>
                   </TooltipContent>
                 </Tooltip>
-              ) : (
-                /* Show Dismiss button if not yet resolved */
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      variant="outline"
-                      className="border-green-500 text-green-600 hover:bg-green-50"
-                      onClick={() => reviewMutation.mutate({ status: 'reviewed', comment: 'Dismissed - no action needed' })}
-                      disabled={reviewMutation.isPending || isResolved}
-                    >
-                      <CheckCircle className="h-4 w-4 mr-1" />
-                      {reviewMutation.isPending ? 'Dismissing...' : 'Dismiss Report'}
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent side="bottom" className="max-w-xs">
-                    <p>Dismiss this report - no action needed. Content stays up, user is not banned. Use this when the report doesn't warrant action.</p>
-                  </TooltipContent>
-                </Tooltip>
               )}
+              {/* Dismiss: always available. Logs a "reviewed" decision to resolve the report. */}
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="outline"
+                    className="border-green-500 text-green-600 hover:bg-green-50"
+                    onClick={() => setConfirmDismiss(true)}
+                    disabled={reviewMutation.isPending}
+                  >
+                    <CheckCircle className="h-4 w-4 mr-1" />
+                    {reviewMutation.isPending ? 'Dismissing...' : 'Dismiss Report'}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" className="max-w-xs">
+                  <p>Dismiss this report. Logs a review decision so it moves out of the pending queue.</p>
+                </TooltipContent>
+              </Tooltip>
             </div>
 
             {/* Primary enforcement action - combined when media present and not already blocked */}
