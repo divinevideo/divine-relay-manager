@@ -204,17 +204,17 @@ export function ThreadContext({
 }: ThreadContextProps) {
   if (isLoading) {
     return (
-      <div className="space-y-3">
+      <div className="space-y-2">
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           <Search className="h-4 w-4 animate-pulse" />
           <span>
             Searching for reported content
             {triedExternalRelay ? <span className="text-xs"> (including {triedExternalRelay})</span> : ''}
-            ...
           </span>
         </div>
-        <Skeleton className="h-24 w-full" />
-        <Skeleton className="h-24 w-full ml-6" />
+        <div className="h-1 w-full rounded-full bg-muted overflow-hidden">
+          <div className="h-full w-1/3 rounded-full bg-primary/40 animate-barber-pole" />
+        </div>
       </div>
     );
   }

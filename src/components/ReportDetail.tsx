@@ -1460,10 +1460,9 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
 
           {/* Section: Reported Content */}
           <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-            Reported Content
-            {context.target?.type === 'pubkey' ? ': User' : ''}
-            {context.target?.type === 'event' && displayEvent ? `: ${getKindLabel(displayEvent.kind)}` : ''}
-            {context.target?.type === 'event' && !displayEvent && !context.isLoading && !isBannedEventLoading ? '' : ''}
+            {context.target?.type === 'pubkey' && 'Reported User'}
+            {context.target?.type === 'event' && displayEvent && `Reported ${getKindLabel(displayEvent.kind)}`}
+            {context.target?.type === 'event' && !displayEvent && 'Reported Content'}
           </h4>
 
           {/* Thread Context - the text content being reported */}
@@ -1549,12 +1548,13 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             />
           )}
 
-          {/* Reported User - who created the reported content */}
+          {/* Reported User - who created the reported content. Don't show skeleton while still searching for event. */}
+          {(context.reportedUser.pubkey || (!context.isLoading && !isBannedEventLoading)) && (
           <UserProfileCard
             profile={context.reportedUser.profile}
             pubkey={context.reportedUser.pubkey}
             stats={context.userStats}
-            isLoading={context.isLoading || isBannedEventLoading}
+            isLoading={false}
             onDeleteEvent={(eventId) => {
               deleteMutation.mutate({ eventId, reason: 'Deleted from report review' }, {
                 onSuccess: (deletedId) => {
@@ -1571,6 +1571,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
               });
             }}
           />
+          )}
 
           <Separator />
 
