@@ -1550,6 +1550,8 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
 
           {/* Reported User - who created the reported content. Don't show skeleton while still searching for event. */}
           {(context.reportedUser.pubkey || (!context.isLoading && !isBannedEventLoading)) && (
+          <>
+          <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Reported User</h4>
           <UserProfileCard
             profile={context.reportedUser.profile}
             pubkey={context.reportedUser.pubkey}
@@ -1571,6 +1573,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
               });
             }}
           />
+          </>
           )}
 
           <Separator />
