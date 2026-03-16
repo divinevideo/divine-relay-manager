@@ -1578,26 +1578,30 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
           {/* Section: Investigation Helpers */}
           <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Investigation Helpers</h4>
 
-          {/* Hive AI Content Moderation */}
-          {displayEvent && (
-            <HiveAIReport eventTags={displayEvent.tags} />
-          )}
+          {displayEvent ? (
+            <>
+              {/* Hive AI Content Moderation */}
+              <HiveAIReport eventTags={displayEvent.tags} />
 
-          {/* AI Detection (Reality Defender multi-provider) */}
-          {displayEvent && (
-            <AIDetectionReport
-              eventTags={displayEvent.tags}
-              eventId={displayEvent.id}
-            />
-          )}
+              {/* AI Detection (Reality Defender multi-provider) */}
+              <AIDetectionReport
+                eventTags={displayEvent.tags}
+                eventId={displayEvent.id}
+              />
 
-          {/* AI Summary */}
-          <AISummary
-            summary={summary.data?.summary}
-            riskLevel={summary.data?.riskLevel}
-            isLoading={summary.isLoading}
-            error={summary.error as Error | null}
-          />
+              {/* AI Summary */}
+              <AISummary
+                summary={summary.data?.summary}
+                riskLevel={summary.data?.riskLevel}
+                isLoading={summary.isLoading}
+                error={summary.error as Error | null}
+              />
+            </>
+          ) : context.isLoading || isBannedEventLoading ? (
+            <p className="text-sm text-muted-foreground">Waiting for content to load...</p>
+          ) : (
+            <p className="text-sm text-muted-foreground">No AI analysis available. The reported content could not be retrieved.</p>
+          )}
 
           <Separator />
 
