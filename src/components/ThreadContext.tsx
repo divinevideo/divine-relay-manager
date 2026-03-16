@@ -75,8 +75,8 @@ function PostCard({
     <div
       className={`relative ${depth > 0 ? 'ml-6 border-l-2 border-muted pl-4' : ''}`}
     >
-      <Card className={isReported ? 'border-destructive bg-destructive/5' : ''}>
-        <CardContent className="p-3">
+      <Card className={`overflow-hidden ${isReported ? 'border-destructive bg-destructive/5' : ''}`}>
+        <CardContent className="p-3 overflow-hidden">
           <div className="flex items-start gap-3">
             <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80 shrink-0">
               <Avatar className="h-8 w-8">
@@ -96,7 +96,7 @@ function PostCard({
                   <Badge variant="destructive" className="text-xs">Reported</Badge>
                 )}
               </div>
-              <div className="text-sm mt-1 whitespace-pre-wrap break-all">
+              <div className="text-sm mt-1 whitespace-pre-wrap break-words overflow-hidden">
                 {isLong && !expanded ? (
                   <>
                     {event.content.slice(0, 500)}

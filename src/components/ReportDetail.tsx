@@ -1127,7 +1127,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
 
       {/* Scrollable content area */}
       <ScrollArea className="flex-1 min-h-0">
-        <div className="p-4 space-y-4 overflow-hidden">
+        <div className="p-4 space-y-4 overflow-x-hidden">
           {/* Live Status Check - Verify current moderation state */}
           <Card className="border-blue-200 bg-blue-50/50 dark:bg-blue-950/20">
             <CardHeader className="py-3">

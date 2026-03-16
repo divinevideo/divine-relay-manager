@@ -173,7 +173,7 @@ function ConsolidatedReportItem({
 
   return (
     <div
-      className={`p-3 border rounded-lg cursor-pointer transition-colors ${
+      className={`p-3 border rounded-lg cursor-pointer transition-colors overflow-hidden ${
         isSelected
           ? 'border-primary bg-primary/5 ring-1 ring-primary'
           : isHighPriority
@@ -262,7 +262,7 @@ function IndividualReportItem({
 
   return (
     <div
-      className={`p-3 border rounded-lg cursor-pointer transition-colors ${
+      className={`p-3 border rounded-lg cursor-pointer transition-colors overflow-hidden ${
         isSelected
           ? 'border-primary bg-primary/5 ring-1 ring-primary'
           : isHighPriority
