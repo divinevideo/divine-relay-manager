@@ -276,7 +276,7 @@ export default {
     } catch (error) {
       console.error('Worker error:', error);
       return jsonResponse(
-        { success: false, error: error instanceof Error ? error.message : 'Internal error' },
+        { success: false, error: 'Internal error' },
         500,
         corsHeaders
       );
@@ -715,7 +715,7 @@ Respond with JSON only:
     return new Response(JSON.stringify({
       error: 'Failed to generate summary',
       summary: 'Unable to analyze user behavior at this time.',
-      riskLevel: 'medium'
+      riskLevel: 'unknown'
     }), {
       status: 200, // Return 200 with fallback to not break UI
       headers: { 'Content-Type': 'application/json', ...corsHeaders },

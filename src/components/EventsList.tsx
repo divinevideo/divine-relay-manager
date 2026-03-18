@@ -600,10 +600,21 @@ export function EventsList({ relayUrl }: EventsListProps) {
   };
 
   // Helper to check if user is "new" (created within last 7 days based on event timestamp)
-  const isNewUser = (pubkey: string, events: NostrEvent[]): boolean => {
-    const userEvents = events.filter(e => e.pubkey === pubkey);
-    if (userEvents.length === 0) return true;
-    const oldest = Math.min(...userEvents.map(e => e.created_at));
+  // Pre-compute oldest event per pubkey to avoid O(n²) scanning
+  const oldestByPubkey = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const e of relayEvents || []) {
+      const current = map.get(e.pubkey);
+      if (current === undefined || e.created_at < current) {
+        map.set(e.pubkey, e.created_at);
+      }
+    }
+    return map;
+  }, [relayEvents]);
+
+  const isNewUser = (pubkey: string): boolean => {
+    const oldest = oldestByPubkey.get(pubkey);
+    if (oldest === undefined) return true;
     const sevenDaysAgo = Date.now() / 1000 - (7 * 24 * 60 * 60);
     return oldest > sevenDaysAgo;
   };
@@ -720,7 +731,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
 
       // New users filter
       if (filterNewUsers && events) {
-        if (!isNewUser(event.pubkey, events)) return false;
+        if (!isNewUser(event.pubkey)) return false;
       }
 
       return true;
