@@ -579,17 +579,20 @@ export function EventsList({ relayUrl }: EventsListProps) {
     staleTime: 60000,
   });
 
-  // Build sets of reported event IDs and pubkeys
-  const reportedEventIds = new Set<string>();
-  const reportedPubkeys = new Set<string>();
-  if (allReports) {
-    for (const report of allReports) {
-      const eTag = report.tags.find(t => t[0] === 'e');
-      if (eTag) reportedEventIds.add(eTag[1]);
-      const pTag = report.tags.find(t => t[0] === 'p');
-      if (pTag) reportedPubkeys.add(pTag[1]);
+  // Build sets of reported event IDs and pubkeys (memoized to avoid rebuild on every render)
+  const { reportedEventIds, reportedPubkeys } = useMemo(() => {
+    const eventIds = new Set<string>();
+    const pubkeys = new Set<string>();
+    if (allReports) {
+      for (const report of allReports) {
+        const eTag = report.tags.find(t => t[0] === 'e');
+        if (eTag) eventIds.add(eTag[1]);
+        const pTag = report.tags.find(t => t[0] === 'p');
+        if (pTag) pubkeys.add(pTag[1]);
+      }
     }
-  }
+    return { reportedEventIds: eventIds, reportedPubkeys: pubkeys };
+  }, [allReports]);
 
   // Helper to check if event has media (content URLs or imeta tags)
   const hasMedia = (content: string, tags?: string[][]): boolean => {

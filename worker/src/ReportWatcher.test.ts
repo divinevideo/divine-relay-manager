@@ -744,6 +744,33 @@ describe('ReportWatcher', () => {
       expect(mockDbRun).toHaveBeenCalled();
     });
 
+    it('should skip auto-hide for reports without an e tag (malformed)', async () => {
+      mockEnv.AUTO_HIDE_ENABLED = 'true';
+
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const ws = getLastMockWebSocket();
+      const reportEvent: ReportEvent = {
+        id: 'no_e_tag_report',
+        pubkey: 'reporter',
+        kind: 1984,
+        content: 'Report with no e tag',
+        tags: [
+          ['p', 'some_pubkey'],
+          ['report', 'sexual_minors'],
+          ['client', 'diVine'],
+        ],
+        created_at: Math.floor(Date.now() / 1000),
+      };
+
+      ws!.simulateMessage(JSON.stringify(['EVENT', 'auto-hide-reports', reportEvent]));
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      // Should NOT have called fetch (banevent) — no event to ban
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
     it('should skip auto-hide for reports from untrusted clients', async () => {
       mockEnv.AUTO_HIDE_ENABLED = 'true';
 
