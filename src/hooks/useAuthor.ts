@@ -27,7 +27,7 @@ export function useAuthor(pubkey: string | undefined, apiUrl?: string) {
       // Fall back to WebSocket
       const [event] = await nostr.query(
         [{ kinds: [0], authors: [pubkey!], limit: 1 }],
-        { signal: AbortSignal.any([signal, AbortSignal.timeout(3000)]) },
+        { signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]) },
       );
 
       if (!event) {

@@ -413,21 +413,20 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     refetchInterval: 15 * 1000,
   });
 
-  // Query all moderation decisions from our D1 database
+  // Query all moderation decisions from our D1 database.
+  // Uses placeholderData to keep showing stale results on refetch errors
+  // instead of flickering to 0 reports (Liz's PR #31 bug #2 fix).
   const { data: allDecisions, error: decisionsError, isLoading: decisionsLoading } = useQuery({
-    queryKey: ['all-decisions'],
+    queryKey: ['decisions'],
     queryFn: async () => {
-      try {
-        const decisions = await getAllDecisions();
-        console.log('[Reports] Loaded decisions:', decisions.length, decisions.slice(0, 3));
-        return decisions;
-      } catch (error) {
-        console.error('[Reports] Failed to load decisions:', error);
-        return [];
-      }
+      const decisions = await getAllDecisions();
+      console.log('[Reports] Loaded decisions:', decisions.length, decisions.slice(0, 3));
+      return decisions;
     },
     staleTime: 30 * 1000,
     refetchInterval: 15 * 1000,
+    placeholderData: (previousData) => previousData,
+    retry: 2,
   });
 
   // Debug: log any decisions error
