@@ -269,6 +269,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
       queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
       queryClient.invalidateQueries({ queryKey: ['banned-events'] });
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      queryClient.invalidateQueries({ queryKey: ['all-decisions'] });
       moderationStatus.refetch();
       decisionLog.refetch();
 
@@ -338,6 +339,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
       queryClient.invalidateQueries({ queryKey: ['reports'] });
       queryClient.invalidateQueries({ queryKey: ['banned-events'] });
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      queryClient.invalidateQueries({ queryKey: ['all-decisions'] });
       moderationStatus.refetch();
       decisionLog.refetch();
       toast({ title: "Event deleted from relay", description: "Verifying..." });
@@ -399,6 +401,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
       queryClient.invalidateQueries({ queryKey: ['labels'] });
       queryClient.invalidateQueries({ queryKey: ['resolution-labels'] });
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      queryClient.invalidateQueries({ queryKey: ['all-decisions'] });
       decisionLog.refetch();
       toast({
         title: variables.status === 'reviewed' ? "Marked as reviewed" : "Marked as false positive",
@@ -427,6 +430,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      queryClient.invalidateQueries({ queryKey: ['all-decisions'] });
       decisionLog.refetch();
       pubkeyDecisionLog.refetch();
       toast({
@@ -463,6 +467,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     },
     onSuccess: async ({ hashes }) => {
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      queryClient.invalidateQueries({ queryKey: ['all-decisions'] });
       queryClient.invalidateQueries({ queryKey: ['media-status'] });
       decisionLog.refetch();
       toast({
@@ -559,6 +564,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     },
     onSuccess: (_, variables) => {
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      queryClient.invalidateQueries({ queryKey: ['all-decisions'] });
       queryClient.invalidateQueries({ queryKey: ['media-status'] });
       mediaStatus.refetch();
       decisionLog.refetch();
@@ -592,6 +598,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
       queryClient.invalidateQueries({ queryKey: ['banned-users'] });
       queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      queryClient.invalidateQueries({ queryKey: ['all-decisions'] });
       moderationStatus.refetch();
       decisionLog.refetch();
       toast({ title: "User unbanned", description: "Verifying..." });
@@ -642,6 +649,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
       queryClient.invalidateQueries({ queryKey: ['reports'] });
       queryClient.invalidateQueries({ queryKey: ['banned-events'] });
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      queryClient.invalidateQueries({ queryKey: ['all-decisions'] });
       moderationStatus.refetch();
       decisionLog.refetch();
       toast({ title: "Event restored" });
@@ -694,6 +702,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
       queryClient.invalidateQueries({ queryKey: ['reports'] });
       queryClient.invalidateQueries({ queryKey: ['banned-events'] });
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      queryClient.invalidateQueries({ queryKey: ['all-decisions'] });
       queryClient.invalidateQueries({ queryKey: ['media-status'] });
       moderationStatus.refetch();
       decisionLog.refetch();
