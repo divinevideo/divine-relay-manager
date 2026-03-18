@@ -753,7 +753,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     },
     onSuccess: async () => {
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
-      queryClient.invalidateQueries({ queryKey: ['all-decisions'] });
+
       decisionLog.refetch();
       toast({ title: "Auto-hide confirmed", description: "Content will remain hidden" });
     },
@@ -783,7 +783,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
       queryClient.invalidateQueries({ queryKey: ['reports'] });
       queryClient.invalidateQueries({ queryKey: ['banned-events'] });
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
-      queryClient.invalidateQueries({ queryKey: ['all-decisions'] });
+
       moderationStatus.recheck();
       decisionLog.refetch();
       toast({ title: "Content restored", description: "Auto-hide has been reversed" });
