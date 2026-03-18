@@ -598,7 +598,7 @@ describe('ReportWatcher', () => {
 
       // Should have logged to D1
       expect(mockEnv.DB!.prepare).toHaveBeenCalledWith(
-        expect.stringContaining('INSERT INTO moderation_decisions')
+        expect.stringContaining('moderation_decisions')
       );
       expect(mockDbRun).toHaveBeenCalled();
     });
