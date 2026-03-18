@@ -1327,9 +1327,21 @@ async function verifyZendeskWebhook(
   }
 
   // Option 1: Simple API key header (X-Webhook-Key)
+  // Constant-time comparison via HMAC: HMAC both strings with a fixed key,
+  // compare the digests. Avoids timing side-channel on string equality.
   const apiKey = request.headers.get('X-Webhook-Key');
-  if (apiKey && apiKey === secret) {
-    return true;
+  if (apiKey && apiKey.length === secret.length) {
+    const encoder = new TextEncoder();
+    const key = await crypto.subtle.importKey(
+      'raw', encoder.encode('webhook-compare'), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+    );
+    const [macA, macB] = await Promise.all([
+      crypto.subtle.sign('HMAC', key, encoder.encode(apiKey)),
+      crypto.subtle.sign('HMAC', key, encoder.encode(secret)),
+    ]);
+    if (new Uint8Array(macA).every((v, i) => v === new Uint8Array(macB)[i])) {
+      return true;
+    }
   }
 
   // Option 2: Zendesk native webhook signing (X-Zendesk-Webhook-Signature)
@@ -1657,6 +1669,9 @@ async function handleRealnessViaBinding(
   // GET /api/realness/jobs/:id -> GET realness/api/jobs/:id
   if (subPath.startsWith('/jobs/') && request.method === 'GET') {
     const jobId = subPath.replace('/jobs/', '');
+    if (!/^[a-zA-Z0-9_-]+$/.test(jobId)) {
+      return jsonResponse({ success: false, error: 'Invalid job ID format' }, 400, corsHeaders);
+    }
     try {
       // Service binding uses a dummy URL - the host is ignored
       const response = await realness.fetch(`https://realness/api/jobs/${jobId}`, {
@@ -1715,6 +1730,9 @@ async function handleRealnessViaHTTP(
   // GET /api/realness/jobs/:id -> GET realness/api/jobs/:id
   if (subPath.startsWith('/jobs/') && request.method === 'GET') {
     const jobId = subPath.replace('/jobs/', '');
+    if (!/^[a-zA-Z0-9_-]+$/.test(jobId)) {
+      return jsonResponse({ success: false, error: 'Invalid job ID format' }, 400, corsHeaders);
+    }
     try {
       const response = await fetch(`${realnessUrl}/api/jobs/${jobId}`, { headers });
       const text = await response.text();

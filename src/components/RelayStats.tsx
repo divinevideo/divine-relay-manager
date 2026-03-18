@@ -57,7 +57,7 @@ export function RelayStats({ relayUrl }: RelayStatsProps) {
 
   // Query for banned events count
   const { data: bannedEvents, isLoading: loadingBannedEvents } = useQuery({
-    queryKey: ['banned-events', relayUrl],
+    queryKey: ['banned-events'],
     queryFn: () => callRelayRpc<Array<{ id: string; reason?: string }>>('listbannedevents'),
     enabled: !!relayUrl && !!user,
   });

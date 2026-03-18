@@ -555,7 +555,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
 
   // Query for banned events to mark them
   const { data: bannedEvents } = useQuery({
-    queryKey: ['banned-events', relayUrl],
+    queryKey: ['banned-events'],
     queryFn: () => callRelayRpc<Array<{ id: string; reason?: string }>>('listbannedevents'),
     enabled: !!relayUrl && !!user,
   });
@@ -616,7 +616,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
       return { eventId, action };
     },
     onSuccess: async ({ eventId, action }) => {
-      queryClient.invalidateQueries({ queryKey: ['banned-events', relayUrl] });
+      queryClient.invalidateQueries({ queryKey: ['banned-events'] });
       queryClient.invalidateQueries({ queryKey: ['events-needing-moderation', relayUrl] });
       queryClient.invalidateQueries({ queryKey: ['relay-events', relayUrl] });
       toast({
