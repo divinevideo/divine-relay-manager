@@ -6,10 +6,13 @@ import {
   getSecretKey,
   getManagementUrl,
   callNip86Rpc,
+  banEvent,
+  banPubkey,
+  unbanPubkey,
   type SecretStoreSecret,
 } from './nip86';
 import { ensureSchema } from './db';
-import { generatePreAuthToken, verifyPreAuthToken } from './zendesk-preauth';
+import { generatePreAuthToken, verifyPreAuthToken, base64UrlEncode } from './zendesk-preauth';
 import { deriveFunnelcakeApiUrl, proxyFunnelcakeRequest } from './funnelcake-proxy';
 
 let schemaReady = false;
@@ -152,7 +155,8 @@ interface ApiResponse {
 //   2. X-Admin-Key header matching ADMIN_API_KEY env var (server-to-server callers)
 // Returns null if authorized, or an error string if not.
 function verifyAdminAccess(request: Request, env: Env): string | null {
-  // CF Access injects this header on authenticated requests
+  // CF Access validates the JWT at the edge before the request reaches the worker.
+  // Header presence here means the request passed CF Access authentication.
   if (request.headers.get('Cf-Access-Jwt-Assertion')) {
     return null;
   }
@@ -1904,98 +1908,30 @@ async function handleZendeskWebhook(
       });
     }
 
-    // Execute the moderation action
-    const secretKey = await getSecretKey(env);
-
+    // Execute the moderation action via NIP-86 RPC utilities.
+    // NOTE: Zendesk-originated moderation actions may be dead code —
+    // Aleysha and team use relay.admin.divine.video for moderation,
+    // not Zendesk. Keeping for correctness but monitor for removal.
     let actionResult: { success: boolean; error?: string } = { success: false, error: 'Unknown action' };
 
     switch (body.action_requested) {
       case 'ban_user':
         if (body.nostr_pubkey) {
-          // Use relay RPC to ban
-          const _pubkey = getPublicKey(secretKey);
-          const httpUrl = getManagementUrl(env);
-          const payload = JSON.stringify({ method: 'banpubkey', params: [body.nostr_pubkey, `Zendesk ticket #${body.ticket_id}`] });
-          const payloadHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
-          const payloadHashHex = Array.from(new Uint8Array(payloadHash)).map(b => b.toString(16).padStart(2, '0')).join('');
-
-          const authEvent = finalizeEvent({
-            kind: 27235,
-            content: '',
-            tags: [['u', httpUrl], ['method', 'POST'], ['payload', payloadHashHex]],
-            created_at: Math.floor(Date.now() / 1000),
-          }, secretKey);
-
-          const response = await fetch(httpUrl, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/nostr+json+rpc',
-              'Authorization': `Nostr ${btoa(JSON.stringify(authEvent))}`,
-            },
-            body: payload,
-          });
-
-          actionResult = response.ok ? { success: true } : { success: false, error: `Relay error: ${response.status}` };
+          actionResult = await banPubkey(body.nostr_pubkey, `Zendesk ticket #${body.ticket_id}`, env);
         }
         break;
 
       case 'delete_event':
-        // Use banevent RPC instead of kind 5. NIP-09 kind 5 only allows
-        // authors to delete their own events; the admin key can't delete
-        // other users' events via kind 5 (relay silently ignores it).
-        // NOTE: Zendesk-originated moderation actions may be dead code —
-        // Aleysha and team use relay.admin.divine.video for moderation,
-        // not Zendesk. Fixing for correctness but monitor for removal.
+        // banevent RPC instead of kind 5: NIP-09 kind 5 only allows authors
+        // to delete their own events; admin key can't delete via kind 5.
         if (body.nostr_event_id) {
-          const httpUrl = getManagementUrl(env);
-          const payload = JSON.stringify({ method: 'banevent', params: [body.nostr_event_id, `Zendesk ticket #${body.ticket_id}`] });
-          const payloadHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
-          const payloadHashHex = Array.from(new Uint8Array(payloadHash)).map(b => b.toString(16).padStart(2, '0')).join('');
-
-          const authEvent = finalizeEvent({
-            kind: 27235,
-            content: '',
-            tags: [['u', httpUrl], ['method', 'POST'], ['payload', payloadHashHex]],
-            created_at: Math.floor(Date.now() / 1000),
-          }, secretKey);
-
-          const response = await fetch(httpUrl, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/nostr+json+rpc',
-              'Authorization': `Nostr ${btoa(JSON.stringify(authEvent))}`,
-            },
-            body: payload,
-          });
-
-          actionResult = response.ok ? { success: true } : { success: false, error: `Relay error: ${response.status}` };
+          actionResult = await banEvent(body.nostr_event_id, `Zendesk ticket #${body.ticket_id}`, env);
         }
         break;
 
       case 'allow_user':
         if (body.nostr_pubkey) {
-          const httpUrl = getManagementUrl(env);
-          const payload = JSON.stringify({ method: 'allowpubkey', params: [body.nostr_pubkey] });
-          const payloadHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
-          const payloadHashHex = Array.from(new Uint8Array(payloadHash)).map(b => b.toString(16).padStart(2, '0')).join('');
-
-          const authEvent = finalizeEvent({
-            kind: 27235,
-            content: '',
-            tags: [['u', httpUrl], ['method', 'POST'], ['payload', payloadHashHex]],
-            created_at: Math.floor(Date.now() / 1000),
-          }, secretKey);
-
-          const response = await fetch(httpUrl, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/nostr+json+rpc',
-              'Authorization': `Nostr ${btoa(JSON.stringify(authEvent))}`,
-            },
-            body: payload,
-          });
-
-          actionResult = response.ok ? { success: true } : { success: false, error: `Relay error: ${response.status}` };
+          actionResult = await unbanPubkey(body.nostr_pubkey, env);
         }
         break;
     }
@@ -2377,14 +2313,6 @@ async function handleMobileJwt(
     const header = {
       alg: 'HS256',
       typ: 'JWT',
-    };
-
-    // Base64URL encode helper
-    const base64UrlEncode = (data: string): string => {
-      return btoa(data)
-        .replace(/\+/g, '-')
-        .replace(/\//g, '_')
-        .replace(/=+$/, '');
     };
 
     // Encode header and payload

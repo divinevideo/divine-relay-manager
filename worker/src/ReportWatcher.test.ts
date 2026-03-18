@@ -936,7 +936,7 @@ describe('ReportWatcher', () => {
           bind: vi.fn().mockReturnValue({
             run: mockDbRun,
             first: vi.fn().mockImplementation(() => {
-              if (sql.includes('moderation_targets')) {
+              if (_sql.includes('moderation_targets')) {
                 return Promise.reject(new Error('D1 query failed'));
               }
               return Promise.resolve(null);

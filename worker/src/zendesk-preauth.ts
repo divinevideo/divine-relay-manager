@@ -24,7 +24,7 @@ interface VerifyResult {
   error?: string;
 }
 
-function base64UrlEncode(data: string): string {
+export function base64UrlEncode(data: string): string {
   return btoa(data)
     .replace(/\+/g, '-')
     .replace(/\//g, '_')
