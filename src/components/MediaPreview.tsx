@@ -1,12 +1,14 @@
 // ABOUTME: Displays media (images/videos) from Nostr events with proper handling
 // ABOUTME: Extracts URLs from content and imeta tags, renders with appropriate player
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Image, Video, Eye, EyeOff, AlertTriangle, ExternalLink } from "lucide-react";
 import type { NostrEvent } from "@nostrify/nostrify";
+import { useApiUrl } from "@/hooks/useAdminApi";
+import { getApiHeaders } from "@/lib/adminApi";
 
 interface MediaItem {
   url: string;
@@ -140,9 +142,28 @@ export function MediaPreview({
 }: MediaPreviewProps) {
   const [showMedia, setShowMedia] = useState(showByDefault);
   const [failedUrls, setFailedUrls] = useState<Set<string>>(new Set());
+  const [proxyUrls, setProxyUrls] = useState<Map<string, string>>(new Map());
+  const apiUrl = useApiUrl();
+
+  // Collapse media if showByDefault changes to false (e.g., high-priority reports loaded)
+  // This handles the race condition where reports load after initial render
+  useEffect(() => {
+    if (!showByDefault) {
+      setShowMedia(false);
+    }
+  }, [showByDefault]);
+
+  // Clean up blob URLs on unmount to avoid memory leaks
+  useEffect(() => {
+    return () => {
+      proxyUrls.forEach(url => {
+        if (url.startsWith('blob:')) URL.revokeObjectURL(url);
+      });
+    };
+  }, [proxyUrls]);
 
   const content = propContent ?? event?.content ?? '';
-  const tags = propTags ?? event?.tags ?? [];
+  const tags = useMemo(() => propTags ?? event?.tags ?? [], [propTags, event?.tags]);
 
   const mediaItems = useMemo(() => extractMediaItems(content, tags), [content, tags]);
 
@@ -155,8 +176,24 @@ export function MediaPreview({
   const imageCount = mediaItems.filter(m => m.type === 'image').length;
   const videoCount = mediaItems.filter(m => m.type === 'video').length;
 
-  const handleError = (url: string) => {
-    setFailedUrls(prev => new Set(prev).add(url));
+  const handleError = async (url: string, sha256?: string) => {
+    if (sha256 && !proxyUrls.has(url) && !failedUrls.has(url)) {
+      // First failure: fetch through authenticated proxy via JS (not <img src>)
+      // CF Access blocks unauthenticated browser requests to the API domain,
+      // so we fetch with service token headers and create a blob URL.
+      try {
+        const proxyUrl = `${apiUrl}/api/media-proxy/${sha256}`;
+        const resp = await fetch(proxyUrl, { headers: getApiHeaders('') });
+        if (!resp.ok) throw new Error(`${resp.status}`);
+        const blob = await resp.blob();
+        const blobUrl = URL.createObjectURL(blob);
+        setProxyUrls(prev => new Map(prev).set(url, blobUrl));
+      } catch {
+        setFailedUrls(prev => new Set(prev).add(url));
+      }
+    } else {
+      setFailedUrls(prev => new Set(prev).add(url));
+    }
   };
 
   return (
@@ -203,7 +240,9 @@ export function MediaPreview({
       {showMedia && (
         <CardContent className="py-2 px-3">
           <div className="grid grid-cols-2 gap-2">
-            {visibleItems.map((item, index) => (
+            {visibleItems.map((item, index) => {
+              const displayUrl = proxyUrls.get(item.url) || item.url;
+              return (
               <div key={item.url} className="relative">
                 {failedUrls.has(item.url) ? (
                   <div className="aspect-video bg-muted rounded flex items-center justify-center text-muted-foreground">
@@ -211,23 +250,28 @@ export function MediaPreview({
                   </div>
                 ) : item.type === 'video' ? (
                   <video
-                    src={item.url}
+                    src={displayUrl}
                     controls
                     className="w-full rounded aspect-video object-contain bg-black"
-                    onError={() => handleError(item.url)}
+                    onError={() => handleError(item.url, item.sha256)}
                     preload="metadata"
                   />
                 ) : (
                   <img
-                    src={item.url}
+                    src={displayUrl}
                     alt={`Media ${index + 1}`}
                     className="w-full rounded aspect-square object-cover cursor-pointer hover:opacity-90 transition-opacity"
-                    onError={() => handleError(item.url)}
-                    onClick={() => window.open(item.url, '_blank')}
+                    onError={() => handleError(item.url, item.sha256)}
+                    onClick={() => window.open(displayUrl, '_blank')}
                   />
                 )}
+                {proxyUrls.has(item.url) && !failedUrls.has(item.url) && (
+                  <Badge variant="destructive" className="absolute top-1 left-1 text-[10px] px-1 py-0">
+                    BLOCKED
+                  </Badge>
+                )}
                 <a
-                  href={item.url}
+                  href={displayUrl}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="absolute top-1 right-1 p-1 bg-black/50 rounded hover:bg-black/70 transition-colors"
@@ -236,7 +280,8 @@ export function MediaPreview({
                   <ExternalLink className="h-3 w-3 text-white" />
                 </a>
               </div>
-            ))}
+              );
+            })}
           </div>
 
           {hasMore && (
@@ -271,6 +316,8 @@ export function InlineMediaPreview({
 }) {
   const [showMedia, setShowMedia] = useState(true);
   const [failedUrls, setFailedUrls] = useState<Set<string>>(new Set());
+  const [proxyUrls, setProxyUrls] = useState<Map<string, string>>(new Map());
+  const apiUrl = useApiUrl();
 
   const mediaItems = useMemo(() => extractMediaItems(content, tags), [content, tags]);
 
@@ -278,8 +325,21 @@ export function InlineMediaPreview({
     return null;
   }
 
-  const handleError = (url: string) => {
-    setFailedUrls(prev => new Set(prev).add(url));
+  const handleError = async (url: string, sha256?: string) => {
+    if (sha256 && !proxyUrls.has(url) && !failedUrls.has(url)) {
+      try {
+        const proxyUrl = `${apiUrl}/api/media-proxy/${sha256}`;
+        const resp = await fetch(proxyUrl, { headers: getApiHeaders('') });
+        if (!resp.ok) throw new Error(`${resp.status}`);
+        const blob = await resp.blob();
+        const blobUrl = URL.createObjectURL(blob);
+        setProxyUrls(prev => new Map(prev).set(url, blobUrl));
+      } catch {
+        setFailedUrls(prev => new Set(prev).add(url));
+      }
+    } else {
+      setFailedUrls(prev => new Set(prev).add(url));
+    }
   };
 
   return (
@@ -298,7 +358,9 @@ export function InlineMediaPreview({
 
       {showMedia && (
         <div className="grid grid-cols-2 gap-2">
-          {mediaItems.slice(0, 4).map((item, index) => (
+          {mediaItems.slice(0, 4).map((item, index) => {
+            const displayUrl = proxyUrls.get(item.url) || item.url;
+            return (
             <div key={item.url} className="relative">
               {failedUrls.has(item.url) ? (
                 <div className="aspect-video bg-muted rounded flex items-center justify-center">
@@ -306,23 +368,29 @@ export function InlineMediaPreview({
                 </div>
               ) : item.type === 'video' ? (
                 <video
-                  src={item.url}
+                  src={displayUrl}
                   controls
                   className="w-full rounded aspect-video object-contain bg-black"
-                  onError={() => handleError(item.url)}
+                  onError={() => handleError(item.url, item.sha256)}
                   preload="metadata"
                 />
               ) : (
                 <img
-                  src={item.url}
+                  src={displayUrl}
                   alt={`Media ${index + 1}`}
                   className="w-full rounded aspect-square object-cover cursor-pointer"
-                  onError={() => handleError(item.url)}
-                  onClick={() => window.open(item.url, '_blank')}
+                  onError={() => handleError(item.url, item.sha256)}
+                  onClick={() => window.open(displayUrl, '_blank')}
                 />
               )}
+              {proxyUrls.has(item.url) && !failedUrls.has(item.url) && (
+                <Badge variant="destructive" className="absolute top-1 left-1 text-[10px] px-1 py-0">
+                  BLOCKED
+                </Badge>
+              )}
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>

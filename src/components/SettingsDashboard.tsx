@@ -232,7 +232,7 @@ export function SettingsDashboard() {
     data: bannedEvents,
     isLoading: bannedEventsLoading,
   } = useQuery({
-    queryKey: ['banned-events', relayUrl],
+    queryKey: ['banned-events'],
     queryFn: () => callRelayRpc<Array<{ id: string; reason?: string }>>('listbannedevents'),
     enabled: !!user && !!relayUrl,
   });

@@ -8,6 +8,8 @@ interface ImportMetaEnv {
   readonly VITE_STAGING_API_URL?: string;
   readonly VITE_LEGACY_RELAY_URL?: string;
   readonly VITE_LEGACY_API_URL?: string;
+  readonly VITE_CF_ACCESS_CLIENT_ID?: string;
+  readonly VITE_CF_ACCESS_CLIENT_SECRET?: string;
 }
 
 interface ImportMeta {

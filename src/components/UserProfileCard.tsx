@@ -8,9 +8,10 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { User, FileText, Flag, Tag, CheckCircle, ChevronDown, ChevronUp, Video, ExternalLink, Copy, Check, ArrowUpRight } from "lucide-react";
+import { User, FileText, Flag, Tag, CheckCircle, ChevronDown, ChevronUp, Video, ExternalLink, Copy, Check, ArrowUpRight, Trash2 } from "lucide-react";
 import type { NostrEvent, NostrMetadata } from "@nostrify/nostrify";
 import type { UserStats } from "@/hooks/useUserStats";
+import { getDivineProfileUrl } from "@/lib/constants";
 
 // Label category colors
 const LABEL_COLORS: Record<string, string> = {
@@ -101,9 +102,10 @@ interface UserProfileCardProps {
   pubkey?: string | null;
   stats?: UserStats;
   isLoading?: boolean;
+  onDeleteEvent?: (eventId: string) => void;
 }
 
-export function UserProfileCard({ profile, pubkey, stats, isLoading }: UserProfileCardProps) {
+export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEvent }: UserProfileCardProps) {
   const [copied, setCopied] = useState(false);
 
   // Convert hex pubkey to npub
@@ -158,10 +160,10 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading }: UserProfi
     );
   }
 
-  const displayName = profile?.display_name || profile?.name || `${npub.slice(0, 12)}...`;
+  const hasProfile = !!(profile?.display_name || profile?.name);
+  const displayName = profile?.display_name || profile?.name || npub;
   const nip05 = profile?.nip05;
-  const truncatedNpub = `${npub.slice(0, 12)}...${npub.slice(-6)}`;
-  const profileUrl = `https://divine.video/profile/${npub}`;
+  const profileUrl = getDivineProfileUrl(npub);
 
   // Extract unique labels from label events
   const labelCounts = new Map<string, number>();
@@ -176,29 +178,29 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading }: UserProfi
   return (
     <Card className="overflow-hidden">
       <CardHeader className="pb-3">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 min-w-0 overflow-hidden">
           <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80 shrink-0">
             <Avatar className="h-12 w-12">
               <AvatarImage src={profile?.picture} />
               <AvatarFallback>{displayName.slice(0, 2).toUpperCase()}</AvatarFallback>
             </Avatar>
           </a>
-          <div className="flex-1 min-w-0">
-            <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80">
-              <CardTitle className="text-base truncate flex items-center gap-1">
-                {displayName}
+          <div className="flex-1 min-w-0 overflow-hidden">
+            <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80 block min-w-0 overflow-hidden">
+              <CardTitle className="text-base flex items-center gap-1 min-w-0">
+                <span className="truncate min-w-0">{displayName}</span>
                 <ArrowUpRight className="h-3 w-3 text-muted-foreground shrink-0" />
               </CardTitle>
             </a>
             {nip05 && (
-              <div className="flex items-center gap-1 text-sm text-muted-foreground">
-                <CheckCircle className="h-3 w-3 text-green-500" />
-                <span className="truncate">{nip05}</span>
+              <div className="flex items-center gap-1 text-sm text-muted-foreground min-w-0">
+                <CheckCircle className="h-3 w-3 text-green-500 shrink-0" />
+                <span className="truncate min-w-0">{nip05}</span>
               </div>
             )}
-            <div className="flex items-center gap-1">
-              <code className="text-xs text-muted-foreground font-mono">
-                {truncatedNpub}
+            <div className="flex items-center gap-1 min-w-0">
+              <code className="text-xs text-muted-foreground font-mono block truncate min-w-0 flex-1">
+                {npub}
               </code>
               <Button
                 variant="ghost"
@@ -214,6 +216,9 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading }: UserProfi
                 )}
               </Button>
             </div>
+            {!hasProfile && (
+              <p className="text-xs text-muted-foreground italic">No profile published to this relay</p>
+            )}
           </div>
         </div>
       </CardHeader>
@@ -260,7 +265,7 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading }: UserProfi
 
         {/* Recent Posts */}
         {stats?.recentPosts && stats.recentPosts.length > 0 && (
-          <RecentPostsSection posts={stats.recentPosts} />
+          <RecentPostsSection posts={stats.recentPosts} onDeleteEvent={onDeleteEvent} />
         )}
       </CardContent>
     </Card>
@@ -268,7 +273,7 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading }: UserProfi
 }
 
 // Separate component for recent posts with expand/collapse
-function RecentPostsSection({ posts }: { posts: NostrEvent[] }) {
+function RecentPostsSection({ posts, onDeleteEvent }: { posts: NostrEvent[]; onDeleteEvent?: (eventId: string) => void }) {
   const [expanded, setExpanded] = useState(true);
   const [showAll, setShowAll] = useState(false);
 
@@ -349,12 +354,25 @@ function RecentPostsSection({ posts }: { posts: NostrEvent[] }) {
                   <p className="text-xs text-muted-foreground">+{media.length - 4} more media</p>
                 )}
 
-                {/* Timestamp and kind */}
+                {/* Timestamp, kind, and delete */}
                 <div className="flex items-center justify-between text-xs text-muted-foreground">
                   <span>{new Date(post.created_at * 1000).toLocaleString()}</span>
-                  <Badge variant="outline" className="text-xs">
-                    {post.kind === 1 ? 'Note' : post.kind === 1063 ? 'Video' : `Kind ${post.kind}`}
-                  </Badge>
+                  <div className="flex items-center gap-1.5">
+                    <Badge variant="outline" className="text-xs">
+                      {post.kind === 1 ? 'Note' : post.kind === 1063 ? 'Video' : `Kind ${post.kind}`}
+                    </Badge>
+                    {onDeleteEvent && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 w-6 p-0 text-muted-foreground hover:text-destructive"
+                        onClick={() => onDeleteEvent(post.id)}
+                        title="Delete this event"
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </Button>
+                    )}
+                  </div>
                 </div>
               </div>
             );

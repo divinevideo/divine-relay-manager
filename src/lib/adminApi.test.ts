@@ -52,7 +52,7 @@ describe('adminApi', () => {
         `${API_URL}/api/info`,
         expect.objectContaining({
           method: 'GET',
-          headers: { 'Content-Type': 'application/json' },
+          headers: expect.objectContaining({ 'Content-Type': 'application/json' }),
         })
       );
     });
@@ -70,7 +70,7 @@ describe('adminApi', () => {
         expect.stringContaining('/api/publish'),
         expect.objectContaining({
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: expect.objectContaining({ 'Content-Type': 'application/json' }),
           body: JSON.stringify(event),
         })
       );
