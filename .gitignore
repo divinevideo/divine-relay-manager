@@ -24,3 +24,6 @@ dist-ssr
 
 # Git worktrees
 .worktrees/
+
+# Local TLS certs (mkcert)
+.certs/

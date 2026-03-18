@@ -14,8 +14,7 @@ import {
 } from "@/components/ui/tooltip";
 import { useAuthor } from "@/hooks/useAuthor";
 import { cn } from "@/lib/utils";
-
-const DIVINE_PROFILE_URL = "https://divine.video/profile";
+import { getDivineProfileUrl } from "@/lib/constants";
 
 interface UserIdentifierProps {
   pubkey: string;
@@ -81,10 +80,10 @@ export function UserIdentifier({
     ? displayName.slice(0, 2).toUpperCase()
     : npub.slice(5, 7).toUpperCase();
 
-  // Truncated npub for display (npub1abc...xyz)
-  const truncatedNpub = `${npub.slice(0, 8)}...${npub.slice(-4)}`;
+  // Full npub -- CSS truncation handles overflow based on available space
+  const displayNpub = npub;
 
-  const profileUrl = `${DIVINE_PROFILE_URL}/${npub}`;
+  const profileUrl = getDivineProfileUrl(npub);
 
   if (variant === "compact") {
     const content = (
@@ -97,8 +96,8 @@ export function UserIdentifier({
             </AvatarFallback>
           </Avatar>
         )}
-        <span className="font-medium">
-          {displayName || truncatedNpub}
+        <span className="font-medium truncate">
+          {displayName || displayNpub}
         </span>
       </>
     );
@@ -195,9 +194,9 @@ export function UserIdentifier({
           {nip05 && showNip05 && (
             <p className="text-xs text-muted-foreground truncate">{nip05}</p>
           )}
-          <div className="flex items-center gap-1">
-            <code className="text-xs font-mono text-muted-foreground truncate">
-              {truncatedNpub}
+          <div className="flex items-center gap-1 min-w-0">
+            <code className="text-xs font-mono text-muted-foreground truncate min-w-0">
+              {displayNpub}
             </code>
             {showCopyButton && (
               <Button
@@ -237,7 +236,7 @@ export function UserIdentifier({
               {displayName ? (
                 <span className="font-medium">{displayName}</span>
               ) : (
-                <code className="text-xs font-mono">{truncatedNpub}</code>
+                <code className="text-xs font-mono">{displayNpub}</code>
               )}
               {nip05 && showNip05 && !displayName && (
                 <span className="text-xs text-muted-foreground">({nip05})</span>
@@ -300,7 +299,7 @@ interface UserDisplayNameProps {
 
 export function UserDisplayName({
   pubkey,
-  fallbackLength = 8,
+  fallbackLength: _fallbackLength = 8,
   linkToProfile = false,
   className,
 }: UserDisplayNameProps) {
@@ -316,20 +315,20 @@ export function UserDisplayName({
   }
 
   const content = displayName ? (
-    <span className={className}>{displayName}</span>
+    <span className={cn("block truncate", className)}>{displayName}</span>
   ) : (
-    <code className={cn("font-mono", className)}>
-      {npub.slice(0, fallbackLength)}...
+    <code className={cn("block font-mono truncate", className)}>
+      {npub}
     </code>
   );
 
   if (linkToProfile) {
     return (
       <a
-        href={`${DIVINE_PROFILE_URL}/${npub}`}
+        href={getDivineProfileUrl(npub)}
         target="_blank"
         rel="noopener noreferrer"
-        className="hover:opacity-80"
+        className="block min-w-0 overflow-hidden hover:opacity-80"
       >
         {content}
       </a>

@@ -1,21 +1,35 @@
 // ABOUTME: CF Worker that signs and publishes Nostr events for Divine Relay Admin
 // ABOUTME: Holds the relay admin nsec in secrets and handles NIP-86 moderation actions
 
-import { finalizeEvent, nip19, getPublicKey } from 'nostr-tools';
+import { finalizeEvent, nip19, getPublicKey, verifyEvent } from 'nostr-tools';
+import {
+  getSecretKey,
+  getManagementUrl,
+  callNip86Rpc,
+  type SecretStoreSecret,
+} from './nip86';
+import { ensureSchema } from './db';
+import { generatePreAuthToken, verifyPreAuthToken } from './zendesk-preauth';
+import { deriveFunnelcakeApiUrl, proxyFunnelcakeRequest } from './funnelcake-proxy';
 
-// Secrets Store secret object (for account-level secrets)
-interface SecretStoreSecret {
-  get(): Promise<string>;
+let schemaReady = false;
+async function ensureSchemaOnce(db: D1Database): Promise<void> {
+  if (schemaReady) return;
+  await ensureSchema(db);
+  schemaReady = true;
 }
+
+// Re-export ReportWatcher Durable Object for wrangler
+export { ReportWatcher } from './ReportWatcher';
 
 interface Env {
   NOSTR_NSEC: string | SecretStoreSecret;
   RELAY_URL: string;
   ALLOWED_ORIGINS: string;
   ANTHROPIC_API_KEY?: string;
-  // Optional Cloudflare Access token for private moderation hosts.
-  CF_ACCESS_CLIENT_ID?: string;
-  CF_ACCESS_CLIENT_SECRET?: string;
+  // Cloudflare Access Service Token for moderation.admin.divine.video
+  CF_ACCESS_CLIENT_ID?: string | SecretStoreSecret;
+  CF_ACCESS_CLIENT_SECRET?: string | SecretStoreSecret;
   // Service binding to divine-realness worker (bypasses CF Access)
   REALNESS?: Fetcher;
   // Service binding to divine-moderation-api worker for public moderation lookups
@@ -23,6 +37,7 @@ interface Env {
   // Zendesk integration
   ZENDESK_SUBDOMAIN?: string;
   ZENDESK_JWT_SECRET?: string;
+  ZENDESK_PREAUTH_SECRET?: string;  // HMAC secret for pre-auth token generation/verification
   ZENDESK_WEBHOOK_SECRET?: string;  // For /api/zendesk/webhook
   ZENDESK_PARSE_REPORT_SECRET?: string;  // For /api/zendesk/parse-report
   ZENDESK_API_TOKEN?: string;
@@ -36,6 +51,18 @@ interface Env {
   MANAGEMENT_URL?: string;   // Full URL override for NIP-86 management API (for local dev with HTTP)
   MODERATION_SERVICE_URL?: string;  // URL for media moderation service
   REALNESS_API_URL?: string;  // URL for AI detection/realness service
+  FUNNELCAKE_API_URL?: string;  // Explicit Funnelcake REST API URL (derived from RELAY_URL if not set)
+  // Durable Object bindings
+  REPORT_WATCHER?: DurableObjectNamespace;
+  // Auto-hide feature flag
+  AUTO_HIDE_ENABLED?: string;
+  // Admin API key — required on all admin endpoints when request doesn't come through CF Access
+  ADMIN_API_KEY?: string;
+  // Environment identifier for deep links (e.g., "production", "staging")
+  ENVIRONMENT?: string;
+  // Blossom admin bypass (for proxying blocked media to moderators)
+  BLOSSOM_WEBHOOK_SECRET?: string | SecretStoreSecret;
+  CDN_DOMAIN?: string;
 }
 
 // Zendesk JWT payload structure
@@ -52,24 +79,27 @@ const DEFAULT_MODERATION_SERVICE_URL = 'https://moderation-api.divine.video';
 const DEFAULT_REALNESS_API_URL = 'https://realness.admin.divine.video';
 
 /**
- * Get the NIP-86 management API URL for the configured relay.
- * If MANAGEMENT_URL is set (for local dev with HTTP), use it directly.
- * Otherwise, converts WSS relay URL to HTTPS and appends the management path.
- */
-function getManagementUrl(env: Env): string {
-  if (env.MANAGEMENT_URL) {
-    return env.MANAGEMENT_URL;
-  }
-  const baseUrl = env.RELAY_URL.replace(/^wss?:\/\//, 'https://');
-  const managementPath = env.MANAGEMENT_PATH || '/management';
-  return `${baseUrl}${managementPath}`;
-}
-
-/**
  * Get the moderation service URL from env or use default.
  */
 function getModerationServiceUrl(env: Env): string {
   return env.MODERATION_SERVICE_URL || DEFAULT_MODERATION_SERVICE_URL;
+}
+
+/**
+ * Resolve CF Access credentials from env (supports both plain strings and SecretStoreSecret bindings).
+ */
+async function getCfAccessCredentials(env: Env): Promise<{ clientId: string; clientSecret: string } | null> {
+  if (!env.CF_ACCESS_CLIENT_ID || !env.CF_ACCESS_CLIENT_SECRET) return null;
+
+  const clientId = typeof env.CF_ACCESS_CLIENT_ID === 'string'
+    ? env.CF_ACCESS_CLIENT_ID
+    : await env.CF_ACCESS_CLIENT_ID.get();
+  const clientSecret = typeof env.CF_ACCESS_CLIENT_SECRET === 'string'
+    ? env.CF_ACCESS_CLIENT_SECRET
+    : await env.CF_ACCESS_CLIENT_SECRET.get();
+
+  if (!clientId || !clientSecret) return null;
+  return { clientId, clientSecret };
 }
 
 function getAllowedOrigin(requestOrigin: string | null, allowedOriginsEnv: string | undefined): string {
@@ -102,6 +132,38 @@ interface ApiResponse {
   event?: object;
   error?: string;
   pubkey?: string;
+  // Moderation action responses
+  eventId?: string;
+  deleted?: number;
+  labelsDeleted?: number;
+  // Realness proxy pass-through
+  details?: string;
+  // Zendesk parse-report responses
+  ticket_id?: number;
+  event_id?: string | null;
+  author_pubkey?: string | null;
+  violation_type?: string | null;
+  skipped?: boolean;
+}
+
+// Verify that the request is authorized for admin API access.
+// Accepts either:
+//   1. Cf-Access-Jwt-Assertion header (request came through CF Access on relay.admin.divine.video)
+//   2. X-Admin-Key header matching ADMIN_API_KEY env var (server-to-server callers)
+// Returns null if authorized, or an error string if not.
+function verifyAdminAccess(request: Request, env: Env): string | null {
+  // CF Access injects this header on authenticated requests
+  if (request.headers.get('Cf-Access-Jwt-Assertion')) {
+    return null;
+  }
+
+  // Server-to-server callers use a shared API key
+  const adminKey = request.headers.get('X-Admin-Key');
+  if (env.ADMIN_API_KEY && adminKey === env.ADMIN_API_KEY) {
+    return null;
+  }
+
+  return 'Unauthorized: admin access requires CF Access or X-Admin-Key header';
 }
 
 export default {
@@ -115,7 +177,8 @@ export default {
     const corsHeaders = {
       'Access-Control-Allow-Origin': allowedOrigin,
       'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization, Range, X-Admin-Key, CF-Access-Client-Id, CF-Access-Client-Secret',
+      'Access-Control-Expose-Headers': 'Content-Range, Accept-Ranges, X-Admin-Proxy, X-Moderation-Status',
     };
 
     // Handle preflight
@@ -127,6 +190,17 @@ export default {
       // Route handling
       if (path === '/api/info' && request.method === 'GET') {
         return handleInfo(env, corsHeaders);
+      }
+
+      // Zendesk endpoints have their own auth (HMAC, NIP-98, JWT) — skip admin gate
+      if (path.startsWith('/api/zendesk/')) {
+        return handleZendeskRoutes(request, path, env, corsHeaders);
+      }
+
+      // All other /api/* endpoints require admin access (CF Access or API key)
+      const adminAuthError = verifyAdminAccess(request, env);
+      if (adminAuthError) {
+        return jsonResponse({ success: false, error: adminAuthError }, 401, corsHeaders);
       }
 
       if (path === '/api/publish' && request.method === 'POST') {
@@ -172,14 +246,25 @@ export default {
         return handleCheckResult(sha256, env, corsHeaders);
       }
 
+      // Media proxy for blocked content preview (Blossom admin bypass)
+      if (path.startsWith('/api/media-proxy/') && request.method === 'GET') {
+        const sha256 = path.replace('/api/media-proxy/', '').replace(/\.[^.]+$/, '');
+        return handleMediaProxy(request, sha256, env, corsHeaders);
+      }
+
       // Realness API proxy (for AI detection behind CF Access)
       if (path.startsWith('/api/realness/')) {
         return handleRealnessProxy(request, path, env, corsHeaders);
       }
 
-      // Zendesk integration endpoints (require JWT auth)
-      if (path.startsWith('/api/zendesk/')) {
-        return handleZendeskRoutes(request, path, env, corsHeaders);
+      // Report watcher management endpoints
+      if (path.startsWith('/api/report-watcher/')) {
+        return handleReportWatcherRoutes(request, path, env, corsHeaders);
+      }
+
+      // Funnelcake REST API proxy -- fast ClickHouse-backed reads
+      if (path.startsWith('/api/funnelcake/')) {
+        return handleFunnelcakeProxy(path, env, corsHeaders);
       }
 
       // 404 for unknown routes
@@ -191,6 +276,39 @@ export default {
         500,
         corsHeaders
       );
+    }
+  },
+
+  // Cron keep-alive: wake the ReportWatcher DO every 5 minutes so the alarm
+  // chain can't break permanently after a Cloudflare-initiated eviction.
+  async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext): Promise<void> {
+    if (!env.REPORT_WATCHER) {
+      console.log('[scheduled] REPORT_WATCHER binding not configured, skipping');
+      return;
+    }
+
+    try {
+      const id = env.REPORT_WATCHER.idFromName('singleton');
+      const stub = env.REPORT_WATCHER.get(id);
+      const response = await stub.fetch(new Request('https://do/status'));
+      const status = await response.json() as { status?: { running: boolean } };
+      console.log(`[scheduled] ReportWatcher status: running=${status?.status?.running}`);
+    } catch (error) {
+      console.error('[scheduled] Failed to check ReportWatcher:', error);
+    }
+
+    // Clean up expired pre-auth nonces
+    if (env.DB) {
+      try {
+        const result = await env.DB.prepare(
+          'DELETE FROM zendesk_preauth_nonces WHERE expires_at < unixepoch()'
+        ).run();
+        if (result.meta.changes > 0) {
+          console.log(`[scheduled] Cleaned up ${result.meta.changes} expired pre-auth nonces`);
+        }
+      } catch (error) {
+        console.error('[scheduled] Failed to clean up pre-auth nonces:', error);
+      }
     }
   },
 };
@@ -205,21 +323,15 @@ function jsonResponse(data: ApiResponse, status: number, headers: Record<string,
   });
 }
 
-async function getSecretKey(env: Env): Promise<Uint8Array> {
-  const nsec = typeof env.NOSTR_NSEC === 'string'
-    ? env.NOSTR_NSEC
-    : await env.NOSTR_NSEC.get();
-
-  if (!nsec) {
-    throw new Error('NOSTR_NSEC secret not configured');
-  }
-
-  const decoded = nip19.decode(nsec);
-  if (decoded.type !== 'nsec') {
-    throw new Error('Invalid NOSTR_NSEC format - must be nsec1...');
-  }
-
-  return decoded.data as Uint8Array;
+/** Forward an upstream JSON response with CORS headers. Separate from jsonResponse to avoid weakening its type guard. */
+function proxyJsonResponse(data: unknown, status: number, headers: Record<string, string>): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      'Content-Type': 'application/json',
+      ...headers,
+    },
+  });
 }
 
 async function handleInfo(env: Env, corsHeaders: Record<string, string>): Promise<Response> {
@@ -302,6 +414,10 @@ async function handlePublish(
       console.log('[handlePublish] Resolution label details:', { status, targetType, targetId });
 
       if (status && targetType && targetId) {
+        if (env.DB) {
+          await markHumanReviewed(env.DB, targetType, targetId);
+        }
+
         // Use waitUntil to ensure sync completes even after response is sent
         const syncPromise = syncZendeskAfterAction(
           env,
@@ -375,14 +491,22 @@ async function handleModerate(
           return jsonResponse({ success: false, error: rpcResult.error || 'banevent RPC failed' }, 500, corsHeaders);
         }
 
+        if (env.DB) {
+          await markHumanReviewed(env.DB, 'event', body.eventId);
+        }
+
         // Sync any linked Zendesk tickets
-        syncZendeskAfterAction(
-          env,
-          body.action,
-          'event',
-          body.eventId,
-          getPublicKey(secretKey)
-        ).catch((err) => console.error('[handleModerate] Zendesk sync error:', err));
+        try {
+          await syncZendeskAfterAction(
+            env,
+            body.action,
+            'event',
+            body.eventId,
+            getPublicKey(secretKey)
+          );
+        } catch (err) {
+          console.error('[handleModerate] Zendesk sync error:', err);
+        }
 
         return jsonResponse({ success: true, eventId: body.eventId }, 200, corsHeaders);
       } catch (error) {
@@ -435,14 +559,23 @@ async function handleModerate(
     return jsonResponse({ success: false, error: publishResult.error }, 500, corsHeaders);
   }
 
-  // Sync any linked Zendesk tickets (delete_event syncs in its own early return)
-  syncZendeskAfterAction(
-    env,
-    body.action,
-    body.pubkey ? 'pubkey' : 'event',
-    body.pubkey || '',
-    getPublicKey(secretKey)
-  ).catch((err) => console.error('[handleModerate] Zendesk sync error:', err));
+  if (env.DB && body.pubkey) {
+    await markHumanReviewed(env.DB, 'pubkey', body.pubkey);
+  }
+
+  // Sync linked Zendesk tickets for both event and pubkey targets if present
+  // (delete_event has its own early-return sync above)
+  const moderator = getPublicKey(secretKey);
+  try {
+    if (body.eventId) {
+      await syncZendeskAfterAction(env, body.action, 'event', body.eventId, moderator);
+    }
+    if (body.pubkey) {
+      await syncZendeskAfterAction(env, body.action, 'pubkey', body.pubkey, moderator);
+    }
+  } catch (err) {
+    console.error('[handleModerate] Zendesk sync error:', err);
+  }
 
   return jsonResponse({ success: true, event }, 200, corsHeaders);
 }
@@ -461,51 +594,10 @@ async function handleRelayRpc(
     return jsonResponse({ success: false, error: 'Missing method' }, 400, corsHeaders);
   }
 
-  const secretKey = await getSecretKey(env);
+  // Use shared NIP-86 RPC utility
+  const result = await callNip86Rpc(body.method, body.params || [], env);
 
-  // Build NIP-98 auth event
-  const httpUrl = getManagementUrl(env);
-  const payload = JSON.stringify({ method: body.method, params: body.params || [] });
-  const payloadHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
-  const payloadHashHex = Array.from(new Uint8Array(payloadHash)).map(b => b.toString(16).padStart(2, '0')).join('');
-
-  const authEvent = finalizeEvent(
-    {
-      kind: 27235,
-      content: '',
-      tags: [
-        ['u', httpUrl],
-        ['method', 'POST'],
-        ['payload', payloadHashHex],
-      ],
-      created_at: Math.floor(Date.now() / 1000),
-    },
-    secretKey
-  );
-
-  const authHeader = `Nostr ${btoa(JSON.stringify(authEvent))}`;
-
-  // Call relay RPC
-  const response = await fetch(httpUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/nostr+json+rpc',
-      'Authorization': authHeader,
-    },
-    body: payload,
-  });
-
-  if (!response.ok) {
-    return jsonResponse(
-      { success: false, error: `Relay error: ${response.status} ${response.statusText}` },
-      response.status,
-      corsHeaders
-    );
-  }
-
-  const result = await response.json() as { result?: unknown; error?: string };
-
-  if (result.error) {
+  if (!result.success) {
     return jsonResponse({ success: false, error: result.error }, 400, corsHeaders);
   }
 
@@ -627,33 +719,15 @@ Respond with JSON only:
   }
 }
 
-// Ensure moderation_decisions table exists
-async function ensureDecisionsTable(db: D1Database): Promise<void> {
-  // Run each statement separately to avoid issues with D1's exec
-  await db.prepare(`
-    CREATE TABLE IF NOT EXISTS moderation_decisions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      target_type TEXT NOT NULL,
-      target_id TEXT NOT NULL,
-      action TEXT NOT NULL,
-      reason TEXT,
-      moderator_pubkey TEXT,
-      report_id TEXT,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP
-    )
-  `).run();
-
-  // Create indexes in separate statements
+async function markHumanReviewed(db: D1Database, targetType: string, targetId: string): Promise<void> {
   try {
-    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_decisions_target ON moderation_decisions(target_type, target_id)`).run();
-  } catch {
-    // Index might already exist
-  }
-
-  try {
-    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_decisions_report ON moderation_decisions(report_id)`).run();
-  } catch {
-    // Index might already exist
+    await db.prepare(`
+      INSERT INTO moderation_targets (target_id, target_type, ever_human_reviewed)
+      VALUES (?, ?, 1)
+      ON CONFLICT(target_id) DO UPDATE SET ever_human_reviewed = 1
+    `).bind(targetId, targetType).run();
+  } catch (error) {
+    console.error('[markHumanReviewed] Failed to update moderation_targets:', error);
   }
 }
 
@@ -716,7 +790,7 @@ async function handleLogDecision(
       return jsonResponse({ success: false, error: 'Missing required fields' }, 400, corsHeaders);
     }
 
-    await ensureDecisionsTable(env.DB);
+    await ensureSchemaOnce(env.DB);
 
     await env.DB.prepare(`
       INSERT INTO moderation_decisions (target_type, target_id, action, reason, moderator_pubkey, report_id)
@@ -729,6 +803,8 @@ async function handleLogDecision(
       body.moderatorPubkey || null,
       body.reportId || null
     ).run();
+
+    await markHumanReviewed(env.DB, body.targetType, body.targetId);
 
     return new Response(JSON.stringify({ success: true }), {
       status: 200,
@@ -753,7 +829,7 @@ async function handleGetAllDecisions(
       return jsonResponse({ success: false, error: 'Database not configured' }, 500, corsHeaders);
     }
 
-    await ensureDecisionsTable(env.DB);
+    await ensureSchemaOnce(env.DB);
 
     // Get all decisions, ordered by most recent first
     const decisions = await env.DB.prepare(`
@@ -789,7 +865,7 @@ async function handleGetDecisions(
       return jsonResponse({ success: false, error: 'Database not configured' }, 500, corsHeaders);
     }
 
-    await ensureDecisionsTable(env.DB);
+    await ensureSchemaOnce(env.DB);
 
     // Get all decisions for this target (could be event ID, pubkey, or media hash)
     const decisions = await env.DB.prepare(`
@@ -825,7 +901,7 @@ async function handleDeleteDecisions(
       return jsonResponse({ success: false, error: 'Database not configured' }, 500, corsHeaders);
     }
 
-    await ensureDecisionsTable(env.DB);
+    await ensureSchemaOnce(env.DB);
 
     let labelsDeleted = 0;
 
@@ -866,7 +942,8 @@ async function handleDeleteDecisions(
       }
     }
 
-    // Delete all decisions for this target from D1 (reopens the report)
+    // Delete all decisions for this target from D1 (reopens the report).
+    // moderation_targets.ever_human_reviewed is NOT cleared — prevents re-auto-hide.
     const result = await env.DB.prepare(`
       DELETE FROM moderation_decisions
       WHERE target_id = ?
@@ -902,9 +979,10 @@ async function handleCheckResult(
       'Content-Type': 'application/json',
     };
 
-    if (env.CF_ACCESS_CLIENT_ID && env.CF_ACCESS_CLIENT_SECRET) {
-      headers['CF-Access-Client-Id'] = env.CF_ACCESS_CLIENT_ID;
-      headers['CF-Access-Client-Secret'] = env.CF_ACCESS_CLIENT_SECRET;
+    const cfAccess = await getCfAccessCredentials(env);
+    if (cfAccess) {
+      headers['CF-Access-Client-Id'] = cfAccess.clientId;
+      headers['CF-Access-Client-Secret'] = cfAccess.clientSecret;
     }
 
     const moderationRequest = new Request(`${getModerationServiceUrl(env)}/check-result/${sha256}`, {
@@ -965,15 +1043,16 @@ async function handleModerateMedia(
     }
 
     // Require Zero Trust credentials for moderation service
-    if (!env.CF_ACCESS_CLIENT_ID || !env.CF_ACCESS_CLIENT_SECRET) {
+    const cfAccess = await getCfAccessCredentials(env);
+    if (!cfAccess) {
       return jsonResponse({ success: false, error: 'CF_ACCESS credentials not configured' }, 500, corsHeaders);
     }
 
     // Build headers with Cloudflare Access service token
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
-      'CF-Access-Client-Id': env.CF_ACCESS_CLIENT_ID,
-      'CF-Access-Client-Secret': env.CF_ACCESS_CLIENT_SECRET,
+      'CF-Access-Client-Id': cfAccess.clientId,
+      'CF-Access-Client-Secret': cfAccess.clientSecret,
     };
 
     const response = await fetch(`${getModerationServiceUrl(env)}/api/v1/moderate`, {
@@ -1001,13 +1080,17 @@ async function handleModerateMedia(
     // Sync any linked Zendesk tickets
     // Note: media actions use sha256, but current ticket mapping is by event_id/pubkey
     // This will be a no-op unless ticket mapping is enhanced to track media hashes
-    syncZendeskAfterAction(
-      env,
-      body.action,
-      'media',
-      body.sha256,
-      'relay-manager'
-    ).catch((err) => console.error('[handleModerateMedia] Zendesk sync error:', err));
+    try {
+      await syncZendeskAfterAction(
+        env,
+        body.action,
+        'media',
+        body.sha256,
+        'relay-manager'
+      );
+    } catch (err) {
+      console.error('[handleModerateMedia] Zendesk sync error:', err);
+    }
 
     return new Response(JSON.stringify({ success: true, result }), {
       status: 200,
@@ -1275,6 +1358,63 @@ async function verifyZendeskWebhook(
   return signature === expectedSig;
 }
 
+// Verify NIP-98 HTTP Auth (kind 27235)
+// Returns the authenticated pubkey or an error
+interface Nip98Result {
+  valid: boolean;
+  pubkey?: string;
+  error?: string;
+}
+
+async function verifyNip98Auth(
+  request: Request,
+  expectedUrl: string
+): Promise<Nip98Result> {
+  const authHeader = request.headers.get('Authorization');
+  if (!authHeader || !authHeader.startsWith('Nostr ')) {
+    return { valid: false, error: 'Missing or invalid Authorization header (expected: Nostr <base64>)' };
+  }
+
+  try {
+    const base64Event = authHeader.slice(6); // Remove "Nostr " prefix
+    const eventJson = atob(base64Event);
+    const event = JSON.parse(eventJson);
+
+    // Verify event structure
+    if (event.kind !== 27235) {
+      return { valid: false, error: 'Invalid event kind (expected 27235)' };
+    }
+
+    // Verify signature
+    if (!verifyEvent(event)) {
+      return { valid: false, error: 'Invalid event signature' };
+    }
+
+    // Check timestamp (allow 60 seconds clock skew)
+    const now = Math.floor(Date.now() / 1000);
+    if (Math.abs(event.created_at - now) > 60) {
+      return { valid: false, error: 'Event timestamp too old or in future' };
+    }
+
+    // Verify URL tag
+    const urlTag = event.tags.find((t: string[]) => t[0] === 'u');
+    if (!urlTag || urlTag[1] !== expectedUrl) {
+      return { valid: false, error: `URL mismatch (expected ${expectedUrl})` };
+    }
+
+    // Verify method tag
+    const methodTag = event.tags.find((t: string[]) => t[0] === 'method');
+    if (!methodTag || methodTag[1].toUpperCase() !== request.method) {
+      return { valid: false, error: 'Method mismatch' };
+    }
+
+    return { valid: true, pubkey: event.pubkey };
+  } catch (e) {
+    console.error('[verifyNip98Auth] Error:', e);
+    return { valid: false, error: 'Failed to parse auth event' };
+  }
+}
+
 // Update Zendesk ticket with action result and internal note
 async function updateZendeskTicket(
   ticketId: number,
@@ -1379,8 +1519,113 @@ async function addZendeskInternalNote(
   }
 }
 
+// Proxy handler for blocked media preview (Blossom admin bypass)
+// Moderators need to see media that Blossom blocks (Banned/Restricted status returns 404 on CDN).
+// This endpoint authenticates against Blossom's admin bypass and streams the content through.
+async function handleMediaProxy(
+  request: Request,
+  sha256: string,
+  env: Env,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  if (!/^[a-f0-9]{64}$/i.test(sha256)) {
+    return jsonResponse({ success: false, error: 'Invalid sha256' }, 400, corsHeaders);
+  }
+
+  if (!env.BLOSSOM_WEBHOOK_SECRET) {
+    return jsonResponse({ success: false, error: 'BLOSSOM_WEBHOOK_SECRET not configured' }, 500, corsHeaders);
+  }
+
+  const secret = typeof env.BLOSSOM_WEBHOOK_SECRET === 'string'
+    ? env.BLOSSOM_WEBHOOK_SECRET
+    : await env.BLOSSOM_WEBHOOK_SECRET.get();
+
+  const cdnDomain = env.CDN_DOMAIN || 'media.divine.video';
+  const upstreamUrl = `https://${cdnDomain}/admin/api/blob/${sha256.toLowerCase()}/content`;
+
+  const headers: Record<string, string> = {
+    'Authorization': `Bearer ${secret}`,
+  };
+
+  // Forward Range header for video seeking
+  const range = request.headers.get('Range');
+  if (range) {
+    headers['Range'] = range;
+  }
+
+  try {
+    const upstream = await fetch(upstreamUrl, { headers });
+
+    if (!upstream.ok && upstream.status !== 206) {
+      return jsonResponse(
+        { success: false, error: `Blossom returned ${upstream.status}` },
+        upstream.status,
+        corsHeaders
+      );
+    }
+
+    // Stream response body through without buffering
+    const responseHeaders: Record<string, string> = {
+      ...corsHeaders,
+      'Cache-Control': 'private, no-cache',
+      'X-Admin-Proxy': 'blossom-admin',
+    };
+
+    // Pass through relevant headers from upstream
+    for (const header of ['Content-Type', 'Content-Length', 'Content-Range', 'Accept-Ranges']) {
+      const value = upstream.headers.get(header);
+      if (value) responseHeaders[header] = value;
+    }
+
+    // Pass through moderation status if present
+    const modStatus = upstream.headers.get('X-Moderation-Status');
+    if (modStatus) responseHeaders['X-Moderation-Status'] = modStatus;
+
+    return new Response(upstream.body, {
+      status: upstream.status,
+      headers: responseHeaders,
+    });
+  } catch (error) {
+    console.error('[handleMediaProxy] Error:', error);
+    return jsonResponse(
+      { success: false, error: error instanceof Error ? error.message : 'Proxy fetch failed' },
+      502,
+      corsHeaders
+    );
+  }
+}
+
 // Proxy handler for realness API (AI detection)
 // Uses service binding if available (preferred), falls back to HTTP with CF Access
+// Funnelcake REST API proxy -- fast reads via ClickHouse
+async function handleFunnelcakeProxy(
+  path: string,
+  env: Env,
+  corsHeaders: Record<string, string>,
+): Promise<Response> {
+  const funnelcakeUrl = deriveFunnelcakeApiUrl(
+    env.RELAY_URL || 'wss://relay.divine.video',
+    env.FUNNELCAKE_API_URL,
+  );
+
+  // /api/funnelcake/event/{id} → /api/event/{id}
+  const eventMatch = path.match(/^\/api\/funnelcake\/event\/([a-f0-9]{64})$/i);
+  if (eventMatch) {
+    return proxyFunnelcakeRequest(funnelcakeUrl, `/api/event/${eventMatch[1]}`, corsHeaders);
+  }
+
+  // /api/funnelcake/users/{pubkey} → /api/users/{pubkey}
+  const userMatch = path.match(/^\/api\/funnelcake\/users\/([a-f0-9]{64})$/i);
+  if (userMatch) {
+    return proxyFunnelcakeRequest(funnelcakeUrl, `/api/users/${userMatch[1]}`, corsHeaders);
+  }
+
+  return new Response(JSON.stringify({ error: 'Not found' }), {
+    status: 404,
+    headers: { 'Content-Type': 'application/json', ...corsHeaders },
+  });
+}
+
 async function handleRealnessProxy(
   request: Request,
   path: string,
@@ -1414,7 +1659,7 @@ async function handleRealnessViaBinding(
         headers: { 'Accept': 'application/json' },
       });
       const data = await response.json();
-      return jsonResponse(data, response.status, corsHeaders);
+      return proxyJsonResponse(data, response.status, corsHeaders);
     } catch (error) {
       console.error('[realness proxy/binding] jobs error:', error);
       return jsonResponse({ success: false, error: 'Failed to fetch job', details: String(error) }, 500, corsHeaders);
@@ -1431,7 +1676,7 @@ async function handleRealnessViaBinding(
         body,
       });
       const data = await response.json();
-      return jsonResponse(data, response.status, corsHeaders);
+      return proxyJsonResponse(data, response.status, corsHeaders);
     } catch (error) {
       console.error('[realness proxy/binding] analyze error:', error);
       return jsonResponse({ success: false, error: 'Failed to submit analysis', details: String(error) }, 500, corsHeaders);
@@ -1451,14 +1696,15 @@ async function handleRealnessViaHTTP(
   const realnessUrl = env.REALNESS_API_URL || DEFAULT_REALNESS_API_URL;
 
   // Check CF Access credentials
-  if (!env.CF_ACCESS_CLIENT_ID || !env.CF_ACCESS_CLIENT_SECRET) {
+  const cfAccess = await getCfAccessCredentials(env);
+  if (!cfAccess) {
     return jsonResponse({ success: false, error: 'CF_ACCESS credentials not configured (and no service binding)' }, 500, corsHeaders);
   }
 
   // Build headers with CF Access auth
   const headers: Record<string, string> = {
-    'CF-Access-Client-Id': env.CF_ACCESS_CLIENT_ID,
-    'CF-Access-Client-Secret': env.CF_ACCESS_CLIENT_SECRET,
+    'CF-Access-Client-Id': cfAccess.clientId,
+    'CF-Access-Client-Secret': cfAccess.clientSecret,
     'Accept': 'application/json',
   };
 
@@ -1470,7 +1716,7 @@ async function handleRealnessViaHTTP(
       const text = await response.text();
       try {
         const data = JSON.parse(text);
-        return jsonResponse(data, response.status, corsHeaders);
+        return proxyJsonResponse(data, response.status, corsHeaders);
       } catch {
         console.error('[realness proxy/http] jobs non-JSON response:', response.status, text.slice(0, 500));
         return jsonResponse({ success: false, error: `Upstream error: ${response.status}`, details: text.slice(0, 200) }, response.status, corsHeaders);
@@ -1493,7 +1739,7 @@ async function handleRealnessViaHTTP(
       const text = await response.text();
       try {
         const data = JSON.parse(text);
-        return jsonResponse(data, response.status, corsHeaders);
+        return proxyJsonResponse(data, response.status, corsHeaders);
       } catch {
         console.error('[realness proxy/http] analyze non-JSON response:', response.status, text.slice(0, 500));
         return jsonResponse({ success: false, error: `Upstream error: ${response.status}`, details: text.slice(0, 200) }, response.status, corsHeaders);
@@ -1505,6 +1751,58 @@ async function handleRealnessViaHTTP(
   }
 
   return jsonResponse({ success: false, error: 'Unknown realness endpoint' }, 404, corsHeaders);
+}
+
+// ============================================================================
+// Report Watcher Management
+// ============================================================================
+
+/**
+ * Handle /api/report-watcher/* routes
+ * Proxies requests to the ReportWatcher Durable Object
+ */
+async function handleReportWatcherRoutes(
+  request: Request,
+  path: string,
+  env: Env,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  if (!env.REPORT_WATCHER) {
+    return jsonResponse(
+      { success: false, error: 'Report watcher not configured' },
+      500,
+      corsHeaders
+    );
+  }
+
+  const subPath = path.replace('/api/report-watcher', '');
+
+  // Get the singleton DO instance (using a fixed ID)
+  const id = env.REPORT_WATCHER.idFromName('singleton');
+  const stub = env.REPORT_WATCHER.get(id);
+
+  try {
+    // Forward the request to the DO
+    const doRequest = new Request(`https://do${subPath}`, {
+      method: request.method,
+      headers: request.headers,
+    });
+
+    const response = await stub.fetch(doRequest);
+    const data = await response.json();
+
+    return new Response(JSON.stringify(data), {
+      status: response.status,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders },
+    });
+  } catch (error) {
+    console.error('[handleReportWatcherRoutes] Error:', error);
+    return jsonResponse(
+      { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+      500,
+      corsHeaders
+    );
+  }
 }
 
 // Route handler for all /api/zendesk/* endpoints
@@ -1524,6 +1822,17 @@ async function handleZendeskRoutes(
   // Parse report endpoint - extracts Nostr IDs from ticket description, stores mapping, adds links
   if (subPath === '/parse-report' && request.method === 'POST') {
     return handleParseReport(request, env, corsHeaders);
+  }
+
+  // Pre-auth endpoint - generates nonce-bound HMAC tokens for Zendesk JWT hardening
+  if (subPath === '/pre-auth' && request.method === 'POST') {
+    return handleZendeskPreAuth(request, env, corsHeaders);
+  }
+
+  // Mobile JWT endpoint - generates JWTs for mobile app users via Zendesk callback
+  // Accept both GET (Zendesk SDK sends GET with ?user_token=) and POST (form-encoded)
+  if (subPath === '/mobile-jwt' && (request.method === 'GET' || request.method === 'POST')) {
+    return handleMobileJwt(request, env, corsHeaders);
   }
 
   // All other Zendesk endpoints require JWT auth
@@ -1631,14 +1940,35 @@ async function handleZendeskWebhook(
         break;
 
       case 'delete_event':
+        // Use banevent RPC instead of kind 5. NIP-09 kind 5 only allows
+        // authors to delete their own events; the admin key can't delete
+        // other users' events via kind 5 (relay silently ignores it).
+        // NOTE: Zendesk-originated moderation actions may be dead code —
+        // Aleysha and team use relay.admin.divine.video for moderation,
+        // not Zendesk. Fixing for correctness but monitor for removal.
         if (body.nostr_event_id) {
-          const event = finalizeEvent({
-            kind: 5,
-            content: `Zendesk ticket #${body.ticket_id}`,
-            tags: [['e', body.nostr_event_id]],
+          const httpUrl = getManagementUrl(env);
+          const payload = JSON.stringify({ method: 'banevent', params: [body.nostr_event_id, `Zendesk ticket #${body.ticket_id}`] });
+          const payloadHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
+          const payloadHashHex = Array.from(new Uint8Array(payloadHash)).map(b => b.toString(16).padStart(2, '0')).join('');
+
+          const authEvent = finalizeEvent({
+            kind: 27235,
+            content: '',
+            tags: [['u', httpUrl], ['method', 'POST'], ['payload', payloadHashHex]],
             created_at: Math.floor(Date.now() / 1000),
           }, secretKey);
-          actionResult = await publishToRelay(event, env.RELAY_URL);
+
+          const response = await fetch(httpUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/nostr+json+rpc',
+              'Authorization': `Nostr ${btoa(JSON.stringify(authEvent))}`,
+            },
+            body: payload,
+          });
+
+          actionResult = response.ok ? { success: true } : { success: false, error: `Relay error: ${response.status}` };
         }
         break;
 
@@ -1672,7 +2002,7 @@ async function handleZendeskWebhook(
 
     // Log the decision
     if (env.DB && actionResult.success) {
-      await ensureDecisionsTable(env.DB);
+      await ensureSchemaOnce(env.DB);
       await env.DB.prepare(`
         INSERT INTO moderation_decisions (target_type, target_id, action, reason, moderator_pubkey, report_id)
         VALUES (?, ?, ?, ?, ?, ?)
@@ -1685,14 +2015,22 @@ async function handleZendeskWebhook(
         `zendesk:${body.ticket_id}`
       ).run();
 
+      const targetType = body.nostr_event_id ? 'event' : 'pubkey';
+      const targetId = body.nostr_event_id || body.nostr_pubkey || '';
+      await markHumanReviewed(env.DB, targetType, targetId);
+
       // Sync any linked Zendesk tickets (via our mapping table)
-      syncZendeskAfterAction(
-        env,
-        body.action_requested,
-        body.nostr_event_id ? 'event' : 'pubkey',
-        body.nostr_event_id || body.nostr_pubkey || '',
-        body.agent_email || 'webhook'
-      ).catch((err) => console.error('[handleZendeskWebhook] Zendesk sync error:', err));
+      try {
+        await syncZendeskAfterAction(
+          env,
+          body.action_requested,
+          body.nostr_event_id ? 'event' : 'pubkey',
+          body.nostr_event_id || body.nostr_pubkey || '',
+          body.agent_email || 'webhook'
+        );
+      } catch (err) {
+        console.error('[handleZendeskWebhook] Zendesk sync error:', err);
+      }
     }
 
     // Callback to Zendesk to update ticket status and add internal note
@@ -1815,19 +2153,20 @@ async function handleParseReport(
     }
 
     // Generate internal note with links
+    const envParam = env.ENVIRONMENT ? `&env=${env.ENVIRONMENT}` : '';
     const lines = ['📋 **Content Report Links**', ''];
     if (violation_type) {
       lines.push(`**Violation Type:** ${violation_type}`, '');
     }
     if (event_id) {
       lines.push('**Reported Event:**');
-      lines.push(`• [View in Relay Admin](https://relay.admin.divine.video/reports?event=${event_id})`);
+      lines.push(`• [View in Relay Admin](https://relay.admin.divine.video/reports?event=${event_id}${envParam})`);
       lines.push(`• Event ID: \`${event_id}\``);
       lines.push('');
     }
     if (author_pubkey) {
       lines.push('**Reported Author:**');
-      lines.push(`• [View in Relay Admin](https://relay.admin.divine.video/reports?pubkey=${author_pubkey})`);
+      lines.push(`• [View in Relay Admin](https://relay.admin.divine.video/reports?pubkey=${author_pubkey}${envParam})`);
       lines.push(`• Pubkey: \`${author_pubkey}\``);
     }
 
@@ -1841,6 +2180,253 @@ async function handleParseReport(
     console.error('[handleParseReport] Error:', error);
     return jsonResponse(
       { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+      500,
+      corsHeaders
+    );
+  }
+}
+
+// Generate a pre-auth token for Zendesk JWT hardening
+// Requires NIP-98 auth to prove identity, returns a nonce-bound HMAC-signed token
+async function handleZendeskPreAuth(
+  request: Request,
+  env: Env,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  try {
+    if (!env.ZENDESK_PREAUTH_SECRET) {
+      return jsonResponse({ success: false, error: 'ZENDESK_PREAUTH_SECRET not configured' }, 500, corsHeaders);
+    }
+    if (!env.DB) {
+      return jsonResponse({ success: false, error: 'D1 database not configured' }, 500, corsHeaders);
+    }
+
+    // Ensure nonce table exists
+    await ensureSchemaOnce(env.DB);
+
+    // Verify NIP-98 auth
+    const authResult = await verifyNip98Auth(request, request.url);
+    if (!authResult.valid) {
+      return jsonResponse(
+        { success: false, error: `NIP-98 auth required: ${authResult.error}` },
+        401,
+        corsHeaders
+      );
+    }
+
+    const pubkey = authResult.pubkey!;
+
+    // Generate pre-auth token
+    const { token, nonce, expiresAt } = await generatePreAuthToken(pubkey, env.ZENDESK_PREAUTH_SECRET);
+
+    // Store nonce in D1 for single-use verification
+    await env.DB.prepare(
+      'INSERT INTO zendesk_preauth_nonces (nonce, pubkey, expires_at) VALUES (?, ?, ?)'
+    ).bind(nonce, pubkey, expiresAt).run();
+
+    console.log(`[handleZendeskPreAuth] Issued pre-auth token for pubkey: ${pubkey.substring(0, 16)}...`);
+
+    return new Response(JSON.stringify({
+      success: true,
+      token,
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders },
+    });
+  } catch (error) {
+    console.error('[handleZendeskPreAuth] Error:', error);
+    return jsonResponse(
+      { success: false, error: 'Internal server error' },
+      500,
+      corsHeaders
+    );
+  }
+}
+
+// Generate JWT for mobile app users to authenticate with Zendesk SDK
+// This enables "View Past Messages" and push notifications
+async function handleMobileJwt(
+  request: Request,
+  env: Env,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  try {
+    if (!env.ZENDESK_JWT_SECRET) {
+      return jsonResponse({ success: false, error: 'ZENDESK_JWT_SECRET not configured' }, 500, corsHeaders);
+    }
+
+    let pubkey: string | undefined;
+    let name: string | undefined;
+    let email: string | undefined;
+
+    // Zendesk server-to-server callback — Zendesk does not send any auth
+    // headers on JWT callbacks (confirmed via Zendesk developer docs).
+    //
+    // Security analysis — why no request-level auth is acceptable:
+    //   1. Endpoint URL is private to Zendesk admin config (not in client code)
+    //   2. HTTPS protects the request in transit
+    //   3. The returned JWT is only verifiable by Zendesk (signed with their shared secret)
+    //   4. JWT payload contains only public data (npub, which is public by definition)
+    //   5. JWT expires in 1 hour and cannot authenticate to any Divine service
+    //      (relay, Keycast, blossom, relay-manager)
+    //   6. Worst case: attacker with a known npub could view/create Zendesk support
+    //      tickets as that user — a Zendesk-scoped nuisance, not a Divine security issue
+
+    // Extract user_token from GET query param or POST form body
+    let userToken: string | null = null;
+    const contentType = request.headers.get('content-type') || '';
+
+    if (request.method === 'GET') {
+      const url = new URL(request.url);
+      userToken = url.searchParams.get('user_token');
+    } else if (contentType.includes('application/x-www-form-urlencoded')) {
+      const formData = await request.formData();
+      userToken = formData.get('user_token') as string | null;
+      name = formData.get('name') as string | null || undefined;
+      email = formData.get('email') as string | null || undefined;
+    } else {
+      return jsonResponse({ success: false, error: 'Unsupported request format' }, 400, corsHeaders);
+    }
+
+    console.log('[handleMobileJwt] Zendesk callback with user_token:', userToken ? '(present)' : '(missing)');
+
+    if (userToken && userToken.includes('.')) {
+      // Pre-auth token path: nonce-bound HMAC-signed token
+      if (!env.ZENDESK_PREAUTH_SECRET) {
+        return jsonResponse({ success: false, error: 'ZENDESK_PREAUTH_SECRET not configured' }, 500, corsHeaders);
+      }
+
+      const verifyResult = await verifyPreAuthToken(userToken, env.ZENDESK_PREAUTH_SECRET);
+      if (!verifyResult.valid) {
+        console.warn(`[handleMobileJwt] Pre-auth token rejected: ${verifyResult.error}`);
+        return jsonResponse({ success: false, error: 'Invalid or expired token' }, 401, corsHeaders);
+      }
+
+      // Atomically consume the nonce — prevents replay
+      if (!env.DB) {
+        return jsonResponse({ success: false, error: 'Server configuration error' }, 500, corsHeaders);
+      }
+      const deleteResult = await env.DB.prepare(
+        'DELETE FROM zendesk_preauth_nonces WHERE nonce = ? AND pubkey = ? AND expires_at >= unixepoch() RETURNING *'
+      ).bind(verifyResult.nonce, verifyResult.pubkey).first();
+
+      if (!deleteResult) {
+        console.warn(`[handleMobileJwt] Nonce not found or already consumed: ${verifyResult.nonce}`);
+        return jsonResponse({ success: false, error: 'Invalid or expired token' }, 401, corsHeaders);
+      }
+
+      pubkey = verifyResult.pubkey;
+      console.log(`[handleMobileJwt] Pre-auth token verified for pubkey: ${pubkey?.substring(0, 16)}...`);
+    } else if (userToken) {
+      // Reject raw npub/hex tokens. Pre-auth HMAC tokens (containing '.')
+      // are the only accepted format. The legacy raw npub path was removed
+      // because setJwtIdentity (which sends pre-auth tokens) was added in
+      // divine-mobile PR #1294 before any app build ever used JWT identity,
+      // so no released build ever sent raw npub as user_token.
+      console.warn('[handleMobileJwt] Rejected non-pre-auth user_token (raw npub/hex not accepted)');
+      return jsonResponse({ success: false, error: 'Invalid token format. Pre-auth token required.' }, 401, corsHeaders);
+    }
+
+    // Validate pubkey (required, 64 hex chars)
+    if (!pubkey || !/^[a-f0-9]{64}$/i.test(pubkey)) {
+      return jsonResponse({ success: false, error: 'Missing or invalid pubkey (must be 64 hex chars)' }, 400, corsHeaders);
+    }
+
+    pubkey = pubkey.toLowerCase();
+    const now = Math.floor(Date.now() / 1000);
+    const exp = now + 3600; // 1 hour expiry
+
+    // Convert hex pubkey to npub (bech32) for consistent user identification
+    // This matches the pattern used in divine-mobile's zendesk_support_service
+    const npub = nip19.npubEncode(pubkey);
+
+    // Enrich name from Funnelcake profile if not already provided
+    if (!name && env.RELAY_URL) {
+      try {
+        const apiBase = env.RELAY_URL.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:').replace(/\/$/, '');
+        const profileRes = await fetch(`${apiBase}/api/users/${pubkey}`, {
+          headers: { 'Accept': 'application/json' },
+          signal: AbortSignal.timeout(3000),
+        });
+        if (profileRes.ok) {
+          const userData = await profileRes.json() as { profile?: { display_name?: string; name?: string } };
+          const displayName = userData.profile?.display_name || userData.profile?.name;
+          if (displayName) {
+            name = displayName;
+            console.log(`[handleMobileJwt] Resolved display name: ${name}`);
+          }
+        }
+      } catch (e) {
+        console.log(`[handleMobileJwt] Profile lookup failed (non-fatal): ${e}`);
+      }
+    }
+
+    // Build JWT payload
+    // external_id uses npub to link REST API tickets to SDK identity
+    const payload = {
+      iss: 'divine.video',
+      iat: now,
+      exp: exp,
+      jti: crypto.randomUUID(),
+      external_id: npub,
+      name: name || `Divine User`,
+      email: email || `${npub}@divine.video`,
+    };
+
+    // Build JWT header
+    const header = {
+      alg: 'HS256',
+      typ: 'JWT',
+    };
+
+    // Base64URL encode helper
+    const base64UrlEncode = (data: string): string => {
+      return btoa(data)
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=+$/, '');
+    };
+
+    // Encode header and payload
+    const headerB64 = base64UrlEncode(JSON.stringify(header));
+    const payloadB64 = base64UrlEncode(JSON.stringify(payload));
+    const dataToSign = `${headerB64}.${payloadB64}`;
+
+    // Sign with HMAC-SHA256
+    const key = await crypto.subtle.importKey(
+      'raw',
+      new TextEncoder().encode(env.ZENDESK_JWT_SECRET),
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['sign']
+    );
+
+    const signatureBytes = await crypto.subtle.sign(
+      'HMAC',
+      key,
+      new TextEncoder().encode(dataToSign)
+    );
+
+    const signatureB64 = base64UrlEncode(
+      String.fromCharCode(...new Uint8Array(signatureBytes))
+    );
+
+    const jwt = `${dataToSign}.${signatureB64}`;
+
+    console.log(`[handleMobileJwt] Generated JWT for npub: ${npub.substring(0, 16)}...`);
+
+    return new Response(JSON.stringify({
+      success: true,
+      jwt,
+      expires_at: exp,
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders },
+    });
+  } catch (error) {
+    console.error('[handleMobileJwt] Error:', error);
+    return jsonResponse(
+      { success: false, error: 'Internal server error' },
       500,
       corsHeaders
     );
@@ -1888,7 +2474,8 @@ async function syncZendeskAfterAction(
     }
 
     // Determine if this is a resolution action (should solve ticket)
-    const resolutionActions = ['reviewed', 'dismissed', 'no-action', 'false-positive'];
+    // Note: ban_user is Zendesk webhook naming, ban_pubkey is UI naming - same effect
+    const resolutionActions = ['reviewed', 'dismissed', 'no-action', 'false-positive', 'delete_event', 'ban_pubkey', 'ban_user', 'auto_hide_confirmed', 'auto_hide_restored'];
     const isResolution = resolutionActions.includes(action);
 
     // Build note
@@ -1948,7 +2535,7 @@ async function handleZendeskContext(
 
     // Get decision history
     if (env.DB) {
-      await ensureDecisionsTable(env.DB);
+      await ensureSchemaOnce(env.DB);
       const targetId = eventId || pubkey;
       const decisions = await env.DB.prepare(`
         SELECT * FROM moderation_decisions
@@ -2094,14 +2681,33 @@ async function handleZendeskAction(
         break;
 
       case 'delete_event':
+        // Use banevent RPC instead of kind 5. See handleZendeskWebhook
+        // delete_event comment for rationale.
+        // NOTE: Zendesk-originated moderation may be dead code — monitor
+        // for removal if relay admin tool fully replaces Zendesk actions.
         if (body.event_id) {
-          const event = finalizeEvent({
-            kind: 5,
-            content: reason,
-            tags: [['e', body.event_id]],
+          const httpUrl = getManagementUrl(env);
+          const payload = JSON.stringify({ method: 'banevent', params: [body.event_id, reason] });
+          const payloadHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
+          const payloadHashHex = Array.from(new Uint8Array(payloadHash)).map(b => b.toString(16).padStart(2, '0')).join('');
+
+          const authEvent = finalizeEvent({
+            kind: 27235,
+            content: '',
+            tags: [['u', httpUrl], ['method', 'POST'], ['payload', payloadHashHex]],
             created_at: Math.floor(Date.now() / 1000),
           }, secretKey);
-          actionResult = await publishToRelay(event, env.RELAY_URL);
+
+          const response = await fetch(httpUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/nostr+json+rpc',
+              'Authorization': `Nostr ${btoa(JSON.stringify(authEvent))}`,
+            },
+            body: payload,
+          });
+
+          actionResult = response.ok ? { success: true } : { success: false, error: `Relay error: ${response.status}` };
         } else {
           actionResult = { success: false, error: 'Missing event_id' };
         }
@@ -2113,7 +2719,7 @@ async function handleZendeskAction(
 
     // Log the decision
     if (env.DB && actionResult.success) {
-      await ensureDecisionsTable(env.DB);
+      await ensureSchemaOnce(env.DB);
       await env.DB.prepare(`
         INSERT INTO moderation_decisions (target_type, target_id, action, reason, moderator_pubkey, report_id)
         VALUES (?, ?, ?, ?, ?, ?)
@@ -2125,17 +2731,25 @@ async function handleZendeskAction(
         user.email,
         body.ticket_id ? `zendesk:${body.ticket_id}` : null
       ).run();
+
+      const ztargetType = body.event_id ? 'event' : 'pubkey';
+      const ztargetId = body.event_id || body.pubkey || '';
+      await markHumanReviewed(env.DB, ztargetType, ztargetId);
     }
 
     // Sync any linked Zendesk tickets
     if (actionResult.success) {
-      syncZendeskAfterAction(
-        env,
-        body.action,
-        body.event_id ? 'event' : 'pubkey',
-        body.event_id || body.pubkey || '',
-        user.email
-      ).catch((err) => console.error('[handleZendeskAction] Zendesk sync error:', err));
+      try {
+        await syncZendeskAfterAction(
+          env,
+          body.action,
+          body.event_id ? 'event' : 'pubkey',
+          body.event_id || body.pubkey || '',
+          user.email
+        );
+      } catch (err) {
+        console.error('[handleZendeskAction] Zendesk sync error:', err);
+      }
     }
 
     return new Response(JSON.stringify({

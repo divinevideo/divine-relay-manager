@@ -64,5 +64,6 @@ export function useUserStats(pubkey: string | undefined) {
       };
     },
     enabled: !!pubkey,
+    staleTime: 2 * 60_000, // Cache user stats for 2 minutes when switching between reports
   });
 }

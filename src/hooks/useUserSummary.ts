@@ -3,6 +3,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import type { NostrEvent } from "@nostrify/nostrify";
+import { getApiHeaders } from "@/lib/adminApi";
 import { useApiUrl } from "@/hooks/useAdminApi";
 
 interface SummaryResponse {
@@ -26,7 +27,7 @@ export function useUserSummary(
 
       const response = await fetch(`${apiUrl}/api/summarize-user`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getApiHeaders(),
         body: JSON.stringify({
           pubkey,
           recentPosts: recentPosts.slice(0, 10).map(e => ({

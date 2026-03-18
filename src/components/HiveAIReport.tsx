@@ -1,6 +1,7 @@
 // ABOUTME: Displays Hive AI moderation results from the divine-moderation-service
 // ABOUTME: Shows confidence scores, classification categories, timestamps, and re-check ability
 
+import { getApiHeaders } from "@/lib/adminApi";
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Badge } from "@/components/ui/badge";
@@ -171,7 +172,7 @@ export function HiveAIReport({ sha256: providedSha256, videoUrl: providedVideoUr
     queryFn: async (): Promise<ModerationResult | null> => {
       if (!sha256) return null;
 
-      const response = await fetch(`${apiUrl}/api/check-result/${sha256}`);
+      const response = await fetch(`${apiUrl}/api/check-result/${sha256}`, { headers: getApiHeaders('') });
       if (!response.ok) {
         if (response.status === 404) return null;
         throw new Error(`Failed to fetch moderation result: ${response.status}`);
@@ -213,7 +214,7 @@ export function HiveAIReport({ sha256: providedSha256, videoUrl: providedVideoUr
       // Call the worker to trigger a moderation check
       const response = await fetch(`${apiUrl}/api/moderate-check`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getApiHeaders(),
         body: JSON.stringify({ url: videoUrl, sha256 }),
       });
 
@@ -390,7 +391,7 @@ export function HiveStatusBadge({ sha256: providedSha256, eventTags, className }
     queryKey: ['hive-moderation', sha256],
     queryFn: async (): Promise<ModerationResult | null> => {
       if (!sha256) return null;
-      const response = await fetch(`${apiUrl}/api/check-result/${sha256}`);
+      const response = await fetch(`${apiUrl}/api/check-result/${sha256}`, { headers: getApiHeaders('') });
       if (!response.ok) return null;
       return response.json();
     },

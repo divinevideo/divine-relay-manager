@@ -15,8 +15,10 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAuthor } from "@/hooks/useAuthor";
+import { useAppContext } from "@/hooks/useAppContext";
 import { MessageSquare } from "lucide-react";
 import type { NostrEvent } from "@nostrify/nostrify";
+import { getDivineProfileUrl } from "@/lib/constants";
 
 interface ThreadModalProps {
   eventId: string;
@@ -55,12 +57,14 @@ function buildThreadTree(events: NostrEvent[], rootId: string): ThreadNode | nul
 
 function ThreadPost({
   node,
-  highlightId
+  highlightId,
+  apiUrl,
 }: {
   node: ThreadNode;
   highlightId?: string;
+  apiUrl?: string;
 }) {
-  const author = useAuthor(node.event.pubkey);
+  const author = useAuthor(node.event.pubkey, apiUrl);
   const npubFallback = (() => {
     try {
       return nip19.npubEncode(node.event.pubkey).slice(0, 12) + '...';
@@ -74,7 +78,7 @@ function ThreadPost({
   const isHighlighted = node.event.id === highlightId;
   const profileUrl = (() => {
     try {
-      return `https://divine.video/profile/${nip19.npubEncode(node.event.pubkey)}`;
+      return getDivineProfileUrl(nip19.npubEncode(node.event.pubkey));
     } catch {
       return undefined;
     }
@@ -110,14 +114,14 @@ function ThreadPost({
                 <Badge variant="destructive" className="text-xs">Reported</Badge>
               )}
             </div>
-            <p className="text-sm mt-1 whitespace-pre-wrap break-words">
+            <p className="text-sm mt-1 whitespace-pre-wrap break-all">
               {node.event.content}
             </p>
           </div>
         </div>
       </div>
       {node.replies.map(reply => (
-        <ThreadPost key={reply.event.id} node={reply} highlightId={highlightId} />
+        <ThreadPost key={reply.event.id} node={reply} highlightId={highlightId} apiUrl={apiUrl} />
       ))}
     </div>
   );
@@ -125,6 +129,7 @@ function ThreadPost({
 
 export function ThreadModal({ eventId, open, onOpenChange, highlightEventId }: ThreadModalProps) {
   const { nostr } = useNostr();
+  const { config } = useAppContext();
 
   // Fetch full thread
   const { data: thread, isLoading } = useQuery({
@@ -164,7 +169,7 @@ export function ThreadModal({ eventId, open, onOpenChange, highlightEventId }: T
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl max-h-[80vh]">
+      <DialogContent className="max-w-2xl max-h-[80vh] overflow-hidden">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <MessageSquare className="h-5 w-5" />
@@ -179,7 +184,7 @@ export function ThreadModal({ eventId, open, onOpenChange, highlightEventId }: T
               ))}
             </div>
           ) : thread ? (
-            <ThreadPost node={thread} highlightId={highlightEventId || eventId} />
+            <ThreadPost node={thread} highlightId={highlightEventId || eventId} apiUrl={config.apiUrl} />
           ) : (
             <div className="text-center py-8 text-muted-foreground">
               <p>Could not load thread</p>
