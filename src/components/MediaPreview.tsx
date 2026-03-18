@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Image, Video, Eye, EyeOff, AlertTriangle, ExternalLink } from "lucide-react";
 import type { NostrEvent } from "@nostrify/nostrify";
 import { useApiUrl } from "@/hooks/useAdminApi";
+import { getApiHeaders } from "@/lib/adminApi";
 
 interface MediaItem {
   url: string;
@@ -152,6 +153,15 @@ export function MediaPreview({
     }
   }, [showByDefault]);
 
+  // Clean up blob URLs on unmount to avoid memory leaks
+  useEffect(() => {
+    return () => {
+      proxyUrls.forEach(url => {
+        if (url.startsWith('blob:')) URL.revokeObjectURL(url);
+      });
+    };
+  }, [proxyUrls]);
+
   const content = propContent ?? event?.content ?? '';
   const tags = useMemo(() => propTags ?? event?.tags ?? [], [propTags, event?.tags]);
 
@@ -166,13 +176,22 @@ export function MediaPreview({
   const imageCount = mediaItems.filter(m => m.type === 'image').length;
   const videoCount = mediaItems.filter(m => m.type === 'video').length;
 
-  const handleError = (url: string, sha256?: string) => {
-    if (sha256 && !proxyUrls.has(url)) {
-      // First failure: retry through authenticated proxy
-      const proxyUrl = `${apiUrl}/api/media-proxy/${sha256}`;
-      setProxyUrls(prev => new Map(prev).set(url, proxyUrl));
+  const handleError = async (url: string, sha256?: string) => {
+    if (sha256 && !proxyUrls.has(url) && !failedUrls.has(url)) {
+      // First failure: fetch through authenticated proxy via JS (not <img src>)
+      // CF Access blocks unauthenticated browser requests to the API domain,
+      // so we fetch with service token headers and create a blob URL.
+      try {
+        const proxyUrl = `${apiUrl}/api/media-proxy/${sha256}`;
+        const resp = await fetch(proxyUrl, { headers: getApiHeaders('') });
+        if (!resp.ok) throw new Error(`${resp.status}`);
+        const blob = await resp.blob();
+        const blobUrl = URL.createObjectURL(blob);
+        setProxyUrls(prev => new Map(prev).set(url, blobUrl));
+      } catch {
+        setFailedUrls(prev => new Set(prev).add(url));
+      }
     } else {
-      // Proxy also failed or no sha256 available
       setFailedUrls(prev => new Set(prev).add(url));
     }
   };
@@ -306,10 +325,18 @@ export function InlineMediaPreview({
     return null;
   }
 
-  const handleError = (url: string, sha256?: string) => {
-    if (sha256 && !proxyUrls.has(url)) {
-      const proxyUrl = `${apiUrl}/api/media-proxy/${sha256}`;
-      setProxyUrls(prev => new Map(prev).set(url, proxyUrl));
+  const handleError = async (url: string, sha256?: string) => {
+    if (sha256 && !proxyUrls.has(url) && !failedUrls.has(url)) {
+      try {
+        const proxyUrl = `${apiUrl}/api/media-proxy/${sha256}`;
+        const resp = await fetch(proxyUrl, { headers: getApiHeaders('') });
+        if (!resp.ok) throw new Error(`${resp.status}`);
+        const blob = await resp.blob();
+        const blobUrl = URL.createObjectURL(blob);
+        setProxyUrls(prev => new Map(prev).set(url, blobUrl));
+      } catch {
+        setFailedUrls(prev => new Set(prev).add(url));
+      }
     } else {
       setFailedUrls(prev => new Set(prev).add(url));
     }
