@@ -679,7 +679,7 @@ describe('ReportWatcher', () => {
           bind: vi.fn().mockReturnValue({
             run: mockDbRun,
             first: vi.fn().mockResolvedValue(
-              sql.includes('moderation_targets') ? null : { 1: 1 }
+              _sql.includes('moderation_targets') ? null : { 1: 1 }
             ),
           }),
         })),
@@ -831,7 +831,7 @@ describe('ReportWatcher', () => {
           bind: vi.fn().mockReturnValue({
             run: mockDbRun,
             first: vi.fn().mockResolvedValue(
-              sql.includes('moderation_targets') ? { 1: 1 } : null
+              _sql.includes('moderation_targets') ? { 1: 1 } : null
             ),
           }),
         })),
