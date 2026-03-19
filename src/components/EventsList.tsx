@@ -579,17 +579,20 @@ export function EventsList({ relayUrl }: EventsListProps) {
     staleTime: 60000,
   });
 
-  // Build sets of reported event IDs and pubkeys
-  const reportedEventIds = new Set<string>();
-  const reportedPubkeys = new Set<string>();
-  if (allReports) {
-    for (const report of allReports) {
-      const eTag = report.tags.find(t => t[0] === 'e');
-      if (eTag) reportedEventIds.add(eTag[1]);
-      const pTag = report.tags.find(t => t[0] === 'p');
-      if (pTag) reportedPubkeys.add(pTag[1]);
+  // Build sets of reported event IDs and pubkeys (memoized to avoid rebuild on every render)
+  const { reportedEventIds, reportedPubkeys } = useMemo(() => {
+    const eventIds = new Set<string>();
+    const pubkeys = new Set<string>();
+    if (allReports) {
+      for (const report of allReports) {
+        const eTag = report.tags.find(t => t[0] === 'e');
+        if (eTag) eventIds.add(eTag[1]);
+        const pTag = report.tags.find(t => t[0] === 'p');
+        if (pTag) pubkeys.add(pTag[1]);
+      }
     }
-  }
+    return { reportedEventIds: eventIds, reportedPubkeys: pubkeys };
+  }, [allReports]);
 
   // Helper to check if event has media (content URLs or imeta tags)
   const hasMedia = (content: string, tags?: string[][]): boolean => {
@@ -600,10 +603,21 @@ export function EventsList({ relayUrl }: EventsListProps) {
   };
 
   // Helper to check if user is "new" (created within last 7 days based on event timestamp)
-  const isNewUser = (pubkey: string, events: NostrEvent[]): boolean => {
-    const userEvents = events.filter(e => e.pubkey === pubkey);
-    if (userEvents.length === 0) return true;
-    const oldest = Math.min(...userEvents.map(e => e.created_at));
+  // Pre-compute oldest event per pubkey to avoid O(n²) scanning
+  const oldestByPubkey = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const e of relayEvents || []) {
+      const current = map.get(e.pubkey);
+      if (current === undefined || e.created_at < current) {
+        map.set(e.pubkey, e.created_at);
+      }
+    }
+    return map;
+  }, [relayEvents]);
+
+  const isNewUser = (pubkey: string): boolean => {
+    const oldest = oldestByPubkey.get(pubkey);
+    if (oldest === undefined) return true;
     const sevenDaysAgo = Date.now() / 1000 - (7 * 24 * 60 * 60);
     return oldest > sevenDaysAgo;
   };
@@ -720,7 +734,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
 
       // New users filter
       if (filterNewUsers && events) {
-        if (!isNewUser(event.pubkey, events)) return false;
+        if (!isNewUser(event.pubkey)) return false;
       }
 
       return true;

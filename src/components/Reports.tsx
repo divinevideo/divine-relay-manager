@@ -387,7 +387,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     queryFn: async () => {
       try {
         const pubkeys = await listBannedPubkeys();
-        console.log('[Reports] Banned pubkeys from relay:', pubkeys.length);
+
         return pubkeys;
       } catch (error) {
         console.warn('NIP-86 listbannedpubkeys failed:', error);
@@ -420,7 +420,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     queryKey: ['decisions'],
     queryFn: async () => {
       const decisions = await getAllDecisions();
-      console.log('[Reports] Loaded decisions:', decisions.length, decisions.slice(0, 3));
+
       return decisions;
     },
     staleTime: 30 * 1000,
@@ -502,14 +502,6 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       }
     }
 
-    console.log('[Reports] Resolved targets breakdown:', {
-      total: resolved.size,
-      fromLabels,
-      fromBannedPubkeys,
-      fromBannedEvents,
-      fromDecisions,
-      decisionsLoaded: allDecisions?.length ?? 'undefined',
-    });
     return resolved;
   }, [resolutionLabels, bannedPubkeys, bannedEvents, allDecisions]);
 
@@ -538,7 +530,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       }
     }
 
-    console.log('[Reports] Pending review targets:', pending.size);
+
     return pending;
   }, [allDecisions]);
 

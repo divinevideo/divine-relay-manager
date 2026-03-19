@@ -6,4 +6,4 @@ CREATE TABLE IF NOT EXISTS zendesk_preauth_nonces (
   expires_at INTEGER NOT NULL
 );
 
-CREATE INDEX idx_nonces_expires ON zendesk_preauth_nonces(expires_at);
+CREATE INDEX IF NOT EXISTS idx_nonces_expires ON zendesk_preauth_nonces(expires_at);
