@@ -606,14 +606,14 @@ export function EventsList({ relayUrl }: EventsListProps) {
   // Pre-compute oldest event per pubkey to avoid O(n²) scanning
   const oldestByPubkey = useMemo(() => {
     const map = new Map<string, number>();
-    for (const e of relayEvents || []) {
+    for (const e of events || []) {
       const current = map.get(e.pubkey);
       if (current === undefined || e.created_at < current) {
         map.set(e.pubkey, e.created_at);
       }
     }
     return map;
-  }, [relayEvents]);
+  }, [events]);
 
   const isNewUser = (pubkey: string): boolean => {
     const oldest = oldestByPubkey.get(pubkey);
