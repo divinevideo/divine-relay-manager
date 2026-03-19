@@ -35,7 +35,7 @@ npx tsc --noEmit              # type-check
 
 # Worker
 cd worker
-npx wrangler dev              # local dev
+npx wrangler dev --config wrangler.local.toml    # local dev
 npx wrangler deploy --config wrangler.staging.toml
 npx wrangler deploy --config wrangler.prod.toml
 
@@ -45,6 +45,13 @@ npx vite build && npx wrangler pages deploy dist --project-name divine-relay-adm
 # Tests
 cd worker && npx vitest run
 ```
+
+**There is no `wrangler.toml`.** Each environment has its own config file:
+- `wrangler.local.toml` -- local dev (legacy D1, no secrets store)
+- `wrangler.staging.toml` -- staging deploy
+- `wrangler.prod.toml` -- production deploy
+
+Never deploy with the local config. Always pass `--config` explicitly.
 
 ## Integration Contracts
 
@@ -75,7 +82,7 @@ When a moderation action completes, `handleModerate()` triggers side effects:
 
 - POSTs to the Blossom media server admin moderation endpoint with Bearer token auth
 - Payload: `{ sha256, action: "BLOCK"|"RESTRICT"|"APPROVE" }`
-- Auth token is a per-worker secret (not in wrangler.toml)
+- Auth token is a per-worker secret (not in wrangler config)
 
 ### ReportWatcher (Durable Object)
 

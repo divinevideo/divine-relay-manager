@@ -1,22 +1,13 @@
-# ⚠️  DEPRECATED — Use wrangler.prod.toml or wrangler.staging.toml instead
+# ABOUTME: Cloudflare Worker for Divine Relay Admin API - LOCAL DEV
+# ABOUTME: Run with: cd worker && npx wrangler dev --config wrangler.local.toml
 #
-# This legacy config deploys to api-relay.divine.video with the old D1 database
-# (blossom-webhook-events). New deployments should use:
-#   - Production: npx wrangler deploy --config wrangler.prod.toml
-#   - Staging:    npx wrangler deploy --config wrangler.staging.toml
-#
-# ABOUTME: Cloudflare Worker for Divine Relay Admin API (LEGACY)
-# ABOUTME: Handles NIP-86 signing and publishing
+# For deployments, use wrangler.prod.toml or wrangler.staging.toml.
 
 name = "divine-relay-admin-api"
 main = "src/index.ts"
 compatibility_date = "2024-12-01"
 
-# Custom domain routes
-routes = [
-  { pattern = "relay.admin.divine.video/api/*", zone_name = "divine.video" },
-  { pattern = "api-relay.divine.video/*", zone_name = "divine.video" }
-]
+# No routes — local dev only. See wrangler.prod.toml / wrangler.staging.toml for deploy routes.
 
 # The NOSTR_NSEC secret must be set via: wrangler secret put NOSTR_NSEC
 
@@ -47,9 +38,10 @@ database_id = "829f06cf-294b-4491-8611-30fc53df2589"
 binding = "REALNESS"
 service = "divine-ai-detector"
 
-[[services]]
-binding = "MODERATION_API"
-service = "divine-moderation-api"
+# TODO: uncomment when divine-moderation-api worker is deployed to Cloudflare
+# [[services]]
+# binding = "MODERATION_API"
+# service = "divine-moderation-api"
 
 # Durable Objects for persistent state (needed for local dev)
 [durable_objects]

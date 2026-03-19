@@ -461,15 +461,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // Build set of resolved target keys (from labels, bans, deletions, and decisions)
   const resolvedTargets = useMemo(() => {
     const resolved = new Set<string>();
-    let fromLabels = 0, fromBannedPubkeys = 0, fromBannedEvents = 0, fromDecisions = 0;
 
     // Add from resolution labels
     if (resolutionLabels) {
       for (const label of resolutionLabels) {
         const eTag = label.tags.find(t => t[0] === 'e');
-        if (eTag) { resolved.add(`event:${eTag[1]}`); fromLabels++; }
+        if (eTag) { resolved.add(`event:${eTag[1]}`); }
         const pTag = label.tags.find(t => t[0] === 'p');
-        if (pTag) { resolved.add(`pubkey:${pTag[1]}`); fromLabels++; }
+        if (pTag) { resolved.add(`pubkey:${pTag[1]}`); }
       }
     }
 
@@ -477,7 +476,6 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     if (bannedPubkeys) {
       for (const entry of bannedPubkeys) {
         resolved.add(`pubkey:${entry.pubkey}`);
-        fromBannedPubkeys++;
       }
     }
 
@@ -485,7 +483,6 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     if (bannedEvents) {
       for (const event of bannedEvents) {
         resolved.add(`event:${event.id}`);
-        fromBannedEvents++;
       }
     }
 
@@ -494,10 +491,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       for (const decision of allDecisions) {
         if (decision.target_type === 'pubkey') {
           resolved.add(`pubkey:${decision.target_id}`);
-          fromDecisions++;
         } else if (decision.target_type === 'event') {
           resolved.add(`event:${decision.target_id}`);
-          fromDecisions++;
         }
       }
     }

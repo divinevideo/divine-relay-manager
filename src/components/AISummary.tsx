@@ -5,16 +5,22 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Bot, AlertTriangle, AlertCircle, ShieldAlert, Skull } from "lucide-react";
+import { Bot, AlertTriangle, AlertCircle, ShieldAlert, Skull, HelpCircle } from "lucide-react";
 
 interface AISummaryProps {
   summary?: string;
-  riskLevel?: 'low' | 'medium' | 'high' | 'critical';
+  riskLevel?: 'low' | 'medium' | 'high' | 'critical' | 'unknown';
   isLoading?: boolean;
   error?: Error | null;
 }
 
 const RISK_CONFIG = {
+  unknown: {
+    icon: HelpCircle,
+    color: 'bg-muted',
+    textColor: 'text-muted-foreground',
+    label: 'Unknown Risk'
+  },
   low: {
     icon: AlertCircle,
     color: 'bg-green-500',
@@ -71,7 +77,7 @@ export function AISummary({ summary, riskLevel, isLoading, error }: AISummaryPro
     return null;
   }
 
-  const risk = riskLevel ? RISK_CONFIG[riskLevel] : RISK_CONFIG.low;
+  const risk = riskLevel ? (RISK_CONFIG[riskLevel] || RISK_CONFIG.unknown) : RISK_CONFIG.unknown;
   const RiskIcon = risk.icon;
 
   return (
