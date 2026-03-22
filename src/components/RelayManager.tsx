@@ -13,6 +13,7 @@ import { Card } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Server, FileText, Users, Settings, Flag, Tag, Bug } from "lucide-react";
 import { useAppContext } from "@/hooks/useAppContext";
+import AdminBar from "@/components/AdminBar";
 
 // Map URL paths to tab values
 function getTabFromPath(pathname: string): string {
@@ -40,6 +41,7 @@ export function RelayManager() {
 
   return (
     <div className="h-screen flex flex-col overflow-hidden bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800">
+      <AdminBar />
       {/* Header */}
       <header className="shrink-0 border-b bg-white/80 dark:bg-gray-900/80 backdrop-blur-sm">
         <div className="container mx-auto px-4 py-4">
