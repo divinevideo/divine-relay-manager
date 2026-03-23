@@ -640,7 +640,7 @@ async function handleModerate(
   // DM the banned user (non-critical side effect)
   if (body.action === 'ban_pubkey' && body.pubkey) {
     try {
-      await notifyModerationService(env, body.pubkey, 'PERMANENT_BAN', body.reason || 'Account banned by moderator');
+      await notifyModerationService(env, body.pubkey, 'ACCOUNT_SUSPENDED', body.reason || 'Account suspended by moderator');
     } catch (err) {
       console.error('[handleModerate] DM notification error:', err);
     }
@@ -675,9 +675,9 @@ async function handleRelayRpc(
   // case exists but is not called by any frontend component.
   if (body.method === 'banpubkey' && body.params?.[0]) {
     const pubkey = String(body.params[0]);
-    const reason = body.params[1] ? String(body.params[1]) : 'Account banned by moderator';
+    const reason = body.params[1] ? String(body.params[1]) : undefined;
     try {
-      await notifyModerationService(env, pubkey, 'PERMANENT_BAN', reason);
+      await notifyModerationService(env, pubkey, 'ACCOUNT_SUSPENDED', reason || 'Account suspended by moderator');
     } catch (err) {
       console.error('[handleRelayRpc] DM notification error:', err);
     }
