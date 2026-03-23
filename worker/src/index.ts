@@ -108,6 +108,10 @@ async function getCfAccessCredentials(env: Env): Promise<{ clientId: string; cli
 /**
  * Notify moderation-service to send a DM to an affected user.
  * Non-critical side effect — caller must wrap in try/catch.
+ *
+ * Option A: routes through moderation-service's /api/v1/notify endpoint.
+ * If a dedicated DM service is extracted later (support-trust-safety#118),
+ * this function is the single call site to update.
  */
 async function notifyModerationService(
   env: Env,
@@ -664,6 +668,19 @@ async function handleRelayRpc(
 
   if (!result.success) {
     return jsonResponse({ success: false, error: result.error }, 400, corsHeaders);
+  }
+
+  // DM the banned user (non-critical side effect)
+  // This is the actual ban path used by the UI -- handleModerate's ban_pubkey
+  // case exists but is not called by any frontend component.
+  if (body.method === 'banpubkey' && body.params?.[0]) {
+    const pubkey = String(body.params[0]);
+    const reason = body.params[1] ? String(body.params[1]) : 'Account banned by moderator';
+    try {
+      await notifyModerationService(env, pubkey, 'PERMANENT_BAN', reason);
+    } catch (err) {
+      console.error('[handleRelayRpc] DM notification error:', err);
+    }
   }
 
   return new Response(JSON.stringify({ success: true, result: result.result }), {
