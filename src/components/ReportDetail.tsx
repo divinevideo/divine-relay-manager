@@ -49,7 +49,7 @@ import { CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, getReportCategory, buildReas
 import { KIND_NAMES } from "@/lib/kindNames";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { UserX, UserCheck, Tag, Flag, Trash2, CheckCircle, Video, History, Ban, ShieldX, Link2, User, FileText, Unlock, Repeat2, FileCode, Loader2, XCircle, RefreshCw, Undo2, EyeOff, Eye } from "lucide-react";
+import { UserX, UserCheck, Tag, Flag, Trash2, CheckCircle, Video, History, Ban, ShieldX, ShieldAlert, Link2, User, FileText, Unlock, Repeat2, FileCode, Loader2, XCircle, RefreshCw, Undo2, EyeOff, Eye } from "lucide-react";
 import { CopyableId, CopyableTags } from "@/components/CopyableId";
 import type { NostrEvent } from "@nostrify/nostrify";
 
@@ -116,6 +116,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   const [confirmDismiss, setConfirmDismiss] = useState(false);
   const [dismissReason, setDismissReason] = useState("");
   const [confirmBlockMedia, setConfirmBlockMedia] = useState(false);
+  const [confirmAgeRestrict, setConfirmAgeRestrict] = useState(false);
   const [confirmBlockAndDelete, setConfirmBlockAndDelete] = useState(false);
   const [banOptions, setBanOptions] = useState({ deleteEvents: true, blockMedia: true });
   const [actionReason, setActionReason] = useState('');
@@ -585,6 +586,41 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     onError: (error: Error) => {
       toast({
         title: "Failed to block media",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  const ageRestrictMediaMutation = useMutation({
+    mutationFn: async ({ hashes, reason }: { hashes: string[]; reason: string }) => {
+      const results = await Promise.all(
+        hashes.map(sha256 => moderateMedia(sha256, 'AGE_RESTRICTED', reason))
+      );
+      await Promise.all(
+        hashes.map(sha256 => logDecision({
+          targetType: 'media',
+          targetId: sha256,
+          action: 'restrict_media',
+          reason,
+          reportId: report?.id,
+        }))
+      );
+      return { results, hashes };
+    },
+    onSuccess: async ({ hashes }) => {
+      queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      queryClient.invalidateQueries({ queryKey: ['media-status'] });
+      decisionLog.refetch();
+      toast({
+        title: "Media age-restricted",
+        description: `${hashes.length} media file(s) age-restricted`,
+      });
+      setConfirmAgeRestrict(false);
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Failed to age-restrict media",
         description: error.message,
         variant: "destructive",
       });
@@ -1066,6 +1102,49 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
               {blockMediaMutation.isPending ? 'Blocking...' : 'Block Media'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Age Restrict Media Confirmation Dialog */}
+      <AlertDialog open={confirmAgeRestrict} onOpenChange={(open) => { setConfirmAgeRestrict(open); if (!open) { setActionNote(''); setActionReason(defaultReason); } }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Age-Restrict Media?</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div>
+                <p>This will age-restrict {mediaHashes.length} media file(s). The content owner can still view it, but it will be hidden from the public feed and age-gated in supporting clients. This can be reversed.</p>
+                <div className="mt-2 space-y-1">
+                  {mediaHashes.map(hash => (
+                    <CopyableId
+                      key={hash}
+                      value={hash}
+                      type="hash"
+                      truncateStart={16}
+                      truncateEnd={8}
+                      size="xs"
+                    />
+                  ))}
+                </div>
+
+                {reasonSelector}
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={ageRestrictMediaMutation.isPending}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                ageRestrictMediaMutation.mutate({
+                  hashes: mediaHashes,
+                  reason: buildReasonString(actionReason, actionNote),
+                });
+              }}
+              disabled={ageRestrictMediaMutation.isPending}
+              className="bg-orange-600 text-white hover:bg-orange-700"
+            >
+              {ageRestrictMediaMutation.isPending ? 'Restricting...' : 'Age Restrict'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -1813,8 +1892,8 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
               </Tooltip>
             </div>
 
-            {/* Primary enforcement action - combined when media present and not already blocked */}
-            {context.target?.type === 'event' && mediaHashes.length > 0 && !isEventDeleted && !mediaStatus.hasBlockedMedia && (
+            {/* Primary enforcement action - combined when media present and not already moderated */}
+            {context.target?.type === 'event' && mediaHashes.length > 0 && !isEventDeleted && !mediaStatus.hasModeratedMedia && (
               <div>
                 <Tooltip>
                   <TooltipTrigger asChild>
@@ -1877,33 +1956,60 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                   </Tooltip>
                 )
               )}
-              {mediaHashes.length > 0 && (
-                mediaStatus.hasBlockedMedia ? (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        variant="outline"
-                        className="border-green-500 text-green-600 hover:bg-green-50"
-                        onClick={() => {
-                          const blockedHashes = mediaStatus.results
-                            .filter(r => r.isBlocked)
-                            .map(r => r.hash);
-                          unblockMediaMutation.mutate({
-                            hashes: blockedHashes,
-                            reason: 'Unblocked by moderator',
-                          });
-                        }}
-                        disabled={unblockMediaMutation.isPending || mediaStatus.isLoading}
-                      >
-                        <Unlock className="h-4 w-4 mr-1" />
-                        {unblockMediaMutation.isPending ? 'Unblocking...' : `Unblock Media (${mediaStatus.blockedCount})`}
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent side="bottom" className="max-w-xs">
-                      <p>Unblock previously blocked media files. They will be allowed to be served again.</p>
-                    </TooltipContent>
-                  </Tooltip>
-                ) : (
+              {mediaHashes.length > 0 && mediaStatus.hasBlockedMedia && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="outline"
+                      className="border-green-500 text-green-600 hover:bg-green-50"
+                      onClick={() => {
+                        const blockedHashes = mediaStatus.results
+                          .filter(r => r.isBlocked)
+                          .map(r => r.hash);
+                        unblockMediaMutation.mutate({
+                          hashes: blockedHashes,
+                          reason: 'Unblocked by moderator',
+                        });
+                      }}
+                      disabled={unblockMediaMutation.isPending || mediaStatus.isLoading}
+                    >
+                      <Unlock className="h-4 w-4 mr-1" />
+                      {unblockMediaMutation.isPending ? 'Unblocking...' : `Unblock Media (${mediaStatus.blockedCount})`}
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" className="max-w-xs">
+                    <p>Unblock previously blocked media files. They will be allowed to be served again.</p>
+                  </TooltipContent>
+                </Tooltip>
+              )}
+              {mediaHashes.length > 0 && mediaStatus.hasRestrictedMedia && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="outline"
+                      className="border-green-500 text-green-600 hover:bg-green-50"
+                      onClick={() => {
+                        const restrictedHashes = mediaStatus.results
+                          .filter(r => r.isRestricted)
+                          .map(r => r.hash);
+                        unblockMediaMutation.mutate({
+                          hashes: restrictedHashes,
+                          reason: 'Restriction removed by moderator',
+                        });
+                      }}
+                      disabled={unblockMediaMutation.isPending || mediaStatus.isLoading}
+                    >
+                      <Unlock className="h-4 w-4 mr-1" />
+                      {unblockMediaMutation.isPending ? 'Removing...' : `Remove Restriction (${mediaStatus.restrictedCount})`}
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" className="max-w-xs">
+                    <p>Remove age restriction from media files. They will be publicly accessible again.</p>
+                  </TooltipContent>
+                </Tooltip>
+              )}
+              {mediaHashes.length > 0 && !mediaStatus.hasModeratedMedia && (
+                <>
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <Button
@@ -1919,7 +2025,23 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                       <p>Block media files by their hash. They won't be served and re-uploads of the same file will be blocked. This can be reversed.</p>
                     </TooltipContent>
                   </Tooltip>
-                )
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="outline"
+                        className="border-orange-500 text-orange-600 hover:bg-orange-50"
+                        onClick={() => setConfirmAgeRestrict(true)}
+                        disabled={ageRestrictMediaMutation.isPending || mediaStatus.isLoading}
+                      >
+                        <ShieldAlert className="h-4 w-4 mr-1" />
+                        {mediaStatus.isLoading ? 'Checking...' : `Age Restrict (${mediaHashes.length})`}
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom" className="max-w-xs">
+                      <p>Age-restrict media files. The owner can still view them, but they will be hidden from the public feed and age-gated. This can be reversed.</p>
+                    </TooltipContent>
+                  </Tooltip>
+                </>
               )}
               {context.reportedUser.pubkey && (
                 isUserBanned ? (

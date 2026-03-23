@@ -9,6 +9,7 @@ export interface MediaStatusResult {
   hash: string;
   status: MediaStatus | null;
   isBlocked: boolean;
+  isRestricted: boolean;
 }
 
 export function useMediaStatus(hashes: string[]) {
@@ -25,7 +26,8 @@ export function useMediaStatus(hashes: string[]) {
           return {
             hash,
             status,
-            isBlocked: status?.action === 'PERMANENT_BAN' || status?.action === 'AGE_RESTRICTED',
+            isBlocked: status?.action === 'PERMANENT_BAN',
+            isRestricted: status?.action === 'AGE_RESTRICTED',
           };
         })
       );
@@ -36,12 +38,15 @@ export function useMediaStatus(hashes: string[]) {
     staleTime: 30000, // Cache for 30 seconds
   });
 
-  // Check if any media is blocked
+  // Check if any media is blocked or restricted
   const hasBlockedMedia = data?.some(r => r.isBlocked) ?? false;
+  const hasRestrictedMedia = data?.some(r => r.isRestricted) ?? false;
+  const hasModeratedMedia = hasBlockedMedia || hasRestrictedMedia;
 
-  // Count blocked and unblocked
+  // Count by state
   const blockedCount = data?.filter(r => r.isBlocked).length ?? 0;
-  const unblockedCount = data?.filter(r => !r.isBlocked).length ?? 0;
+  const restrictedCount = data?.filter(r => r.isRestricted).length ?? 0;
+  const unblockedCount = data?.filter(r => !r.isBlocked && !r.isRestricted).length ?? 0;
 
   // Get status for a specific hash
   const getStatus = (hash: string): MediaStatusResult | undefined => {
@@ -51,7 +56,10 @@ export function useMediaStatus(hashes: string[]) {
   return {
     results: data || [],
     hasBlockedMedia,
+    hasRestrictedMedia,
+    hasModeratedMedia,
     blockedCount,
+    restrictedCount,
     unblockedCount,
     getStatus,
     isLoading,
