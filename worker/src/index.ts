@@ -105,6 +105,49 @@ async function getCfAccessCredentials(env: Env): Promise<{ clientId: string; cli
   return { clientId, clientSecret };
 }
 
+/**
+ * Notify moderation-service to send a DM to an affected user.
+ * Non-critical side effect — caller must wrap in try/catch.
+ */
+async function notifyModerationService(
+  env: Env,
+  recipientPubkey: string,
+  action: string,
+  reason: string,
+  sha256?: string,
+  eventId?: string
+): Promise<void> {
+  const cfAccess = await getCfAccessCredentials(env);
+  if (!cfAccess) {
+    console.warn('[notifyModerationService] CF_ACCESS credentials not configured, skipping DM');
+    return;
+  }
+
+  const response = await fetch(`${getModerationServiceUrl(env)}/api/v1/notify`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'CF-Access-Client-Id': cfAccess.clientId,
+      'CF-Access-Client-Secret': cfAccess.clientSecret,
+    },
+    body: JSON.stringify({
+      recipientPubkey,
+      action,
+      reason,
+      ...(sha256 && { sha256 }),
+      ...(eventId && { eventId }),
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error(`[notifyModerationService] Failed: ${response.status} - ${errorText}`);
+  } else {
+    const result = await response.json() as { dm_sent: boolean; reason?: string };
+    console.log(`[notifyModerationService] DM sent=${result.dm_sent}${result.reason ? ` (${result.reason})` : ''}`);
+  }
+}
+
 function getAllowedOrigin(requestOrigin: string | null, allowedOriginsEnv: string | undefined): string {
   if (!allowedOriginsEnv?.trim()) return '';
 
@@ -512,6 +555,15 @@ async function handleModerate(
           console.error('[handleModerate] Zendesk sync error:', err);
         }
 
+        // DM the content creator about the deletion (non-critical side effect)
+        if (body.pubkey) {
+          try {
+            await notifyModerationService(env, body.pubkey, 'PERMANENT_BAN', body.reason || 'Content removed by moderator', undefined, body.eventId);
+          } catch (err) {
+            console.error('[handleModerate] DM notification error:', err);
+          }
+        }
+
         return jsonResponse({ success: true, eventId: body.eventId }, 200, corsHeaders);
       } catch (error) {
         console.error('[handleModerate] delete_event error:', error);
@@ -579,6 +631,15 @@ async function handleModerate(
     }
   } catch (err) {
     console.error('[handleModerate] Zendesk sync error:', err);
+  }
+
+  // DM the banned user (non-critical side effect)
+  if (body.action === 'ban_pubkey' && body.pubkey) {
+    try {
+      await notifyModerationService(env, body.pubkey, 'PERMANENT_BAN', body.reason || 'Account banned by moderator');
+    } catch (err) {
+      console.error('[handleModerate] DM notification error:', err);
+    }
   }
 
   return jsonResponse({ success: true, event }, 200, corsHeaders);
