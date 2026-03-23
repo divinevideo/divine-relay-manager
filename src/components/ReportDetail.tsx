@@ -660,8 +660,8 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   }, [allReportsForTarget]);
 
   const unblockMediaMutation = useMutation({
-    mutationFn: async ({ hashes, reason }: { hashes: string[]; reason: string }) => {
-      // Unblock all media hashes
+    mutationFn: async ({ hashes, reason, logAction = 'unblock_media' }: { hashes: string[]; reason: string; logAction?: string }) => {
+      // Unblock all media hashes (sends SAFE to moderation-service)
       const results = await Promise.all(
         hashes.map(sha256 => unblockMedia(sha256, reason))
       );
@@ -670,7 +670,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
         hashes.map(sha256 => logDecision({
           targetType: 'media',
           targetId: sha256,
-          action: 'unblock_media',
+          action: logAction,
           reason,
           reportId: report?.id,
         }))
@@ -683,8 +683,8 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
       mediaStatus.refetch();
       decisionLog.refetch();
       toast({
-        title: "Media unblocked",
-        description: `${variables.hashes.length} media file(s) unblocked`,
+        title: variables.logAction === 'unrestrict_media' ? "Restriction removed" : "Media unblocked",
+        description: `${variables.hashes.length} media file(s) ${variables.logAction === 'unrestrict_media' ? 'unrestricted' : 'unblocked'}`,
       });
     },
     onError: (error: Error) => {
@@ -1995,6 +1995,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                         unblockMediaMutation.mutate({
                           hashes: restrictedHashes,
                           reason: 'Restriction removed by moderator',
+                          logAction: 'unrestrict_media',
                         });
                       }}
                       disabled={unblockMediaMutation.isPending || mediaStatus.isLoading}

@@ -1,5 +1,5 @@
 // ABOUTME: Hook to check moderation status of media hashes
-// ABOUTME: Queries the moderation service to determine if media is blocked
+// ABOUTME: Queries the moderation service to determine if media is blocked or age-restricted
 
 import { useQuery } from "@tanstack/react-query";
 import { useAdminApi } from "@/hooks/useAdminApi";
