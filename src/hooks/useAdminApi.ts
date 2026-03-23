@@ -33,8 +33,8 @@ export function useAdminApi() {
     // Moderation actions
     moderateAction: (params: Parameters<typeof adminApi.moderateAction>[1]) =>
       adminApi.moderateAction(apiUrl, params),
-    deleteEvent: (eventId: string, reason?: string) =>
-      adminApi.deleteEvent(apiUrl, eventId, reason),
+    deleteEvent: (eventId: string, reason?: string, pubkey?: string) =>
+      adminApi.deleteEvent(apiUrl, eventId, reason, pubkey),
     banPubkeyViaModerate: (pubkey: string, reason?: string) =>
       adminApi.banPubkeyViaModerate(apiUrl, pubkey, reason),
     allowPubkey: (pubkey: string) =>
