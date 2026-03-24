@@ -271,6 +271,26 @@ export default {
         return handleFunnelcakeProxy(path, env, corsHeaders);
       }
 
+      // Server-side relay queries for reports and resolution labels.
+      // Replaces browser-side WebSocket queries that served stale data due to
+      // nostrify NPool connection caching. The worker opens a fresh WebSocket
+      // per request via queryRelay(), so every poll gets current data.
+      if (path === '/api/reports' && request.method === 'GET') {
+        const result = await queryRelay({ kinds: [1984], limit: 200 }, env.RELAY_URL);
+        if (!result.success) {
+          return jsonResponse({ success: false, error: result.error }, 502, corsHeaders);
+        }
+        return jsonResponse({ success: true, events: result.events }, 200, corsHeaders);
+      }
+
+      if (path === '/api/resolution-labels' && request.method === 'GET') {
+        const result = await queryRelay({ kinds: [1985], '#L': ['moderation/resolution'], limit: 500 }, env.RELAY_URL);
+        if (!result.success) {
+          return jsonResponse({ success: false, error: result.error }, 502, corsHeaders);
+        }
+        return jsonResponse({ success: true, events: result.events }, 200, corsHeaders);
+      }
+
       // 404 for unknown routes
       return jsonResponse({ success: false, error: 'Not found' }, 404, corsHeaders);
     } catch (error) {
