@@ -36,8 +36,10 @@ AUTO_HIDE_ENABLED = "true"
 TRUSTED_CLIENTS = "diVine,divine-web,divine-mobile"
 # Path for NIP-86 management API
 MANAGEMENT_PATH = "/"
-# URL for media moderation service
+# Both hostnames serve the same worker (divine-moderation-service).
+# The worker enforces hostname/path routing: /api/* must use API_HOSTNAME.
 MODERATION_SERVICE_URL = "https://moderation-api.divine.video"
+MODERATION_ADMIN_URL = "https://moderation-api.divine.video"
 # Allow both the main frontend and Cloudflare Pages preview deployments
 ALLOWED_ORIGINS = "https://relay.admin.divine.video,*.divine-relay-manager.pages.dev,*.divine-relay-admin.pages.dev"
 # CDN domain for media proxy (Blossom admin bypass for blocked content preview)
@@ -56,6 +58,11 @@ database_id = "5e694cde-20d4-491d-aed3-aaac47a5a9b5"
 [[services]]
 binding = "REALNESS"
 service = "divine-ai-detector"
+
+# Service binding to divine-moderation-service (bypasses CF Access + no cold starts)
+[[services]]
+binding = "MODERATION_API"
+service = "divine-moderation-service"
 
 # Durable Objects for persistent state
 [durable_objects]

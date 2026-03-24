@@ -36,8 +36,12 @@ AUTO_HIDE_ENABLED = "true"
 TRUSTED_CLIENTS = "diVine,divine-web,divine-mobile"
 # Path for NIP-86 management API (Funnelcake uses /management)
 MANAGEMENT_PATH = "/"
-# URL for media moderation service
+# Both hostnames serve the same worker (divine-moderation-service).
+# The worker enforces hostname/path routing: /api/* paths must use API_HOSTNAME,
+# /admin/* paths must use ADMIN_HOSTNAME. Can't mix them.
+# moderation-api.divine.video has cold start issues (support-trust-safety#119).
 MODERATION_SERVICE_URL = "https://moderation-api.divine.video"
+MODERATION_ADMIN_URL = "https://moderation-api.divine.video"
 # Allow both the main frontend and Cloudflare Pages preview deployments
 ALLOWED_ORIGINS = "https://relay.admin.divine.video,*.divine-relay-manager.pages.dev,*.divine-relay-admin.pages.dev"
 # CDN domain for media proxy (Blossom admin bypass for blocked content preview)
@@ -57,10 +61,11 @@ database_id = "d000fe55-dfac-4f54-a348-5c57241c2453"
 binding = "REALNESS"
 service = "divine-ai-detector"
 
-# divine-moderation-api not yet deployed to Cloudflare — code falls back to fetch()
-# [[services]]
-# binding = "MODERATION_API"
-# service = "divine-moderation-api"
+# Service binding to divine-moderation-service (bypasses CF Access + no cold starts)
+# Used by handleModerateMedia and handleCheckResult for /api/v1/* calls
+[[services]]
+binding = "MODERATION_API"
+service = "divine-moderation-service"
 
 # Durable Objects for persistent state
 [durable_objects]

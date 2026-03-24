@@ -341,7 +341,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const { nostr } = useNostr();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const { listBannedPubkeys, listBannedEvents, getAllDecisions } = useAdminApi();
+  const { listBannedPubkeys, listBannedEvents, getAllDecisions, fetchReports, fetchResolutionLabels } = useAdminApi();
   const { config, updateConfig } = useAppContext();
   const queryClient = useQueryClient();
   const isMobile = useIsMobile();
@@ -355,32 +355,20 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // Check for deep link params to force fresh data fetch
   const hasDeepLinkParams = !!(searchParams.get('event') || searchParams.get('pubkey'));
 
-  // All polling queries use retry: false and swallow errors to keep previous data.
-  // Network failures to the staging/production API should never destabilize the UI.
+  // Reports and resolution labels fetched via server-side relay query through
+  // the worker. Replaces browser-side WebSocket (nostrify NPool) which served
+  // stale cached data. The worker opens a fresh WebSocket per request.
   const { data: reports, isLoading, error, refetch, isFetching, dataUpdatedAt } = useQuery({
     queryKey: ['reports', relayUrl],
-    queryFn: async ({ signal }) => {
-      const events = await nostr.query(
-        [{ kinds: [1984], limit: 200 }],
-        { signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]) }
-      );
-      return events.sort((a, b) => b.created_at - a.created_at);
-    },
+    queryFn: fetchReports,
     refetchInterval: 15 * 1000,
     placeholderData: (previousData) => previousData,
     retry: false,
   });
 
-  // Query for resolution labels (kind 1985 with moderation/resolution namespace)
   const { data: resolutionLabels } = useQuery({
     queryKey: ['resolution-labels', relayUrl],
-    queryFn: async ({ signal }) => {
-      const events = await nostr.query(
-        [{ kinds: [1985], '#L': ['moderation/resolution'], limit: 500 }],
-        { signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]) }
-      );
-      return events;
-    },
+    queryFn: fetchResolutionLabels,
     refetchInterval: 15 * 1000,
     placeholderData: (previousData) => previousData,
     retry: false,

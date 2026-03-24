@@ -52,7 +52,9 @@ interface Env {
   // Relay management configuration
   MANAGEMENT_PATH?: string;  // Path for NIP-86 management API, defaults to "/management"
   MANAGEMENT_URL?: string;   // Full URL override for NIP-86 management API (for local dev with HTTP)
-  MODERATION_SERVICE_URL?: string;  // URL for media moderation service
+  MODERATION_SERVICE_URL?: string;  // URL for public moderation API (check-result, status)
+  MODERATION_ADMIN_URL?: string;    // URL for CF Access-protected moderation service (/api/v1/moderate, /api/v1/notify)
+  SERVICE_API_TOKEN?: string;       // Bearer token for moderation-service API auth (via service binding)
   REALNESS_API_URL?: string;  // URL for AI detection/realness service
   FUNNELCAKE_API_URL?: string;  // Explicit Funnelcake REST API URL (derived from RELAY_URL if not set)
   // Durable Object bindings
@@ -78,14 +80,24 @@ interface ZendeskJWTPayload {
   external_id?: string;
 }
 
-const DEFAULT_MODERATION_SERVICE_URL = 'https://moderation-api.divine.video';
+const DEFAULT_MODERATION_API_URL = 'https://moderation-api.divine.video';
+const DEFAULT_MODERATION_ADMIN_URL = 'https://moderation.admin.divine.video';
 const DEFAULT_REALNESS_API_URL = 'https://realness.admin.divine.video';
 
 /**
- * Get the moderation service URL from env or use default.
+ * Get the public moderation API URL (check-result, status lookups).
+ * No CF Access required — this is the thin public-facing worker.
  */
 function getModerationServiceUrl(env: Env): string {
-  return env.MODERATION_SERVICE_URL || DEFAULT_MODERATION_SERVICE_URL;
+  return env.MODERATION_SERVICE_URL || DEFAULT_MODERATION_API_URL;
+}
+
+/**
+ * Get the CF Access-protected moderation admin URL (/api/v1/moderate, /api/v1/notify).
+ * This is the full moderation-service worker with D1, DM sending, Blossom webhooks.
+ */
+function getModerationAdminUrl(env: Env): string {
+  return env.MODERATION_ADMIN_URL || DEFAULT_MODERATION_ADMIN_URL;
 }
 
 /**
@@ -269,6 +281,26 @@ export default {
       // Funnelcake REST API proxy -- fast ClickHouse-backed reads
       if (path.startsWith('/api/funnelcake/')) {
         return handleFunnelcakeProxy(path, env, corsHeaders);
+      }
+
+      // Server-side relay queries for reports and resolution labels.
+      // Replaces browser-side WebSocket queries that served stale data due to
+      // nostrify NPool connection caching. The worker opens a fresh WebSocket
+      // per request via queryRelay(), so every poll gets current data.
+      if (path === '/api/reports' && request.method === 'GET') {
+        const result = await queryRelay({ kinds: [1984], limit: 200 }, env.RELAY_URL);
+        if (!result.success) {
+          return jsonResponse({ success: false, error: result.error }, 502, corsHeaders);
+        }
+        return jsonResponse({ success: true, events: result.events }, 200, corsHeaders);
+      }
+
+      if (path === '/api/resolution-labels' && request.method === 'GET') {
+        const result = await queryRelay({ kinds: [1985], '#L': ['moderation/resolution'], limit: 500 }, env.RELAY_URL);
+        if (!result.success) {
+          return jsonResponse({ success: false, error: result.error }, 502, corsHeaders);
+        }
+        return jsonResponse({ success: true, events: result.events }, 200, corsHeaders);
       }
 
       // 404 for unknown routes
@@ -1046,20 +1078,25 @@ async function handleModerateMedia(
       return jsonResponse({ success: false, error: 'Missing action' }, 400, corsHeaders);
     }
 
-    // Require Zero Trust credentials for moderation service
-    const cfAccess = await getCfAccessCredentials(env);
-    if (!cfAccess) {
-      return jsonResponse({ success: false, error: 'CF_ACCESS credentials not configured' }, 500, corsHeaders);
-    }
-
-    // Build headers with Cloudflare Access service token
+    // Build auth headers: Bearer token for service binding, CF Access for HTTP fallback
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
-      'CF-Access-Client-Id': cfAccess.clientId,
-      'CF-Access-Client-Secret': cfAccess.clientSecret,
     };
 
-    const response = await fetch(`${getModerationServiceUrl(env)}/api/v1/moderate`, {
+    if (env.MODERATION_API && env.SERVICE_API_TOKEN) {
+      // Service binding: authenticate via Bearer token
+      headers['Authorization'] = `Bearer ${env.SERVICE_API_TOKEN}`;
+    } else {
+      // HTTP fallback: authenticate via CF Access service token
+      const cfAccess = await getCfAccessCredentials(env);
+      if (!cfAccess) {
+        return jsonResponse({ success: false, error: 'CF_ACCESS credentials not configured' }, 500, corsHeaders);
+      }
+      headers['CF-Access-Client-Id'] = cfAccess.clientId;
+      headers['CF-Access-Client-Secret'] = cfAccess.clientSecret;
+    }
+
+    const moderationRequest = new Request(`${getModerationAdminUrl(env)}/api/v1/moderate`, {
       method: 'POST',
       headers,
       body: JSON.stringify({
@@ -1069,6 +1106,11 @@ async function handleModerateMedia(
         source: 'relay-manager',
       }),
     });
+
+    // Use service binding if available (bypasses CF Access + network), fall back to fetch
+    const response = env.MODERATION_API
+      ? await env.MODERATION_API.fetch(moderationRequest)
+      : await fetch(moderationRequest);
 
     if (!response.ok) {
       const errorText = await response.text();

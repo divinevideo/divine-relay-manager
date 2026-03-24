@@ -52,6 +52,12 @@ export function useAdminApi() {
     listBannedEvents: () =>
       adminApi.listBannedEvents(apiUrl),
 
+    // Server-side relay queries (replaces browser WebSocket for freshness)
+    fetchReports: () =>
+      adminApi.fetchReports(apiUrl),
+    fetchResolutionLabels: () =>
+      adminApi.fetchResolutionLabels(apiUrl),
+
     // Labels
     publishLabel: (params: adminApi.LabelParams) =>
       adminApi.publishLabel(apiUrl, params),

@@ -211,6 +211,18 @@ export async function listBannedEvents(apiUrl: string): Promise<Array<{ id: stri
   return callRelayRpc<Array<{ id: string; reason?: string }>>(apiUrl, 'listbannedevents');
 }
 
+// Fetch reports via server-side relay query (replaces browser WebSocket)
+export async function fetchReports(apiUrl: string): Promise<NostrEvent[]> {
+  const data = await apiRequest<{ success: boolean; events: NostrEvent[] }>(apiUrl, '/api/reports', 'GET');
+  return (data.events || []).sort((a: NostrEvent, b: NostrEvent) => b.created_at - a.created_at);
+}
+
+// Fetch resolution labels via server-side relay query (replaces browser WebSocket)
+export async function fetchResolutionLabels(apiUrl: string): Promise<NostrEvent[]> {
+  const data = await apiRequest<{ success: boolean; events: NostrEvent[] }>(apiUrl, '/api/resolution-labels', 'GET');
+  return data.events || [];
+}
+
 // Publish a NIP-32 label (kind 1985)
 export async function publishLabel(apiUrl: string, params: LabelParams): Promise<ApiResponse> {
   const tags: string[][] = [
