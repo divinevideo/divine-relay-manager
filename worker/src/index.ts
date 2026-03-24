@@ -52,7 +52,8 @@ interface Env {
   // Relay management configuration
   MANAGEMENT_PATH?: string;  // Path for NIP-86 management API, defaults to "/management"
   MANAGEMENT_URL?: string;   // Full URL override for NIP-86 management API (for local dev with HTTP)
-  MODERATION_SERVICE_URL?: string;  // URL for media moderation service
+  MODERATION_SERVICE_URL?: string;  // URL for public moderation API (check-result, status)
+  MODERATION_ADMIN_URL?: string;    // URL for CF Access-protected moderation service (/api/v1/moderate, /api/v1/notify)
   REALNESS_API_URL?: string;  // URL for AI detection/realness service
   FUNNELCAKE_API_URL?: string;  // Explicit Funnelcake REST API URL (derived from RELAY_URL if not set)
   // Durable Object bindings
@@ -78,14 +79,24 @@ interface ZendeskJWTPayload {
   external_id?: string;
 }
 
-const DEFAULT_MODERATION_SERVICE_URL = 'https://moderation-api.divine.video';
+const DEFAULT_MODERATION_API_URL = 'https://moderation-api.divine.video';
+const DEFAULT_MODERATION_ADMIN_URL = 'https://moderation.admin.divine.video';
 const DEFAULT_REALNESS_API_URL = 'https://realness.admin.divine.video';
 
 /**
- * Get the moderation service URL from env or use default.
+ * Get the public moderation API URL (check-result, status lookups).
+ * No CF Access required — this is the thin public-facing worker.
  */
 function getModerationServiceUrl(env: Env): string {
-  return env.MODERATION_SERVICE_URL || DEFAULT_MODERATION_SERVICE_URL;
+  return env.MODERATION_SERVICE_URL || DEFAULT_MODERATION_API_URL;
+}
+
+/**
+ * Get the CF Access-protected moderation admin URL (/api/v1/moderate, /api/v1/notify).
+ * This is the full moderation-service worker with D1, DM sending, Blossom webhooks.
+ */
+function getModerationAdminUrl(env: Env): string {
+  return env.MODERATION_ADMIN_URL || DEFAULT_MODERATION_ADMIN_URL;
 }
 
 /**
@@ -1079,7 +1090,7 @@ async function handleModerateMedia(
       'CF-Access-Client-Secret': cfAccess.clientSecret,
     };
 
-    const response = await fetch(`${getModerationServiceUrl(env)}/api/v1/moderate`, {
+    const response = await fetch(`${getModerationAdminUrl(env)}/api/v1/moderate`, {
       method: 'POST',
       headers,
       body: JSON.stringify({
