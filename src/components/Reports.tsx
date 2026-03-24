@@ -355,6 +355,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // Check for deep link params to force fresh data fetch
   const hasDeepLinkParams = !!(searchParams.get('event') || searchParams.get('pubkey'));
 
+  // All polling queries use retry: false and swallow errors to keep previous data.
+  // Network failures to the staging/production API should never destabilize the UI.
   const { data: reports, isLoading, error, refetch, isFetching, dataUpdatedAt } = useQuery({
     queryKey: ['reports', relayUrl],
     queryFn: async ({ signal }) => {
@@ -364,7 +366,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       );
       return events.sort((a, b) => b.created_at - a.created_at);
     },
-    refetchInterval: 15 * 1000, // Poll every 15 seconds for team consistency
+    refetchInterval: 15 * 1000,
+    placeholderData: (previousData) => previousData,
+    retry: false,
   });
 
   // Query for resolution labels (kind 1985 with moderation/resolution namespace)
@@ -378,6 +382,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       return events;
     },
     refetchInterval: 15 * 1000,
+    placeholderData: (previousData) => previousData,
+    retry: false,
   });
 
   // Query banned pubkeys from relay (NIP-86 RPC)
@@ -386,16 +392,16 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     queryKey: ['banned-pubkeys'],
     queryFn: async () => {
       try {
-        const pubkeys = await listBannedPubkeys();
-
-        return pubkeys;
+        return await listBannedPubkeys();
       } catch (error) {
         console.warn('NIP-86 listbannedpubkeys failed:', error);
-        return [];
+        throw error; // let React Query handle it, but retry: false + placeholderData keeps UI stable
       }
     },
     staleTime: hasDeepLinkParams ? 0 : 30 * 1000,
     refetchInterval: 15 * 1000,
+    placeholderData: (previousData) => previousData,
+    retry: false,
   });
 
   // Query banned/deleted events from relay (NIP-86 RPC)
@@ -406,35 +412,31 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         return await listBannedEvents();
       } catch (error) {
         console.warn('NIP-86 listbannedevents failed:', error);
-        return [];
+        throw error;
       }
     },
     staleTime: 30 * 1000,
     refetchInterval: 15 * 1000,
+    placeholderData: (previousData) => previousData,
+    retry: false,
   });
 
   // Query all moderation decisions from our D1 database.
-  // Uses placeholderData to keep showing stale results on refetch errors
-  // instead of flickering to 0 reports (Liz's PR #31 bug #2 fix).
   const { data: allDecisions, error: decisionsError, isLoading: decisionsLoading } = useQuery({
     queryKey: ['decisions'],
     queryFn: async () => {
-      const decisions = await getAllDecisions();
-
-      return decisions;
+      try {
+        return await getAllDecisions();
+      } catch (error) {
+        console.warn('[Reports] Decisions query failed:', error);
+        throw error;
+      }
     },
     staleTime: 30 * 1000,
     refetchInterval: 15 * 1000,
     placeholderData: (previousData) => previousData,
-    retry: 2,
+    retry: false,
   });
-
-  // Debug: log any decisions error
-  useEffect(() => {
-    if (decisionsError) {
-      console.error('[Reports] Decisions query error:', decisionsError);
-    }
-  }, [decisionsError]);
 
   // Track relative time since last data update for freshness indicator
   const [lastUpdatedText, setLastUpdatedText] = useState<string>('');
