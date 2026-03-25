@@ -2,6 +2,8 @@
 // ABOUTME: Handles signing, publishing events, and NIP-86 relay management via the server-side Worker
 // ABOUTME: All functions accept apiUrl as first parameter to support environment switching
 
+import type { NostrEvent } from "@nostrify/nostrify";
+
 // Build headers with CF Access service token for cross-origin API requests.
 // The service token authenticates the frontend to CF Access policies on api-relay-* domains.
 export function getApiHeaders(contentType = 'application/json'): Record<string, string> {

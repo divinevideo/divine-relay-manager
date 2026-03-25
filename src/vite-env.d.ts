@@ -16,20 +16,11 @@ interface ImportMeta {
   readonly env: ImportMetaEnv;
 }
 
-// NIP-07 window.nostr interface
-interface NostrEvent {
-  id?: string;
-  kind: number;
-  content: string;
-  tags: string[][];
-  created_at: number;
-  pubkey?: string;
-  sig?: string;
-}
-
-interface NostrSigner {
+// NIP-07 window.nostr signer interface
+// Uses NostrEvent from @nostrify/nostrify — do not redeclare here
+interface Nip07Signer {
   getPublicKey(): Promise<string>;
-  signEvent(event: NostrEvent): Promise<NostrEvent>;
+  signEvent(event: Record<string, unknown>): Promise<Record<string, unknown>>;
   nip04?: {
     encrypt(pubkey: string, plaintext: string): Promise<string>;
     decrypt(pubkey: string, ciphertext: string): Promise<string>;
@@ -42,6 +33,6 @@ interface NostrSigner {
 
 declare global {
   interface Window {
-    nostr?: NostrSigner;
+    nostr?: Nip07Signer;
   }
 }

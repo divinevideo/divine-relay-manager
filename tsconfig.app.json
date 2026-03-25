@@ -27,5 +27,5 @@
       "@/*": ["./src/*"]
     }
   },
-  "include": ["src", "src/types/nostr.d.ts"]
+  "include": ["src"]
 }
