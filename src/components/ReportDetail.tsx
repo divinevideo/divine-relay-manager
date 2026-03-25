@@ -660,7 +660,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   }, [allReportsForTarget]);
 
   const unblockMediaMutation = useMutation({
-    mutationFn: async ({ hashes, reason, logAction = 'unblock_media' }: { hashes: string[]; reason: string; logAction?: string }) => {
+    mutationFn: async ({ hashes, reason, logAction = 'unblock_media' }: { hashes: string[]; reason: string; logAction?: 'unblock_media' | 'unrestrict_media' }) => {
       // Unblock all media hashes (sends SAFE to moderation-service)
       const results = await Promise.all(
         hashes.map(sha256 => unblockMedia(sha256, reason))

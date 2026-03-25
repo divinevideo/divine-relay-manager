@@ -36,9 +36,8 @@ AUTO_HIDE_ENABLED = "true"
 TRUSTED_CLIENTS = "diVine,divine-web,divine-mobile"
 # Path for NIP-86 management API (Funnelcake uses /management)
 MANAGEMENT_PATH = "/"
-# Both hostnames serve the same worker (divine-moderation-service).
-# The worker enforces hostname/path routing: /api/* paths must use API_HOSTNAME,
-# /admin/* paths must use ADMIN_HOSTNAME. Can't mix them.
+# Both URLs point to divine-moderation-service. Currently same hostname;
+# service binding (MODERATION_API) is preferred and bypasses hostname routing.
 # moderation-api.divine.video has cold start issues (support-trust-safety#119).
 MODERATION_SERVICE_URL = "https://moderation-api.divine.video"
 MODERATION_ADMIN_URL = "https://moderation-api.divine.video"
@@ -62,7 +61,7 @@ binding = "REALNESS"
 service = "divine-ai-detector"
 
 # Service binding to divine-moderation-service (bypasses CF Access + no cold starts)
-# Used by handleModerateMedia and handleCheckResult for /api/v1/* calls
+# Used by handleModerateMedia (/api/v1/moderate) and handleCheckResult (/check-result/{sha256})
 [[services]]
 binding = "MODERATION_API"
 service = "divine-moderation-service"

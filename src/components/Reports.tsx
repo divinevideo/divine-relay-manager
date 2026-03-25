@@ -4,7 +4,6 @@
 import { useState, useMemo, useEffect } from "react";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNostr } from "@nostrify/react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useAppContext } from "@/hooks/useAppContext";
 import { getEnvironmentById, getCurrentEnvironment } from "@/lib/environments";
@@ -338,7 +337,6 @@ function IndividualReportItem({
 }
 
 export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
-  const { nostr } = useNostr();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const { listBannedPubkeys, listBannedEvents, getAllDecisions, fetchReports, fetchResolutionLabels } = useAdminApi();
@@ -410,7 +408,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   });
 
   // Query all moderation decisions from our D1 database.
-  const { data: allDecisions, error: decisionsError, isLoading: decisionsLoading } = useQuery({
+  // retry: false is intentional — placeholderData keeps stale data visible on failure,
+  // and refetchInterval (15s) provides automatic recovery. This avoids stacking retries
+  // on cold-start timeouts which compound latency. (Previously retry: 2, changed to
+  // match the resilience pattern across all polling queries in this component.)
+  const { data: allDecisions, isLoading: decisionsLoading } = useQuery({
     queryKey: ['decisions'],
     queryFn: async () => {
       try {

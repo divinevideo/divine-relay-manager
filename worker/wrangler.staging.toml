@@ -36,8 +36,8 @@ AUTO_HIDE_ENABLED = "true"
 TRUSTED_CLIENTS = "diVine,divine-web,divine-mobile"
 # Path for NIP-86 management API
 MANAGEMENT_PATH = "/"
-# Both hostnames serve the same worker (divine-moderation-service).
-# The worker enforces hostname/path routing: /api/* must use API_HOSTNAME.
+# Both URLs point to divine-moderation-service. Currently same hostname;
+# service binding (MODERATION_API) is preferred and bypasses hostname routing.
 MODERATION_SERVICE_URL = "https://moderation-api.divine.video"
 MODERATION_ADMIN_URL = "https://moderation-api.divine.video"
 # Allow both the main frontend and Cloudflare Pages preview deployments

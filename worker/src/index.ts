@@ -35,7 +35,7 @@ interface Env {
   CF_ACCESS_CLIENT_SECRET?: string | SecretStoreSecret;
   // Service binding to divine-realness worker (bypasses CF Access)
   REALNESS?: Fetcher;
-  // Service binding to divine-moderation-api worker for public moderation lookups
+  // Service binding to divine-moderation-service (bypasses CF Access + no cold starts)
   MODERATION_API?: Fetcher;
   // Zendesk integration
   ZENDESK_SUBDOMAIN?: string;
@@ -80,24 +80,22 @@ interface ZendeskJWTPayload {
   external_id?: string;
 }
 
-const DEFAULT_MODERATION_API_URL = 'https://moderation-api.divine.video';
-const DEFAULT_MODERATION_ADMIN_URL = 'https://moderation.admin.divine.video';
-const DEFAULT_REALNESS_API_URL = 'https://realness.admin.divine.video';
-
 /**
  * Get the public moderation API URL (check-result, status lookups).
- * No CF Access required — this is the thin public-facing worker.
+ * Configured via MODERATION_SERVICE_URL in wrangler.*.toml.
  */
 function getModerationServiceUrl(env: Env): string {
-  return env.MODERATION_SERVICE_URL || DEFAULT_MODERATION_API_URL;
+  if (!env.MODERATION_SERVICE_URL) throw new Error('MODERATION_SERVICE_URL not configured');
+  return env.MODERATION_SERVICE_URL;
 }
 
 /**
- * Get the CF Access-protected moderation admin URL (/api/v1/moderate, /api/v1/notify).
- * This is the full moderation-service worker with D1, DM sending, Blossom webhooks.
+ * Get the moderation admin URL (/api/v1/moderate, /api/v1/notify).
+ * Configured via MODERATION_ADMIN_URL in wrangler.*.toml.
  */
 function getModerationAdminUrl(env: Env): string {
-  return env.MODERATION_ADMIN_URL || DEFAULT_MODERATION_ADMIN_URL;
+  if (!env.MODERATION_ADMIN_URL) throw new Error('MODERATION_ADMIN_URL not configured');
+  return env.MODERATION_ADMIN_URL;
 }
 
 /**
@@ -1754,7 +1752,10 @@ async function handleRealnessViaHTTP(
   env: Env,
   corsHeaders: Record<string, string>
 ): Promise<Response> {
-  const realnessUrl = env.REALNESS_API_URL || DEFAULT_REALNESS_API_URL;
+  if (!env.REALNESS_API_URL) {
+    return jsonResponse({ success: false, error: 'REALNESS_API_URL not configured' }, 500, corsHeaders);
+  }
+  const realnessUrl = env.REALNESS_API_URL;
 
   // Check CF Access credentials
   const cfAccess = await getCfAccessCredentials(env);
