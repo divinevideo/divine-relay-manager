@@ -487,6 +487,20 @@ export async function verifyMediaBlocked(apiUrl: string, sha256: string): Promis
   }
 }
 
+// Verify that media was actually age-restricted
+export async function verifyAgeRestricted(apiUrl: string, sha256: string): Promise<boolean> {
+  try {
+    // Give the moderation service a moment to process
+    await new Promise(resolve => setTimeout(resolve, 1000));
+
+    // Check the moderation status
+    const status = await checkMediaStatus(apiUrl, sha256);
+    return status?.action === 'AGE_RESTRICTED';
+  } catch {
+    return false;
+  }
+}
+
 // Combined verification for block & delete action
 export interface VerificationResult {
   eventDeleted: boolean;

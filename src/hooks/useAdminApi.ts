@@ -107,6 +107,8 @@ export function useAdminApi() {
       adminApi.verifyEventDeleted(eventId, relayUrl),
     verifyMediaBlocked: (sha256: string) =>
       adminApi.verifyMediaBlocked(apiUrl, sha256),
+    verifyAgeRestricted: (sha256: string) =>
+      adminApi.verifyAgeRestricted(apiUrl, sha256),
     verifyModerationAction: (eventId: string, mediaHashes: string[]) =>
       adminApi.verifyModerationAction(apiUrl, eventId, mediaHashes, relayUrl),
   }), [apiUrl, relayUrl]);

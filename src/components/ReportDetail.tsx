@@ -104,7 +104,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   const {
     banPubkey, deleteEvent, markAsReviewed, moderateMedia, unblockMedia,
     logDecision, deleteDecisions, verifyModerationAction, verifyPubkeyBanned,
-    verifyPubkeyUnbanned, verifyEventDeleted, verifyMediaBlocked,
+    verifyPubkeyUnbanned, verifyEventDeleted, verifyMediaBlocked, verifyAgeRestricted,
     unbanPubkey, callRelayRpc,
   } = useAdminApi();
   const { config } = useAppContext();
@@ -614,9 +614,45 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
       decisionLog.refetch();
       toast({
         title: "Media age-restricted",
-        description: `${hashes.length} media file(s) age-restricted`,
+        description: `${hashes.length} media file(s) age-restricted. Verifying...`,
       });
       setConfirmAgeRestrict(false);
+
+      // Verify the age restriction landed (same pattern as blockMediaMutation)
+      setIsVerifying(true);
+      setVerificationResult(null);
+      try {
+        const verificationResults = await Promise.all(
+          hashes.map(async (hash) => ({
+            hash,
+            restricted: await verifyAgeRestricted(hash),
+          }))
+        );
+        const allRestricted = verificationResults.every(v => v.restricted);
+        const failedCount = verificationResults.filter(v => !v.restricted).length;
+        setVerificationResult({
+          type: 'media',
+          success: allRestricted,
+          message: allRestricted
+            ? 'Age restriction verified - all files restricted'
+            : `Warning: ${failedCount} file(s) may not be restricted`,
+        });
+        toast({
+          title: allRestricted ? "Restriction Verified" : "Verification Warning",
+          description: allRestricted
+            ? "All media confirmed age-restricted"
+            : "Some media may not be restricted - check manually",
+          variant: allRestricted ? "default" : "destructive",
+        });
+      } catch {
+        setVerificationResult({
+          type: 'media',
+          success: false,
+          message: 'Could not verify age restriction status',
+        });
+      } finally {
+        setIsVerifying(false);
+      }
     },
     onError: (error: Error) => {
       toast({

@@ -20,6 +20,7 @@ import {
   publishLabelAndBan,
   markAsReviewed,
   moderateMedia,
+  verifyAgeRestricted,
   logDecision,
   getDecisions,
   extractMediaHashes,
@@ -705,6 +706,54 @@ describe('adminApi', () => {
         const callBody = JSON.parse(lastCall[1].body);
         expect(callBody.action).toBe(action);
       }
+    });
+  });
+
+  describe('verifyAgeRestricted', () => {
+    it('returns true when status is AGE_RESTRICTED after delay', async () => {
+      vi.useFakeTimers();
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ sha256: 'testhash', action: 'AGE_RESTRICTED' }),
+      });
+
+      const promise = verifyAgeRestricted(API_URL, 'testhash');
+      await vi.advanceTimersByTimeAsync(1000);
+      const result = await promise;
+
+      expect(result).toBe(true);
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/check-result/testhash'),
+        expect.anything()
+      );
+      vi.useRealTimers();
+    });
+
+    it('returns false when status is not AGE_RESTRICTED', async () => {
+      vi.useFakeTimers();
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ sha256: 'testhash', action: 'SAFE' }),
+      });
+
+      const promise = verifyAgeRestricted(API_URL, 'testhash');
+      await vi.advanceTimersByTimeAsync(1000);
+      const result = await promise;
+
+      expect(result).toBe(false);
+      vi.useRealTimers();
+    });
+
+    it('returns false on fetch error', async () => {
+      vi.useFakeTimers();
+      mockFetch.mockRejectedValueOnce(new Error('network'));
+
+      const promise = verifyAgeRestricted(API_URL, 'testhash');
+      await vi.advanceTimersByTimeAsync(1000);
+      const result = await promise;
+
+      expect(result).toBe(false);
+      vi.useRealTimers();
     });
   });
 
