@@ -1665,7 +1665,7 @@ async function addZendeskInternalNote(
     const auth = btoa(`${env.ZENDESK_EMAIL}/token:${env.ZENDESK_API_TOKEN}`);
     const url = `https://${env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets/${ticketId}`;
 
-    const payload: { ticket: { comment: { body: string; public: boolean }; status?: string } } = {
+    const payload: { ticket: { comment: { body: string; public: boolean }; status?: string; assignee_email?: string; custom_fields?: Array<{ id: number; value: string }> } } = {
       ticket: {
         comment: {
           body: note,
@@ -1676,6 +1676,17 @@ async function addZendeskInternalNote(
 
     if (solve) {
       payload.ticket.status = 'solved';
+      // Zendesk requires an assignee to solve a ticket (system rule, not enforced via API error).
+      // Without this, the comment is added but the status change is silently ignored.
+      payload.ticket.assignee_email = env.ZENDESK_EMAIL;
+      // Category and Issue are required fields. Auto-categorize triggers set these at creation
+      // for specific report types, but "other" reports are missed (misconfigured trigger).
+      // These defaults are safe: they only overwrite empty fields in practice, since specific
+      // report types already have values set by triggers before we reach the solve step.
+      payload.ticket.custom_fields = [
+        { id: 14559549220879, value: 'trust___safety' },      // Category
+        { id: 14560383908879, value: 'other_content_report' }, // Issue
+      ];
     }
 
     const response = await fetch(url, {
