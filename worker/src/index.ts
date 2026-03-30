@@ -2238,9 +2238,10 @@ async function handleParseReport(
     }
 
     // Parse description with regex
-    const eventMatch = description.match(/Event ID:\s*([a-f0-9]{64})/i);
-    const pubkeyMatch = description.match(/Author Pubkey:\s*([a-f0-9]{64})/i);
-    const violationMatch = description.match(/Violation Type:\s*(\w+)/i);
+    // Tolerates markdown bold (**Event ID:**) and alternate field names (Reported Pubkey vs Author Pubkey)
+    const eventMatch = description.match(/\*{0,2}Event ID:?\*{0,2}\s*([a-f0-9]{64})/i);
+    const pubkeyMatch = description.match(/\*{0,2}(?:Author|Reported) Pubkey:?\*{0,2}\s*([a-f0-9]{64})/i);
+    const violationMatch = description.match(/\*{0,2}(?:Violation Type|Reason):?\*{0,2}\s*(\w[\w\s-]*\w)/i);
 
     const event_id = eventMatch?.[1] || null;
     const author_pubkey = pubkeyMatch?.[1] || null;
