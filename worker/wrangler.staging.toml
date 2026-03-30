@@ -27,6 +27,12 @@ binding = "CF_ACCESS_CLIENT_SECRET"
 store_id = "ef490704b12a4feb91c7feb51229c364"
 secret_name = "CF-Access-Client-Secret"
 
+# Bearer token for moderation-service API auth (via service binding)
+[[secrets_store_secrets]]
+binding = "SERVICE_API_TOKEN"
+store_id = "ef490704b12a4feb91c7feb51229c364"
+secret_name = "SERVICE_API_TOKEN"
+
 [vars]
 RELAY_URL = "wss://relay.staging.divine.video"
 ENVIRONMENT = "staging"
