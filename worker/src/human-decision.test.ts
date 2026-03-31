@@ -87,10 +87,9 @@ function createEnv(db: unknown) {
   };
 }
 
-const mockCtx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() } as unknown as ExecutionContext;
-
 describe('human decision persistence', () => {
   let mockFetch: ReturnType<typeof vi.fn>;
+  let mockCtx: ExecutionContext;
 
   beforeEach(() => {
     mockFetch = vi.fn().mockResolvedValue({
@@ -99,6 +98,7 @@ describe('human decision persistence', () => {
     });
     vi.stubGlobal('fetch', mockFetch);
     vi.stubGlobal('WebSocket', MockWebSocket);
+    mockCtx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() } as unknown as ExecutionContext;
   });
 
   afterEach(() => {
