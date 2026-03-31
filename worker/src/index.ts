@@ -119,7 +119,8 @@ async function getCfAccessCredentials(env: Env): Promise<{ clientId: string; cli
  * Notify moderation-service to send a DM to an affected user.
  * Non-critical side effect — caller must wrap in try/catch.
  *
- * Option A: routes through moderation-service's /api/v1/notify endpoint.
+ * Uses service binding (MODERATION_API) with Bearer token when available,
+ * falls back to fetch() with CF Access headers.
  * If a dedicated DM service is extracted later (support-trust-safety#118),
  * this function is the single call site to update.
  */
@@ -131,19 +132,27 @@ async function notifyModerationService(
   sha256?: string,
   eventId?: string
 ): Promise<void> {
-  const cfAccess = await getCfAccessCredentials(env);
-  if (!cfAccess) {
-    console.warn('[notifyModerationService] CF_ACCESS credentials not configured, skipping DM');
-    return;
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+
+  if (env.MODERATION_API && env.SERVICE_API_TOKEN) {
+    // Service binding: authenticate via Bearer token
+    headers['Authorization'] = `Bearer ${env.SERVICE_API_TOKEN}`;
+  } else {
+    // HTTP fallback: authenticate via CF Access service token
+    const cfAccess = await getCfAccessCredentials(env);
+    if (!cfAccess) {
+      console.warn('[notifyModerationService] No auth credentials configured, skipping DM');
+      return;
+    }
+    headers['CF-Access-Client-Id'] = cfAccess.clientId;
+    headers['CF-Access-Client-Secret'] = cfAccess.clientSecret;
   }
 
-  const response = await fetch(`${getModerationServiceUrl(env)}/api/v1/notify`, {
+  const notifyRequest = new Request(`${getModerationServiceUrl(env)}/api/v1/notify`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'CF-Access-Client-Id': cfAccess.clientId,
-      'CF-Access-Client-Secret': cfAccess.clientSecret,
-    },
+    headers,
     body: JSON.stringify({
       recipientPubkey,
       action,
@@ -152,6 +161,10 @@ async function notifyModerationService(
       ...(eventId && { eventId }),
     }),
   });
+
+  const response = env.MODERATION_API
+    ? await env.MODERATION_API.fetch(notifyRequest)
+    : await fetch(notifyRequest);
 
   if (!response.ok) {
     const errorText = await response.text();
