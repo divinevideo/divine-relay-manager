@@ -87,6 +87,8 @@ function createEnv(db: unknown) {
   };
 }
 
+const mockCtx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() } as unknown as ExecutionContext;
+
 describe('human decision persistence', () => {
   let mockFetch: ReturnType<typeof vi.fn>;
 
@@ -119,7 +121,7 @@ describe('human decision persistence', () => {
         }),
       });
 
-      const response = await worker.fetch(request, env as never);
+      const response = await worker.fetch(request, env as never, mockCtx);
       expect(response.status).toBe(200);
 
       // Should have an INSERT into moderation_targets
@@ -156,7 +158,7 @@ describe('human decision persistence', () => {
           }),
         });
 
-        const response = await worker.fetch(request, env as never);
+        const response = await worker.fetch(request, env as never, mockCtx);
         expect(response.status).toBe(200);
 
         const targetInserts = sqlLog.filter(s => s.sql.includes('moderation_targets'));
@@ -182,7 +184,7 @@ describe('human decision persistence', () => {
         headers: { 'Cf-Access-Jwt-Assertion': 'test' },
       });
 
-      const response = await worker.fetch(request, env as never);
+      const response = await worker.fetch(request, env as never, mockCtx);
       const body = await response.json() as { success: boolean };
       expect(body.success).toBe(true);
 
@@ -226,7 +228,7 @@ describe('human decision persistence', () => {
         }),
       });
 
-      const response = await worker.fetch(request, env as never);
+      const response = await worker.fetch(request, env as never, mockCtx);
       expect(response.status).toBe(200);
 
       // Should have an INSERT into moderation_targets for the target event
@@ -262,7 +264,7 @@ describe('human decision persistence', () => {
         }),
       });
 
-      const response = await worker.fetch(request, env as never);
+      const response = await worker.fetch(request, env as never, mockCtx);
       expect(response.status).toBe(200);
 
       // Should NOT have an INSERT into moderation_targets
@@ -270,6 +272,78 @@ describe('human decision persistence', () => {
         s.sql.includes('moderation_targets') && s.sql.includes('INSERT')
       );
       expect(targetInserts.length).toBe(0);
+    });
+  });
+
+  describe('DM notification failure isolation', () => {
+    it('banpubkey via relay-rpc succeeds when notify fails', async () => {
+      const { db } = createMockDB();
+      const env = createEnv(db);
+      // No MODERATION_ADMIN_URL -- notifyModerationService will throw
+
+      const request = new Request('http://localhost/api/relay-rpc', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        body: JSON.stringify({
+          method: 'banpubkey',
+          params: ['abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234', 'spam'],
+        }),
+      });
+
+      const response = await worker.fetch(request, env as never, mockCtx);
+      expect(response.status).toBe(200);
+      const body = await response.json() as { success: boolean };
+      expect(body.success).toBe(true);
+
+      // waitUntil should have been called with the DM promise
+      expect(mockCtx.waitUntil).toHaveBeenCalled();
+    });
+
+    it('ban_pubkey via moderate succeeds when notify fails', async () => {
+      const { db } = createMockDB();
+      const env = createEnv(db);
+      // No MODERATION_ADMIN_URL -- notifyModerationService will throw
+
+      const request = new Request('http://localhost/api/moderate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        body: JSON.stringify({
+          action: 'ban_pubkey',
+          pubkey: 'abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234',
+          reason: 'spam',
+        }),
+      });
+
+      const response = await worker.fetch(request, env as never, mockCtx);
+      expect(response.status).toBe(200);
+      const body = await response.json() as { success: boolean };
+      expect(body.success).toBe(true);
+
+      expect(mockCtx.waitUntil).toHaveBeenCalled();
+    });
+
+    it('delete_event via moderate succeeds when notify fails', async () => {
+      const { db } = createMockDB();
+      const env = createEnv(db);
+      // No MODERATION_ADMIN_URL -- notifyModerationService will throw
+
+      const request = new Request('http://localhost/api/moderate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        body: JSON.stringify({
+          action: 'delete_event',
+          eventId: 'event_abc123',
+          pubkey: 'abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234',
+          reason: 'Content violation',
+        }),
+      });
+
+      const response = await worker.fetch(request, env as never, mockCtx);
+      expect(response.status).toBe(200);
+      const body = await response.json() as { success: boolean };
+      expect(body.success).toBe(true);
+
+      expect(mockCtx.waitUntil).toHaveBeenCalled();
     });
   });
 });

@@ -150,7 +150,7 @@ async function notifyModerationService(
     headers['CF-Access-Client-Secret'] = cfAccess.clientSecret;
   }
 
-  const notifyRequest = new Request(`${getModerationServiceUrl(env)}/api/v1/notify`, {
+  const notifyRequest = new Request(`${getModerationAdminUrl(env)}/api/v1/notify`, {
     method: 'POST',
     headers,
     body: JSON.stringify({
@@ -241,7 +241,7 @@ function verifyAdminAccess(request: Request, env: Env): string | null {
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
 
@@ -282,11 +282,11 @@ export default {
       }
 
       if (path === '/api/moderate' && request.method === 'POST') {
-        return handleModerate(request, env, corsHeaders);
+        return handleModerate(request, env, corsHeaders, ctx);
       }
 
       if (path === '/api/relay-rpc' && request.method === 'POST') {
-        return handleRelayRpc(request, env, corsHeaders);
+        return handleRelayRpc(request, env, corsHeaders, ctx);
       }
 
       if (path === '/api/summarize-user' && request.method === 'POST') {
@@ -539,7 +539,8 @@ async function handlePublish(
 async function handleModerate(
   request: Request,
   env: Env,
-  corsHeaders: Record<string, string>
+  corsHeaders: Record<string, string>,
+  ctx?: ExecutionContext
 ): Promise<Response> {
   const body = (await request.json()) as {
     action: string;
@@ -602,13 +603,11 @@ async function handleModerate(
           console.error('[handleModerate] Zendesk sync error:', err);
         }
 
-        // DM the content creator about the deletion (non-critical side effect)
+        // DM the content creator about the deletion (non-critical, off response path)
         if (body.pubkey) {
-          try {
-            await notifyModerationService(env, body.pubkey, 'PERMANENT_BAN', body.reason || 'Content removed by moderator', undefined, body.eventId);
-          } catch (err) {
-            console.error('[handleModerate] DM notification error:', err);
-          }
+          const dmPromise = notifyModerationService(env, body.pubkey, 'PERMANENT_BAN', body.reason || 'Content removed by moderator', undefined, body.eventId)
+            .catch(err => console.error('[handleModerate] DM notification error:', err));
+          if (ctx) ctx.waitUntil(dmPromise);
         }
 
         return jsonResponse({ success: true, eventId: body.eventId }, 200, corsHeaders);
@@ -680,13 +679,11 @@ async function handleModerate(
     console.error('[handleModerate] Zendesk sync error:', err);
   }
 
-  // DM the banned user (non-critical side effect)
+  // DM the banned user (non-critical, off response path)
   if (body.action === 'ban_pubkey' && body.pubkey) {
-    try {
-      await notifyModerationService(env, body.pubkey, 'ACCOUNT_SUSPENDED', body.reason || 'Account suspended by moderator');
-    } catch (err) {
-      console.error('[handleModerate] DM notification error:', err);
-    }
+    const dmPromise = notifyModerationService(env, body.pubkey, 'ACCOUNT_SUSPENDED', body.reason || 'Account suspended by moderator')
+      .catch(err => console.error('[handleModerate] DM notification error:', err));
+    if (ctx) ctx.waitUntil(dmPromise);
   }
 
   return jsonResponse({ success: true, event }, 200, corsHeaders);
@@ -695,7 +692,8 @@ async function handleModerate(
 async function handleRelayRpc(
   request: Request,
   env: Env,
-  corsHeaders: Record<string, string>
+  corsHeaders: Record<string, string>,
+  ctx?: ExecutionContext
 ): Promise<Response> {
   const body = (await request.json()) as {
     method: string;
@@ -713,17 +711,15 @@ async function handleRelayRpc(
     return jsonResponse({ success: false, error: result.error }, 400, corsHeaders);
   }
 
-  // DM the banned user (non-critical side effect)
+  // DM the banned user (non-critical, off response path)
   // This is the actual ban path used by the UI -- handleModerate's ban_pubkey
   // case exists but is not called by any frontend component.
   if (body.method === 'banpubkey' && body.params?.[0]) {
     const pubkey = String(body.params[0]);
     const reason = body.params[1] ? String(body.params[1]) : undefined;
-    try {
-      await notifyModerationService(env, pubkey, 'ACCOUNT_SUSPENDED', reason || 'Account suspended by moderator');
-    } catch (err) {
-      console.error('[handleRelayRpc] DM notification error:', err);
-    }
+    const dmPromise = notifyModerationService(env, pubkey, 'ACCOUNT_SUSPENDED', reason || 'Account suspended by moderator')
+      .catch(err => console.error('[handleRelayRpc] DM notification error:', err));
+    if (ctx) ctx.waitUntil(dmPromise);
   }
 
   return new Response(JSON.stringify({ success: true, result: result.result }), {
