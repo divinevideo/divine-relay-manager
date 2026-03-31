@@ -4,7 +4,6 @@
 import { useState, useMemo, useEffect } from "react";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNostr } from "@nostrify/react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useAppContext } from "@/hooks/useAppContext";
 import { getEnvironmentById, getCurrentEnvironment } from "@/lib/environments";
@@ -338,10 +337,9 @@ function IndividualReportItem({
 }
 
 export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
-  const { nostr } = useNostr();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const { listBannedPubkeys, listBannedEvents, getAllDecisions } = useAdminApi();
+  const { listBannedPubkeys, listBannedEvents, getAllDecisions, fetchReports, fetchResolutionLabels } = useAdminApi();
   const { config, updateConfig } = useAppContext();
   const queryClient = useQueryClient();
   const isMobile = useIsMobile();
@@ -355,29 +353,23 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // Check for deep link params to force fresh data fetch
   const hasDeepLinkParams = !!(searchParams.get('event') || searchParams.get('pubkey'));
 
+  // Reports and resolution labels fetched via server-side relay query through
+  // the worker. Replaces browser-side WebSocket (nostrify NPool) which served
+  // stale cached data. The worker opens a fresh WebSocket per request.
   const { data: reports, isLoading, error, refetch, isFetching, dataUpdatedAt } = useQuery({
     queryKey: ['reports', relayUrl],
-    queryFn: async ({ signal }) => {
-      const events = await nostr.query(
-        [{ kinds: [1984], limit: 200 }],
-        { signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]) }
-      );
-      return events.sort((a, b) => b.created_at - a.created_at);
-    },
-    refetchInterval: 15 * 1000, // Poll every 15 seconds for team consistency
+    queryFn: fetchReports,
+    refetchInterval: 15 * 1000,
+    placeholderData: (previousData) => previousData,
+    retry: false,
   });
 
-  // Query for resolution labels (kind 1985 with moderation/resolution namespace)
   const { data: resolutionLabels } = useQuery({
     queryKey: ['resolution-labels', relayUrl],
-    queryFn: async ({ signal }) => {
-      const events = await nostr.query(
-        [{ kinds: [1985], '#L': ['moderation/resolution'], limit: 500 }],
-        { signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]) }
-      );
-      return events;
-    },
+    queryFn: fetchResolutionLabels,
     refetchInterval: 15 * 1000,
+    placeholderData: (previousData) => previousData,
+    retry: false,
   });
 
   // Query banned pubkeys from relay (NIP-86 RPC)
@@ -386,16 +378,16 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     queryKey: ['banned-pubkeys'],
     queryFn: async () => {
       try {
-        const pubkeys = await listBannedPubkeys();
-
-        return pubkeys;
+        return await listBannedPubkeys();
       } catch (error) {
         console.warn('NIP-86 listbannedpubkeys failed:', error);
-        return [];
+        throw error; // let React Query handle it, but retry: false + placeholderData keeps UI stable
       }
     },
     staleTime: hasDeepLinkParams ? 0 : 30 * 1000,
     refetchInterval: 15 * 1000,
+    placeholderData: (previousData) => previousData,
+    retry: false,
   });
 
   // Query banned/deleted events from relay (NIP-86 RPC)
@@ -406,35 +398,35 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         return await listBannedEvents();
       } catch (error) {
         console.warn('NIP-86 listbannedevents failed:', error);
-        return [];
+        throw error;
       }
     },
     staleTime: 30 * 1000,
     refetchInterval: 15 * 1000,
+    placeholderData: (previousData) => previousData,
+    retry: false,
   });
 
   // Query all moderation decisions from our D1 database.
-  // Uses placeholderData to keep showing stale results on refetch errors
-  // instead of flickering to 0 reports (Liz's PR #31 bug #2 fix).
-  const { data: allDecisions, error: decisionsError, isLoading: decisionsLoading } = useQuery({
+  // retry: false is intentional — placeholderData keeps stale data visible on failure,
+  // and refetchInterval (15s) provides automatic recovery. This avoids stacking retries
+  // on cold-start timeouts which compound latency. (Previously retry: 2, changed to
+  // match the resilience pattern across all polling queries in this component.)
+  const { data: allDecisions, isLoading: decisionsLoading } = useQuery({
     queryKey: ['decisions'],
     queryFn: async () => {
-      const decisions = await getAllDecisions();
-
-      return decisions;
+      try {
+        return await getAllDecisions();
+      } catch (error) {
+        console.warn('[Reports] Decisions query failed:', error);
+        throw error;
+      }
     },
     staleTime: 30 * 1000,
     refetchInterval: 15 * 1000,
     placeholderData: (previousData) => previousData,
-    retry: 2,
+    retry: false,
   });
-
-  // Debug: log any decisions error
-  useEffect(() => {
-    if (decisionsError) {
-      console.error('[Reports] Decisions query error:', decisionsError);
-    }
-  }, [decisionsError]);
 
   // Track relative time since last data update for freshness indicator
   const [lastUpdatedText, setLastUpdatedText] = useState<string>('');

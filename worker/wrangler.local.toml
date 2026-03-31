@@ -19,8 +19,10 @@ AUTO_HIDE_ENABLED = "false"
 TRUSTED_CLIENTS = "diVine,divine-web,divine-mobile"
 # Path for NIP-86 management API (appended to relay URL converted to HTTPS)
 MANAGEMENT_PATH = "/"
-# URL for media moderation service
+# URLs for divine-moderation-service (no service binding in local dev)
 MODERATION_SERVICE_URL = "https://moderation-api.divine.video"
+MODERATION_ADMIN_URL = "https://moderation-api.divine.video"
+REALNESS_API_URL = "https://realness.admin.divine.video"
 # Allow both the main frontend and Cloudflare Pages preview deployments
 ALLOWED_ORIGINS = "https://relay.admin.divine.video,*.divine-relay-manager.pages.dev,*.divine-relay-admin.pages.dev"
 # Zendesk custom field IDs for webhook callback
@@ -38,10 +40,10 @@ database_id = "829f06cf-294b-4491-8611-30fc53df2589"
 binding = "REALNESS"
 service = "divine-ai-detector"
 
-# TODO: uncomment when divine-moderation-api worker is deployed to Cloudflare
+# TODO: uncomment when running divine-moderation-service locally
 # [[services]]
 # binding = "MODERATION_API"
-# service = "divine-moderation-api"
+# service = "divine-moderation-service"
 
 # Durable Objects for persistent state (needed for local dev)
 [durable_objects]

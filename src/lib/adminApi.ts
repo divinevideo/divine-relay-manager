@@ -2,6 +2,8 @@
 // ABOUTME: Handles signing, publishing events, and NIP-86 relay management via the server-side Worker
 // ABOUTME: All functions accept apiUrl as first parameter to support environment switching
 
+import type { NostrEvent } from "@nostrify/nostrify";
+
 // Build headers with CF Access service token for cross-origin API requests.
 // The service token authenticates the frontend to CF Access policies on api-relay-* domains.
 export function getApiHeaders(contentType = 'application/json'): Record<string, string> {
@@ -209,6 +211,18 @@ export async function listBannedPubkeys(apiUrl: string): Promise<BannedPubkeyEnt
 // List banned events
 export async function listBannedEvents(apiUrl: string): Promise<Array<{ id: string; reason?: string }>> {
   return callRelayRpc<Array<{ id: string; reason?: string }>>(apiUrl, 'listbannedevents');
+}
+
+// Fetch reports via server-side relay query (replaces browser WebSocket)
+export async function fetchReports(apiUrl: string): Promise<NostrEvent[]> {
+  const data = await apiRequest<{ success: boolean; events: NostrEvent[] }>(apiUrl, '/api/reports', 'GET');
+  return (data.events || []).sort((a: NostrEvent, b: NostrEvent) => b.created_at - a.created_at);
+}
+
+// Fetch resolution labels via server-side relay query (replaces browser WebSocket)
+export async function fetchResolutionLabels(apiUrl: string): Promise<NostrEvent[]> {
+  const data = await apiRequest<{ success: boolean; events: NostrEvent[] }>(apiUrl, '/api/resolution-labels', 'GET');
+  return data.events || [];
 }
 
 // Publish a NIP-32 label (kind 1985)
@@ -468,6 +482,20 @@ export async function verifyMediaBlocked(apiUrl: string, sha256: string): Promis
     // Check the moderation status
     const status = await checkMediaStatus(apiUrl, sha256);
     return status?.action === 'PERMANENT_BAN';
+  } catch {
+    return false;
+  }
+}
+
+// Verify that media was actually age-restricted
+export async function verifyAgeRestricted(apiUrl: string, sha256: string): Promise<boolean> {
+  try {
+    // Give the moderation service a moment to process
+    await new Promise(resolve => setTimeout(resolve, 1000));
+
+    // Check the moderation status
+    const status = await checkMediaStatus(apiUrl, sha256);
+    return status?.action === 'AGE_RESTRICTED';
   } catch {
     return false;
   }

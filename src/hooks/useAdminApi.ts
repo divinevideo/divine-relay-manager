@@ -52,6 +52,12 @@ export function useAdminApi() {
     listBannedEvents: () =>
       adminApi.listBannedEvents(apiUrl),
 
+    // Server-side relay queries (replaces browser WebSocket for freshness)
+    fetchReports: () =>
+      adminApi.fetchReports(apiUrl),
+    fetchResolutionLabels: () =>
+      adminApi.fetchResolutionLabels(apiUrl),
+
     // Labels
     publishLabel: (params: adminApi.LabelParams) =>
       adminApi.publishLabel(apiUrl, params),
@@ -101,6 +107,8 @@ export function useAdminApi() {
       adminApi.verifyEventDeleted(eventId, relayUrl),
     verifyMediaBlocked: (sha256: string) =>
       adminApi.verifyMediaBlocked(apiUrl, sha256),
+    verifyAgeRestricted: (sha256: string) =>
+      adminApi.verifyAgeRestricted(apiUrl, sha256),
     verifyModerationAction: (eventId: string, mediaHashes: string[]) =>
       adminApi.verifyModerationAction(apiUrl, eventId, mediaHashes, relayUrl),
   }), [apiUrl, relayUrl]);
