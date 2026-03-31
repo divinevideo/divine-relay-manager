@@ -115,6 +115,66 @@ async function getCfAccessCredentials(env: Env): Promise<{ clientId: string; cli
   return { clientId, clientSecret };
 }
 
+/**
+ * Notify moderation-service to send a DM to an affected user.
+ * Non-critical side effect — caller must wrap in try/catch.
+ *
+ * Uses service binding (MODERATION_API) with Bearer token when available,
+ * falls back to fetch() with CF Access headers.
+ * If a dedicated DM service is extracted later (support-trust-safety#118),
+ * this function is the single call site to update.
+ */
+async function notifyModerationService(
+  env: Env,
+  recipientPubkey: string,
+  action: string,
+  reason: string,
+  sha256?: string,
+  eventId?: string
+): Promise<void> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+
+  if (env.MODERATION_API && env.SERVICE_API_TOKEN) {
+    // Service binding: authenticate via Bearer token
+    headers['Authorization'] = `Bearer ${env.SERVICE_API_TOKEN}`;
+  } else {
+    // HTTP fallback: authenticate via CF Access service token
+    const cfAccess = await getCfAccessCredentials(env);
+    if (!cfAccess) {
+      console.warn('[notifyModerationService] No auth credentials configured, skipping DM');
+      return;
+    }
+    headers['CF-Access-Client-Id'] = cfAccess.clientId;
+    headers['CF-Access-Client-Secret'] = cfAccess.clientSecret;
+  }
+
+  const notifyRequest = new Request(`${getModerationAdminUrl(env)}/api/v1/notify`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      recipientPubkey,
+      action,
+      reason,
+      ...(sha256 && { sha256 }),
+      ...(eventId && { eventId }),
+    }),
+  });
+
+  const response = env.MODERATION_API
+    ? await env.MODERATION_API.fetch(notifyRequest)
+    : await fetch(notifyRequest);
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error(`[notifyModerationService] Failed: ${response.status} - ${errorText}`);
+  } else {
+    const result = await response.json() as { dm_sent: boolean; reason?: string };
+    console.log(`[notifyModerationService] DM sent=${result.dm_sent}${result.reason ? ` (${result.reason})` : ''}`);
+  }
+}
+
 function getAllowedOrigin(requestOrigin: string | null, allowedOriginsEnv: string | undefined): string {
   if (!allowedOriginsEnv?.trim()) return '';
 
@@ -181,7 +241,7 @@ function verifyAdminAccess(request: Request, env: Env): string | null {
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
 
@@ -222,11 +282,11 @@ export default {
       }
 
       if (path === '/api/moderate' && request.method === 'POST') {
-        return handleModerate(request, env, corsHeaders);
+        return handleModerate(request, env, corsHeaders, ctx);
       }
 
       if (path === '/api/relay-rpc' && request.method === 'POST') {
-        return handleRelayRpc(request, env, corsHeaders);
+        return handleRelayRpc(request, env, corsHeaders, ctx);
       }
 
       if (path === '/api/summarize-user' && request.method === 'POST') {
@@ -479,7 +539,8 @@ async function handlePublish(
 async function handleModerate(
   request: Request,
   env: Env,
-  corsHeaders: Record<string, string>
+  corsHeaders: Record<string, string>,
+  ctx?: ExecutionContext
 ): Promise<Response> {
   const body = (await request.json()) as {
     action: string;
@@ -540,6 +601,13 @@ async function handleModerate(
           );
         } catch (err) {
           console.error('[handleModerate] Zendesk sync error:', err);
+        }
+
+        // DM the content creator about the deletion (non-critical, off response path)
+        if (body.pubkey) {
+          const dmPromise = notifyModerationService(env, body.pubkey, 'PERMANENT_BAN', body.reason || 'Content removed by moderator', undefined, body.eventId)
+            .catch(err => console.error('[handleModerate] DM notification error:', err));
+          if (ctx) ctx.waitUntil(dmPromise);
         }
 
         return jsonResponse({ success: true, eventId: body.eventId }, 200, corsHeaders);
@@ -611,13 +679,21 @@ async function handleModerate(
     console.error('[handleModerate] Zendesk sync error:', err);
   }
 
+  // DM the banned user (non-critical, off response path)
+  if (body.action === 'ban_pubkey' && body.pubkey) {
+    const dmPromise = notifyModerationService(env, body.pubkey, 'ACCOUNT_SUSPENDED', body.reason || 'Account suspended by moderator')
+      .catch(err => console.error('[handleModerate] DM notification error:', err));
+    if (ctx) ctx.waitUntil(dmPromise);
+  }
+
   return jsonResponse({ success: true, event }, 200, corsHeaders);
 }
 
 async function handleRelayRpc(
   request: Request,
   env: Env,
-  corsHeaders: Record<string, string>
+  corsHeaders: Record<string, string>,
+  ctx?: ExecutionContext
 ): Promise<Response> {
   const body = (await request.json()) as {
     method: string;
@@ -633,6 +709,17 @@ async function handleRelayRpc(
 
   if (!result.success) {
     return jsonResponse({ success: false, error: result.error }, 400, corsHeaders);
+  }
+
+  // DM the banned user (non-critical, off response path)
+  // This is the actual ban path used by the UI -- handleModerate's ban_pubkey
+  // case exists but is not called by any frontend component.
+  if (body.method === 'banpubkey' && body.params?.[0]) {
+    const pubkey = String(body.params[0]);
+    const reason = body.params[1] ? String(body.params[1]) : undefined;
+    const dmPromise = notifyModerationService(env, pubkey, 'ACCOUNT_SUSPENDED', reason || 'Account suspended by moderator')
+      .catch(err => console.error('[handleRelayRpc] DM notification error:', err));
+    if (ctx) ctx.waitUntil(dmPromise);
   }
 
   return new Response(JSON.stringify({ success: true, result: result.result }), {

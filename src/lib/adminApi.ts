@@ -133,8 +133,8 @@ export async function moderateAction(apiUrl: string, params: ModerateParams): Pr
   return data;
 }
 
-export async function deleteEvent(apiUrl: string, eventId: string, reason?: string): Promise<ApiResponse> {
-  return moderateAction(apiUrl, { action: 'delete_event', eventId, reason });
+export async function deleteEvent(apiUrl: string, eventId: string, reason?: string, pubkey?: string): Promise<ApiResponse> {
+  return moderateAction(apiUrl, { action: 'delete_event', eventId, reason, pubkey });
 }
 
 export async function banPubkeyViaModerate(apiUrl: string, pubkey: string, reason?: string): Promise<ApiResponse> {

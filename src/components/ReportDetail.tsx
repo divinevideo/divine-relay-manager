@@ -398,7 +398,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
 
   const deleteMutation = useMutation({
     mutationFn: async ({ eventId, reason }: { eventId: string; reason: string }) => {
-      await deleteEvent(eventId, reason);
+      await deleteEvent(eventId, reason, context.reportedUser?.pubkey ?? undefined);
       // Log the decision
       await logDecision({
         targetType: 'event',
@@ -892,7 +892,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
       }
 
       // Then delete the event
-      await deleteEvent(eventId, reason);
+      await deleteEvent(eventId, reason, context.reportedUser?.pubkey ?? undefined);
       await logDecision({
         targetType: 'event',
         targetId: eventId,
