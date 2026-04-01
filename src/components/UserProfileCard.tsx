@@ -8,7 +8,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { User, FileText, Flag, Tag, CheckCircle, ChevronDown, ChevronUp, Video, ExternalLink, Copy, Check, ArrowUpRight, Trash2 } from "lucide-react";
+import { User, FileText, Flag, Tag, CheckCircle, ChevronDown, ChevronUp, Copy, Check, ArrowUpRight, Trash2 } from "lucide-react";
+import { InlineMediaPreview } from "@/components/MediaPreview";
 import type { NostrEvent, NostrMetadata } from "@nostrify/nostrify";
 import type { UserStats } from "@/hooks/useUserStats";
 import { getDivineProfileUrl } from "@/lib/constants";
@@ -33,69 +34,6 @@ function getLabelColor(label: string): string {
   return LABEL_COLORS.default;
 }
 
-// Extract media URLs from content and tags
-function extractMediaUrls(content: string, tags: string[][]): { url: string; type: 'image' | 'video' }[] {
-  const urls: { url: string; type: 'image' | 'video' }[] = [];
-  const seen = new Set<string>();
-
-  const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
-  const videoExts = ['mp4', 'webm', 'mov', 'm4v'];
-
-  const getType = (url: string): 'image' | 'video' | null => {
-    const ext = url.split(/[?#]/)[0].split('.').pop()?.toLowerCase();
-    if (ext && imageExts.includes(ext)) return 'image';
-    if (ext && videoExts.includes(ext)) return 'video';
-    if (/divine\.video/.test(url)) return 'video'; // divine.video hosts videos
-    return null;
-  };
-
-  // Check imeta tags
-  for (const tag of tags) {
-    if (tag[0] === 'imeta') {
-      const urlPart = tag.find(p => p.startsWith('url '));
-      if (urlPart) {
-        const url = urlPart.slice(4);
-        const type = getType(url);
-        if (type && !seen.has(url)) {
-          seen.add(url);
-          urls.push({ url, type });
-        }
-      }
-    }
-    if (tag[0] === 'url' && tag[1]) {
-      const url = tag[1];
-      const type = getType(url);
-      if (type && !seen.has(url)) {
-        seen.add(url);
-        urls.push({ url, type });
-      }
-    }
-  }
-
-  // Extract from content
-  const urlPattern = /(https?:\/\/[^\s<>"{}|\\^`[\]]+\.(?:jpg|jpeg|png|gif|webp|mp4|webm|mov|m4v)(?:\?[^\s]*)?)/gi;
-  let match;
-  while ((match = urlPattern.exec(content)) !== null) {
-    const url = match[1];
-    const type = getType(url);
-    if (type && !seen.has(url)) {
-      seen.add(url);
-      urls.push({ url, type });
-    }
-  }
-
-  // Also check for divine.video URLs
-  const divinePattern = /(https?:\/\/[^\s]*divine\.video[^\s<>"{}|\\^`[\]]*)/gi;
-  while ((match = divinePattern.exec(content)) !== null) {
-    const url = match[1];
-    if (!seen.has(url)) {
-      seen.add(url);
-      urls.push({ url, type: 'video' });
-    }
-  }
-
-  return urls;
-}
 
 interface UserProfileCardProps {
   profile?: NostrMetadata;
@@ -299,9 +237,6 @@ function RecentPostsSection({ posts, onDeleteEvent }: { posts: NostrEvent[]; onD
       {expanded && (
         <div className="space-y-3">
           {visiblePosts.map(post => {
-            const media = extractMediaUrls(post.content, post.tags);
-            const hasMedia = media.length > 0;
-
             return (
               <div key={post.id} className="p-3 bg-muted rounded-lg space-y-2 overflow-hidden">
                 {/* Post content */}
@@ -311,48 +246,8 @@ function RecentPostsSection({ posts, onDeleteEvent }: { posts: NostrEvent[]; onD
                   </p>
                 )}
 
-                {/* Media preview */}
-                {hasMedia && (
-                  <div className="grid grid-cols-2 gap-2">
-                    {media.slice(0, 4).map((m, idx) => (
-                      <div key={idx} className="relative">
-                        {m.type === 'video' ? (
-                          <div className="relative">
-                            <video
-                              src={m.url}
-                              className="w-full rounded aspect-video object-cover bg-black"
-                              controls
-                              preload="metadata"
-                            />
-                            <Badge className="absolute top-1 left-1 bg-black/70 text-white text-xs">
-                              <Video className="h-3 w-3 mr-1" />
-                              Video
-                            </Badge>
-                          </div>
-                        ) : (
-                          <img
-                            src={m.url}
-                            alt=""
-                            className="w-full rounded aspect-square object-cover cursor-pointer hover:opacity-90"
-                            onClick={() => window.open(m.url, '_blank')}
-                          />
-                        )}
-                        <a
-                          href={m.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="absolute top-1 right-1 p-1 bg-black/50 rounded hover:bg-black/70"
-                        >
-                          <ExternalLink className="h-3 w-3 text-white" />
-                        </a>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {media.length > 4 && (
-                  <p className="text-xs text-muted-foreground">+{media.length - 4} more media</p>
-                )}
+                {/* Media preview - uses InlineMediaPreview for admin proxy fallback */}
+                <InlineMediaPreview content={post.content} tags={post.tags} />
 
                 {/* Timestamp, kind, and delete */}
                 <div className="flex items-center justify-between text-xs text-muted-foreground">
