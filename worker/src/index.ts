@@ -175,22 +175,62 @@ async function notifyModerationService(
   }
 }
 
-function getAllowedOrigin(requestOrigin: string | null, allowedOriginsEnv: string | undefined): string {
-  if (!allowedOriginsEnv?.trim()) return '';
+function getAllowedOrigin(requestOrigin: string | null, allowedOriginsEnv: string | undefined): string | null {
+  if (!requestOrigin || !allowedOriginsEnv?.trim()) return null;
 
-  const allowedOrigins = allowedOriginsEnv.split(',').map(o => o.trim());
-  if (!requestOrigin) return allowedOrigins[0] || '';
-
+  const allowedOrigins = allowedOriginsEnv.split(',').map((origin) => origin.trim()).filter(Boolean);
   for (const allowed of allowedOrigins) {
-    if (allowed.startsWith('*.') && requestOrigin.endsWith(allowed.slice(1))) {
-      return requestOrigin;
-    }
-    if (requestOrigin === allowed) {
+    if (originMatchesRule(requestOrigin, allowed)) {
       return requestOrigin;
     }
   }
 
-  return allowedOrigins[0] || '';
+  return null;
+}
+
+function originMatchesRule(requestOrigin: string, allowedRule: string): boolean {
+  if (requestOrigin === allowedRule) {
+    return true;
+  }
+
+  try {
+    const requestUrl = new URL(requestOrigin);
+
+    if (allowedRule.startsWith('*.')) {
+      return hostnameMatchesWildcard(requestUrl.hostname, allowedRule.slice(2));
+    }
+
+    const wildcardIndex = allowedRule.indexOf('://*.');
+    if (wildcardIndex !== -1) {
+      const scheme = allowedRule.slice(0, wildcardIndex);
+      const hostname = allowedRule.slice(wildcardIndex + '://*.'.length);
+      return requestUrl.protocol === `${scheme}:` && hostnameMatchesWildcard(requestUrl.hostname, hostname);
+    }
+  } catch {
+    return false;
+  }
+
+  return false;
+}
+
+function hostnameMatchesWildcard(hostname: string, suffix: string): boolean {
+  return hostname !== suffix && hostname.endsWith(`.${suffix}`);
+}
+
+function buildCorsHeaders(allowedOrigin: string | null): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With, Range, X-Admin-Key, CF-Access-Client-Id, CF-Access-Client-Secret',
+    'Access-Control-Expose-Headers': 'Content-Range, Accept-Ranges, X-Admin-Proxy, X-Moderation-Status',
+    'Access-Control-Max-Age': '86400',
+  };
+
+  if (allowedOrigin) {
+    headers['Access-Control-Allow-Origin'] = allowedOrigin;
+    headers['Vary'] = 'Origin';
+  }
+
+  return headers;
 }
 
 interface UnsignedEvent {
@@ -247,17 +287,11 @@ export default {
 
     const requestOrigin = request.headers.get('Origin');
     const allowedOrigin = getAllowedOrigin(requestOrigin, env.ALLOWED_ORIGINS);
-
-    const corsHeaders = {
-      'Access-Control-Allow-Origin': allowedOrigin,
-      'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization, Range, X-Admin-Key, CF-Access-Client-Id, CF-Access-Client-Secret',
-      'Access-Control-Expose-Headers': 'Content-Range, Accept-Ranges, X-Admin-Proxy, X-Moderation-Status',
-    };
+    const corsHeaders = buildCorsHeaders(allowedOrigin);
 
     // Handle preflight
     if (request.method === 'OPTIONS') {
-      return new Response(null, { headers: corsHeaders });
+      return new Response(null, { status: 204, headers: corsHeaders });
     }
 
     try {
