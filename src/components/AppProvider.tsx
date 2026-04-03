@@ -23,6 +23,16 @@ export function AppProvider(props: AppProviderProps) {
   // App configuration state with localStorage persistence
   const [config, setConfig] = useLocalStorage<AppConfig>(storageKey, defaultConfig);
 
+  // Fix stale localhost URLs saved from dev sessions
+  useEffect(() => {
+    if (config.apiUrl?.includes('localhost') || config.apiUrl?.startsWith('http://')) {
+      setConfig((prev) => ({ ...prev, apiUrl: defaultConfig.apiUrl }));
+    }
+    if (config.relayUrl?.includes('localhost') || config.relayUrl?.startsWith('ws://localhost')) {
+      setConfig((prev) => ({ ...prev, relayUrl: defaultConfig.relayUrl }));
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Generic config updater with callback pattern
   const updateConfig = (updater: (currentConfig: AppConfig) => AppConfig) => {
     setConfig(updater);
