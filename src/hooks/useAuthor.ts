@@ -9,18 +9,18 @@ import { fetchFunnelcakeUser } from '@/lib/funnelcakeApi';
 export function useAuthor(pubkey: string | undefined, apiUrl?: string) {
   const { nostr } = useNostr();
 
-  return useQuery<{ event?: NostrEvent; metadata?: NostrMetadata }>({
+  return useQuery<{ event?: NostrEvent; metadata?: NostrMetadata; isFunnelcakeUser: boolean }>({
     queryKey: ['author', pubkey ?? ''],
     queryFn: async ({ signal }) => {
       if (!pubkey) {
-        return {};
+        return { isFunnelcakeUser: false };
       }
 
       // Try REST first for speed
       if (apiUrl) {
         const restResult = await fetchFunnelcakeUser(apiUrl, pubkey);
         if (restResult) {
-          return { event: undefined, metadata: restResult.metadata as NostrMetadata };
+          return { event: undefined, metadata: restResult.metadata as NostrMetadata, isFunnelcakeUser: true };
         }
       }
 
@@ -33,14 +33,14 @@ export function useAuthor(pubkey: string | undefined, apiUrl?: string) {
       if (!event) {
         // No kind 0 metadata event — user exists but hasn't published a profile.
         // Return empty rather than throwing, to avoid error states in profile cards.
-        return {};
+        return { isFunnelcakeUser: false };
       }
 
       try {
         const metadata = n.json().pipe(n.metadata()).parse(event.content);
-        return { metadata, event };
+        return { metadata, event, isFunnelcakeUser: false };
       } catch {
-        return { event };
+        return { event, isFunnelcakeUser: false };
       }
     },
     retry: 1, // Most failures are missing profiles, not transient errors

@@ -14,7 +14,7 @@ import {
 } from "@/components/ui/tooltip";
 import { useAuthor } from "@/hooks/useAuthor";
 import { cn } from "@/lib/utils";
-import { getDivineProfileUrl } from "@/lib/constants";
+import { getProfileUrl } from "@/lib/constants";
 
 interface UserIdentifierProps {
   pubkey: string;
@@ -49,6 +49,7 @@ export function UserIdentifier({
   }
 
   const metadata = author.data?.metadata;
+  const isFunnelcakeUser = author.data?.isFunnelcakeUser ?? false;
   const displayName = metadata?.display_name || metadata?.name;
   const nip05 = metadata?.nip05;
   const picture = metadata?.picture;
@@ -83,7 +84,7 @@ export function UserIdentifier({
   // Full npub -- CSS truncation handles overflow based on available space
   const displayNpub = npub;
 
-  const profileUrl = getDivineProfileUrl(npub);
+  const profileUrl = getProfileUrl(npub, isFunnelcakeUser);
 
   if (variant === "compact") {
     const content = (
@@ -305,6 +306,7 @@ export function UserDisplayName({
 }: UserDisplayNameProps) {
   const author = useAuthor(pubkey);
   const metadata = author.data?.metadata;
+  const isFunnelcakeUser = author.data?.isFunnelcakeUser ?? false;
   const displayName = metadata?.display_name || metadata?.name;
 
   let npub = "";
@@ -325,7 +327,7 @@ export function UserDisplayName({
   if (linkToProfile) {
     return (
       <a
-        href={getDivineProfileUrl(npub)}
+        href={getProfileUrl(npub, isFunnelcakeUser)}
         target="_blank"
         rel="noopener noreferrer"
         className="block min-w-0 overflow-hidden hover:opacity-80"

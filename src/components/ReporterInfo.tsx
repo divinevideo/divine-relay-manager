@@ -9,7 +9,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Flag, Star } from "lucide-react";
 import { useAuthor } from "@/hooks/useAuthor";
 import type { NostrMetadata } from "@nostrify/nostrify";
-import { getDivineProfileUrl } from "@/lib/constants";
+import { getProfileUrl } from "@/lib/constants";
 
 interface ReporterInfoProps {
   profile?: NostrMetadata;
@@ -44,9 +44,10 @@ export function ReportedBy({ pubkey, timestamp }: ReportedByProps) {
     npub = pubkey;
   }
 
+  const isFunnelcakeUser = author.data?.isFunnelcakeUser ?? false;
   const displayName = metadata?.display_name || metadata?.name || `${npub.slice(0, 12)}...`;
   const date = new Date(timestamp * 1000);
-  const profileUrl = getDivineProfileUrl(npub);
+  const profileUrl = getProfileUrl(npub, isFunnelcakeUser);
 
   return (
     <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -94,7 +95,7 @@ export function ReporterInfo({ profile, pubkey, reportCount, isLoading }: Report
 
   const displayName = profile?.display_name || profile?.name || `${npub.slice(0, 12)}...`;
   const trust = getTrustLevel(reportCount);
-  const profileUrl = getDivineProfileUrl(npub);
+  const profileUrl = getProfileUrl(npub, false);
 
   return (
     <Card>

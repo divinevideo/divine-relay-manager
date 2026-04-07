@@ -12,7 +12,7 @@ import { FileText, Copy, Check, Flag } from "lucide-react";
 import { useState } from "react";
 import { nip19 } from "nostr-tools";
 import type { NostrEvent } from "@nostrify/nostrify";
-import { getDivineProfileUrl } from "@/lib/constants";
+import { getProfileUrl } from "@/lib/constants";
 
 interface ReporterCardProps {
   pubkey: string;
@@ -43,9 +43,10 @@ export function ReporterCard({
     npub = pubkey;
   }
 
+  const isFunnelcakeUser = author.data?.isFunnelcakeUser ?? false;
   const displayName = profile?.display_name || profile?.name || `${npub.slice(0, 12)}...`;
   const npubDisplay = `${npub.slice(0, 12)}...${npub.slice(-6)}`;
-  const profileUrl = getDivineProfileUrl(npub);
+  const profileUrl = getProfileUrl(npub, isFunnelcakeUser);
 
   const copyPubkey = async () => {
     try {
@@ -295,7 +296,8 @@ export function ReporterInline({ pubkey, onViewProfile }: ReporterInlineProps) {
     );
   }
 
-  const profileUrl = getDivineProfileUrl(npub);
+  const isFunnelcakeUser = author.data?.isFunnelcakeUser ?? false;
+  const profileUrl = getProfileUrl(npub, isFunnelcakeUser);
 
   return (
     <div className="flex items-center gap-2 flex-wrap">
@@ -304,7 +306,7 @@ export function ReporterInline({ pubkey, onViewProfile }: ReporterInlineProps) {
         target="_blank"
         rel="noopener noreferrer"
         className="flex items-center gap-1.5 hover:bg-muted rounded-full pr-2 transition-colors"
-        title="View reporter's profile on diVine"
+        title={isFunnelcakeUser ? "View profile on Divine" : "View profile on njump.me"}
       >
         <Avatar className="h-5 w-5">
           <AvatarImage src={profile?.picture} />

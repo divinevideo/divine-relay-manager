@@ -62,10 +62,19 @@ export function getReportCategory(event: { tags: string[][] }): string {
 
 // Divine profile URL base
 export const DIVINE_PROFILE_URL = "https://divine.video/profile";
+export const NJUMP_PROFILE_URL = "https://njump.me";
 
 // Build a full profile URL from an npub
 export function getDivineProfileUrl(npub: string): string {
   return `${DIVINE_PROFILE_URL}/${npub}`;
+}
+
+// Build a profile URL, preferring divine.video when the user is indexed by Funnelcake
+// (i.e., their profile exists on the relay). Falls back to njump.me to avoid empty pages.
+export function getProfileUrl(npub: string, isFunnelcakeUser: boolean): string {
+  return isFunnelcakeUser
+    ? `${DIVINE_PROFILE_URL}/${npub}`
+    : `${NJUMP_PROFILE_URL}/${npub}`;
 }
 
 // Build a reason string for moderation decisions from a category key + optional note
