@@ -47,6 +47,8 @@ interface Env {
   ZENDESK_EMAIL?: string;
   ZENDESK_FIELD_ACTION_STATUS?: string;
   ZENDESK_FIELD_ACTION_REQUESTED?: string;
+  ZENDESK_FIELD_CATEGORY?: string;       // For auto-solve required fields
+  ZENDESK_FIELD_ISSUE?: string;          // For auto-solve required fields
   KV?: KVNamespace;
   DB?: D1Database;
   // Relay management configuration
@@ -1683,10 +1685,12 @@ async function addZendeskInternalNote(
       // because auto-categorize triggers fire at ticket creation, and this solve call runs
       // later only for report types where triggers didn't set specific values (e.g., "other"
       // reports with the previously misconfigured trigger).
-      payload.ticket.custom_fields = [
-        { id: 14559549220879, value: 'trust___safety' },      // Category
-        { id: 14560383908879, value: 'other_content_report' }, // Issue
-      ];
+      if (env.ZENDESK_FIELD_CATEGORY && env.ZENDESK_FIELD_ISSUE) {
+        payload.ticket.custom_fields = [
+          { id: parseInt(env.ZENDESK_FIELD_CATEGORY, 10), value: 'trust___safety' },
+          { id: parseInt(env.ZENDESK_FIELD_ISSUE, 10), value: 'other_content_report' },
+        ];
+      }
     }
 
     const response = await fetch(url, {
