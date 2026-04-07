@@ -1679,10 +1679,10 @@ async function addZendeskInternalNote(
       // Zendesk requires an assignee to solve a ticket (system rule, not enforced via API error).
       // Without this, the comment is added but the status change is silently ignored.
       payload.ticket.assignee_email = env.ZENDESK_EMAIL;
-      // Category and Issue are required fields. Auto-categorize triggers set these at creation
-      // for specific report types, but "other" reports are missed (misconfigured trigger).
-      // These defaults are safe: they only overwrite empty fields in practice, since specific
-      // report types already have values set by triggers before we reach the solve step.
+      // Category and Issue are required fields. These values are set unconditionally. Safe
+      // because auto-categorize triggers fire at ticket creation, and this solve call runs
+      // later only for report types where triggers didn't set specific values (e.g., "other"
+      // reports with the previously misconfigured trigger).
       payload.ticket.custom_fields = [
         { id: 14559549220879, value: 'trust___safety' },      // Category
         { id: 14560383908879, value: 'other_content_report' }, // Issue
@@ -2252,7 +2252,7 @@ async function handleParseReport(
     // Tolerates markdown bold (**Event ID:**) and alternate field names (Reported Pubkey vs Author Pubkey)
     const eventMatch = description.match(/\*{0,2}Event ID:?\*{0,2}\s*([a-f0-9]{64})/i);
     const pubkeyMatch = description.match(/\*{0,2}(?:Author|Reported) Pubkey:?\*{0,2}\s*([a-f0-9]{64})/i);
-    const violationMatch = description.match(/\*{0,2}(?:Violation Type|Reason):?\*{0,2}\s*(\w[\w\s-]*\w)/i);
+    const violationMatch = description.match(/\*{0,2}(?:Violation Type|Reason):?\*{0,2}\s*(\w[^\n]*\w|\w)/i);
 
     const event_id = eventMatch?.[1] || null;
     const author_pubkey = pubkeyMatch?.[1] || null;
