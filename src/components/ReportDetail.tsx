@@ -1398,10 +1398,30 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                 </Badge>
               )}
               {isEventDeleted && (
-                <Badge variant="destructive" className="flex items-center gap-1">
-                  <ShieldX className="h-3 w-3" />
-                  Event Deleted
-                </Badge>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Badge variant="destructive" className="flex items-center gap-1 cursor-help">
+                      <ShieldX className="h-3 w-3" />
+                      {decisionLog.isDeleted ? 'Removed by Moderation' : 'Not Found on Relay'}
+                    </Badge>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" className="max-w-xs">
+                    {decisionLog.isDeleted ? (
+                      <p className="text-xs">
+                        Deleted via relay admin
+                        {decisionLog.decisions.find(d => d.action === 'delete_event' || d.action === 'delete')?.created_at &&
+                          ` on ${new Date(decisionLog.decisions.find(d => d.action === 'delete_event' || d.action === 'delete')!.created_at).toLocaleDateString()}`
+                        }
+                      </p>
+                    ) : decisionLog.isAutoHidden ? (
+                      <p className="text-xs">Auto-hidden by AI classification, then removed from relay</p>
+                    ) : isUserBanned ? (
+                      <p className="text-xs">User is banned — event removed as part of ban</p>
+                    ) : (
+                      <p className="text-xs">Event not found on relay. May have been self-deleted by the author or never stored here.</p>
+                    )}
+                  </TooltipContent>
+                </Tooltip>
               )}
               {isPendingReview && (
                 <Badge variant="outline" className="flex items-center gap-1 border-orange-500 text-orange-600">
