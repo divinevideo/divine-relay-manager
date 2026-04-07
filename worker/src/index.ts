@@ -47,6 +47,8 @@ interface Env {
   ZENDESK_EMAIL?: string;
   ZENDESK_FIELD_ACTION_STATUS?: string;
   ZENDESK_FIELD_ACTION_REQUESTED?: string;
+  ZENDESK_FIELD_CATEGORY?: string;       // For auto-solve required fields
+  ZENDESK_FIELD_ISSUE?: string;          // For auto-solve required fields
   KV?: KVNamespace;
   DB?: D1Database;
   // Relay management configuration
@@ -1665,7 +1667,7 @@ async function addZendeskInternalNote(
     const auth = btoa(`${env.ZENDESK_EMAIL}/token:${env.ZENDESK_API_TOKEN}`);
     const url = `https://${env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets/${ticketId}`;
 
-    const payload: { ticket: { comment: { body: string; public: boolean }; status?: string } } = {
+    const payload: { ticket: { comment: { body: string; public: boolean }; status?: string; assignee_email?: string; custom_fields?: Array<{ id: number; value: string }> } } = {
       ticket: {
         comment: {
           body: note,
@@ -1676,6 +1678,19 @@ async function addZendeskInternalNote(
 
     if (solve) {
       payload.ticket.status = 'solved';
+      // Zendesk requires an assignee to solve a ticket (system rule, not enforced via API error).
+      // Without this, the comment is added but the status change is silently ignored.
+      payload.ticket.assignee_email = env.ZENDESK_EMAIL;
+      // Category and Issue are required fields. These values are set unconditionally. Safe
+      // because auto-categorize triggers fire at ticket creation, and this solve call runs
+      // later only for report types where triggers didn't set specific values (e.g., "other"
+      // reports with the previously misconfigured trigger).
+      if (env.ZENDESK_FIELD_CATEGORY && env.ZENDESK_FIELD_ISSUE) {
+        payload.ticket.custom_fields = [
+          { id: parseInt(env.ZENDESK_FIELD_CATEGORY, 10), value: 'trust___safety' },
+          { id: parseInt(env.ZENDESK_FIELD_ISSUE, 10), value: 'other_content_report' },
+        ];
+      }
     }
 
     const response = await fetch(url, {
@@ -2238,9 +2253,10 @@ async function handleParseReport(
     }
 
     // Parse description with regex
-    const eventMatch = description.match(/Event ID:\s*([a-f0-9]{64})/i);
-    const pubkeyMatch = description.match(/Author Pubkey:\s*([a-f0-9]{64})/i);
-    const violationMatch = description.match(/Violation Type:\s*(\w+)/i);
+    // Tolerates markdown bold (**Event ID:**) and alternate field names (Reported Pubkey vs Author Pubkey)
+    const eventMatch = description.match(/\*{0,2}Event ID:?\*{0,2}\s*([a-f0-9]{64})/i);
+    const pubkeyMatch = description.match(/\*{0,2}(?:Author|Reported) Pubkey:?\*{0,2}\s*([a-f0-9]{64})/i);
+    const violationMatch = description.match(/\*{0,2}(?:Violation Type|Reason):?\*{0,2}\s*(\w[^\n]*\w|\w)/i);
 
     const event_id = eventMatch?.[1] || null;
     const author_pubkey = pubkeyMatch?.[1] || null;

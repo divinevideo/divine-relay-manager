@@ -28,6 +28,9 @@ ALLOWED_ORIGINS = "https://relay.admin.divine.video,https://app.divine.video,htt
 # Zendesk custom field IDs for webhook callback
 ZENDESK_FIELD_ACTION_STATUS = "14545793289743"
 ZENDESK_FIELD_ACTION_REQUESTED = "14545826900367"
+# Zendesk custom field IDs for auto-solve required fields
+ZENDESK_FIELD_CATEGORY = "14559549220879"
+ZENDESK_FIELD_ISSUE = "14560383908879"
 
 # D1 Database for moderation decision log
 [[d1_databases]]
