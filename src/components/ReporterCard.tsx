@@ -8,7 +8,7 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { FileText, Copy, Check, Flag } from "lucide-react";
+import { FileText, Copy, Check, Flag, ExternalLink } from "lucide-react";
 import { useState } from "react";
 import { nip19 } from "nostr-tools";
 import type { NostrEvent } from "@nostrify/nostrify";
@@ -83,8 +83,9 @@ export function ReporterCard({
           </Avatar>
         </a>
         <div className="flex-1 min-w-0">
-          <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80">
+          <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:opacity-80">
             <p className="text-sm font-medium truncate">{displayName}</p>
+            {!isFunnelcakeUser && <ExternalLink className="h-3 w-3 text-muted-foreground shrink-0" />}
           </a>
           <p className="text-xs text-muted-foreground font-mono truncate">{npubDisplay}</p>
         </div>
@@ -112,8 +113,9 @@ export function ReporterCard({
 
         <div className="flex-1 min-w-0 space-y-1">
           <div className="flex items-center gap-2">
-            <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80">
+            <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:opacity-80">
               <p className="font-medium truncate">{displayName}</p>
+              {!isFunnelcakeUser && <ExternalLink className="h-3 w-3 text-muted-foreground shrink-0" />}
             </a>
             {category && (
               <Badge variant="outline" className="text-xs shrink-0">{category}</Badge>
@@ -313,6 +315,7 @@ export function ReporterInline({ pubkey, onViewProfile }: ReporterInlineProps) {
           <AvatarFallback className="text-[10px]">{displayName.slice(0, 2).toUpperCase()}</AvatarFallback>
         </Avatar>
         <span className="text-sm font-medium hover:underline">{displayName}</span>
+        {!isFunnelcakeUser && <ExternalLink className="h-3 w-3 text-muted-foreground shrink-0" />}
       </a>
       <span className="text-xs text-muted-foreground flex items-center gap-1">
         <Flag className="h-3 w-3" />

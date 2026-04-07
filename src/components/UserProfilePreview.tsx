@@ -8,7 +8,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { User, Bot, Calendar, MessageSquare, AlertTriangle } from "lucide-react";
+import { User, Bot, Calendar, MessageSquare, AlertTriangle, ExternalLink } from "lucide-react";
 import { nip19 } from "nostr-tools";
 import { getProfileUrl } from "@/lib/constants";
 
@@ -75,8 +75,9 @@ export function UserProfilePreview({ pubkey, className }: UserProfilePreviewProp
           </a>
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
-              <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80">
+              <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:opacity-80">
                 <h4 className="font-semibold truncate">{displayName}</h4>
+                {!isFunnelcakeUser && <ExternalLink className="h-3.5 w-3.5 text-muted-foreground shrink-0" />}
               </a>
               {isBot && (
                 <Badge variant="secondary" className="text-xs">

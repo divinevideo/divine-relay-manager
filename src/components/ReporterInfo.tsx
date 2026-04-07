@@ -6,7 +6,7 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Flag, Star } from "lucide-react";
+import { Flag, Star, ExternalLink } from "lucide-react";
 import { useAuthor } from "@/hooks/useAuthor";
 import type { NostrMetadata } from "@nostrify/nostrify";
 import { getProfileUrl } from "@/lib/constants";
@@ -57,6 +57,7 @@ export function ReportedBy({ pubkey, timestamp }: ReportedByProps) {
           <AvatarFallback className="text-xs">{displayName.slice(0, 2).toUpperCase()}</AvatarFallback>
         </Avatar>
         <span className={metadata?.name ? "font-medium" : "font-mono"}>{displayName}</span>
+        {!isFunnelcakeUser && <ExternalLink className="h-3 w-3 shrink-0" />}
       </a>
       <span>•</span>
       <span>{date.toLocaleDateString()}</span>
