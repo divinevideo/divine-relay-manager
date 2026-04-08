@@ -46,7 +46,7 @@ import {
   UserPlus,
   Loader2,
   XCircle,
-  ExternalLink,
+  Globe,
 } from "lucide-react";
 import type { NostrEvent } from "@nostrify/nostrify";
 
@@ -183,7 +183,7 @@ function EventCard({
             <div className="min-w-0">
               <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:opacity-80" onClick={(e) => e.stopPropagation()}>
                 <p className="font-medium text-sm truncate">{displayName}</p>
-                {!isFunnelcakeUser && <ExternalLink className="h-3 w-3 text-muted-foreground shrink-0" />}
+                {!isFunnelcakeUser && <Globe className="h-3 w-3 text-purple-500 shrink-0" />}
               </a>
               <p className="text-xs text-muted-foreground font-mono">
                 {(() => {

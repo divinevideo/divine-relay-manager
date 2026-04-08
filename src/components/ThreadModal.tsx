@@ -16,7 +16,7 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAuthor } from "@/hooks/useAuthor";
 import { useAppContext } from "@/hooks/useAppContext";
-import { MessageSquare, ExternalLink } from "lucide-react";
+import { MessageSquare, Globe } from "lucide-react";
 import type { NostrEvent } from "@nostrify/nostrify";
 import { getProfileUrl } from "@/lib/constants";
 
@@ -107,7 +107,7 @@ function ThreadPost({
             <div className="flex items-center gap-2 flex-wrap">
               <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:opacity-80">
                 <span className="text-sm font-medium">{displayName}</span>
-                {!isFunnelcakeUser && <ExternalLink className="h-3 w-3 text-muted-foreground shrink-0" />}
+                {!isFunnelcakeUser && <Globe className="h-3 w-3 text-purple-500 shrink-0" />}
               </a>
               <span className="text-xs text-muted-foreground">
                 {date.toLocaleString()}

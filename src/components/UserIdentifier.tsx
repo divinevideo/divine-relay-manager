@@ -3,7 +3,7 @@
 
 import { useState } from "react";
 import { nip19 } from "nostr-tools";
-import { Copy, Check, ExternalLink } from "lucide-react";
+import { Copy, Check, Globe } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import {
@@ -118,7 +118,7 @@ export function UserIdentifier({
                 )}
               >
                 {content}
-                {!isFunnelcakeUser && <ExternalLink className="h-3 w-3 text-muted-foreground shrink-0" />}
+                {!isFunnelcakeUser && <Globe className="h-3 w-3 text-purple-500 shrink-0" />}
               </a>
             ) : (
               <span
@@ -189,7 +189,7 @@ export function UserIdentifier({
               className="inline-flex items-center gap-1 hover:opacity-80"
             >
               {nameElement}
-              {!isFunnelcakeUser && <ExternalLink className="h-3 w-3 text-muted-foreground shrink-0" />}
+              {!isFunnelcakeUser && <Globe className="h-3 w-3 text-purple-500 shrink-0" />}
             </a>
           ) : (
             nameElement
@@ -270,7 +270,7 @@ export function UserIdentifier({
           className="inline-flex items-center gap-1 hover:opacity-80"
         >
           {inlineContent}
-          {!isFunnelcakeUser && <ExternalLink className="h-3 w-3 text-muted-foreground shrink-0" />}
+          {!isFunnelcakeUser && <Globe className="h-3 w-3 text-purple-500 shrink-0" />}
         </a>
       ) : (
         inlineContent
@@ -336,7 +336,7 @@ export function UserDisplayName({
         className="inline-flex items-center gap-1 min-w-0 overflow-hidden hover:opacity-80"
       >
         {content}
-        {!isFunnelcakeUser && <ExternalLink className="h-3 w-3 text-muted-foreground shrink-0" />}
+        {!isFunnelcakeUser && <Globe className="h-3 w-3 text-purple-500 shrink-0" />}
       </a>
     );
   }
