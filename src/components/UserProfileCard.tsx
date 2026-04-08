@@ -8,7 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { User, FileText, Flag, Tag, CheckCircle, ChevronDown, ChevronUp, Copy, Check, ArrowUpRight, Trash2 } from "lucide-react";
+import { User, FileText, Flag, Tag, CheckCircle, ChevronDown, ChevronUp, Copy, Check, ArrowUpRight, Trash2, Globe, ExternalLink, Video, MessageSquare, Info } from "lucide-react";
 import { InlineMediaPreview } from "@/components/MediaPreview";
 import type { NostrEvent, NostrMetadata } from "@nostrify/nostrify";
 import type { UserStats } from "@/hooks/useUserStats";
@@ -41,9 +41,10 @@ interface UserProfileCardProps {
   stats?: UserStats;
   isLoading?: boolean;
   onDeleteEvent?: (eventId: string) => void;
+  isFunnelcakeUser?: boolean;
 }
 
-export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEvent }: UserProfileCardProps) {
+export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEvent, isFunnelcakeUser = false }: UserProfileCardProps) {
   const [copied, setCopied] = useState(false);
 
   // Convert hex pubkey to npub
@@ -101,7 +102,7 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
   const hasProfile = !!(profile?.display_name || profile?.name);
   const displayName = profile?.display_name || profile?.name || npub;
   const nip05 = profile?.nip05;
-  const profileUrl = getProfileUrl(npub, false);
+  const profileUrl = getProfileUrl(npub, isFunnelcakeUser);
 
   // Extract unique labels from label events
   const labelCounts = new Map<string, number>();
@@ -124,12 +125,25 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
             </Avatar>
           </a>
           <div className="flex-1 min-w-0 overflow-hidden">
-            <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80 block min-w-0 overflow-hidden">
-              <CardTitle className="text-base flex items-center gap-1 min-w-0">
-                <span className="truncate min-w-0">{displayName}</span>
-                <ArrowUpRight className="h-3 w-3 text-muted-foreground shrink-0" />
-              </CardTitle>
-            </a>
+            <div className="flex items-center gap-2 min-w-0 overflow-hidden">
+              <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80 min-w-0 overflow-hidden">
+                <CardTitle className="text-base flex items-center gap-1 min-w-0">
+                  <span className="truncate min-w-0">{displayName}</span>
+                  <ArrowUpRight className="h-3 w-3 text-muted-foreground shrink-0" />
+                </CardTitle>
+              </a>
+              {isFunnelcakeUser ? (
+                <a href={profileUrl} target="_blank" rel="noopener noreferrer">
+                  <Badge variant="outline" className="text-xs text-green-600 border-green-300 bg-green-50 shrink-0">Divine</Badge>
+                </a>
+              ) : (
+                <a href={profileUrl} target="_blank" rel="noopener noreferrer">
+                  <Badge variant="outline" className="text-xs text-purple-600 border-purple-300 bg-purple-50 gap-1 shrink-0">
+                    <Globe className="h-3 w-3" />Nostr
+                  </Badge>
+                </a>
+              )}
+            </div>
             {nip05 && (
               <div className="flex items-center gap-1 text-sm text-muted-foreground min-w-0">
                 <CheckCircle className="h-3 w-3 text-green-500 shrink-0" />
@@ -249,13 +263,29 @@ function RecentPostsSection({ posts, onDeleteEvent }: { posts: NostrEvent[]; onD
                 {/* Media preview - uses InlineMediaPreview for admin proxy fallback */}
                 <InlineMediaPreview content={post.content} tags={post.tags} />
 
-                {/* Timestamp, kind, and delete */}
+                {/* Timestamp, kind, link, and delete */}
                 <div className="flex items-center justify-between text-xs text-muted-foreground">
                   <span>{new Date(post.created_at * 1000).toLocaleString()}</span>
                   <div className="flex items-center gap-1.5">
-                    <Badge variant="outline" className="text-xs">
-                      {post.kind === 1 ? 'Note' : post.kind === 1063 ? 'Video' : `Kind ${post.kind}`}
-                    </Badge>
+                    {(() => {
+                      try {
+                        const eventUrl = (post.kind === 34235 || post.kind === 34236)
+                          ? `https://divine.video/${nip19.naddrEncode({ identifier: post.tags.find(t => t[0] === 'd')?.[1] || '', pubkey: post.pubkey, kind: post.kind })}`
+                          : `https://njump.me/${nip19.neventEncode({ id: post.id })}`;
+                        return (
+                          <a href={eventUrl} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800">
+                            <ExternalLink className="h-3 w-3" />
+                          </a>
+                        );
+                      } catch { return null; }
+                    })()}
+                    {(post.kind === 34235 || post.kind === 34236) ? (
+                      <Badge variant="default" className="text-xs gap-1 bg-green-600"><Video className="h-3 w-3" />Video</Badge>
+                    ) : post.kind === 1111 ? (
+                      <Badge variant="outline" className="text-xs gap-1 text-amber-600 border-amber-300 bg-amber-50"><MessageSquare className="h-3 w-3" />Comment</Badge>
+                    ) : (
+                      <Badge variant="outline" className="text-xs gap-1 text-amber-600 border-amber-300 bg-amber-50"><Globe className="h-3 w-3" />Note</Badge>
+                    )}
                     {onDeleteEvent && (
                       <Button
                         variant="ghost"
@@ -269,6 +299,12 @@ function RecentPostsSection({ posts, onDeleteEvent }: { posts: NostrEvent[]; onD
                     )}
                   </div>
                 </div>
+                {post.kind === 1 && (
+                  <p className="text-xs text-amber-600 flex items-center gap-1 mt-1">
+                    <Info className="h-3 w-3 shrink-0" />
+                    Text note — not visible in Divine apps
+                  </p>
+                )}
               </div>
             );
           })}

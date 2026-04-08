@@ -1664,6 +1664,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             pubkey={context.reportedUser.pubkey}
             stats={context.userStats}
             isLoading={false}
+            isFunnelcakeUser={context.reportedUser.isFunnelcakeUser}
             onDeleteEvent={(eventId) => {
               deleteMutation.mutate({ eventId, reason: 'Deleted from report review' }, {
                 onSuccess: (deletedId) => {
