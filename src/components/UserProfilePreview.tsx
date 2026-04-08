@@ -2,6 +2,7 @@
 // ABOUTME: Shows profile picture, name, bio, and recent activity
 
 import { useAuthor } from "@/hooks/useAuthor";
+import { useApiUrl } from "@/hooks/useAdminApi";
 import { useQuery } from "@tanstack/react-query";
 import { useNostr } from "@nostrify/react";
 import { Card, CardContent } from "@/components/ui/card";
@@ -10,7 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { User, Bot, Calendar, MessageSquare, AlertTriangle, Globe, ExternalLink, Video } from "lucide-react";
 import { nip19 } from "nostr-tools";
-import { getProfileUrl } from "@/lib/constants";
+import { getProfileUrl, getPublicEventUrl } from "@/lib/constants";
 
 interface UserProfilePreviewProps {
   pubkey: string;
@@ -19,6 +20,7 @@ interface UserProfilePreviewProps {
 
 export function UserProfilePreview({ pubkey, className }: UserProfilePreviewProps) {
   const { nostr } = useNostr();
+  const apiUrl = useApiUrl();
   const { data: author, isLoading: loadingProfile } = useAuthor(pubkey);
 
   // Fetch recent activity: videos, comments, and text notes
@@ -126,9 +128,10 @@ export function UserProfilePreview({ pubkey, className }: UserProfilePreviewProp
                 const isComment = event.kind === 1111;
                 const eventUrl = (() => {
                   try {
-                    return isVideo
-                      ? `https://divine.video/${nip19.naddrEncode({ identifier: event.tags.find(t => t[0] === 'd')?.[1] || '', pubkey: event.pubkey, kind: event.kind })}`
-                      : `https://njump.me/${nip19.neventEncode({ id: event.id })}`;
+                    const encodedRef = isVideo
+                      ? nip19.naddrEncode({ identifier: event.tags.find(t => t[0] === 'd')?.[1] || '', pubkey: event.pubkey, kind: event.kind })
+                      : nip19.neventEncode({ id: event.id });
+                    return getPublicEventUrl(encodedRef, apiUrl);
                   } catch { return undefined; }
                 })();
                 return (

@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import type { NostrEvent } from "@nostrify/nostrify";
-import { getProfileUrl } from "@/lib/constants";
+import { getProfileUrl, getPublicEventUrl } from "@/lib/constants";
 import type { FetchSource } from "@/hooks/useThread";
 
 interface ThreadContextProps {
@@ -43,10 +43,6 @@ interface ThreadContextProps {
   /** True when a re-check is in progress */
   isRechecking?: boolean;
 }
-
-// NIP-71 video kinds. Divine primarily uses 34235 (addressable video),
-// but we check all video kinds to handle edge cases.
-const VIDEO_KINDS = [21, 22, 34235, 34236];
 
 function PostCard({
   event,
@@ -138,12 +134,12 @@ function PostCard({
               </div>
               {!isReported && (
                 <a
-                  href={`https://divine.video/${nip19.neventEncode({ id: event.id })}`}
+                  href={getPublicEventUrl(nip19.neventEncode({ id: event.id }), apiUrl)}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1 mt-1"
                 >
-                  {VIDEO_KINDS.includes(event.kind) ? 'View video' : 'View'} on Divine
+                  Open event
                   <ExternalLink className="h-3 w-3" />
                 </a>
               )}

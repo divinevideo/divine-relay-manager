@@ -13,7 +13,7 @@ export function useAuthor(pubkey: string | undefined, apiUrlOverride?: string) {
   const apiUrl = apiUrlOverride ?? config.apiUrl;
 
   return useQuery<{ event?: NostrEvent; metadata?: NostrMetadata; isFunnelcakeUser: boolean }>({
-    queryKey: ['author', pubkey ?? ''],
+    queryKey: ['author', pubkey ?? '', apiUrl ?? ''],
     queryFn: async ({ signal }) => {
       if (!pubkey) {
         return { isFunnelcakeUser: false };
