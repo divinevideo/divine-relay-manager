@@ -8,7 +8,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { User, Bot, Calendar, MessageSquare, AlertTriangle, Globe } from "lucide-react";
+import { User, Bot, Calendar, MessageSquare, AlertTriangle, Globe, ExternalLink, Video, Info } from "lucide-react";
 import { nip19 } from "nostr-tools";
 import { getProfileUrl } from "@/lib/constants";
 
@@ -21,15 +21,16 @@ export function UserProfilePreview({ pubkey, className }: UserProfilePreviewProp
   const { nostr } = useNostr();
   const { data: author, isLoading: loadingProfile } = useAuthor(pubkey);
 
-  // Fetch recent activity (kind 1 notes)
-  const { data: recentNotes, isLoading: _loadingNotes } = useQuery({
-    queryKey: ['user-recent-notes', pubkey],
+  // Fetch recent activity: videos, comments, and text notes
+  const { data: recentContent, isLoading: _loadingContent } = useQuery({
+    queryKey: ['user-recent-content', pubkey],
     queryFn: async ({ signal }) => {
+      const timeout = AbortSignal.any([signal, AbortSignal.timeout(5000)]);
       const events = await nostr.query(
-        [{ kinds: [1], authors: [pubkey], limit: 5 }],
-        { signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]) }
+        [{ kinds: [1, 1111, 34235, 34236], authors: [pubkey], limit: 10 }],
+        { signal: timeout }
       );
-      return events.sort((a, b) => b.created_at - a.created_at);
+      return events.sort((a, b) => b.created_at - a.created_at).slice(0, 5);
     },
     staleTime: 5 * 60 * 1000,
   });
@@ -103,33 +104,69 @@ export function UserProfilePreview({ pubkey, className }: UserProfilePreviewProp
         )}
 
         {/* Recent activity */}
-        {recentNotes && recentNotes.length > 0 && (
+        {recentContent && recentContent.length > 0 && (
           <div className="space-y-2">
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <MessageSquare className="h-3 w-3" />
-              <span>Recent posts:</span>
+              <span>Recent content on relay:</span>
             </div>
             <div className="space-y-2">
-              {recentNotes.slice(0, 3).map((note) => (
-                <div key={note.id} className="bg-background/50 p-2 rounded text-sm">
-                  <div className="flex items-center gap-2 text-xs text-muted-foreground mb-1">
-                    <Calendar className="h-3 w-3" />
-                    {new Date(note.created_at * 1000).toLocaleString()}
+              {recentContent.map((event) => {
+                const isVideo = event.kind === 34235 || event.kind === 34236;
+                const isComment = event.kind === 1111;
+                const isNote = event.kind === 1;
+                const kindLabel = isVideo ? 'Video' : isComment ? 'Comment' : 'Note';
+                const eventUrl = (() => {
+                  try {
+                    return isVideo
+                      ? `https://divine.video/${nip19.naddrEncode({ identifier: event.tags.find(t => t[0] === 'd')?.[1] || '', pubkey: event.pubkey, kind: event.kind })}`
+                      : `https://njump.me/${nip19.neventEncode({ id: event.id })}`;
+                  } catch { return undefined; }
+                })();
+                return (
+                  <div key={event.id} className="bg-background/50 p-2 rounded text-sm">
+                    <div className="flex items-center justify-between mb-1">
+                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                        <Calendar className="h-3 w-3" />
+                        {new Date(event.created_at * 1000).toLocaleString()}
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        {eventUrl && (
+                          <a href={eventUrl} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-600 hover:underline inline-flex items-center gap-0.5">
+                            <ExternalLink className="h-3 w-3" />
+                          </a>
+                        )}
+                        {isVideo ? (
+                          <Badge variant="default" className="text-xs gap-1 bg-green-600"><Video className="h-3 w-3" />Video</Badge>
+                        ) : (
+                          <Badge variant="outline" className="text-xs gap-1 text-amber-600 border-amber-300 bg-amber-50">
+                            {isComment ? <MessageSquare className="h-3 w-3" /> : <Globe className="h-3 w-3" />}
+                            {kindLabel}
+                          </Badge>
+                        )}
+                      </div>
+                    </div>
+                    <p className="break-words">
+                      {event.content.length > 150 ? `${event.content.slice(0, 150)}...` : event.content}
+                    </p>
+                    {isNote && (
+                      <p className="text-xs text-amber-600 mt-1 flex items-center gap-1">
+                        <Info className="h-3 w-3 shrink-0" />
+                        Text note — not visible in Divine apps
+                      </p>
+                    )}
                   </div>
-                  <p className="break-words">
-                    {note.content.length > 150 ? `${note.content.slice(0, 150)}...` : note.content}
-                  </p>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         )}
 
         {/* No recent activity */}
-        {recentNotes && recentNotes.length === 0 && (
+        {recentContent && recentContent.length === 0 && (
           <div className="text-sm text-muted-foreground italic flex items-center gap-2">
             <AlertTriangle className="h-4 w-4" />
-            No recent posts found
+            No recent content found on relay
           </div>
         )}
       </CardContent>
