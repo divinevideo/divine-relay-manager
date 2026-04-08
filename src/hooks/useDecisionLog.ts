@@ -14,6 +14,7 @@ export function useDecisionLog(targetId: string | null | undefined) {
       return getDecisions(targetId);
     },
     enabled: !!targetId,
+    staleTime: 30_000, // Cache decisions for 30s when navigating between reports
   });
 
   // Check if target has any decisions
