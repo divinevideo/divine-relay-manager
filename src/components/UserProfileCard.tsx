@@ -294,7 +294,7 @@ function RecentPostsSection({ posts, onDeleteEvent }: { posts: NostrEvent[]; onD
                         {(post.kind === 34235 || post.kind === 34236)
                           ? "Short-form video — visible in Divine apps"
                           : post.kind === 1111
-                          ? "Video comment — visible in Divine apps"
+                          ? "Comment (kind 1111) — visible in Divine apps when attached to a video"
                           : "Text note (kind 1) — not visible in Divine apps. Only visible via external Nostr clients."}
                       </TooltipContent>
                     </Tooltip>

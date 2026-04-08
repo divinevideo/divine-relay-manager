@@ -161,7 +161,7 @@ export function UserProfilePreview({ pubkey, className }: UserProfilePreviewProp
                             {isVideo
                               ? "Short-form video — visible in Divine apps"
                               : isComment
-                              ? "Video comment — visible in Divine apps"
+                              ? "Comment (kind 1111) — visible in Divine apps when attached to a video"
                               : "Text note (kind 1) — not visible in Divine apps. Only visible via external Nostr clients."}
                           </TooltipContent>
                         </Tooltip>
