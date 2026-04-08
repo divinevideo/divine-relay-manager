@@ -8,7 +8,8 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { User, Bot, Calendar, MessageSquare, AlertTriangle, Globe, ExternalLink, Video, Info } from "lucide-react";
+import { User, Bot, Calendar, MessageSquare, AlertTriangle, Globe, ExternalLink, Video } from "lucide-react";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { nip19 } from "nostr-tools";
 import { getProfileUrl } from "@/lib/constants";
 
@@ -146,25 +147,29 @@ export function UserProfilePreview({ pubkey, className }: UserProfilePreviewProp
                             <ExternalLink className="h-3 w-3" />
                           </a>
                         )}
-                        {isVideo ? (
-                          <Badge variant="default" className="text-xs gap-1 bg-green-600"><Video className="h-3 w-3" />Video</Badge>
-                        ) : (
-                          <Badge variant="outline" className="text-xs gap-1 text-amber-600 border-amber-300 bg-amber-50">
-                            {isComment ? <MessageSquare className="h-3 w-3" /> : <Globe className="h-3 w-3" />}
-                            {kindLabel}
-                          </Badge>
-                        )}
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            {isVideo ? (
+                              <Badge variant="default" className="text-xs gap-1 bg-green-600 cursor-help"><Video className="h-3 w-3" />Video</Badge>
+                            ) : isComment ? (
+                              <Badge variant="outline" className="text-xs gap-1 text-green-600 border-green-300 bg-green-50 cursor-help"><MessageSquare className="h-3 w-3" />Comment</Badge>
+                            ) : (
+                              <Badge variant="outline" className="text-xs gap-1 text-amber-600 border-amber-300 bg-amber-50 cursor-help"><Globe className="h-3 w-3" />Note</Badge>
+                            )}
+                          </TooltipTrigger>
+                          <TooltipContent side="top" className="max-w-xs text-xs">
+                            {isVideo
+                              ? "Short-form video — visible in Divine apps"
+                              : isComment
+                              ? "Video comment — visible in Divine apps"
+                              : "Text note (kind 1) — not visible in Divine apps. Only visible via external Nostr clients."}
+                          </TooltipContent>
+                        </Tooltip>
                       </div>
                     </div>
                     <p className="break-words">
                       {event.content.length > 150 ? `${event.content.slice(0, 150)}...` : event.content}
                     </p>
-                    {isNote && (
-                      <p className="text-xs text-amber-600 mt-1 flex items-center gap-1">
-                        <Info className="h-3 w-3 shrink-0" />
-                        Text note — not visible in Divine apps
-                      </p>
-                    )}
                   </div>
                 );
               })}
