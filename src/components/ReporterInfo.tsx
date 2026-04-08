@@ -66,6 +66,8 @@ export function ReportedBy({ pubkey, timestamp }: ReportedByProps) {
 }
 
 export function ReporterInfo({ profile, pubkey, reportCount, isLoading }: ReporterInfoProps) {
+  const author = useAuthor(pubkey);
+
   if (isLoading) {
     return (
       <Card>
@@ -94,9 +96,10 @@ export function ReporterInfo({ profile, pubkey, reportCount, isLoading }: Report
     npub = pubkey;
   }
 
+  const isFunnelcakeUser = author.data?.isFunnelcakeUser ?? false;
   const displayName = profile?.display_name || profile?.name || `${npub.slice(0, 12)}...`;
   const trust = getTrustLevel(reportCount);
-  const profileUrl = getProfileUrl(npub, false);
+  const profileUrl = getProfileUrl(npub, isFunnelcakeUser);
 
   return (
     <Card>
