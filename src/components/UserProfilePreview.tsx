@@ -124,8 +124,6 @@ export function UserProfilePreview({ pubkey, className }: UserProfilePreviewProp
               {recentContent.map((event) => {
                 const isVideo = event.kind === 34235 || event.kind === 34236;
                 const isComment = event.kind === 1111;
-                const isNote = event.kind === 1;
-                const kindLabel = isVideo ? 'Video' : isComment ? 'Comment' : 'Note';
                 const eventUrl = (() => {
                   try {
                     return isVideo
