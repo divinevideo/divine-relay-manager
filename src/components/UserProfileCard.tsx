@@ -9,7 +9,6 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { User, FileText, Flag, Tag, CheckCircle, ChevronDown, ChevronUp, Copy, Check, ArrowUpRight, Trash2, Globe, ExternalLink, Video, MessageSquare } from "lucide-react";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { InlineMediaPreview } from "@/components/MediaPreview";
 import type { NostrEvent, NostrMetadata } from "@nostrify/nostrify";
 import type { UserStats } from "@/hooks/useUserStats";
@@ -280,24 +279,13 @@ function RecentPostsSection({ posts, onDeleteEvent }: { posts: NostrEvent[]; onD
                         );
                       } catch { return null; }
                     })()}
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        {(post.kind === 34235 || post.kind === 34236) ? (
-                          <Badge variant="default" className="text-xs gap-1 bg-green-600 cursor-help"><Video className="h-3 w-3" />Video</Badge>
-                        ) : post.kind === 1111 ? (
-                          <Badge variant="outline" className="text-xs gap-1 text-green-600 border-green-300 bg-green-50 cursor-help"><MessageSquare className="h-3 w-3" />Comment</Badge>
-                        ) : (
-                          <Badge variant="outline" className="text-xs gap-1 text-amber-600 border-amber-300 bg-amber-50 cursor-help"><Globe className="h-3 w-3" />Note</Badge>
-                        )}
-                      </TooltipTrigger>
-                      <TooltipContent side="top" className="max-w-xs text-xs">
-                        {(post.kind === 34235 || post.kind === 34236)
-                          ? "Short-form video — visible in Divine apps"
-                          : post.kind === 1111
-                          ? "Comment (kind 1111) — visible in Divine apps when attached to a video"
-                          : "Text note (kind 1) — not visible in Divine apps. Only visible via external Nostr clients."}
-                      </TooltipContent>
-                    </Tooltip>
+                    {(post.kind === 34235 || post.kind === 34236) ? (
+                      <Badge variant="default" className="text-xs gap-1 bg-green-600" title="Short-form video — visible in Divine apps"><Video className="h-3 w-3" />Video</Badge>
+                    ) : post.kind === 1111 ? (
+                      <Badge variant="outline" className="text-xs gap-1 text-green-600 border-green-300 bg-green-50" title="Comment (kind 1111) — visible in Divine apps when attached to a video"><MessageSquare className="h-3 w-3" />Comment</Badge>
+                    ) : (
+                      <Badge variant="outline" className="text-xs gap-1 text-amber-600 border-amber-300 bg-amber-50" title="Text note (kind 1) — not visible in Divine apps. Only visible via external Nostr clients."><Globe className="h-3 w-3" />Note</Badge>
+                    )}
                     {onDeleteEvent && (
                       <Button
                         variant="ghost"
