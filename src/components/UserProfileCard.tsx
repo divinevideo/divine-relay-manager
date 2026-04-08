@@ -236,7 +236,7 @@ function RecentPostsSection({ posts, onDeleteEvent }: { posts: NostrEvent[]; onD
       <div className="flex items-center justify-between">
         <h5 className="text-xs font-medium text-muted-foreground uppercase flex items-center gap-2">
           <FileText className="h-3 w-3" />
-          Recent Content ({posts.length})
+          Recent Content on Relay ({posts.length})
         </h5>
         <Button
           variant="ghost"
