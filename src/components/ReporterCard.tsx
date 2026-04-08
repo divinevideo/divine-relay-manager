@@ -323,11 +323,19 @@ export function ReporterInline({ pubkey, onViewProfile }: ReporterInlineProps) {
       <Badge variant="outline" className={`text-xs ${trust.color}`}>
         {trust.level}
       </Badge>
-      {!isFunnelcakeUser && (
-        <Badge variant="outline" className="text-xs text-purple-600 border-purple-300 bg-purple-50 gap-1">
-          <Globe className="h-3 w-3" />
-          Nostr
-        </Badge>
+      {isFunnelcakeUser ? (
+        <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80">
+          <Badge variant="outline" className="text-xs text-green-600 border-green-300 bg-green-50 gap-1">
+            Divine
+          </Badge>
+        </a>
+      ) : (
+        <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80">
+          <Badge variant="outline" className="text-xs text-purple-600 border-purple-300 bg-purple-50 gap-1">
+            <Globe className="h-3 w-3" />
+            Nostr
+          </Badge>
+        </a>
       )}
       {onViewProfile && (
         <Button

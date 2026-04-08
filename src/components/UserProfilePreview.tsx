@@ -78,8 +78,18 @@ export function UserProfilePreview({ pubkey, className }: UserProfilePreviewProp
             <div className="flex items-center gap-2">
               <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:opacity-80">
                 <h4 className="font-semibold truncate">{displayName}</h4>
-                {!isFunnelcakeUser && <Globe className="h-3.5 w-3.5 text-purple-500 shrink-0" />}
               </a>
+              {isFunnelcakeUser ? (
+                <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80">
+                  <Badge variant="outline" className="text-xs text-green-600 border-green-300 bg-green-50">Divine</Badge>
+                </a>
+              ) : (
+                <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80">
+                  <Badge variant="outline" className="text-xs text-purple-600 border-purple-300 bg-purple-50 gap-1">
+                    <Globe className="h-3 w-3" />Nostr
+                  </Badge>
+                </a>
+              )}
               {isBot && (
                 <Badge variant="secondary" className="text-xs">
                   <Bot className="h-3 w-3 mr-1" />
