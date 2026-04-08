@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import type { NostrEvent } from "@nostrify/nostrify";
-import { getDivineProfileUrl } from "@/lib/constants";
+import { getProfileUrl, getPublicEventUrl } from "@/lib/constants";
 import type { FetchSource } from "@/hooks/useThread";
 
 interface ThreadContextProps {
@@ -44,10 +44,6 @@ interface ThreadContextProps {
   isRechecking?: boolean;
 }
 
-// NIP-71 video kinds. Divine primarily uses 34235 (addressable video),
-// but we check all video kinds to handle edge cases.
-const VIDEO_KINDS = [21, 22, 34235, 34236];
-
 function PostCard({
   event,
   isReported = false,
@@ -68,12 +64,13 @@ function PostCard({
       return event.pubkey.slice(0, 8) + '...';
     }
   })();
+  const isFunnelcakeUser = author.data?.isFunnelcakeUser ?? false;
   const displayName = author.data?.metadata?.display_name || author.data?.metadata?.name || npubFallback;
   const avatar = author.data?.metadata?.picture;
   const date = new Date(event.created_at * 1000);
   const profileUrl = (() => {
     try {
-      return getDivineProfileUrl(nip19.npubEncode(event.pubkey));
+      return getProfileUrl(nip19.npubEncode(event.pubkey), isFunnelcakeUser);
     } catch {
       return undefined;
     }
@@ -95,8 +92,9 @@ function PostCard({
             </a>
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2 flex-wrap">
-                <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80">
+                <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:opacity-80">
                   <span className="font-medium text-sm">{displayName}</span>
+                  {!isFunnelcakeUser && <Globe className="h-3 w-3 text-purple-500 shrink-0" />}
                 </a>
                 <span className="text-xs text-muted-foreground">
                   {date.toLocaleDateString()} {date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
@@ -136,12 +134,12 @@ function PostCard({
               </div>
               {!isReported && (
                 <a
-                  href={`https://divine.video/${nip19.neventEncode({ id: event.id })}`}
+                  href={getPublicEventUrl(nip19.neventEncode({ id: event.id }), apiUrl)}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1 mt-1"
                 >
-                  {VIDEO_KINDS.includes(event.kind) ? 'View video' : 'View'} on Divine
+                  Open event
                   <ExternalLink className="h-3 w-3" />
                 </a>
               )}

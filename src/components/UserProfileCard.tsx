@@ -8,11 +8,12 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { User, FileText, Flag, Tag, CheckCircle, ChevronDown, ChevronUp, Copy, Check, ArrowUpRight, Trash2 } from "lucide-react";
+import { useApiUrl } from "@/hooks/useAdminApi";
+import { User, FileText, Flag, Tag, CheckCircle, ChevronDown, ChevronUp, Copy, Check, ArrowUpRight, Trash2, Globe, ExternalLink, Video, MessageSquare } from "lucide-react";
 import { InlineMediaPreview } from "@/components/MediaPreview";
 import type { NostrEvent, NostrMetadata } from "@nostrify/nostrify";
 import type { UserStats } from "@/hooks/useUserStats";
-import { getDivineProfileUrl } from "@/lib/constants";
+import { getProfileUrl, getPublicEventUrl } from "@/lib/constants";
 
 // Label category colors
 const LABEL_COLORS: Record<string, string> = {
@@ -41,10 +42,12 @@ interface UserProfileCardProps {
   stats?: UserStats;
   isLoading?: boolean;
   onDeleteEvent?: (eventId: string) => void;
+  isFunnelcakeUser?: boolean;
 }
 
-export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEvent }: UserProfileCardProps) {
+export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEvent, isFunnelcakeUser = false }: UserProfileCardProps) {
   const [copied, setCopied] = useState(false);
+  const apiUrl = useApiUrl();
 
   // Convert hex pubkey to npub
   let npub = "";
@@ -101,7 +104,7 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
   const hasProfile = !!(profile?.display_name || profile?.name);
   const displayName = profile?.display_name || profile?.name || npub;
   const nip05 = profile?.nip05;
-  const profileUrl = getDivineProfileUrl(npub);
+  const profileUrl = getProfileUrl(npub, isFunnelcakeUser);
 
   // Extract unique labels from label events
   const labelCounts = new Map<string, number>();
@@ -124,12 +127,25 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
             </Avatar>
           </a>
           <div className="flex-1 min-w-0 overflow-hidden">
-            <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80 block min-w-0 overflow-hidden">
-              <CardTitle className="text-base flex items-center gap-1 min-w-0">
-                <span className="truncate min-w-0">{displayName}</span>
-                <ArrowUpRight className="h-3 w-3 text-muted-foreground shrink-0" />
-              </CardTitle>
-            </a>
+            <div className="flex items-center gap-2 min-w-0 overflow-hidden">
+              <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80 min-w-0 overflow-hidden">
+                <CardTitle className="text-base flex items-center gap-1 min-w-0">
+                  <span className="truncate min-w-0">{displayName}</span>
+                  <ArrowUpRight className="h-3 w-3 text-muted-foreground shrink-0" />
+                </CardTitle>
+              </a>
+              {isFunnelcakeUser ? (
+                <a href={profileUrl} target="_blank" rel="noopener noreferrer">
+                  <Badge variant="outline" className="text-xs text-green-600 border-green-300 bg-green-50 shrink-0">Divine</Badge>
+                </a>
+              ) : (
+                <a href={profileUrl} target="_blank" rel="noopener noreferrer">
+                  <Badge variant="outline" className="text-xs text-purple-600 border-purple-300 bg-purple-50 gap-1 shrink-0">
+                    <Globe className="h-3 w-3" />Nostr
+                  </Badge>
+                </a>
+              )}
+            </div>
             {nip05 && (
               <div className="flex items-center gap-1 text-sm text-muted-foreground min-w-0">
                 <CheckCircle className="h-3 w-3 text-green-500 shrink-0" />
@@ -203,7 +219,7 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
 
         {/* Recent Posts */}
         {stats?.recentPosts && stats.recentPosts.length > 0 && (
-          <RecentPostsSection posts={stats.recentPosts} onDeleteEvent={onDeleteEvent} />
+          <RecentPostsSection posts={stats.recentPosts} onDeleteEvent={onDeleteEvent} apiUrl={apiUrl} />
         )}
       </CardContent>
     </Card>
@@ -211,7 +227,15 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
 }
 
 // Separate component for recent posts with expand/collapse
-function RecentPostsSection({ posts, onDeleteEvent }: { posts: NostrEvent[]; onDeleteEvent?: (eventId: string) => void }) {
+function RecentPostsSection({
+  posts,
+  onDeleteEvent,
+  apiUrl,
+}: {
+  posts: NostrEvent[];
+  onDeleteEvent?: (eventId: string) => void;
+  apiUrl: string;
+}) {
   const [expanded, setExpanded] = useState(true);
   const [showAll, setShowAll] = useState(false);
 
@@ -222,7 +246,7 @@ function RecentPostsSection({ posts, onDeleteEvent }: { posts: NostrEvent[]; onD
       <div className="flex items-center justify-between">
         <h5 className="text-xs font-medium text-muted-foreground uppercase flex items-center gap-2">
           <FileText className="h-3 w-3" />
-          Recent Content ({posts.length})
+          Recent Content on Relay ({posts.length})
         </h5>
         <Button
           variant="ghost"
@@ -249,13 +273,30 @@ function RecentPostsSection({ posts, onDeleteEvent }: { posts: NostrEvent[]; onD
                 {/* Media preview - uses InlineMediaPreview for admin proxy fallback */}
                 <InlineMediaPreview content={post.content} tags={post.tags} />
 
-                {/* Timestamp, kind, and delete */}
+                {/* Timestamp, kind, link, and delete */}
                 <div className="flex items-center justify-between text-xs text-muted-foreground">
                   <span>{new Date(post.created_at * 1000).toLocaleString()}</span>
                   <div className="flex items-center gap-1.5">
-                    <Badge variant="outline" className="text-xs">
-                      {post.kind === 1 ? 'Note' : post.kind === 1063 ? 'Video' : `Kind ${post.kind}`}
-                    </Badge>
+                    {(() => {
+                      try {
+                        const encodedRef = (post.kind === 34235 || post.kind === 34236)
+                          ? nip19.naddrEncode({ identifier: post.tags.find(t => t[0] === 'd')?.[1] || '', pubkey: post.pubkey, kind: post.kind })
+                          : nip19.neventEncode({ id: post.id });
+                        const eventUrl = getPublicEventUrl(encodedRef, apiUrl);
+                        return (
+                          <a href={eventUrl} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800">
+                            <ExternalLink className="h-3 w-3" />
+                          </a>
+                        );
+                      } catch { return null; }
+                    })()}
+                    {(post.kind === 34235 || post.kind === 34236) ? (
+                      <Badge variant="default" className="text-xs gap-1 bg-green-600" title="Short-form video — visible in Divine apps"><Video className="h-3 w-3" />Video</Badge>
+                    ) : post.kind === 1111 ? (
+                      <Badge variant="outline" className="text-xs gap-1 text-green-600 border-green-300 bg-green-50" title="Comment (kind 1111) — visible in Divine apps when attached to a video"><MessageSquare className="h-3 w-3" />Comment</Badge>
+                    ) : (
+                      <Badge variant="outline" className="text-xs gap-1 text-amber-600 border-amber-300 bg-amber-50" title="Text note (kind 1) — not visible in Divine apps. Only visible via external Nostr clients."><Globe className="h-3 w-3" />Note</Badge>
+                    )}
                     {onDeleteEvent && (
                       <Button
                         variant="ghost"

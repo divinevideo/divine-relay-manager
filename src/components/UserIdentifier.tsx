@@ -3,7 +3,7 @@
 
 import { useState } from "react";
 import { nip19 } from "nostr-tools";
-import { Copy, Check } from "lucide-react";
+import { Copy, Check, Globe } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import {
@@ -14,7 +14,7 @@ import {
 } from "@/components/ui/tooltip";
 import { useAuthor } from "@/hooks/useAuthor";
 import { cn } from "@/lib/utils";
-import { getDivineProfileUrl } from "@/lib/constants";
+import { getProfileUrl } from "@/lib/constants";
 
 interface UserIdentifierProps {
   pubkey: string;
@@ -49,6 +49,7 @@ export function UserIdentifier({
   }
 
   const metadata = author.data?.metadata;
+  const isFunnelcakeUser = author.data?.isFunnelcakeUser ?? false;
   const displayName = metadata?.display_name || metadata?.name;
   const nip05 = metadata?.nip05;
   const picture = metadata?.picture;
@@ -83,7 +84,7 @@ export function UserIdentifier({
   // Full npub -- CSS truncation handles overflow based on available space
   const displayNpub = npub;
 
-  const profileUrl = getDivineProfileUrl(npub);
+  const profileUrl = getProfileUrl(npub, isFunnelcakeUser);
 
   if (variant === "compact") {
     const content = (
@@ -117,6 +118,7 @@ export function UserIdentifier({
                 )}
               >
                 {content}
+                {!isFunnelcakeUser && <Globe className="h-3 w-3 text-purple-500 shrink-0" />}
               </a>
             ) : (
               <span
@@ -184,9 +186,10 @@ export function UserIdentifier({
               href={profileUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="hover:opacity-80"
+              className="inline-flex items-center gap-1 hover:opacity-80"
             >
               {nameElement}
+              {!isFunnelcakeUser && <Globe className="h-3 w-3 text-purple-500 shrink-0" />}
             </a>
           ) : (
             nameElement
@@ -267,6 +270,7 @@ export function UserIdentifier({
           className="inline-flex items-center gap-1 hover:opacity-80"
         >
           {inlineContent}
+          {!isFunnelcakeUser && <Globe className="h-3 w-3 text-purple-500 shrink-0" />}
         </a>
       ) : (
         inlineContent
@@ -305,6 +309,7 @@ export function UserDisplayName({
 }: UserDisplayNameProps) {
   const author = useAuthor(pubkey);
   const metadata = author.data?.metadata;
+  const isFunnelcakeUser = author.data?.isFunnelcakeUser ?? false;
   const displayName = metadata?.display_name || metadata?.name;
 
   let npub = "";
@@ -325,12 +330,13 @@ export function UserDisplayName({
   if (linkToProfile) {
     return (
       <a
-        href={getDivineProfileUrl(npub)}
+        href={getProfileUrl(npub, isFunnelcakeUser)}
         target="_blank"
         rel="noopener noreferrer"
-        className="block min-w-0 overflow-hidden hover:opacity-80"
+        className="inline-flex items-center gap-1 min-w-0 overflow-hidden hover:opacity-80"
       >
         {content}
+        {!isFunnelcakeUser && <Globe className="h-3 w-3 text-purple-500 shrink-0" />}
       </a>
     );
   }

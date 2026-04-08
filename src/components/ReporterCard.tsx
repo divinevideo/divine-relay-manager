@@ -8,11 +8,11 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { FileText, Copy, Check, Flag } from "lucide-react";
+import { FileText, Copy, Check, Flag, Globe } from "lucide-react";
 import { useState } from "react";
 import { nip19 } from "nostr-tools";
 import type { NostrEvent } from "@nostrify/nostrify";
-import { getDivineProfileUrl } from "@/lib/constants";
+import { getProfileUrl } from "@/lib/constants";
 
 interface ReporterCardProps {
   pubkey: string;
@@ -43,9 +43,10 @@ export function ReporterCard({
     npub = pubkey;
   }
 
+  const isFunnelcakeUser = author.data?.isFunnelcakeUser ?? false;
   const displayName = profile?.display_name || profile?.name || `${npub.slice(0, 12)}...`;
   const npubDisplay = `${npub.slice(0, 12)}...${npub.slice(-6)}`;
-  const profileUrl = getDivineProfileUrl(npub);
+  const profileUrl = getProfileUrl(npub, isFunnelcakeUser);
 
   const copyPubkey = async () => {
     try {
@@ -82,8 +83,9 @@ export function ReporterCard({
           </Avatar>
         </a>
         <div className="flex-1 min-w-0">
-          <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80">
+          <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:opacity-80">
             <p className="text-sm font-medium truncate">{displayName}</p>
+            {!isFunnelcakeUser && <Globe className="h-3 w-3 text-purple-500 shrink-0" />}
           </a>
           <p className="text-xs text-muted-foreground font-mono truncate">{npubDisplay}</p>
         </div>
@@ -111,8 +113,9 @@ export function ReporterCard({
 
         <div className="flex-1 min-w-0 space-y-1">
           <div className="flex items-center gap-2">
-            <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80">
+            <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:opacity-80">
               <p className="font-medium truncate">{displayName}</p>
+              {!isFunnelcakeUser && <Globe className="h-3 w-3 text-purple-500 shrink-0" />}
             </a>
             {category && (
               <Badge variant="outline" className="text-xs shrink-0">{category}</Badge>
@@ -295,7 +298,8 @@ export function ReporterInline({ pubkey, onViewProfile }: ReporterInlineProps) {
     );
   }
 
-  const profileUrl = getDivineProfileUrl(npub);
+  const isFunnelcakeUser = author.data?.isFunnelcakeUser ?? false;
+  const profileUrl = getProfileUrl(npub, isFunnelcakeUser);
 
   return (
     <div className="flex items-center gap-2 flex-wrap">
@@ -304,7 +308,7 @@ export function ReporterInline({ pubkey, onViewProfile }: ReporterInlineProps) {
         target="_blank"
         rel="noopener noreferrer"
         className="flex items-center gap-1.5 hover:bg-muted rounded-full pr-2 transition-colors"
-        title="View reporter's profile on diVine"
+        title={isFunnelcakeUser ? "View profile on Divine" : "View profile on njump.me"}
       >
         <Avatar className="h-5 w-5">
           <AvatarImage src={profile?.picture} />
@@ -319,6 +323,20 @@ export function ReporterInline({ pubkey, onViewProfile }: ReporterInlineProps) {
       <Badge variant="outline" className={`text-xs ${trust.color}`}>
         {trust.level}
       </Badge>
+      {isFunnelcakeUser ? (
+        <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80">
+          <Badge variant="outline" className="text-xs text-green-600 border-green-300 bg-green-50 gap-1">
+            Divine
+          </Badge>
+        </a>
+      ) : (
+        <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80">
+          <Badge variant="outline" className="text-xs text-purple-600 border-purple-300 bg-purple-50 gap-1">
+            <Globe className="h-3 w-3" />
+            Nostr
+          </Badge>
+        </a>
+      )}
       {onViewProfile && (
         <Button
           type="button"

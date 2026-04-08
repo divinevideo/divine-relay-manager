@@ -1,3 +1,5 @@
+import { getEnvironmentByApiUrl } from "@/lib/environments";
+
 // ABOUTME: Shared constants for moderation categories and labels
 // ABOUTME: DTSP (Digital Trust & Safety Partnership) category mappings
 
@@ -61,11 +63,25 @@ export function getReportCategory(event: { tags: string[][] }): string {
 }
 
 // Divine profile URL base
+export const DIVINE_PUBLIC_URL = "https://divine.video";
 export const DIVINE_PROFILE_URL = "https://divine.video/profile";
+export const NJUMP_PROFILE_URL = "https://njump.me";
 
-// Build a full profile URL from an npub
-export function getDivineProfileUrl(npub: string): string {
-  return `${DIVINE_PROFILE_URL}/${npub}`;
+// Build a profile URL, preferring divine.video when the user is indexed by Funnelcake
+// (i.e., their profile exists on the relay). Falls back to njump.me to avoid empty pages.
+export function getProfileUrl(npub: string, isFunnelcakeUser: boolean): string {
+  return isFunnelcakeUser
+    ? `${DIVINE_PROFILE_URL}/${npub}`
+    : `${NJUMP_PROFILE_URL}/${npub}`;
+}
+
+// Build a public event URL. Only production routes to divine.video; staging/local
+// fall back to njump so moderators never get kicked to production unexpectedly.
+export function getPublicEventUrl(encodedRef: string, apiUrl?: string): string {
+  const environment = apiUrl ? getEnvironmentByApiUrl(apiUrl) : undefined;
+  return environment?.id === 'production'
+    ? `${DIVINE_PUBLIC_URL}/${encodedRef}`
+    : `${NJUMP_PROFILE_URL}/${encodedRef}`;
 }
 
 // Build a reason string for moderation decisions from a category key + optional note

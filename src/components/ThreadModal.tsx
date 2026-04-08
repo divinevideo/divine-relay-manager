@@ -16,9 +16,9 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAuthor } from "@/hooks/useAuthor";
 import { useAppContext } from "@/hooks/useAppContext";
-import { MessageSquare } from "lucide-react";
+import { MessageSquare, Globe } from "lucide-react";
 import type { NostrEvent } from "@nostrify/nostrify";
-import { getDivineProfileUrl } from "@/lib/constants";
+import { getProfileUrl } from "@/lib/constants";
 
 interface ThreadModalProps {
   eventId: string;
@@ -72,13 +72,14 @@ function ThreadPost({
       return node.event.pubkey.slice(0, 8) + '...';
     }
   })();
+  const isFunnelcakeUser = author.data?.isFunnelcakeUser ?? false;
   const displayName = author.data?.metadata?.display_name || author.data?.metadata?.name || npubFallback;
   const avatar = author.data?.metadata?.picture;
   const date = new Date(node.event.created_at * 1000);
   const isHighlighted = node.event.id === highlightId;
   const profileUrl = (() => {
     try {
-      return getDivineProfileUrl(nip19.npubEncode(node.event.pubkey));
+      return getProfileUrl(nip19.npubEncode(node.event.pubkey), isFunnelcakeUser);
     } catch {
       return undefined;
     }
@@ -104,8 +105,9 @@ function ThreadPost({
           </a>
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
-              <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80">
+              <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:opacity-80">
                 <span className="text-sm font-medium">{displayName}</span>
+                {!isFunnelcakeUser && <Globe className="h-3 w-3 text-purple-500 shrink-0" />}
               </a>
               <span className="text-xs text-muted-foreground">
                 {date.toLocaleString()}
