@@ -12,7 +12,7 @@ import { User, FileText, Flag, Tag, CheckCircle, ChevronDown, ChevronUp, Copy, C
 import { InlineMediaPreview } from "@/components/MediaPreview";
 import type { NostrEvent, NostrMetadata } from "@nostrify/nostrify";
 import type { UserStats } from "@/hooks/useUserStats";
-import { getDivineProfileUrl } from "@/lib/constants";
+import { getProfileUrl } from "@/lib/constants";
 
 // Label category colors
 const LABEL_COLORS: Record<string, string> = {
@@ -101,7 +101,7 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
   const hasProfile = !!(profile?.display_name || profile?.name);
   const displayName = profile?.display_name || profile?.name || npub;
   const nip05 = profile?.nip05;
-  const profileUrl = getDivineProfileUrl(npub);
+  const profileUrl = getProfileUrl(npub, false);
 
   // Extract unique labels from label events
   const labelCounts = new Map<string, number>();

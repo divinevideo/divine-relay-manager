@@ -22,7 +22,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Textarea } from "@/components/ui/textarea";
 import { EventDetail } from "@/components/EventDetail";
 import { BulkDeleteByKind } from "@/components/BulkDeleteByKind";
-import { getDivineProfileUrl } from "@/lib/constants";
+import { getProfileUrl } from "@/lib/constants";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   FileText,
@@ -46,6 +46,7 @@ import {
   UserPlus,
   Loader2,
   XCircle,
+  ExternalLink,
 } from "lucide-react";
 import type { NostrEvent } from "@nostrify/nostrify";
 
@@ -121,11 +122,12 @@ function EventCard({
   const [moderationReason, setModerationReason] = useState('');
 
   const metadata = author.data?.metadata;
+  const isFunnelcakeUser = author.data?.isFunnelcakeUser ?? false;
   const displayName = metadata?.name || nip19.npubEncode(event.pubkey).slice(0, 12) + '...';
   const profileImage = metadata?.picture;
   const profileUrl = (() => {
     try {
-      return getDivineProfileUrl(nip19.npubEncode(event.pubkey));
+      return getProfileUrl(nip19.npubEncode(event.pubkey), isFunnelcakeUser);
     } catch {
       return undefined;
     }
@@ -179,8 +181,9 @@ function EventCard({
               )}
             </a>
             <div className="min-w-0">
-              <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80" onClick={(e) => e.stopPropagation()}>
+              <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:opacity-80" onClick={(e) => e.stopPropagation()}>
                 <p className="font-medium text-sm truncate">{displayName}</p>
+                {!isFunnelcakeUser && <ExternalLink className="h-3 w-3 text-muted-foreground shrink-0" />}
               </a>
               <p className="text-xs text-muted-foreground font-mono">
                 {(() => {

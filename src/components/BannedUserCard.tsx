@@ -16,7 +16,7 @@ import {
 import { ExternalLink, FileText, ChevronDown, Copy, Check, Trash2 } from "lucide-react";
 import { useState } from "react";
 import type { NostrMetadata } from "@nostrify/nostrify";
-import { getDivineProfileUrl } from "@/lib/constants";
+import { getProfileUrl } from "@/lib/constants";
 
 interface BannedUserCardProps {
   pubkey: string;
@@ -83,7 +83,7 @@ export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban }: BannedUse
 
   const displayName = profile?.name || profile?.display_name || shortNpub;
   const njumpUrl = `https://njump.me/${npub}`;
-  const profileUrl = getDivineProfileUrl(npub);
+  const profileUrl = getProfileUrl(npub, false);
 
   const copyNpub = () => {
     navigator.clipboard.writeText(npub);

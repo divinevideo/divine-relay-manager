@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import type { NostrEvent } from "@nostrify/nostrify";
-import { getDivineProfileUrl } from "@/lib/constants";
+import { getProfileUrl } from "@/lib/constants";
 import type { FetchSource } from "@/hooks/useThread";
 
 interface ThreadContextProps {
@@ -68,12 +68,13 @@ function PostCard({
       return event.pubkey.slice(0, 8) + '...';
     }
   })();
+  const isFunnelcakeUser = author.data?.isFunnelcakeUser ?? false;
   const displayName = author.data?.metadata?.display_name || author.data?.metadata?.name || npubFallback;
   const avatar = author.data?.metadata?.picture;
   const date = new Date(event.created_at * 1000);
   const profileUrl = (() => {
     try {
-      return getDivineProfileUrl(nip19.npubEncode(event.pubkey));
+      return getProfileUrl(nip19.npubEncode(event.pubkey), isFunnelcakeUser);
     } catch {
       return undefined;
     }
@@ -95,8 +96,9 @@ function PostCard({
             </a>
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2 flex-wrap">
-                <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80">
+                <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:opacity-80">
                   <span className="font-medium text-sm">{displayName}</span>
+                  {!isFunnelcakeUser && <ExternalLink className="h-3 w-3 text-muted-foreground shrink-0" />}
                 </a>
                 <span className="text-xs text-muted-foreground">
                   {date.toLocaleDateString()} {date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
