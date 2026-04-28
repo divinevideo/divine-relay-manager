@@ -7,6 +7,8 @@ export const CATEGORY_LABELS: Record<string, string> = {
   'sexual_minors': 'CSAM',
   'csam': 'CSAM',
   'NS-csam': 'CSAM',
+  // NIP-32 social.nos.ontology labels emitted by divine-mobile and divine-web.
+  // Keep both kebab- and camel-case aliases where clients already differ on wire values.
   'NS-spam': 'Spam',
   'NS-harassment': 'Harassment',
   'NS-violence': 'Violence',
