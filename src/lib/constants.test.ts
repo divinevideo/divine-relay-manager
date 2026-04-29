@@ -14,6 +14,12 @@ describe('CATEGORY_LABELS', () => {
     expect(CATEGORY_LABELS['NS-aiGenerated']).toBe('AI Generated');
     expect(CATEGORY_LABELS['NS-other']).toBe('Other');
   });
+
+  it('maps kebab-case aliases to the same display labels as camelCase', () => {
+    expect(CATEGORY_LABELS['NS-sexual-content']).toBe('Sexual Content');
+    expect(CATEGORY_LABELS['NS-false-information']).toBe('Misinformation');
+    expect(CATEGORY_LABELS['NS-ai-generated']).toBe('AI Generated');
+  });
 });
 
 describe('getReportCategory', () => {
