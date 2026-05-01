@@ -10,15 +10,18 @@ import { Labels } from "@/components/Labels";
 import { DebugPanel } from "@/components/DebugPanel";
 import { SettingsDashboard } from "@/components/SettingsDashboard";
 import { EnvironmentSelector } from "@/components/EnvironmentSelector";
+import { DashboardPulse } from "@/components/DashboardPulse";
+import { StatsTrends } from "@/components/StatsTrends";
 import { Card } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Server, FileText, Users, Settings, Flag, Tag, Bug, GripVertical } from "lucide-react";
+import { Server, FileText, Users, Settings, Flag, Tag, Bug, GripVertical, BarChart3 } from "lucide-react";
 import { useAppContext } from "@/hooks/useAppContext";
 import AdminBar from "@/components/AdminBar";
 
 // Tab definitions in default order (Reports first for moderation workflow)
 const TAB_DEFINITIONS = [
   { id: 'reports', label: 'Reports', icon: Flag },
+  { id: 'stats', label: 'Stats', icon: BarChart3 },
   { id: 'events', label: 'Events', icon: FileText },
   { id: 'users', label: 'Users', icon: Users },
   { id: 'labels', label: 'Labels', icon: Tag },
@@ -60,6 +63,7 @@ function saveTabOrder(order: TabId[]): void {
 
 // Map URL paths to tab values
 function getTabFromPath(pathname: string): string {
+  if (pathname.startsWith('/stats')) return 'stats';
   if (pathname.startsWith('/events')) return 'events';
   if (pathname.startsWith('/users')) return 'users';
   if (pathname.startsWith('/reports')) return 'reports';
@@ -165,9 +169,10 @@ export function RelayManager() {
         </div>
       </header>
 
-      <div className="flex-1 min-h-0 overflow-hidden container mx-auto px-4 py-4">
-        <Tabs value={currentTab} onValueChange={handleTabChange} className="h-full flex flex-col">
-          <TabsList className="shrink-0 grid w-full grid-cols-6">
+      <div className="flex-1 min-h-0 overflow-hidden container mx-auto px-4 py-4 flex flex-col gap-4">
+        <DashboardPulse />
+        <Tabs value={currentTab} onValueChange={handleTabChange} className="flex-1 min-h-0 flex flex-col">
+          <TabsList className="shrink-0 grid w-full grid-cols-7">
             {orderedTabs.map((tab) => {
               const Icon = tab.icon;
               const isDragOver = dragOverTab === tab.id;
@@ -203,6 +208,10 @@ export function RelayManager() {
 
           <TabsContent value="reports" className="flex-1 min-h-0 mt-4">
             <Reports relayUrl={config.relayUrl} selectedReportId={params.reportId} />
+          </TabsContent>
+
+          <TabsContent value="stats" className="flex-1 min-h-0 overflow-auto mt-4">
+            <StatsTrends />
           </TabsContent>
 
           <TabsContent value="labels" className="flex-1 min-h-0 mt-4">

@@ -49,7 +49,7 @@ describe('proxyFunnelcakeRequest', () => {
       expect(response.status).toBe(200);
       expect(response.headers.get('Cache-Control')).toBe('public, max-age=300');
       expect(response.headers.get('Access-Control-Allow-Origin')).toBe('*');
-      const body = await response.json();
+      const body = await response.json() as { id: string };
       expect(body.id).toBe('abc123');
     } finally {
       globalThis.fetch = originalFetch;

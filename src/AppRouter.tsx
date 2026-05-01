@@ -11,6 +11,7 @@ export function AppRouter() {
       <Routes>
         {/* Main tabs - each tab gets its own route */}
         <Route path="/" element={<Navigate to="/reports" replace />} />
+        <Route path="/stats" element={<Index />} />
         <Route path="/events" element={<Index />} />
         <Route path="/users" element={<Index />} />
         <Route path="/users/:pubkey" element={<Index />} />

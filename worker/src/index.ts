@@ -14,6 +14,7 @@ import {
 import { ensureSchema } from './db';
 import { generatePreAuthToken, verifyPreAuthToken, base64UrlEncode } from './zendesk-preauth';
 import { deriveFunnelcakeApiUrl, proxyFunnelcakeRequest } from './funnelcake-proxy';
+import { handleDashboardStats } from './dashboard-stats';
 
 let schemaReady = false;
 async function ensureSchemaOnce(db: D1Database): Promise<void> {
@@ -203,6 +204,7 @@ interface UnsignedEvent {
 interface ApiResponse {
   success: boolean;
   event?: object;
+  events?: object[];
   error?: string;
   pubkey?: string;
   // Moderation action responses
@@ -334,6 +336,10 @@ export default {
       // Report watcher management endpoints
       if (path.startsWith('/api/report-watcher/')) {
         return handleReportWatcherRoutes(request, path, env, corsHeaders);
+      }
+
+      if (path === '/api/dashboard-stats' && request.method === 'GET') {
+        return handleDashboardStats(env, corsHeaders);
       }
 
       // Funnelcake REST API proxy -- fast ClickHouse-backed reads

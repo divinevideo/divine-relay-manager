@@ -49,6 +49,79 @@ interface InfoResponse {
   error?: string;
 }
 
+export type MetricStatus = 'live' | 'partial' | 'unavailable' | 'error';
+
+export interface DashboardMetric<T> {
+  value: T;
+  status: MetricStatus;
+  message?: string;
+}
+
+export interface PlatformStats {
+  total_events: number;
+  total_videos: number;
+  vine_videos: number;
+}
+
+export interface VideoActivitySummary {
+  postsLastHour: number;
+  postsLastDay: number;
+  activePublishersLastDay: number;
+}
+
+export interface EngagementSummary {
+  viewsLastDay: number;
+  uniqueViewersLastDay: number;
+  loopsLastDay: number;
+  source: 'leaderboard_top_day';
+}
+
+export interface TrustSummary {
+  pendingReports: number;
+  reportTargets: number;
+  resolvedTargets: number;
+}
+
+export interface LeaderboardVideo {
+  id?: string;
+  event_id?: string;
+  author?: string;
+  pubkey?: string;
+  views: number;
+  unique_viewers: number;
+  loops: number;
+  [key: string]: unknown;
+}
+
+export interface LeaderboardCreator {
+  pubkey: string;
+  views: number;
+  unique_viewers: number;
+  loops: number;
+  videos_with_views: number;
+  [key: string]: unknown;
+}
+
+export interface DashboardStats {
+  generatedAt: string;
+  platform: DashboardMetric<PlatformStats | null>;
+  videoActivity: DashboardMetric<VideoActivitySummary>;
+  engagement: DashboardMetric<EngagementSummary>;
+  trust: DashboardMetric<TrustSummary>;
+  topVideos: DashboardMetric<LeaderboardVideo[]>;
+  topCreators: DashboardMetric<LeaderboardCreator[]>;
+  auth: {
+    registrations: DashboardMetric<number | null>;
+    logins: DashboardMetric<number | null>;
+  };
+}
+
+export interface DashboardStatsResponse {
+  success: boolean;
+  stats: DashboardStats;
+  error?: string;
+}
+
 export interface LabelParams {
   targetType: 'event' | 'pubkey';
   targetValue: string;
@@ -113,6 +186,14 @@ async function _apiRequestWithValidation<T>(
 // Info endpoint
 export async function getWorkerInfo(apiUrl: string): Promise<InfoResponse> {
   return apiRequest<InfoResponse>(apiUrl, '/api/info', 'GET');
+}
+
+export async function fetchDashboardStats(apiUrl: string): Promise<DashboardStatsResponse> {
+  const data = await apiRequest<DashboardStatsResponse>(apiUrl, '/api/dashboard-stats', 'GET');
+  if (!data.success) {
+    throw new ApiError(data.error || 'Failed to fetch dashboard stats');
+  }
+  return data;
 }
 
 // Publish endpoint - for general event publishing

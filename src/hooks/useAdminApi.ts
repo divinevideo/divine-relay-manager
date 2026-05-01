@@ -27,6 +27,9 @@ export function useAdminApi() {
     // Info
     getWorkerInfo: () => adminApi.getWorkerInfo(apiUrl),
 
+    // Product + trust dashboard
+    fetchDashboardStats: () => adminApi.fetchDashboardStats(apiUrl),
+
     // Event publishing
     publishEvent: (event: adminApi.UnsignedEvent) => adminApi.publishEvent(apiUrl, event),
 

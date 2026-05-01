@@ -14,6 +14,7 @@ import {
   unbanPubkey,
   listBannedPubkeys,
   listBannedEvents,
+  fetchDashboardStats,
   fetchReports,
   fetchResolutionLabels,
   publishLabel,
@@ -128,6 +129,50 @@ describe('adminApi', () => {
       const result = await getWorkerInfo(API_URL);
 
       expect(result).toEqual(mockInfo);
+    });
+  });
+
+  describe('fetchDashboardStats', () => {
+    it('should call /api/dashboard-stats and return product trust stats', async () => {
+      const mockResponse = {
+        success: true,
+        stats: {
+          generatedAt: '2026-05-02T00:00:00.000Z',
+          platform: { value: { total_events: 120, total_videos: 30, vine_videos: 9 }, status: 'live' },
+          videoActivity: {
+            value: { postsLastHour: 2, postsLastDay: 12, activePublishersLastDay: 4 },
+            status: 'live',
+          },
+          engagement: {
+            value: {
+              viewsLastDay: 80,
+              uniqueViewersLastDay: 24,
+              loopsLastDay: 42,
+              source: 'leaderboard_top_day',
+            },
+            status: 'partial',
+          },
+          trust: { value: { pendingReports: 3, reportTargets: 6, resolvedTargets: 3 }, status: 'live' },
+          topVideos: { value: [], status: 'live' },
+          topCreators: { value: [], status: 'live' },
+          auth: {
+            registrations: { value: null, status: 'unavailable' },
+            logins: { value: null, status: 'unavailable' },
+          },
+        },
+      };
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => mockResponse,
+      });
+
+      const result = await fetchDashboardStats(API_URL);
+
+      expect(result).toEqual(mockResponse);
+      expect(mockFetch).toHaveBeenCalledWith(
+        `${API_URL}/api/dashboard-stats`,
+        expect.objectContaining({ method: 'GET' })
+      );
     });
   });
 
