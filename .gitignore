@@ -25,5 +25,8 @@ dist-ssr
 # Git worktrees
 .worktrees/
 
+# Local brainstorming companion artifacts
+.superpowers/
+
 # Local TLS certs (mkcert)
 .certs/
