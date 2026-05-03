@@ -145,6 +145,10 @@ export class ReportWatcher implements DurableObject {
         return this.handleGetConfig();
       }
 
+      if (path === '/config' && request.method === 'PUT') {
+        return this.handlePutConfig(request);
+      }
+
       return new Response(JSON.stringify({ error: 'Not found' }), {
         status: 404,
         headers: { 'Content-Type': 'application/json' },
@@ -252,6 +256,79 @@ export class ReportWatcher implements DurableObject {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     });
+  }
+
+  private async handlePutConfig(request: Request): Promise<Response> {
+    let config: AutoHideConfig;
+    try {
+      config = await request.json() as AutoHideConfig;
+    } catch {
+      return new Response(JSON.stringify({ success: false, error: 'Invalid JSON body' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    const validationError = this.validateConfig(config);
+    if (validationError) {
+      return new Response(JSON.stringify({ success: false, error: validationError }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    this.autoHideConfig = config;
+    await this.state.storage.put('autoHideConfig', config);
+    console.log('[ReportWatcher] Auto-hide config updated');
+
+    return new Response(JSON.stringify({
+      success: true,
+      config: this.autoHideConfig,
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  private validateConfig(config: AutoHideConfig): string | null {
+    if (!config || typeof config.enabled !== 'boolean') {
+      return 'Missing or invalid "enabled" field';
+    }
+    if (!Array.isArray(config.trustedClients)) {
+      return 'Missing or invalid "trustedClients" field';
+    }
+    if (!Array.isArray(config.tiers) || config.tiers.length === 0) {
+      return 'Must have at least one tier';
+    }
+
+    const allCategories = new Set<string>();
+    for (const tier of config.tiers) {
+      if (!tier.name || typeof tier.name !== 'string') {
+        return 'Each tier must have a name';
+      }
+      if (!Array.isArray(tier.categories)) {
+        return `Tier "${tier.name}": categories must be an array`;
+      }
+      if (typeof tier.threshold !== 'number' || tier.threshold < 1) {
+        return `Tier "${tier.name}": threshold must be >= 1`;
+      }
+      if (tier.name !== 'Immediate' && tier.threshold < 2) {
+        return `Tier "${tier.name}": non-immediate tier threshold must be >= 2`;
+      }
+
+      for (const cat of tier.categories) {
+        if (allCategories.has(cat)) {
+          return `Category "${cat}" appears in multiple tiers (duplicate not allowed)`;
+        }
+        allCategories.add(cat);
+      }
+    }
+
+    if (config.trustedClients.length === 0 && config.tiers.some(t => t.requireTrustedClient)) {
+      return 'At least one trusted client required when a tier has requireTrustedClient enabled';
+    }
+
+    return null;
   }
 
   private buildDefaultConfig(): AutoHideConfig {

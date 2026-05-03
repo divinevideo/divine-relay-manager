@@ -1083,5 +1083,116 @@ describe('ReportWatcher', () => {
       expect(body.config.trustedClients).toEqual(['TestClient']);
       expect(body.config.tiers[1].threshold).toBe(5);
     });
+
+    it('should save valid config via PUT /config', async () => {
+      mockState = createMockState();
+      mockEnv = createMockEnv({ AUTO_HIDE_ENABLED: 'true' });
+      watcher = new ReportWatcher(mockState, mockEnv);
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const newConfig: AutoHideConfig = {
+        enabled: true,
+        trustedClients: ['diVine', 'divine-web', 'divine-mobile'],
+        tiers: [
+          { name: 'Immediate', categories: ['csam', 'NS-csam'], threshold: 1, requireTrustedClient: true },
+          { name: 'Threshold', categories: ['NS-sexualContent'], threshold: 3, requireTrustedClient: false },
+        ],
+      };
+
+      const request = new Request('https://do/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newConfig),
+      });
+      const response = await watcher.fetch(request);
+
+      expect(response.status).toBe(200);
+      const body = await response.json() as { success: boolean; config: AutoHideConfig };
+      expect(body.success).toBe(true);
+      expect(body.config.tiers[1].threshold).toBe(3);
+
+      expect(mockState.storage.put).toHaveBeenCalledWith('autoHideConfig', newConfig);
+    });
+
+    it('should reject threshold tier with threshold < 2', async () => {
+      mockState = createMockState();
+      mockEnv = createMockEnv({ AUTO_HIDE_ENABLED: 'true' });
+      watcher = new ReportWatcher(mockState, mockEnv);
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const badConfig: AutoHideConfig = {
+        enabled: true,
+        trustedClients: ['diVine'],
+        tiers: [
+          { name: 'Immediate', categories: ['csam'], threshold: 1, requireTrustedClient: true },
+          { name: 'Threshold', categories: ['NS-spam'], threshold: 1, requireTrustedClient: false },
+        ],
+      };
+
+      const request = new Request('https://do/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(badConfig),
+      });
+      const response = await watcher.fetch(request);
+
+      expect(response.status).toBe(400);
+      const body = await response.json() as { error: string };
+      expect(body.error).toContain('threshold');
+    });
+
+    it('should reject duplicate categories across tiers', async () => {
+      mockState = createMockState();
+      mockEnv = createMockEnv({ AUTO_HIDE_ENABLED: 'true' });
+      watcher = new ReportWatcher(mockState, mockEnv);
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const badConfig: AutoHideConfig = {
+        enabled: true,
+        trustedClients: ['diVine'],
+        tiers: [
+          { name: 'Immediate', categories: ['csam', 'NS-spam'], threshold: 1, requireTrustedClient: true },
+          { name: 'Threshold', categories: ['NS-spam'], threshold: 2, requireTrustedClient: false },
+        ],
+      };
+
+      const request = new Request('https://do/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(badConfig),
+      });
+      const response = await watcher.fetch(request);
+
+      expect(response.status).toBe(400);
+      const body = await response.json() as { error: string };
+      expect(body.error).toContain('duplicate');
+    });
+
+    it('should reject config with no trusted clients when a tier requires them', async () => {
+      mockState = createMockState();
+      mockEnv = createMockEnv({ AUTO_HIDE_ENABLED: 'true' });
+      watcher = new ReportWatcher(mockState, mockEnv);
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const badConfig: AutoHideConfig = {
+        enabled: true,
+        trustedClients: [],
+        tiers: [
+          { name: 'Immediate', categories: ['csam'], threshold: 1, requireTrustedClient: true },
+          { name: 'Threshold', categories: ['NS-spam'], threshold: 2, requireTrustedClient: false },
+        ],
+      };
+
+      const request = new Request('https://do/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(badConfig),
+      });
+      const response = await watcher.fetch(request);
+
+      expect(response.status).toBe(400);
+      const body = await response.json() as { error: string };
+      expect(body.error).toContain('trusted');
+    });
   });
 });
