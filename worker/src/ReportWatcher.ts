@@ -39,6 +39,22 @@ export interface ReportEvent {
   created_at: number;
 }
 
+export interface AutoHideConfig {
+  enabled: boolean;
+  trustedClients: string[];
+  tiers: AutoHideTier[];
+}
+
+export interface AutoHideTier {
+  name: string;
+  categories: string[];
+  threshold: number;
+  requireTrustedClient: boolean;
+}
+
+const DEFAULT_IMMEDIATE_CATEGORIES = ['sexual_minors', 'csam', 'NS-csam'];
+const DEFAULT_THRESHOLD_CATEGORIES = ['NS-sexualContent', 'NS-sexual-content', 'NS-violence', 'NS-extremism'];
+
 // Reconnection settings
 const INITIAL_RECONNECT_DELAY_MS = 1000;
 const MAX_RECONNECT_DELAY_MS = 60000;
@@ -46,13 +62,6 @@ const RECONNECT_BACKOFF_MULTIPLIER = 2;
 
 // Alarm interval for connection health checks
 const HEALTH_CHECK_INTERVAL_MS = 30000;
-
-// Categories that trigger auto-hide (MVP: CSAM-related categories)
-// Maps various client formats to a normalized category for auto-hide
-// - 'sexual_minors' - NIP-56 standard
-// - 'csam' - Divine mobile/web app format
-// - 'NS-csam' - Divine web app with NIP-32 prefix
-const AUTO_HIDE_CATEGORIES = ['sexual_minors', 'csam', 'NS-csam'];
 
 /**
  * ReportWatcher Durable Object
@@ -77,6 +86,7 @@ export class ReportWatcher implements DurableObject {
   private reconnectAttempts: number = 0;
   private reconnectDelay: number = INITIAL_RECONNECT_DELAY_MS;
   private subscriptionId: string = 'auto-hide-reports';
+  private autoHideConfig: AutoHideConfig | null = null;
 
   constructor(state: DurableObjectState, env: ReportWatcherEnv) {
     this.state = state;
@@ -95,11 +105,18 @@ export class ReportWatcher implements DurableObject {
         this.eventsProcessed = stored.eventsProcessed;
         this.eventsAutoHidden = stored.eventsAutoHidden || 0;
 
-        // If we were running, reconnect
         if (this.running) {
           console.log('[ReportWatcher] Restoring connection after restart');
           this.connect();
         }
+      }
+
+      // Load or seed auto-hide config
+      this.autoHideConfig = await this.state.storage.get<AutoHideConfig>('autoHideConfig') ?? null;
+      if (!this.autoHideConfig) {
+        this.autoHideConfig = this.buildDefaultConfig();
+        await this.state.storage.put('autoHideConfig', this.autoHideConfig);
+        console.log('[ReportWatcher] Seeded default auto-hide config');
       }
     });
   }
@@ -122,6 +139,10 @@ export class ReportWatcher implements DurableObject {
 
       if (path === '/status' && request.method === 'GET') {
         return this.handleStatus();
+      }
+
+      if (path === '/config' && request.method === 'GET') {
+        return this.handleGetConfig();
       }
 
       return new Response(JSON.stringify({ error: 'Not found' }), {
@@ -221,6 +242,37 @@ export class ReportWatcher implements DurableObject {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     });
+  }
+
+  private handleGetConfig(): Response {
+    return new Response(JSON.stringify({
+      success: true,
+      config: this.autoHideConfig,
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  private buildDefaultConfig(): AutoHideConfig {
+    return {
+      enabled: this.env.AUTO_HIDE_ENABLED === 'true',
+      trustedClients: (this.env.TRUSTED_CLIENTS || 'diVine,divine-web,divine-mobile').split(','),
+      tiers: [
+        {
+          name: 'Immediate',
+          categories: [...DEFAULT_IMMEDIATE_CATEGORIES],
+          threshold: 1,
+          requireTrustedClient: true,
+        },
+        {
+          name: 'Threshold',
+          categories: [...DEFAULT_THRESHOLD_CATEGORIES],
+          threshold: 2,
+          requireTrustedClient: false,
+        },
+      ],
+    };
   }
 
   /**

@@ -2,7 +2,7 @@
 // ABOUTME: Tests start/stop/status and WebSocket functionality
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ReportWatcher, type ReportWatcherEnv, type ReportEvent, type ReportWatcherStatus } from './ReportWatcher';
+import { ReportWatcher, type ReportWatcherEnv, type ReportEvent, type ReportWatcherStatus, type AutoHideConfig } from './ReportWatcher';
 
 // Mock WebSocket instances created during tests
 let mockWebSockets: MockWebSocket[] = [];
@@ -1024,6 +1024,64 @@ describe('ReportWatcher', () => {
 
       // diVine is NOT in custom trusted list
       expect(mockFetch).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('auto-hide config', () => {
+    it('should seed default config from env vars on first boot', async () => {
+      mockState = createMockState();
+      mockEnv = createMockEnv({
+        AUTO_HIDE_ENABLED: 'true',
+        TRUSTED_CLIENTS: 'diVine,divine-web',
+      });
+      watcher = new ReportWatcher(mockState, mockEnv);
+
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const request = new Request('https://do/config', { method: 'GET' });
+      const response = await watcher.fetch(request);
+
+      expect(response.status).toBe(200);
+
+      const body = await response.json() as { success: boolean; config: AutoHideConfig };
+      expect(body.success).toBe(true);
+      expect(body.config.enabled).toBe(true);
+      expect(body.config.trustedClients).toEqual(['diVine', 'divine-web']);
+      expect(body.config.tiers).toHaveLength(2);
+      expect(body.config.tiers[0].name).toBe('Immediate');
+      expect(body.config.tiers[0].categories).toContain('csam');
+      expect(body.config.tiers[0].threshold).toBe(1);
+      expect(body.config.tiers[0].requireTrustedClient).toBe(true);
+      expect(body.config.tiers[1].name).toBe('Threshold');
+      expect(body.config.tiers[1].threshold).toBe(2);
+      expect(body.config.tiers[1].requireTrustedClient).toBe(false);
+    });
+
+    it('should return stored config when it exists', async () => {
+      mockState = createMockState();
+      const storedConfig: AutoHideConfig = {
+        enabled: false,
+        trustedClients: ['TestClient'],
+        tiers: [
+          { name: 'Immediate', categories: ['csam'], threshold: 1, requireTrustedClient: true },
+          { name: 'Threshold', categories: ['NS-spam'], threshold: 5, requireTrustedClient: true },
+        ],
+      };
+      vi.mocked(mockState.storage.get).mockImplementation(async (key: string) => {
+        if (key === 'autoHideConfig') return storedConfig;
+        return undefined;
+      });
+
+      watcher = new ReportWatcher(mockState, mockEnv);
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const request = new Request('https://do/config', { method: 'GET' });
+      const response = await watcher.fetch(request);
+      const body = await response.json() as { config: AutoHideConfig };
+
+      expect(body.config.enabled).toBe(false);
+      expect(body.config.trustedClients).toEqual(['TestClient']);
+      expect(body.config.tiers[1].threshold).toBe(5);
     });
   });
 });
