@@ -207,3 +207,10 @@ worker/
 - **NIP-56**: Kind 1984 report events. Core input for the moderation queue.
 - **NIP-32**: Kind 1985 label events. Published by the moderation service with AI classification results.
 - **Kind 0**: Profile metadata. Fetched by `useAuthor` for display names and avatars.
+
+## Cross-Repo Coordination
+
+This repo is **Layer 1** in the auto-hide evolution plan. Read the coordination doc at session start:
+`~/code/support-trust-safety/docs/moderation/auto-hide-evolution-plan.md`
+
+When you make decisions or discover constraints that affect other layers, update that doc and flag it for the user.
