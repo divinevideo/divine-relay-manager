@@ -8,13 +8,23 @@
 # Cloudflare Durable Object outside the GKE observability perimeter.
 # No Prometheus, no VMRule, no liveness probe can reach it.
 #
+# Failure counting uses GitHub Actions repository variables
+# (RW_FAILS_STAGING, RW_FAILS_PRODUCTION) instead of actions/cache.
+# These are simple integers that persist across runs without accumulating
+# cache entries. The workflow resets them to 0 on recovery.
+#
 # Setup:
 #   1. Repo secrets (Settings > Secrets and variables > Actions):
-#      - CF_ACCESS_CLIENT_ID    — Cloudflare Access service token
-#      - CF_ACCESS_CLIENT_SECRET — Cloudflare Access service token
-#      - SLACK_WEBHOOK_ALERTS   — Incoming webhook for #divine-alerts
+#      - CF_ACCESS_CLIENT_ID    -- Cloudflare Access service token
+#      - CF_ACCESS_CLIENT_SECRET -- Cloudflare Access service token
+#      - SLACK_WEBHOOK_ALERTS   -- Incoming webhook for #divine-alerts
 #        (same value as vmalertmanager-slack-webhook-{env} in GCP Secret Manager)
-#   2. To test manually: Actions tab > "ReportWatcher Health Check" > Run workflow
+#   2. Repo variables (Settings > Secrets and variables > Actions > Variables):
+#      - RW_FAILS_STAGING       -- set to 0 (created automatically on first run)
+#      - RW_FAILS_PRODUCTION    -- set to 0 (created automatically on first run)
+#   3. Workflow permissions: needs read/write access to Actions variables.
+#      The default GITHUB_TOKEN has this for repo-scoped variables.
+#   4. To test manually: Actions tab > "ReportWatcher Health Check" > Run workflow
 
 name: ReportWatcher Health Check
 
@@ -26,7 +36,7 @@ on:
 jobs:
   health-check:
     runs-on: ubuntu-latest
-    # Never mark the workflow as failed — that emails all repo watchers.
+    # Never mark the workflow as failed -- that emails all repo watchers.
     # Alerting goes through Slack only.
     continue-on-error: true
 
@@ -35,8 +45,10 @@ jobs:
         env:
           - name: staging
             url: https://api-relay-staging.divine.video
+            fails_var: RW_FAILS_STAGING
           - name: production
             url: https://api-relay-prod.divine.video
+            fails_var: RW_FAILS_PRODUCTION
 
     steps:
       - name: Check health
@@ -46,22 +58,57 @@ jobs:
           CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
           API_URL: ${{ matrix.env.url }}
         run: |
-          RESPONSE=$(curl -sf --max-time 10 \
+          # Capture HTTP status and body separately for diagnostics (#130)
+          HTTP_CODE=$(curl -s -o /tmp/rw-response.json -w '%{http_code}' --max-time 10 \
             -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
             -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
-            "$API_URL/api/report-watcher/status" 2>&1) || {
+            "$API_URL/api/report-watcher/status" 2>/tmp/rw-curl-err.txt) || {
+            CURL_EXIT=$?
+            CURL_ERR=$(cat /tmp/rw-curl-err.txt 2>/dev/null | tail -1)
+            # Distinguish transport failures from HTTP errors
+            if [ "$CURL_EXIT" = "28" ]; then
+              DIAG="timeout after 10s"
+            elif [ "$CURL_EXIT" = "6" ]; then
+              DIAG="DNS resolution failed"
+            elif [ "$CURL_EXIT" = "7" ]; then
+              DIAG="connection refused"
+            else
+              DIAG="curl exit $CURL_EXIT: $CURL_ERR"
+            fi
             echo "healthy=false" >> "$GITHUB_OUTPUT"
-            echo "payload=HTTP request failed" >> "$GITHUB_OUTPUT"
+            echo "payload=transport_error: $DIAG" >> "$GITHUB_OUTPUT"
+            echo "http_code=0" >> "$GITHUB_OUTPUT"
             exit 0
           }
-          CONNECTED=$(echo "$RESPONSE" | jq -r '.status.connected')
-          RUNNING=$(echo "$RESPONSE" | jq -r '.status.running')
+
+          echo "http_code=$HTTP_CODE" >> "$GITHUB_OUTPUT"
+
+          if [ "$HTTP_CODE" = "403" ] || [ "$HTTP_CODE" = "401" ]; then
+            echo "healthy=false" >> "$GITHUB_OUTPUT"
+            echo "payload=auth_error: HTTP $HTTP_CODE (check CF Access credentials)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "healthy=false" >> "$GITHUB_OUTPUT"
+            echo "payload=http_error: HTTP $HTTP_CODE" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          BODY=$(cat /tmp/rw-response.json)
+          CONNECTED=$(echo "$BODY" | jq -r '.status.connected' 2>/dev/null) || {
+            echo "healthy=false" >> "$GITHUB_OUTPUT"
+            echo "payload=parse_error: response is not valid JSON" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          RUNNING=$(echo "$BODY" | jq -r '.status.running')
+
           if [ "$CONNECTED" = "true" ] && [ "$RUNNING" = "true" ]; then
             echo "healthy=true" >> "$GITHUB_OUTPUT"
           else
             echo "healthy=false" >> "$GITHUB_OUTPUT"
           fi
-          echo "payload=$(echo "$RESPONSE" | jq -c '.status')" >> "$GITHUB_OUTPUT"
+          echo "payload=$(echo "$BODY" | jq -c '.status')" >> "$GITHUB_OUTPUT"
 
       # --- Self-healing: try to restart before alerting ---
 
@@ -74,54 +121,59 @@ jobs:
           API_URL: ${{ matrix.env.url }}
         run: |
           echo "ReportWatcher unhealthy on ${{ matrix.env.name }}, attempting restart..."
-          curl -sf --max-time 15 -X POST \
+          echo "Initial failure: ${{ steps.check.outputs.payload }}"
+
+          RESTART_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 -X POST \
             -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
             -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
-            "$API_URL/api/report-watcher/start" || true
+            "$API_URL/api/report-watcher/start" 2>/dev/null) || true
+          echo "Restart response: HTTP $RESTART_CODE"
 
           echo "Waiting 30s for reconnection..."
           sleep 30
 
-          RESPONSE=$(curl -sf --max-time 10 \
+          HTTP_CODE=$(curl -s -o /tmp/rw-recover.json -w '%{http_code}' --max-time 10 \
             -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
             -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
-            "$API_URL/api/report-watcher/status" 2>&1) || {
+            "$API_URL/api/report-watcher/status" 2>/dev/null) || {
             echo "recovered=false" >> "$GITHUB_OUTPUT"
-            echo "payload=HTTP request failed after restart" >> "$GITHUB_OUTPUT"
+            echo "payload=transport_error after restart (HTTP $HTTP_CODE)" >> "$GITHUB_OUTPUT"
             exit 0
           }
-          CONNECTED=$(echo "$RESPONSE" | jq -r '.status.connected')
-          RUNNING=$(echo "$RESPONSE" | jq -r '.status.running')
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "recovered=false" >> "$GITHUB_OUTPUT"
+            echo "payload=http_error after restart: HTTP $HTTP_CODE" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          BODY=$(cat /tmp/rw-recover.json)
+          CONNECTED=$(echo "$BODY" | jq -r '.status.connected' 2>/dev/null)
+          RUNNING=$(echo "$BODY" | jq -r '.status.running' 2>/dev/null)
           if [ "$CONNECTED" = "true" ] && [ "$RUNNING" = "true" ]; then
             echo "recovered=true" >> "$GITHUB_OUTPUT"
             echo "ReportWatcher recovered after restart"
           else
             echo "recovered=false" >> "$GITHUB_OUTPUT"
-            echo "payload=$(echo "$RESPONSE" | jq -c '.status')" >> "$GITHUB_OUTPUT"
+            echo "payload=$(echo "$BODY" | jq -c '.status')" >> "$GITHUB_OUTPUT"
             echo "ReportWatcher still unhealthy after restart"
           fi
 
-      # --- Failure counting: only alert on 2+ consecutive post-recovery failures ---
-
-      - name: Restore failure count
-        if: steps.check.outputs.healthy == 'false' && steps.recover.outputs.recovered != 'true'
-        uses: actions/cache/restore@v4
-        with:
-          path: .health-state
-          key: rw-health-${{ matrix.env.name }}-${{ github.run_id }}
-          restore-keys: rw-health-${{ matrix.env.name }}-
+      # --- Failure counting via repo variables (not cache) ---
+      # Uses GitHub Actions repository variables for persistence.
+      # Simple, no cache accumulation, easy to inspect and reset manually.
 
       - name: Update failure count
         id: counts
         if: always()
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HEALTHY: ${{ steps.check.outputs.healthy }}
           RECOVERED: ${{ steps.recover.outputs.recovered }}
-          ENV_NAME: ${{ matrix.env.name }}
+          FAILS_VAR: ${{ matrix.env.fails_var }}
         run: |
-          mkdir -p .health-state
-
-          FAILS=$(cat ".health-state/$ENV_NAME-fails" 2>/dev/null || echo 0)
+          # Read current count from repo variable (default 0 if not set)
+          FAILS=$(gh variable get "$FAILS_VAR" --repo "$GITHUB_REPOSITORY" 2>/dev/null || echo "0")
 
           if [ "$HEALTHY" = "true" ] || [ "$RECOVERED" = "true" ]; then
             FAILS=0
@@ -129,7 +181,9 @@ jobs:
             FAILS=$((FAILS + 1))
           fi
 
-          echo "$FAILS" > ".health-state/$ENV_NAME-fails"
+          # Write back
+          gh variable set "$FAILS_VAR" --repo "$GITHUB_REPOSITORY" --body "$FAILS"
+
           echo "fails=$FAILS" >> "$GITHUB_OUTPUT"
 
           if [ "$FAILS" -ge 2 ]; then
@@ -138,19 +192,11 @@ jobs:
             echo "alert=false" >> "$GITHUB_OUTPUT"
           fi
 
-          # Track if we auto-recovered (worth a quiet log, not an alert)
           if [ "$HEALTHY" = "false" ] && [ "$RECOVERED" = "true" ]; then
             echo "self_healed=true" >> "$GITHUB_OUTPUT"
           else
             echo "self_healed=false" >> "$GITHUB_OUTPUT"
           fi
-
-      - name: Save failure count
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: .health-state
-          key: rw-health-${{ matrix.env.name }}-${{ github.run_id }}
 
       # --- Alert to Slack only when auto-recovery failed twice in a row ---
 
