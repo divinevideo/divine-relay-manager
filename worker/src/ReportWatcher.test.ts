@@ -154,8 +154,10 @@ describe('ReportWatcher', () => {
     });
 
     it('should reflect AUTO_HIDE_ENABLED from env', async () => {
+      mockState = createMockState();
       mockEnv = createMockEnv({ AUTO_HIDE_ENABLED: 'true' });
       watcher = new ReportWatcher(mockState, mockEnv);
+      await new Promise(resolve => setTimeout(resolve, 10));
 
       const request = new Request('https://do/status', { method: 'GET' });
       const response = await watcher.fetch(request);
@@ -468,7 +470,7 @@ describe('ReportWatcher', () => {
     let mockFetch: ReturnType<typeof vi.fn>;
     let mockDbRun: ReturnType<typeof vi.fn>;
 
-    beforeEach(() => {
+    beforeEach(async () => {
       mockFetch = vi.fn().mockResolvedValue({
         ok: true,
         json: async () => ({ result: true }),
@@ -476,18 +478,25 @@ describe('ReportWatcher', () => {
       vi.stubGlobal('fetch', mockFetch);
 
       mockDbRun = vi.fn().mockResolvedValue({ success: true });
+      mockState = createMockState();
+      mockEnv = createMockEnv({ AUTO_HIDE_ENABLED: 'true' });
       mockEnv.DB = {
         prepare: vi.fn().mockReturnValue({
           bind: vi.fn().mockReturnValue({
             run: mockDbRun,
-            first: vi.fn().mockResolvedValue(null), // Default: no existing decision
+            first: vi.fn().mockResolvedValue(null),
           }),
         }),
       } as unknown as D1Database;
+      watcher = new ReportWatcher(mockState, mockEnv);
+      await new Promise(resolve => setTimeout(resolve, 10));
     });
 
     it('should skip auto-hide when AUTO_HIDE_ENABLED is false', async () => {
-      mockEnv.AUTO_HIDE_ENABLED = 'false';
+      mockState = createMockState();
+      mockEnv = createMockEnv({ AUTO_HIDE_ENABLED: 'false' });
+      watcher = new ReportWatcher(mockState, mockEnv);
+      await new Promise(resolve => setTimeout(resolve, 10));
 
       await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
       await new Promise(resolve => setTimeout(resolve, 10));
@@ -513,8 +522,6 @@ describe('ReportWatcher', () => {
     });
 
     it('should skip auto-hide for non-qualifying categories', async () => {
-      mockEnv.AUTO_HIDE_ENABLED = 'true';
-
       await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
       await new Promise(resolve => setTimeout(resolve, 10));
 
@@ -539,8 +546,6 @@ describe('ReportWatcher', () => {
     });
 
     it('should call banevent when enabled for qualifying category from trusted client', async () => {
-      mockEnv.AUTO_HIDE_ENABLED = 'true';
-
       await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
       await new Promise(resolve => setTimeout(resolve, 10));
 
@@ -574,8 +579,6 @@ describe('ReportWatcher', () => {
     });
 
     it('should log decision to D1 on successful auto-hide', async () => {
-      mockEnv.AUTO_HIDE_ENABLED = 'true';
-
       await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
       await new Promise(resolve => setTimeout(resolve, 10));
 
@@ -604,8 +607,6 @@ describe('ReportWatcher', () => {
     });
 
     it('should increment eventsAutoHidden counter on success', async () => {
-      mockEnv.AUTO_HIDE_ENABLED = 'true';
-
       await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
       await new Promise(resolve => setTimeout(resolve, 10));
 
@@ -634,7 +635,6 @@ describe('ReportWatcher', () => {
     });
 
     it('should log failure when banevent fails', async () => {
-      mockEnv.AUTO_HIDE_ENABLED = 'true';
       mockFetch.mockResolvedValueOnce({
         ok: false,
         status: 500,
@@ -671,8 +671,6 @@ describe('ReportWatcher', () => {
     });
 
     it('should skip processing if event is already auto-hidden (deduplication)', async () => {
-      mockEnv.AUTO_HIDE_ENABLED = 'true';
-
       // Mock D1: no human resolution, but already auto-hidden
       mockEnv.DB = {
         prepare: vi.fn().mockImplementation((_sql: string) => ({
@@ -715,8 +713,6 @@ describe('ReportWatcher', () => {
     });
 
     it('should skip auto-hide for reports without a client tag', async () => {
-      mockEnv.AUTO_HIDE_ENABLED = 'true';
-
       await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
       await new Promise(resolve => setTimeout(resolve, 10));
 
@@ -745,8 +741,6 @@ describe('ReportWatcher', () => {
     });
 
     it('should skip auto-hide for reports without an e tag (malformed)', async () => {
-      mockEnv.AUTO_HIDE_ENABLED = 'true';
-
       await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
       await new Promise(resolve => setTimeout(resolve, 10));
 
@@ -772,8 +766,6 @@ describe('ReportWatcher', () => {
     });
 
     it('should skip auto-hide for reports from untrusted clients', async () => {
-      mockEnv.AUTO_HIDE_ENABLED = 'true';
-
       await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
       await new Promise(resolve => setTimeout(resolve, 10));
 
@@ -802,8 +794,6 @@ describe('ReportWatcher', () => {
     });
 
     it('should accept reports from all configured trusted clients', async () => {
-      mockEnv.AUTO_HIDE_ENABLED = 'true';
-
       for (const clientName of ['diVine', 'divine-web', 'divine-mobile']) {
         // Reset mocks for each iteration
         mockFetch.mockClear();
@@ -849,8 +839,6 @@ describe('ReportWatcher', () => {
     });
 
     it('should skip auto-hide when target has human resolution', async () => {
-      mockEnv.AUTO_HIDE_ENABLED = 'true';
-
       // Mock D1: moderation_targets returns a row (human reviewed),
       // moderation_decisions returns null (not already auto-hidden)
       mockEnv.DB = {
@@ -889,8 +877,6 @@ describe('ReportWatcher', () => {
     });
 
     it('should proceed with auto-hide when no human resolution exists', async () => {
-      mockEnv.AUTO_HIDE_ENABLED = 'true';
-
       // Mock D1: moderation_targets returns null (no human review),
       // moderation_decisions returns null (not already auto-hidden)
       mockEnv.DB = {
@@ -927,7 +913,6 @@ describe('ReportWatcher', () => {
     });
 
     it('should proceed with auto-hide when DB is unavailable (fail open)', async () => {
-      mockEnv.AUTO_HIDE_ENABLED = 'true';
       mockEnv.DB = undefined as unknown as D1Database;
 
       await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
@@ -955,8 +940,6 @@ describe('ReportWatcher', () => {
     });
 
     it('should proceed with auto-hide when hasHumanResolution query fails (fail open)', async () => {
-      mockEnv.AUTO_HIDE_ENABLED = 'true';
-
       // Mock D1: moderation_targets query throws, moderation_decisions returns null
       mockEnv.DB = {
         prepare: vi.fn().mockImplementation((_sql: string) => ({
@@ -997,8 +980,21 @@ describe('ReportWatcher', () => {
     });
 
     it('should respect custom TRUSTED_CLIENTS config', async () => {
-      mockEnv.AUTO_HIDE_ENABLED = 'true';
-      mockEnv.TRUSTED_CLIENTS = 'custom-app,another-app';
+      mockState = createMockState();
+      mockEnv = createMockEnv({
+        AUTO_HIDE_ENABLED: 'true',
+        TRUSTED_CLIENTS: 'custom-app,another-app',
+      });
+      mockEnv.DB = {
+        prepare: vi.fn().mockReturnValue({
+          bind: vi.fn().mockReturnValue({
+            run: mockDbRun,
+            first: vi.fn().mockResolvedValue(null),
+          }),
+        }),
+      } as unknown as D1Database;
+      watcher = new ReportWatcher(mockState, mockEnv);
+      await new Promise(resolve => setTimeout(resolve, 10));
 
       await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
       await new Promise(resolve => setTimeout(resolve, 10));
@@ -1024,6 +1020,143 @@ describe('ReportWatcher', () => {
 
       // diVine is NOT in custom trusted list
       expect(mockFetch).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('tier-aware auto-hide', () => {
+    let mockFetch: ReturnType<typeof vi.fn>;
+    let mockDb: {
+      prepare: ReturnType<typeof vi.fn>;
+    };
+
+    function createMockDbResult(rows: unknown[] = []) {
+      return {
+        bind: vi.fn().mockReturnThis(),
+        first: vi.fn().mockResolvedValue(rows.length > 0 ? rows[0] : null),
+        run: vi.fn().mockResolvedValue({ success: true }),
+        all: vi.fn().mockResolvedValue({ results: rows }),
+      };
+    }
+
+    function createReport(category: string, clientName: string = 'diVine'): ReportEvent {
+      return {
+        id: 'report-' + Math.random().toString(36).slice(2),
+        pubkey: 'reporter-pubkey-' + Math.random().toString(36).slice(2),
+        kind: 1984,
+        content: 'test report',
+        tags: [
+          ['e', 'target-event-id-abc123'],
+          ['p', 'target-pubkey-xyz'],
+          ['l', category, 'social.nos.ontology'],
+          ['client', clientName],
+        ],
+        created_at: Math.floor(Date.now() / 1000),
+      };
+    }
+
+    beforeEach(async () => {
+      mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ result: true }),
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      mockDb = {
+        prepare: vi.fn().mockReturnValue(createMockDbResult()),
+      };
+
+      mockState = createMockState();
+      mockEnv = createMockEnv({
+        AUTO_HIDE_ENABLED: 'true',
+        TRUSTED_CLIENTS: 'diVine,divine-web',
+        DB: mockDb as unknown as D1Database,
+      });
+      watcher = new ReportWatcher(mockState, mockEnv);
+      await new Promise(resolve => setTimeout(resolve, 10));
+    });
+
+    it('should log auto_hide_pending for threshold-tier category below threshold', async () => {
+      const countResult = createMockDbResult();
+      countResult.first = vi.fn().mockResolvedValue({ count: 1 });
+
+      mockDb.prepare = vi.fn().mockImplementation((sql: string) => {
+        if (sql.includes('COUNT(DISTINCT')) {
+          return countResult;
+        }
+        return createMockDbResult();
+      });
+
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const ws = getLastMockWebSocket();
+      const report = createReport('NS-sexualContent', 'diVine');
+      ws!.simulateMessage(JSON.stringify(['EVENT', 'auto-hide-reports', report]));
+
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      const insertCalls = mockDb.prepare.mock.calls.filter(
+        (call: string[]) => call[0]?.includes?.('INSERT') && call[0]?.includes?.('moderation_decisions')
+      );
+      expect(insertCalls.length).toBeGreaterThan(0);
+
+      // Should NOT have called banEvent (below threshold)
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('should auto-hide threshold-tier category when count reaches threshold', async () => {
+      const countResult = createMockDbResult();
+      countResult.first = vi.fn().mockResolvedValue({ count: 2 });
+
+      mockDb.prepare = vi.fn().mockImplementation((sql: string) => {
+        if (sql.includes('COUNT(DISTINCT')) {
+          return countResult;
+        }
+        return createMockDbResult();
+      });
+
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const ws = getLastMockWebSocket();
+      const report = createReport('NS-sexualContent', 'diVine');
+      ws!.simulateMessage(JSON.stringify(['EVENT', 'auto-hide-reports', report]));
+
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      // Should have called banEvent (threshold met)
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+
+      // Should have pending + auto_hidden inserts
+      const insertCalls = mockDb.prepare.mock.calls.filter(
+        (call: string[]) => call[0]?.includes?.('INSERT') && call[0]?.includes?.('moderation_decisions')
+      );
+      expect(insertCalls.length).toBeGreaterThanOrEqual(2);
+    });
+
+    it('should not require trusted client for threshold tier by default', async () => {
+      const countResult = createMockDbResult();
+      countResult.first = vi.fn().mockResolvedValue({ count: 2 });
+
+      mockDb.prepare = vi.fn().mockImplementation((sql: string) => {
+        if (sql.includes('COUNT(DISTINCT')) {
+          return countResult;
+        }
+        return createMockDbResult();
+      });
+
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const ws = getLastMockWebSocket();
+      // Untrusted client, threshold-tier category
+      const report = createReport('NS-sexualContent', 'Amethyst');
+      ws!.simulateMessage(JSON.stringify(['EVENT', 'auto-hide-reports', report]));
+
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      // Should still process (threshold tier doesn't require trusted client by default)
+      expect(mockFetch).toHaveBeenCalledTimes(1);
     });
   });
 
