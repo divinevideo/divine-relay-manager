@@ -16,6 +16,7 @@ export function AppRouter() {
         <Route path="/users/:pubkey" element={<Index />} />
         <Route path="/reports" element={<Index />} />
         <Route path="/reports/:reportId" element={<Index />} />
+        <Route path="/pending-review" element={<Index />} />
         <Route path="/labels" element={<Index />} />
         <Route path="/settings" element={<Index />} />
         <Route path="/debug" element={<Index />} />
