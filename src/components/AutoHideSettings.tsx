@@ -144,9 +144,7 @@ export function AutoHideSettings() {
   const { data, isLoading, error } = useQuery({
     queryKey: ["autoHideConfig", appConfig.apiUrl],
     queryFn: async () => {
-      const res = await fetch(`${appConfig.apiUrl}/api/report-watcher/config`, {
-        credentials: "include",
-      });
+      const res = await fetch(`${appConfig.apiUrl}/api/report-watcher/config`);
       if (!res.ok) throw new Error(`Failed to fetch config: ${res.status}`);
       const body = await res.json() as { success: boolean; config: AutoHideConfig };
       return body.config;
@@ -166,7 +164,6 @@ export function AutoHideSettings() {
     mutationFn: async (config: AutoHideConfig) => {
       const res = await fetch(`${appConfig.apiUrl}/api/report-watcher/config`, {
         method: "PUT",
-        credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(config),
       });
