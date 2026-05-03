@@ -1,0 +1,197 @@
+# ReportWatcher Health Check
+#
+# Polls staging and production ReportWatcher Durable Objects every 15 min.
+# If unhealthy, attempts auto-recovery via /start. If recovery fails,
+# alerts #divine-alerts via Slack webhook (same channel as GKE alerting).
+#
+# Lives in relay-manager (not iac-coreconfig) because ReportWatcher is a
+# Cloudflare Durable Object outside the GKE observability perimeter.
+# No Prometheus, no VMRule, no liveness probe can reach it.
+#
+# Setup:
+#   1. Repo secrets (Settings > Secrets and variables > Actions):
+#      - CF_ACCESS_CLIENT_ID    — Cloudflare Access service token
+#      - CF_ACCESS_CLIENT_SECRET — Cloudflare Access service token
+#      - SLACK_WEBHOOK_ALERTS   — Incoming webhook for #divine-alerts
+#        (same value as vmalertmanager-slack-webhook-{env} in GCP Secret Manager)
+#   2. To test manually: Actions tab > "ReportWatcher Health Check" > Run workflow
+
+name: ReportWatcher Health Check
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+jobs:
+  health-check:
+    runs-on: ubuntu-latest
+    # Never mark the workflow as failed — that emails all repo watchers.
+    # Alerting goes through Slack only.
+    continue-on-error: true
+
+    strategy:
+      matrix:
+        env:
+          - name: staging
+            url: https://api-relay-staging.divine.video
+          - name: production
+            url: https://api-relay-prod.divine.video
+
+    steps:
+      - name: Check health
+        id: check
+        env:
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          API_URL: ${{ matrix.env.url }}
+        run: |
+          RESPONSE=$(curl -sf --max-time 10 \
+            -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
+            -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
+            "$API_URL/api/report-watcher/status" 2>&1) || {
+            echo "healthy=false" >> "$GITHUB_OUTPUT"
+            echo "payload=HTTP request failed" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          CONNECTED=$(echo "$RESPONSE" | jq -r '.status.connected')
+          RUNNING=$(echo "$RESPONSE" | jq -r '.status.running')
+          if [ "$CONNECTED" = "true" ] && [ "$RUNNING" = "true" ]; then
+            echo "healthy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "healthy=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "payload=$(echo "$RESPONSE" | jq -c '.status')" >> "$GITHUB_OUTPUT"
+
+      # --- Self-healing: try to restart before alerting ---
+
+      - name: Attempt auto-recovery
+        id: recover
+        if: steps.check.outputs.healthy == 'false'
+        env:
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          API_URL: ${{ matrix.env.url }}
+        run: |
+          echo "ReportWatcher unhealthy on ${{ matrix.env.name }}, attempting restart..."
+          curl -sf --max-time 15 -X POST \
+            -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
+            -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
+            "$API_URL/api/report-watcher/start" || true
+
+          echo "Waiting 30s for reconnection..."
+          sleep 30
+
+          RESPONSE=$(curl -sf --max-time 10 \
+            -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
+            -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
+            "$API_URL/api/report-watcher/status" 2>&1) || {
+            echo "recovered=false" >> "$GITHUB_OUTPUT"
+            echo "payload=HTTP request failed after restart" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          CONNECTED=$(echo "$RESPONSE" | jq -r '.status.connected')
+          RUNNING=$(echo "$RESPONSE" | jq -r '.status.running')
+          if [ "$CONNECTED" = "true" ] && [ "$RUNNING" = "true" ]; then
+            echo "recovered=true" >> "$GITHUB_OUTPUT"
+            echo "ReportWatcher recovered after restart"
+          else
+            echo "recovered=false" >> "$GITHUB_OUTPUT"
+            echo "payload=$(echo "$RESPONSE" | jq -c '.status')" >> "$GITHUB_OUTPUT"
+            echo "ReportWatcher still unhealthy after restart"
+          fi
+
+      # --- Failure counting: only alert on 2+ consecutive post-recovery failures ---
+
+      - name: Restore failure count
+        if: steps.check.outputs.healthy == 'false' && steps.recover.outputs.recovered != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: .health-state
+          key: rw-health-${{ matrix.env.name }}-${{ github.run_id }}
+          restore-keys: rw-health-${{ matrix.env.name }}-
+
+      - name: Update failure count
+        id: counts
+        if: always()
+        env:
+          HEALTHY: ${{ steps.check.outputs.healthy }}
+          RECOVERED: ${{ steps.recover.outputs.recovered }}
+          ENV_NAME: ${{ matrix.env.name }}
+        run: |
+          mkdir -p .health-state
+
+          FAILS=$(cat ".health-state/$ENV_NAME-fails" 2>/dev/null || echo 0)
+
+          if [ "$HEALTHY" = "true" ] || [ "$RECOVERED" = "true" ]; then
+            FAILS=0
+          else
+            FAILS=$((FAILS + 1))
+          fi
+
+          echo "$FAILS" > ".health-state/$ENV_NAME-fails"
+          echo "fails=$FAILS" >> "$GITHUB_OUTPUT"
+
+          if [ "$FAILS" -ge 2 ]; then
+            echo "alert=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "alert=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Track if we auto-recovered (worth a quiet log, not an alert)
+          if [ "$HEALTHY" = "false" ] && [ "$RECOVERED" = "true" ]; then
+            echo "self_healed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "self_healed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Save failure count
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .health-state
+          key: rw-health-${{ matrix.env.name }}-${{ github.run_id }}
+
+      # --- Alert to Slack only when auto-recovery failed twice in a row ---
+
+      - name: Alert to Slack
+        if: steps.counts.outputs.alert == 'true'
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_ALERTS }}
+          ENV_NAME: ${{ matrix.env.name }}
+          FAILS: ${{ steps.counts.outputs.fails }}
+          STATUS_PAYLOAD: ${{ steps.recover.outputs.payload || steps.check.outputs.payload }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK" ]; then
+            echo "::warning::SLACK_WEBHOOK_ALERTS secret not configured, skipping alert"
+            exit 0
+          fi
+
+          curl -sf --max-time 10 -X POST "$SLACK_WEBHOOK" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"text\": \":rotating_light: ReportWatcher *$ENV_NAME* unhealthy ($FAILS consecutive failures, auto-restart failed)\",
+              \"blocks\": [
+                {
+                  \"type\": \"section\",
+                  \"text\": {
+                    \"type\": \"mrkdwn\",
+                    \"text\": \":rotating_light: *ReportWatcher health check failing*\n*Environment:* $ENV_NAME\n*Consecutive failures:* $FAILS (including auto-restart attempts)\n*Status:* \`$STATUS_PAYLOAD\`\"
+                  }
+                },
+                {
+                  \"type\": \"context\",
+                  \"elements\": [{
+                    \"type\": \"mrkdwn\",
+                    \"text\": \"<https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}|View workflow run>\"
+                  }]
+                }
+              ]
+            }"
+
+      # --- Quiet log when self-healing worked (no alert, just visibility) ---
+
+      - name: Log self-healing
+        if: steps.counts.outputs.self_healed == 'true'
+        run: |
+          echo "::notice::ReportWatcher ${{ matrix.env.name }} was unhealthy but recovered after auto-restart"
