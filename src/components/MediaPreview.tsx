@@ -191,7 +191,7 @@ export function MediaPreview({
       } catch {
         setFailedUrls(prev => new Set(prev).add(url));
       }
-    } else {
+    } else if (!proxyUrls.has(url)) {
       setFailedUrls(prev => new Set(prev).add(url));
     }
   };
@@ -250,6 +250,7 @@ export function MediaPreview({
                   </div>
                 ) : item.type === 'video' ? (
                   <video
+                    key={displayUrl}
                     src={displayUrl}
                     controls
                     className="w-full rounded aspect-video object-contain bg-black"
@@ -258,6 +259,7 @@ export function MediaPreview({
                   />
                 ) : (
                   <img
+                    key={displayUrl}
                     src={displayUrl}
                     alt={`Media ${index + 1}`}
                     className="w-full rounded aspect-square object-cover cursor-pointer hover:opacity-90 transition-opacity"
@@ -337,7 +339,7 @@ export function InlineMediaPreview({
       } catch {
         setFailedUrls(prev => new Set(prev).add(url));
       }
-    } else {
+    } else if (!proxyUrls.has(url)) {
       setFailedUrls(prev => new Set(prev).add(url));
     }
   };
@@ -368,6 +370,7 @@ export function InlineMediaPreview({
                 </div>
               ) : item.type === 'video' ? (
                 <video
+                  key={displayUrl}
                   src={displayUrl}
                   controls
                   className="w-full rounded aspect-video object-contain bg-black"
@@ -376,6 +379,7 @@ export function InlineMediaPreview({
                 />
               ) : (
                 <img
+                  key={displayUrl}
                   src={displayUrl}
                   alt={`Media ${index + 1}`}
                   className="w-full rounded aspect-square object-cover cursor-pointer"
