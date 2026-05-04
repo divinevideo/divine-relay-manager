@@ -39,6 +39,22 @@ export interface ReportEvent {
   created_at: number;
 }
 
+export interface AutoHideConfig {
+  enabled: boolean;
+  trustedClients: string[];
+  tiers: AutoHideTier[];
+}
+
+export interface AutoHideTier {
+  name: string;
+  categories: string[];
+  threshold: number;
+  requireTrustedClient: boolean;
+}
+
+const DEFAULT_IMMEDIATE_CATEGORIES = ['sexual_minors', 'csam', 'NS-csam'];
+const DEFAULT_THRESHOLD_CATEGORIES = ['NS-sexualContent', 'NS-sexual-content', 'NS-violence', 'NS-extremism'];
+
 // Reconnection settings
 const INITIAL_RECONNECT_DELAY_MS = 1000;
 const MAX_RECONNECT_DELAY_MS = 60000;
@@ -46,13 +62,6 @@ const RECONNECT_BACKOFF_MULTIPLIER = 2;
 
 // Alarm interval for connection health checks
 const HEALTH_CHECK_INTERVAL_MS = 30000;
-
-// Categories that trigger auto-hide (MVP: CSAM-related categories)
-// Maps various client formats to a normalized category for auto-hide
-// - 'sexual_minors' - NIP-56 standard
-// - 'csam' - Divine mobile/web app format
-// - 'NS-csam' - Divine web app with NIP-32 prefix
-const AUTO_HIDE_CATEGORIES = ['sexual_minors', 'csam', 'NS-csam'];
 
 /**
  * ReportWatcher Durable Object
@@ -77,6 +86,7 @@ export class ReportWatcher implements DurableObject {
   private reconnectAttempts: number = 0;
   private reconnectDelay: number = INITIAL_RECONNECT_DELAY_MS;
   private subscriptionId: string = 'auto-hide-reports';
+  private autoHideConfig: AutoHideConfig | null = null;
 
   constructor(state: DurableObjectState, env: ReportWatcherEnv) {
     this.state = state;
@@ -95,11 +105,18 @@ export class ReportWatcher implements DurableObject {
         this.eventsProcessed = stored.eventsProcessed;
         this.eventsAutoHidden = stored.eventsAutoHidden || 0;
 
-        // If we were running, reconnect
         if (this.running) {
           console.log('[ReportWatcher] Restoring connection after restart');
           this.connect();
         }
+      }
+
+      // Load or seed auto-hide config
+      this.autoHideConfig = await this.state.storage.get<AutoHideConfig>('autoHideConfig') ?? null;
+      if (!this.autoHideConfig) {
+        this.autoHideConfig = this.buildDefaultConfig();
+        await this.state.storage.put('autoHideConfig', this.autoHideConfig);
+        console.log('[ReportWatcher] Seeded default auto-hide config');
       }
     });
   }
@@ -122,6 +139,14 @@ export class ReportWatcher implements DurableObject {
 
       if (path === '/status' && request.method === 'GET') {
         return this.handleStatus();
+      }
+
+      if (path === '/config' && request.method === 'GET') {
+        return this.handleGetConfig();
+      }
+
+      if (path === '/config' && request.method === 'PUT') {
+        return this.handlePutConfig(request);
       }
 
       return new Response(JSON.stringify({ error: 'Not found' }), {
@@ -223,6 +248,110 @@ export class ReportWatcher implements DurableObject {
     });
   }
 
+  private handleGetConfig(): Response {
+    return new Response(JSON.stringify({
+      success: true,
+      config: this.autoHideConfig,
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  private async handlePutConfig(request: Request): Promise<Response> {
+    let config: AutoHideConfig;
+    try {
+      config = await request.json() as AutoHideConfig;
+    } catch {
+      return new Response(JSON.stringify({ success: false, error: 'Invalid JSON body' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    const validationError = this.validateConfig(config);
+    if (validationError) {
+      return new Response(JSON.stringify({ success: false, error: validationError }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    this.autoHideConfig = config;
+    await this.state.storage.put('autoHideConfig', config);
+    console.log('[ReportWatcher] Auto-hide config updated');
+
+    return new Response(JSON.stringify({
+      success: true,
+      config: this.autoHideConfig,
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  private validateConfig(config: AutoHideConfig): string | null {
+    if (!config || typeof config.enabled !== 'boolean') {
+      return 'Missing or invalid "enabled" field';
+    }
+    if (!Array.isArray(config.trustedClients)) {
+      return 'Missing or invalid "trustedClients" field';
+    }
+    if (!Array.isArray(config.tiers) || config.tiers.length === 0) {
+      return 'Must have at least one tier';
+    }
+
+    const allCategories = new Set<string>();
+    for (const tier of config.tiers) {
+      if (!tier.name || typeof tier.name !== 'string') {
+        return 'Each tier must have a name';
+      }
+      if (!Array.isArray(tier.categories)) {
+        return `Tier "${tier.name}": categories must be an array`;
+      }
+      if (typeof tier.threshold !== 'number' || tier.threshold < 1) {
+        return `Tier "${tier.name}": threshold must be >= 1`;
+      }
+      if (tier.name !== 'Immediate' && tier.threshold < 2) {
+        return `Tier "${tier.name}": non-immediate tier threshold must be >= 2`;
+      }
+
+      for (const cat of tier.categories) {
+        if (allCategories.has(cat)) {
+          return `Category "${cat}" appears in multiple tiers (duplicate not allowed)`;
+        }
+        allCategories.add(cat);
+      }
+    }
+
+    if (config.trustedClients.length === 0 && config.tiers.some(t => t.requireTrustedClient)) {
+      return 'At least one trusted client required when a tier has requireTrustedClient enabled';
+    }
+
+    return null;
+  }
+
+  private buildDefaultConfig(): AutoHideConfig {
+    return {
+      enabled: this.env.AUTO_HIDE_ENABLED === 'true',
+      trustedClients: (this.env.TRUSTED_CLIENTS || 'diVine,divine-web,divine-mobile').split(','),
+      tiers: [
+        {
+          name: 'Immediate',
+          categories: [...DEFAULT_IMMEDIATE_CATEGORIES],
+          threshold: 1,
+          requireTrustedClient: true,
+        },
+        {
+          name: 'Threshold',
+          categories: [...DEFAULT_THRESHOLD_CATEGORIES],
+          threshold: 2,
+          requireTrustedClient: false,
+        },
+      ],
+    };
+  }
+
   /**
    * Build status object
    */
@@ -234,7 +363,7 @@ export class ReportWatcher implements DurableObject {
       lastEventAt: this.lastEventAt,
       eventsProcessed: this.eventsProcessed,
       eventsAutoHidden: this.eventsAutoHidden,
-      autoHideEnabled: this.env.AUTO_HIDE_ENABLED === 'true',
+      autoHideEnabled: this.autoHideConfig?.enabled ?? false,
       reconnectAttempts: this.reconnectAttempts,
     };
   }
@@ -449,15 +578,11 @@ export class ReportWatcher implements DurableObject {
     }
   }
 
-  /**
-   * Process auto-hide for a report
-   */
   private async processAutoHide(
     event: ReportEvent,
     category: string,
     targetEventId: string
   ): Promise<void> {
-    // Ensure D1 schema exists before any DB access
     if (!this.schemaReady && this.env.DB) {
       try {
         await ensureSchema(this.env.DB);
@@ -467,52 +592,92 @@ export class ReportWatcher implements DurableObject {
       }
     }
 
-    // Check if auto-hide is enabled
-    if (this.env.AUTO_HIDE_ENABLED !== 'true') {
+    const config = this.autoHideConfig;
+    if (!config || !config.enabled) {
       console.log('[ReportWatcher] Auto-hide disabled, skipping');
       return;
     }
 
-    // Check if category qualifies for auto-hide
-    if (!AUTO_HIDE_CATEGORIES.includes(category)) {
-      console.log(`[ReportWatcher] Category '${category}' not in auto-hide list, skipping`);
+    // Find which tier this category belongs to
+    const tier = config.tiers.find(t => t.categories.includes(category));
+    if (!tier) {
+      console.log(`[ReportWatcher] Category '${category}' not in any auto-hide tier, skipping`);
       return;
     }
 
-    // Check if report is from a trusted client (Divine apps)
-    const trustedClients = (this.env.TRUSTED_CLIENTS || 'diVine,divine-web,divine-mobile').split(',');
-    const clientTag = event.tags.find((t: string[]) => t[0] === 'client');
-    const clientName = clientTag?.[1];
+    // Check trusted-client gate if tier requires it
+    if (tier.requireTrustedClient) {
+      const clientTag = event.tags.find((t: string[]) => t[0] === 'client');
+      const clientName = clientTag?.[1];
 
-    if (!clientName || !trustedClients.includes(clientName)) {
-      console.log(`[ReportWatcher] Report from untrusted client '${clientName || 'none'}', skipping auto-hide`);
-      await this.logDecision({
-        targetType: 'event',
-        targetId: targetEventId,
-        action: 'auto_hide_skipped',
-        reason: `${category}: untrusted client (${clientName || 'no client tag'})`,
-        reportId: event.id,
-        reporterPubkey: event.pubkey,
-      });
-      return;
+      if (!clientName || !config.trustedClients.includes(clientName)) {
+        console.log(`[ReportWatcher] Report from untrusted client '${clientName || 'none'}', skipping (tier: ${tier.name})`);
+        await this.logDecision({
+          targetType: 'event',
+          targetId: targetEventId,
+          action: 'auto_hide_skipped',
+          reason: `${category}: untrusted client (${clientName || 'no client tag'})`,
+          reportId: event.id,
+          reporterPubkey: event.pubkey,
+        });
+        return;
+      }
     }
 
-    // Check if a human has already reviewed this target — their decision stands
     if (await this.hasHumanResolution(targetEventId)) {
       console.log(`[ReportWatcher] Event ${targetEventId.slice(0, 8)}... has human resolution, skipping auto-hide`);
       return;
     }
 
-    // Check if this event was already auto-hidden (deduplication)
     if (await this.isAlreadyAutoHidden(targetEventId)) {
       console.log(`[ReportWatcher] Event ${targetEventId.slice(0, 8)}... already auto-hidden, skipping`);
       return;
     }
 
-    console.log(`[ReportWatcher] Processing auto-hide for event ${targetEventId.slice(0, 8)}...`);
+    // Immediate tier: single report triggers ban
+    if (tier.threshold <= 1) {
+      await this.executeAutoHide(event, category, targetEventId, tier.name);
+      return;
+    }
 
-    // Call banevent RPC to hide the content
-    const reason = `Auto-hidden: ${category} report (report_id: ${event.id})`;
+    // Threshold tier: count unique reporters, ban when threshold met
+    await this.processThresholdAutoHide(event, category, targetEventId, tier);
+  }
+
+  private async processThresholdAutoHide(
+    event: ReportEvent,
+    category: string,
+    targetEventId: string,
+    tier: AutoHideTier
+  ): Promise<void> {
+    await this.logDecision({
+      targetType: 'event',
+      targetId: targetEventId,
+      action: 'auto_hide_pending',
+      reason: `${category}: awaiting threshold (${tier.name}, need ${tier.threshold})`,
+      reportId: event.id,
+      reporterPubkey: event.pubkey,
+    });
+
+    const count = await this.countUniqueReporters(targetEventId);
+
+    if (count >= tier.threshold) {
+      console.log(`[ReportWatcher] Threshold met for ${targetEventId.slice(0, 8)}... (${count}/${tier.threshold})`);
+      await this.executeAutoHide(event, category, targetEventId, tier.name);
+    } else {
+      console.log(`[ReportWatcher] Below threshold for ${targetEventId.slice(0, 8)}... (${count}/${tier.threshold})`);
+    }
+  }
+
+  private async executeAutoHide(
+    event: ReportEvent,
+    category: string,
+    targetEventId: string,
+    tierName: string
+  ): Promise<void> {
+    console.log(`[ReportWatcher] Auto-hiding event ${targetEventId.slice(0, 8)}... (tier: ${tierName})`);
+
+    const reason = `Auto-hidden: ${category} report (tier: ${tierName}, report_id: ${event.id})`;
     const result = await banEvent(targetEventId, reason, this.env);
 
     if (result.success) {
@@ -520,7 +685,6 @@ export class ReportWatcher implements DurableObject {
       this.eventsAutoHidden++;
       await this.persistState();
 
-      // Log to D1
       await this.logDecision({
         targetType: 'event',
         targetId: targetEventId,
@@ -532,7 +696,6 @@ export class ReportWatcher implements DurableObject {
     } else {
       console.error(`[ReportWatcher] Failed to auto-hide event: ${result.error}`);
 
-      // Log failure to D1 for monitoring
       await this.logDecision({
         targetType: 'event',
         targetId: targetEventId,
@@ -541,6 +704,27 @@ export class ReportWatcher implements DurableObject {
         reportId: event.id,
         reporterPubkey: event.pubkey,
       });
+    }
+  }
+
+  private async countUniqueReporters(targetEventId: string): Promise<number> {
+    if (!this.env.DB) {
+      console.warn('[ReportWatcher] D1 not available for reporter count');
+      return 0;
+    }
+
+    try {
+      const result = await this.env.DB.prepare(`
+        SELECT COUNT(DISTINCT reporter_pubkey) as count
+        FROM moderation_decisions
+        WHERE target_id = ?
+          AND action IN ('auto_hide_pending', 'auto_hidden')
+      `).bind(targetEventId).first<{ count: number }>();
+
+      return result?.count ?? 0;
+    } catch (error) {
+      console.error('[ReportWatcher] Failed to count reporters:', error);
+      return 0;
     }
   }
 
