@@ -27,3 +27,6 @@ dist-ssr
 
 # Local TLS certs (mkcert)
 .certs/
+
+# Legacy checked-in frontend build output (not an active deploy artifact path)
+worker/public/
