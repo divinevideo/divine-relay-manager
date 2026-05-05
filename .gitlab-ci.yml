@@ -5,7 +5,6 @@ default:
 
 stages:
   - build
-  - deploy
 
 build:
   stage: build
@@ -14,16 +13,3 @@ build:
   only:
     variables:
       - $CI_DEFAULT_BRANCH != $CI_COMMIT_REF_NAME
-
-pages:
-  stage: deploy
-  script:
-    - npm run build
-    - rm -rf public
-    - mv dist public
-  artifacts:
-    paths:
-      - public
-  only:
-    variables:
-      - $CI_DEFAULT_BRANCH == $CI_COMMIT_REF_NAME

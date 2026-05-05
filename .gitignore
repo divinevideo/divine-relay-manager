@@ -27,3 +27,6 @@ dist-ssr
 
 # Local TLS certs (mkcert)
 .certs/
+
+# Legacy worker frontend artifacts (frontend deploys from dist)
+worker/public/

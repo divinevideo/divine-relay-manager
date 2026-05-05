@@ -15,6 +15,13 @@ This application consists of two deployable components:
 
 ## Frontend Deployment (Cloudflare Pages)
 
+### Frontend Artifact Source of Truth
+
+The frontend artifact path is `dist` only.
+
+- Cloudflare Pages deploys from `dist`
+- `worker/public` is a legacy checked-in build artifact and is not part of the active deployment path
+
 ### Environment Variables
 
 Configure these in: **Cloudflare Dashboard → Pages → [project] → Settings → Environment variables**
