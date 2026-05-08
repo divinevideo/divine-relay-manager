@@ -796,9 +796,8 @@ export class ReportWatcher implements DurableObject {
     }
 
     try {
-      const insertVerb = decision.action === 'auto_hidden' ? 'INSERT OR IGNORE INTO' : 'INSERT INTO';
       await this.env.DB.prepare(`
-        ${insertVerb} moderation_decisions
+        INSERT INTO moderation_decisions
         (target_type, target_id, action, reason, moderator_pubkey, report_id, reporter_pubkey, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
       `).bind(
