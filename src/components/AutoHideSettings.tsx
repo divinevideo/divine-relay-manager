@@ -9,6 +9,7 @@ import { Label } from "@/components/ui/label";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { useAppContext } from "@/hooks/useAppContext";
 import { useToast } from "@/hooks/useToast";
+import { getApiHeaders } from "@/lib/adminApi";
 import { Shield, X, Plus, Save, AlertTriangle } from "lucide-react";
 
 interface AutoHideTier {
@@ -144,7 +145,9 @@ export function AutoHideSettings() {
   const { data, isLoading, error } = useQuery({
     queryKey: ["autoHideConfig", appConfig.apiUrl],
     queryFn: async () => {
-      const res = await fetch(`${appConfig.apiUrl}/api/report-watcher/config`);
+      const res = await fetch(`${appConfig.apiUrl}/api/report-watcher/config`, {
+        headers: getApiHeaders(''),
+      });
       if (!res.ok) throw new Error(`Failed to fetch config: ${res.status}`);
       const body = await res.json() as { success: boolean; config: AutoHideConfig };
       return body.config;
@@ -164,7 +167,7 @@ export function AutoHideSettings() {
     mutationFn: async (config: AutoHideConfig) => {
       const res = await fetch(`${appConfig.apiUrl}/api/report-watcher/config`, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers: getApiHeaders(),
         body: JSON.stringify(config),
       });
       const body = await res.json() as { success: boolean; config?: AutoHideConfig; error?: string };

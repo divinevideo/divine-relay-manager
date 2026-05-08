@@ -659,7 +659,7 @@ export class ReportWatcher implements DurableObject {
       reporterPubkey: event.pubkey,
     });
 
-    const count = await this.countUniqueReporters(targetEventId);
+    const count = await this.countUniqueReporters(targetEventId, category);
 
     if (count >= tier.threshold) {
       console.log(`[ReportWatcher] Threshold met for ${targetEventId.slice(0, 8)}... (${count}/${tier.threshold})`);
@@ -707,7 +707,7 @@ export class ReportWatcher implements DurableObject {
     }
   }
 
-  private async countUniqueReporters(targetEventId: string): Promise<number> {
+  private async countUniqueReporters(targetEventId: string, category: string): Promise<number> {
     if (!this.env.DB) {
       console.warn('[ReportWatcher] D1 not available for reporter count');
       return 0;
@@ -719,7 +719,8 @@ export class ReportWatcher implements DurableObject {
         FROM moderation_decisions
         WHERE target_id = ?
           AND action IN ('auto_hide_pending', 'auto_hidden')
-      `).bind(targetEventId).first<{ count: number }>();
+          AND reason LIKE ?
+      `).bind(targetEventId, `${category}%`).first<{ count: number }>();
 
       return result?.count ?? 0;
     } catch (error) {
