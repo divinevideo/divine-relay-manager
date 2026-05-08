@@ -191,7 +191,10 @@ export function MediaPreview({
       } catch {
         setFailedUrls(prev => new Set(prev).add(url));
       }
-    } else if (!proxyUrls.has(url)) {
+    } else if (proxyUrls.has(url)) {
+      setProxyUrls(prev => { const next = new Map(prev); next.delete(url); return next; });
+      setFailedUrls(prev => new Set(prev).add(url));
+    } else {
       setFailedUrls(prev => new Set(prev).add(url));
     }
   };
@@ -339,7 +342,10 @@ export function InlineMediaPreview({
       } catch {
         setFailedUrls(prev => new Set(prev).add(url));
       }
-    } else if (!proxyUrls.has(url)) {
+    } else if (proxyUrls.has(url)) {
+      setProxyUrls(prev => { const next = new Map(prev); next.delete(url); return next; });
+      setFailedUrls(prev => new Set(prev).add(url));
+    } else {
       setFailedUrls(prev => new Set(prev).add(url));
     }
   };
