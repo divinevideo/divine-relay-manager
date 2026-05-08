@@ -479,8 +479,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     }
 
     // Add from moderation decisions (ban_user, delete_event, etc.)
+    // Exclude auto-hide actions — those targets belong in pendingReviewTargets, not resolved
+    const autoHideActions = ['auto_hidden', 'auto_hide_pending', 'auto_hide_skipped', 'auto_hide_failed'];
     if (allDecisions && allDecisions.length > 0) {
       for (const decision of allDecisions) {
+        if (autoHideActions.includes(decision.action)) continue;
         if (decision.target_type === 'pubkey') {
           resolved.add(`pubkey:${decision.target_id}`);
         } else if (decision.target_type === 'event') {
@@ -938,8 +941,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                   checked={showPendingReview}
                   onCheckedChange={(checked) => {
                     setShowPendingReview(checked);
-                    // When showing pending review, turn off hide resolved
-                    if (checked) setHideResolved(false);
+                    if (checked) {
+                      setHideResolved(false);
+                      setFilterCategory(null);
+                    }
                   }}
                 />
               </div>

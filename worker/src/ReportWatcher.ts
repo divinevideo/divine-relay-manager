@@ -719,8 +719,8 @@ export class ReportWatcher implements DurableObject {
         FROM moderation_decisions
         WHERE target_id = ?
           AND action IN ('auto_hide_pending', 'auto_hidden')
-          AND reason LIKE ?
-      `).bind(targetEventId, `${category}%`).first<{ count: number }>();
+          AND (reason = ? OR reason LIKE ?)
+      `).bind(targetEventId, category, `${category}:%`).first<{ count: number }>();
 
       return result?.count ?? 0;
     } catch (error) {

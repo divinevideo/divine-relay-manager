@@ -324,6 +324,14 @@ export function InlineMediaPreview({
   const [proxyUrls, setProxyUrls] = useState<Map<string, string>>(new Map());
   const apiUrl = useApiUrl();
 
+  useEffect(() => {
+    return () => {
+      proxyUrls.forEach(url => {
+        if (url.startsWith('blob:')) URL.revokeObjectURL(url);
+      });
+    };
+  }, [proxyUrls]);
+
   const mediaItems = useMemo(() => extractMediaItems(content, tags), [content, tags]);
 
   if (mediaItems.length === 0) {
