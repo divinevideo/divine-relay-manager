@@ -1,7 +1,7 @@
 // ABOUTME: Displays Hive AI moderation results from the divine-moderation-service
 // ABOUTME: Shows confidence scores, classification categories, timestamps, and re-check ability
 
-import { getApiHeaders } from "@/lib/adminApi";
+import { getApiHeaders, type MediaStatusAction } from "@/lib/adminApi";
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Badge } from "@/components/ui/badge";
@@ -27,7 +27,7 @@ interface HiveAIReportProps {
 }
 
 interface ModerationResult {
-  action: 'SAFE' | 'REVIEW' | 'AGE_RESTRICTED' | 'PERMANENT_BAN' | 'FLAGGED' | 'QUARANTINE';
+  action: MediaStatusAction | 'FLAGGED';
   scores: {
     nudity?: number;
     violence?: number;

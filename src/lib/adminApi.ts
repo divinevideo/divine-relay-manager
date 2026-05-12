@@ -280,15 +280,21 @@ export async function markAsReviewed(
   });
 }
 
-// Media moderation actions
-export type ModerationAction = 'SAFE' | 'REVIEW' | 'AGE_RESTRICTED' | 'PERMANENT_BAN' | 'QUARANTINE';
+// Media moderation request actions
+export type ModerationAction = 'SAFE' | 'REVIEW' | 'AGE_RESTRICTED' | 'PERMANENT_BAN';
+// Media moderation status values returned by /api/check-result/:sha256
+export type MediaStatusAction = ModerationAction | 'QUARANTINE';
 
 export interface MediaStatus {
   sha256: string;
-  action: ModerationAction;
+  action: MediaStatusAction;
   reason?: string;
   created_at?: string;
   source?: string;
+}
+
+export function isBlockedMediaAction(action: MediaStatusAction | null | undefined): boolean {
+  return action === 'PERMANENT_BAN' || action === 'QUARANTINE';
 }
 
 export async function moderateMedia(

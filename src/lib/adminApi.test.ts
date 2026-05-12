@@ -24,10 +24,12 @@ import {
   logDecision,
   getDecisions,
   extractMediaHashes,
+  isBlockedMediaAction,
   type UnsignedEvent,
   type ApiResponse,
   type LabelParams,
   type ModerationAction,
+  type MediaStatusAction,
 } from './adminApi';
 
 // Mock fetch globally
@@ -754,6 +756,24 @@ describe('adminApi', () => {
 
       expect(result).toBe(false);
       vi.useRealTimers();
+    });
+  });
+
+  describe('isBlockedMediaAction', () => {
+    it('treats permanently banned media as blocked', () => {
+      expect(isBlockedMediaAction('PERMANENT_BAN')).toBe(true);
+    });
+
+    it('treats quarantined media as blocked', () => {
+      expect(isBlockedMediaAction('QUARANTINE')).toBe(true);
+    });
+
+    it('does not treat non-blocking statuses as blocked', () => {
+      const actions: MediaStatusAction[] = ['SAFE', 'REVIEW', 'AGE_RESTRICTED'];
+
+      for (const action of actions) {
+        expect(isBlockedMediaAction(action)).toBe(false);
+      }
     });
   });
 
