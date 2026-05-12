@@ -55,8 +55,8 @@ export interface AutoHideTier {
 const DEFAULT_IMMEDIATE_CATEGORIES = ['sexual_minors', 'csam', 'NS-csam'];
 const DEFAULT_THRESHOLD_CATEGORIES = ['NS-sexualContent', 'NS-sexual-content', 'NS-violence', 'NS-extremism'];
 
+// Auto-hide action strings used below: auto_hidden, auto_hide_pending, auto_hide_skipped, auto_hide_failed.
 // Keep in sync with src/lib/constants.ts AUTO_HIDE_ACTIONS.
-const AUTO_HIDE_ACTIONS = ['auto_hidden', 'auto_hide_pending', 'auto_hide_skipped', 'auto_hide_failed'] as const;
 
 // Reconnection settings
 const INITIAL_RECONNECT_DELAY_MS = 1000;
