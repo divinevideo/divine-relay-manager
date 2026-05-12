@@ -26,7 +26,7 @@ export function useMediaStatus(hashes: string[]) {
           return {
             hash,
             status,
-            isBlocked: status?.action === 'PERMANENT_BAN' || status?.action === 'QUARANTINE',
+            isBlocked: status?.action === 'PERMANENT_BAN',
             isRestricted: status?.action === 'AGE_RESTRICTED',
           };
         })

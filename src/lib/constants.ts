@@ -51,6 +51,11 @@ export const CATEGORY_LABELS: Record<string, string> = {
   'other': 'Other',
 };
 
+// Auto-hide decision action names written by ReportWatcher.
+// Keep in sync with worker/src/ReportWatcher.ts AUTO_HIDE_ACTIONS.
+export const AUTO_HIDE_ACTIONS = ['auto_hidden', 'auto_hide_pending', 'auto_hide_skipped', 'auto_hide_failed'] as const;
+export type AutoHideAction = typeof AUTO_HIDE_ACTIONS[number];
+
 export const RESOLUTION_STATUSES = ['reviewed', 'dismissed', 'no-action', 'false-positive'] as const;
 export type ResolutionStatus = typeof RESOLUTION_STATUSES[number];
 

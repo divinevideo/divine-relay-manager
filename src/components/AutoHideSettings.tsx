@@ -200,8 +200,7 @@ export function AutoHideSettings() {
       setValidationError("Add at least one trusted client when a tier requires them");
       return;
     }
-    const thresholdTier = draft.tiers.find((t) => t.name !== "Immediate");
-    if (thresholdTier && thresholdTier.threshold < 2) {
+    if (draft.tiers.some((t) => t.threshold > 1 && t.threshold < 2)) {
       setValidationError("Threshold tier minimum is 2");
       return;
     }
@@ -259,7 +258,7 @@ export function AutoHideSettings() {
           <TierConfig
             key={tier.name}
             tier={tier}
-            isImmediate={tier.name === "Immediate"}
+            isImmediate={tier.threshold === 1}
             onChange={(updated) => {
               const newTiers = [...draft.tiers];
               newTiers[i] = updated;

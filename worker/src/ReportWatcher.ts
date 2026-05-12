@@ -55,6 +55,9 @@ export interface AutoHideTier {
 const DEFAULT_IMMEDIATE_CATEGORIES = ['sexual_minors', 'csam', 'NS-csam'];
 const DEFAULT_THRESHOLD_CATEGORIES = ['NS-sexualContent', 'NS-sexual-content', 'NS-violence', 'NS-extremism'];
 
+// Keep in sync with src/lib/constants.ts AUTO_HIDE_ACTIONS.
+const AUTO_HIDE_ACTIONS = ['auto_hidden', 'auto_hide_pending', 'auto_hide_skipped', 'auto_hide_failed'] as const;
+
 // Reconnection settings
 const INITIAL_RECONNECT_DELAY_MS = 1000;
 const MAX_RECONNECT_DELAY_MS = 60000;
@@ -312,9 +315,7 @@ export class ReportWatcher implements DurableObject {
       if (typeof tier.threshold !== 'number' || tier.threshold < 1) {
         return `Tier "${tier.name}": threshold must be >= 1`;
       }
-      if (tier.name !== 'Immediate' && tier.threshold < 2) {
-        return `Tier "${tier.name}": non-immediate tier threshold must be >= 2`;
-      }
+      // threshold === 1 defines immediate behavior; no name-based gate needed.
 
       for (const cat of tier.categories) {
         if (allCategories.has(cat)) {

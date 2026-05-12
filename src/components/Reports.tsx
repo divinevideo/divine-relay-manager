@@ -43,7 +43,7 @@ import {
 import { nip19 } from "nostr-tools";
 import { ReportDetail } from "@/components/ReportDetail";
 import { useAdminApi } from "@/hooks/useAdminApi";
-import { CATEGORY_LABELS } from "@/lib/constants";
+import { AUTO_HIDE_ACTIONS, CATEGORY_LABELS } from "@/lib/constants";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
 import type { NostrEvent } from "@nostrify/nostrify";
@@ -479,8 +479,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     }
 
     // Add from moderation decisions (ban_user, delete_event, etc.)
-    // Exclude auto-hide actions — those targets belong in pendingReviewTargets, not resolved
-    const autoHideActions = ['auto_hidden', 'auto_hide_pending', 'auto_hide_skipped', 'auto_hide_failed'];
+    const autoHideActions: readonly string[] = AUTO_HIDE_ACTIONS;
     if (allDecisions && allDecisions.length > 0) {
       for (const decision of allDecisions) {
         if (autoHideActions.includes(decision.action)) continue;

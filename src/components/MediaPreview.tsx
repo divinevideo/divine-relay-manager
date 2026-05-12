@@ -1,7 +1,7 @@
 // ABOUTME: Displays media (images/videos) from Nostr events with proper handling
 // ABOUTME: Extracts URLs from content and imeta tags, renders with appropriate player
 
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -143,6 +143,8 @@ export function MediaPreview({
   const [showMedia, setShowMedia] = useState(showByDefault);
   const [failedUrls, setFailedUrls] = useState<Set<string>>(new Set());
   const [proxyUrls, setProxyUrls] = useState<Map<string, string>>(new Map());
+  const proxyUrlsRef = useRef(proxyUrls);
+  proxyUrlsRef.current = proxyUrls;
   const apiUrl = useApiUrl();
 
   // Collapse media if showByDefault changes to false (e.g., high-priority reports loaded)
@@ -153,14 +155,13 @@ export function MediaPreview({
     }
   }, [showByDefault]);
 
-  // Clean up blob URLs on unmount to avoid memory leaks
   useEffect(() => {
     return () => {
-      proxyUrls.forEach(url => {
+      proxyUrlsRef.current.forEach(url => {
         if (url.startsWith('blob:')) URL.revokeObjectURL(url);
       });
     };
-  }, [proxyUrls]);
+  }, []);
 
   const content = propContent ?? event?.content ?? '';
   const tags = useMemo(() => propTags ?? event?.tags ?? [], [propTags, event?.tags]);
@@ -322,15 +323,17 @@ export function InlineMediaPreview({
   const [showMedia, setShowMedia] = useState(true);
   const [failedUrls, setFailedUrls] = useState<Set<string>>(new Set());
   const [proxyUrls, setProxyUrls] = useState<Map<string, string>>(new Map());
+  const proxyUrlsRef = useRef(proxyUrls);
+  proxyUrlsRef.current = proxyUrls;
   const apiUrl = useApiUrl();
 
   useEffect(() => {
     return () => {
-      proxyUrls.forEach(url => {
+      proxyUrlsRef.current.forEach(url => {
         if (url.startsWith('blob:')) URL.revokeObjectURL(url);
       });
     };
-  }, [proxyUrls]);
+  }, []);
 
   const mediaItems = useMemo(() => extractMediaItems(content, tags), [content, tags]);
 
