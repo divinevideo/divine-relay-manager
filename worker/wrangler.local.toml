@@ -13,6 +13,8 @@ compatibility_date = "2024-12-01"
 
 # CF Access credentials - set via: wrangler secret put CF_ACCESS_CLIENT_ID / CF_ACCESS_CLIENT_SECRET
 
+# BLOSSOM_WEBHOOK_SECRET - set via: wrangler secret put BLOSSOM_WEBHOOK_SECRET
+
 [vars]
 RELAY_URL = "wss://relay.divine.video"
 AUTO_HIDE_ENABLED = "false"
