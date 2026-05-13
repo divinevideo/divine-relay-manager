@@ -3,6 +3,13 @@
 
 import { type Nip86Env, banEvent } from './nip86';
 import { ensureSchema } from './db';
+import {
+  AUTO_HIDE_ACTION,
+  isImmediateAutoHideTier,
+  isThresholdAutoHideTier,
+  type AutoHideConfig,
+  type AutoHideTier,
+} from '../../shared/autohide';
 
 /**
  * Extended environment for ReportWatcher DO
@@ -38,25 +45,10 @@ export interface ReportEvent {
   tags: string[][];
   created_at: number;
 }
-
-export interface AutoHideConfig {
-  enabled: boolean;
-  trustedClients: string[];
-  tiers: AutoHideTier[];
-}
-
-export interface AutoHideTier {
-  name: string;
-  categories: string[];
-  threshold: number;
-  requireTrustedClient: boolean;
-}
+export type { AutoHideConfig, AutoHideTier } from '../../shared/autohide';
 
 const DEFAULT_IMMEDIATE_CATEGORIES = ['sexual_minors', 'csam', 'NS-csam'];
 const DEFAULT_THRESHOLD_CATEGORIES = ['NS-sexualContent', 'NS-sexual-content', 'NS-violence', 'NS-extremism'];
-
-// Auto-hide action strings used below: auto_hidden, auto_hide_pending, auto_hide_skipped, auto_hide_failed.
-// Keep in sync with src/lib/constants.ts AUTO_HIDE_ACTIONS.
 
 // Reconnection settings
 const INITIAL_RECONNECT_DELAY_MS = 1000;
@@ -315,7 +307,15 @@ export class ReportWatcher implements DurableObject {
       if (typeof tier.threshold !== 'number' || tier.threshold < 1) {
         return `Tier "${tier.name}": threshold must be >= 1`;
       }
-      // threshold === 1 defines immediate behavior; no name-based gate needed.
+      if (!['immediate', 'threshold'].includes(tier.kind)) {
+        return `Tier "${tier.name}": kind must be "immediate" or "threshold"`;
+      }
+      if (isImmediateAutoHideTier(tier) && tier.threshold !== 1) {
+        return `Tier "${tier.name}": immediate tier threshold must be exactly 1`;
+      }
+      if (isThresholdAutoHideTier(tier) && tier.threshold < 2) {
+        return `Tier "${tier.name}": threshold tier minimum is 2`;
+      }
 
       for (const cat of tier.categories) {
         if (allCategories.has(cat)) {
@@ -338,12 +338,14 @@ export class ReportWatcher implements DurableObject {
       trustedClients: (this.env.TRUSTED_CLIENTS || 'diVine,divine-web,divine-mobile').split(','),
       tiers: [
         {
+          kind: 'immediate',
           name: 'Immediate',
           categories: [...DEFAULT_IMMEDIATE_CATEGORIES],
           threshold: 1,
           requireTrustedClient: true,
         },
         {
+          kind: 'threshold',
           name: 'Threshold',
           categories: [...DEFAULT_THRESHOLD_CATEGORIES],
           threshold: 2,
@@ -616,7 +618,7 @@ export class ReportWatcher implements DurableObject {
         await this.logDecision({
           targetType: 'event',
           targetId: targetEventId,
-          action: 'auto_hide_skipped',
+          action: AUTO_HIDE_ACTION.skipped,
           reason: `${category}: untrusted client (${clientName || 'no client tag'})`,
           reportId: event.id,
           reporterPubkey: event.pubkey,
@@ -636,7 +638,7 @@ export class ReportWatcher implements DurableObject {
     }
 
     // Immediate tier: single report triggers ban
-    if (tier.threshold <= 1) {
+    if (isImmediateAutoHideTier(tier)) {
       await this.executeAutoHide(event, category, targetEventId, tier.name);
       return;
     }
@@ -651,10 +653,14 @@ export class ReportWatcher implements DurableObject {
     targetEventId: string,
     tier: AutoHideTier
   ): Promise<void> {
+    if (!isThresholdAutoHideTier(tier)) {
+      return;
+    }
+
     await this.logDecision({
       targetType: 'event',
       targetId: targetEventId,
-      action: 'auto_hide_pending',
+      action: AUTO_HIDE_ACTION.pending,
       reason: `${category}: awaiting threshold (${tier.name}, need ${tier.threshold})`,
       reportId: event.id,
       reporterPubkey: event.pubkey,
@@ -689,7 +695,7 @@ export class ReportWatcher implements DurableObject {
       await this.logDecision({
         targetType: 'event',
         targetId: targetEventId,
-        action: 'auto_hidden',
+        action: AUTO_HIDE_ACTION.hidden,
         reason: category,
         reportId: event.id,
         reporterPubkey: event.pubkey,
@@ -700,7 +706,7 @@ export class ReportWatcher implements DurableObject {
       await this.logDecision({
         targetType: 'event',
         targetId: targetEventId,
-        action: 'auto_hide_failed',
+        action: AUTO_HIDE_ACTION.failed,
         reason: `${category}: ${result.error}`,
         reportId: event.id,
         reporterPubkey: event.pubkey,
@@ -719,9 +725,15 @@ export class ReportWatcher implements DurableObject {
         SELECT COUNT(DISTINCT reporter_pubkey) as count
         FROM moderation_decisions
         WHERE target_id = ?
-          AND action IN ('auto_hide_pending', 'auto_hidden')
+          AND action IN (?, ?)
           AND (reason = ? OR reason LIKE ?)
-      `).bind(targetEventId, category, `${category}:%`).first<{ count: number }>();
+      `).bind(
+        targetEventId,
+        AUTO_HIDE_ACTION.pending,
+        AUTO_HIDE_ACTION.hidden,
+        category,
+        `${category}:%`
+      ).first<{ count: number }>();
 
       return result?.count ?? 0;
     } catch (error) {
@@ -745,9 +757,9 @@ export class ReportWatcher implements DurableObject {
         SELECT 1 FROM moderation_decisions
         WHERE target_type = 'event'
           AND target_id = ?
-          AND action IN ('auto_hidden', 'auto_hide_confirmed')
+          AND action IN (?, ?)
         LIMIT 1
-      `).bind(targetEventId).first();
+      `).bind(targetEventId, AUTO_HIDE_ACTION.hidden, 'auto_hide_confirmed').first();
 
       return result !== null;
     } catch (error) {

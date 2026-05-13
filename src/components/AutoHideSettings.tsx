@@ -11,19 +11,11 @@ import { useAppContext } from "@/hooks/useAppContext";
 import { useToast } from "@/hooks/useToast";
 import { getApiHeaders } from "@/lib/adminApi";
 import { Shield, X, Plus, Save, AlertTriangle } from "lucide-react";
-
-interface AutoHideTier {
-  name: string;
-  categories: string[];
-  threshold: number;
-  requireTrustedClient: boolean;
-}
-
-interface AutoHideConfig {
-  enabled: boolean;
-  trustedClients: string[];
-  tiers: AutoHideTier[];
-}
+import {
+  isImmediateAutoHideTier,
+  type AutoHideConfig,
+  type AutoHideTier,
+} from "../../shared/autohide";
 
 function ChipList({
   items,
@@ -258,7 +250,7 @@ export function AutoHideSettings() {
           <TierConfig
             key={tier.name}
             tier={tier}
-            isImmediate={tier.threshold === 1}
+            isImmediate={isImmediateAutoHideTier(tier)}
             onChange={(updated) => {
               const newTiers = [...draft.tiers];
               newTiers[i] = updated;

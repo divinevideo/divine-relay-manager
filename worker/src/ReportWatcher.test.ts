@@ -1181,10 +1181,12 @@ describe('ReportWatcher', () => {
       expect(body.config.enabled).toBe(true);
       expect(body.config.trustedClients).toEqual(['diVine', 'divine-web']);
       expect(body.config.tiers).toHaveLength(2);
+      expect(body.config.tiers[0].kind).toBe('immediate');
       expect(body.config.tiers[0].name).toBe('Immediate');
       expect(body.config.tiers[0].categories).toContain('csam');
       expect(body.config.tiers[0].threshold).toBe(1);
       expect(body.config.tiers[0].requireTrustedClient).toBe(true);
+      expect(body.config.tiers[1].kind).toBe('threshold');
       expect(body.config.tiers[1].name).toBe('Threshold');
       expect(body.config.tiers[1].threshold).toBe(2);
       expect(body.config.tiers[1].requireTrustedClient).toBe(false);
@@ -1196,8 +1198,8 @@ describe('ReportWatcher', () => {
         enabled: false,
         trustedClients: ['TestClient'],
         tiers: [
-          { name: 'Immediate', categories: ['csam'], threshold: 1, requireTrustedClient: true },
-          { name: 'Threshold', categories: ['NS-spam'], threshold: 5, requireTrustedClient: true },
+          { kind: 'immediate', name: 'Immediate', categories: ['csam'], threshold: 1, requireTrustedClient: true },
+          { kind: 'threshold', name: 'Threshold', categories: ['NS-spam'], threshold: 5, requireTrustedClient: true },
         ],
       };
       vi.mocked(mockState.storage.get).mockImplementation(async (key: string) => {
@@ -1227,8 +1229,8 @@ describe('ReportWatcher', () => {
         enabled: true,
         trustedClients: ['diVine', 'divine-web', 'divine-mobile'],
         tiers: [
-          { name: 'Immediate', categories: ['csam', 'NS-csam'], threshold: 1, requireTrustedClient: true },
-          { name: 'Threshold', categories: ['NS-sexualContent'], threshold: 3, requireTrustedClient: false },
+          { kind: 'immediate', name: 'Immediate', categories: ['csam', 'NS-csam'], threshold: 1, requireTrustedClient: true },
+          { kind: 'threshold', name: 'Threshold', categories: ['NS-sexualContent'], threshold: 3, requireTrustedClient: false },
         ],
       };
 
@@ -1257,8 +1259,8 @@ describe('ReportWatcher', () => {
         enabled: true,
         trustedClients: ['diVine'],
         tiers: [
-          { name: 'Immediate', categories: ['csam'], threshold: 1, requireTrustedClient: true },
-          { name: 'Threshold', categories: ['NS-spam'], threshold: 1, requireTrustedClient: false },
+          { kind: 'immediate', name: 'Immediate', categories: ['csam'], threshold: 1, requireTrustedClient: true },
+          { kind: 'threshold', name: 'Threshold', categories: ['NS-spam'], threshold: 1, requireTrustedClient: false },
         ],
       };
 
@@ -1274,6 +1276,59 @@ describe('ReportWatcher', () => {
       expect(body.error).toContain('threshold');
     });
 
+    it('should reject immediate tier with threshold other than 1', async () => {
+      mockState = createMockState();
+      mockEnv = createMockEnv({ AUTO_HIDE_ENABLED: 'true' });
+      watcher = new ReportWatcher(mockState, mockEnv);
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const badConfig: AutoHideConfig = {
+        enabled: true,
+        trustedClients: ['diVine'],
+        tiers: [
+          { kind: 'immediate', name: 'Immediate', categories: ['csam'], threshold: 2, requireTrustedClient: true },
+          { kind: 'threshold', name: 'Threshold', categories: ['NS-spam'], threshold: 3, requireTrustedClient: false },
+        ],
+      };
+
+      const request = new Request('https://do/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(badConfig),
+      });
+      const response = await watcher.fetch(request);
+
+      expect(response.status).toBe(400);
+      const body = await response.json() as { error: string };
+      expect(body.error).toContain('exactly 1');
+    });
+
+    it('should reject tier with invalid kind', async () => {
+      mockState = createMockState();
+      mockEnv = createMockEnv({ AUTO_HIDE_ENABLED: 'true' });
+      watcher = new ReportWatcher(mockState, mockEnv);
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const badConfig = {
+        enabled: true,
+        trustedClients: ['diVine'],
+        tiers: [
+          { kind: 'fast', name: 'Immediate', categories: ['csam'], threshold: 1, requireTrustedClient: true },
+        ],
+      };
+
+      const request = new Request('https://do/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(badConfig),
+      });
+      const response = await watcher.fetch(request);
+
+      expect(response.status).toBe(400);
+      const body = await response.json() as { error: string };
+      expect(body.error).toContain('kind');
+    });
+
     it('should reject duplicate categories across tiers', async () => {
       mockState = createMockState();
       mockEnv = createMockEnv({ AUTO_HIDE_ENABLED: 'true' });
@@ -1284,8 +1339,8 @@ describe('ReportWatcher', () => {
         enabled: true,
         trustedClients: ['diVine'],
         tiers: [
-          { name: 'Immediate', categories: ['csam', 'NS-spam'], threshold: 1, requireTrustedClient: true },
-          { name: 'Threshold', categories: ['NS-spam'], threshold: 2, requireTrustedClient: false },
+          { kind: 'immediate', name: 'Immediate', categories: ['csam', 'NS-spam'], threshold: 1, requireTrustedClient: true },
+          { kind: 'threshold', name: 'Threshold', categories: ['NS-spam'], threshold: 2, requireTrustedClient: false },
         ],
       };
 
@@ -1311,8 +1366,8 @@ describe('ReportWatcher', () => {
         enabled: true,
         trustedClients: [],
         tiers: [
-          { name: 'Immediate', categories: ['csam'], threshold: 1, requireTrustedClient: true },
-          { name: 'Threshold', categories: ['NS-spam'], threshold: 2, requireTrustedClient: false },
+          { kind: 'immediate', name: 'Immediate', categories: ['csam'], threshold: 1, requireTrustedClient: true },
+          { kind: 'threshold', name: 'Threshold', categories: ['NS-spam'], threshold: 2, requireTrustedClient: false },
         ],
       };
 
