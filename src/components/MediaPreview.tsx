@@ -1,7 +1,7 @@
 // ABOUTME: Displays media (images/videos) from Nostr events with proper handling
 // ABOUTME: Extracts URLs from content and imeta tags, renders with appropriate player
 
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -143,6 +143,8 @@ export function MediaPreview({
   const [showMedia, setShowMedia] = useState(showByDefault);
   const [failedUrls, setFailedUrls] = useState<Set<string>>(new Set());
   const [proxyUrls, setProxyUrls] = useState<Map<string, string>>(new Map());
+  const proxyUrlsRef = useRef(proxyUrls);
+  proxyUrlsRef.current = proxyUrls;
   const apiUrl = useApiUrl();
 
   // Collapse media if showByDefault changes to false (e.g., high-priority reports loaded)
@@ -153,14 +155,13 @@ export function MediaPreview({
     }
   }, [showByDefault]);
 
-  // Clean up blob URLs on unmount to avoid memory leaks
   useEffect(() => {
     return () => {
-      proxyUrls.forEach(url => {
+      proxyUrlsRef.current.forEach(url => {
         if (url.startsWith('blob:')) URL.revokeObjectURL(url);
       });
     };
-  }, [proxyUrls]);
+  }, []);
 
   const content = propContent ?? event?.content ?? '';
   const tags = useMemo(() => propTags ?? event?.tags ?? [], [propTags, event?.tags]);
@@ -191,6 +192,9 @@ export function MediaPreview({
       } catch {
         setFailedUrls(prev => new Set(prev).add(url));
       }
+    } else if (proxyUrls.has(url)) {
+      setProxyUrls(prev => { const next = new Map(prev); next.delete(url); return next; });
+      setFailedUrls(prev => new Set(prev).add(url));
     } else {
       setFailedUrls(prev => new Set(prev).add(url));
     }
@@ -250,6 +254,7 @@ export function MediaPreview({
                   </div>
                 ) : item.type === 'video' ? (
                   <video
+                    key={displayUrl}
                     src={displayUrl}
                     controls
                     className="w-full rounded aspect-video object-contain bg-black"
@@ -258,6 +263,7 @@ export function MediaPreview({
                   />
                 ) : (
                   <img
+                    key={displayUrl}
                     src={displayUrl}
                     alt={`Media ${index + 1}`}
                     className="w-full rounded aspect-square object-cover cursor-pointer hover:opacity-90 transition-opacity"
@@ -317,7 +323,17 @@ export function InlineMediaPreview({
   const [showMedia, setShowMedia] = useState(true);
   const [failedUrls, setFailedUrls] = useState<Set<string>>(new Set());
   const [proxyUrls, setProxyUrls] = useState<Map<string, string>>(new Map());
+  const proxyUrlsRef = useRef(proxyUrls);
+  proxyUrlsRef.current = proxyUrls;
   const apiUrl = useApiUrl();
+
+  useEffect(() => {
+    return () => {
+      proxyUrlsRef.current.forEach(url => {
+        if (url.startsWith('blob:')) URL.revokeObjectURL(url);
+      });
+    };
+  }, []);
 
   const mediaItems = useMemo(() => extractMediaItems(content, tags), [content, tags]);
 
@@ -337,6 +353,9 @@ export function InlineMediaPreview({
       } catch {
         setFailedUrls(prev => new Set(prev).add(url));
       }
+    } else if (proxyUrls.has(url)) {
+      setProxyUrls(prev => { const next = new Map(prev); next.delete(url); return next; });
+      setFailedUrls(prev => new Set(prev).add(url));
     } else {
       setFailedUrls(prev => new Set(prev).add(url));
     }
@@ -368,6 +387,7 @@ export function InlineMediaPreview({
                 </div>
               ) : item.type === 'video' ? (
                 <video
+                  key={displayUrl}
                   src={displayUrl}
                   controls
                   className="w-full rounded aspect-video object-contain bg-black"
@@ -376,6 +396,7 @@ export function InlineMediaPreview({
                 />
               ) : (
                 <img
+                  key={displayUrl}
                   src={displayUrl}
                   alt={`Media ${index + 1}`}
                   className="w-full rounded aspect-square object-cover cursor-pointer"

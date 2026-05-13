@@ -1,4 +1,5 @@
 import { getEnvironmentByApiUrl } from "@/lib/environments";
+export { AUTO_HIDE_ACTION, AUTO_HIDE_ACTIONS, type AutoHideAction } from "../../shared/autohide";
 
 // ABOUTME: Shared constants for moderation categories and labels
 // ABOUTME: DTSP (Digital Trust & Safety Partnership) category mappings

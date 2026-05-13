@@ -1987,6 +1987,7 @@ async function handleReportWatcherRoutes(
     const doRequest = new Request(`https://do${subPath}`, {
       method: request.method,
       headers: request.headers,
+      body: request.body,
     });
 
     const response = await stub.fetch(doRequest);
