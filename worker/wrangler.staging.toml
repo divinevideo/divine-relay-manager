@@ -33,6 +33,12 @@ binding = "SERVICE_API_TOKEN"
 store_id = "ef490704b12a4feb91c7feb51229c364"
 secret_name = "SERVICE_API_TOKEN"
 
+# Blossom admin bypass token (proxies blocked media to moderators)
+[[secrets_store_secrets]]
+binding = "BLOSSOM_WEBHOOK_SECRET"
+store_id = "ef490704b12a4feb91c7feb51229c364"
+secret_name = "BLOSSOM_WEBHOOK_SECRET"
+
 [vars]
 RELAY_URL = "wss://relay.staging.divine.video"
 ENVIRONMENT = "staging"

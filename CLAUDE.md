@@ -13,7 +13,7 @@ CF Pages                               CF Workers (staging + prod)
   |                                      |
   |-- useThread, useAuthor, etc.         |-- handleModerate() --> relay RPC
   |   (direct relay WebSocket)           |-- syncZendeskAfterAction()
-  |                                      |-- notifyBlossom()
+  |                                      |-- handleMediaProxy()
   |                                      |-- ReportWatcher (Durable Object)
   v                                      v
 Funnelcake relay (GKE)               D1 (moderation_decisions, zendesk_tickets,
@@ -64,7 +64,6 @@ When a moderation action completes, `handleModerate()` triggers side effects:
 | Relay RPC (banevent/banpubkey/etc.) | **YES** | Return error to UI. Do not proceed. |
 | `markHumanReviewed()` | No | Log error, continue. Prevents auto-hide from overriding human decisions. |
 | `syncZendeskAfterAction()` | No | Log error, continue. Zendesk ticket state may lag. |
-| `notifyBlossom()` | No | Log error, continue. Media moderation state may lag. |
 
 **Rules:**
 - Critical side effects: `await`, return error on failure.
@@ -78,11 +77,12 @@ When a moderation action completes, `handleModerate()` triggers side effects:
 - Only resolves tickets for actions in the `resolutionActions` array
 - **When adding new moderation actions, check whether they should resolve tickets and add to `resolutionActions` if so.**
 
-### notifyBlossom()
+### handleMediaProxy()
 
-- POSTs to the Blossom media server admin moderation endpoint with Bearer token auth
-- Payload: `{ sha256, action: "BLOCK"|"RESTRICT"|"APPROVE" }`
-- Auth token is a per-worker secret (not in wrangler config)
+- Proxies blocked media to moderators via Blossom's admin blob endpoint
+- Requires `BLOSSOM_WEBHOOK_SECRET` Bearer auth and returns a clear 500 if the secret is unbound
+- Uses `CDN_DOMAIN` from `wrangler.*.toml`, defaulting to `media.divine.video`
+- Forwards `Range` requests and streams the upstream response body through without buffering
 
 ### ReportWatcher (Durable Object)
 
