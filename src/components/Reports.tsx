@@ -61,7 +61,7 @@ const SORT_OPTIONS: { value: SortOption; label: string }[] = [
 
 // High-priority categories that need immediate attention (CSAM, illegal content)
 // Includes both NIP-56 standard names and Divine client variations
-const HIGH_PRIORITY_CATEGORIES = ['sexual_minors', 'csam', 'NS-csam', 'nonconsensual_sexual_content', 'terrorism_extremism', 'credible_threats'];
+const HIGH_PRIORITY_CATEGORIES = ['sexual_minors', 'csam', 'NS-csam', 'NS-childSafety', 'NS-child-safety', 'nonconsensual_sexual_content', 'terrorism_extremism', 'credible_threats'];
 const MEDIUM_PRIORITY_CATEGORIES = ['doxxing_pii', 'malware_scam', 'illegal_goods'];
 
 // Category priority for sorting

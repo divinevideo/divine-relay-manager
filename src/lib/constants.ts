@@ -12,6 +12,10 @@ export const CATEGORY_LABELS: Record<string, string> = {
   'NS-spam': 'Spam',
   'NS-harassment': 'Harassment',
   'NS-violence': 'Violence',
+  'NS-childSafety': 'Child Safety',
+  'NS-child-safety': 'Child Safety',
+  'NS-underageUser': 'Under 16',
+  'NS-underage-user': 'Under 16',
   'NS-sexualContent': 'Sexual Content',
   'NS-sexual-content': 'Sexual Content',
   'NS-copyright': 'Copyright',
@@ -44,6 +48,10 @@ export const CATEGORY_LABELS: Record<string, string> = {
   'ai-generated': 'AI Generated',
   'NS-ai-generated': 'AI Generated',
   'violence': 'Violence',
+  'childSafety': 'Child Safety',
+  'child-safety': 'Child Safety',
+  'underageUser': 'Under 16',
+  'underage-user': 'Under 16',
   'sexual-content': 'Sexual Content',
   'sexualContent': 'Sexual Content',
   'false-info': 'Misinformation',
@@ -57,6 +65,7 @@ export type ResolutionStatus = typeof RESOLUTION_STATUSES[number];
 // Categories where media should be hidden by default for moderator safety
 export const HIGH_PRIORITY_CATEGORIES = [
   'sexual_minors', 'csam', 'NS-csam',
+  'NS-childSafety', 'NS-child-safety',
   'nonconsensual_sexual_content', 'terrorism_extremism', 'credible_threats',
 ];
 
