@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
-import { CATEGORY_LABELS, getReportCategory } from './constants';
+import { CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, getReportCategory } from './constants';
 
 describe('CATEGORY_LABELS', () => {
   it('maps the divine-mobile NIP-32 labels to existing display labels', () => {
     expect(CATEGORY_LABELS['NS-spam']).toBe('Spam');
     expect(CATEGORY_LABELS['NS-harassment']).toBe('Harassment');
     expect(CATEGORY_LABELS['NS-violence']).toBe('Violence');
+    expect(CATEGORY_LABELS['NS-childSafety']).toBe('Child Safety');
+    expect(CATEGORY_LABELS['NS-underageUser']).toBe('Under 16');
     expect(CATEGORY_LABELS['NS-sexualContent']).toBe('Sexual Content');
     expect(CATEGORY_LABELS['NS-copyright']).toBe('Copyright');
     expect(CATEGORY_LABELS['NS-falseInformation']).toBe('Misinformation');
@@ -16,9 +18,25 @@ describe('CATEGORY_LABELS', () => {
   });
 
   it('maps kebab-case aliases to the same display labels as camelCase', () => {
+    expect(CATEGORY_LABELS['NS-child-safety']).toBe('Child Safety');
+    expect(CATEGORY_LABELS['NS-underage-user']).toBe('Under 16');
     expect(CATEGORY_LABELS['NS-sexual-content']).toBe('Sexual Content');
     expect(CATEGORY_LABELS['NS-false-information']).toBe('Misinformation');
     expect(CATEGORY_LABELS['NS-ai-generated']).toBe('AI Generated');
+  });
+
+  it('maps non-prefixed child-safety aliases used across clients', () => {
+    expect(CATEGORY_LABELS['childSafety']).toBe('Child Safety');
+    expect(CATEGORY_LABELS['child-safety']).toBe('Child Safety');
+    expect(CATEGORY_LABELS['underageUser']).toBe('Under 16');
+    expect(CATEGORY_LABELS['underage-user']).toBe('Under 16');
+  });
+});
+
+describe('HIGH_PRIORITY_CATEGORIES', () => {
+  it('includes child-safety aliases for moderator-safety treatment', () => {
+    expect(HIGH_PRIORITY_CATEGORIES).toContain('NS-childSafety');
+    expect(HIGH_PRIORITY_CATEGORIES).toContain('NS-child-safety');
   });
 });
 
