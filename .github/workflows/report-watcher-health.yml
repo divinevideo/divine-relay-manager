@@ -101,7 +101,11 @@ jobs:
             echo "payload=parse_error: response is not valid JSON" >> "$GITHUB_OUTPUT"
             exit 0
           }
-          RUNNING=$(echo "$BODY" | jq -r '.status.running')
+          RUNNING=$(echo "$BODY" | jq -r '.status.running' 2>/dev/null) || {
+            echo "healthy=false" >> "$GITHUB_OUTPUT"
+            echo "payload=parse_error: .status.running not readable" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
 
           if [ "$CONNECTED" = "true" ] && [ "$RUNNING" = "true" ]; then
             echo "healthy=true" >> "$GITHUB_OUTPUT"
@@ -114,7 +118,7 @@ jobs:
 
       - name: Attempt auto-recovery
         id: recover
-        if: steps.check.outputs.healthy == 'false'
+        if: steps.check.outputs.healthy == 'false' && steps.check.outputs.http_code != '401' && steps.check.outputs.http_code != '403'
         env:
           CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
           CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
@@ -126,8 +130,8 @@ jobs:
           RESTART_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 -X POST \
             -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
             -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
-            "$API_URL/api/report-watcher/start" 2>/dev/null) || true
-          echo "Restart response: HTTP $RESTART_CODE"
+            "$API_URL/api/report-watcher/start" 2>/dev/null) || RESTART_CODE="transport_error"
+          echo "Restart response: $RESTART_CODE"
 
           echo "Waiting 30s for reconnection..."
           sleep 30
@@ -137,7 +141,7 @@ jobs:
             -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
             "$API_URL/api/report-watcher/status" 2>/dev/null) || {
             echo "recovered=false" >> "$GITHUB_OUTPUT"
-            echo "payload=transport_error after restart (HTTP $HTTP_CODE)" >> "$GITHUB_OUTPUT"
+            echo "payload=transport_error after restart" >> "$GITHUB_OUTPUT"
             exit 0
           }
 
@@ -174,6 +178,7 @@ jobs:
         run: |
           # Read current count from repo variable (default 0 if not set)
           FAILS=$(gh variable get "$FAILS_VAR" --repo "$GITHUB_REPOSITORY" 2>/dev/null || echo "0")
+          [[ "$FAILS" =~ ^[0-9]+$ ]] || FAILS=0
 
           if [ "$HEALTHY" = "true" ] || [ "$RECOVERED" = "true" ]; then
             FAILS=0
@@ -213,27 +218,22 @@ jobs:
             exit 0
           fi
 
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          PAYLOAD=$(jq -n \
+            --arg env "$ENV_NAME" \
+            --arg fails "$FAILS" \
+            --arg status "$STATUS_PAYLOAD" \
+            --arg run_url "$RUN_URL" \
+            '{
+              text: ":rotating_light: ReportWatcher *\($env)* unhealthy (\($fails) consecutive failures, auto-restart failed)",
+              blocks: [
+                {type: "section", text: {type: "mrkdwn", text: ":rotating_light: *ReportWatcher health check failing*\n*Environment:* \($env)\n*Consecutive failures:* \($fails) (including auto-restart attempts)\n*Status:* `\($status)`"}},
+                {type: "context", elements: [{type: "mrkdwn", text: "<\($run_url)|View workflow run>"}]}
+              ]
+            }')
           curl -sf --max-time 10 -X POST "$SLACK_WEBHOOK" \
             -H "Content-Type: application/json" \
-            -d "{
-              \"text\": \":rotating_light: ReportWatcher *$ENV_NAME* unhealthy ($FAILS consecutive failures, auto-restart failed)\",
-              \"blocks\": [
-                {
-                  \"type\": \"section\",
-                  \"text\": {
-                    \"type\": \"mrkdwn\",
-                    \"text\": \":rotating_light: *ReportWatcher health check failing*\n*Environment:* $ENV_NAME\n*Consecutive failures:* $FAILS (including auto-restart attempts)\n*Status:* \`$STATUS_PAYLOAD\`\"
-                  }
-                },
-                {
-                  \"type\": \"context\",
-                  \"elements\": [{
-                    \"type\": \"mrkdwn\",
-                    \"text\": \"<https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}|View workflow run>\"
-                  }]
-                }
-              ]
-            }"
+            -d "$PAYLOAD"
 
       # --- Quiet log when self-healing worked (no alert, just visibility) ---
 
