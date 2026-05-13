@@ -1219,6 +1219,40 @@ describe('ReportWatcher', () => {
       expect(body.config.tiers[1].threshold).toBe(5);
     });
 
+    it('should migrate legacy stored config missing tier kinds', async () => {
+      mockState = createMockState();
+      const legacyStoredConfig = {
+        enabled: true,
+        trustedClients: ['diVine'],
+        tiers: [
+          { name: 'Immediate', categories: ['csam'], threshold: 1, requireTrustedClient: true },
+          { name: 'Threshold', categories: ['NS-spam'], threshold: 3, requireTrustedClient: false },
+        ],
+      };
+      vi.mocked(mockState.storage.get).mockImplementation(async (key: string) => {
+        if (key === 'autoHideConfig') return legacyStoredConfig;
+        return undefined;
+      });
+
+      watcher = new ReportWatcher(mockState, mockEnv);
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const request = new Request('https://do/config', { method: 'GET' });
+      const response = await watcher.fetch(request);
+      const body = await response.json() as { config: AutoHideConfig };
+
+      expect(body.config.tiers[0].kind).toBe('immediate');
+      expect(body.config.tiers[1].kind).toBe('threshold');
+      expect(mockState.storage.put).toHaveBeenCalledWith('autoHideConfig', {
+        enabled: true,
+        trustedClients: ['diVine'],
+        tiers: [
+          { kind: 'immediate', name: 'Immediate', categories: ['csam'], threshold: 1, requireTrustedClient: true },
+          { kind: 'threshold', name: 'Threshold', categories: ['NS-spam'], threshold: 3, requireTrustedClient: false },
+        ],
+      });
+    });
+
     it('should save valid config via PUT /config', async () => {
       mockState = createMockState();
       mockEnv = createMockEnv({ AUTO_HIDE_ENABLED: 'true' });

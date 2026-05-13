@@ -5,6 +5,7 @@ import { type Nip86Env, banEvent } from './nip86';
 import { ensureSchema } from './db';
 import {
   AUTO_HIDE_ACTION,
+  AUTO_HIDE_TIER_KINDS,
   isImmediateAutoHideTier,
   isThresholdAutoHideTier,
   type AutoHideConfig,
@@ -46,6 +47,9 @@ export interface ReportEvent {
   created_at: number;
 }
 export type { AutoHideConfig, AutoHideTier } from '../../shared/autohide';
+
+type StoredAutoHideTier = Omit<AutoHideTier, 'kind'> & { kind?: string };
+type StoredAutoHideConfig = Omit<AutoHideConfig, 'tiers'> & { tiers: StoredAutoHideTier[] };
 
 const DEFAULT_IMMEDIATE_CATEGORIES = ['sexual_minors', 'csam', 'NS-csam'];
 const DEFAULT_THRESHOLD_CATEGORIES = ['NS-sexualContent', 'NS-sexual-content', 'NS-violence', 'NS-extremism'];
@@ -106,12 +110,20 @@ export class ReportWatcher implements DurableObject {
         }
       }
 
-      // Load or seed auto-hide config
-      this.autoHideConfig = await this.state.storage.get<AutoHideConfig>('autoHideConfig') ?? null;
-      if (!this.autoHideConfig) {
+      // Load or seed auto-hide config.
+      // Older stored configs predate tier.kind and need to be normalized forward.
+      const storedConfig = await this.state.storage.get<StoredAutoHideConfig>('autoHideConfig') ?? null;
+      if (!storedConfig) {
         this.autoHideConfig = this.buildDefaultConfig();
         await this.state.storage.put('autoHideConfig', this.autoHideConfig);
         console.log('[ReportWatcher] Seeded default auto-hide config');
+      } else {
+        const { config, changed } = this.normalizeStoredConfig(storedConfig);
+        this.autoHideConfig = config;
+        if (changed) {
+          await this.state.storage.put('autoHideConfig', config);
+          console.log('[ReportWatcher] Migrated stored auto-hide config');
+        }
       }
     });
   }
@@ -307,7 +319,7 @@ export class ReportWatcher implements DurableObject {
       if (typeof tier.threshold !== 'number' || tier.threshold < 1) {
         return `Tier "${tier.name}": threshold must be >= 1`;
       }
-      if (!['immediate', 'threshold'].includes(tier.kind)) {
+      if (!AUTO_HIDE_TIER_KINDS.includes(tier.kind)) {
         return `Tier "${tier.name}": kind must be "immediate" or "threshold"`;
       }
       if (isImmediateAutoHideTier(tier) && tier.threshold !== 1) {
@@ -352,6 +364,30 @@ export class ReportWatcher implements DurableObject {
           requireTrustedClient: false,
         },
       ],
+    };
+  }
+
+  private normalizeStoredConfig(config: StoredAutoHideConfig): { config: AutoHideConfig; changed: boolean } {
+    let changed = false;
+
+    const tiers = config.tiers.map((tier) => {
+      if (AUTO_HIDE_TIER_KINDS.includes(tier.kind as AutoHideTier['kind'])) {
+        return tier as AutoHideTier;
+      }
+
+      changed = true;
+      return {
+        ...tier,
+        kind: tier.threshold <= 1 ? 'immediate' : 'threshold',
+      } satisfies AutoHideTier;
+    });
+
+    return {
+      config: {
+        ...config,
+        tiers,
+      },
+      changed,
     };
   }
 
