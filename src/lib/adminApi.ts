@@ -541,21 +541,36 @@ export function extractMediaHashes(content: string, tags: string[][]): string[] 
   // e.g., https://cdn.example.com/abc123def456.mp4
   // e.g., https://blossom.example.com/sha256/abc123def456
   const sha256Pattern = /\b([a-f0-9]{64})\b/gi;
+  const addHashesFromText = (value: string) => {
+    let match;
+    sha256Pattern.lastIndex = 0;
+    while ((match = sha256Pattern.exec(value)) !== null) {
+      hashes.add(match[1].toLowerCase());
+    }
+  };
 
   // Check content for hashes
-  let match;
-  while ((match = sha256Pattern.exec(content)) !== null) {
-    hashes.add(match[1].toLowerCase());
-  }
+  addHashesFromText(content);
 
   // Check imeta tags and url tags
   for (const tag of tags) {
-    if (tag[0] === 'imeta' || tag[0] === 'url' || tag[0] === 'x') {
-      const tagContent = tag.join(' ');
-      sha256Pattern.lastIndex = 0;
-      while ((match = sha256Pattern.exec(tagContent)) !== null) {
-        hashes.add(match[1].toLowerCase());
+    if (tag[0] === 'imeta') {
+      const mime = tag.find((part) => part.toLowerCase().startsWith('m '))?.split(/\s+/)[1];
+      if (mime?.toLowerCase().startsWith('video/')) {
+        for (const part of tag.slice(1)) {
+          const [key, ...values] = part.split(/\s+/);
+          if (key === 'url' || key === 'x') {
+            addHashesFromText(values.join(' '));
+          }
+        }
+      } else {
+        addHashesFromText(tag.join(' '));
       }
+      continue;
+    }
+
+    if (tag[0] === 'url' || tag[0] === 'x') {
+      addHashesFromText(tag.join(' '));
     }
     // Direct x tag with hash
     if (tag[0] === 'x' && tag[1] && /^[a-f0-9]{64}$/i.test(tag[1])) {
