@@ -889,6 +889,27 @@ describe('adminApi', () => {
       expect(hashes).toContain('abc123def4567890abc123def4567890abc123def4567890abc123def4567890');
     });
 
+    it('should ignore imeta image thumbnail hashes for video moderation actions', () => {
+      const videoHash = '81661ca024bec2be842557ff7e07c833660038f134203f10293568f5ea11863f';
+      const thumbnailHash = 'b06e68dbec25463be257e44b06b0bcbb376d3cd1d5fa47e41747ead9e290e068';
+      const tags = [
+        [
+          'imeta',
+          `url https://media.divine.video/${videoHash}`,
+          'm video/mp4',
+          `image https://media.divine.video/${thumbnailHash}`,
+          'dim 608x608',
+          'size 1397120',
+          `x ${videoHash}`,
+          'blurhash UD0WGxgXghf[h2gagff_e6f~feg5g7f9e@e-',
+        ],
+      ];
+
+      const hashes = extractMediaHashes('', tags);
+
+      expect(hashes).toEqual([videoHash]);
+    });
+
     it('should extract hashes from content URLs', () => {
       const content = 'Check out https://blossom.test.com/sha256/fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210';
 
