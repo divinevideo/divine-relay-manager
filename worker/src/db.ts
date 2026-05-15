@@ -50,4 +50,26 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       ever_human_reviewed INTEGER DEFAULT 0
     )
   `).run();
+
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS pending_verdicts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_id TEXT,
+      pubkey TEXT,
+      verdict TEXT NOT NULL DEFAULT 'flag_for_review',
+      category TEXT,
+      rule_name TEXT,
+      source TEXT DEFAULT 'osprey',
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      status TEXT DEFAULT 'pending',
+      resolved_at TEXT,
+      resolved_by TEXT
+    )
+  `).run();
+
+  try {
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_verdicts_status ON pending_verdicts(status, created_at)`).run();
+  } catch {
+    // Index already exists
+  }
 }

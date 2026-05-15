@@ -372,6 +372,18 @@ export default {
         return handleReportWatcherRoutes(request, path, env, corsHeaders);
       }
 
+      // Pending review queue (interim Osprey verdict surface)
+      if (path === '/api/pending-review' && request.method === 'POST') {
+        return handleSubmitVerdict(request, env, corsHeaders);
+      }
+      if (path === '/api/pending-review' && request.method === 'GET') {
+        return handleListVerdicts(request, env, corsHeaders);
+      }
+      if (path.startsWith('/api/pending-review/') && path.endsWith('/resolve') && request.method === 'POST') {
+        const id = path.replace('/api/pending-review/', '').replace('/resolve', '');
+        return handleResolveVerdict(id, request, env, corsHeaders);
+      }
+
       // Funnelcake REST API proxy -- fast ClickHouse-backed reads
       if (path.startsWith('/api/funnelcake/')) {
         return handleFunnelcakeProxy(path, env, corsHeaders);
@@ -1004,6 +1016,175 @@ async function handleGetAllDecisions(
     });
   } catch (error) {
     console.error('Get all decisions error:', error);
+    return jsonResponse(
+      { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+      500,
+      corsHeaders
+    );
+  }
+}
+
+// --- Pending review queue (interim Osprey verdict surface) ---
+
+async function handleSubmitVerdict(
+  request: Request,
+  env: Env,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  try {
+    if (!env.DB) {
+      return jsonResponse({ success: false, error: 'Database not configured' }, 500, corsHeaders);
+    }
+
+    const body = await request.json() as {
+      event_id?: string;
+      pubkey?: string;
+      verdict?: string;
+      category?: string;
+      rule_name?: string;
+      source?: string;
+    };
+
+    if (!body.event_id && !body.pubkey) {
+      return jsonResponse({ success: false, error: 'At least one of event_id or pubkey is required' }, 400, corsHeaders);
+    }
+
+    await ensureSchemaOnce(env.DB);
+
+    const result = await env.DB.prepare(`
+      INSERT INTO pending_verdicts (event_id, pubkey, verdict, category, rule_name, source)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).bind(
+      body.event_id || null,
+      body.pubkey || null,
+      body.verdict || 'flag_for_review',
+      body.category || null,
+      body.rule_name || null,
+      body.source || 'osprey'
+    ).run();
+
+    return new Response(JSON.stringify({
+      success: true,
+      id: result.meta?.last_row_id,
+    }), {
+      status: 201,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders },
+    });
+  } catch (error) {
+    console.error('Submit verdict error:', error);
+    return jsonResponse(
+      { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+      500,
+      corsHeaders
+    );
+  }
+}
+
+async function handleListVerdicts(
+  request: Request,
+  env: Env,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  try {
+    if (!env.DB) {
+      return jsonResponse({ success: false, error: 'Database not configured' }, 500, corsHeaders);
+    }
+
+    await ensureSchemaOnce(env.DB);
+
+    const url = new URL(request.url);
+    const status = url.searchParams.get('status') || 'pending';
+
+    const verdicts = await env.DB.prepare(`
+      SELECT * FROM pending_verdicts
+      WHERE status = ?
+      ORDER BY created_at DESC
+      LIMIT 200
+    `).bind(status).all();
+
+    return new Response(JSON.stringify({
+      success: true,
+      verdicts: verdicts.results || [],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders },
+    });
+  } catch (error) {
+    console.error('List verdicts error:', error);
+    return jsonResponse(
+      { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+      500,
+      corsHeaders
+    );
+  }
+}
+
+async function handleResolveVerdict(
+  id: string,
+  request: Request,
+  env: Env,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  try {
+    if (!env.DB) {
+      return jsonResponse({ success: false, error: 'Database not configured' }, 500, corsHeaders);
+    }
+
+    const body = await request.json() as {
+      action: 'confirm' | 'dismiss';
+      resolved_by?: string;
+    };
+
+    if (body.action !== 'confirm' && body.action !== 'dismiss') {
+      return jsonResponse({ success: false, error: 'action must be "confirm" or "dismiss"' }, 400, corsHeaders);
+    }
+
+    await ensureSchemaOnce(env.DB);
+
+    const verdict = await env.DB.prepare(
+      `SELECT * FROM pending_verdicts WHERE id = ?`
+    ).bind(id).first();
+
+    if (!verdict) {
+      return jsonResponse({ success: false, error: 'Verdict not found' }, 404, corsHeaders);
+    }
+
+    if (verdict.status !== 'pending') {
+      return jsonResponse({ success: false, error: `Verdict already ${verdict.status}` }, 409, corsHeaders);
+    }
+
+    if (body.action === 'confirm' && verdict.event_id) {
+      const rpcRequest = new Request(`https://placeholder/api/relay-rpc`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          method: 'banevent',
+          params: [verdict.event_id, `Confirmed: ${verdict.category || verdict.verdict}`],
+        }),
+      });
+      const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders);
+      const rpcResult = await rpcResponse.json() as { success: boolean; error?: string };
+      if (!rpcResult.success) {
+        return jsonResponse({ success: false, error: rpcResult.error || 'Ban failed' }, 500, corsHeaders);
+      }
+    }
+
+    await env.DB.prepare(`
+      UPDATE pending_verdicts
+      SET status = ?, resolved_at = CURRENT_TIMESTAMP, resolved_by = ?
+      WHERE id = ?
+    `).bind(
+      body.action === 'confirm' ? 'confirmed' : 'dismissed',
+      body.resolved_by || null,
+      id
+    ).run();
+
+    return new Response(JSON.stringify({ success: true }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders },
+    });
+  } catch (error) {
+    console.error('Resolve verdict error:', error);
     return jsonResponse(
       { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
       500,

@@ -9,16 +9,18 @@ import { Reports } from "@/components/Reports";
 import { Labels } from "@/components/Labels";
 import { DebugPanel } from "@/components/DebugPanel";
 import { SettingsDashboard } from "@/components/SettingsDashboard";
+import { PendingReview } from "@/components/PendingReview";
 import { EnvironmentSelector } from "@/components/EnvironmentSelector";
 import { Card } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Server, FileText, Users, Settings, Flag, Tag, Bug, GripVertical } from "lucide-react";
+import { Server, FileText, Users, Settings, Flag, Tag, Bug, GripVertical, ClipboardCheck } from "lucide-react";
 import { useAppContext } from "@/hooks/useAppContext";
 import AdminBar from "@/components/AdminBar";
 
 // Tab definitions in default order (Reports first for moderation workflow)
 const TAB_DEFINITIONS = [
   { id: 'reports', label: 'Reports', icon: Flag },
+  { id: 'pending-review', label: 'Review', icon: ClipboardCheck },
   { id: 'events', label: 'Events', icon: FileText },
   { id: 'users', label: 'Users', icon: Users },
   { id: 'labels', label: 'Labels', icon: Tag },
@@ -60,6 +62,7 @@ function saveTabOrder(order: TabId[]): void {
 
 // Map URL paths to tab values
 function getTabFromPath(pathname: string): string {
+  if (pathname.startsWith('/pending-review')) return 'pending-review';
   if (pathname.startsWith('/events')) return 'events';
   if (pathname.startsWith('/users')) return 'users';
   if (pathname.startsWith('/reports')) return 'reports';
@@ -167,7 +170,7 @@ export function RelayManager() {
 
       <div className="flex-1 min-h-0 overflow-hidden container mx-auto px-4 py-4">
         <Tabs value={currentTab} onValueChange={handleTabChange} className="h-full flex flex-col">
-          <TabsList className="shrink-0 grid w-full grid-cols-6">
+          <TabsList className="shrink-0 grid w-full grid-cols-7">
             {orderedTabs.map((tab) => {
               const Icon = tab.icon;
               const isDragOver = dragOverTab === tab.id;
@@ -192,6 +195,10 @@ export function RelayManager() {
               );
             })}
           </TabsList>
+
+          <TabsContent value="pending-review" className="flex-1 min-h-0 mt-4">
+            <PendingReview />
+          </TabsContent>
 
           <TabsContent value="events" className="flex-1 min-h-0 overflow-hidden mt-4">
             <EventsList relayUrl={config.relayUrl} />
