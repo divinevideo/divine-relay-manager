@@ -685,10 +685,9 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   // Check media status from moderation service
   const mediaStatus = useMediaStatus(mediaHashes);
 
-  // Check if any report on this target has a high-priority category (CSAM, etc.)
-  // Used to collapse media preview by default to protect moderators
+  // undefined while loading, then true/false once reports are available
   const hasHighPriorityReports = useMemo(() => {
-    if (!allReportsForTarget?.length) return false;
+    if (!allReportsForTarget) return undefined;
     return allReportsForTarget.some(r => {
       const cat = getReportCategory(r);
       return HIGH_PRIORITY_CATEGORIES.includes(cat);
@@ -1621,7 +1620,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                     {/* Media in original post */}
                     <MediaPreview
                       event={context.thread.repostedEvent}
-                      showByDefault={!hasHighPriorityReports}
+                      showByDefault={hasHighPriorityReports === false}
                       maxItems={6}
                     />
                   </div>
@@ -1638,7 +1637,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
           {displayEvent && (
             <MediaPreview
               event={displayEvent}
-              showByDefault={!hasHighPriorityReports}
+              showByDefault={hasHighPriorityReports === false}
               maxItems={6}
             />
           )}
