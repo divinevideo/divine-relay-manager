@@ -134,7 +134,9 @@ function extractMediaItems(content: string, tags: string[][]): MediaItem[] {
 }
 
 function getHlsUrl(sha256?: string): string | null {
-  return sha256 ? `https://media.divine.video/${sha256}/hls/master.m3u8` : null;
+  if (!sha256) return null;
+  const cdnDomain = import.meta.env.VITE_CDN_DOMAIN || 'media.divine.video';
+  return `https://${cdnDomain}/${sha256}/hls/master.m3u8`;
 }
 
 // Native <video> with HLS.js fallback for C2PA-signed videos that Chrome can't decode natively.
@@ -237,7 +239,7 @@ export function MediaPreview({
     if (sha256 && !proxyUrls.has(url) && !failedUrls.has(url)) {
       try {
         const proxyUrl = `${apiUrl}/api/media-proxy/${sha256}`;
-        const resp = await fetch(proxyUrl, { headers: getApiHeaders(''), credentials: 'include' });
+        const resp = await fetch(proxyUrl, { headers: getApiHeaders('') });
         if (resp.status === 404) { markFailed(url, 'unavailable'); return; }
         if (!resp.ok) { markFailed(url, 'error'); return; }
         const ct = resp.headers.get('content-type') || '';
@@ -363,8 +365,8 @@ export function MediaPreview({
           {/* Show sha256 hashes for reference */}
           <div className="mt-2 space-y-1">
             {visibleItems.filter(m => m.sha256).slice(0, 2).map(item => (
-              <p key={item.sha256} className="text-xs text-muted-foreground font-mono truncate">
-                sha256: {item.sha256?.slice(0, 16)}...
+              <p key={item.sha256} className="text-xs text-muted-foreground font-mono break-all">
+                sha256: {item.sha256}
               </p>
             ))}
           </div>
@@ -413,7 +415,7 @@ export function InlineMediaPreview({
     if (sha256 && !proxyUrls.has(url) && !failedUrls.has(url)) {
       try {
         const proxyUrl = `${apiUrl}/api/media-proxy/${sha256}`;
-        const resp = await fetch(proxyUrl, { headers: getApiHeaders(''), credentials: 'include' });
+        const resp = await fetch(proxyUrl, { headers: getApiHeaders('') });
         if (resp.status === 404) { markFailed(url, 'unavailable'); return; }
         if (!resp.ok) { markFailed(url, 'error'); return; }
         const ct = resp.headers.get('content-type') || '';
