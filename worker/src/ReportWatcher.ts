@@ -11,6 +11,12 @@ import {
   type AutoHideConfig,
   type AutoHideTier,
 } from '../../shared/autohide';
+import {
+  AGE_REVIEW_ACTION,
+  DEADLINE_DAYS,
+  TERMINAL_STATES,
+  defaultResolutionForBand,
+} from '../../shared/age-review';
 
 /**
  * Extended environment for ReportWatcher DO
@@ -86,6 +92,7 @@ export class ReportWatcher implements DurableObject {
   private reconnectDelay: number = INITIAL_RECONNECT_DELAY_MS;
   private subscriptionId: string = 'auto-hide-reports';
   private autoHideConfig: AutoHideConfig | null = null;
+  private pendingAgeReviewPubkeys = new Set<string>();
 
   constructor(state: DurableObjectState, env: ReportWatcherEnv) {
     this.state = state;
@@ -615,6 +622,17 @@ export class ReportWatcher implements DurableObject {
         console.error('[ReportWatcher] Auto-hide processing failed:', error);
       });
     }
+
+    // Create age review case for under-16 reports (pubkey-level, independent of auto-hide).
+    // In-memory Set guards against the SELECT-then-INSERT race: the Set check+add is
+    // synchronous, so concurrent WebSocket messages can't interleave between them.
+    const reportedPubkey = targetPubkeyTag?.[1];
+    if (category === 'NS-underageUser' && reportedPubkey && !this.pendingAgeReviewPubkeys.has(reportedPubkey)) {
+      this.pendingAgeReviewPubkeys.add(reportedPubkey);
+      this.createAgeReviewCase(event, reportedPubkey)
+        .catch(error => console.error('[ReportWatcher] Age review case creation failed:', error))
+        .finally(() => this.pendingAgeReviewPubkeys.delete(reportedPubkey));
+    }
   }
 
   private async processAutoHide(
@@ -863,6 +881,64 @@ export class ReportWatcher implements DurableObject {
     } catch (error) {
       console.error('[ReportWatcher] Failed to log decision:', error);
     }
+  }
+
+  private async createAgeReviewCase(event: ReportEvent, reportedPubkey: string): Promise<void> {
+    if (!this.env.DB) {
+      console.warn('[ReportWatcher] D1 database not available, cannot create age review case');
+      return;
+    }
+
+    if (!this.schemaReady) {
+      try {
+        await ensureSchema(this.env.DB);
+        this.schemaReady = true;
+      } catch (error) {
+        console.error('[ReportWatcher] Failed to ensure schema:', error);
+        return;
+      }
+    }
+
+    // Skip if an active case already exists for this pubkey
+    const existing = await this.env.DB.prepare(`
+      SELECT id, state FROM age_review_cases
+      WHERE pubkey = ? AND state NOT IN (${TERMINAL_STATES.map(() => '?').join(',')})
+      LIMIT 1
+    `).bind(reportedPubkey, ...TERMINAL_STATES).first<{ id: string; state: string }>();
+
+    if (existing) {
+      console.log(`[ReportWatcher] Active age review case ${existing.id} already exists for ${reportedPubkey.slice(0, 8)}..., skipping`);
+      return;
+    }
+
+    const caseId = crypto.randomUUID();
+    const band = 'age_13_15' as const;
+    const deadline = new Date(Date.now() + DEADLINE_DAYS * 24 * 60 * 60 * 1000).toISOString();
+
+    await this.env.DB.prepare(`
+      INSERT INTO age_review_cases
+      (id, pubkey, reporter_pubkey, report_id, suspected_age_band, state, allowed_resolution, deadline_at)
+      VALUES (?, ?, ?, ?, ?, 'open_reported', ?, ?)
+    `).bind(
+      caseId,
+      reportedPubkey,
+      event.pubkey,
+      event.id,
+      band,
+      defaultResolutionForBand(band),
+      deadline,
+    ).run();
+
+    await this.logDecision({
+      targetType: 'pubkey',
+      targetId: reportedPubkey,
+      action: AGE_REVIEW_ACTION.caseCreated,
+      reason: `Under-16 report: age review case ${caseId} created (default band: ${band})`,
+      reportId: event.id,
+      reporterPubkey: event.pubkey,
+    });
+
+    console.log(`[ReportWatcher] Age review case created: ${caseId} for ${reportedPubkey.slice(0, 8)}... (deadline: ${deadline})`);
   }
 
   /**

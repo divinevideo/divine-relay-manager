@@ -74,7 +74,7 @@ class ApiError extends Error {
 async function apiRequest<T>(
   apiUrl: string,
   endpoint: string,
-  method: 'GET' | 'POST' | 'DELETE',
+  method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
   body?: object
 ): Promise<T> {
   if (!apiUrl) {
@@ -909,5 +909,47 @@ function extractBreakdown(
   }
 
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Age Review
+// ---------------------------------------------------------------------------
+
+export type { AgeReviewCase, AgeReviewState, AgeBand } from '../../shared/age-review';
+
+interface AgeReviewCasesResponse {
+  success: boolean;
+  cases: import('../../shared/age-review').AgeReviewCase[];
+}
+
+interface AgeReviewCaseResponse {
+  success: boolean;
+  case: import('../../shared/age-review').AgeReviewCase;
+}
+
+export async function getAgeReviewCases(
+  apiUrl: string,
+  params?: { state?: string; age_band?: string },
+): Promise<AgeReviewCasesResponse> {
+  const query = new URLSearchParams();
+  if (params?.state) query.set('state', params.state);
+  if (params?.age_band) query.set('age_band', params.age_band);
+  const qs = query.toString();
+  return apiRequest<AgeReviewCasesResponse>(apiUrl, `/api/age-review/cases${qs ? `?${qs}` : ''}`, 'GET');
+}
+
+export async function getAgeReviewCase(
+  apiUrl: string,
+  caseId: string,
+): Promise<AgeReviewCaseResponse> {
+  return apiRequest<AgeReviewCaseResponse>(apiUrl, `/api/age-review/cases/${caseId}`, 'GET');
+}
+
+export async function updateAgeReviewCase(
+  apiUrl: string,
+  caseId: string,
+  updates: Record<string, unknown>,
+): Promise<AgeReviewCaseResponse> {
+  return apiRequest<AgeReviewCaseResponse>(apiUrl, `/api/age-review/cases/${caseId}`, 'PATCH', updates);
 }
 

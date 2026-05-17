@@ -111,6 +111,15 @@ export function useAdminApi() {
       adminApi.verifyAgeRestricted(apiUrl, sha256),
     verifyModerationAction: (eventId: string, mediaHashes: string[]) =>
       adminApi.verifyModerationAction(apiUrl, eventId, mediaHashes, relayUrl),
+
+    // Age review
+    getAgeReviewCases: (params?: { state?: string; age_band?: string }) =>
+      adminApi.getAgeReviewCases(apiUrl, params),
+    getAgeReviewCase: (caseId: string) =>
+      adminApi.getAgeReviewCase(apiUrl, caseId),
+    updateAgeReviewCase: (caseId: string, updates: Record<string, unknown>) =>
+      adminApi.updateAgeReviewCase(apiUrl, caseId, updates),
+
   }), [apiUrl, relayUrl]);
 
   return boundApi;
