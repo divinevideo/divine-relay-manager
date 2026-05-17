@@ -27,6 +27,7 @@ function makeCase(overrides: Partial<AgeReviewCase> = {}): AgeReviewCase {
     remaining_days_when_paused: null,
     moderator_pubkey: null,
     resolution_note: null,
+    last_alerted_at: null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     ...overrides,
@@ -133,6 +134,17 @@ describe('handleUpdateAgeReviewCase', () => {
     expect(res.status).toBe(400);
     const body = await res.json() as { error: string };
     expect(body.error).toContain('Invalid state');
+  });
+
+  it('rejects invalid state transition', async () => {
+    const req = new Request('https://api.test/api/age-review/cases/case-1', {
+      method: 'PATCH',
+      body: JSON.stringify({ state: 'submitted_for_review' }),
+    });
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', { DB: db as unknown as D1Database }, corsHeaders);
+    expect(res.status).toBe(400);
+    const body = await res.json() as { error: string };
+    expect(body.error).toContain('Cannot transition');
   });
 
   it('rejects update on terminal case', async () => {
@@ -416,6 +428,43 @@ describe('checkAgeReviewDeadlines', () => {
 
     expect(mockFetch).toHaveBeenCalledTimes(1);
     expect(mockFetch.mock.calls[0][0]).toBe('https://hooks.slack.com/test');
+
+    const stampCalls = db.prepare.mock.calls.filter(
+      (c: string[]) => c[0]?.includes('UPDATE') && c[0]?.includes('last_alerted_at')
+    );
+    expect(stampCalls.length).toBe(1);
+
+    vi.unstubAllGlobals();
+  });
+
+  it('does not stamp last_alerted_at when Slack send fails', async () => {
+    const approachingCase = makeCase({
+      deadline_at: new Date(Date.now() + 1 * 24 * 60 * 60 * 1000).toISOString(),
+      state: 'restricted_pending_user_response',
+    });
+    const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 500 });
+    vi.stubGlobal('fetch', mockFetch);
+
+    const db = {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        bind: vi.fn().mockReturnValue({
+          all: vi.fn().mockResolvedValue({
+            results: sql.includes('deadline_at > datetime') ? [approachingCase] : [],
+          }),
+          run: vi.fn().mockResolvedValue({ meta: { changes: 0 } }),
+        }),
+      })),
+    };
+
+    await checkAgeReviewDeadlines({
+      DB: db as unknown as D1Database,
+      SLACK_WEBHOOK_URL: 'https://hooks.slack.com/test',
+    });
+
+    const stampCalls = db.prepare.mock.calls.filter(
+      (c: string[]) => c[0]?.includes('UPDATE') && c[0]?.includes('last_alerted_at')
+    );
+    expect(stampCalls.length).toBe(0);
 
     vi.unstubAllGlobals();
   });

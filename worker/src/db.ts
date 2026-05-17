@@ -67,6 +67,7 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       remaining_days_when_paused REAL,
       moderator_pubkey TEXT,
       resolution_note TEXT,
+      last_alerted_at TEXT,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     )

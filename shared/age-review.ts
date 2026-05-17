@@ -17,6 +17,18 @@ export type AgeReviewState = typeof AGE_REVIEW_STATES[number];
 
 export const TERMINAL_STATES: readonly AgeReviewState[] = ['cleared', 'denied_closed'];
 
+export const VALID_TRANSITIONS: Record<AgeReviewState, readonly AgeReviewState[]> = {
+  open_reported: ['under_moderator_review', 'cleared', 'denied_closed'],
+  under_moderator_review: ['restricted_pending_user_response', 'restricted_pending_support_email', 'needs_follow_up', 'cleared', 'denied_closed'],
+  restricted_pending_user_response: ['restricted_pending_parental_consent', 'restricted_pending_support_email', 'submitted_for_review', 'needs_follow_up', 'cleared', 'denied_closed'],
+  restricted_pending_parental_consent: ['submitted_for_review', 'needs_follow_up', 'cleared', 'denied_closed'],
+  restricted_pending_support_email: ['submitted_for_review', 'needs_follow_up', 'cleared', 'denied_closed'],
+  submitted_for_review: ['under_moderator_review', 'needs_follow_up', 'cleared', 'denied_closed'],
+  needs_follow_up: ['under_moderator_review', 'cleared', 'denied_closed'],
+  cleared: [],
+  denied_closed: [],
+};
+
 export const RESOLUTION_TYPES = [
   'support_email_only',
   'parent_video_or_email',
@@ -57,6 +69,7 @@ export interface AgeReviewCase {
   remaining_days_when_paused: number | null;
   moderator_pubkey: string | null;
   resolution_note: string | null;
+  last_alerted_at: string | null;
   created_at: string;
   updated_at: string;
 }

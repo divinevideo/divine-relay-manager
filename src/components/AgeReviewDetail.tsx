@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { Badge } from "@/components/ui/badge";
@@ -85,6 +85,10 @@ export function AgeReviewDetail({ caseData: c }: Props) {
   const [resolutionNote, setResolutionNote] = useState(c.resolution_note ?? "");
   const [copiedField, setCopiedField] = useState<string | null>(null);
 
+  useEffect(() => {
+    setResolutionNote(c.resolution_note ?? "");
+  }, [c.id, c.resolution_note]);
+
   const isTerminal = TERMINAL_STATES.includes(c.state);
   const daysRemaining = getDaysRemaining(c);
 
@@ -147,7 +151,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
               {copiedField === 'pubkey' ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
             </button>
             <a
-              href={`/users/${npub}`}
+              href={`/users/${c.pubkey}`}
               className="text-muted-foreground hover:text-foreground"
               title="View in Users tab"
             >

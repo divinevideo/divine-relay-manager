@@ -5,6 +5,7 @@ import {
   AGE_BANDS,
   AGE_REVIEW_STATES,
   TERMINAL_STATES,
+  VALID_TRANSITIONS,
   DEADLINE_DAYS,
   defaultResolutionForBand,
 } from '../../shared/age-review';
@@ -96,6 +97,13 @@ export async function handleUpdateAgeReviewCase(
   if (body.state && typeof body.state === 'string') {
     if (!AGE_REVIEW_STATES.includes(body.state as AgeReviewState)) {
       return json({ success: false, error: `Invalid state: ${body.state}` }, 400, corsHeaders);
+    }
+    const allowed = VALID_TRANSITIONS[existing.state as AgeReviewState];
+    if (!allowed?.includes(body.state as AgeReviewState)) {
+      return json({
+        success: false,
+        error: `Cannot transition from '${existing.state}' to '${body.state}'`,
+      }, 400, corsHeaders);
     }
     updates.push('state = ?');
     binds.push(body.state);
@@ -287,7 +295,7 @@ export async function handleParentContact(
 export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> {
   if (!env.DB) return;
 
-  // Alert on cases approaching deadline (within 2 days)
+  // Alert on cases approaching deadline (within 2 days), skip if alerted in last 12h
   const approaching = await env.DB.prepare(`
     SELECT * FROM age_review_cases
     WHERE state NOT IN (${TERMINAL_STATES.map(() => '?').join(',')})
@@ -295,11 +303,19 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
       AND deadline_at IS NOT NULL
       AND deadline_at < datetime('now', '+2 days')
       AND deadline_at > datetime('now')
+      AND (last_alerted_at IS NULL OR last_alerted_at < datetime('now', '-12 hours'))
     ORDER BY deadline_at ASC
   `).bind(...TERMINAL_STATES).all<AgeReviewCase>();
 
   if (approaching.results.length > 0 && env.SLACK_WEBHOOK_URL) {
-    await sendSlackAlert(env.SLACK_WEBHOOK_URL, 'approaching', approaching.results);
+    const sent = await sendSlackAlert(env.SLACK_WEBHOOK_URL, 'approaching', approaching.results);
+    if (sent) {
+      for (const row of approaching.results) {
+        await env.DB.prepare(
+          `UPDATE age_review_cases SET last_alerted_at = datetime('now') WHERE id = ?`
+        ).bind(row.id).run();
+      }
+    }
   }
 
   // Auto-close expired cases.
@@ -331,7 +347,7 @@ async function sendSlackAlert(
   webhookUrl: string,
   alertType: 'approaching' | 'expired',
   cases: AgeReviewCase[],
-): Promise<void> {
+): Promise<boolean> {
   const emoji = alertType === 'expired' ? ':rotating_light:' : ':warning:';
   const header = alertType === 'expired'
     ? `${emoji} ${cases.length} age review case(s) expired`
@@ -350,9 +366,12 @@ async function sendSlackAlert(
     });
     if (!res.ok) {
       console.error(`[age-review] Slack alert returned ${res.status}`);
+      return false;
     }
+    return true;
   } catch (error) {
     console.error('[age-review] Failed to send Slack alert:', error);
+    return false;
   }
 }
 
