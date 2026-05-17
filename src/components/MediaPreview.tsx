@@ -9,7 +9,6 @@ import { Image, Video, Eye, EyeOff, AlertTriangle, ExternalLink, ImageOff } from
 import type { NostrEvent } from "@nostrify/nostrify";
 import { useApiUrl } from "@/hooks/useAdminApi";
 import { getApiHeaders } from "@/lib/adminApi";
-import Hls from "hls.js";
 
 interface MediaItem {
   url: string;
@@ -141,6 +140,7 @@ function getHlsUrl(sha256?: string): string | null {
 
 // Native <video> with HLS.js fallback for C2PA-signed videos that Chrome can't decode natively.
 // Mirrors divine-web's approach: try native MP4 first, fall back to transcoded HLS segments.
+// hls.js is loaded dynamically to avoid pulling ~500kB into the main bundle for a rare fallback.
 function HlsVideo({
   src,
   hlsSrc,
@@ -152,32 +152,38 @@ function HlsVideo({
   onError: () => void;
 } & Omit<React.VideoHTMLAttributes<HTMLVideoElement>, 'onError' | 'src'>) {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const hlsRef = useRef<Hls | null>(null);
+  const destroyRef = useRef<(() => void) | null>(null);
   const triedHlsRef = useRef(false);
 
   useEffect(() => {
-    return () => { hlsRef.current?.destroy(); };
+    return () => { destroyRef.current?.(); };
   }, []);
 
-  const handleError = () => {
+  const handleError = async () => {
     const video = videoRef.current;
     if (hlsSrc && !triedHlsRef.current && video) {
       triedHlsRef.current = true;
-      if (Hls.isSupported()) {
-        const hls = new Hls();
-        hlsRef.current = hls;
-        hls.loadSource(hlsSrc);
-        hls.attachMedia(video);
-        hls.on(Hls.Events.ERROR, (_, data) => {
-          if (data.fatal) {
-            hls.destroy();
-            hlsRef.current = null;
-            onError();
-          }
-        });
-      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-        video.src = hlsSrc;
-      } else {
+      try {
+        const { default: Hls } = await import('hls.js');
+        if (Hls.isSupported()) {
+          const hls = new Hls();
+          destroyRef.current = () => hls.destroy();
+          hls.loadSource(hlsSrc);
+          hls.attachMedia(video);
+          hls.on(Hls.Events.ERROR, (_, data) => {
+            if (data.fatal) {
+              hls.destroy();
+              destroyRef.current = null;
+              onError();
+            }
+          });
+        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+          video.src = hlsSrc;
+          video.load();
+        } else {
+          onError();
+        }
+      } catch {
         onError();
       }
     } else {
@@ -199,14 +205,22 @@ export function MediaPreview({
   maxItems = 4,
 }: MediaPreviewProps) {
   const [showMedia, setShowMedia] = useState(showByDefault);
+  const userToggledRef = useRef(false);
   const [failedUrls, setFailedUrls] = useState<Map<string, 'unavailable' | 'error'>>(new Map());
   const [proxyUrls, setProxyUrls] = useState<Map<string, string>>(new Map());
   const proxyUrlsRef = useRef(proxyUrls);
   proxyUrlsRef.current = proxyUrls;
   const apiUrl = useApiUrl();
 
+  const eventId = event?.id;
   useEffect(() => {
-    setShowMedia(showByDefault);
+    userToggledRef.current = false;
+  }, [eventId]);
+
+  useEffect(() => {
+    if (!userToggledRef.current) {
+      setShowMedia(showByDefault);
+    }
   }, [showByDefault]);
 
   useEffect(() => {
@@ -281,7 +295,7 @@ export function MediaPreview({
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => setShowMedia(!showMedia)}
+            onClick={() => { userToggledRef.current = true; setShowMedia(!showMedia); }}
             className="h-7 px-2"
           >
             {showMedia ? (
