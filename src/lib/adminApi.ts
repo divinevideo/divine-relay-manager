@@ -17,6 +17,9 @@ export function getApiHeaders(contentType = 'application/json'): Record<string, 
   if (import.meta.env.VITE_CF_ACCESS_CLIENT_SECRET) {
     headers['CF-Access-Client-Secret'] = import.meta.env.VITE_CF_ACCESS_CLIENT_SECRET;
   }
+  if (import.meta.env.VITE_ADMIN_API_KEY) {
+    headers['X-Admin-Key'] = import.meta.env.VITE_ADMIN_API_KEY;
+  }
   return headers;
 }
 
@@ -907,3 +910,4 @@ function extractBreakdown(
 
   return null;
 }
+
