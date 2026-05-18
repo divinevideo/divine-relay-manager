@@ -14,6 +14,14 @@ import {
 import { ensureSchema } from './db';
 import { generatePreAuthToken, verifyPreAuthToken, base64UrlEncode } from './zendesk-preauth';
 import { deriveFunnelcakeApiUrl, proxyFunnelcakeRequest } from './funnelcake-proxy';
+import {
+  handleGetAgeReviewCases,
+  handleGetAgeReviewCase,
+  handleUpdateAgeReviewCase,
+  handleGetModerationStatus,
+  handleParentContact,
+  checkAgeReviewDeadlines,
+} from './age-review';
 
 let schemaReady = false;
 async function ensureSchemaOnce(db: D1Database): Promise<void> {
@@ -65,6 +73,8 @@ interface Env {
   AUTO_HIDE_ENABLED?: string;
   // Admin API key — required on all admin endpoints when request doesn't come through CF Access
   ADMIN_API_KEY?: string;
+  // Slack webhook for age review deadline alerts
+  SLACK_WEBHOOK_URL?: string;
   // Environment identifier for deep links (e.g., "production", "staging")
   ENVIRONMENT?: string;
   // Blossom admin bypass (for proxying blocked media to moderators)
@@ -221,7 +231,7 @@ function hostnameMatchesWildcard(hostname: string, suffix: string): boolean {
 
 function buildCorsHeaders(allowedOrigin: string | null): Record<string, string> {
   const headers: Record<string, string> = {
-    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With, Range, X-Admin-Key, CF-Access-Client-Id, CF-Access-Client-Secret',
     'Access-Control-Expose-Headers': 'Content-Range, Accept-Ranges, X-Admin-Proxy, X-Moderation-Status',
     'Access-Control-Max-Age': '86400',
@@ -305,6 +315,23 @@ export default {
       // Zendesk endpoints have their own auth (HMAC, NIP-98, JWT) — skip admin gate
       if (path.startsWith('/api/zendesk/')) {
         return handleZendeskRoutes(request, path, env, corsHeaders);
+      }
+
+      // Mobile-facing endpoints: NIP-98 user auth, not admin auth
+      if (path === '/v1/account/moderation-status' && request.method === 'GET') {
+        const authResult = await verifyNip98Auth(request, request.url);
+        if (!authResult.valid || !authResult.pubkey) return jsonResponse({ success: false, error: authResult.error ?? 'Unauthorized' }, 401, corsHeaders);
+        if (env.DB) await ensureSchemaOnce(env.DB);
+        return handleGetModerationStatus(authResult.pubkey, env, corsHeaders);
+      }
+
+      if (path.startsWith('/v1/minor-review-cases/') && path.endsWith('/parent-contact') && request.method === 'POST') {
+        const authResult = await verifyNip98Auth(request, request.url);
+        if (!authResult.valid || !authResult.pubkey) return jsonResponse({ success: false, error: authResult.error ?? 'Unauthorized' }, 401, corsHeaders);
+        if (env.DB) await ensureSchemaOnce(env.DB);
+        const caseId = path.replace('/v1/minor-review-cases/', '').replace('/parent-contact', '');
+        if (!caseId) return jsonResponse({ success: false, error: 'Invalid caseId' }, 400, corsHeaders);
+        return handleParentContact(request, caseId, authResult.pubkey, env, corsHeaders);
       }
 
       // All other /api/* endpoints require admin access (CF Access or API key)
@@ -397,6 +424,22 @@ export default {
         return jsonResponse({ success: true, events: result.events }, 200, corsHeaders);
       }
 
+      // Age review case management
+      if (path === '/api/age-review/cases' && request.method === 'GET') {
+        if (env.DB) await ensureSchemaOnce(env.DB);
+        return handleGetAgeReviewCases(request, env, corsHeaders);
+      }
+      if (path.startsWith('/api/age-review/cases/') && request.method === 'GET') {
+        if (env.DB) await ensureSchemaOnce(env.DB);
+        const caseId = path.replace('/api/age-review/cases/', '');
+        return handleGetAgeReviewCase(caseId, env, corsHeaders);
+      }
+      if (path.startsWith('/api/age-review/cases/') && request.method === 'PATCH') {
+        if (env.DB) await ensureSchemaOnce(env.DB);
+        const caseId = path.replace('/api/age-review/cases/', '');
+        return handleUpdateAgeReviewCase(request, caseId, env, corsHeaders);
+      }
+
       // 404 for unknown routes
       return jsonResponse({ success: false, error: 'Not found' }, 404, corsHeaders);
     } catch (error) {
@@ -438,6 +481,14 @@ export default {
         }
       } catch (error) {
         console.error('[scheduled] Failed to clean up pre-auth nonces:', error);
+      }
+
+      // Check age review deadlines and auto-close expired cases
+      try {
+        await ensureSchemaOnce(env.DB);
+        await checkAgeReviewDeadlines(env);
+      } catch (error) {
+        console.error('[scheduled] Age review deadline check failed:', error);
       }
     }
   },

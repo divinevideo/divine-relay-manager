@@ -60,6 +60,8 @@ CDN_DOMAIN = "media.divine.video"
 # Zendesk custom field IDs for webhook callback
 ZENDESK_FIELD_ACTION_STATUS = "14545793289743"
 ZENDESK_FIELD_ACTION_REQUESTED = "14545826900367"
+# Slack webhook for age review deadline alerts (add via: wrangler secret put SLACK_WEBHOOK_URL --config wrangler.prod.toml)
+# SLACK_WEBHOOK_URL — not in [vars] because it's a secret
 # Zendesk custom field IDs for auto-solve required fields
 ZENDESK_FIELD_CATEGORY = "14559549220879"
 ZENDESK_FIELD_ISSUE = "14560383908879"

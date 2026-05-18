@@ -50,6 +50,8 @@ export const CATEGORY_LABELS: Record<string, string> = {
   'false-info': 'Misinformation',
   'falseInformation': 'Misinformation',
   'other': 'Other',
+  'NS-underageUser': 'Under 16',
+  'NS-childSafety': 'Child Safety',
 };
 
 export const RESOLUTION_STATUSES = ['reviewed', 'dismissed', 'no-action', 'false-positive'] as const;
@@ -59,6 +61,7 @@ export type ResolutionStatus = typeof RESOLUTION_STATUSES[number];
 export const HIGH_PRIORITY_CATEGORIES = [
   'sexual_minors', 'csam', 'NS-csam',
   'nonconsensual_sexual_content', 'terrorism_extremism', 'credible_threats',
+  'NS-underageUser', 'NS-childSafety',
 ];
 
 // Helper to get label with fallback
