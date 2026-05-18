@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
-import worker, { notifyModerationService } from './index';
+import worker from './index';
 
 const env = {
   ALLOWED_ORIGINS: 'https://app.divine.video,https://*.openvine-app.pages.dev',
   RELAY_URL: 'wss://relay.divine.video',
 } as never;
+
+const TEST_NSEC = 'nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5';
 
 const ctx = {} as ExecutionContext;
 
@@ -20,6 +22,17 @@ function makeModerateMediaEnv(serviceApiToken: string | { get: () => Promise<str
         return new Response(JSON.stringify({ success: true, sha256: 'abc123', action: 'AGE_RESTRICTED' }), { status: 200 });
       }),
     },
+  } as never;
+}
+
+function makeRelayRpcEnv(serviceApiToken: string | { get: () => Promise<string> }) {
+  return {
+    ALLOWED_ORIGINS: 'https://app.divine.video',
+    RELAY_URL: 'wss://relay.divine.video',
+    ADMIN_API_KEY: 'test-admin-key',
+    MODERATION_ADMIN_URL: 'https://moderation-api.divine.video',
+    SERVICE_API_TOKEN: serviceApiToken,
+    NOSTR_NSEC: TEST_NSEC,
   } as never;
 }
 
@@ -151,15 +164,44 @@ describe('SERVICE_API_TOKEN secrets store resolution', () => {
 });
 
 describe('notifyModerationService null token', () => {
-  it('throws when Secrets Store binding resolves to null', async () => {
+  it('logs and swallows null token errors on the non-critical DM path', async () => {
     const nullBinding = { get: vi.fn(async () => null) };
-    const testEnv = {
-      SERVICE_API_TOKEN: nullBinding,
-      MODERATION_ADMIN_URL: 'https://moderation-api.divine.video',
-    } as never;
+    const testEnv = makeRelayRpcEnv(nullBinding as never);
+    const waitUntil = vi.fn();
+    const testCtx = { waitUntil } as unknown as ExecutionContext;
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ result: true }), { status: 200 })
+    );
 
-    await expect(
-      notifyModerationService(testEnv, 'deadbeef', 'ACCOUNT_SUSPENDED', 'test reason')
-    ).rejects.toThrow('SERVICE_API_TOKEN');
+    const response = await worker.fetch(
+      new Request('https://api-relay-prod.divine.video/api/relay-rpc', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Admin-Key': 'test-admin-key',
+          Origin: 'https://app.divine.video',
+        },
+        body: JSON.stringify({
+          method: 'banpubkey',
+          params: ['deadbeef', 'test reason'],
+        }),
+      }),
+      testEnv,
+      testCtx,
+    );
+
+    expect(response.status).toBe(200);
+    expect(waitUntil).toHaveBeenCalledOnce();
+    await waitUntil.mock.calls[0][0];
+    expect(errorSpy).toHaveBeenCalledWith(
+      '[handleRelayRpc] DM notification error:',
+      expect.objectContaining({
+        message: expect.stringContaining('SERVICE_API_TOKEN'),
+      }),
+    );
+
+    fetchSpy.mockRestore();
+    errorSpy.mockRestore();
   });
 });

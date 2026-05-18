@@ -110,18 +110,20 @@ function getModerationAdminUrl(env: Env): string {
   return env.MODERATION_ADMIN_URL;
 }
 
+async function resolveSecret(binding: string | SecretStoreSecret | undefined): Promise<string | null> {
+  if (!binding) return null;
+  const value = typeof binding === 'string' ? binding : await binding.get();
+  return value ?? null;
+}
+
 /**
  * Resolve CF Access credentials from env (supports both plain strings and SecretStoreSecret bindings).
  */
 async function getCfAccessCredentials(env: Env): Promise<{ clientId: string; clientSecret: string } | null> {
   if (!env.CF_ACCESS_CLIENT_ID || !env.CF_ACCESS_CLIENT_SECRET) return null;
 
-  const clientId = typeof env.CF_ACCESS_CLIENT_ID === 'string'
-    ? env.CF_ACCESS_CLIENT_ID
-    : await env.CF_ACCESS_CLIENT_ID.get();
-  const clientSecret = typeof env.CF_ACCESS_CLIENT_SECRET === 'string'
-    ? env.CF_ACCESS_CLIENT_SECRET
-    : await env.CF_ACCESS_CLIENT_SECRET.get();
+  const clientId = await resolveSecret(env.CF_ACCESS_CLIENT_ID);
+  const clientSecret = await resolveSecret(env.CF_ACCESS_CLIENT_SECRET);
 
   if (!clientId || !clientSecret) return null;
   return { clientId, clientSecret };
@@ -131,12 +133,12 @@ async function getCfAccessCredentials(env: Env): Promise<{ clientId: string; cli
  * Notify moderation-service to send a DM to an affected user.
  * Non-critical side effect — caller must wrap in try/catch.
  *
- * Uses service binding (MODERATION_API) with Bearer token when available,
- * falls back to fetch() with CF Access headers.
+ * Uses Bearer auth when SERVICE_API_TOKEN is configured,
+ * falls back to CF Access headers otherwise.
  * If a dedicated DM service is extracted later (support-trust-safety#118),
  * this function is the single call site to update.
  */
-export async function notifyModerationService(
+async function notifyModerationService(
   env: Env,
   recipientPubkey: string,
   action: string,
@@ -149,9 +151,7 @@ export async function notifyModerationService(
   };
 
   if (env.SERVICE_API_TOKEN) {
-    const token = typeof env.SERVICE_API_TOKEN === 'string'
-      ? env.SERVICE_API_TOKEN
-      : await env.SERVICE_API_TOKEN.get();
+    const token = await resolveSecret(env.SERVICE_API_TOKEN);
     if (!token) {
       throw new Error('SERVICE_API_TOKEN binding exists but resolved to empty — secret misconfigured');
     }
@@ -1254,15 +1254,13 @@ async function handleModerateMedia(
       return jsonResponse({ success: false, error: 'Missing action' }, 400, corsHeaders);
     }
 
-    // Build auth headers: Bearer token for service binding, CF Access for HTTP fallback
+    // Build auth headers: Bearer when SERVICE_API_TOKEN is configured, CF Access otherwise
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     };
 
     if (env.SERVICE_API_TOKEN) {
-      const token = typeof env.SERVICE_API_TOKEN === 'string'
-        ? env.SERVICE_API_TOKEN
-        : await env.SERVICE_API_TOKEN.get();
+      const token = await resolveSecret(env.SERVICE_API_TOKEN);
       if (!token) {
         return jsonResponse({ success: false, error: 'SERVICE_API_TOKEN binding exists but resolved to empty' }, 500, corsHeaders);
       }
@@ -1787,9 +1785,10 @@ async function handleMediaProxy(
     return jsonResponse({ success: false, error: 'BLOSSOM_WEBHOOK_SECRET not configured' }, 500, corsHeaders);
   }
 
-  const secret = typeof env.BLOSSOM_WEBHOOK_SECRET === 'string'
-    ? env.BLOSSOM_WEBHOOK_SECRET
-    : await env.BLOSSOM_WEBHOOK_SECRET.get();
+  const secret = await resolveSecret(env.BLOSSOM_WEBHOOK_SECRET);
+  if (!secret) {
+    return jsonResponse({ success: false, error: 'BLOSSOM_WEBHOOK_SECRET binding exists but resolved to empty' }, 500, corsHeaders);
+  }
 
   const cdnDomain = env.CDN_DOMAIN || 'media.divine.video';
   const upstreamUrl = `https://${cdnDomain}/admin/api/blob/${sha256.toLowerCase()}/content`;
