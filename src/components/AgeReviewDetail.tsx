@@ -52,6 +52,16 @@ const BAND_LABELS: Record<AgeBand, string> = {
   age_16_plus_claimed: "16+ (Claimed)",
 };
 
+function getRestrictionStateForBand(band: AgeBand): AgeReviewState {
+  switch (band) {
+    case 'under_13':
+    case 'age_16_plus_claimed':
+      return 'restricted_pending_support_email';
+    case 'age_13_15':
+      return 'restricted_pending_user_response';
+  }
+}
+
 function stateColor(state: AgeReviewState): string {
   if (state === 'cleared') return 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400';
   if (state === 'denied_closed') return 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400';
@@ -224,9 +234,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
                     className="h-7 text-xs"
                     disabled={updateCase.isPending}
                     onClick={() => updateCase.mutate({
-                      state: c.suspected_age_band === 'age_16_plus_claimed'
-                        ? 'restricted_pending_support_email'
-                        : 'restricted_pending_user_response',
+                      state: getRestrictionStateForBand(c.suspected_age_band),
                     })}
                   >
                     <AlertTriangle className="h-3 w-3 mr-1" />
