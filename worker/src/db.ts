@@ -68,10 +68,18 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       moderator_pubkey TEXT,
       resolution_note TEXT,
       last_alerted_at TEXT,
+      zendesk_ticket_id INTEGER,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     )
   `).run();
+
+  // Add zendesk_ticket_id to existing tables that were created without it
+  try {
+    await db.prepare(`ALTER TABLE age_review_cases ADD COLUMN zendesk_ticket_id INTEGER`).run();
+  } catch {
+    // Column already exists
+  }
 
   try {
     await db.prepare(`CREATE INDEX IF NOT EXISTS idx_age_review_pubkey ON age_review_cases(pubkey)`).run();
@@ -79,6 +87,12 @@ export async function ensureSchema(db: D1Database): Promise<void> {
     await db.prepare(`CREATE INDEX IF NOT EXISTS idx_age_review_deadline ON age_review_cases(deadline_at)`).run();
   } catch {
     // Indexes already exist
+  }
+
+  try {
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_age_review_zendesk_ticket ON age_review_cases(zendesk_ticket_id)`).run();
+  } catch {
+    // Index already exists
   }
 
 }

@@ -20,6 +20,7 @@ import {
   handleUpdateAgeReviewCase,
   handleGetModerationStatus,
   handleParentContact,
+  handleAgeReviewReplyWebhook,
   checkAgeReviewDeadlines,
 } from './age-review';
 
@@ -51,6 +52,7 @@ interface Env {
   ZENDESK_PREAUTH_SECRET?: string;  // HMAC secret for pre-auth token generation/verification
   ZENDESK_WEBHOOK_SECRET?: string;  // For /api/zendesk/webhook
   ZENDESK_PARSE_REPORT_SECRET?: string;  // For /api/zendesk/parse-report
+  ZENDESK_AGE_REVIEW_WEBHOOK_SECRET?: string;  // For /api/zendesk/age-review-reply
   ZENDESK_API_TOKEN?: string;
   ZENDESK_EMAIL?: string;
   ZENDESK_FIELD_ACTION_STATUS?: string;
@@ -2077,6 +2079,22 @@ async function handleZendeskRoutes(
   // Webhook endpoint uses signature verification instead of JWT
   if (subPath === '/webhook' && request.method === 'POST') {
     return handleZendeskWebhook(request, env, corsHeaders);
+  }
+
+  // Age review: parent replied to Zendesk ticket
+  if (subPath === '/age-review-reply' && request.method === 'POST') {
+    const bodyText = await request.text();
+    if (!await verifyZendeskWebhook(request, bodyText, env.ZENDESK_AGE_REVIEW_WEBHOOK_SECRET)) {
+      return jsonResponse({ success: false, error: 'Invalid webhook signature' }, 401, corsHeaders);
+    }
+    if (env.DB) await ensureSchemaOnce(env.DB);
+    // Body was consumed by request.text() for signature verification; reconstruct
+    const syntheticRequest = new Request(request.url, {
+      method: request.method,
+      headers: request.headers,
+      body: bodyText,
+    });
+    return handleAgeReviewReplyWebhook(syntheticRequest, env, corsHeaders);
   }
 
   // Parse report endpoint - extracts Nostr IDs from ticket description, stores mapping, adds links

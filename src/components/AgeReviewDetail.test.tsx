@@ -30,6 +30,7 @@ function makeCase(overrides: Partial<AgeReviewCase> = {}): AgeReviewCase {
     moderator_pubkey: null,
     resolution_note: null,
     last_alerted_at: null,
+    zendesk_ticket_id: null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     ...overrides,

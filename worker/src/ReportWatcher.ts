@@ -609,10 +609,10 @@ export class ReportWatcher implements DurableObject {
 
     console.log(`[ReportWatcher] Report received:`, {
       reportId: event.id,
-      reporter: event.pubkey.slice(0, 8) + '...',
+      reporter: event.pubkey,
       category,
       targetType,
-      targetId: targetId.slice(0, 8) + '...',
+      targetId,
       content: event.content.slice(0, 50) + (event.content.length > 50 ? '...' : ''),
     });
 
@@ -682,12 +682,12 @@ export class ReportWatcher implements DurableObject {
     }
 
     if (await this.hasHumanResolution(targetEventId)) {
-      console.log(`[ReportWatcher] Event ${targetEventId.slice(0, 8)}... has human resolution, skipping auto-hide`);
+      console.log(`[ReportWatcher] Event ${targetEventId} has human resolution, skipping auto-hide`);
       return;
     }
 
     if (await this.isAlreadyAutoHidden(targetEventId)) {
-      console.log(`[ReportWatcher] Event ${targetEventId.slice(0, 8)}... already auto-hidden, skipping`);
+      console.log(`[ReportWatcher] Event ${targetEventId} already auto-hidden, skipping`);
       return;
     }
 
@@ -723,10 +723,10 @@ export class ReportWatcher implements DurableObject {
     const count = await this.countUniqueReporters(targetEventId, category);
 
     if (count >= tier.threshold) {
-      console.log(`[ReportWatcher] Threshold met for ${targetEventId.slice(0, 8)}... (${count}/${tier.threshold})`);
+      console.log(`[ReportWatcher] Threshold met for ${targetEventId} (${count}/${tier.threshold})`);
       await this.executeAutoHide(event, category, targetEventId, tier.name);
     } else {
-      console.log(`[ReportWatcher] Below threshold for ${targetEventId.slice(0, 8)}... (${count}/${tier.threshold})`);
+      console.log(`[ReportWatcher] Below threshold for ${targetEventId} (${count}/${tier.threshold})`);
     }
   }
 
@@ -736,13 +736,13 @@ export class ReportWatcher implements DurableObject {
     targetEventId: string,
     tierName: string
   ): Promise<void> {
-    console.log(`[ReportWatcher] Auto-hiding event ${targetEventId.slice(0, 8)}... (tier: ${tierName})`);
+    console.log(`[ReportWatcher] Auto-hiding event ${targetEventId} (tier: ${tierName})`);
 
     const reason = `Auto-hidden: ${category} report (tier: ${tierName}, report_id: ${event.id})`;
     const result = await banEvent(targetEventId, reason, this.env);
 
     if (result.success) {
-      console.log(`[ReportWatcher] Successfully auto-hidden event ${targetEventId.slice(0, 8)}...`);
+      console.log(`[ReportWatcher] Successfully auto-hidden event ${targetEventId}`);
       this.eventsAutoHidden++;
       await this.persistState();
 
@@ -877,7 +877,7 @@ export class ReportWatcher implements DurableObject {
         decision.reporterPubkey
       ).run();
 
-      console.log(`[ReportWatcher] Logged decision: ${decision.action} for ${decision.targetId.slice(0, 8)}...`);
+      console.log(`[ReportWatcher] Logged decision: ${decision.action} for ${decision.targetId}`);
     } catch (error) {
       console.error('[ReportWatcher] Failed to log decision:', error);
     }
@@ -907,7 +907,7 @@ export class ReportWatcher implements DurableObject {
     `).bind(reportedPubkey, ...TERMINAL_STATES).first<{ id: string; state: string }>();
 
     if (existing) {
-      console.log(`[ReportWatcher] Active age review case ${existing.id} already exists for ${reportedPubkey.slice(0, 8)}..., skipping`);
+      console.log(`[ReportWatcher] Active age review case ${existing.id} already exists for ${reportedPubkey}, skipping`);
       return;
     }
 
@@ -938,7 +938,7 @@ export class ReportWatcher implements DurableObject {
       reporterPubkey: event.pubkey,
     });
 
-    console.log(`[ReportWatcher] Age review case created: ${caseId} for ${reportedPubkey.slice(0, 8)}... (deadline: ${deadline})`);
+    console.log(`[ReportWatcher] Age review case created: ${caseId} for ${reportedPubkey} (deadline: ${deadline})`);
   }
 
   /**
