@@ -64,7 +64,7 @@ interface Env {
   MANAGEMENT_URL?: string;   // Full URL override for NIP-86 management API (for local dev with HTTP)
   MODERATION_SERVICE_URL?: string;  // URL for public moderation API (check-result, status)
   MODERATION_ADMIN_URL?: string;    // URL for CF Access-protected moderation service (/api/v1/moderate, /api/v1/notify)
-  SERVICE_API_TOKEN?: string;       // Bearer token for moderation-service API auth (via service binding)
+  SERVICE_API_TOKEN?: string | SecretStoreSecret;  // Bearer token for moderation-service API auth (via Secrets Store)
   REALNESS_API_URL?: string;  // URL for AI detection/realness service
   FUNNELCAKE_API_URL?: string;  // Explicit Funnelcake REST API URL (derived from RELAY_URL if not set)
   // Durable Object bindings
@@ -136,7 +136,7 @@ async function getCfAccessCredentials(env: Env): Promise<{ clientId: string; cli
  * If a dedicated DM service is extracted later (support-trust-safety#118),
  * this function is the single call site to update.
  */
-async function notifyModerationService(
+export async function notifyModerationService(
   env: Env,
   recipientPubkey: string,
   action: string,
@@ -148,11 +148,15 @@ async function notifyModerationService(
     'Content-Type': 'application/json',
   };
 
-  if (env.MODERATION_API && env.SERVICE_API_TOKEN) {
-    // Service binding: authenticate via Bearer token
-    headers['Authorization'] = `Bearer ${env.SERVICE_API_TOKEN}`;
+  if (env.SERVICE_API_TOKEN) {
+    const token = typeof env.SERVICE_API_TOKEN === 'string'
+      ? env.SERVICE_API_TOKEN
+      : await env.SERVICE_API_TOKEN.get();
+    if (!token) {
+      throw new Error('SERVICE_API_TOKEN binding exists but resolved to empty — secret misconfigured');
+    }
+    headers['Authorization'] = `Bearer ${token}`;
   } else {
-    // HTTP fallback: authenticate via CF Access service token
     const cfAccess = await getCfAccessCredentials(env);
     if (!cfAccess) {
       console.warn('[notifyModerationService] No auth credentials configured, skipping DM');
@@ -1255,11 +1259,15 @@ async function handleModerateMedia(
       'Content-Type': 'application/json',
     };
 
-    if (env.MODERATION_API && env.SERVICE_API_TOKEN) {
-      // Service binding: authenticate via Bearer token
-      headers['Authorization'] = `Bearer ${env.SERVICE_API_TOKEN}`;
+    if (env.SERVICE_API_TOKEN) {
+      const token = typeof env.SERVICE_API_TOKEN === 'string'
+        ? env.SERVICE_API_TOKEN
+        : await env.SERVICE_API_TOKEN.get();
+      if (!token) {
+        return jsonResponse({ success: false, error: 'SERVICE_API_TOKEN binding exists but resolved to empty' }, 500, corsHeaders);
+      }
+      headers['Authorization'] = `Bearer ${token}`;
     } else {
-      // HTTP fallback: authenticate via CF Access service token
       const cfAccess = await getCfAccessCredentials(env);
       if (!cfAccess) {
         return jsonResponse({ success: false, error: 'CF_ACCESS credentials not configured' }, 500, corsHeaders);
