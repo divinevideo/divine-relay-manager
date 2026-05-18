@@ -192,11 +192,22 @@ export async function handleGetModerationStatus(
     return json({ restriction: { status: 'active' } }, 200, corsHeaders);
   }
 
+  // Only surface restriction for states where a moderator has reviewed.
+  // open_reported is pre-review — a single unsolicited report should not
+  // restrict the user before a human confirms.
+  const RESTRICTED_STATES: readonly AgeReviewState[] = [
+    'under_moderator_review',
+    'restricted_pending_user_response',
+    'restricted_pending_parental_consent',
+    'restricted_pending_support_email',
+    'submitted_for_review',
+    'needs_follow_up',
+  ];
   const activeCase = await env.DB.prepare(`
     SELECT * FROM age_review_cases
-    WHERE pubkey = ? AND state NOT IN (${TERMINAL_STATES.map(() => '?').join(',')})
+    WHERE pubkey = ? AND state IN (${RESTRICTED_STATES.map(() => '?').join(',')})
     ORDER BY created_at DESC LIMIT 1
-  `).bind(userPubkey, ...TERMINAL_STATES).first<AgeReviewCase>();
+  `).bind(userPubkey, ...RESTRICTED_STATES).first<AgeReviewCase>();
 
   if (!activeCase) {
     return json({ restriction: { status: 'active' } }, 200, corsHeaders);
@@ -248,6 +259,18 @@ export async function handleParentContact(
   }
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(body.email) || body.email.length > 254) {
     return json({ success: false, error: 'Invalid email format' }, 400, corsHeaders);
+  }
+
+  // Validate state transition before modifying the case
+  const targetState: AgeReviewState = activeCase.suspected_age_band === 'age_13_15'
+    ? 'restricted_pending_parental_consent'
+    : 'restricted_pending_support_email';
+  const allowed = VALID_TRANSITIONS[activeCase.state as AgeReviewState];
+  if (!allowed?.includes(targetState)) {
+    return json({
+      success: false,
+      error: `Cannot submit parent contact from state '${activeCase.state}'`,
+    }, 400, corsHeaders);
   }
 
   // Save parent email, pause the clock (if not already paused), and transition state

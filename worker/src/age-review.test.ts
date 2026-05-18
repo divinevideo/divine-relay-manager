@@ -251,6 +251,25 @@ describe('handleGetModerationStatus', () => {
     expect(body.minorReviewCase.state).toBe('restricted_pending_user_response');
   });
 
+  it('returns active for open_reported case (pre-moderator review)', async () => {
+    const c = makeCase({ state: 'open_reported' });
+    const db = createMockDb([c]);
+    // The query now filters by RESTRICTED_STATES, so open_reported won't match
+    db.prepare.mockImplementation((sql: string) => ({
+      bind: vi.fn().mockReturnValue({
+        first: vi.fn().mockResolvedValue(
+          sql.includes('WHERE pubkey = ?') ? null : null
+        ),
+      }),
+    }));
+
+    const res = await handleGetModerationStatus(c.pubkey, { DB: db as unknown as D1Database }, corsHeaders);
+    const body = await res.json() as { restriction: { status: string } };
+
+    expect(res.status).toBe(200);
+    expect(body.restriction.status).toBe('active');
+  });
+
   it('returns active (fail-open) when DB unavailable', async () => {
     const res = await handleGetModerationStatus('a'.repeat(64), {}, corsHeaders);
     const body = await res.json() as { restriction: { status: string } };
@@ -347,6 +366,28 @@ describe('handleParentContact', () => {
     expect(res.status).toBe(400);
     const body = await res.json() as { error: string };
     expect(body.error).toContain('closed');
+  });
+
+  it('rejects parent contact from invalid state (open_reported)', async () => {
+    const c = makeCase({ state: 'open_reported' });
+    const db = createMockDb([c]);
+    db.prepare.mockImplementation((sql: string) => ({
+      bind: vi.fn().mockReturnValue({
+        first: vi.fn().mockResolvedValue(
+          sql.includes('WHERE id = ? AND pubkey = ?') ? c : null
+        ),
+        run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+      }),
+    }));
+
+    const req = new Request('https://api.test/v1/minor-review-cases/case-1/parent-contact', {
+      method: 'POST',
+      body: JSON.stringify({ email: 'parent@example.com' }),
+    });
+    const res = await handleParentContact(req, 'case-1', c.pubkey, { DB: db as unknown as D1Database }, corsHeaders);
+    expect(res.status).toBe(400);
+    const body = await res.json() as { error: string };
+    expect(body.error).toContain('Cannot submit parent contact');
   });
 
   it('rejects invalid email', async () => {
