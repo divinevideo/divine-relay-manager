@@ -29,6 +29,7 @@ import { nip19 } from "nostr-tools";
 import {
   AGE_BANDS,
   TERMINAL_STATES,
+  getDaysRemaining,
   type AgeReviewCase,
   type AgeReviewState,
   type AgeBand,
@@ -74,15 +75,6 @@ function bandColor(band: AgeBand): string {
   if (band === 'under_13') return 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400';
   if (band === 'age_13_15') return 'bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-400';
   return 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400';
-}
-
-function getDaysRemaining(c: AgeReviewCase): number | null {
-  if (c.clock_paused && c.remaining_days_when_paused != null) {
-    return c.remaining_days_when_paused;
-  }
-  if (!c.deadline_at) return null;
-  const ms = new Date(c.deadline_at).getTime() - Date.now();
-  return ms / (24 * 60 * 60 * 1000);
 }
 
 interface Props {

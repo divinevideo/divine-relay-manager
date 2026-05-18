@@ -952,4 +952,3 @@ export async function updateAgeReviewCase(
 ): Promise<AgeReviewCaseResponse> {
   return apiRequest<AgeReviewCaseResponse>(apiUrl, `/api/age-review/cases/${caseId}`, 'PATCH', updates);
 }
-

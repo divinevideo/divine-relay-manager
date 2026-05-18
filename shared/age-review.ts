@@ -54,6 +54,14 @@ export function defaultResolutionForBand(band: AgeBand): ResolutionType {
   }
 }
 
+export function getDaysRemaining(c: AgeReviewCase): number | null {
+  if (c.clock_paused && c.remaining_days_when_paused != null) {
+    return c.remaining_days_when_paused;
+  }
+  if (!c.deadline_at) return null;
+  return (new Date(c.deadline_at).getTime() - Date.now()) / (24 * 60 * 60 * 1000);
+}
+
 export interface AgeReviewCase {
   id: string;
   pubkey: string;
@@ -70,6 +78,7 @@ export interface AgeReviewCase {
   moderator_pubkey: string | null;
   resolution_note: string | null;
   last_alerted_at: string | null;
+  zendesk_ticket_id: number | null;
   created_at: string;
   updated_at: string;
 }

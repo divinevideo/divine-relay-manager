@@ -5,7 +5,9 @@ import {
   handleUpdateAgeReviewCase,
   handleGetModerationStatus,
   handleParentContact,
+  handleAgeReviewReplyWebhook,
   checkAgeReviewDeadlines,
+  syncAgeReviewTicketResolution,
 } from './age-review';
 import type { AgeReviewCase } from '../../shared/age-review';
 
@@ -28,6 +30,7 @@ function makeCase(overrides: Partial<AgeReviewCase> = {}): AgeReviewCase {
     moderator_pubkey: null,
     resolution_note: null,
     last_alerted_at: null,
+    zendesk_ticket_id: null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     ...overrides,
@@ -213,6 +216,39 @@ describe('handleUpdateAgeReviewCase', () => {
     });
     const res = await handleUpdateAgeReviewCase(req, 'case-1', { DB: db as unknown as D1Database }, corsHeaders);
     expect(res.status).toBe(200);
+  });
+
+  it('syncs Zendesk ticket when transitioning to terminal state', async () => {
+    const reviewCase = makeCase({
+      state: 'under_moderator_review',
+      zendesk_ticket_id: 55,
+    });
+    const reviewDb = createMockDb([reviewCase]);
+
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({}) });
+    vi.stubGlobal('fetch', mockFetch);
+
+    const req = new Request('https://api.test/api/age-review/cases/case-1', {
+      method: 'PATCH',
+      body: JSON.stringify({ state: 'cleared', resolution_note: 'Age verified' }),
+    });
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', {
+      DB: reviewDb as unknown as D1Database,
+      ZENDESK_SUBDOMAIN: 'test',
+      ZENDESK_API_TOKEN: 'tok',
+      ZENDESK_EMAIL: 'agent@test.com',
+    }, corsHeaders);
+    expect(res.status).toBe(200);
+
+    const zendeskCall = mockFetch.mock.calls.find(
+      (call: unknown[]) => (call[0] as string).includes('zendesk.com/api/v2/tickets/55')
+    );
+    expect(zendeskCall).toBeTruthy();
+    const payload = JSON.parse(zendeskCall![1].body);
+    expect(payload.ticket.status).toBe('solved');
+    expect(payload.ticket.comment.body).toContain('cleared');
+
+    vi.unstubAllGlobals();
   });
 });
 
@@ -418,29 +454,51 @@ describe('checkAgeReviewDeadlines', () => {
     // No throw — just returns
   });
 
-  it('auto-closes expired cases', async () => {
+  it('auto-closes expired cases and syncs Zendesk', async () => {
     const expiredCase = makeCase({
       deadline_at: new Date(Date.now() - 1000).toISOString(),
       state: 'restricted_pending_user_response',
+      zendesk_ticket_id: 55,
     });
     const runMock = vi.fn().mockResolvedValue({ meta: { changes: 1 } });
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal('fetch', mockFetch);
+
     const db = {
       prepare: vi.fn().mockImplementation((sql: string) => ({
         bind: vi.fn().mockReturnValue({
           all: vi.fn().mockResolvedValue({
             results: sql.includes('deadline_at > datetime') ? [] : [expiredCase],
           }),
+          first: vi.fn().mockResolvedValue(
+            sql.includes('zendesk_ticket_id') ? { zendesk_ticket_id: 55 } : null
+          ),
           run: runMock,
         }),
       })),
     };
 
-    await checkAgeReviewDeadlines({ DB: db as unknown as D1Database });
+    await checkAgeReviewDeadlines({
+      DB: db as unknown as D1Database,
+      ZENDESK_SUBDOMAIN: 'test',
+      ZENDESK_API_TOKEN: 'tok',
+      ZENDESK_EMAIL: 'agent@test.com',
+    });
 
     const closeCalls = db.prepare.mock.calls.filter(
       (c: string[]) => c[0]?.includes('denied_closed')
     );
     expect(closeCalls.length).toBe(1);
+
+    // Verify Zendesk ticket was resolved
+    const zendeskCall = mockFetch.mock.calls.find(
+      (call: unknown[]) => (call[0] as string).includes('zendesk.com/api/v2/tickets/55')
+    );
+    expect(zendeskCall).toBeTruthy();
+    const payload = JSON.parse((zendeskCall as [string, RequestInit])[1].body as string);
+    expect(payload.ticket.status).toBe('solved');
+
+    vi.unstubAllGlobals();
   });
 
   it('sends Slack alert for approaching deadlines', async () => {
@@ -532,5 +590,377 @@ describe('checkAgeReviewDeadlines', () => {
     expect(mockFetch).not.toHaveBeenCalled();
 
     vi.unstubAllGlobals();
+  });
+});
+
+// -- handleParentContact + Zendesk ticket creation ----------------------------
+
+describe('handleParentContact Zendesk integration', () => {
+  it('creates Zendesk ticket on parent email submission', async () => {
+    const c = makeCase({ state: 'restricted_pending_user_response' });
+    const runMock = vi.fn().mockResolvedValue({ meta: { changes: 1 } });
+    const db = {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        bind: vi.fn().mockReturnValue({
+          first: vi.fn().mockResolvedValue(
+            sql.includes('WHERE id = ? AND pubkey = ?') ? c : null
+          ),
+          run: runMock,
+        }),
+      })),
+    };
+
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ ticket: { id: 42 } }),
+    });
+    vi.stubGlobal('fetch', mockFetch);
+
+    const req = new Request('https://api.test/v1/minor-review-cases/case-1/parent-contact', {
+      method: 'POST',
+      body: JSON.stringify({ email: 'parent@example.com' }),
+    });
+    const res = await handleParentContact(req, 'case-1', c.pubkey, {
+      DB: db as unknown as D1Database,
+      ZENDESK_SUBDOMAIN: 'test',
+      ZENDESK_API_TOKEN: 'tok',
+      ZENDESK_EMAIL: 'agent@test.com',
+    }, corsHeaders);
+    expect(res.status).toBe(200);
+
+    // Zendesk API was called to create ticket
+    const zendeskCall = mockFetch.mock.calls.find(
+      (call: unknown[]) => (call[0] as string).includes('zendesk.com/api/v2/tickets')
+    );
+    expect(zendeskCall).toBeTruthy();
+    const ticketPayload = JSON.parse(zendeskCall![1].body);
+    expect(ticketPayload.ticket.requester.email).toBe('parent@example.com');
+    expect(ticketPayload.ticket.tags).toContain('age-review');
+
+    // Ticket ID was stored back on the case
+    const storeCall = db.prepare.mock.calls.find(
+      (call: string[]) => call[0]?.includes('zendesk_ticket_id')
+    );
+    expect(storeCall).toBeTruthy();
+
+    vi.unstubAllGlobals();
+  });
+
+  it('succeeds even when Zendesk ticket creation fails', async () => {
+    const c = makeCase({ state: 'restricted_pending_user_response' });
+    const db = {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        bind: vi.fn().mockReturnValue({
+          first: vi.fn().mockResolvedValue(
+            sql.includes('WHERE id = ? AND pubkey = ?') ? c : null
+          ),
+          run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+        }),
+      })),
+    };
+
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      text: () => Promise.resolve('Internal Server Error'),
+    });
+    vi.stubGlobal('fetch', mockFetch);
+
+    const req = new Request('https://api.test/v1/minor-review-cases/case-1/parent-contact', {
+      method: 'POST',
+      body: JSON.stringify({ email: 'parent@example.com' }),
+    });
+    const res = await handleParentContact(req, 'case-1', c.pubkey, {
+      DB: db as unknown as D1Database,
+      ZENDESK_SUBDOMAIN: 'test',
+      ZENDESK_API_TOKEN: 'tok',
+      ZENDESK_EMAIL: 'agent@test.com',
+    }, corsHeaders);
+
+    // Still succeeds — Zendesk is non-critical
+    expect(res.status).toBe(200);
+
+    vi.unstubAllGlobals();
+  });
+
+  it('skips Zendesk when credentials missing', async () => {
+    const c = makeCase({ state: 'restricted_pending_user_response' });
+    const db = {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        bind: vi.fn().mockReturnValue({
+          first: vi.fn().mockResolvedValue(
+            sql.includes('WHERE id = ? AND pubkey = ?') ? c : null
+          ),
+          run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+        }),
+      })),
+    };
+
+    const mockFetch = vi.fn();
+    vi.stubGlobal('fetch', mockFetch);
+
+    const req = new Request('https://api.test/v1/minor-review-cases/case-1/parent-contact', {
+      method: 'POST',
+      body: JSON.stringify({ email: 'parent@example.com' }),
+    });
+    const res = await handleParentContact(req, 'case-1', c.pubkey, {
+      DB: db as unknown as D1Database,
+    }, corsHeaders);
+
+    expect(res.status).toBe(200);
+    // No Zendesk API call made
+    expect(mockFetch).not.toHaveBeenCalled();
+
+    vi.unstubAllGlobals();
+  });
+
+  it('skips ticket creation when case already has a zendesk_ticket_id', async () => {
+    const c = makeCase({ state: 'restricted_pending_user_response', zendesk_ticket_id: 99 });
+    const db = {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        bind: vi.fn().mockReturnValue({
+          first: vi.fn().mockResolvedValue(
+            sql.includes('WHERE id = ? AND pubkey = ?') ? c : null
+          ),
+          run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+        }),
+      })),
+    };
+
+    const mockFetch = vi.fn();
+    vi.stubGlobal('fetch', mockFetch);
+
+    const req = new Request('https://api.test/v1/minor-review-cases/case-1/parent-contact', {
+      method: 'POST',
+      body: JSON.stringify({ email: 'parent@example.com' }),
+    });
+    const res = await handleParentContact(req, 'case-1', c.pubkey, {
+      DB: db as unknown as D1Database,
+      ZENDESK_SUBDOMAIN: 'test',
+      ZENDESK_API_TOKEN: 'tok',
+      ZENDESK_EMAIL: 'agent@test.com',
+    }, corsHeaders);
+
+    expect(res.status).toBe(200);
+    expect(mockFetch).not.toHaveBeenCalled();
+
+    vi.unstubAllGlobals();
+  });
+});
+
+// -- syncAgeReviewTicketResolution ---------------------------------------------
+
+describe('syncAgeReviewTicketResolution', () => {
+  it('returns early when case has no zendesk_ticket_id', async () => {
+    const mockFetch = vi.fn();
+    vi.stubGlobal('fetch', mockFetch);
+
+    const db = {
+      prepare: vi.fn().mockImplementation(() => ({
+        bind: vi.fn().mockReturnValue({
+          first: vi.fn().mockResolvedValue({ zendesk_ticket_id: null }),
+        }),
+      })),
+    };
+
+    await syncAgeReviewTicketResolution('case-1', 'cleared', 'All good', {
+      DB: db as unknown as D1Database,
+      ZENDESK_SUBDOMAIN: 'test',
+      ZENDESK_API_TOKEN: 'tok',
+      ZENDESK_EMAIL: 'agent@test.com',
+    });
+
+    expect(mockFetch).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it('solves Zendesk ticket with internal note on resolution', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal('fetch', mockFetch);
+
+    const db = {
+      prepare: vi.fn().mockImplementation(() => ({
+        bind: vi.fn().mockReturnValue({
+          first: vi.fn().mockResolvedValue({ zendesk_ticket_id: 42 }),
+        }),
+      })),
+    };
+
+    await syncAgeReviewTicketResolution('case-1', 'denied_closed', 'Expired', {
+      DB: db as unknown as D1Database,
+      ZENDESK_SUBDOMAIN: 'test',
+      ZENDESK_API_TOKEN: 'tok',
+      ZENDESK_EMAIL: 'agent@test.com',
+    });
+
+    expect(mockFetch).toHaveBeenCalledOnce();
+    const [url, opts] = mockFetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain('/api/v2/tickets/42');
+    const payload = JSON.parse(opts.body as string);
+    expect(payload.ticket.status).toBe('solved');
+    expect(payload.ticket.comment.public).toBe(false);
+    expect(payload.ticket.comment.body).toContain('denied_closed');
+
+    vi.unstubAllGlobals();
+  });
+
+  it('includes custom fields when env vars are set', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal('fetch', mockFetch);
+
+    const db = {
+      prepare: vi.fn().mockImplementation(() => ({
+        bind: vi.fn().mockReturnValue({
+          first: vi.fn().mockResolvedValue({ zendesk_ticket_id: 42 }),
+        }),
+      })),
+    };
+
+    await syncAgeReviewTicketResolution('case-1', 'cleared', null, {
+      DB: db as unknown as D1Database,
+      ZENDESK_SUBDOMAIN: 'test',
+      ZENDESK_API_TOKEN: 'tok',
+      ZENDESK_EMAIL: 'agent@test.com',
+      ZENDESK_FIELD_CATEGORY: '12345',
+      ZENDESK_FIELD_ISSUE: '67890',
+    });
+
+    const payload = JSON.parse((mockFetch.mock.calls[0] as [string, RequestInit])[1].body as string);
+    expect(payload.ticket.custom_fields).toEqual([
+      { id: 12345, value: 'trust___safety' },
+      { id: 67890, value: 'age_review' },
+    ]);
+
+    vi.unstubAllGlobals();
+  });
+});
+
+// -- handleAgeReviewReplyWebhook ------------------------------------------------
+
+describe('handleAgeReviewReplyWebhook', () => {
+  it('transitions pending case to submitted_for_review', async () => {
+    const c = makeCase({
+      state: 'restricted_pending_parental_consent',
+      zendesk_ticket_id: 42,
+    });
+    const runMock = vi.fn().mockResolvedValue({ meta: { changes: 1 } });
+    const db = {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        bind: vi.fn().mockReturnValue({
+          first: vi.fn().mockResolvedValue(
+            sql.includes('zendesk_ticket_id') ? c : null
+          ),
+          run: runMock,
+        }),
+      })),
+    };
+
+    const req = new Request('https://api.test/api/zendesk/age-review-reply', {
+      method: 'POST',
+      body: JSON.stringify({ ticket_id: 42 }),
+    });
+    const res = await handleAgeReviewReplyWebhook(req, { DB: db as unknown as D1Database }, corsHeaders);
+    const body = await res.json() as { success: boolean; new_state: string };
+
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+    expect(body.new_state).toBe('submitted_for_review');
+
+    const updateCall = db.prepare.mock.calls.find(
+      (call: string[]) => call[0]?.includes('submitted_for_review')
+    );
+    expect(updateCall).toBeTruthy();
+    expect(updateCall![0]).toContain('clock_paused = 1');
+  });
+
+  it('re-pauses clock when moderator had resumed it', async () => {
+    const c = makeCase({
+      state: 'restricted_pending_parental_consent',
+      zendesk_ticket_id: 42,
+      clock_paused: 0,
+      deadline_at: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+    const runMock = vi.fn().mockResolvedValue({ meta: { changes: 1 } });
+    const boundValues: unknown[] = [];
+    const db = {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        bind: vi.fn().mockImplementation((...args: unknown[]) => {
+          if (sql.includes('submitted_for_review')) boundValues.push(...args);
+          return {
+            first: vi.fn().mockResolvedValue(
+              sql.includes('zendesk_ticket_id') ? c : null
+            ),
+            run: runMock,
+          };
+        }),
+      })),
+    };
+
+    const req = new Request('https://api.test/api/zendesk/age-review-reply', {
+      method: 'POST',
+      body: JSON.stringify({ ticket_id: 42 }),
+    });
+    const res = await handleAgeReviewReplyWebhook(req, { DB: db as unknown as D1Database }, corsHeaders);
+    expect(res.status).toBe(200);
+
+    // Should have bound an ISO timestamp and remaining days (~5)
+    expect(boundValues.length).toBeGreaterThanOrEqual(2);
+    const remainingDays = boundValues[1] as number;
+    expect(remainingDays).toBeGreaterThan(4);
+    expect(remainingDays).toBeLessThan(6);
+  });
+
+  it('returns 404 when no case linked to ticket', async () => {
+    const db = {
+      prepare: vi.fn().mockImplementation(() => ({
+        bind: vi.fn().mockReturnValue({
+          first: vi.fn().mockResolvedValue(null),
+        }),
+      })),
+    };
+
+    const req = new Request('https://api.test/api/zendesk/age-review-reply', {
+      method: 'POST',
+      body: JSON.stringify({ ticket_id: 999 }),
+    });
+    const res = await handleAgeReviewReplyWebhook(req, { DB: db as unknown as D1Database }, corsHeaders);
+    expect(res.status).toBe(404);
+  });
+
+  it('does not transition if case is not in pending state', async () => {
+    const c = makeCase({
+      state: 'under_moderator_review',
+      zendesk_ticket_id: 42,
+    });
+    const db = {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        bind: vi.fn().mockReturnValue({
+          first: vi.fn().mockResolvedValue(
+            sql.includes('zendesk_ticket_id') ? c : null
+          ),
+          run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+        }),
+      })),
+    };
+
+    const req = new Request('https://api.test/api/zendesk/age-review-reply', {
+      method: 'POST',
+      body: JSON.stringify({ ticket_id: 42 }),
+    });
+    const res = await handleAgeReviewReplyWebhook(req, { DB: db as unknown as D1Database }, corsHeaders);
+    const body = await res.json() as { success: boolean; message: string };
+
+    expect(res.status).toBe(200);
+    expect(body.message).toContain('not in a state that can advance');
+  });
+
+  it('returns 400 when ticket_id missing', async () => {
+    const db = createMockDb([]);
+    const req = new Request('https://api.test/api/zendesk/age-review-reply', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    const res = await handleAgeReviewReplyWebhook(req, { DB: db as unknown as D1Database }, corsHeaders);
+    expect(res.status).toBe(400);
   });
 });

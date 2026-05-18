@@ -21,7 +21,7 @@ import { Sheet, SheetContent } from "@/components/ui/sheet";
 import {
   AGE_BANDS,
   TERMINAL_STATES,
-  type AgeReviewCase,
+  getDaysRemaining,
   type AgeReviewState,
   type AgeBand,
 } from "../../shared/age-review";
@@ -45,14 +45,6 @@ const STATE_SHORT: Record<AgeReviewState, string> = {
 };
 
 type FilterMode = 'active' | 'closed' | 'all';
-
-function getDaysRemaining(c: AgeReviewCase): number | null {
-  if (c.clock_paused && c.remaining_days_when_paused != null) {
-    return c.remaining_days_when_paused;
-  }
-  if (!c.deadline_at) return null;
-  return (new Date(c.deadline_at).getTime() - Date.now()) / (24 * 60 * 60 * 1000);
-}
 
 export function AgeReview() {
   const api = useAdminApi();
