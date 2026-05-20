@@ -31,7 +31,7 @@ export function EventActions({
 
   const banEventMutation = useMutation({
     mutationFn: async () => {
-      await api.deleteEvent(eventId, 'Banned by moderator', pubkey);
+      await api.callRelayRpc('banevent', [eventId, 'Banned by moderator']);
       await api.logDecision({
         targetType: 'event',
         targetId: eventId,

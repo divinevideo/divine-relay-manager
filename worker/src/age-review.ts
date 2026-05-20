@@ -10,6 +10,7 @@ import {
   defaultResolutionForBand,
 } from '../../shared/age-review';
 import { handleBulkModerate, type BulkModerateEnv } from './bulk-moderate';
+import type { BulkAction, BulkModerateResult } from '../../shared/bulk-moderation';
 
 interface AgeReviewEnv extends BulkModerateEnv {
   SLACK_WEBHOOK_URL?: string;
@@ -830,7 +831,7 @@ async function sendSlackAlert(
 
 async function triggerBulkModerate(
   pubkey: string,
-  action: string,
+  action: BulkAction,
   reason: string,
   env: AgeReviewEnv,
 ): Promise<void> {
@@ -839,9 +840,10 @@ async function triggerBulkModerate(
     body: JSON.stringify({ pubkey, action, reason }),
   });
   const response = await handleBulkModerate(request, env, {});
-  if (!response.ok) {
-    const body = await response.json() as { error?: string };
-    throw new Error(body.error || `Bulk moderate returned ${response.status}`);
+  const body = await response.json() as BulkModerateResult & { error?: string };
+  if (!response.ok || !body.success) {
+    const summary = body.failures?.slice(0, 3).join('; ');
+    throw new Error(summary || body.error || `Bulk moderate returned ${response.status}`);
   }
 }
 

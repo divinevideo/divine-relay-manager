@@ -1,21 +1,25 @@
-import { banEvent, publishKind5Deletion, type Nip86Env } from './nip86';
+import { getAdminPubkey, banEvent, publishKind5Deletion, type Nip86Env } from './nip86';
+import { syncZendeskAfterAction, type ZendeskSyncEnv } from './zendesk-sync';
+import { VALID_BULK_ACTIONS, type BulkAction, type BulkModerateResult } from '../../shared/bulk-moderation';
+import { extractMediaHashes as extractSharedMediaHashes } from '../../shared/media-hashes';
 
-type BulkAction = 'age-restrict-all' | 'un-age-restrict-all' | 'delete-all';
-const VALID_BULK_ACTIONS: BulkAction[] = ['age-restrict-all', 'un-age-restrict-all', 'delete-all'];
-const VIDEO_KINDS = [34235, 34236, 21, 22];
+const BULK_ACTION_CONCURRENCY = 5;
+const RELAY_QUERY_LIMIT = 500;
+const RELAY_QUERY_FETCH_LIMIT = RELAY_QUERY_LIMIT + 1;
+const RELAY_QUERY_TIMEOUT_MS = 10000;
 
-export interface BulkModerateEnv extends Nip86Env {
+export interface BulkModerateEnv extends Nip86Env, ZendeskSyncEnv {
   DB?: D1Database;
   MODERATION_API?: Fetcher;
   MODERATION_ADMIN_URL?: string;
   SERVICE_API_TOKEN?: string | { get(): Promise<string> };
 }
 
-interface BulkResult {
-  success: boolean;
-  eventsProcessed: number;
-  mediaProcessed: number;
-  failures: string[];
+interface RelayEventSummary {
+  id: string;
+  kind: number;
+  content: string;
+  tags: string[][];
 }
 
 function json(data: unknown, status: number, corsHeaders: Record<string, string>): Response {
@@ -44,42 +48,66 @@ export async function handleBulkModerate(
 
   const events = await queryRelayEvents(body.pubkey, env);
   const mediaHashes = extractMediaHashes(events);
-
-  const result: BulkResult = { success: true, eventsProcessed: 0, mediaProcessed: 0, failures: [] };
+  const moderatorPubkey = await getAdminPubkey(env);
+  const result: BulkModerateResult = { success: true, eventsProcessed: 0, mediaProcessed: 0, failures: [] };
 
   if (action === 'delete-all') {
-    for (const event of events) {
+    const successfulEventIds: string[] = [];
+
+    await runWithConcurrency(events, BULK_ACTION_CONCURRENCY, async (event) => {
       try {
-        await banEvent(event.id, reason, env);
-        await publishKind5Deletion(event.id, reason, env);
-        result.eventsProcessed++;
-        if (env.DB) {
-          await env.DB.prepare(
-            `INSERT INTO moderation_decisions (target_type, target_id, action, reason, created_at) VALUES (?, ?, ?, ?, datetime('now'))`
-          ).bind('event', event.id, 'delete_event', reason).run();
+        const banResult = await banEvent(event.id, reason, env);
+        if (!banResult.success) {
+          throw new Error(banResult.error || 'banevent failed');
         }
+
+        const deleteResult = await publishKind5Deletion(event.id, reason, env);
+        if (!deleteResult.success) {
+          throw new Error(deleteResult.error || 'kind 5 deletion failed');
+        }
+
+        result.eventsProcessed++;
+        successfulEventIds.push(event.id);
       } catch (error) {
-        result.failures.push(`event:${event.id}:${error}`);
+        result.failures.push(`event:${event.id}:${formatError(error)}`);
       }
+    });
+
+    if (env.DB && successfulEventIds.length > 0) {
+      await env.DB.batch(
+        successfulEventIds.map((eventId) => env.DB!.prepare(
+          `INSERT INTO moderation_decisions (target_type, target_id, action, reason, moderator_pubkey, created_at) VALUES (?, ?, ?, ?, ?, datetime('now'))`
+        ).bind('event', eventId, 'delete_event', reason, moderatorPubkey))
+      );
     }
-    for (const sha256 of mediaHashes) {
+
+    await runWithConcurrency(successfulEventIds, BULK_ACTION_CONCURRENCY, async (eventId) => {
+      await syncZendeskAfterAction(env, 'delete_event', 'event', eventId, moderatorPubkey);
+    });
+
+    if (successfulEventIds.length > 0) {
+      await syncZendeskAfterAction(env, 'delete_event', 'pubkey', body.pubkey, moderatorPubkey);
+    }
+
+    await runWithConcurrency(mediaHashes, BULK_ACTION_CONCURRENCY, async (sha256) => {
       try {
         await callModerateMedia(sha256, 'DELETE', reason, env);
         result.mediaProcessed++;
       } catch (error) {
-        result.failures.push(`media:${sha256}:${error}`);
+        result.failures.push(`media:${sha256}:${formatError(error)}`);
       }
-    }
+    });
   } else {
+    result.eventsProcessed = events.length;
     const mediaAction = action === 'age-restrict-all' ? 'AGE_RESTRICTED' : 'SAFE';
-    for (const sha256 of mediaHashes) {
+    await runWithConcurrency(mediaHashes, BULK_ACTION_CONCURRENCY, async (sha256) => {
       try {
         await callModerateMedia(sha256, mediaAction, reason, env);
         result.mediaProcessed++;
       } catch (error) {
-        result.failures.push(`media:${sha256}:${error}`);
+        result.failures.push(`media:${sha256}:${formatError(error)}`);
       }
-    }
+    });
   }
 
   result.success = result.failures.length === 0;
@@ -89,80 +117,82 @@ export async function handleBulkModerate(
 export async function queryRelayEvents(
   pubkey: string,
   env: Pick<BulkModerateEnv, 'RELAY_URL'>,
-): Promise<Array<{ id: string; kind: number; tags: string[][] }>> {
-  return new Promise((resolve) => {
+): Promise<RelayEventSummary[]> {
+  return new Promise((resolve, reject) => {
     try {
       const ws = new WebSocket(env.RELAY_URL);
       let resolved = false;
-      const events: Array<{ id: string; kind: number; tags: string[][] }> = [];
+      const events: RelayEventSummary[] = [];
       const subId = `bulk-${Date.now()}`;
 
+      const finish = (fn: (value?: unknown) => void, value?: unknown) => {
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(timeout);
+        ws.close();
+        fn(value);
+      };
+
       const timeout = setTimeout(() => {
-        if (!resolved) {
-          resolved = true;
-          ws.close();
-          resolve(events);
-        }
-      }, 10000);
+        finish(reject, new Error('Relay query timed out before EOSE'));
+      }, RELAY_QUERY_TIMEOUT_MS);
 
       ws.addEventListener('open', () => {
-        ws.send(JSON.stringify(['REQ', subId, { authors: [pubkey], limit: 5000 }]));
+        ws.send(JSON.stringify(['REQ', subId, { authors: [pubkey], limit: RELAY_QUERY_FETCH_LIMIT }]));
       });
 
       ws.addEventListener('message', (msg) => {
         try {
           const data = JSON.parse(msg.data as string);
           if (data[0] === 'EVENT' && data[1] === subId) {
-            const event = data[2] as { id: string; kind: number; tags: string[][] };
-            events.push({ id: event.id, kind: event.kind, tags: event.tags });
+            const event = data[2] as { id: string; kind: number; content?: string; tags: string[][] };
+            events.push({ id: event.id, kind: event.kind, content: event.content || '', tags: event.tags });
           } else if (data[0] === 'EOSE' && data[1] === subId) {
-            clearTimeout(timeout);
-            resolved = true;
-            ws.close();
-            resolve(events);
+            if (events.length > RELAY_QUERY_LIMIT) {
+              finish(reject, new Error(`Bulk moderation matched more than ${RELAY_QUERY_LIMIT} events; narrow the scope or add pagination`));
+              return;
+            }
+            finish(resolve, events);
           }
         } catch {
-          // Ignore parse errors
+          // Ignore malformed relay frames and continue collecting.
         }
       });
 
       ws.addEventListener('error', () => {
-        if (!resolved) {
-          clearTimeout(timeout);
-          resolved = true;
-          resolve(events);
-        }
+        finish(reject, new Error('Relay query failed'));
       });
 
       ws.addEventListener('close', () => {
-        if (!resolved) {
-          clearTimeout(timeout);
-          resolved = true;
-          resolve(events);
-        }
+        finish(reject, new Error('Relay query closed before EOSE'));
       });
-    } catch {
-      resolve([]);
+    } catch (error) {
+      reject(error);
     }
   });
 }
 
-export function extractMediaHashes(events: Array<{ id: string; kind: number; tags: string[][] }>): string[] {
+export function extractMediaHashes(events: RelayEventSummary[]): string[] {
   const hashes = new Set<string>();
   for (const event of events) {
-    if (!VIDEO_KINDS.includes(event.kind)) continue;
-    for (const tag of event.tags) {
-      if (tag[0] === 'imeta') {
-        for (let i = 1; i < tag.length; i++) {
-          if (tag[i].startsWith('sha256 ')) {
-            hashes.add(tag[i].split(' ')[1]);
-          }
-        }
-      }
-      if (tag[0] === 'x') hashes.add(tag[1]);
-    }
+    const eventHashes = extractSharedMediaHashes(event.content, event.tags);
+    eventHashes.forEach((hash) => hashes.add(hash));
   }
   return Array.from(hashes);
+}
+
+async function runWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T) => Promise<void>,
+): Promise<void> {
+  for (let i = 0; i < items.length; i += concurrency) {
+    await Promise.all(items.slice(i, i + concurrency).map(worker));
+  }
+}
+
+function formatError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 async function callModerateMedia(

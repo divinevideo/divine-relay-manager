@@ -3,6 +3,12 @@
 // ABOUTME: All functions accept apiUrl as first parameter to support environment switching
 
 import type { NostrEvent } from "@nostrify/nostrify";
+import {
+  VALID_BULK_ACTIONS,
+  type BulkAction,
+  type BulkModerateResult,
+} from "../../shared/bulk-moderation";
+import { extractMediaHashes as extractSharedMediaHashes } from "../../shared/media-hashes";
 
 // Build headers with CF Access service token for cross-origin API requests.
 // The service token authenticates the frontend to CF Access policies on api-relay-* domains.
@@ -544,50 +550,7 @@ export async function verifyModerationAction(
 
 // Extract sha256 hashes from media URLs in content or tags
 export function extractMediaHashes(content: string, tags: string[][]): string[] {
-  const hashes: Set<string> = new Set();
-
-  // Common Blossom/media URL patterns with sha256
-  // e.g., https://cdn.example.com/abc123def456.mp4
-  // e.g., https://blossom.example.com/sha256/abc123def456
-  const sha256Pattern = /\b([a-f0-9]{64})\b/gi;
-  const addHashesFromText = (value: string) => {
-    let match;
-    sha256Pattern.lastIndex = 0;
-    while ((match = sha256Pattern.exec(value)) !== null) {
-      hashes.add(match[1].toLowerCase());
-    }
-  };
-
-  // Check content for hashes
-  addHashesFromText(content);
-
-  // Check imeta tags and url tags
-  for (const tag of tags) {
-    if (tag[0] === 'imeta') {
-      const mime = tag.find((part) => part.toLowerCase().startsWith('m '))?.split(/\s+/)[1];
-      if (mime?.toLowerCase().startsWith('video/')) {
-        for (const part of tag.slice(1)) {
-          const [key, ...values] = part.split(/\s+/);
-          if (key === 'url' || key === 'x') {
-            addHashesFromText(values.join(' '));
-          }
-        }
-      } else {
-        addHashesFromText(tag.join(' '));
-      }
-      continue;
-    }
-
-    if (tag[0] === 'url' || tag[0] === 'x') {
-      addHashesFromText(tag.join(' '));
-    }
-    // Direct x tag with hash
-    if (tag[0] === 'x' && tag[1] && /^[a-f0-9]{64}$/i.test(tag[1])) {
-      hashes.add(tag[1].toLowerCase());
-    }
-  }
-
-  return Array.from(hashes);
+  return extractSharedMediaHashes(content, tags);
 }
 
 // Scene classification from VLM
@@ -954,14 +917,7 @@ export async function updateAgeReviewCase(
 }
 
 // Bulk moderation
-export type BulkAction = 'age-restrict-all' | 'un-age-restrict-all' | 'delete-all';
-
-export interface BulkModerateResult {
-  success: boolean;
-  eventsProcessed: number;
-  mediaProcessed: number;
-  failures: string[];
-}
+export { VALID_BULK_ACTIONS, type BulkAction, type BulkModerateResult };
 
 export async function bulkModerate(
   apiUrl: string,
@@ -969,7 +925,12 @@ export async function bulkModerate(
   action: BulkAction,
   reason?: string,
 ): Promise<BulkModerateResult> {
-  return apiRequest<BulkModerateResult>(apiUrl, '/api/bulk-moderate', 'POST', { pubkey, action, reason });
+  const result = await apiRequest<BulkModerateResult>(apiUrl, '/api/bulk-moderate', 'POST', { pubkey, action, reason });
+  if (!result.success) {
+    const summary = result.failures.slice(0, 3).join('; ');
+    throw new ApiError(summary ? `Bulk moderation failed: ${summary}` : 'Bulk moderation failed');
+  }
+  return result;
 }
 
 // Delete media (convenience wrapper)
