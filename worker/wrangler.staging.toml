@@ -64,8 +64,7 @@ ZENDESK_FIELD_ACTION_REQUESTED = "14545826900367"
 # Zendesk custom field IDs for auto-solve required fields
 ZENDESK_FIELD_CATEGORY = "14559549220879"
 ZENDESK_FIELD_ISSUE = "14560383908879"
-# Age review deadline date field — create in Zendesk admin, then set the ID here
-# ZENDESK_FIELD_AGE_REVIEW_DEADLINE = ""
+ZENDESK_FIELD_AGE_REVIEW_DEADLINE = "16123853180303"
 
 # D1 Database for moderation decision log (staging)
 [[d1_databases]]
