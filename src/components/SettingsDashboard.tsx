@@ -18,7 +18,7 @@ import {
   AlertTriangle, Mail, Tag,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { AutoHideSettings } from "@/components/AutoHideSettings";
+import { AutoHideSettings, AgeReviewSettings } from "@/components/AutoHideSettings";
 
 // ── NIP-11 type (replicated from RelayInfo.tsx to keep this component self-contained) ──
 
@@ -275,6 +275,7 @@ export function SettingsDashboard() {
         </Alert>
 
         <AutoHideSettings />
+        <AgeReviewSettings />
 
         {/* ── 1. Environment & Connection Banner ── */}
         <Card className={cn("border-l-4", envBorderColor(env?.id))}>
