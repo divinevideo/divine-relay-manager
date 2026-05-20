@@ -150,7 +150,7 @@ export function UserActions({
             }
             title="Delete All Content"
             summary="This will permanently delete all media files from this user. This cannot be undone."
-            onConfirm={() => bulkDeleteMutation.mutateAsync()}
+            onConfirm={async () => { await bulkDeleteMutation.mutateAsync(); }}
             isPending={bulkDeleteMutation.isPending}
           />
         </>

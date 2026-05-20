@@ -1064,7 +1064,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                 eventId={context.target.value}
                 pubkey={context.reportedUser.pubkey || ''}
                 mediaHashes={mediaHashes}
-                isEventBanned={isEventDeleted}
+                isEventBanned={isEventDeleted ?? undefined}
                 hasBlockedMedia={mediaStatus.hasBlockedMedia}
                 hasRestrictedMedia={mediaStatus.hasRestrictedMedia}
                 onActionComplete={handleActionComplete}
@@ -1076,7 +1076,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
               <UserActions
                 pubkey={context.reportedUser.pubkey}
                 context="report"
-                isBanned={isUserBanned}
+                isBanned={isUserBanned ?? undefined}
                 onActionComplete={handleActionComplete}
               />
             )}

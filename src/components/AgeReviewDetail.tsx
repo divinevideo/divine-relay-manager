@@ -341,10 +341,12 @@ export function AgeReviewDetail({ caseData: c }: Props) {
                     }
                     title="Deny & Delete Content"
                     summary="Denying this case will permanently delete all events and media for this user. This cannot be undone."
-                    onConfirm={() => updateCase.mutateAsync({
-                      state: 'denied_closed',
-                      resolution_note: resolutionNote || undefined,
-                    })}
+                    onConfirm={async () => {
+                      await updateCase.mutateAsync({
+                        state: 'denied_closed',
+                        resolution_note: resolutionNote || undefined,
+                      });
+                    }}
                     isPending={updateCase.isPending}
                   />
                 ) : (
