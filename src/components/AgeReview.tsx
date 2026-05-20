@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/select";
 import { Clock, RefreshCw, Filter, AlertTriangle } from "lucide-react";
 import { AgeReviewDetail } from "@/components/AgeReviewDetail";
+import { UserIdentifier } from "@/components/UserIdentifier";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
 import {
@@ -175,7 +176,7 @@ export function AgeReview() {
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-1.5 mb-0.5">
-                        <code className="text-xs font-mono truncate" title={c.pubkey}>{c.pubkey}</code>
+                        <UserIdentifier pubkey={c.pubkey} variant="compact" showAvatar={false} linkToProfile={false} className="text-xs" />
                       </div>
                       <div className="flex items-center gap-1.5 flex-wrap">
                         <Badge variant="outline" className="text-[10px] h-4 px-1">

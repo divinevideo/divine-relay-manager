@@ -21,11 +21,10 @@ import {
   XCircle,
   AlertTriangle,
   Loader2,
-  Copy,
-  Check,
   ExternalLink,
 } from "lucide-react";
-import { nip19 } from "nostr-tools";
+import { CopyableId } from "@/components/CopyableId";
+import { UserIdentifier } from "@/components/UserIdentifier";
 import {
   AGE_BANDS,
   TERMINAL_STATES,
@@ -85,7 +84,6 @@ export function AgeReviewDetail({ caseData: c }: Props) {
   const api = useAdminApi();
   const queryClient = useQueryClient();
   const [resolutionNote, setResolutionNote] = useState(c.resolution_note ?? "");
-  const [copiedField, setCopiedField] = useState<string | null>(null);
 
   useEffect(() => {
     setResolutionNote(c.resolution_note ?? "");
@@ -101,14 +99,6 @@ export function AgeReviewDetail({ caseData: c }: Props) {
       queryClient.invalidateQueries({ queryKey: ['age-review-cases'] });
     },
   });
-
-  const copyToClipboard = (text: string, field: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedField(field);
-    setTimeout(() => setCopiedField(null), 2000);
-  };
-
-  const npub = nip19.npubEncode(c.pubkey);
 
   return (
     <ScrollArea className="h-full">
@@ -143,26 +133,42 @@ export function AgeReviewDetail({ caseData: c }: Props) {
         {/* Identity */}
         <div className="space-y-1.5">
           <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Flagged User</h4>
-          <div className="flex items-center gap-1.5">
-            <code className="text-xs bg-muted px-1.5 py-0.5 rounded font-mono break-all">{npub}</code>
-            <button
-              onClick={() => copyToClipboard(c.pubkey, 'pubkey')}
-              className="text-muted-foreground hover:text-foreground"
-              title="Copy hex pubkey"
-            >
-              {copiedField === 'pubkey' ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
-            </button>
+          <UserIdentifier
+            pubkey={c.pubkey}
+            variant="block"
+            showAvatar={true}
+            avatarSize="md"
+            showCopyButton={false}
+            showNip05={true}
+            linkToProfile={true}
+          />
+          <div className="flex flex-wrap items-center gap-2">
+            <CopyableId
+              value={c.pubkey}
+              type="hex"
+              size="xs"
+              label="Hex pubkey:"
+              truncateStart={16}
+              truncateEnd={8}
+            />
             <a
               href={`/users/${c.pubkey}`}
-              className="text-muted-foreground hover:text-foreground"
-              title="View in Users tab"
+              className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
             >
               <ExternalLink className="h-3 w-3" />
+              View in Users tab
             </a>
           </div>
           {c.reporter_pubkey && (
-            <div className="text-xs text-muted-foreground">
-              Reported by: <code className="bg-muted px-1 py-0.5 rounded font-mono break-all">{c.reporter_pubkey}</code>
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <span>Reported by:</span>
+              <UserIdentifier
+                pubkey={c.reporter_pubkey}
+                variant="compact"
+                showAvatar={false}
+                linkToProfile={false}
+                copyOnClick={false}
+              />
             </div>
           )}
           {c.parent_contact_email && (
