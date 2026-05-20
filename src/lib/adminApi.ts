@@ -74,7 +74,7 @@ class ApiError extends Error {
 async function apiRequest<T>(
   apiUrl: string,
   endpoint: string,
-  method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
   body?: object
 ): Promise<T> {
   if (!apiUrl) {
@@ -995,14 +995,5 @@ export async function updateAgeReviewConfig(
   apiUrl: string,
   config: Partial<AgeReviewConfig>,
 ): Promise<AgeReviewConfig> {
-  // Worker route accepts PUT
-  const response = await fetch(`${apiUrl}/api/age-review/config`, {
-    method: 'PUT',
-    headers: getApiHeaders(),
-    body: JSON.stringify(config),
-  });
-  if (!response.ok) {
-    throw new ApiError(`HTTP ${response.status}: ${response.statusText}`, response.status, response.statusText);
-  }
-  return response.json() as Promise<AgeReviewConfig>;
+  return apiRequest<AgeReviewConfig>(apiUrl, '/api/age-review/config', 'PUT', config);
 }

@@ -134,6 +134,12 @@ export function EventActions({
       for (const hash of mediaHashes) {
         await api.moderateMedia(hash, 'SAFE', 'Unblocked by moderator');
       }
+      await api.logDecision({
+        targetType: 'event',
+        targetId: eventId,
+        action: 'unblock_media',
+        reason: `Unblocked/unrestricted ${mediaHashes.length} media file(s)`,
+      });
     },
     onSuccess: () => {
       toast({ title: 'Media unblocked' });
