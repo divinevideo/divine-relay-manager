@@ -191,3 +191,42 @@ export async function unbanPubkey(
 ): Promise<Nip86RpcResult> {
   return callNip86Rpc('unbanpubkey', [pubkey], env);
 }
+
+/**
+ * Publish a NIP-09 kind 5 deletion request to the relay.
+ * Published from the admin key -- Funnelcake honors admin deletions.
+ * Other relays may ignore kind 5 from non-authors.
+ */
+export async function publishKind5Deletion(
+  targetEventId: string,
+  reason: string,
+  env: Nip86Env,
+  fetchFn: typeof fetch = fetch,
+): Promise<{ success: boolean; error?: string }> {
+  const secretKey = await getSecretKey(env);
+  const relayHttpUrl = env.RELAY_URL.replace('wss://', 'https://').replace('ws://', 'http://');
+
+  const event = finalizeEvent(
+    {
+      kind: 5,
+      content: reason,
+      tags: [['e', targetEventId]],
+      created_at: Math.floor(Date.now() / 1000),
+    },
+    secretKey,
+  );
+
+  try {
+    const response = await fetchFn(relayHttpUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(['EVENT', event]),
+    });
+    if (!response.ok) {
+      return { success: false, error: `Relay returned ${response.status}` };
+    }
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: String(error) };
+  }
+}

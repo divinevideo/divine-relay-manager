@@ -11,6 +11,7 @@ import {
   allowEvent,
   banPubkey,
   unbanPubkey,
+  publishKind5Deletion,
   type Nip86Env,
 } from './nip86';
 
@@ -212,5 +213,54 @@ describe('convenience methods', () => {
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
     expect(body.method).toBe('unbanpubkey');
     expect(body.params).toEqual(['pubkey123']);
+  });
+});
+
+describe('publishKind5Deletion', () => {
+  it('constructs a valid NIP-09 kind 5 event and posts to relay', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true });
+    const env: Nip86Env = {
+      NOSTR_NSEC: TEST_NSEC,
+      RELAY_URL: 'wss://relay.test.com',
+    };
+
+    const result = await publishKind5Deletion('target-event-id-hex', 'Content violates policy', env, mockFetch);
+
+    expect(result.success).toBe(true);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe('https://relay.test.com');
+    const body = JSON.parse(opts.body);
+    expect(body[0]).toBe('EVENT');
+    expect(body[1].kind).toBe(5);
+    expect(body[1].tags).toContainEqual(['e', 'target-event-id-hex']);
+    expect(body[1].content).toBe('Content violates policy');
+    expect(body[1].sig).toBeDefined();
+  });
+
+  it('returns error when relay responds with non-OK status', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 500 });
+    const env: Nip86Env = {
+      NOSTR_NSEC: TEST_NSEC,
+      RELAY_URL: 'wss://relay.test.com',
+    };
+
+    const result = await publishKind5Deletion('event-id', 'reason', env, mockFetch);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('500');
+  });
+
+  it('returns error on fetch failure', async () => {
+    const mockFetch = vi.fn().mockRejectedValue(new Error('Network error'));
+    const env: Nip86Env = {
+      NOSTR_NSEC: TEST_NSEC,
+      RELAY_URL: 'wss://relay.test.com',
+    };
+
+    const result = await publishKind5Deletion('event-id', 'reason', env, mockFetch);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Network error');
   });
 });
