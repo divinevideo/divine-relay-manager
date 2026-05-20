@@ -18,6 +18,7 @@ import { UserX, UserCheck, Plus, Users, Trash2, User, X } from "lucide-react";
 import { BannedUserCard } from "@/components/BannedUserCard";
 import { nip19 } from "nostr-tools";
 import { useAdminApi } from "@/hooks/useAdminApi";
+import { UserActions } from "@/components/UserActions";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { UserDisplayName } from "@/components/UserIdentifier";
 import { CopyableId } from "@/components/CopyableId";
@@ -342,6 +343,12 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
                 </Button>
               )}
             </div>
+            <UserActions
+              pubkey={selectedPubkey}
+              context="users"
+              isBanned={bannedUsers?.some((u: BannedUser) => u.pubkey === selectedPubkey) ?? false}
+              onActionComplete={invalidateUserQueries}
+            />
           </CardContent>
         </Card>
       )}
