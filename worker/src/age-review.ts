@@ -21,6 +21,11 @@ interface AgeReviewEnv {
   ZENDESK_FIELD_AGE_REVIEW_DEADLINE?: string;
 }
 
+interface ZendeskClientConfig {
+  auth: string;
+  baseUrl: string;
+}
+
 // ---------------------------------------------------------------------------
 // Admin API handlers (behind verifyAdminAccess)
 // ---------------------------------------------------------------------------
@@ -179,7 +184,7 @@ export async function handleUpdateAgeReviewCase(
     `UPDATE age_review_cases SET ${updates.join(', ')} WHERE id = ?`
   ).bind(...binds).run();
 
-  const updated = await env.DB.prepare('SELECT * FROM age_review_cases WHERE id = ?')
+  let updated = await env.DB.prepare('SELECT * FROM age_review_cases WHERE id = ?')
     .bind(caseId).first<AgeReviewCase>();
 
   // Non-critical: sync Zendesk ticket when case reaches terminal state
@@ -200,17 +205,19 @@ export async function handleUpdateAgeReviewCase(
     body.state &&
     (body.state as string).startsWith('restricted_') &&
     !existing.zendesk_ticket_id &&
-    updated &&
-    !updated.zendesk_ticket_id
+    !updated?.zendesk_ticket_id
   ) {
     try {
-      await createAgeReviewInternalTicket(
+      const zendeskTicketId = await createAgeReviewInternalTicket(
         caseId,
         existing.pubkey,
-        (updated.suspected_age_band ?? existing.suspected_age_band) as AgeBand,
-        updated.deadline_at ?? existing.deadline_at,
+        (updated?.suspected_age_band ?? existing.suspected_age_band) as AgeBand,
+        updated?.deadline_at ?? existing.deadline_at,
         env,
       );
+      if (updated && zendeskTicketId) {
+        updated = { ...updated, zendesk_ticket_id: zendeskTicketId };
+      }
     } catch (error) {
       console.error('[age-review] Failed to create internal Zendesk ticket:', error);
     }
@@ -385,24 +392,19 @@ const BAND_DISPLAY: Record<AgeBand, string> = {
   age_16_plus_claimed: '16+ (claimed)',
 };
 
-async function createAgeReviewTicket(
-  caseId: string,
-  parentEmail: string,
-  ageBand: AgeBand,
-  deadlineAt: string | null,
-  env: AgeReviewEnv,
-): Promise<void> {
+function getZendeskClientConfig(env: AgeReviewEnv): ZendeskClientConfig | null {
   if (!env.ZENDESK_SUBDOMAIN || !env.ZENDESK_API_TOKEN || !env.ZENDESK_EMAIL) {
-    console.warn('[age-review] Missing Zendesk credentials, skipping ticket creation');
-    return;
+    return null;
   }
-  if (!env.DB) return;
 
-  const auth = btoa(`${env.ZENDESK_EMAIL}/token:${env.ZENDESK_API_TOKEN}`);
-  const url = `https://${env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets`;
+  return {
+    auth: btoa(`${env.ZENDESK_EMAIL}/token:${env.ZENDESK_API_TOKEN}`),
+    baseUrl: `https://${env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2`,
+  };
+}
 
-  const subject = `Age review: parental verification needed [${caseId}]`;
-  const body = [
+function buildParentOutreachBody(ageBand: AgeBand): string {
+  return [
     'Hello,',
     '',
     'We received a report that an account on Divine may belong to a minor in the ' +
@@ -416,27 +418,55 @@ async function createAgeReviewTicket(
     'Thank you,',
     'Divine Trust & Safety',
   ].join('\n');
+}
 
+function buildAgeReviewCustomFields(
+  env: AgeReviewEnv,
+  deadlineAt: string | null,
+): { id: number; value: string }[] {
   const customFields: { id: number; value: string }[] = [];
+
   if (env.ZENDESK_FIELD_CATEGORY && env.ZENDESK_FIELD_ISSUE) {
     customFields.push(
       { id: parseInt(env.ZENDESK_FIELD_CATEGORY, 10), value: 'trust___safety' },
       { id: parseInt(env.ZENDESK_FIELD_ISSUE, 10), value: 'age_review' },
     );
   }
+
   const deadlineField = buildDeadlineCustomField(deadlineAt, env);
   if (deadlineField) customFields.push(deadlineField);
 
-  const res = await fetch(url, {
+  return customFields;
+}
+
+async function createAgeReviewTicket(
+  caseId: string,
+  parentEmail: string,
+  ageBand: AgeBand,
+  deadlineAt: string | null,
+  env: AgeReviewEnv,
+): Promise<void> {
+  const zendesk = getZendeskClientConfig(env);
+  if (!zendesk) {
+    console.warn('[age-review] Missing Zendesk credentials, skipping ticket creation');
+    return;
+  }
+  if (!env.DB) return;
+
+  const subject = `Age review: parental verification needed [${caseId}]`;
+  const outreachBody = buildParentOutreachBody(ageBand);
+  const customFields = buildAgeReviewCustomFields(env, deadlineAt);
+
+  const res = await fetch(`${zendesk.baseUrl}/tickets`, {
     method: 'POST',
     headers: {
-      'Authorization': `Basic ${auth}`,
+      'Authorization': `Basic ${zendesk.auth}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
       ticket: {
         subject,
-        comment: { body, public: true },
+        comment: { body: outreachBody, public: true },
         requester: { email: parentEmail, name: 'Parent/Guardian' },
         tags: ['age-review', `age-band-${ageBand}`],
         priority: 'high',
@@ -465,30 +495,15 @@ async function updateTicketWithParentContact(
   ageBand: AgeBand,
   env: AgeReviewEnv,
 ): Promise<void> {
-  if (!env.ZENDESK_SUBDOMAIN || !env.ZENDESK_API_TOKEN || !env.ZENDESK_EMAIL) return;
+  const zendesk = getZendeskClientConfig(env);
+  if (!zendesk) return;
 
-  const auth = btoa(`${env.ZENDESK_EMAIL}/token:${env.ZENDESK_API_TOKEN}`);
-  const url = `https://${env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets/${ticketId}`;
+  const outreachBody = buildParentOutreachBody(ageBand);
 
-  const outreachBody = [
-    'Hello,',
-    '',
-    'We received a report that an account on Divine may belong to a minor in the ' +
-      `${BAND_DISPLAY[ageBand]} age range. As part of our safety process, we need a ` +
-      'parent or guardian to verify they are aware of and approve this account.',
-    '',
-    'Please reply to this email to confirm you are the parent or legal guardian of the account holder.',
-    '',
-    'If you have questions, you can reply directly to this email or contact us at contact@divine.video.',
-    '',
-    'Thank you,',
-    'Divine Trust & Safety',
-  ].join('\n');
-
-  const res = await fetch(url, {
+  const res = await fetch(`${zendesk.baseUrl}/tickets/${ticketId}`, {
     method: 'PUT',
     headers: {
-      'Authorization': `Basic ${auth}`,
+      'Authorization': `Basic ${zendesk.auth}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
@@ -523,15 +538,13 @@ async function createAgeReviewInternalTicket(
   ageBand: AgeBand,
   deadlineAt: string | null,
   env: AgeReviewEnv,
-): Promise<void> {
-  if (!env.ZENDESK_SUBDOMAIN || !env.ZENDESK_API_TOKEN || !env.ZENDESK_EMAIL) {
+): Promise<number | null> {
+  const zendesk = getZendeskClientConfig(env);
+  if (!zendesk) {
     console.warn('[age-review] Missing Zendesk credentials, skipping internal ticket creation');
-    return;
+    return null;
   }
-  if (!env.DB) return;
-
-  const auth = btoa(`${env.ZENDESK_EMAIL}/token:${env.ZENDESK_API_TOKEN}`);
-  const url = `https://${env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets`;
+  if (!env.DB) return null;
 
   const subject = `Age review: ${BAND_DISPLAY[ageBand]} account restricted [${caseId}]`;
   const note = [
@@ -543,20 +556,12 @@ async function createAgeReviewInternalTicket(
     'It will be updated if a parent/guardian email is provided or the case is resolved.',
   ].join('\n');
 
-  const customFields: { id: number; value: string }[] = [];
-  if (env.ZENDESK_FIELD_CATEGORY && env.ZENDESK_FIELD_ISSUE) {
-    customFields.push(
-      { id: parseInt(env.ZENDESK_FIELD_CATEGORY, 10), value: 'trust___safety' },
-      { id: parseInt(env.ZENDESK_FIELD_ISSUE, 10), value: 'age_review' },
-    );
-  }
-  const deadlineField = buildDeadlineCustomField(deadlineAt, env);
-  if (deadlineField) customFields.push(deadlineField);
+  const customFields = buildAgeReviewCustomFields(env, deadlineAt);
 
-  const res = await fetch(url, {
+  const res = await fetch(`${zendesk.baseUrl}/tickets`, {
     method: 'POST',
     headers: {
-      'Authorization': `Basic ${auth}`,
+      'Authorization': `Basic ${zendesk.auth}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
@@ -581,7 +586,10 @@ async function createAgeReviewInternalTicket(
       'UPDATE age_review_cases SET zendesk_ticket_id = ? WHERE id = ?'
     ).bind(data.ticket.id, caseId).run();
     console.log(`[age-review] Created internal Zendesk ticket #${data.ticket.id} for case ${caseId}`);
+    return data.ticket.id;
   }
+
+  return null;
 }
 
 export async function syncAgeReviewTicketResolution(
@@ -590,7 +598,10 @@ export async function syncAgeReviewTicketResolution(
   resolutionNote: string | null,
   env: AgeReviewEnv,
 ): Promise<void> {
-  if (!env.DB || !env.ZENDESK_SUBDOMAIN || !env.ZENDESK_API_TOKEN || !env.ZENDESK_EMAIL) return;
+  if (!env.DB) return;
+
+  const zendesk = getZendeskClientConfig(env);
+  if (!zendesk) return;
 
   const row = await env.DB.prepare(
     'SELECT zendesk_ticket_id FROM age_review_cases WHERE id = ?'
@@ -599,8 +610,6 @@ export async function syncAgeReviewTicketResolution(
   if (!row?.zendesk_ticket_id) return;
 
   const ticketId = row.zendesk_ticket_id;
-  const auth = btoa(`${env.ZENDESK_EMAIL}/token:${env.ZENDESK_API_TOKEN}`);
-  const url = `https://${env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets/${ticketId}`;
 
   const noteLines = [
     `Age review case ${caseId} resolved: **${state}**`,
@@ -625,10 +634,10 @@ export async function syncAgeReviewTicketResolution(
 
   // Catches Zendesk API/network errors here; callers also wrap in try/catch for unexpected errors (e.g. D1 failure on the SELECT above)
   try {
-    const res = await fetch(url, {
+    const res = await fetch(`${zendesk.baseUrl}/tickets/${ticketId}`, {
       method: 'PUT',
       headers: {
-        'Authorization': `Basic ${auth}`,
+        'Authorization': `Basic ${zendesk.auth}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(payload),
