@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { handleBulkModerate, extractMediaHashes } from './bulk-moderate';
+import { handleBulkModerate, extractMediaHashes, type BulkModerateEnv } from './bulk-moderate';
 
 describe('handleBulkModerate', () => {
   const mockEnv = {
@@ -19,7 +19,7 @@ describe('handleBulkModerate', () => {
       method: 'POST',
       body: JSON.stringify({ pubkey: 'a'.repeat(64), action: 'invalid' }),
     });
-    const response = await handleBulkModerate(request, mockEnv as any, {});
+    const response = await handleBulkModerate(request, mockEnv as unknown as BulkModerateEnv, {});
     expect(response.status).toBe(400);
     const body = await response.json() as { error: string };
     expect(body.error).toMatch(/Invalid action/);
@@ -30,7 +30,7 @@ describe('handleBulkModerate', () => {
       method: 'POST',
       body: JSON.stringify({ pubkey: 'short', action: 'age-restrict-all' }),
     });
-    const response = await handleBulkModerate(request, mockEnv as any, {});
+    const response = await handleBulkModerate(request, mockEnv as unknown as BulkModerateEnv, {});
     expect(response.status).toBe(400);
     const body = await response.json() as { error: string };
     expect(body.error).toMatch(/pubkey/);
@@ -41,7 +41,7 @@ describe('handleBulkModerate', () => {
       method: 'POST',
       body: JSON.stringify({ action: 'delete-all' }),
     });
-    const response = await handleBulkModerate(request, mockEnv as any, {});
+    const response = await handleBulkModerate(request, mockEnv as unknown as BulkModerateEnv, {});
     expect(response.status).toBe(400);
   });
 
@@ -51,7 +51,7 @@ describe('handleBulkModerate', () => {
         method: 'POST',
         body: JSON.stringify({ pubkey: 'a'.repeat(64), action }),
       });
-      const response = await handleBulkModerate(request, mockEnv as any, {});
+      const response = await handleBulkModerate(request, mockEnv as unknown as BulkModerateEnv, {});
       expect(response.status).toBe(200);
     }
   });

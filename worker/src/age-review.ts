@@ -9,7 +9,7 @@ import {
   DEADLINE_DAYS,
   defaultResolutionForBand,
 } from '../../shared/age-review';
-import { handleBulkModerate } from './bulk-moderate';
+import { handleBulkModerate, type BulkModerateEnv } from './bulk-moderate';
 
 interface AgeReviewEnv {
   DB?: D1Database;
@@ -839,7 +839,7 @@ async function triggerBulkModerate(
     method: 'POST',
     body: JSON.stringify({ pubkey, action, reason }),
   });
-  const response = await handleBulkModerate(request, env as any, {});
+  const response = await handleBulkModerate(request, env as unknown as BulkModerateEnv, {});
   if (!response.ok) {
     const body = await response.json() as { error?: string };
     throw new Error(body.error || `Bulk moderate returned ${response.status}`);
