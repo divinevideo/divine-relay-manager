@@ -2,7 +2,7 @@ import { banEvent, publishKind5Deletion, type Nip86Env } from './nip86';
 
 type BulkAction = 'age-restrict-all' | 'un-age-restrict-all' | 'delete-all';
 const VALID_BULK_ACTIONS: BulkAction[] = ['age-restrict-all', 'un-age-restrict-all', 'delete-all'];
-const VIDEO_KINDS = [34235, 34236];
+const VIDEO_KINDS = [34235, 34236, 21, 22];
 
 export interface BulkModerateEnv extends Nip86Env {
   DB?: D1Database;

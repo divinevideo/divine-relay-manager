@@ -119,7 +119,7 @@ export function UserActions({
       ) : (
         <Tooltip>
           <TooltipTrigger asChild>
-            <Button variant="destructive" onClick={() => banUserMutation.mutate()} disabled={anyPending}>
+            <Button variant="outline" className="border-red-500 text-red-600 hover:bg-red-50" onClick={() => banUserMutation.mutate()} disabled={anyPending}>
               <UserX className="h-4 w-4 mr-1" />
               {banUserMutation.isPending ? 'Banning...' : 'Ban User'}
             </Button>

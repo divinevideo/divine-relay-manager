@@ -6,11 +6,13 @@ import { AgeReviewDetail } from './AgeReviewDetail';
 import type { AgeReviewCase, AgeBand, AgeReviewState } from '../../shared/age-review';
 
 const updateAgeReviewCase = vi.fn().mockResolvedValue({ success: true });
+const getAgeReviewConfig = vi.fn().mockResolvedValue({ auto_delete_on_deny: false });
 const writeText = vi.fn().mockResolvedValue(undefined);
 
 vi.mock('@/hooks/useAdminApi', () => ({
   useAdminApi: () => ({
     updateAgeReviewCase,
+    getAgeReviewConfig,
   }),
 }));
 
@@ -60,6 +62,8 @@ function renderDetail(caseData: AgeReviewCase) {
 describe('AgeReviewDetail', () => {
   beforeEach(() => {
     updateAgeReviewCase.mockClear();
+    getAgeReviewConfig.mockClear();
+    getAgeReviewConfig.mockResolvedValue({ auto_delete_on_deny: false });
     writeText.mockClear();
     Object.assign(navigator, {
       clipboard: {
@@ -80,6 +84,21 @@ describe('AgeReviewDetail', () => {
     await waitFor(() => {
       expect(updateAgeReviewCase).toHaveBeenCalledWith('case-1', { state: expectedState });
     });
+  });
+
+  it('shows Deny & Close without confirmation when auto-delete is off', () => {
+    renderDetail(makeCase());
+    expect(screen.getByRole('button', { name: /Deny.*Close/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Deny.*Delete/ })).not.toBeInTheDocument();
+  });
+
+  it('shows Deny & Delete with confirmation when auto-delete is on', async () => {
+    getAgeReviewConfig.mockResolvedValue({ auto_delete_on_deny: true });
+    renderDetail(makeCase());
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Deny.*Delete/ })).toBeInTheDocument();
+    });
+    expect(screen.queryByRole('button', { name: /Deny.*Close/ })).not.toBeInTheDocument();
   });
 
   it('copies the raw hex pubkey from the moderator control', async () => {

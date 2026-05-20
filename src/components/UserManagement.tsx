@@ -331,18 +331,11 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
                 <span className="text-muted-foreground">No restrictions</span>
               )}
             </div>
-            <div className="flex gap-2">
-              {!bannedUsers?.some((u: BannedUser) => u.pubkey === selectedPubkey) && (
-                <Button variant="destructive" size="sm" onClick={() => banUserMutation.mutate({ pubkey: selectedPubkey })} disabled={banUserMutation.isPending}>
-                  <UserX className="h-4 w-4 mr-1" />Ban
-                </Button>
-              )}
-              {!allowedUsers?.some((u: AllowedUser) => u.pubkey === selectedPubkey) && (
-                <Button variant="outline" size="sm" onClick={() => allowUserMutation.mutate({ pubkey: selectedPubkey })} disabled={allowUserMutation.isPending}>
-                  <UserCheck className="h-4 w-4 mr-1" />Allow
-                </Button>
-              )}
-            </div>
+            {!allowedUsers?.some((u: AllowedUser) => u.pubkey === selectedPubkey) && (
+              <Button variant="outline" size="sm" onClick={() => allowUserMutation.mutate({ pubkey: selectedPubkey })} disabled={allowUserMutation.isPending}>
+                <UserCheck className="h-4 w-4 mr-1" />Allow
+              </Button>
+            )}
             <UserActions
               pubkey={selectedPubkey}
               context="users"

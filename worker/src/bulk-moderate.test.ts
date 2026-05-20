@@ -99,6 +99,17 @@ describe('extractMediaHashes', () => {
     expect(extractMediaHashes(events)).toEqual(['same-hash']);
   });
 
+  it('extracts from short-form video kinds 21 and 22', () => {
+    const events = [
+      { id: 'e1', kind: 21, tags: [['x', 'short-hash-1']] },
+      { id: 'e2', kind: 22, tags: [['imeta', 'sha256 short-hash-2']] },
+    ];
+    const hashes = extractMediaHashes(events);
+    expect(hashes).toContain('short-hash-1');
+    expect(hashes).toContain('short-hash-2');
+    expect(hashes).toHaveLength(2);
+  });
+
   it('returns empty array when no video events', () => {
     const events = [
       { id: 'e1', kind: 1, tags: [] },

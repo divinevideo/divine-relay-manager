@@ -11,8 +11,7 @@ import {
 } from '../../shared/age-review';
 import { handleBulkModerate, type BulkModerateEnv } from './bulk-moderate';
 
-interface AgeReviewEnv {
-  DB?: D1Database;
+interface AgeReviewEnv extends BulkModerateEnv {
   SLACK_WEBHOOK_URL?: string;
   ZENDESK_SUBDOMAIN?: string;
   ZENDESK_API_TOKEN?: string;
@@ -839,7 +838,7 @@ async function triggerBulkModerate(
     method: 'POST',
     body: JSON.stringify({ pubkey, action, reason }),
   });
-  const response = await handleBulkModerate(request, env as unknown as BulkModerateEnv, {});
+  const response = await handleBulkModerate(request, env, {});
   if (!response.ok) {
     const body = await response.json() as { error?: string };
     throw new Error(body.error || `Bulk moderate returned ${response.status}`);
