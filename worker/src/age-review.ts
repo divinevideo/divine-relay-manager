@@ -9,6 +9,7 @@ import {
   DEADLINE_DAYS,
   defaultResolutionForBand,
 } from '../../shared/age-review';
+import { handleBulkModerate } from './bulk-moderate';
 
 interface AgeReviewEnv {
   DB?: D1Database;
@@ -223,7 +224,29 @@ export async function handleUpdateAgeReviewCase(
     }
   }
 
-  return json({ success: true, case: updated }, 200, corsHeaders);
+  // Non-critical: fire bulk content actions on state transitions
+  let bulkActionTriggered: string | undefined;
+  if (body.state && typeof body.state === 'string') {
+    try {
+      if ((body.state as string).startsWith('restricted_')) {
+        await triggerBulkModerate(existing.pubkey, 'age-restrict-all', 'Age review restriction', env);
+        bulkActionTriggered = 'age-restrict-all';
+      } else if (body.state === 'cleared') {
+        await triggerBulkModerate(existing.pubkey, 'un-age-restrict-all', 'Age review cleared', env);
+        bulkActionTriggered = 'un-age-restrict-all';
+      } else if (body.state === 'denied_closed') {
+        const config = await getAgeReviewConfig(env.DB!);
+        if (config.auto_delete_on_deny) {
+          await triggerBulkModerate(existing.pubkey, 'delete-all', 'Age review denied', env);
+          bulkActionTriggered = 'delete-all';
+        }
+      }
+    } catch (error) {
+      console.error(`[age-review] Bulk action failed for case ${caseId}:`, error);
+    }
+  }
+
+  return json({ success: true, case: updated, bulkActionTriggered }, 200, corsHeaders);
 }
 
 // ---------------------------------------------------------------------------
@@ -752,6 +775,16 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
     } catch (error) {
       console.error(`[age-review] Failed to sync Zendesk for auto-closed case ${row.id}:`, error);
     }
+
+    try {
+      const config = await getAgeReviewConfig(env.DB!);
+      if (config.auto_delete_on_deny) {
+        await triggerBulkModerate(row.pubkey, 'delete-all', 'Age review expired -- auto-deleted', env);
+        console.log(`[age-review] Auto-deleted content for expired case ${row.id}`);
+      }
+    } catch (error) {
+      console.error(`[age-review] Auto-delete failed for expired case ${row.id}:`, error);
+    }
   }
 
   if (expired.results.length > 0 && env.SLACK_WEBHOOK_URL) {
@@ -789,6 +822,59 @@ async function sendSlackAlert(
     console.error('[age-review] Failed to send Slack alert:', error);
     return false;
   }
+}
+
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Bulk action trigger (internal call to handleBulkModerate)
+// ---------------------------------------------------------------------------
+
+async function triggerBulkModerate(
+  pubkey: string,
+  action: string,
+  reason: string,
+  env: AgeReviewEnv,
+): Promise<void> {
+  const request = new Request('https://internal/api/bulk-moderate', {
+    method: 'POST',
+    body: JSON.stringify({ pubkey, action, reason }),
+  });
+  const response = await handleBulkModerate(request, env as any, {});
+  if (!response.ok) {
+    const body = await response.json() as { error?: string };
+    throw new Error(body.error || `Bulk moderate returned ${response.status}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Age review configuration (D1)
+// ---------------------------------------------------------------------------
+
+interface AgeReviewConfig {
+  auto_delete_on_deny: boolean;
+}
+
+const DEFAULT_CONFIG: AgeReviewConfig = { auto_delete_on_deny: true };
+
+export async function getAgeReviewConfig(db: D1Database): Promise<AgeReviewConfig> {
+  const row = await db.prepare(
+    "SELECT value FROM age_review_config WHERE key = 'auto_delete_on_deny'"
+  ).first<{ value: string }>();
+  return {
+    auto_delete_on_deny: row ? row.value === 'true' : DEFAULT_CONFIG.auto_delete_on_deny,
+  };
+}
+
+export async function updateAgeReviewConfig(
+  db: D1Database,
+  config: Partial<AgeReviewConfig>,
+): Promise<AgeReviewConfig> {
+  if (config.auto_delete_on_deny !== undefined) {
+    await db.prepare(
+      "INSERT INTO age_review_config (key, value) VALUES ('auto_delete_on_deny', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+    ).bind(String(config.auto_delete_on_deny)).run();
+  }
+  return getAgeReviewConfig(db);
 }
 
 // ---------------------------------------------------------------------------

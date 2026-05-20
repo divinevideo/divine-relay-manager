@@ -442,17 +442,23 @@ export default {
 
       // Age review config
       if (path === '/api/age-review/config' && request.method === 'GET') {
-        if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, corsHeaders);
+        if (!env.DB) return jsonResponse({ success: false, error: 'Database not configured' }, 500, corsHeaders);
         await ensureSchemaOnce(env.DB);
         const config = await getAgeReviewConfig(env.DB);
-        return jsonResponse(config, 200, corsHeaders);
+        return new Response(JSON.stringify(config), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders },
+        });
       }
       if (path === '/api/age-review/config' && request.method === 'PUT') {
-        if (!env.DB) return jsonResponse({ error: 'Database not configured' }, 500, corsHeaders);
+        if (!env.DB) return jsonResponse({ success: false, error: 'Database not configured' }, 500, corsHeaders);
         await ensureSchemaOnce(env.DB);
         const configBody = await request.json() as Record<string, unknown>;
         const config = await updateAgeReviewConfig(env.DB, configBody);
-        return jsonResponse(config, 200, corsHeaders);
+        return new Response(JSON.stringify(config), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders },
+        });
       }
 
       // Age review case management

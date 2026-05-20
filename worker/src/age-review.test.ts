@@ -8,6 +8,8 @@ import {
   handleAgeReviewReplyWebhook,
   checkAgeReviewDeadlines,
   syncAgeReviewTicketResolution,
+  getAgeReviewConfig,
+  updateAgeReviewConfig,
 } from './age-review';
 import type { AgeReviewCase } from '../../shared/age-review';
 
@@ -1043,5 +1045,44 @@ describe('handleAgeReviewReplyWebhook', () => {
     });
     const res = await handleAgeReviewReplyWebhook(req, { DB: db as unknown as D1Database }, corsHeaders);
     expect(res.status).toBe(400);
+  });
+});
+
+// -- Age review config --------------------------------------------------------
+
+describe('getAgeReviewConfig', () => {
+  it('returns default config when no rows exist', async () => {
+    const db = {
+      prepare: vi.fn().mockReturnValue({
+        first: vi.fn().mockResolvedValue(null),
+      }),
+    };
+    const config = await getAgeReviewConfig(db as unknown as D1Database);
+    expect(config.auto_delete_on_deny).toBe(true);
+  });
+
+  it('reads stored config value', async () => {
+    const db = {
+      prepare: vi.fn().mockReturnValue({
+        first: vi.fn().mockResolvedValue({ value: 'false' }),
+      }),
+    };
+    const config = await getAgeReviewConfig(db as unknown as D1Database);
+    expect(config.auto_delete_on_deny).toBe(false);
+  });
+});
+
+describe('updateAgeReviewConfig', () => {
+  it('writes config and returns updated value', async () => {
+    const db = {
+      prepare: vi.fn().mockImplementation((sql: string) => {
+        if (sql.includes('INSERT')) {
+          return { bind: vi.fn().mockReturnValue({ run: vi.fn().mockResolvedValue({}) }) };
+        }
+        return { first: vi.fn().mockResolvedValue({ value: 'false' }) };
+      }),
+    };
+    const config = await updateAgeReviewConfig(db as unknown as D1Database, { auto_delete_on_deny: false });
+    expect(config.auto_delete_on_deny).toBe(false);
   });
 });
