@@ -13,6 +13,10 @@ vi.mock('@/hooks/useAdminApi', () => ({
   }),
 }));
 
+vi.mock('@/hooks/useAuthor', () => ({
+  useAuthor: () => ({ data: undefined, isLoading: false }),
+}));
+
 function makeCase(overrides: Partial<AgeReviewCase> = {}): AgeReviewCase {
   return {
     id: 'case-1',
