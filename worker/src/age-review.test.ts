@@ -714,7 +714,7 @@ describe('handleParentContact Zendesk integration', () => {
     vi.unstubAllGlobals();
   });
 
-  it('skips ticket creation when case already has a zendesk_ticket_id', async () => {
+  it('updates existing Zendesk ticket when case already has a zendesk_ticket_id', async () => {
     const c = makeCase({ state: 'restricted_pending_user_response', zendesk_ticket_id: 99 });
     const db = {
       prepare: vi.fn().mockImplementation((sql: string) => ({
@@ -727,7 +727,7 @@ describe('handleParentContact Zendesk integration', () => {
       })),
     };
 
-    const mockFetch = vi.fn();
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal('fetch', mockFetch);
 
     const req = new Request('https://api.test/v1/minor-review-cases/case-1/parent-contact', {
@@ -742,7 +742,13 @@ describe('handleParentContact Zendesk integration', () => {
     }, corsHeaders);
 
     expect(res.status).toBe(200);
-    expect(mockFetch).not.toHaveBeenCalled();
+    expect(mockFetch).toHaveBeenCalledOnce();
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe('https://test.zendesk.com/api/v2/tickets/99');
+    expect(opts.method).toBe('PUT');
+    const payload = JSON.parse(opts.body);
+    expect(payload.ticket.requester.email).toBe('parent@example.com');
+    expect(payload.ticket.comment.public).toBe(true);
 
     vi.unstubAllGlobals();
   });
