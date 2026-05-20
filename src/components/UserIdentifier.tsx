@@ -21,6 +21,7 @@ interface UserIdentifierProps {
   showAvatar?: boolean;
   avatarSize?: "sm" | "md" | "lg";
   showCopyButton?: boolean;
+  copyOnClick?: boolean;
   showNip05?: boolean;
   linkToProfile?: boolean;
   variant?: "inline" | "block" | "compact";
@@ -32,6 +33,7 @@ export function UserIdentifier({
   showAvatar = false,
   avatarSize = "sm",
   showCopyButton = true,
+  copyOnClick = false,
   showNip05 = true,
   linkToProfile = false,
   variant = "inline",
@@ -123,10 +125,11 @@ export function UserIdentifier({
             ) : (
               <span
                 className={cn(
-                  "inline-flex items-center gap-1 cursor-pointer hover:opacity-80",
+                  "inline-flex items-center gap-1",
+                  copyOnClick && "cursor-pointer hover:opacity-80",
                   className
                 )}
-                onClick={handleCopy}
+                onClick={copyOnClick ? handleCopy : undefined}
               >
                 {content}
                 {copied && <Check className="h-3 w-3 text-green-500" />}
@@ -142,9 +145,11 @@ export function UserIdentifier({
                 <p className="text-xs text-muted-foreground">{nip05}</p>
               )}
               <p className="text-xs font-mono break-all">{npub}</p>
-              <p className="text-xs text-muted-foreground">
-                {linkToProfile ? "Click to view profile" : "Click to copy"}
-              </p>
+              {(linkToProfile || copyOnClick) && (
+                <p className="text-xs text-muted-foreground">
+                  {linkToProfile ? "Click to view profile" : "Click to copy"}
+                </p>
+              )}
             </div>
           </TooltipContent>
         </Tooltip>

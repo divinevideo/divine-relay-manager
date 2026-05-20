@@ -31,7 +31,7 @@ export function AppProvider(props: AppProviderProps) {
     if (config.relayUrl?.includes('localhost') || config.relayUrl?.startsWith('ws://localhost')) {
       setConfig((prev) => ({ ...prev, relayUrl: defaultConfig.relayUrl }));
     }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [config.apiUrl, config.relayUrl, defaultConfig.apiUrl, defaultConfig.relayUrl, setConfig]);
 
   // Generic config updater with callback pattern
   const updateConfig = (updater: (currentConfig: AppConfig) => AppConfig) => {

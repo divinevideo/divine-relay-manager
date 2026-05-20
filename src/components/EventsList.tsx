@@ -535,7 +535,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
   }, [directEventLookup, searchMode]);
 
   // Flatten all pages into a single events array
-  const events = eventsData?.pages.flat() ?? [];
+  const events = useMemo(() => eventsData?.pages.flat() ?? [], [eventsData?.pages]);
 
   // Auto-load more when scrolling near bottom of the scroll area
   useEffect(() => {

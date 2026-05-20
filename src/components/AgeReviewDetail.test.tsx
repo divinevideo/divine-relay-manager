@@ -6,6 +6,7 @@ import { AgeReviewDetail } from './AgeReviewDetail';
 import type { AgeReviewCase, AgeBand, AgeReviewState } from '../../shared/age-review';
 
 const updateAgeReviewCase = vi.fn().mockResolvedValue({ success: true });
+const writeText = vi.fn().mockResolvedValue(undefined);
 
 vi.mock('@/hooks/useAdminApi', () => ({
   useAdminApi: () => ({
@@ -59,6 +60,12 @@ function renderDetail(caseData: AgeReviewCase) {
 describe('AgeReviewDetail', () => {
   beforeEach(() => {
     updateAgeReviewCase.mockClear();
+    writeText.mockClear();
+    Object.assign(navigator, {
+      clipboard: {
+        writeText,
+      },
+    });
   });
 
   it.each<[AgeBand, AgeReviewState]>([
@@ -72,6 +79,17 @@ describe('AgeReviewDetail', () => {
 
     await waitFor(() => {
       expect(updateAgeReviewCase).toHaveBeenCalledWith('case-1', { state: expectedState });
+    });
+  });
+
+  it('copies the raw hex pubkey from the moderator control', async () => {
+    const caseData = makeCase();
+    renderDetail(caseData);
+
+    fireEvent.click(screen.getByRole('button', { name: /Hex pubkey:/ }));
+
+    await waitFor(() => {
+      expect(writeText).toHaveBeenCalledWith(caseData.pubkey);
     });
   });
 });

@@ -23,6 +23,7 @@ import {
   Loader2,
   ExternalLink,
 } from "lucide-react";
+import { CopyableId } from "@/components/CopyableId";
 import { UserIdentifier } from "@/components/UserIdentifier";
 import {
   AGE_BANDS,
@@ -99,7 +100,6 @@ export function AgeReviewDetail({ caseData: c }: Props) {
     },
   });
 
-
   return (
     <ScrollArea className="h-full">
       <div className="space-y-4 p-4">
@@ -138,17 +138,27 @@ export function AgeReviewDetail({ caseData: c }: Props) {
             variant="block"
             showAvatar={true}
             avatarSize="md"
-            showCopyButton={true}
+            showCopyButton={false}
             showNip05={true}
             linkToProfile={true}
           />
-          <a
-            href={`/users/${c.pubkey}`}
-            className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-          >
-            <ExternalLink className="h-3 w-3" />
-            View in Users tab
-          </a>
+          <div className="flex flex-wrap items-center gap-2">
+            <CopyableId
+              value={c.pubkey}
+              type="hex"
+              size="xs"
+              label="Hex pubkey:"
+              truncateStart={16}
+              truncateEnd={8}
+            />
+            <a
+              href={`/users/${c.pubkey}`}
+              className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+            >
+              <ExternalLink className="h-3 w-3" />
+              View in Users tab
+            </a>
+          </div>
           {c.reporter_pubkey && (
             <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
               <span>Reported by:</span>
@@ -157,6 +167,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
                 variant="compact"
                 showAvatar={false}
                 linkToProfile={false}
+                copyOnClick={false}
               />
             </div>
           )}
