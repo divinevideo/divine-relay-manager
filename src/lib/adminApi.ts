@@ -284,7 +284,7 @@ export async function markAsReviewed(
 }
 
 // Media moderation request actions
-export type ModerationAction = 'SAFE' | 'REVIEW' | 'AGE_RESTRICTED' | 'PERMANENT_BAN';
+export type ModerationAction = 'SAFE' | 'REVIEW' | 'AGE_RESTRICTED' | 'PERMANENT_BAN' | 'DELETE';
 // Media moderation status values returned by /api/check-result/:sha256
 export type MediaStatusAction = ModerationAction | 'QUARANTINE';
 
@@ -951,4 +951,58 @@ export async function updateAgeReviewCase(
   updates: Record<string, unknown>,
 ): Promise<AgeReviewCaseResponse> {
   return apiRequest<AgeReviewCaseResponse>(apiUrl, `/api/age-review/cases/${caseId}`, 'PATCH', updates);
+}
+
+// Bulk moderation
+export type BulkAction = 'age-restrict-all' | 'un-age-restrict-all' | 'delete-all';
+
+export interface BulkModerateResult {
+  success: boolean;
+  eventsProcessed: number;
+  mediaProcessed: number;
+  failures: string[];
+}
+
+export async function bulkModerate(
+  apiUrl: string,
+  pubkey: string,
+  action: BulkAction,
+  reason?: string,
+): Promise<BulkModerateResult> {
+  return apiRequest<BulkModerateResult>(apiUrl, '/api/bulk-moderate', 'POST', { pubkey, action, reason });
+}
+
+// Delete media (convenience wrapper)
+export async function deleteMedia(apiUrl: string, sha256: string, reason?: string): Promise<ApiResponse> {
+  return moderateMedia(apiUrl, sha256, 'DELETE', reason || 'Deleted by moderator');
+}
+
+// Publish NIP-09 kind 5 deletion request via worker
+export async function publishDeletionRequest(apiUrl: string, eventId: string, reason?: string): Promise<ApiResponse> {
+  return apiRequest<ApiResponse>(apiUrl, '/api/publish-deletion', 'POST', { eventId, reason });
+}
+
+// Age review config
+export interface AgeReviewConfig {
+  auto_delete_on_deny: boolean;
+}
+
+export async function getAgeReviewConfig(apiUrl: string): Promise<AgeReviewConfig> {
+  return apiRequest<AgeReviewConfig>(apiUrl, '/api/age-review/config', 'GET');
+}
+
+export async function updateAgeReviewConfig(
+  apiUrl: string,
+  config: Partial<AgeReviewConfig>,
+): Promise<AgeReviewConfig> {
+  // Worker route accepts PUT
+  const response = await fetch(`${apiUrl}/api/age-review/config`, {
+    method: 'PUT',
+    headers: getApiHeaders(),
+    body: JSON.stringify(config),
+  });
+  if (!response.ok) {
+    throw new ApiError(`HTTP ${response.status}: ${response.statusText}`, response.status, response.statusText);
+  }
+  return response.json() as Promise<AgeReviewConfig>;
 }
