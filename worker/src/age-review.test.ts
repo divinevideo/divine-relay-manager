@@ -250,6 +250,81 @@ describe('handleUpdateAgeReviewCase', () => {
 
     vi.unstubAllGlobals();
   });
+
+  it('creates an internal Zendesk ticket when transitioning into a restricted state', async () => {
+    const reviewCase = makeCase({
+      state: 'under_moderator_review',
+      suspected_age_band: 'age_16_plus_claimed',
+      deadline_at: '2026-05-30T12:00:00.000Z',
+    });
+    const updatedCase = {
+      ...reviewCase,
+      state: 'restricted_pending_support_email',
+    };
+
+    const bindCalls: Array<{ sql: string; params: unknown[] }> = [];
+    let selectCount = 0;
+    const db = {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        bind: vi.fn().mockImplementation((...params: unknown[]) => {
+          bindCalls.push({ sql, params });
+          return {
+            first: vi.fn().mockImplementation(async () => {
+              if (sql === 'SELECT * FROM age_review_cases WHERE id = ?') {
+                selectCount += 1;
+                return selectCount === 1 ? reviewCase : updatedCase;
+              }
+              return null;
+            }),
+            run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+          };
+        }),
+      })),
+    };
+
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ ticket: { id: 321 } }),
+    });
+    vi.stubGlobal('fetch', mockFetch);
+
+    const req = new Request('https://api.test/api/age-review/cases/case-1', {
+      method: 'PATCH',
+      body: JSON.stringify({ state: 'restricted_pending_support_email' }),
+    });
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', {
+      DB: db as unknown as D1Database,
+      ZENDESK_SUBDOMAIN: 'test',
+      ZENDESK_API_TOKEN: 'tok',
+      ZENDESK_EMAIL: 'agent@test.com',
+      ZENDESK_FIELD_CATEGORY: '1001',
+      ZENDESK_FIELD_ISSUE: '1002',
+      ZENDESK_FIELD_AGE_REVIEW_DEADLINE: '1003',
+    }, corsHeaders);
+    const body = await res.json() as { success: boolean; case: AgeReviewCase };
+
+    expect(res.status).toBe(200);
+    expect(body.case.zendesk_ticket_id).toBe(321);
+    expect(mockFetch).toHaveBeenCalledOnce();
+    expect(mockFetch.mock.calls[0][0]).toBe('https://test.zendesk.com/api/v2/tickets');
+
+    const payload = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(payload.ticket.subject).toBe('Age review: 16+ (claimed) account restricted [case-1]');
+    expect(payload.ticket.comment.public).toBe(false);
+    expect(payload.ticket.tags).toEqual(['age-review', 'age-band-age_16_plus_claimed', 'internal']);
+    expect(payload.ticket.custom_fields).toEqual([
+      { id: 1001, value: 'trust___safety' },
+      { id: 1002, value: 'age_review' },
+      { id: 1003, value: '2026-05-30' },
+    ]);
+
+    const ticketStoreCall = bindCalls.find(
+      (call) => call.sql.includes('SET zendesk_ticket_id = ?') && call.params[0] === 321 && call.params[1] === 'case-1'
+    );
+    expect(ticketStoreCall).toBeTruthy();
+
+    vi.unstubAllGlobals();
+  });
 });
 
 // -- handleGetModerationStatus ------------------------------------------------
@@ -714,7 +789,7 @@ describe('handleParentContact Zendesk integration', () => {
     vi.unstubAllGlobals();
   });
 
-  it('skips ticket creation when case already has a zendesk_ticket_id', async () => {
+  it('updates existing Zendesk ticket when case already has a zendesk_ticket_id', async () => {
     const c = makeCase({ state: 'restricted_pending_user_response', zendesk_ticket_id: 99 });
     const db = {
       prepare: vi.fn().mockImplementation((sql: string) => ({
@@ -727,7 +802,7 @@ describe('handleParentContact Zendesk integration', () => {
       })),
     };
 
-    const mockFetch = vi.fn();
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal('fetch', mockFetch);
 
     const req = new Request('https://api.test/v1/minor-review-cases/case-1/parent-contact', {
@@ -742,7 +817,13 @@ describe('handleParentContact Zendesk integration', () => {
     }, corsHeaders);
 
     expect(res.status).toBe(200);
-    expect(mockFetch).not.toHaveBeenCalled();
+    expect(mockFetch).toHaveBeenCalledOnce();
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe('https://test.zendesk.com/api/v2/tickets/99');
+    expect(opts.method).toBe('PUT');
+    const payload = JSON.parse(opts.body);
+    expect(payload.ticket.requester.email).toBe('parent@example.com');
+    expect(payload.ticket.comment.public).toBe(true);
 
     vi.unstubAllGlobals();
   });

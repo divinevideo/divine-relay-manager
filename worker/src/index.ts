@@ -59,6 +59,7 @@ interface Env {
   ZENDESK_FIELD_ACTION_REQUESTED?: string;
   ZENDESK_FIELD_CATEGORY?: string;       // For auto-solve required fields
   ZENDESK_FIELD_ISSUE?: string;          // For auto-solve required fields
+  ZENDESK_FIELD_AGE_REVIEW_DEADLINE?: string;
   KV?: KVNamespace;
   DB?: D1Database;
   // Relay management configuration
