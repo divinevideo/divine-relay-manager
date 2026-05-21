@@ -196,8 +196,7 @@ export async function handleUpdateAgeReviewCase(
   const enteredRestrictedState = requestedState !== undefined
     && isAccountRestrictedAgeReviewState(requestedState)
     && !isAccountRestrictedAgeReviewState(existing.state);
-  const clearedRestrictedState = requestedState === 'cleared'
-    && isAccountRestrictedAgeReviewState(existing.state);
+  const clearedCase = requestedState === 'cleared';
   const deniedCase = requestedState === 'denied_closed';
 
   // Non-critical: sync Zendesk ticket when case reaches terminal state
@@ -242,7 +241,7 @@ export async function handleUpdateAgeReviewCase(
       if (enteredRestrictedState) {
         await triggerBulkModerate(existing.pubkey, 'age-restrict-all', 'Age review restriction', env);
         bulkActionTriggered = 'age-restrict-all';
-      } else if (clearedRestrictedState) {
+      } else if (clearedCase) {
         await triggerBulkModerate(existing.pubkey, 'un-age-restrict-all', 'Age review cleared', env);
         bulkActionTriggered = 'un-age-restrict-all';
       } else if (deniedCase) {
@@ -264,7 +263,7 @@ export async function handleUpdateAgeReviewCase(
       let keycastResult;
       if (enteredRestrictedState) {
         keycastResult = await suspendUser(existing.pubkey, 'age_review', env);
-      } else if (clearedRestrictedState) {
+      } else if (clearedCase) {
         keycastResult = await unsuspendUser(existing.pubkey, env);
       } else if (deniedCase) {
         keycastResult = await banUser(existing.pubkey, 'age_review_denied', env);
