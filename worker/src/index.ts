@@ -88,6 +88,8 @@ interface Env {
   // Blossom admin bypass (for proxying blocked media to moderators)
   BLOSSOM_WEBHOOK_SECRET?: string | SecretStoreSecret;
   CDN_DOMAIN?: string;
+  KEYCAST_URL?: string;
+  KEYCAST_SERVICE_TOKEN?: string | SecretStoreSecret;
 }
 
 // Zendesk JWT payload structure

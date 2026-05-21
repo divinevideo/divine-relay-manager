@@ -11,8 +11,9 @@ import {
 } from '../../shared/age-review';
 import { handleBulkModerate, type BulkModerateEnv } from './bulk-moderate';
 import type { BulkAction, BulkModerateResult } from '../../shared/bulk-moderation';
+import { suspendUser, unsuspendUser, banUser, type KeycastEnv } from './keycast-client';
 
-interface AgeReviewEnv extends BulkModerateEnv {
+interface AgeReviewEnv extends BulkModerateEnv, KeycastEnv {
   SLACK_WEBHOOK_URL?: string;
   ZENDESK_SUBDOMAIN?: string;
   ZENDESK_API_TOKEN?: string;
@@ -246,7 +247,30 @@ export async function handleUpdateAgeReviewCase(
     }
   }
 
-  return json({ success: true, case: updated, bulkActionTriggered }, 200, corsHeaders);
+  // Non-critical: sync account status with Keycast
+  let keycastUpdated = false;
+  if (body.state && typeof body.state === 'string') {
+    try {
+      let keycastResult;
+      if ((body.state as string).startsWith('restricted_')) {
+        keycastResult = await suspendUser(existing.pubkey, 'age_review', env);
+      } else if (body.state === 'cleared') {
+        keycastResult = await unsuspendUser(existing.pubkey, env);
+      } else if (body.state === 'denied_closed') {
+        keycastResult = await banUser(existing.pubkey, 'age_review_denied', env);
+      }
+      if (keycastResult) {
+        keycastUpdated = keycastResult.success;
+        if (!keycastResult.success) {
+          console.error(`[age-review] Keycast ${body.state} failed for case ${caseId}: ${keycastResult.error}`);
+        }
+      }
+    } catch (error) {
+      console.error(`[age-review] Keycast call failed for case ${caseId}:`, error);
+    }
+  }
+
+  return json({ success: true, case: updated, bulkActionTriggered, keycastUpdated }, 200, corsHeaders);
 }
 
 // ---------------------------------------------------------------------------
@@ -752,9 +776,7 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
     }
   }
 
-  // Auto-close expired cases.
-  // NOTE: This only updates the case state. Actual account enforcement (ban,
-  // Keycast restriction) is deferred to the Keycast integration (Track C).
+  // Auto-close expired cases and ban via Keycast.
   const expired = await env.DB.prepare(`
     SELECT * FROM age_review_cases
     WHERE state NOT IN (${TERMINAL_STATES.map(() => '?').join(',')})
@@ -784,6 +806,17 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
       }
     } catch (error) {
       console.error(`[age-review] Auto-delete failed for expired case ${row.id}:`, error);
+    }
+
+    try {
+      const banResult = await banUser(row.pubkey, 'age_review_expired', env);
+      if (banResult.success) {
+        console.log(`[age-review] Keycast ban sent for expired case ${row.id}`);
+      } else {
+        console.error(`[age-review] Keycast ban failed for expired case ${row.id}: ${banResult.error}`);
+      }
+    } catch (error) {
+      console.error(`[age-review] Keycast ban failed for expired case ${row.id}:`, error);
     }
   }
 
