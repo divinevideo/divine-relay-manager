@@ -1,14 +1,13 @@
-# ABOUTME: Cloudflare Worker for Divine Relay Admin API - STAGING
-# ABOUTME: Deploy with: npx wrangler deploy --config wrangler.staging.toml
+# ABOUTME: Ephemeral test instance of prod worker for evaluating auto-hide settings UI
+# ABOUTME: Deploy with: npx wrangler deploy --config wrangler.test.toml
+# ABOUTME: Delete when done: npx wrangler delete --config wrangler.test.toml
 
-name = "divine-relay-admin-api-staging"
+name = "divine-relay-admin-api-test"
 main = "src/index.ts"
 compatibility_date = "2024-12-01"
 
-# Staging API route
-routes = [
-  { pattern = "api-relay-staging.divine.video/*", zone_name = "divine.video" }
-]
+# No custom routes — uses workers.dev URL only
+workers_dev = true
 
 # NOSTR_NSEC is bound via secrets store (shared across workers)
 [[secrets_store_secrets]]
@@ -46,47 +45,36 @@ store_id = "ef490704b12a4feb91c7feb51229c364"
 secret_name = "KEYCAST_SERVICE_TOKEN"
 
 [vars]
-RELAY_URL = "wss://relay.staging.divine.video"
-ENVIRONMENT = "staging"
-# Auto-hide feature flag (set to "true" to enable automatic content hiding)
+RELAY_URL = "wss://relay.divine.video"
+ENVIRONMENT = "test"
 AUTO_HIDE_ENABLED = "true"
-# Comma-separated list of trusted client names for auto-hide (must match client tag on kind 1984 events)
 TRUSTED_CLIENTS = "diVine,divine-web,divine-mobile"
-# Path for NIP-86 management API
 MANAGEMENT_PATH = "/"
-# Both URLs point to divine-moderation-service. Currently same hostname;
-# service binding (MODERATION_API) is preferred and bypasses hostname routing.
 MODERATION_SERVICE_URL = "https://moderation-api.divine.video"
 MODERATION_ADMIN_URL = "https://moderation-api.divine.video"
-# Allow admin UI plus the managed web app and its preview deployments
-ALLOWED_ORIGINS = "https://relay.admin.divine.video,https://app.divine.video,https://*.openvine-app.pages.dev,*.divine-relay-manager.pages.dev,*.divine-relay-admin.pages.dev"
-# CDN domain for media proxy (Blossom admin bypass for blocked content preview)
+ALLOWED_ORIGINS = "https://relay.admin.divine.video,https://*.divine-relay-admin.pages.dev"
 CDN_DOMAIN = "media.divine.video"
-# Zendesk custom field IDs for webhook callback
 ZENDESK_FIELD_ACTION_STATUS = "14545793289743"
 ZENDESK_FIELD_ACTION_REQUESTED = "14545826900367"
-# Slack webhook for age review deadline alerts (add via: wrangler secret put SLACK_WEBHOOK_URL --config wrangler.staging.toml)
-# SLACK_WEBHOOK_URL — not in [vars] because it's a secret
-# Zendesk custom field IDs for auto-solve required fields
 ZENDESK_FIELD_CATEGORY = "14559549220879"
 ZENDESK_FIELD_ISSUE = "14560383908879"
-# Age review deadline date field — create in Zendesk admin, then set the ID here
 ZENDESK_FIELD_AGE_REVIEW_DEADLINE = "16123853180303"
 # Keycast account suspension API
-KEYCAST_URL = "https://login.staging.dvines.org"
+KEYCAST_URL = "https://login.divine.video"
+ADMIN_API_KEY = "test-autohide-eval-2026"
 
-# D1 Database for moderation decision log (staging)
+# D1 Database — uses PROD database (same data as production)
 [[d1_databases]]
 binding = "DB"
-database_name = "divine-moderation-decisions-staging"
-database_id = "5e694cde-20d4-491d-aed3-aaac47a5a9b5"
+database_name = "divine-moderation-decisions-prod"
+database_id = "d000fe55-dfac-4f54-a348-5c57241c2453"
 
-# Service binding to divine-realness worker (bypasses CF Access 522 issue)
+# Service binding to divine-realness worker
 [[services]]
 binding = "REALNESS"
 service = "divine-ai-detector"
 
-# Service binding to divine-moderation-service (bypasses CF Access + no cold starts)
+# Service binding to divine-moderation-service
 [[services]]
 binding = "MODERATION_API"
 service = "divine-moderation-service"
@@ -101,8 +89,3 @@ bindings = [
 [[migrations]]
 tag = "v1"
 new_classes = ["ReportWatcher"]
-
-# Keep ReportWatcher DO alive — wake it every 5 minutes so the alarm chain
-# can't break permanently after a Cloudflare-initiated eviction.
-[triggers]
-crons = ["*/5 * * * *"]
