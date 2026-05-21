@@ -95,4 +95,10 @@ export async function ensureSchema(db: D1Database): Promise<void> {
     // Index already exists
   }
 
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS age_review_config (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    )
+  `).run();
 }

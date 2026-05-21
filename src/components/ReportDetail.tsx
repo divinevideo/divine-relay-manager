@@ -1,7 +1,7 @@
 // ABOUTME: Full detail view for a selected report in the split-pane layout
 // ABOUTME: Combines thread context, user profile, AI summary, and action buttons
 
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -19,7 +19,6 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -38,18 +37,18 @@ import { LabelPublisherInline } from "@/components/LabelPublisher";
 import { ThreadModal } from "@/components/ThreadModal";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { useAppContext } from "@/hooks/useAppContext";
-import { extractMediaHashes, type ResolutionStatus, type ModerationAction } from "@/lib/adminApi";
+import { extractMediaHashes, type ResolutionStatus } from "@/lib/adminApi";
 import { useMediaStatus } from "@/hooks/useMediaStatus";
 import { useDecisionLog } from "@/hooks/useDecisionLog";
 import { HiveAIReport } from "@/components/HiveAIReport";
 import { AIDetectionReport } from "@/components/AIDetectionReport";
 import { MediaPreview } from "@/components/MediaPreview";
 import { BulkDeleteByKind } from "@/components/BulkDeleteByKind";
-import { CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, getReportCategory, buildReasonString } from "@/lib/constants";
+import { EventActions } from "@/components/EventActions";
+import { UserActions } from "@/components/UserActions";
+import { CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, getReportCategory } from "@/lib/constants";
 import { KIND_NAMES } from "@/lib/kindNames";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Textarea } from "@/components/ui/textarea";
-import { UserX, UserCheck, Tag, Flag, Trash2, CheckCircle, Video, History, Ban, ShieldX, ShieldAlert, Link2, User, FileText, Unlock, Repeat2, FileCode, Loader2, XCircle, RefreshCw, Undo2, EyeOff, Eye } from "lucide-react";
+import { Tag, Flag, CheckCircle, History, Ban, ShieldX, Link2, User, FileText, Repeat2, FileCode, RefreshCw, EyeOff, Eye } from "lucide-react";
 import { CopyableId, CopyableTags } from "@/components/CopyableId";
 import type { NostrEvent } from "@nostrify/nostrify";
 
@@ -81,85 +80,20 @@ function getReportTarget(event: NostrEvent): { type: 'event' | 'pubkey'; value: 
   return null;
 }
 
-// Deduplicated category labels for the reason selector dropdown.
-// Also builds a map from any raw key to its canonical (first-seen) key,
-// so getReportCategory() values always match a SelectItem.
-const { UNIQUE_CATEGORY_ENTRIES, CANONICAL_KEY } = (() => {
-  const seen = new Map<string, string>(); // label → first key
-  const entries: [string, string][] = [];
-  const canonical: Record<string, string> = {};
-  for (const [key, label] of Object.entries(CATEGORY_LABELS)) {
-    if (!seen.has(label)) {
-      seen.set(label, key);
-      entries.push([key, label]);
-    }
-    canonical[key] = seen.get(label)!;
-  }
-  return { UNIQUE_CATEGORY_ENTRIES: entries, CANONICAL_KEY: canonical };
-})();
 
 export function ReportDetail({ report, allReportsForTarget, allReports = [], onDismiss }: ReportDetailProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const {
-    banPubkey, deleteEvent, markAsReviewed, moderateMedia, unblockMedia,
-    logDecision, deleteDecisions, verifyModerationAction, verifyPubkeyBanned,
-    verifyPubkeyUnbanned, verifyEventDeleted, verifyMediaBlocked, verifyAgeRestricted,
-    unbanPubkey, callRelayRpc,
+    deleteEvent, markAsReviewed, logDecision, deleteDecisions, callRelayRpc,
   } = useAdminApi();
   const { config } = useAppContext();
   const navigate = useNavigate();
   const [showThreadModal, setShowThreadModal] = useState(false);
   const [showLabelForm, setShowLabelForm] = useState(false);
-  const [confirmBan, setConfirmBan] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmDismiss, setConfirmDismiss] = useState(false);
   const [dismissReason, setDismissReason] = useState("");
-  const [confirmBlockMedia, setConfirmBlockMedia] = useState(false);
-  const [confirmAgeRestrict, setConfirmAgeRestrict] = useState(false);
-  const [confirmBlockAndDelete, setConfirmBlockAndDelete] = useState(false);
-  const [banOptions, setBanOptions] = useState({ deleteEvents: true, blockMedia: true });
-  const [actionReason, setActionReason] = useState('');
-  const [actionNote, setActionNote] = useState('');
 
-  // Initialize reason from report category when report changes
-  const defaultReason = report ? (CANONICAL_KEY[getReportCategory(report)] || getReportCategory(report)) : '';
-  useEffect(() => {
-    if (report) {
-      setActionReason(defaultReason);
-      setActionNote('');
-    }
-  }, [report, defaultReason]);
-
-  const reasonSelector = (
-    <div className="space-y-2 pt-2 border-t">
-      <Label className="text-sm font-medium">Reason</Label>
-      <Select value={actionReason} onValueChange={setActionReason}>
-        <SelectTrigger>
-          <SelectValue placeholder="Select reason..." />
-        </SelectTrigger>
-        <SelectContent>
-          {UNIQUE_CATEGORY_ENTRIES.map(([key, label]) => (
-            <SelectItem key={key} value={key}>{label}</SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-      <Textarea
-        placeholder="Add a note (optional)..."
-        value={actionNote}
-        onChange={(e) => setActionNote(e.target.value)}
-        rows={2}
-        maxLength={500}
-      />
-    </div>
-  );
-
-  const [isVerifying, setIsVerifying] = useState(false);
-  const [verificationResult, setVerificationResult] = useState<{
-    type: 'ban' | 'delete' | 'media';
-    success: boolean;
-    message: string;
-  } | null>(null);
   const context = useReportContext(report);
 
   // Banned event fallback: if thread found no event and target is an event ID, try management API
@@ -241,221 +175,6 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     return { userReports, eventReports };
   }, [allReports, context.reportedUser.pubkey, context.target]);
 
-  const banMutation = useMutation({
-    mutationFn: async ({ pubkey, reason, deleteEvents, blockMedia }: {
-      pubkey: string;
-      reason: string;
-      deleteEvents?: boolean;
-      blockMedia?: boolean;
-    }) => {
-      const results = { banned: false, eventsDeleted: 0, mediaBlocked: 0 };
-
-      // Ban the pubkey
-      await banPubkey(pubkey, reason);
-      results.banned = true;
-
-      // Log the ban decision
-      await logDecision({
-        targetType: 'pubkey',
-        targetId: pubkey,
-        action: 'ban_user',
-        reason,
-        reportId: report?.id,
-      });
-
-      // Always delete the reported event when banning a user
-      if (context.target?.type === 'event' && context.target.value) {
-        try {
-          await deleteEvent(context.target.value, `User banned: ${reason}`);
-          await logDecision({
-            targetType: 'event',
-            targetId: context.target.value,
-            action: 'delete_event',
-            reason: `User banned: ${reason}`,
-            reportId: report?.id,
-          });
-          results.eventsDeleted++;
-        } catch {
-          // Continue even if this fails
-        }
-      }
-
-      // Optionally delete all their other events
-      if (deleteEvents && context.userStats?.recentPosts) {
-        const alreadyDeleted = context.target?.type === 'event' ? context.target.value : null;
-        for (const event of context.userStats.recentPosts) {
-          if (event.id === alreadyDeleted) continue; // Already deleted above
-          try {
-            await deleteEvent(event.id, `User banned: ${reason}`);
-            await logDecision({
-              targetType: 'event',
-              targetId: event.id,
-              action: 'delete_event',
-              reason: `User banned: ${reason}`,
-              reportId: report?.id,
-            });
-            results.eventsDeleted++;
-          } catch {
-            // Continue even if some fail
-          }
-        }
-      }
-
-      // Optionally block all their media
-      if (blockMedia) {
-        const allHashes = new Set<string>();
-        // Include media from the reported event
-        if (context.thread?.event) {
-          const hashes = extractMediaHashes(context.thread.event.content, context.thread.event.tags);
-          hashes.forEach(h => allHashes.add(h));
-        }
-        if (context.thread?.repostedEvent) {
-          const hashes = extractMediaHashes(context.thread.repostedEvent.content, context.thread.repostedEvent.tags);
-          hashes.forEach(h => allHashes.add(h));
-        }
-        // Include media from other recent posts
-        if (context.userStats?.recentPosts) {
-          for (const event of context.userStats.recentPosts) {
-            const hashes = extractMediaHashes(event.content, event.tags);
-            hashes.forEach(h => allHashes.add(h));
-          }
-        }
-        for (const hash of allHashes) {
-          try {
-            await moderateMedia(hash, 'PERMANENT_BAN', `User banned: ${reason}`);
-            await logDecision({
-              targetType: 'media',
-              targetId: hash,
-              action: 'block_media',
-              reason: `User banned: ${reason}`,
-              reportId: report?.id,
-            });
-            results.mediaBlocked++;
-          } catch {
-            // Continue even if some fail
-          }
-        }
-      }
-
-      return results;
-    },
-    onSuccess: async (results, variables) => {
-      queryClient.invalidateQueries({ queryKey: ['banned-users'] });
-      queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
-      queryClient.invalidateQueries({ queryKey: ['banned-events'] });
-      queryClient.invalidateQueries({ queryKey: ['decisions'] });
-      moderationStatus.recheck();
-      decisionLog.refetch();
-
-      let message = "User banned";
-      if (results.eventsDeleted > 0) {
-        message += `, ${results.eventsDeleted} event(s) deleted`;
-      }
-      if (results.mediaBlocked > 0) {
-        message += `, ${results.mediaBlocked} media file(s) blocked`;
-      }
-
-      toast({ title: message, description: "Verifying..." });
-      setConfirmBan(false);
-
-      // Verify the ban worked
-      setIsVerifying(true);
-      setVerificationResult(null);
-      try {
-        const verified = await verifyPubkeyBanned(variables.pubkey);
-        setVerificationResult({
-          type: 'ban',
-          success: verified,
-          message: verified
-            ? 'Ban verified - user is in banned list'
-            : 'Warning: User may not be banned',
-        });
-        toast({
-          title: verified ? "Ban Verified" : "Verification Warning",
-          description: verified
-            ? "User confirmed banned on relay"
-            : "Could not confirm ban - check manually",
-          variant: verified ? "default" : "destructive",
-        });
-      } catch {
-        setVerificationResult({
-          type: 'ban',
-          success: false,
-          message: 'Could not verify ban status',
-        });
-      } finally {
-        setIsVerifying(false);
-      }
-    },
-    onError: (error: Error) => {
-      toast({
-        title: "Failed to ban user",
-        description: error.message,
-        variant: "destructive",
-      });
-    },
-  });
-
-  const deleteMutation = useMutation({
-    mutationFn: async ({ eventId, reason }: { eventId: string; reason: string }) => {
-      await deleteEvent(eventId, reason, context.reportedUser?.pubkey ?? undefined);
-      // Log the decision
-      await logDecision({
-        targetType: 'event',
-        targetId: eventId,
-        action: 'delete_event',
-        reason,
-        reportId: report?.id,
-      });
-      return eventId;
-    },
-    onSuccess: async (eventId) => {
-      queryClient.invalidateQueries({ queryKey: ['reports'] });
-      queryClient.invalidateQueries({ queryKey: ['banned-events'] });
-      queryClient.invalidateQueries({ queryKey: ['decisions'] });
-      moderationStatus.recheck();
-      decisionLog.refetch();
-      toast({ title: "Event deleted from relay", description: "Verifying..." });
-      setConfirmDelete(false);
-
-      // Verify the delete worked
-      setIsVerifying(true);
-      setVerificationResult(null);
-      try {
-        const isDeleted = await verifyEventDeleted(eventId);
-        setVerificationResult({
-          type: 'delete',
-          success: isDeleted,
-          message: isDeleted
-            ? 'Delete verified - event removed from relay'
-            : 'Warning: Event may still exist on relay',
-        });
-        toast({
-          title: isDeleted ? "Delete Verified" : "Verification Warning",
-          description: isDeleted
-            ? "Event confirmed removed from relay"
-            : "Could not confirm event removal - check manually",
-          variant: isDeleted ? "default" : "destructive",
-        });
-      } catch {
-        setVerificationResult({
-          type: 'delete',
-          success: false,
-          message: 'Could not verify delete status',
-        });
-      } finally {
-        setIsVerifying(false);
-      }
-    },
-    onError: (error: Error) => {
-      toast({
-        title: "Failed to delete event",
-        description: error.message,
-        variant: "destructive",
-      });
-    },
-  });
-
   const reviewMutation = useMutation({
     mutationFn: async ({ status, comment }: { status: ResolutionStatus; comment?: string }) => {
       if (!context.target) throw new Error('No target');
@@ -518,151 +237,6 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     },
   });
 
-  const blockMediaMutation = useMutation({
-    mutationFn: async ({ hashes, action, reason }: { hashes: string[]; action: ModerationAction; reason: string }) => {
-      // Block all media hashes found in the event
-      const results = await Promise.all(
-        hashes.map(sha256 => moderateMedia(sha256, action, reason))
-      );
-      // Log decisions for each hash
-      await Promise.all(
-        hashes.map(sha256 => logDecision({
-          targetType: 'media',
-          targetId: sha256,
-          action: 'block_media',
-          reason,
-          reportId: report?.id,
-        }))
-      );
-      return { results, hashes };
-    },
-    onSuccess: async ({ hashes }) => {
-      queryClient.invalidateQueries({ queryKey: ['decisions'] });
-      queryClient.invalidateQueries({ queryKey: ['media-status'] });
-      decisionLog.refetch();
-      toast({
-        title: "Media blocked",
-        description: `${hashes.length} media file(s) permanently banned. Verifying...`,
-      });
-      setConfirmBlockMedia(false);
-
-      // Verify the media block worked
-      setIsVerifying(true);
-      setVerificationResult(null);
-      try {
-        // Verify each hash individually
-        const verificationResults = await Promise.all(
-          hashes.map(async (hash) => ({
-            hash,
-            blocked: await verifyMediaBlocked(hash),
-          }))
-        );
-        const allBlocked = verificationResults.every(v => v.blocked);
-        const failedCount = verificationResults.filter(v => !v.blocked).length;
-        setVerificationResult({
-          type: 'media',
-          success: allBlocked,
-          message: allBlocked
-            ? 'Media block verified - all files blocked'
-            : `Warning: ${failedCount} file(s) may not be blocked`,
-        });
-        toast({
-          title: allBlocked ? "Block Verified" : "Verification Warning",
-          description: allBlocked
-            ? "All media confirmed blocked"
-            : "Some media may not be blocked - check manually",
-          variant: allBlocked ? "default" : "destructive",
-        });
-      } catch {
-        setVerificationResult({
-          type: 'media',
-          success: false,
-          message: 'Could not verify media block status',
-        });
-      } finally {
-        setIsVerifying(false);
-      }
-    },
-    onError: (error: Error) => {
-      toast({
-        title: "Failed to block media",
-        description: error.message,
-        variant: "destructive",
-      });
-    },
-  });
-
-  const ageRestrictMediaMutation = useMutation({
-    mutationFn: async ({ hashes, reason }: { hashes: string[]; reason: string }) => {
-      const results = await Promise.all(
-        hashes.map(sha256 => moderateMedia(sha256, 'AGE_RESTRICTED', reason))
-      );
-      await Promise.all(
-        hashes.map(sha256 => logDecision({
-          targetType: 'media',
-          targetId: sha256,
-          action: 'restrict_media',
-          reason,
-          reportId: report?.id,
-        }))
-      );
-      return { results, hashes };
-    },
-    onSuccess: async ({ hashes }) => {
-      queryClient.invalidateQueries({ queryKey: ['decisions'] });
-      queryClient.invalidateQueries({ queryKey: ['media-status'] });
-      decisionLog.refetch();
-      toast({
-        title: "Media age-restricted",
-        description: `${hashes.length} media file(s) age-restricted. Verifying...`,
-      });
-      setConfirmAgeRestrict(false);
-
-      // Verify the age restriction landed (same pattern as blockMediaMutation)
-      setIsVerifying(true);
-      setVerificationResult(null);
-      try {
-        const verificationResults = await Promise.all(
-          hashes.map(async (hash) => ({
-            hash,
-            restricted: await verifyAgeRestricted(hash),
-          }))
-        );
-        const allRestricted = verificationResults.every(v => v.restricted);
-        const failedCount = verificationResults.filter(v => !v.restricted).length;
-        setVerificationResult({
-          type: 'media',
-          success: allRestricted,
-          message: allRestricted
-            ? 'Age restriction verified - all files restricted'
-            : `Warning: ${failedCount} file(s) may not be restricted`,
-        });
-        toast({
-          title: allRestricted ? "Restriction Verified" : "Verification Warning",
-          description: allRestricted
-            ? "All media confirmed age-restricted"
-            : "Some media may not be restricted - check manually",
-          variant: allRestricted ? "default" : "destructive",
-        });
-      } catch {
-        setVerificationResult({
-          type: 'media',
-          success: false,
-          message: 'Could not verify age restriction status',
-        });
-      } finally {
-        setIsVerifying(false);
-      }
-    },
-    onError: (error: Error) => {
-      toast({
-        title: "Failed to age-restrict media",
-        description: error.message,
-        variant: "destructive",
-      });
-    },
-  });
-
   // Extract media hashes from the reported event AND reposted event if it's a repost
   const mediaHashes = useMemo(() => {
     const hashes = new Set<string>();
@@ -693,122 +267,6 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
       return HIGH_PRIORITY_CATEGORIES.includes(cat);
     });
   }, [allReportsForTarget]);
-
-  const unblockMediaMutation = useMutation({
-    mutationFn: async ({ hashes, reason, logAction = 'unblock_media' }: { hashes: string[]; reason: string; logAction?: 'unblock_media' | 'unrestrict_media' }) => {
-      // Unblock all media hashes (sends SAFE to moderation-service)
-      const results = await Promise.all(
-        hashes.map(sha256 => unblockMedia(sha256, reason))
-      );
-      // Log decisions for each hash
-      await Promise.all(
-        hashes.map(sha256 => logDecision({
-          targetType: 'media',
-          targetId: sha256,
-          action: logAction,
-          reason,
-          reportId: report?.id,
-        }))
-      );
-      return results;
-    },
-    onSuccess: (_, variables) => {
-      queryClient.invalidateQueries({ queryKey: ['decisions'] });
-      queryClient.invalidateQueries({ queryKey: ['media-status'] });
-      mediaStatus.refetch();
-      decisionLog.refetch();
-      toast({
-        title: variables.logAction === 'unrestrict_media' ? "Restriction removed" : "Media unblocked",
-        description: `${variables.hashes.length} media file(s) ${variables.logAction === 'unrestrict_media' ? 'unrestricted' : 'unblocked'}`,
-      });
-    },
-    onError: (error: Error) => {
-      toast({
-        title: "Failed to unblock media",
-        description: error.message,
-        variant: "destructive",
-      });
-    },
-  });
-
-  const unbanUserMutation = useMutation({
-    mutationFn: async ({ pubkey }: { pubkey: string }) => {
-      await unbanPubkey(pubkey);
-      await logDecision({
-        targetType: 'pubkey',
-        targetId: pubkey,
-        action: 'unban_user',
-        reason: 'Unbanned from report viewer',
-        reportId: report?.id,
-      });
-      return pubkey;
-    },
-    onSuccess: async (pubkey) => {
-      queryClient.invalidateQueries({ queryKey: ['banned-users'] });
-      queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
-      queryClient.invalidateQueries({ queryKey: ['decisions'] });
-      moderationStatus.recheck();
-      decisionLog.refetch();
-      toast({ title: "User unbanned", description: "Verifying..." });
-
-      setIsVerifying(true);
-      setVerificationResult(null);
-      try {
-        const verified = await verifyPubkeyUnbanned(pubkey);
-        setVerificationResult({
-          type: 'ban',
-          success: verified,
-          message: verified
-            ? 'Unban verified - user is no longer in banned list'
-            : 'Warning: User may still be banned',
-        });
-      } catch {
-        setVerificationResult({
-          type: 'ban',
-          success: false,
-          message: 'Could not verify unban status',
-        });
-      } finally {
-        setIsVerifying(false);
-      }
-    },
-    onError: (error: Error) => {
-      toast({
-        title: "Failed to unban user",
-        description: error.message,
-        variant: "destructive",
-      });
-    },
-  });
-
-  const restoreEventMutation = useMutation({
-    mutationFn: async ({ eventId }: { eventId: string }) => {
-      await callRelayRpc('allowevent', [eventId]);
-      await logDecision({
-        targetType: 'event',
-        targetId: eventId,
-        action: 'restore_event',
-        reason: 'Restored from report viewer',
-        reportId: report?.id,
-      });
-      return eventId;
-    },
-    onSuccess: async () => {
-      queryClient.invalidateQueries({ queryKey: ['reports'] });
-      queryClient.invalidateQueries({ queryKey: ['banned-events'] });
-      queryClient.invalidateQueries({ queryKey: ['decisions'] });
-      moderationStatus.recheck();
-      decisionLog.refetch();
-      toast({ title: "Event restored" });
-    },
-    onError: (error: Error) => {
-      toast({
-        title: "Failed to restore event",
-        description: error.message,
-        variant: "destructive",
-      });
-    },
-  });
 
   // Confirm auto-hidden content (approve the auto-hide decision)
   const confirmAutoHideMutation = useMutation({
@@ -868,100 +326,17 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     },
   });
 
-  // Combined action: Block media AND delete event
-  const blockAndDeleteMutation = useMutation({
-    mutationFn: async ({ eventId, hashes, reason }: { eventId: string; hashes: string[]; reason: string }) => {
-      const results = { mediaBlocked: 0, eventDeleted: false };
-
-      // First block all media
-      for (const sha256 of hashes) {
-        try {
-          await moderateMedia(sha256, 'PERMANENT_BAN', reason);
-          await logDecision({
-            targetType: 'media',
-            targetId: sha256,
-            action: 'block_media',
-            reason,
-            reportId: report?.id,
-          });
-          results.mediaBlocked++;
-        } catch {
-          // Continue even if some fail
-        }
-      }
-
-      // Then delete the event
-      await deleteEvent(eventId, reason, context.reportedUser?.pubkey ?? undefined);
-      await logDecision({
-        targetType: 'event',
-        targetId: eventId,
-        action: 'delete_event',
-        reason,
-        reportId: report?.id,
-      });
-      results.eventDeleted = true;
-
-      return results;
-    },
-    onSuccess: async (results, variables) => {
-      queryClient.invalidateQueries({ queryKey: ['reports'] });
-      queryClient.invalidateQueries({ queryKey: ['banned-events'] });
-      queryClient.invalidateQueries({ queryKey: ['decisions'] });
-      queryClient.invalidateQueries({ queryKey: ['media-status'] });
-      moderationStatus.recheck();
-      decisionLog.refetch();
-      toast({
-        title: "Content removed",
-        description: `${results.mediaBlocked} media file(s) blocked and event deleted. Verifying...`,
-      });
-      setConfirmBlockAndDelete(false);
-
-      // Verify the moderation action worked
-      setIsVerifying(true);
-      try {
-        const verification = await verifyModerationAction(
-          variables.eventId,
-          variables.hashes
-        );
-
-        if (verification.allSuccessful) {
-          toast({
-            title: "Verified",
-            description: "Event deleted and all media blocked successfully",
-          });
-        } else {
-          const issues: string[] = [];
-          if (!verification.eventDeleted) {
-            issues.push("Event may still be accessible");
-          }
-          const failedMedia = verification.mediaBlocked.filter(m => !m.blocked);
-          if (failedMedia.length > 0) {
-            issues.push(`${failedMedia.length} media file(s) may not be blocked`);
-          }
-          toast({
-            title: "Verification Warning",
-            description: issues.join(". "),
-            variant: "destructive",
-          });
-        }
-      } catch (verifyError) {
-        console.error('Verification failed:', verifyError);
-        toast({
-          title: "Verification unavailable",
-          description: "Could not verify moderation action",
-        });
-      } finally {
-        setIsVerifying(false);
-      }
-    },
-    onError: (error: Error) => {
-      toast({
-        title: "Failed to remove content",
-        description: error.message,
-        variant: "destructive",
-      });
-    },
-  });
+  const handleActionComplete = () => {
+    queryClient.invalidateQueries({ queryKey: ['reports'] });
+    queryClient.invalidateQueries({ queryKey: ['banned-events'] });
+    queryClient.invalidateQueries({ queryKey: ['banned-users'] });
+    queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
+    queryClient.invalidateQueries({ queryKey: ['decisions'] });
+    queryClient.invalidateQueries({ queryKey: ['media-status'] });
+    queryClient.invalidateQueries({ queryKey: ['user-stats', context.reportedUser.pubkey] });
+    moderationStatus.recheck();
+    decisionLog.refetch();
+  };
 
   if (!report) {
     return (
@@ -982,247 +357,6 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     <div className="h-full flex flex-col overflow-hidden">
       {/* Dialogs - rendered as portals, don't affect flex layout */}
       {/* Ban Confirmation Dialog */}
-      <AlertDialog open={confirmBan} onOpenChange={(open) => { setConfirmBan(open); if (!open) { setActionNote(''); setActionReason(defaultReason); } }}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Ban User?</AlertDialogTitle>
-            <AlertDialogDescription asChild>
-              <div className="space-y-3">
-                <p>This will ban this user from the relay. This can be reversed.</p>
-                {context.reportedUser.pubkey && (
-                  <div className="bg-muted px-2 py-1.5 rounded">
-                    <UserIdentifier
-                      pubkey={context.reportedUser.pubkey}
-                      showAvatar
-                      avatarSize="sm"
-                      variant="block"
-                      linkToProfile
-                    />
-                  </div>
-                )}
-
-                <div className="space-y-2 pt-2">
-                  <div className="flex items-center space-x-2">
-                    <Checkbox
-                      id="deleteEvents"
-                      checked={banOptions.deleteEvents}
-                      onCheckedChange={(checked) =>
-                        setBanOptions(prev => ({ ...prev, deleteEvents: !!checked }))
-                      }
-                    />
-                    <Label htmlFor="deleteEvents" className="text-sm font-normal">
-                      Delete all events from this user ({context.userStats?.recentPosts?.length || 0} found)
-                    </Label>
-                  </div>
-                  <div className="flex items-center space-x-2">
-                    <Checkbox
-                      id="blockMedia"
-                      checked={banOptions.blockMedia}
-                      onCheckedChange={(checked) =>
-                        setBanOptions(prev => ({ ...prev, blockMedia: !!checked }))
-                      }
-                    />
-                    <Label htmlFor="blockMedia" className="text-sm font-normal">
-                      Block all media/videos from this user
-                    </Label>
-                  </div>
-                </div>
-
-                {reasonSelector}
-              </div>
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={banMutation.isPending}>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => {
-                if (context.reportedUser.pubkey) {
-                  banMutation.mutate({
-                    pubkey: context.reportedUser.pubkey,
-                    reason: buildReasonString(actionReason, actionNote),
-                    deleteEvents: banOptions.deleteEvents,
-                    blockMedia: banOptions.blockMedia,
-                  });
-                }
-              }}
-              disabled={banMutation.isPending}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-            >
-              {banMutation.isPending ? 'Banning...' : 'Ban User'}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-
-      {/* Delete Event Confirmation Dialog */}
-      <AlertDialog open={confirmDelete} onOpenChange={(open) => { setConfirmDelete(open); if (!open) { setActionNote(''); setActionReason(defaultReason); } }}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Ban Event?</AlertDialogTitle>
-            <AlertDialogDescription asChild>
-              <div>
-                <p>This will remove this event from the relay. The content will no longer be served. This can be reversed.</p>
-                {context.target?.value && (
-                  <div className="mt-2">
-                    <CopyableId
-                      value={context.target.value}
-                      type="note"
-                      truncateStart={16}
-                      truncateEnd={8}
-                      size="xs"
-                    />
-                  </div>
-                )}
-
-                {reasonSelector}
-              </div>
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={deleteMutation.isPending}>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => {
-                if (context.target?.type === 'event' && context.target.value) {
-                  deleteMutation.mutate({
-                    eventId: context.target.value,
-                    reason: buildReasonString(actionReason, actionNote),
-                  });
-                }
-              }}
-              disabled={deleteMutation.isPending}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-            >
-              {deleteMutation.isPending ? 'Banning...' : 'Ban Event'}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-
-      {/* Block Media Confirmation Dialog */}
-      <AlertDialog open={confirmBlockMedia} onOpenChange={(open) => { setConfirmBlockMedia(open); if (!open) { setActionNote(''); setActionReason(defaultReason); } }}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Block Media?</AlertDialogTitle>
-            <AlertDialogDescription asChild>
-              <div>
-                <p>This will ban {mediaHashes.length} media file(s) from being served. This can be reversed.</p>
-                <div className="mt-2 space-y-1">
-                  {mediaHashes.map(hash => (
-                    <CopyableId
-                      key={hash}
-                      value={hash}
-                      type="hash"
-                      truncateStart={16}
-                      truncateEnd={8}
-                      size="xs"
-                    />
-                  ))}
-                </div>
-
-                {reasonSelector}
-              </div>
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={blockMediaMutation.isPending}>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => {
-                blockMediaMutation.mutate({
-                  hashes: mediaHashes,
-                  action: 'PERMANENT_BAN',
-                  reason: buildReasonString(actionReason, actionNote),
-                });
-              }}
-              disabled={blockMediaMutation.isPending}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-            >
-              {blockMediaMutation.isPending ? 'Blocking...' : 'Block Media'}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-
-      {/* Age Restrict Media Confirmation Dialog */}
-      <AlertDialog open={confirmAgeRestrict} onOpenChange={(open) => { setConfirmAgeRestrict(open); if (!open) { setActionNote(''); setActionReason(defaultReason); } }}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Age-Restrict Media?</AlertDialogTitle>
-            <AlertDialogDescription asChild>
-              <div>
-                <p>This will age-restrict {mediaHashes.length} media file(s). The content owner can still view it, but it will be hidden from the public feed and age-gated in supporting clients. This can be reversed.</p>
-                <div className="mt-2 space-y-1">
-                  {mediaHashes.map(hash => (
-                    <CopyableId
-                      key={hash}
-                      value={hash}
-                      type="hash"
-                      truncateStart={16}
-                      truncateEnd={8}
-                      size="xs"
-                    />
-                  ))}
-                </div>
-
-                {reasonSelector}
-              </div>
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={ageRestrictMediaMutation.isPending}>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => {
-                ageRestrictMediaMutation.mutate({
-                  hashes: mediaHashes,
-                  reason: buildReasonString(actionReason, actionNote),
-                });
-              }}
-              disabled={ageRestrictMediaMutation.isPending}
-              className="bg-orange-600 text-white hover:bg-orange-700"
-            >
-              {ageRestrictMediaMutation.isPending ? 'Restricting...' : 'Age Restrict'}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-
-      {/* Block Media AND Delete Event Combined Confirmation Dialog */}
-      <AlertDialog open={confirmBlockAndDelete} onOpenChange={(open) => { setConfirmBlockAndDelete(open); if (!open) { setActionNote(''); setActionReason(defaultReason); } }}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Remove Content?</AlertDialogTitle>
-            <AlertDialogDescription asChild>
-              <div className="space-y-2">
-                <p>This will:</p>
-                <ul className="list-disc list-inside space-y-1 text-sm">
-                  <li>Ban {mediaHashes.length} media file(s)</li>
-                  <li>Delete the event from the relay</li>
-                </ul>
-
-                {reasonSelector}
-              </div>
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={blockAndDeleteMutation.isPending}>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => {
-                if (context.target?.type === 'event' && context.target.value) {
-                  blockAndDeleteMutation.mutate({
-                    eventId: context.target.value,
-                    hashes: mediaHashes,
-                    reason: buildReasonString(actionReason, actionNote),
-                  });
-                }
-              }}
-              disabled={blockAndDeleteMutation.isPending}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-            >
-              {blockAndDeleteMutation.isPending ? 'Removing...' : 'Remove Content'}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-
       {/* Dismiss Report Dialog */}
       <AlertDialog open={confirmDismiss} onOpenChange={(open) => { setConfirmDismiss(open); if (!open) setDismissReason(''); }}>
         <AlertDialogContent>
@@ -1276,42 +410,6 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
       {/* Scrollable content area */}
       <ScrollArea className="flex-1 min-h-0 [&>div>div]:!block">
         <div className="p-4 space-y-4 overflow-x-hidden max-w-full">
-          {/* Verification Status - for just-completed actions */}
-          {(isVerifying || verificationResult) && (
-            <div
-              className={`p-3 rounded-lg flex items-center gap-3 ${
-                verificationResult?.success
-                  ? "bg-green-100 dark:bg-green-950/50 border border-green-300 dark:border-green-800"
-                  : "bg-red-100 dark:bg-red-950/50 border border-red-300 dark:border-red-800"
-              }`}
-            >
-              {isVerifying ? (
-                <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-              ) : verificationResult?.success ? (
-                <CheckCircle className="h-5 w-5 text-green-600" />
-              ) : (
-                <XCircle className="h-5 w-5 text-red-600" />
-              )}
-              <div className="flex-1">
-                <p className={`text-sm font-medium ${verificationResult?.success ? "text-green-800 dark:text-green-300" : "text-red-800 dark:text-red-300"}`}>
-                  {isVerifying
-                    ? "Verifying moderation action..."
-                    : verificationResult?.message}
-                </p>
-              </div>
-              {verificationResult && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setVerificationResult(null)}
-                  className="h-6 px-2"
-                >
-                  Dismiss
-                </Button>
-              )}
-            </div>
-          )}
-
           {/* Pending Review Banner - for auto-hidden items awaiting human review */}
           {isPendingReview && (
             <div className="bg-orange-100 dark:bg-orange-950/50 border border-orange-300 dark:border-orange-800 rounded-lg p-3">
@@ -1690,20 +788,26 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             stats={context.userStats}
             isLoading={false}
             isFunnelcakeUser={context.reportedUser.isFunnelcakeUser}
-            onDeleteEvent={(eventId) => {
-              deleteMutation.mutate({ eventId, reason: 'Deleted from report review' }, {
-                onSuccess: (deletedId) => {
-                  toast({
-                    title: "Event deleted",
-                    description: "The event has been removed from the relay.",
-                    action: (
-                      <ToastAction altText="Undo delete" onClick={() => restoreEventMutation.mutate({ eventId: deletedId })}>
-                        Undo
-                      </ToastAction>
-                    ),
-                  });
-                },
-              });
+            onDeleteEvent={async (eventId) => {
+              try {
+                await deleteEvent(eventId, 'Deleted from report review');
+                toast({
+                  title: "Event deleted",
+                  description: "The event has been removed from the relay.",
+                  action: (
+                    <ToastAction altText="Undo delete" onClick={async () => {
+                      await callRelayRpc('allowevent', [eventId]);
+                      handleActionComplete();
+                      toast({ title: "Event restored" });
+                    }}>
+                      Undo
+                    </ToastAction>
+                  ),
+                });
+                handleActionComplete();
+              } catch (error) {
+                toast({ title: "Failed to delete event", description: String(error), variant: "destructive" });
+              }
             }}
           />
           </>
@@ -1954,197 +1058,31 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
               </Tooltip>
             </div>
 
-            {/* Primary enforcement action - combined when media present and not already moderated */}
-            {context.target?.type === 'event' && mediaHashes.length > 0 && !isEventDeleted && !mediaStatus.hasModeratedMedia && (
-              <div>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      variant="destructive"
-                      size="lg"
-                      className="w-full"
-                      onClick={() => setConfirmBlockAndDelete(true)}
-                      disabled={blockAndDeleteMutation.isPending || mediaStatus.isLoading || isVerifying}
-                    >
-                      <Trash2 className="h-4 w-4 mr-2" />
-                      {blockAndDeleteMutation.isPending ? 'Removing...' : isVerifying ? 'Verifying...' : mediaStatus.isLoading ? 'Checking media...' : `Block Media & Ban Event`}
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent side="bottom" className="max-w-xs">
-                    <p>Block all media files (images/videos) AND ban the event from the relay. The media will be blocked by hash so re-uploads are prevented. Both actions can be reversed.</p>
-                  </TooltipContent>
-                </Tooltip>
-              </div>
+            {/* Event & media actions */}
+            {context.target?.type === 'event' && context.target.value && (
+              <EventActions
+                eventId={context.target.value}
+                pubkey={context.reportedUser.pubkey || ''}
+                mediaHashes={mediaHashes}
+                isEventBanned={isEventDeleted ?? undefined}
+                hasBlockedMedia={mediaStatus.hasBlockedMedia}
+                hasRestrictedMedia={mediaStatus.hasRestrictedMedia}
+                onActionComplete={handleActionComplete}
+              />
             )}
 
-            {/* Secondary enforcement actions */}
+            {/* User actions */}
+            {context.reportedUser.pubkey && (
+              <UserActions
+                pubkey={context.reportedUser.pubkey}
+                context="report"
+                isBanned={isUserBanned ?? undefined}
+                onActionComplete={handleActionComplete}
+              />
+            )}
+
+            {/* Report-specific actions */}
             <div className="flex flex-wrap gap-2">
-              {context.target?.type === 'event' && (
-                isEventDeleted ? (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        variant="outline"
-                        onClick={() => {
-                          if (context.target?.type === 'event' && context.target.value) {
-                            restoreEventMutation.mutate({ eventId: context.target.value });
-                          }
-                        }}
-                        disabled={restoreEventMutation.isPending}
-                      >
-                        <Undo2 className="h-4 w-4 mr-1" />
-                        {restoreEventMutation.isPending ? 'Restoring...' : 'Restore Event'}
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent side="bottom" className="max-w-xs">
-                      <p>Restore this event to the relay. This reverses the ban and allows the content to be served again.</p>
-                    </TooltipContent>
-                  </Tooltip>
-                ) : (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        variant="outline"
-                        onClick={() => setConfirmDelete(true)}
-                        disabled={deleteMutation.isPending}
-                      >
-                        <ShieldX className="h-4 w-4 mr-1" />
-                        Ban Event
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent side="bottom" className="max-w-xs">
-                      <p>Ban this event from the relay. The event will no longer be served, but the user can still post new content. This can be reversed.</p>
-                    </TooltipContent>
-                  </Tooltip>
-                )
-              )}
-              {mediaHashes.length > 0 && mediaStatus.hasBlockedMedia && (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      variant="outline"
-                      className="border-green-500 text-green-600 hover:bg-green-50"
-                      onClick={() => {
-                        const blockedHashes = mediaStatus.results
-                          .filter(r => r.isBlocked)
-                          .map(r => r.hash);
-                        unblockMediaMutation.mutate({
-                          hashes: blockedHashes,
-                          reason: 'Unblocked by moderator',
-                        });
-                      }}
-                      disabled={unblockMediaMutation.isPending || mediaStatus.isLoading}
-                    >
-                      <Unlock className="h-4 w-4 mr-1" />
-                      {unblockMediaMutation.isPending ? 'Unblocking...' : `Unblock Media (${mediaStatus.blockedCount})`}
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent side="bottom" className="max-w-xs">
-                    <p>Unblock previously blocked media files. They will be allowed to be served again.</p>
-                  </TooltipContent>
-                </Tooltip>
-              )}
-              {mediaHashes.length > 0 && mediaStatus.hasRestrictedMedia && (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      variant="outline"
-                      className="border-green-500 text-green-600 hover:bg-green-50"
-                      onClick={() => {
-                        const restrictedHashes = mediaStatus.results
-                          .filter(r => r.isRestricted)
-                          .map(r => r.hash);
-                        unblockMediaMutation.mutate({
-                          hashes: restrictedHashes,
-                          reason: 'Restriction removed by moderator',
-                          logAction: 'unrestrict_media',
-                        });
-                      }}
-                      disabled={unblockMediaMutation.isPending || mediaStatus.isLoading}
-                    >
-                      <Unlock className="h-4 w-4 mr-1" />
-                      {unblockMediaMutation.isPending ? 'Removing...' : `Remove Restriction (${mediaStatus.restrictedCount})`}
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent side="bottom" className="max-w-xs">
-                    <p>Remove age restriction from media files. They will be publicly accessible again.</p>
-                  </TooltipContent>
-                </Tooltip>
-              )}
-              {mediaHashes.length > 0 && !mediaStatus.hasModeratedMedia && (
-                <>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        variant="outline"
-                        onClick={() => setConfirmBlockMedia(true)}
-                        disabled={blockMediaMutation.isPending || mediaStatus.isLoading}
-                      >
-                        <Video className="h-4 w-4 mr-1" />
-                        {mediaStatus.isLoading ? 'Checking...' : `Block Media (${mediaHashes.length})`}
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent side="bottom" className="max-w-xs">
-                      <p>Block media files by their hash. They won't be served and re-uploads of the same file will be blocked. This can be reversed.</p>
-                    </TooltipContent>
-                  </Tooltip>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        variant="outline"
-                        className="border-orange-500 text-orange-600 hover:bg-orange-50"
-                        onClick={() => setConfirmAgeRestrict(true)}
-                        disabled={ageRestrictMediaMutation.isPending || mediaStatus.isLoading}
-                      >
-                        <ShieldAlert className="h-4 w-4 mr-1" />
-                        {mediaStatus.isLoading ? 'Checking...' : `Age Restrict (${mediaHashes.length})`}
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent side="bottom" className="max-w-xs">
-                      <p>Age-restrict media files. The owner can still view them, but they will be hidden from the public feed and age-gated. This can be reversed.</p>
-                    </TooltipContent>
-                  </Tooltip>
-                </>
-              )}
-              {context.reportedUser.pubkey && (
-                isUserBanned ? (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        variant="outline"
-                        onClick={() => {
-                          if (context.reportedUser.pubkey) {
-                            unbanUserMutation.mutate({ pubkey: context.reportedUser.pubkey });
-                          }
-                        }}
-                        disabled={unbanUserMutation.isPending}
-                      >
-                        <UserCheck className="h-4 w-4 mr-1" />
-                        {unbanUserMutation.isPending ? 'Unbanning...' : 'Unban User'}
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent side="bottom" className="max-w-xs">
-                      <p>Unban this user from the relay. They will be able to post new content again. This reverses the ban.</p>
-                    </TooltipContent>
-                  </Tooltip>
-                ) : (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        variant="destructive"
-                        onClick={() => setConfirmBan(true)}
-                        disabled={banMutation.isPending}
-                      >
-                        <UserX className="h-4 w-4 mr-1" />
-                        Ban User
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent side="bottom" className="max-w-xs">
-                      <p>Ban this user from the relay. They won't be able to post new content. Optionally delete all their events and block their media. This can be reversed.</p>
-                    </TooltipContent>
-                  </Tooltip>
-                )
-              )}
               {context.reportedUser.pubkey && (
                 <Tooltip>
                   <TooltipTrigger asChild>
@@ -2153,12 +1091,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                         pubkey={context.reportedUser.pubkey}
                         logDecision={logDecision}
                         reportId={report?.id}
-                        onComplete={() => {
-                          queryClient.invalidateQueries({ queryKey: ['user-stats', context.reportedUser.pubkey] });
-                          queryClient.invalidateQueries({ queryKey: ['decisions'] });
-                          decisionLog.refetch();
-                          moderationStatus.recheck();
-                        }}
+                        onComplete={handleActionComplete}
                       />
                     </div>
                   </TooltipTrigger>

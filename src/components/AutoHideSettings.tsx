@@ -10,12 +10,13 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { useAppContext } from "@/hooks/useAppContext";
 import { useToast } from "@/hooks/useToast";
 import { getApiHeaders } from "@/lib/adminApi";
-import { Shield, X, Plus, Save, AlertTriangle } from "lucide-react";
+import { Shield, X, Plus, Save, AlertTriangle, Clock } from "lucide-react";
 import {
   isImmediateAutoHideTier,
   type AutoHideConfig,
   type AutoHideTier,
 } from "../../shared/autohide";
+import { useAdminApi } from "@/hooks/useAdminApi";
 
 function ChipList({
   items,
@@ -274,6 +275,54 @@ export function AutoHideSettings() {
           <Save className="h-4 w-4 mr-2" />
           {mutation.isPending ? "Saving..." : "Save Configuration"}
         </Button>
+      </CardContent>
+    </Card>
+  );
+}
+
+export function AgeReviewSettings() {
+  const api = useAdminApi();
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+
+  const { data: ageReviewConfig, isLoading } = useQuery({
+    queryKey: ['age-review-config'],
+    queryFn: () => api.getAgeReviewConfig(),
+  });
+
+  const updateMutation = useMutation({
+    mutationFn: (config: { auto_delete_on_deny: boolean }) => api.updateAgeReviewConfig(config),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['age-review-config'] });
+      toast({ title: 'Age review configuration updated' });
+    },
+    onError: (error: Error) => {
+      toast({ title: 'Failed to update config', description: error.message, variant: 'destructive' });
+    },
+  });
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Clock className="h-4 w-4" />
+          Age Review Configuration
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <Label>Auto-delete on deny/expire</Label>
+            <p className="text-xs text-muted-foreground">
+              Automatically delete all events and media when an age review case is denied or expires.
+            </p>
+          </div>
+          <Switch
+            checked={ageReviewConfig?.auto_delete_on_deny ?? true}
+            onCheckedChange={(checked) => updateMutation.mutate({ auto_delete_on_deny: checked })}
+            disabled={isLoading || updateMutation.isPending}
+          />
+        </div>
       </CardContent>
     </Card>
   );

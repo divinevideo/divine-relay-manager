@@ -1,6 +1,8 @@
 import { useState, useEffect } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAdminApi } from "@/hooks/useAdminApi";
+import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
+import { UserActions } from "@/components/UserActions";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -98,6 +100,11 @@ export function AgeReviewDetail({ caseData: c }: Props) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['age-review-cases'] });
     },
+  });
+
+  const { data: ageReviewConfig } = useQuery({
+    queryKey: ['age-review-config'],
+    queryFn: () => api.getAgeReviewConfig(),
   });
 
   return (
@@ -324,19 +331,39 @@ export function AgeReviewDetail({ caseData: c }: Props) {
                   <CheckCircle className="h-3 w-3 mr-1" />
                   Clear
                 </Button>
-                <Button
-                  size="sm"
-                  variant="destructive"
-                  className="h-7 text-xs"
-                  disabled={updateCase.isPending}
-                  onClick={() => updateCase.mutate({
-                    state: 'denied_closed',
-                    resolution_note: resolutionNote || undefined,
-                  })}
-                >
-                  <XCircle className="h-3 w-3 mr-1" />
-                  Deny &amp; Close
-                </Button>
+                {ageReviewConfig?.auto_delete_on_deny ? (
+                  <DeleteConfirmDialog
+                    trigger={
+                      <Button size="sm" variant="destructive" className="h-7 text-xs" disabled={updateCase.isPending}>
+                        <XCircle className="h-3 w-3 mr-1" />
+                        Deny &amp; Delete
+                      </Button>
+                    }
+                    title="Deny & Delete Content"
+                    summary="Denying this case will permanently delete all events and media for this user. This cannot be undone."
+                    onConfirm={async () => {
+                      await updateCase.mutateAsync({
+                        state: 'denied_closed',
+                        resolution_note: resolutionNote || undefined,
+                      });
+                    }}
+                    isPending={updateCase.isPending}
+                  />
+                ) : (
+                  <Button
+                    size="sm"
+                    variant="destructive"
+                    className="h-7 text-xs"
+                    disabled={updateCase.isPending}
+                    onClick={() => updateCase.mutate({
+                      state: 'denied_closed',
+                      resolution_note: resolutionNote || undefined,
+                    })}
+                  >
+                    <XCircle className="h-3 w-3 mr-1" />
+                    Deny &amp; Close
+                  </Button>
+                )}
               </div>
 
               {updateCase.isPending && (
@@ -362,6 +389,17 @@ export function AgeReviewDetail({ caseData: c }: Props) {
               <p className="text-sm">{c.resolution_note}</p>
             </div>
           </>
+        )}
+
+        {isTerminal && c.state === 'denied_closed' && !ageReviewConfig?.auto_delete_on_deny && (
+          <div className="border-t pt-4 mt-4">
+            <p className="text-xs text-muted-foreground mb-2">Auto-delete is disabled. You can manually delete content:</p>
+            <UserActions
+              pubkey={c.pubkey}
+              context="age-review"
+              onActionComplete={() => queryClient.invalidateQueries({ queryKey: ['age-review-cases'] })}
+            />
+          </div>
         )}
 
       </div>

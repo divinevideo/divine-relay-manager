@@ -9,6 +9,7 @@ import {
   banEvent,
   banPubkey,
   unbanPubkey,
+  publishKind5Deletion,
   type SecretStoreSecret,
 } from './nip86';
 import { ensureSchema } from './db';
@@ -22,7 +23,11 @@ import {
   handleParentContact,
   handleAgeReviewReplyWebhook,
   checkAgeReviewDeadlines,
+  getAgeReviewConfig,
+  updateAgeReviewConfig,
 } from './age-review';
+import { handleBulkModerate } from './bulk-moderate';
+import { ensureZendeskTable, addZendeskInternalNote, syncZendeskAfterAction } from './zendesk-sync';
 
 let schemaReady = false;
 async function ensureSchemaOnce(db: D1Database): Promise<void> {
@@ -367,6 +372,18 @@ export default {
         return handleModerateMedia(request, env, corsHeaders);
       }
 
+      if (path === '/api/publish-deletion' && request.method === 'POST') {
+        const body = await request.json() as { eventId?: string; reason?: string };
+        if (!body.eventId) {
+          return jsonResponse({ success: false, error: 'Missing eventId' }, 400, corsHeaders);
+        }
+        const result = await publishKind5Deletion(body.eventId, body.reason || 'Deleted by moderator', env);
+        if (!result.success) {
+          return jsonResponse({ success: false, error: result.error || 'Failed to publish deletion' }, 500, corsHeaders);
+        }
+        return jsonResponse({ success: true }, 200, corsHeaders);
+      }
+
       if (path === '/api/decisions' && request.method === 'POST') {
         return handleLogDecision(request, env, corsHeaders);
       }
@@ -429,6 +446,33 @@ export default {
           return jsonResponse({ success: false, error: result.error }, 502, corsHeaders);
         }
         return jsonResponse({ success: true, events: result.events }, 200, corsHeaders);
+      }
+
+      // Bulk moderation (server-side iteration for batch operations)
+      if (path === '/api/bulk-moderate' && request.method === 'POST') {
+        if (env.DB) await ensureSchemaOnce(env.DB);
+        return handleBulkModerate(request, env, corsHeaders);
+      }
+
+      // Age review config
+      if (path === '/api/age-review/config' && request.method === 'GET') {
+        if (!env.DB) return jsonResponse({ success: false, error: 'Database not configured' }, 500, corsHeaders);
+        await ensureSchemaOnce(env.DB);
+        const config = await getAgeReviewConfig(env.DB);
+        return new Response(JSON.stringify(config), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders },
+        });
+      }
+      if (path === '/api/age-review/config' && request.method === 'PUT') {
+        if (!env.DB) return jsonResponse({ success: false, error: 'Database not configured' }, 500, corsHeaders);
+        await ensureSchemaOnce(env.DB);
+        const configBody = await request.json() as Record<string, unknown>;
+        const config = await updateAgeReviewConfig(env.DB, configBody);
+        return new Response(JSON.stringify(config), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders },
+        });
       }
 
       // Age review case management
@@ -946,42 +990,6 @@ async function markHumanReviewed(db: D1Database, targetType: string, targetId: s
   }
 }
 
-// Ensure zendesk_tickets table exists for tracking Zendesk ↔ Nostr mappings
-async function ensureZendeskTable(db: D1Database): Promise<void> {
-  await db.prepare(`
-    CREATE TABLE IF NOT EXISTS zendesk_tickets (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      ticket_id INTEGER NOT NULL UNIQUE,
-      event_id TEXT,
-      author_pubkey TEXT,
-      violation_type TEXT,
-      status TEXT DEFAULT 'open',
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-      resolved_at TEXT,
-      resolution_action TEXT,
-      resolution_moderator TEXT
-    )
-  `).run();
-
-  try {
-    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_zendesk_event ON zendesk_tickets(event_id)`).run();
-  } catch {
-    // Index might already exist
-  }
-
-  try {
-    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_zendesk_pubkey ON zendesk_tickets(author_pubkey)`).run();
-  } catch {
-    // Index might already exist
-  }
-
-  try {
-    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_zendesk_status ON zendesk_tickets(status)`).run();
-  } catch {
-    // Index might already exist
-  }
-}
-
 async function handleLogDecision(
   request: Request,
   env: Env,
@@ -1245,7 +1253,7 @@ async function handleModerateMedia(
   try {
     const body = await request.json() as {
       sha256: string;
-      action: 'SAFE' | 'REVIEW' | 'AGE_RESTRICTED' | 'PERMANENT_BAN';
+      action: 'SAFE' | 'REVIEW' | 'AGE_RESTRICTED' | 'PERMANENT_BAN' | 'DELETE';
       reason?: string;
     };
 
@@ -1712,65 +1720,6 @@ async function updateZendeskTicket(
 }
 
 // Add internal note to Zendesk ticket (simpler than updateZendeskTicket - just adds comment, optionally solves)
-async function addZendeskInternalNote(
-  ticketId: number,
-  note: string,
-  env: Env,
-  solve: boolean = false
-): Promise<void> {
-  if (!env.ZENDESK_SUBDOMAIN || !env.ZENDESK_API_TOKEN || !env.ZENDESK_EMAIL) {
-    console.warn('[addZendeskInternalNote] Missing Zendesk credentials, skipping');
-    return;
-  }
-
-  try {
-    const auth = btoa(`${env.ZENDESK_EMAIL}/token:${env.ZENDESK_API_TOKEN}`);
-    const url = `https://${env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets/${ticketId}`;
-
-    const payload: { ticket: { comment: { body: string; public: boolean }; status?: string; assignee_email?: string; custom_fields?: Array<{ id: number; value: string }> } } = {
-      ticket: {
-        comment: {
-          body: note,
-          public: false,
-        },
-      },
-    };
-
-    if (solve) {
-      payload.ticket.status = 'solved';
-      // Zendesk requires an assignee to solve a ticket (system rule, not enforced via API error).
-      // Without this, the comment is added but the status change is silently ignored.
-      payload.ticket.assignee_email = env.ZENDESK_EMAIL;
-      // Category and Issue are required fields. These values are set unconditionally. Safe
-      // because auto-categorize triggers fire at ticket creation, and this solve call runs
-      // later only for report types where triggers didn't set specific values (e.g., "other"
-      // reports with the previously misconfigured trigger).
-      if (env.ZENDESK_FIELD_CATEGORY && env.ZENDESK_FIELD_ISSUE) {
-        payload.ticket.custom_fields = [
-          { id: parseInt(env.ZENDESK_FIELD_CATEGORY, 10), value: 'trust___safety' },
-          { id: parseInt(env.ZENDESK_FIELD_ISSUE, 10), value: 'other_content_report' },
-        ];
-      }
-    }
-
-    const response = await fetch(url, {
-      method: 'PUT',
-      headers: {
-        'Authorization': `Basic ${auth}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(payload),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`[addZendeskInternalNote] Failed: ${response.status} - ${errorText}`);
-    }
-  } catch (error) {
-    console.error('[addZendeskInternalNote] Error:', error);
-  }
-}
-
 // Proxy handler for blocked media preview (Blossom admin bypass)
 // Moderators need to see media that Blossom blocks (Banned/Restricted status returns 404 on CDN).
 // This endpoint authenticates against Blossom's admin bypass and streams the content through.
@@ -2638,85 +2587,6 @@ async function handleMobileJwt(
 }
 
 // Sync Zendesk ticket after moderation action in relay-manager
-async function syncZendeskAfterAction(
-  env: Env,
-  action: string,
-  targetType: 'event' | 'pubkey' | 'media',
-  targetId: string,
-  moderator: string
-): Promise<void> {
-  console.log('[syncZendeskAfterAction] Called with:', { action, targetType, targetId, moderator });
-
-  if (!env.DB) {
-    console.log('[syncZendeskAfterAction] No DB configured, skipping');
-    return;
-  }
-
-  try {
-    await ensureZendeskTable(env.DB);
-
-    // Find linked open ticket
-    let linked: { ticket_id: number } | null = null;
-
-    if (targetType === 'event') {
-      console.log('[syncZendeskAfterAction] Querying for event_id:', targetId);
-      linked = await env.DB.prepare(
-        `SELECT ticket_id FROM zendesk_tickets WHERE event_id = ? AND status = 'open'`
-      ).bind(targetId).first();
-    } else if (targetType === 'pubkey') {
-      console.log('[syncZendeskAfterAction] Querying for author_pubkey:', targetId);
-      linked = await env.DB.prepare(
-        `SELECT ticket_id FROM zendesk_tickets WHERE author_pubkey = ? AND status = 'open'`
-      ).bind(targetId).first();
-    }
-
-    console.log('[syncZendeskAfterAction] Query result:', linked);
-
-    if (!linked?.ticket_id) {
-      console.log('[syncZendeskAfterAction] No linked open ticket found, skipping');
-      return;
-    }
-
-    // Determine if this is a resolution action (should solve ticket)
-    // Note: ban_user is Zendesk webhook naming, ban_pubkey is UI naming - same effect
-    const resolutionActions = ['reviewed', 'dismissed', 'no-action', 'false-positive', 'delete_event', 'ban_pubkey', 'ban_user', 'auto_hide_confirmed', 'auto_hide_restored'];
-    const isResolution = resolutionActions.includes(action);
-
-    // Build note
-    const actionDisplay = action.replace(/_/g, ' ').replace(/([A-Z])/g, ' $1').trim();
-    const timestamp = new Date().toISOString();
-
-    const note = [
-      '📋 **Moderation Action Taken**',
-      '',
-      `**Action:** ${actionDisplay}`,
-      `**Target:** \`${targetId}\``,
-      `**Moderator:** ${moderator}`,
-      `**Time:** ${timestamp}`,
-    ].join('\n');
-
-    // Add note (and solve if resolution action)
-    await addZendeskInternalNote(linked.ticket_id, note, env, isResolution);
-
-    // Update our tracking if resolved
-    if (isResolution) {
-      await env.DB.prepare(`
-        UPDATE zendesk_tickets
-        SET status = 'resolved',
-            resolved_at = CURRENT_TIMESTAMP,
-            resolution_action = ?,
-            resolution_moderator = ?
-        WHERE ticket_id = ?
-      `).bind(action, moderator, linked.ticket_id).run();
-    }
-
-    console.log(`[syncZendeskAfterAction] Updated ticket #${linked.ticket_id} with action: ${action}`);
-  } catch (error) {
-    console.error('[syncZendeskAfterAction] Error:', error);
-    // Don't throw - Zendesk sync failure shouldn't break moderation
-  }
-}
-
 // Get context for Zendesk sidebar app
 async function handleZendeskContext(
   request: Request,
