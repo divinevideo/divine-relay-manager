@@ -1417,4 +1417,111 @@ describe('ReportWatcher', () => {
       expect(body.error).toContain('trusted');
     });
   });
+
+  describe('age review case creation', () => {
+    let mockDbRun: ReturnType<typeof vi.fn>;
+    let mockDbFirst: ReturnType<typeof vi.fn>;
+
+    beforeEach(async () => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ result: true }),
+      }));
+
+      mockDbRun = vi.fn().mockResolvedValue({ success: true });
+      mockDbFirst = vi.fn().mockResolvedValue(null);
+      mockState = createMockState();
+      mockEnv = createMockEnv();
+      const mockBound = { run: mockDbRun, first: mockDbFirst };
+      mockEnv.DB = {
+        prepare: vi.fn().mockReturnValue({
+          run: mockDbRun,
+          first: mockDbFirst,
+          bind: vi.fn().mockReturnValue(mockBound),
+        }),
+      } as unknown as D1Database;
+      watcher = new ReportWatcher(mockState, mockEnv);
+    });
+
+    function makeUnderageReport(category: string, reportedPubkey: string): ReportEvent {
+      return {
+        id: `report-${category}`,
+        pubkey: 'reporter_pubkey_abc',
+        kind: 1984,
+        content: 'Under-16 report',
+        tags: [
+          ['p', reportedPubkey, category],
+        ],
+        created_at: Math.floor(Date.now() / 1000),
+      };
+    }
+
+    it('creates age review case for NS-underageUser reports', async () => {
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const ws = getLastMockWebSocket();
+      ws!.simulateMessage(JSON.stringify([
+        'EVENT', 'auto-hide-reports',
+        makeUnderageReport('NS-underageUser', 'aabbccdd'.repeat(8)),
+      ]));
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      const insertCalls = (mockEnv.DB!.prepare as ReturnType<typeof vi.fn>).mock.calls.filter(
+        (c: string[]) => c[0]?.includes('INSERT INTO age_review_cases')
+      );
+      expect(insertCalls.length).toBe(1);
+    });
+
+    it('creates age review case for kebab-case NS-underage-user reports', async () => {
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const ws = getLastMockWebSocket();
+      ws!.simulateMessage(JSON.stringify([
+        'EVENT', 'auto-hide-reports',
+        makeUnderageReport('NS-underage-user', 'aabbccdd'.repeat(8)),
+      ]));
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      const insertCalls = (mockEnv.DB!.prepare as ReturnType<typeof vi.fn>).mock.calls.filter(
+        (c: string[]) => c[0]?.includes('INSERT INTO age_review_cases')
+      );
+      expect(insertCalls.length).toBe(1);
+    });
+
+    it('creates age review case for non-prefixed underageUser reports', async () => {
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const ws = getLastMockWebSocket();
+      ws!.simulateMessage(JSON.stringify([
+        'EVENT', 'auto-hide-reports',
+        makeUnderageReport('underageUser', 'aabbccdd'.repeat(8)),
+      ]));
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      const insertCalls = (mockEnv.DB!.prepare as ReturnType<typeof vi.fn>).mock.calls.filter(
+        (c: string[]) => c[0]?.includes('INSERT INTO age_review_cases')
+      );
+      expect(insertCalls.length).toBe(1);
+    });
+
+    it('does not create age review case for non-underage categories', async () => {
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const ws = getLastMockWebSocket();
+      ws!.simulateMessage(JSON.stringify([
+        'EVENT', 'auto-hide-reports',
+        makeUnderageReport('NS-spam', 'aabbccdd'.repeat(8)),
+      ]));
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      const insertCalls = (mockEnv.DB!.prepare as ReturnType<typeof vi.fn>).mock.calls.filter(
+        (c: string[]) => c[0]?.includes('INSERT INTO age_review_cases')
+      );
+      expect(insertCalls.length).toBe(0);
+    });
+  });
 });

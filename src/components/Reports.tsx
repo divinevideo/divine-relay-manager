@@ -43,7 +43,7 @@ import {
 import { nip19 } from "nostr-tools";
 import { ReportDetail } from "@/components/ReportDetail";
 import { useAdminApi } from "@/hooks/useAdminApi";
-import { AUTO_HIDE_ACTIONS, CATEGORY_LABELS } from "@/lib/constants";
+import { AUTO_HIDE_ACTIONS, CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES } from "@/lib/constants";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
 import type { NostrEvent } from "@nostrify/nostrify";
@@ -59,9 +59,6 @@ const SORT_OPTIONS: { value: SortOption; label: string }[] = [
   { value: 'category', label: 'By Category' },
 ];
 
-// High-priority categories that need immediate attention (CSAM, illegal content)
-// Includes both NIP-56 standard names and Divine client variations
-const HIGH_PRIORITY_CATEGORIES = ['sexual_minors', 'csam', 'NS-csam', 'nonconsensual_sexual_content', 'terrorism_extremism', 'credible_threats'];
 const MEDIUM_PRIORITY_CATEGORIES = ['doxxing_pii', 'malware_scam', 'illegal_goods'];
 
 // Category priority for sorting

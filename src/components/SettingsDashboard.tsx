@@ -1,4 +1,4 @@
-// ABOUTME: Read-only settings dashboard showing relay configuration, NIP-11 metadata, and NIP-86 status
+// ABOUTME: Settings dashboard with auto-hide config, age review config, relay status, and NIP-11/NIP-86 metadata
 // ABOUTME: Environment-aware — re-fetches all data when the environment selector changes
 
 import { useQuery } from "@tanstack/react-query";
@@ -267,12 +267,6 @@ export function SettingsDashboard() {
   return (
     <ScrollArea className="h-full">
       <div className="space-y-6 pb-8">
-
-        <Alert>
-          <AlertDescription className="text-sm text-muted-foreground">
-            Preview — this dashboard is read-only for now.
-          </AlertDescription>
-        </Alert>
 
         <AutoHideSettings />
         <AgeReviewSettings />

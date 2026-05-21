@@ -1,4 +1,5 @@
 import { getEnvironmentByApiUrl } from "@/lib/environments";
+import { UNDERAGE_CATEGORIES, CHILD_SAFETY_CATEGORIES } from "../../shared/categories";
 export { AUTO_HIDE_ACTION, AUTO_HIDE_ACTIONS, type AutoHideAction } from "../../shared/autohide";
 
 // ABOUTME: Shared constants for moderation categories and labels
@@ -50,8 +51,14 @@ export const CATEGORY_LABELS: Record<string, string> = {
   'false-info': 'Misinformation',
   'falseInformation': 'Misinformation',
   'other': 'Other',
-  'NS-underageUser': 'Under 16',
   'NS-childSafety': 'Child Safety',
+  'NS-child-safety': 'Child Safety',
+  'NS-underageUser': 'Under 16',
+  'NS-underage-user': 'Under 16',
+  'childSafety': 'Child Safety',
+  'child-safety': 'Child Safety',
+  'underageUser': 'Under 16',
+  'underage-user': 'Under 16',
 };
 
 export const RESOLUTION_STATUSES = ['reviewed', 'dismissed', 'no-action', 'false-positive'] as const;
@@ -61,7 +68,8 @@ export type ResolutionStatus = typeof RESOLUTION_STATUSES[number];
 export const HIGH_PRIORITY_CATEGORIES = [
   'sexual_minors', 'csam', 'NS-csam',
   'nonconsensual_sexual_content', 'terrorism_extremism', 'credible_threats',
-  'NS-underageUser', 'NS-childSafety',
+  ...CHILD_SAFETY_CATEGORIES,
+  ...UNDERAGE_CATEGORIES,
 ];
 
 // Helper to get label with fallback
