@@ -3,13 +3,14 @@ import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useToast } from '@/hooks/useToast';
 import { useAdminApi } from '@/hooks/useAdminApi';
-import { DeleteConfirmDialog } from './DeleteConfirmDialog';
-import { UserX, UserCheck, ShieldAlert, Trash2 } from 'lucide-react';
+import { ConfirmDialog } from './ConfirmDialog';
+import { UserX, UserCheck, ShieldAlert, Trash2, Pause, Play } from 'lucide-react';
 
 interface UserActionsProps {
   pubkey: string;
   context?: 'report' | 'age-review' | 'users';
   isBanned?: boolean;
+  isSuspended?: boolean;
   onActionComplete?: () => void;
 }
 
@@ -17,11 +18,50 @@ export function UserActions({
   pubkey,
   context = 'users',
   isBanned = false,
+  isSuspended = false,
   onActionComplete,
 }: UserActionsProps) {
   const { toast } = useToast();
   const api = useAdminApi();
   const showBulkActions = context !== 'age-review';
+
+  const suspendUserMutation = useMutation({
+    mutationFn: async () => {
+      await api.suspendPubkey(pubkey, 'Suspended by moderator');
+      await api.logDecision({
+        targetType: 'pubkey',
+        targetId: pubkey,
+        action: 'suspend_user',
+        reason: 'Suspended by moderator',
+      });
+    },
+    onSuccess: () => {
+      toast({ title: 'User suspended' });
+      onActionComplete?.();
+    },
+    onError: (error: Error) => {
+      toast({ title: 'Failed to suspend user', description: error.message, variant: 'destructive' });
+    },
+  });
+
+  const unsuspendUserMutation = useMutation({
+    mutationFn: async () => {
+      await api.unsuspendPubkey(pubkey);
+      await api.logDecision({
+        targetType: 'pubkey',
+        targetId: pubkey,
+        action: 'unsuspend_user',
+        reason: 'Unsuspended by moderator',
+      });
+    },
+    onSuccess: () => {
+      toast({ title: 'User unsuspended' });
+      onActionComplete?.();
+    },
+    onError: (error: Error) => {
+      toast({ title: 'Failed to unsuspend user', description: error.message, variant: 'destructive' });
+    },
+  });
 
   const banUserMutation = useMutation({
     mutationFn: async () => {
@@ -101,7 +141,8 @@ export function UserActions({
     },
   });
 
-  const anyPending = banUserMutation.isPending || unbanUserMutation.isPending ||
+  const anyPending = suspendUserMutation.isPending || unsuspendUserMutation.isPending ||
+    banUserMutation.isPending || unbanUserMutation.isPending ||
     bulkAgeRestrictMutation.isPending || bulkDeleteMutation.isPending;
 
   return (
@@ -114,18 +155,49 @@ export function UserActions({
               {unbanUserMutation.isPending ? 'Unbanning...' : 'Unban User'}
             </Button>
           </TooltipTrigger>
-          <TooltipContent><p>Unban this user. They will be able to post again.</p></TooltipContent>
+          <TooltipContent><p>Unban this user. They can post new content, but previously purged content is not restored.</p></TooltipContent>
         </Tooltip>
       ) : (
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button variant="outline" className="border-red-500 text-red-600 hover:bg-red-50" onClick={() => banUserMutation.mutate()} disabled={anyPending}>
-              <UserX className="h-4 w-4 mr-1" />
-              {banUserMutation.isPending ? 'Banning...' : 'Ban User'}
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent><p>Ban this user from the relay. Can be reversed.</p></TooltipContent>
-        </Tooltip>
+        <>
+          {isSuspended ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="outline" className="border-green-500 text-green-600 hover:bg-green-50"
+                  onClick={() => unsuspendUserMutation.mutate()} disabled={anyPending}>
+                  <Play className="h-4 w-4 mr-1" />
+                  {unsuspendUserMutation.isPending ? 'Unsuspending...' : 'Unsuspend User'}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent><p>Unsuspend this user. Their content will be visible again.</p></TooltipContent>
+            </Tooltip>
+          ) : (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="outline" className="border-amber-500 text-amber-600 hover:bg-amber-50"
+                  onClick={() => suspendUserMutation.mutate()} disabled={anyPending}>
+                  <Pause className="h-4 w-4 mr-1" />
+                  {suspendUserMutation.isPending ? 'Suspending...' : 'Suspend User'}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent><p>Suspend this user. Hides their content without deleting it. Can be reversed.</p></TooltipContent>
+            </Tooltip>
+          )}
+
+          <ConfirmDialog
+            trigger={
+              <Button variant="destructive" disabled={anyPending}>
+                <UserX className="h-4 w-4 mr-1" />
+                Ban User
+              </Button>
+            }
+            title="Ban User"
+            summary="Permanently ban this user and purge all their content from the relay. This destroys events across 16+ tables and cannot be fully reversed — unbanning allows new posts but does not restore purged content."
+            confirmLabel="Ban User"
+            pendingLabel="Banning..."
+            onConfirm={async () => { await banUserMutation.mutateAsync(); }}
+            isPending={banUserMutation.isPending}
+          />
+        </>
       )}
 
       {showBulkActions && (
@@ -141,7 +213,7 @@ export function UserActions({
             <TooltipContent><p>Age-restrict all media from this user. Can be reversed.</p></TooltipContent>
           </Tooltip>
 
-          <DeleteConfirmDialog
+          <ConfirmDialog
             trigger={
               <Button variant="destructive" disabled={anyPending}>
                 <Trash2 className="h-4 w-4 mr-1" />
@@ -150,6 +222,8 @@ export function UserActions({
             }
             title="Delete All Content"
             summary="This will permanently delete all events and media from this user. This cannot be undone."
+            confirmLabel="Confirm Delete"
+            pendingLabel="Deleting..."
             onConfirm={async () => { await bulkDeleteMutation.mutateAsync(); }}
             isPending={bulkDeleteMutation.isPending}
           />

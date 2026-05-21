@@ -51,6 +51,12 @@ export function useAdminApi() {
       adminApi.listBannedPubkeys(apiUrl),
     listBannedEvents: () =>
       adminApi.listBannedEvents(apiUrl),
+    suspendPubkey: (pubkey: string, reason?: string) =>
+      adminApi.suspendPubkey(apiUrl, pubkey, reason),
+    unsuspendPubkey: (pubkey: string) =>
+      adminApi.unsuspendPubkey(apiUrl, pubkey),
+    listSuspendedPubkeys: () =>
+      adminApi.listSuspendedPubkeys(apiUrl),
 
     // Server-side relay queries (replaces browser WebSocket for freshness)
     fetchReports: () =>

@@ -222,6 +222,24 @@ export async function listBannedEvents(apiUrl: string): Promise<Array<{ id: stri
   return callRelayRpc<Array<{ id: string; reason?: string }>>(apiUrl, 'listbannedevents');
 }
 
+export async function suspendPubkey(apiUrl: string, pubkey: string, reason?: string): Promise<void> {
+  await callRelayRpc(apiUrl, 'suspendpubkey', [pubkey, reason || 'Suspended via admin']);
+}
+
+export async function unsuspendPubkey(apiUrl: string, pubkey: string): Promise<void> {
+  await callRelayRpc(apiUrl, 'unsuspendpubkey', [pubkey]);
+}
+
+export async function listSuspendedPubkeys(apiUrl: string): Promise<BannedPubkeyEntry[]> {
+  const result = await callRelayRpc<string[] | BannedPubkeyEntry[]>(apiUrl, 'listsuspendedpubkeys');
+  return result.map(item => {
+    if (typeof item === 'string') {
+      return { pubkey: item };
+    }
+    return item as BannedPubkeyEntry;
+  });
+}
+
 // Fetch reports via server-side relay query (replaces browser WebSocket)
 export async function fetchReports(apiUrl: string): Promise<NostrEvent[]> {
   const data = await apiRequest<{ success: boolean; events: NostrEvent[] }>(apiUrl, '/api/reports', 'GET');

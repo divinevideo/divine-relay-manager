@@ -331,6 +331,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     queryClient.invalidateQueries({ queryKey: ['banned-events'] });
     queryClient.invalidateQueries({ queryKey: ['banned-users'] });
     queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
+    queryClient.invalidateQueries({ queryKey: ['suspended-pubkeys'] });
     queryClient.invalidateQueries({ queryKey: ['decisions'] });
     queryClient.invalidateQueries({ queryKey: ['media-status'] });
     queryClient.invalidateQueries({ queryKey: ['user-stats', context.reportedUser.pubkey] });
@@ -1077,6 +1078,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                 pubkey={context.reportedUser.pubkey}
                 context="report"
                 isBanned={isUserBanned ?? undefined}
+                isSuspended={moderationStatus.isUserSuspended ?? undefined}
                 onActionComplete={handleActionComplete}
               />
             )}

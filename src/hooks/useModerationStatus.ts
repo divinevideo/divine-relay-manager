@@ -8,6 +8,8 @@ import { useAdminApi } from "@/hooks/useAdminApi";
 interface ModerationStatus {
   /** User's pubkey is in the relay's ban list */
   isUserBanned: boolean | null;
+  /** User's pubkey is in the relay's suspended list */
+  isUserSuspended: boolean | null;
   /** Event ID is in the relay's ban list */
   isEventBanned: boolean | null;
   /** Event is not queryable from the relay (deleted, banned, or never existed) */
@@ -28,7 +30,7 @@ export function useModerationStatus(
   /** Set true when the event could not be found via normal relay queries or banned event lookup */
   eventNotFound?: boolean,
 ): ModerationStatus {
-  const { listBannedPubkeys, listBannedEvents, verifyEventDeleted, verifyPubkeyBanned } = useAdminApi();
+  const { listBannedPubkeys, listBannedEvents, listSuspendedPubkeys, verifyEventDeleted, verifyPubkeyBanned } = useAdminApi();
   const [wsResult, setWsResult] = useState<{
     userBanned: boolean | null;
     eventGone: boolean | null;
@@ -66,14 +68,30 @@ export function useModerationStatus(
     staleTime: 30 * 1000,
   });
 
-  // Derive ban list status
+  const suspendedPubkeys = useQuery({
+    queryKey: ['suspended-pubkeys'],
+    queryFn: async () => {
+      try {
+        return await listSuspendedPubkeys();
+      } catch (error) {
+        console.warn('NIP-86 listsuspendedpubkeys failed:', error);
+        return [];
+      }
+    },
+    staleTime: 30 * 1000,
+  });
+
+  // Derive ban/suspend list status
   const isUserBannedFromList = pubkey
     ? bannedPubkeys.data?.some(entry => entry.pubkey === pubkey) ?? null
+    : null;
+  const isUserSuspendedFromList = pubkey
+    ? suspendedPubkeys.data?.some(entry => entry.pubkey === pubkey) ?? null
     : null;
   const isEventBannedFromList = eventId
     ? bannedEvents.data?.some(e => e.id === eventId) ?? null
     : null;
-  const banListsLoading = bannedPubkeys.isLoading || bannedEvents.isLoading;
+  const banListsLoading = bannedPubkeys.isLoading || bannedEvents.isLoading || suspendedPubkeys.isLoading;
 
   // WebSocket + fresh ban list verification
   const runCheck = useCallback(async () => {
@@ -99,14 +117,15 @@ export function useModerationStatus(
         isChecking: false,
       });
 
-      // Also refresh ban lists so badges stay in sync
+      // Also refresh ban/suspend lists so badges stay in sync
       bannedPubkeys.refetch();
       bannedEvents.refetch();
+      suspendedPubkeys.refetch();
     } catch (error) {
       console.error('Moderation status check failed:', error);
       setWsResult(prev => ({ ...prev, isChecking: false }));
     }
-  }, [pubkey, eventId, verifyPubkeyBanned, verifyEventDeleted, bannedPubkeys, bannedEvents]);
+  }, [pubkey, eventId, verifyPubkeyBanned, verifyEventDeleted, bannedPubkeys, bannedEvents, suspendedPubkeys]);
 
   // Auto-check: for events when not found, for users always (just a ban list refresh)
   useEffect(() => {
@@ -134,6 +153,7 @@ export function useModerationStatus(
   return {
     // User ban: WebSocket check result takes precedence over ban list
     isUserBanned: wsResult.userBanned ?? isUserBannedFromList,
+    isUserSuspended: isUserSuspendedFromList,
     // Event in ban list (separate from "gone" — banned events can be retrieved via admin API)
     isEventBanned: isEventBannedFromList,
     // Event gone from relay (WebSocket verified, or known from ban list)
