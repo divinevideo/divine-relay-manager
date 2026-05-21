@@ -15,6 +15,7 @@ import {
 import { ensureSchema } from './db';
 import { generatePreAuthToken, verifyPreAuthToken, base64UrlEncode } from './zendesk-preauth';
 import { deriveFunnelcakeApiUrl, proxyFunnelcakeRequest } from './funnelcake-proxy';
+import type { KeycastEnv } from './keycast-client';
 import {
   handleGetAgeReviewCases,
   handleGetAgeReviewCase,
@@ -39,7 +40,7 @@ async function ensureSchemaOnce(db: D1Database): Promise<void> {
 // Re-export ReportWatcher Durable Object for wrangler
 export { ReportWatcher } from './ReportWatcher';
 
-interface Env {
+interface Env extends KeycastEnv {
   NOSTR_NSEC: string | SecretStoreSecret;
   RELAY_URL: string;
   ALLOWED_ORIGINS: string;
@@ -88,8 +89,6 @@ interface Env {
   // Blossom admin bypass (for proxying blocked media to moderators)
   BLOSSOM_WEBHOOK_SECRET?: string | SecretStoreSecret;
   CDN_DOMAIN?: string;
-  KEYCAST_URL?: string;
-  KEYCAST_SERVICE_TOKEN?: string | SecretStoreSecret;
 }
 
 // Zendesk JWT payload structure

@@ -6,6 +6,7 @@ import {
   AGE_REVIEW_STATES,
   TERMINAL_STATES,
   VALID_TRANSITIONS,
+  isAccountRestrictedAgeReviewState,
   DEADLINE_DAYS,
   defaultResolutionForBand,
 } from '../../shared/age-review';
@@ -189,8 +190,18 @@ export async function handleUpdateAgeReviewCase(
   let updated = await env.DB.prepare('SELECT * FROM age_review_cases WHERE id = ?')
     .bind(caseId).first<AgeReviewCase>();
 
+  const requestedState = typeof body.state === 'string'
+    ? body.state as AgeReviewState
+    : undefined;
+  const enteredRestrictedState = requestedState !== undefined
+    && isAccountRestrictedAgeReviewState(requestedState)
+    && !isAccountRestrictedAgeReviewState(existing.state);
+  const clearedRestrictedState = requestedState === 'cleared'
+    && isAccountRestrictedAgeReviewState(existing.state);
+  const deniedCase = requestedState === 'denied_closed';
+
   // Non-critical: sync Zendesk ticket when case reaches terminal state
-  const newState = (body.state as AgeReviewState) ?? existing.state;
+  const newState = requestedState ?? existing.state;
   if (TERMINAL_STATES.includes(newState)) {
     try {
       const note = (body.resolution_note as string | undefined) ?? existing.resolution_note;
@@ -204,8 +215,7 @@ export async function handleUpdateAgeReviewCase(
   // (parent-contact flow creates its own ticket with requester email; this covers
   // moderator-initiated restriction where no parent email exists yet)
   if (
-    body.state &&
-    (body.state as string).startsWith('restricted_') &&
+    enteredRestrictedState &&
     !existing.zendesk_ticket_id &&
     !updated?.zendesk_ticket_id
   ) {
@@ -227,15 +237,15 @@ export async function handleUpdateAgeReviewCase(
 
   // Non-critical: fire bulk content actions on state transitions
   let bulkActionTriggered: string | undefined;
-  if (body.state && typeof body.state === 'string') {
+  if (requestedState !== undefined) {
     try {
-      if ((body.state as string).startsWith('restricted_')) {
+      if (enteredRestrictedState) {
         await triggerBulkModerate(existing.pubkey, 'age-restrict-all', 'Age review restriction', env);
         bulkActionTriggered = 'age-restrict-all';
-      } else if (body.state === 'cleared') {
+      } else if (clearedRestrictedState) {
         await triggerBulkModerate(existing.pubkey, 'un-age-restrict-all', 'Age review cleared', env);
         bulkActionTriggered = 'un-age-restrict-all';
-      } else if (body.state === 'denied_closed') {
+      } else if (deniedCase) {
         const config = await getAgeReviewConfig(env.DB!);
         if (config.auto_delete_on_deny) {
           await triggerBulkModerate(existing.pubkey, 'delete-all', 'Age review denied', env);
@@ -249,20 +259,20 @@ export async function handleUpdateAgeReviewCase(
 
   // Non-critical: sync account status with Keycast
   let keycastUpdated = false;
-  if (body.state && typeof body.state === 'string') {
+  if (requestedState !== undefined) {
     try {
       let keycastResult;
-      if ((body.state as string).startsWith('restricted_')) {
+      if (enteredRestrictedState) {
         keycastResult = await suspendUser(existing.pubkey, 'age_review', env);
-      } else if (body.state === 'cleared') {
+      } else if (clearedRestrictedState) {
         keycastResult = await unsuspendUser(existing.pubkey, env);
-      } else if (body.state === 'denied_closed') {
+      } else if (deniedCase) {
         keycastResult = await banUser(existing.pubkey, 'age_review_denied', env);
       }
       if (keycastResult) {
         keycastUpdated = keycastResult.success;
         if (!keycastResult.success) {
-          console.error(`[age-review] Keycast ${body.state} failed for case ${caseId}: ${keycastResult.error}`);
+          console.error(`[age-review] Keycast ${requestedState} failed for case ${caseId}: ${keycastResult.error}`);
         }
       }
     } catch (error) {
@@ -369,6 +379,9 @@ export async function handleParentContact(
   }
 
   // Save parent email, pause the clock (if not already paused), and transition state
+  // This path stays within the restricted workflow, so it intentionally does not
+  // resync Keycast. Account suspension is handled when the case first enters a
+  // restricted state via handleUpdateAgeReviewCase.
   if (activeCase.clock_paused) {
     // Clock already paused — update email and state only, preserve existing remaining time
     await env.DB.prepare(`
@@ -731,6 +744,8 @@ export async function handleAgeReviewReplyWebhook(
     ? activeCase.remaining_days_when_paused
     : deadline ? (deadline.getTime() - now.getTime()) / (24 * 60 * 60 * 1000) : DEADLINE_DAYS;
 
+  // This path advances an already-restricted case to moderator review, so it
+  // intentionally leaves Keycast state unchanged.
   await env.DB.prepare(`
     UPDATE age_review_cases
     SET state = 'submitted_for_review',

@@ -11,6 +11,8 @@ export interface KeycastResult {
   error?: string;
 }
 
+export type KeycastReason = 'age_review' | 'age_review_denied' | 'age_review_expired';
+
 const HEX_64 = /^[0-9a-f]{64}$/;
 
 async function resolveToken(binding: string | SecretStoreSecret | undefined): Promise<string | null> {
@@ -21,7 +23,7 @@ async function resolveToken(binding: string | SecretStoreSecret | undefined): Pr
 
 async function callKeycast(
   pubkey: string,
-  body: { status: string; reason?: string },
+  body: { status: string; reason?: KeycastReason },
   env: KeycastEnv,
 ): Promise<KeycastResult> {
   if (!env.KEYCAST_URL || !env.KEYCAST_SERVICE_TOKEN) {
@@ -61,7 +63,7 @@ async function callKeycast(
   }
 }
 
-export async function suspendUser(pubkey: string, reason: string, env: KeycastEnv): Promise<KeycastResult> {
+export async function suspendUser(pubkey: string, reason: KeycastReason, env: KeycastEnv): Promise<KeycastResult> {
   return callKeycast(pubkey, { status: 'suspended', reason }, env);
 }
 
@@ -69,6 +71,6 @@ export async function unsuspendUser(pubkey: string, env: KeycastEnv): Promise<Ke
   return callKeycast(pubkey, { status: 'active' }, env);
 }
 
-export async function banUser(pubkey: string, reason: string, env: KeycastEnv): Promise<KeycastResult> {
+export async function banUser(pubkey: string, reason: KeycastReason, env: KeycastEnv): Promise<KeycastResult> {
   return callKeycast(pubkey, { status: 'banned', reason }, env);
 }

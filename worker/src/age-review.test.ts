@@ -416,6 +416,73 @@ describe('Keycast suspension wiring', () => {
     expect(unsuspendUser).toHaveBeenCalledWith(restrictedCase.pubkey, expect.objectContaining({ DB: expect.anything() }));
   });
 
+  it('does not call unsuspendUser when clearing a case that was never restricted', async () => {
+    const reviewCase = makeCase({ state: 'under_moderator_review' });
+    const updatedCase = { ...reviewCase, state: 'cleared' as const };
+
+    let selectCount = 0;
+    const db = {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        bind: vi.fn().mockReturnValue({
+          first: vi.fn().mockImplementation(async () => {
+            if (sql.includes('WHERE id = ?')) {
+              selectCount += 1;
+              return selectCount === 1 ? reviewCase : updatedCase;
+            }
+            return null;
+          }),
+          run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+        }),
+      })),
+    };
+
+    const req = new Request('https://api.test/api/age-review/cases/case-1', {
+      method: 'PATCH',
+      body: JSON.stringify({ state: 'cleared' }),
+    });
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', { DB: db as unknown as D1Database }, corsHeaders);
+    const body = await res.json() as { success: boolean; keycastUpdated: boolean };
+
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+    expect(body.keycastUpdated).toBe(false);
+    expect(unsuspendUser).not.toHaveBeenCalled();
+  });
+
+  it('does not re-suspend when transitioning between restricted states', async () => {
+    const restrictedCase = makeCase({ state: 'restricted_pending_user_response' });
+    const updatedCase = { ...restrictedCase, state: 'restricted_pending_parental_consent' as const };
+
+    let selectCount = 0;
+    const db = {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        bind: vi.fn().mockReturnValue({
+          first: vi.fn().mockImplementation(async () => {
+            if (sql.includes('WHERE id = ?')) {
+              selectCount += 1;
+              return selectCount === 1 ? restrictedCase : updatedCase;
+            }
+            return null;
+          }),
+          run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+        }),
+      })),
+    };
+
+    const req = new Request('https://api.test/api/age-review/cases/case-1', {
+      method: 'PATCH',
+      body: JSON.stringify({ state: 'restricted_pending_parental_consent' }),
+    });
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', { DB: db as unknown as D1Database }, corsHeaders);
+    const body = await res.json() as { success: boolean; keycastUpdated: boolean; bulkActionTriggered?: string };
+
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+    expect(body.keycastUpdated).toBe(false);
+    expect(body.bulkActionTriggered).toBeUndefined();
+    expect(suspendUser).not.toHaveBeenCalled();
+  });
+
   it('calls banUser when transitioning to denied_closed', async () => {
     const restrictedCase = makeCase({ state: 'restricted_pending_user_response' });
     const updatedCase = { ...restrictedCase, state: 'denied_closed' as const };

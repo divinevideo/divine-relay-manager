@@ -17,6 +17,18 @@ export type AgeReviewState = typeof AGE_REVIEW_STATES[number];
 
 export const TERMINAL_STATES: readonly AgeReviewState[] = ['cleared', 'denied_closed'];
 
+export const ACCOUNT_RESTRICTED_AGE_REVIEW_STATES = [
+  'restricted_pending_user_response',
+  'restricted_pending_parental_consent',
+  'restricted_pending_support_email',
+] as const satisfies readonly AgeReviewState[];
+
+export function isAccountRestrictedAgeReviewState(state: AgeReviewState): boolean {
+  return ACCOUNT_RESTRICTED_AGE_REVIEW_STATES.includes(
+    state as typeof ACCOUNT_RESTRICTED_AGE_REVIEW_STATES[number]
+  );
+}
+
 export const VALID_TRANSITIONS: Record<AgeReviewState, readonly AgeReviewState[]> = {
   open_reported: ['under_moderator_review', 'cleared', 'denied_closed'],
   under_moderator_review: ['restricted_pending_user_response', 'restricted_pending_support_email', 'needs_follow_up', 'cleared', 'denied_closed'],
