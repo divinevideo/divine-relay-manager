@@ -22,9 +22,10 @@ interface BannedUserCardProps {
   pubkey: string;
   reason?: string;
   onUnban?: () => void;
+  actionButton?: React.ReactNode;
 }
 
-export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban }: BannedUserCardProps) {
+export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButton }: BannedUserCardProps) {
   const { nostr } = useNostr();
   const [isOpen, setIsOpen] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -185,11 +186,11 @@ export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban }: BannedUse
                   />
                 </Button>
               </CollapsibleTrigger>
-              {onUnban && (
+              {actionButton ?? (onUnban && (
                 <Button variant="outline" size="sm" onClick={onUnban}>
                   <Trash2 className="h-4 w-4" />
                 </Button>
-              )}
+              ))}
             </div>
           </div>
         </div>

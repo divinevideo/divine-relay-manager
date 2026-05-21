@@ -150,6 +150,8 @@ export async function syncZendeskAfterAction(
       return;
     }
 
+    // suspend_user / unsuspend_user deliberately excluded — suspension is a
+    // holding action, not a final resolution, so tickets stay open for follow-up.
     const resolutionActions = [
       'reviewed',
       'dismissed',

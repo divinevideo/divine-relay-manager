@@ -12,6 +12,7 @@ dist
 dist-ssr
 *.local
 .env
+.dev.vars
 
 # Editor directories and files
 .idea
