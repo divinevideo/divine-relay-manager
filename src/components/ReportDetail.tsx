@@ -33,7 +33,7 @@ import { UserProfileCard } from "@/components/UserProfileCard";
 import { UserIdentifier } from "@/components/UserIdentifier";
 import { ReporterInline } from "@/components/ReporterCard";
 import { AISummary } from "@/components/AISummary";
-import { LabelPublisherInline } from "@/components/LabelPublisher";
+
 import { ThreadModal } from "@/components/ThreadModal";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { useAppContext } from "@/hooks/useAppContext";
@@ -48,7 +48,7 @@ import { EventActions } from "@/components/EventActions";
 import { UserActions } from "@/components/UserActions";
 import { CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, getReportCategory } from "@/lib/constants";
 import { KIND_NAMES } from "@/lib/kindNames";
-import { Tag, Flag, CheckCircle, History, Ban, ShieldX, Link2, User, FileText, Repeat2, FileCode, RefreshCw, EyeOff, Eye } from "lucide-react";
+import { Flag, CheckCircle, History, Ban, ShieldX, Link2, User, FileText, Repeat2, FileCode, RefreshCw, EyeOff, Eye } from "lucide-react";
 import { CopyableId, CopyableTags } from "@/components/CopyableId";
 import type { NostrEvent } from "@nostrify/nostrify";
 
@@ -90,7 +90,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   const { config } = useAppContext();
   const navigate = useNavigate();
   const [showThreadModal, setShowThreadModal] = useState(false);
-  const [showLabelForm, setShowLabelForm] = useState(false);
+
   const [confirmDismiss, setConfirmDismiss] = useState(false);
   const [dismissReason, setDismissReason] = useState("");
 
@@ -1004,15 +1004,6 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
 
           <Separator />
 
-          {/* Inline Label Form */}
-          {showLabelForm && context.target && (
-            <LabelPublisherInline
-              targetType={context.target.type}
-              targetValue={context.target.value}
-              onSuccess={() => setShowLabelForm(false)}
-              onCancel={() => setShowLabelForm(false)}
-            />
-          )}
 
         </div>
       </ScrollArea>
@@ -1102,22 +1093,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                   </TooltipContent>
                 </Tooltip>
               )}
-              {context.target && !showLabelForm && (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      variant="outline"
-                      onClick={() => setShowLabelForm(true)}
-                    >
-                      <Tag className="h-4 w-4 mr-1" />
-                      Create Label
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent side="bottom" className="max-w-xs">
-                    <p>Create a custom NIP-32 label for this content. Labels can be used for categorization without taking enforcement action.</p>
-                  </TooltipContent>
-                </Tooltip>
-              )}
+
             </div>
         </div>
     </div>
