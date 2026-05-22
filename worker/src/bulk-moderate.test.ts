@@ -15,7 +15,7 @@ const hashA = 'a'.repeat(64);
 const hashB = 'b'.repeat(64);
 
 function mockRelay(events: Array<{ id: string; kind: number; content?: string; tags: string[][] }>) {
-  vi.spyOn(globalThis, 'WebSocket').mockImplementation((() => {
+  vi.spyOn(globalThis, 'WebSocket').mockImplementation((function () {
     const listeners = new Map<string, Array<(value?: unknown) => void>>();
     let subId = 'bulk-test';
 
@@ -41,7 +41,7 @@ function mockRelay(events: Array<{ id: string; kind: number; content?: string; t
       }),
       close: vi.fn(),
     };
-  }) as unknown as typeof WebSocket);
+  } as unknown as typeof WebSocket));
 }
 
 describe('handleBulkModerate', () => {

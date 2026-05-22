@@ -298,7 +298,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   // Restore auto-hidden content (reverse the auto-hide)
   const restoreAutoHideMutation = useMutation({
     mutationFn: async ({ eventId }: { eventId: string }) => {
-      await callRelayRpc('allowevent', [eventId]);
+      await callRelayRpc('unbanevent', [eventId]);
       await logDecision({
         targetType: 'event',
         targetId: eventId,
@@ -792,12 +792,19 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             onDeleteEvent={async (eventId) => {
               try {
                 await deleteEvent(eventId, 'Deleted from report review');
+                await logDecision({
+                  targetType: 'event',
+                  targetId: eventId,
+                  action: 'delete_event',
+                  reason: 'Deleted from report review',
+                  reportId: report?.id,
+                });
                 toast({
                   title: "Event deleted",
                   description: "The event has been removed from the relay.",
                   action: (
                     <ToastAction altText="Undo delete" onClick={async () => {
-                      await callRelayRpc('allowevent', [eventId]);
+                      await callRelayRpc('unbanevent', [eventId]);
                       handleActionComplete();
                       toast({ title: "Event restored" });
                     }}>
@@ -1056,6 +1063,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                 eventId={context.target.value}
                 pubkey={context.reportedUser.pubkey || ''}
                 mediaHashes={mediaHashes}
+                mediaHashStatuses={mediaStatus.results}
                 isEventBanned={isEventDeleted ?? undefined}
                 hasBlockedMedia={mediaStatus.hasBlockedMedia}
                 hasRestrictedMedia={mediaStatus.hasRestrictedMedia}

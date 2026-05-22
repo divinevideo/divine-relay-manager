@@ -628,7 +628,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
   // Mutation for event moderation
   const moderateEventMutation = useMutation({
     mutationFn: async ({ eventId, action, reason }: { eventId: string; action: 'allow' | 'ban'; reason?: string }) => {
-      const method = action === 'allow' ? 'allowevent' : 'banevent';
+      const method = action === 'allow' ? 'unbanevent' : 'banevent';
       await callRelayRpc(method, [eventId, reason]);
       return { eventId, action };
     },

@@ -696,11 +696,6 @@ async function handleModerate(
 
   const secretKey = await getSecretKey(env);
 
-  // Build NIP-86 moderation event (kind 10000 + action-specific kinds)
-  let kind: number;
-  let content: string;
-  const tags: string[][] = [];
-
   switch (body.action) {
     case 'delete_event': {
       // Use banevent RPC directly instead of publishing kind 5 events.
@@ -758,76 +753,75 @@ async function handleModerate(
       }
     }
 
-    case 'ban_pubkey':
+    case 'ban_pubkey': {
       if (!body.pubkey) {
         return jsonResponse({ success: false, error: 'Missing pubkey for ban_pubkey' }, 400, corsHeaders);
       }
-      // NIP-86 relay management event
-      kind = 10000;
-      content = JSON.stringify({
-        method: 'banpubkey',
-        params: [body.pubkey, body.reason || ''],
-      });
-      break;
+      try {
+        const rpcRequest = new Request(request.url.replace(/\/api\/moderate$/, '/api/relay-rpc'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            method: 'banpubkey',
+            params: [body.pubkey, body.reason || ''],
+          }),
+        });
+        const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders, ctx);
+        const rpcResult = await rpcResponse.json() as { success: boolean; error?: string };
+        if (!rpcResult.success) {
+          return jsonResponse({ success: false, error: rpcResult.error || 'banpubkey RPC failed' }, 500, corsHeaders);
+        }
+        if (env.DB) {
+          await markHumanReviewed(env.DB, 'pubkey', body.pubkey);
+        }
+        try {
+          await syncZendeskAfterAction(env, body.action, 'pubkey', body.pubkey, getPublicKey(secretKey));
+        } catch (err) {
+          console.error('[handleModerate] Zendesk sync error:', err);
+        }
+        return jsonResponse({ success: true, pubkey: body.pubkey }, 200, corsHeaders);
+      } catch (error) {
+        console.error('[handleModerate] ban_pubkey error:', error);
+        return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Unknown error' }, 500, corsHeaders);
+      }
+    }
 
-    case 'allow_pubkey':
+    case 'allow_pubkey': {
       if (!body.pubkey) {
         return jsonResponse({ success: false, error: 'Missing pubkey for allow_pubkey' }, 400, corsHeaders);
       }
-      kind = 10000;
-      content = JSON.stringify({
-        method: 'allowpubkey',
-        params: [body.pubkey],
-      });
-      break;
+      try {
+        const rpcRequest = new Request(request.url.replace(/\/api\/moderate$/, '/api/relay-rpc'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            method: 'unbanpubkey',
+            params: [body.pubkey],
+          }),
+        });
+        const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders);
+        const rpcResult = await rpcResponse.json() as { success: boolean; error?: string };
+        if (!rpcResult.success) {
+          return jsonResponse({ success: false, error: rpcResult.error || 'unbanpubkey RPC failed' }, 500, corsHeaders);
+        }
+        if (env.DB) {
+          await markHumanReviewed(env.DB, 'pubkey', body.pubkey);
+        }
+        try {
+          await syncZendeskAfterAction(env, body.action, 'pubkey', body.pubkey, getPublicKey(secretKey));
+        } catch (err) {
+          console.error('[handleModerate] Zendesk sync error:', err);
+        }
+        return jsonResponse({ success: true, pubkey: body.pubkey }, 200, corsHeaders);
+      } catch (error) {
+        console.error('[handleModerate] allow_pubkey error:', error);
+        return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Unknown error' }, 500, corsHeaders);
+      }
+    }
 
     default:
       return jsonResponse({ success: false, error: `Unknown action: ${body.action}` }, 400, corsHeaders);
   }
-
-  const event = finalizeEvent(
-    {
-      kind,
-      content,
-      tags,
-      created_at: Math.floor(Date.now() / 1000),
-    },
-    secretKey
-  );
-
-  // Publish to relay
-  const publishResult = await publishToRelay(event, env.RELAY_URL);
-
-  if (!publishResult.success) {
-    return jsonResponse({ success: false, error: publishResult.error }, 500, corsHeaders);
-  }
-
-  if (env.DB && body.pubkey) {
-    await markHumanReviewed(env.DB, 'pubkey', body.pubkey);
-  }
-
-  // Sync linked Zendesk tickets for both event and pubkey targets if present
-  // (delete_event has its own early-return sync above)
-  const moderator = getPublicKey(secretKey);
-  try {
-    if (body.eventId) {
-      await syncZendeskAfterAction(env, body.action, 'event', body.eventId, moderator);
-    }
-    if (body.pubkey) {
-      await syncZendeskAfterAction(env, body.action, 'pubkey', body.pubkey, moderator);
-    }
-  } catch (err) {
-    console.error('[handleModerate] Zendesk sync error:', err);
-  }
-
-  // DM the banned user (non-critical, off response path)
-  if (body.action === 'ban_pubkey' && body.pubkey) {
-    const dmPromise = notifyModerationService(env, body.pubkey, 'ACCOUNT_SUSPENDED', body.reason || 'Account suspended by moderator')
-      .catch(err => console.error('[handleModerate] DM notification error:', err));
-    if (ctx) ctx.waitUntil(dmPromise);
-  }
-
-  return jsonResponse({ success: true, event }, 200, corsHeaders);
 }
 
 async function handleRelayRpc(
@@ -2735,7 +2729,7 @@ async function handleZendeskAction(
       case 'allow_user':
         if (body.pubkey) {
           const httpUrl = getManagementUrl(env);
-          const payload = JSON.stringify({ method: 'allowpubkey', params: [body.pubkey] });
+          const payload = JSON.stringify({ method: 'unbanpubkey', params: [body.pubkey] });
           const payloadHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
           const payloadHashHex = Array.from(new Uint8Array(payloadHash)).map(b => b.toString(16).padStart(2, '0')).join('');
 
