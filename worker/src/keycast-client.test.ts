@@ -33,7 +33,7 @@ describe('keycast-client', () => {
       expect(result).toEqual({ success: true });
       expect(fetchMock).toHaveBeenCalledOnce();
       const [url, opts] = fetchMock.mock.calls[0];
-      expect(url).toBe(`https://login.test.divine.video/admin/users/${VALID_PUBKEY}/status`);
+      expect(url).toBe(`https://login.test.divine.video/api/admin/users/${VALID_PUBKEY}/status`);
       expect(opts.method).toBe('PUT');
       expect(JSON.parse(opts.body)).toEqual({ status: 'suspended', reason: 'age_review' });
       expect(opts.headers['Authorization']).toBe('Bearer test-service-token');

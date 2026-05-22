@@ -326,7 +326,7 @@ describe('handleUpdateAgeReviewCase', () => {
     expect(payload.ticket.tags).toEqual(['age-review', 'age-band-age_16_plus_claimed', 'internal']);
     expect(payload.ticket.custom_fields).toEqual([
       { id: 1001, value: 'trust___safety' },
-      { id: 1002, value: 'age_review' },
+      { id: 1002, value: 'content_report_under_16' },
       { id: 1003, value: '2026-05-30' },
     ]);
 
@@ -1273,7 +1273,7 @@ describe('syncAgeReviewTicketResolution', () => {
     const payload = JSON.parse((mockFetch.mock.calls[0] as [string, RequestInit])[1].body as string);
     expect(payload.ticket.custom_fields).toEqual([
       { id: 12345, value: 'trust___safety' },
-      { id: 67890, value: 'age_review' },
+      { id: 67890, value: 'content_report_under_16' },
     ]);
 
     vi.unstubAllGlobals();
