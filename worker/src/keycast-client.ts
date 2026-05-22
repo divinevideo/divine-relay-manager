@@ -40,7 +40,7 @@ async function callKeycast(
   }
 
   try {
-    const res = await fetch(`${env.KEYCAST_URL}/admin/users/${pubkey}/status`, {
+    const res = await fetch(`${env.KEYCAST_URL}/api/admin/users/${pubkey}/status`, {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',

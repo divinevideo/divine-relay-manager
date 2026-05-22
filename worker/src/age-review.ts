@@ -488,7 +488,7 @@ function buildAgeReviewCustomFields(
   if (env.ZENDESK_FIELD_CATEGORY && env.ZENDESK_FIELD_ISSUE) {
     customFields.push(
       { id: parseInt(env.ZENDESK_FIELD_CATEGORY, 10), value: 'trust___safety' },
-      { id: parseInt(env.ZENDESK_FIELD_ISSUE, 10), value: 'age_review' },
+      { id: parseInt(env.ZENDESK_FIELD_ISSUE, 10), value: 'content_report_under_16' },
     );
   }
 
@@ -687,7 +687,7 @@ export async function syncAgeReviewTicketResolution(
   if (env.ZENDESK_FIELD_CATEGORY && env.ZENDESK_FIELD_ISSUE) {
     (payload.ticket as Record<string, unknown>).custom_fields = [
       { id: parseInt(env.ZENDESK_FIELD_CATEGORY, 10), value: 'trust___safety' },
-      { id: parseInt(env.ZENDESK_FIELD_ISSUE, 10), value: 'age_review' },
+      { id: parseInt(env.ZENDESK_FIELD_ISSUE, 10), value: 'content_report_under_16' },
     ];
   }
 
