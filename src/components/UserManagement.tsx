@@ -122,7 +122,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
   // Mutation for allowing users
   const allowUserMutation = useMutation({
     mutationFn: async ({ pubkey, reason }: { pubkey: string; reason?: string }) => {
-      await callRelayRpc('allowpubkey', [pubkey, reason]);
+      await callRelayRpc('unbanpubkey', [pubkey, reason]);
       // Log to D1 for audit trail
       await logDecision({
         targetType: 'pubkey',

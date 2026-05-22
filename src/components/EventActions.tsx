@@ -50,7 +50,7 @@ export function EventActions({
 
   const restoreEventMutation = useMutation({
     mutationFn: async () => {
-      await api.callRelayRpc('allowevent', [eventId]);
+      await api.callRelayRpc('unbanevent', [eventId]);
       await api.logDecision({
         targetType: 'event',
         targetId: eventId,

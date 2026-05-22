@@ -188,12 +188,12 @@ describe('convenience methods', () => {
     expect(body.params).toEqual(['event123', 'spam']);
   });
 
-  it('allowEvent should call allowevent RPC', async () => {
+  it('allowEvent should call unbanevent RPC', async () => {
     const result = await allowEvent('event123', mockEnv);
     expect(result.success).toBe(true);
 
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
-    expect(body.method).toBe('allowevent');
+    expect(body.method).toBe('unbanevent');
     expect(body.params).toEqual(['event123']);
   });
 

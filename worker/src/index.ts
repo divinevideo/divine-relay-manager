@@ -756,28 +756,71 @@ async function handleModerate(
       }
     }
 
-    case 'ban_pubkey':
+    case 'ban_pubkey': {
       if (!body.pubkey) {
         return jsonResponse({ success: false, error: 'Missing pubkey for ban_pubkey' }, 400, corsHeaders);
       }
-      // NIP-86 relay management event
-      kind = 10000;
-      content = JSON.stringify({
-        method: 'banpubkey',
-        params: [body.pubkey, body.reason || ''],
-      });
-      break;
+      try {
+        const rpcRequest = new Request(request.url.replace(/\/api\/moderate$/, '/api/relay-rpc'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            method: 'banpubkey',
+            params: [body.pubkey, body.reason || ''],
+          }),
+        });
+        const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders, ctx);
+        const rpcResult = await rpcResponse.json() as { success: boolean; error?: string };
+        if (!rpcResult.success) {
+          return jsonResponse({ success: false, error: rpcResult.error || 'banpubkey RPC failed' }, 500, corsHeaders);
+        }
+        if (env.DB) {
+          await markHumanReviewed(env.DB, 'pubkey', body.pubkey);
+        }
+        try {
+          await syncZendeskAfterAction(env, body.action, 'pubkey', body.pubkey, getPublicKey(secretKey));
+        } catch (err) {
+          console.error('[handleModerate] Zendesk sync error:', err);
+        }
+        const dmPromise = notifyModerationService(env, body.pubkey, 'ACCOUNT_SUSPENDED', body.reason || 'Account suspended by moderator')
+          .catch(err => console.error('[handleModerate] DM notification error:', err));
+        if (ctx) ctx.waitUntil(dmPromise);
+        return jsonResponse({ success: true, pubkey: body.pubkey }, 200, corsHeaders);
+      } catch (error) {
+        console.error('[handleModerate] ban_pubkey error:', error);
+        return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Unknown error' }, 500, corsHeaders);
+      }
+    }
 
-    case 'allow_pubkey':
+    case 'allow_pubkey': {
       if (!body.pubkey) {
         return jsonResponse({ success: false, error: 'Missing pubkey for allow_pubkey' }, 400, corsHeaders);
       }
-      kind = 10000;
-      content = JSON.stringify({
-        method: 'allowpubkey',
-        params: [body.pubkey],
-      });
-      break;
+      try {
+        const rpcRequest = new Request(request.url.replace(/\/api\/moderate$/, '/api/relay-rpc'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            method: 'unbanpubkey',
+            params: [body.pubkey],
+          }),
+        });
+        const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders);
+        const rpcResult = await rpcResponse.json() as { success: boolean; error?: string };
+        if (!rpcResult.success) {
+          return jsonResponse({ success: false, error: rpcResult.error || 'unbanpubkey RPC failed' }, 500, corsHeaders);
+        }
+        try {
+          await syncZendeskAfterAction(env, body.action, 'pubkey', body.pubkey, getPublicKey(secretKey));
+        } catch (err) {
+          console.error('[handleModerate] Zendesk sync error:', err);
+        }
+        return jsonResponse({ success: true, pubkey: body.pubkey }, 200, corsHeaders);
+      } catch (error) {
+        console.error('[handleModerate] allow_pubkey error:', error);
+        return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Unknown error' }, 500, corsHeaders);
+      }
+    }
 
     default:
       return jsonResponse({ success: false, error: `Unknown action: ${body.action}` }, 400, corsHeaders);
@@ -2729,7 +2772,7 @@ async function handleZendeskAction(
       case 'allow_user':
         if (body.pubkey) {
           const httpUrl = getManagementUrl(env);
-          const payload = JSON.stringify({ method: 'allowpubkey', params: [body.pubkey] });
+          const payload = JSON.stringify({ method: 'unbanpubkey', params: [body.pubkey] });
           const payloadHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
           const payloadHashHex = Array.from(new Uint8Array(payloadHash)).map(b => b.toString(16).padStart(2, '0')).join('');
 
