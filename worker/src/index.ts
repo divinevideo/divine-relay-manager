@@ -28,7 +28,7 @@ import {
   updateAgeReviewConfig,
 } from './age-review';
 import { handleBulkModerate } from './bulk-moderate';
-import { ensureZendeskTable, addZendeskInternalNote, syncZendeskAfterAction } from './zendesk-sync';
+import { ensureZendeskTable, addZendeskInternalNote, syncZendeskAfterAction, resolveZendeskCreds } from './zendesk-sync';
 
 let schemaReady = false;
 async function ensureSchemaOnce(db: D1Database): Promise<void> {
@@ -53,14 +53,16 @@ interface Env extends KeycastEnv {
   // Service binding to divine-moderation-service (bypasses CF Access + no cold starts)
   MODERATION_API?: Fetcher;
   // Zendesk integration
-  ZENDESK_SUBDOMAIN?: string;
+  ZENDESK_SUBDOMAIN?: string | SecretStoreSecret;
+  // These four are per-worker secrets (not Secrets Store). If migrated to SecretStoreSecret,
+  // update the call sites — they pass these directly to crypto/TextEncoder without resolving.
   ZENDESK_JWT_SECRET?: string;
-  ZENDESK_PREAUTH_SECRET?: string;  // HMAC secret for pre-auth token generation/verification
-  ZENDESK_WEBHOOK_SECRET?: string;  // For /api/zendesk/webhook
-  ZENDESK_PARSE_REPORT_SECRET?: string;  // For /api/zendesk/parse-report
-  ZENDESK_AGE_REVIEW_WEBHOOK_SECRET?: string;  // For /api/zendesk/age-review-reply
-  ZENDESK_API_TOKEN?: string;
-  ZENDESK_EMAIL?: string;
+  ZENDESK_PREAUTH_SECRET?: string;
+  ZENDESK_WEBHOOK_SECRET?: string;
+  ZENDESK_PARSE_REPORT_SECRET?: string;
+  ZENDESK_AGE_REVIEW_WEBHOOK_SECRET?: string | SecretStoreSecret;  // For /api/zendesk/age-review-reply
+  ZENDESK_API_TOKEN?: string | SecretStoreSecret;
+  ZENDESK_EMAIL?: string | SecretStoreSecret;
   ZENDESK_FIELD_ACTION_STATUS?: string;
   ZENDESK_FIELD_ACTION_REQUESTED?: string;
   ZENDESK_FIELD_CATEGORY?: string;       // For auto-solve required fields
@@ -1671,7 +1673,8 @@ async function updateZendeskTicket(
   note: string,
   env: Env
 ): Promise<void> {
-  if (!env.ZENDESK_SUBDOMAIN || !env.ZENDESK_API_TOKEN || !env.ZENDESK_EMAIL) {
+  const creds = await resolveZendeskCreds(env);
+  if (!creds) {
     console.warn('[updateZendeskTicket] Missing Zendesk API credentials, skipping callback');
     return;
   }
@@ -1682,8 +1685,8 @@ async function updateZendeskTicket(
   }
 
   try {
-    const auth = btoa(`${env.ZENDESK_EMAIL}/token:${env.ZENDESK_API_TOKEN}`);
-    const url = `https://${env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets/${ticketId}`;
+    const auth = btoa(`${creds.email}/token:${creds.apiToken}`);
+    const url = `https://${creds.subdomain}.zendesk.com/api/v2/tickets/${ticketId}`;
 
     const customFields = [
       { id: parseInt(env.ZENDESK_FIELD_ACTION_STATUS, 10), value: success ? 'success' : 'failed' },
@@ -2035,7 +2038,8 @@ async function handleZendeskRoutes(
   // Age review: parent replied to Zendesk ticket
   if (subPath === '/age-review-reply' && request.method === 'POST') {
     const bodyText = await request.text();
-    if (!await verifyZendeskWebhook(request, bodyText, env.ZENDESK_AGE_REVIEW_WEBHOOK_SECRET)) {
+    const ageReviewWebhookSecret = await resolveSecret(env.ZENDESK_AGE_REVIEW_WEBHOOK_SECRET) ?? undefined;
+    if (!await verifyZendeskWebhook(request, bodyText, ageReviewWebhookSecret)) {
       return jsonResponse({ success: false, error: 'Invalid webhook signature' }, 401, corsHeaders);
     }
     if (env.DB) await ensureSchemaOnce(env.DB);
@@ -2224,9 +2228,11 @@ async function handleZendeskWebhook(
         }
       }
 
-      // Fire-and-forget: don't await, don't let errors break the response
-      updateZendeskTicket(body.ticket_id, actionResult.success, body.action_requested, zendeskNote, env)
-        .catch((err) => console.error('[handleZendeskWebhook] Zendesk callback error:', err));
+      try {
+        await updateZendeskTicket(body.ticket_id, actionResult.success, body.action_requested, zendeskNote, env);
+      } catch (err) {
+        console.error('[handleZendeskWebhook] Zendesk callback error:', err);
+      }
     }
 
     return new Response(JSON.stringify({

@@ -45,6 +45,28 @@ binding = "KEYCAST_SERVICE_TOKEN"
 store_id = "ef490704b12a4feb91c7feb51229c364"
 secret_name = "KEYCAST_SERVICE_TOKEN"
 
+# Zendesk API credentials (shared across workers)
+[[secrets_store_secrets]]
+binding = "ZENDESK_SUBDOMAIN"
+store_id = "ef490704b12a4feb91c7feb51229c364"
+secret_name = "ZENDESK_SUBDOMAIN"
+
+[[secrets_store_secrets]]
+binding = "ZENDESK_EMAIL"
+store_id = "ef490704b12a4feb91c7feb51229c364"
+secret_name = "ZENDESK_EMAIL"
+
+[[secrets_store_secrets]]
+binding = "ZENDESK_API_TOKEN"
+store_id = "ef490704b12a4feb91c7feb51229c364"
+secret_name = "ZENDESK_API_TOKEN"
+
+# HMAC secret for verifying Zendesk age-review reply webhooks
+[[secrets_store_secrets]]
+binding = "ZENDESK_AGE_REVIEW_WEBHOOK_SECRET"
+store_id = "ef490704b12a4feb91c7feb51229c364"
+secret_name = "ZENDESK_AGE_REVIEW_WEBHOOK_SECRET"
+
 [vars]
 RELAY_URL = "wss://relay.divine.video"
 ENVIRONMENT = "production"

@@ -11,14 +11,16 @@ import {
   defaultResolutionForBand,
 } from '../../shared/age-review';
 import { handleBulkModerate, type BulkModerateEnv } from './bulk-moderate';
+import { resolveZendeskCreds } from './zendesk-sync';
 import type { BulkAction, BulkModerateResult } from '../../shared/bulk-moderation';
 import { suspendUser, unsuspendUser, banUser, type KeycastEnv } from './keycast-client';
+import type { SecretStoreSecret } from './nip86';
 
 interface AgeReviewEnv extends BulkModerateEnv, KeycastEnv {
   SLACK_WEBHOOK_URL?: string;
-  ZENDESK_SUBDOMAIN?: string;
-  ZENDESK_API_TOKEN?: string;
-  ZENDESK_EMAIL?: string;
+  ZENDESK_SUBDOMAIN?: string | SecretStoreSecret;
+  ZENDESK_API_TOKEN?: string | SecretStoreSecret;
+  ZENDESK_EMAIL?: string | SecretStoreSecret;
   ZENDESK_FIELD_CATEGORY?: string;
   ZENDESK_FIELD_ISSUE?: string;
   ZENDESK_FIELD_AGE_REVIEW_DEADLINE?: string;
@@ -27,6 +29,7 @@ interface AgeReviewEnv extends BulkModerateEnv, KeycastEnv {
 interface ZendeskClientConfig {
   auth: string;
   baseUrl: string;
+  email: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -451,14 +454,13 @@ const BAND_DISPLAY: Record<AgeBand, string> = {
   age_16_plus_claimed: '16+ (claimed)',
 };
 
-function getZendeskClientConfig(env: AgeReviewEnv): ZendeskClientConfig | null {
-  if (!env.ZENDESK_SUBDOMAIN || !env.ZENDESK_API_TOKEN || !env.ZENDESK_EMAIL) {
-    return null;
-  }
-
+async function getZendeskClientConfig(env: AgeReviewEnv): Promise<ZendeskClientConfig | null> {
+  const creds = await resolveZendeskCreds(env);
+  if (!creds) return null;
   return {
-    auth: btoa(`${env.ZENDESK_EMAIL}/token:${env.ZENDESK_API_TOKEN}`),
-    baseUrl: `https://${env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2`,
+    auth: btoa(`${creds.email}/token:${creds.apiToken}`),
+    baseUrl: `https://${creds.subdomain}.zendesk.com/api/v2`,
+    email: creds.email,
   };
 }
 
@@ -505,7 +507,7 @@ async function createAgeReviewTicket(
   deadlineAt: string | null,
   env: AgeReviewEnv,
 ): Promise<void> {
-  const zendesk = getZendeskClientConfig(env);
+  const zendesk = await getZendeskClientConfig(env);
   if (!zendesk) {
     console.warn('[age-review] Missing Zendesk credentials, skipping ticket creation');
     return;
@@ -554,7 +556,7 @@ async function updateTicketWithParentContact(
   ageBand: AgeBand,
   env: AgeReviewEnv,
 ): Promise<void> {
-  const zendesk = getZendeskClientConfig(env);
+  const zendesk = await getZendeskClientConfig(env);
   if (!zendesk) return;
 
   const outreachBody = buildParentOutreachBody(ageBand);
@@ -598,7 +600,7 @@ async function createAgeReviewInternalTicket(
   deadlineAt: string | null,
   env: AgeReviewEnv,
 ): Promise<number | null> {
-  const zendesk = getZendeskClientConfig(env);
+  const zendesk = await getZendeskClientConfig(env);
   if (!zendesk) {
     console.warn('[age-review] Missing Zendesk credentials, skipping internal ticket creation');
     return null;
@@ -659,7 +661,7 @@ export async function syncAgeReviewTicketResolution(
 ): Promise<void> {
   if (!env.DB) return;
 
-  const zendesk = getZendeskClientConfig(env);
+  const zendesk = await getZendeskClientConfig(env);
   if (!zendesk) return;
 
   const row = await env.DB.prepare(
@@ -679,7 +681,7 @@ export async function syncAgeReviewTicketResolution(
     ticket: {
       comment: { body: noteLines.join('\n'), public: false },
       status: 'solved',
-      assignee_email: env.ZENDESK_EMAIL,
+      assignee_email: zendesk.email,
     },
   };
 
@@ -710,6 +712,7 @@ export async function syncAgeReviewTicketResolution(
   }
 }
 
+// Caller (index.ts) must verify HMAC signature before dispatching here.
 export async function handleAgeReviewReplyWebhook(
   request: Request,
   env: AgeReviewEnv,

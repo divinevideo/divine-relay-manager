@@ -2,13 +2,34 @@ import type { SecretStoreSecret } from './nip86';
 
 export interface ZendeskSyncEnv {
   DB?: D1Database;
-  ZENDESK_SUBDOMAIN?: string;
-  ZENDESK_API_TOKEN?: string;
-  ZENDESK_EMAIL?: string;
+  ZENDESK_SUBDOMAIN?: string | SecretStoreSecret;
+  ZENDESK_API_TOKEN?: string | SecretStoreSecret;
+  ZENDESK_EMAIL?: string | SecretStoreSecret;
   ZENDESK_FIELD_CATEGORY?: string;
   ZENDESK_FIELD_ISSUE?: string;
   NOSTR_NSEC: string | SecretStoreSecret;
   RELAY_URL: string;
+}
+
+async function resolveString(val: string | SecretStoreSecret | undefined): Promise<string | undefined> {
+  if (!val) return undefined;
+  return typeof val === 'string' ? val : await val.get();
+}
+
+export interface ResolvedZendeskCreds {
+  subdomain: string;
+  email: string;
+  apiToken: string;
+}
+
+export async function resolveZendeskCreds(env: Pick<ZendeskSyncEnv, 'ZENDESK_SUBDOMAIN' | 'ZENDESK_API_TOKEN' | 'ZENDESK_EMAIL'>): Promise<ResolvedZendeskCreds | null> {
+  const [subdomain, apiToken, email] = await Promise.all([
+    resolveString(env.ZENDESK_SUBDOMAIN),
+    resolveString(env.ZENDESK_API_TOKEN),
+    resolveString(env.ZENDESK_EMAIL),
+  ]);
+  if (!subdomain || !apiToken || !email) return null;
+  return { subdomain, email, apiToken };
 }
 
 function buildResolutionCustomFields(env: ZendeskSyncEnv): Array<{ id: number; value: string }> | undefined {
@@ -63,14 +84,15 @@ export async function addZendeskInternalNote(
   env: ZendeskSyncEnv,
   solve: boolean = false
 ): Promise<void> {
-  if (!env.ZENDESK_SUBDOMAIN || !env.ZENDESK_API_TOKEN || !env.ZENDESK_EMAIL) {
+  const creds = await resolveZendeskCreds(env);
+  if (!creds) {
     console.warn('[addZendeskInternalNote] Missing Zendesk credentials, skipping');
     return;
   }
 
   try {
-    const auth = btoa(`${env.ZENDESK_EMAIL}/token:${env.ZENDESK_API_TOKEN}`);
-    const url = `https://${env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets/${ticketId}`;
+    const auth = btoa(`${creds.email}/token:${creds.apiToken}`);
+    const url = `https://${creds.subdomain}.zendesk.com/api/v2/tickets/${ticketId}`;
 
     const payload: {
       ticket: {
@@ -90,7 +112,7 @@ export async function addZendeskInternalNote(
 
     if (solve) {
       payload.ticket.status = 'solved';
-      payload.ticket.assignee_email = env.ZENDESK_EMAIL;
+      payload.ticket.assignee_email = creds.email;
       payload.ticket.custom_fields = buildResolutionCustomFields(env);
     }
 
