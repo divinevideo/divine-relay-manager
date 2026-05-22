@@ -792,6 +792,13 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             onDeleteEvent={async (eventId) => {
               try {
                 await deleteEvent(eventId, 'Deleted from report review');
+                await logDecision({
+                  targetType: 'event',
+                  targetId: eventId,
+                  action: 'delete_event',
+                  reason: 'Deleted from report review',
+                  reportId: report?.id,
+                });
                 toast({
                   title: "Event deleted",
                   description: "The event has been removed from the relay.",
@@ -1056,6 +1063,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                 eventId={context.target.value}
                 pubkey={context.reportedUser.pubkey || ''}
                 mediaHashes={mediaHashes}
+                mediaHashStatuses={mediaStatus.results}
                 isEventBanned={isEventDeleted ?? undefined}
                 hasBlockedMedia={mediaStatus.hasBlockedMedia}
                 hasRestrictedMedia={mediaStatus.hasRestrictedMedia}

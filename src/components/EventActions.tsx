@@ -6,10 +6,17 @@ import { useAdminApi } from '@/hooks/useAdminApi';
 import { DeleteConfirmDialog } from './DeleteConfirmDialog';
 import { ShieldX, Undo2, Video, ShieldAlert, Unlock, Trash2 } from 'lucide-react';
 
+export interface MediaHashStatus {
+  hash: string;
+  isBlocked: boolean;
+  isRestricted: boolean;
+}
+
 interface EventActionsProps {
   eventId: string;
   pubkey: string;
   mediaHashes?: string[];
+  mediaHashStatuses?: MediaHashStatus[];
   isEventBanned?: boolean;
   hasBlockedMedia?: boolean;
   hasRestrictedMedia?: boolean;
@@ -20,6 +27,7 @@ export function EventActions({
   eventId,
   pubkey,
   mediaHashes = [],
+  mediaHashStatuses = [],
   isEventBanned = false,
   hasBlockedMedia = false,
   hasRestrictedMedia = false,
@@ -131,14 +139,16 @@ export function EventActions({
 
   const unblockMediaMutation = useMutation({
     mutationFn: async () => {
-      for (const hash of mediaHashes) {
+      const blockedHashes = mediaHashStatuses.filter(s => s.isBlocked).map(s => s.hash);
+      if (blockedHashes.length === 0) return;
+      for (const hash of blockedHashes) {
         await api.moderateMedia(hash, 'SAFE', 'Unblocked by moderator');
       }
       await api.logDecision({
         targetType: 'event',
         targetId: eventId,
         action: 'unblock_media',
-        reason: `Unblocked/unrestricted ${mediaHashes.length} media file(s)`,
+        reason: `Unblocked ${blockedHashes.length} media file(s)`,
       });
     },
     onSuccess: () => {
@@ -147,6 +157,29 @@ export function EventActions({
     },
     onError: (error: Error) => {
       toast({ title: 'Failed to unblock media', description: error.message, variant: 'destructive' });
+    },
+  });
+
+  const removeRestrictionMutation = useMutation({
+    mutationFn: async () => {
+      const restrictedHashes = mediaHashStatuses.filter(s => s.isRestricted).map(s => s.hash);
+      if (restrictedHashes.length === 0) return;
+      for (const hash of restrictedHashes) {
+        await api.moderateMedia(hash, 'SAFE', 'Restriction removed by moderator');
+      }
+      await api.logDecision({
+        targetType: 'event',
+        targetId: eventId,
+        action: 'remove_restriction',
+        reason: `Removed restriction from ${restrictedHashes.length} media file(s)`,
+      });
+    },
+    onSuccess: () => {
+      toast({ title: 'Restriction removed' });
+      onActionComplete?.();
+    },
+    onError: (error: Error) => {
+      toast({ title: 'Failed to remove restriction', description: error.message, variant: 'destructive' });
     },
   });
 
@@ -217,7 +250,8 @@ export function EventActions({
 
   const anyPending = banEventMutation.isPending || restoreEventMutation.isPending ||
     deleteEventMutation.isPending || blockMediaMutation.isPending || ageRestrictMutation.isPending ||
-    unblockMediaMutation.isPending || deleteMediaMutation.isPending || deleteEventAndMediaMutation.isPending;
+    unblockMediaMutation.isPending || removeRestrictionMutation.isPending ||
+    deleteMediaMutation.isPending || deleteEventAndMediaMutation.isPending;
 
   return (
     <div className="flex flex-wrap gap-2">
@@ -281,9 +315,9 @@ export function EventActions({
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button variant="outline" className="border-green-500 text-green-600 hover:bg-green-50"
-                  onClick={() => unblockMediaMutation.mutate()} disabled={anyPending}>
+                  onClick={() => removeRestrictionMutation.mutate()} disabled={anyPending}>
                   <Unlock className="h-4 w-4 mr-1" />
-                  {unblockMediaMutation.isPending ? 'Removing...' : 'Remove Restriction'}
+                  {removeRestrictionMutation.isPending ? 'Removing...' : 'Remove Restriction'}
                 </Button>
               </TooltipTrigger>
               <TooltipContent><p>Remove age restriction. Media will be publicly accessible.</p></TooltipContent>
