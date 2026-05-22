@@ -906,6 +906,7 @@ interface AgeReviewCasesResponse {
 interface AgeReviewCaseResponse {
   success: boolean;
   case: import('../../shared/age-review').AgeReviewCase;
+  keycastUpdated?: boolean;
 }
 
 export async function getAgeReviewCases(
