@@ -694,11 +694,6 @@ async function handleModerate(
 
   const secretKey = await getSecretKey(env);
 
-  // Build NIP-86 moderation event (kind 10000 + action-specific kinds)
-  let kind: number;
-  let content: string;
-  const tags: string[][] = [];
-
   switch (body.action) {
     case 'delete_event': {
       // Use banevent RPC directly instead of publishing kind 5 events.
@@ -782,9 +777,6 @@ async function handleModerate(
         } catch (err) {
           console.error('[handleModerate] Zendesk sync error:', err);
         }
-        const dmPromise = notifyModerationService(env, body.pubkey, 'ACCOUNT_SUSPENDED', body.reason || 'Account suspended by moderator')
-          .catch(err => console.error('[handleModerate] DM notification error:', err));
-        if (ctx) ctx.waitUntil(dmPromise);
         return jsonResponse({ success: true, pubkey: body.pubkey }, 200, corsHeaders);
       } catch (error) {
         console.error('[handleModerate] ban_pubkey error:', error);
@@ -810,6 +802,9 @@ async function handleModerate(
         if (!rpcResult.success) {
           return jsonResponse({ success: false, error: rpcResult.error || 'unbanpubkey RPC failed' }, 500, corsHeaders);
         }
+        if (env.DB) {
+          await markHumanReviewed(env.DB, 'pubkey', body.pubkey);
+        }
         try {
           await syncZendeskAfterAction(env, body.action, 'pubkey', body.pubkey, getPublicKey(secretKey));
         } catch (err) {
@@ -825,50 +820,6 @@ async function handleModerate(
     default:
       return jsonResponse({ success: false, error: `Unknown action: ${body.action}` }, 400, corsHeaders);
   }
-
-  const event = finalizeEvent(
-    {
-      kind,
-      content,
-      tags,
-      created_at: Math.floor(Date.now() / 1000),
-    },
-    secretKey
-  );
-
-  // Publish to relay
-  const publishResult = await publishToRelay(event, env.RELAY_URL);
-
-  if (!publishResult.success) {
-    return jsonResponse({ success: false, error: publishResult.error }, 500, corsHeaders);
-  }
-
-  if (env.DB && body.pubkey) {
-    await markHumanReviewed(env.DB, 'pubkey', body.pubkey);
-  }
-
-  // Sync linked Zendesk tickets for both event and pubkey targets if present
-  // (delete_event has its own early-return sync above)
-  const moderator = getPublicKey(secretKey);
-  try {
-    if (body.eventId) {
-      await syncZendeskAfterAction(env, body.action, 'event', body.eventId, moderator);
-    }
-    if (body.pubkey) {
-      await syncZendeskAfterAction(env, body.action, 'pubkey', body.pubkey, moderator);
-    }
-  } catch (err) {
-    console.error('[handleModerate] Zendesk sync error:', err);
-  }
-
-  // DM the banned user (non-critical, off response path)
-  if (body.action === 'ban_pubkey' && body.pubkey) {
-    const dmPromise = notifyModerationService(env, body.pubkey, 'ACCOUNT_SUSPENDED', body.reason || 'Account suspended by moderator')
-      .catch(err => console.error('[handleModerate] DM notification error:', err));
-    if (ctx) ctx.waitUntil(dmPromise);
-  }
-
-  return jsonResponse({ success: true, event }, 200, corsHeaders);
 }
 
 async function handleRelayRpc(
