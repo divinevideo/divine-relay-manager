@@ -213,7 +213,7 @@ async function callModerateMedia(
   const body = JSON.stringify({ sha256, action, reason, source: 'relay-manager-bulk' });
 
   if (env.MODERATION_API) {
-    const response = await env.MODERATION_API.fetch('https://internal/api/v1/moderate', {
+    const response = await env.MODERATION_API.fetch('https://moderation-api.divine.video/api/v1/moderate', {
       method: 'POST', headers, body,
     });
     if (!response.ok) throw new Error(`Moderation service returned ${response.status}`);
