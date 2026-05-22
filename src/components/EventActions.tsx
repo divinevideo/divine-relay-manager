@@ -173,24 +173,45 @@ export function EventActions({
 
   const deleteEventAndMediaMutation = useMutation({
     mutationFn: async () => {
-      await api.deleteEvent(eventId, 'Permanently deleted by moderator', pubkey);
-      await api.publishDeletionRequest(eventId, 'Permanently deleted by moderator');
-      for (const hash of mediaHashes) {
-        await api.deleteMedia(hash, 'Permanently deleted by moderator');
+      const completed: string[] = [];
+      try {
+        await api.deleteEvent(eventId, 'Permanently deleted by moderator', pubkey);
+        completed.push('event_deleted');
+        await api.logDecision({ targetType: 'event', targetId: eventId, action: 'delete_event', reason: 'Permanently deleted (combined)' });
+
+        await api.publishDeletionRequest(eventId, 'Permanently deleted by moderator');
+        completed.push('deletion_request');
+
+        for (const hash of mediaHashes) {
+          await api.deleteMedia(hash, 'Permanently deleted by moderator');
+          completed.push(`media_${hash.slice(0, 8)}`);
+        }
+        await api.logDecision({ targetType: 'event', targetId: eventId, action: 'delete_event_and_media', reason: `Permanently deleted event + ${mediaHashes.length} media file(s)` });
+      } catch (error) {
+        if (completed.length > 0) {
+          try {
+            await api.logDecision({ targetType: 'event', targetId: eventId, action: 'delete_event_and_media_partial', reason: `Partial delete (completed: ${completed.join(', ')}). Error: ${error instanceof Error ? error.message : 'unknown'}` });
+          } catch { /* audit log itself failed — nothing more we can do */ }
+        }
+        throw Object.assign(error instanceof Error ? error : new Error('Unknown error'), { completed });
       }
-      await api.logDecision({
-        targetType: 'event',
-        targetId: eventId,
-        action: 'delete_event_and_media',
-        reason: `Permanently deleted event + ${mediaHashes.length} media file(s)`,
-      });
     },
     onSuccess: () => {
       toast({ title: 'Event and media permanently deleted' });
       onActionComplete?.();
     },
-    onError: (error: Error) => {
-      toast({ title: 'Failed to delete', description: error.message, variant: 'destructive' });
+    onError: (error: Error & { completed?: string[] }) => {
+      const completed = error.completed ?? [];
+      if (completed.length > 0) {
+        toast({
+          title: 'Partially completed',
+          description: `Event was deleted but media deletion failed: ${error.message}. Check audit log for details.`,
+          variant: 'destructive',
+        });
+        onActionComplete?.();
+      } else {
+        toast({ title: 'Failed to delete', description: error.message, variant: 'destructive' });
+      }
     },
   });
 

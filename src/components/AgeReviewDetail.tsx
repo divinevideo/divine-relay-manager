@@ -1,6 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAdminApi } from "@/hooks/useAdminApi";
+import { useToast } from "@/hooks/useToast";
 import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
 import { UserActions } from "@/components/UserActions";
 import { Badge } from "@/components/ui/badge";
@@ -82,10 +83,20 @@ interface Props {
   caseData: AgeReviewCase;
 }
 
+const KEYCAST_STATES: AgeReviewState[] = [
+  'restricted_pending_user_response',
+  'restricted_pending_parental_consent',
+  'restricted_pending_support_email',
+  'cleared',
+  'denied_closed',
+];
+
 export function AgeReviewDetail({ caseData: c }: Props) {
   const api = useAdminApi();
+  const { toast } = useToast();
   const queryClient = useQueryClient();
   const [resolutionNote, setResolutionNote] = useState(c.resolution_note ?? "");
+  const pendingStateRef = useRef<string | undefined>();
 
   useEffect(() => {
     setResolutionNote(c.resolution_note ?? "");
@@ -95,10 +106,20 @@ export function AgeReviewDetail({ caseData: c }: Props) {
   const daysRemaining = getDaysRemaining(c);
 
   const updateCase = useMutation({
-    mutationFn: (updates: Record<string, unknown>) =>
-      api.updateAgeReviewCase(c.id, updates),
-    onSuccess: () => {
+    mutationFn: (updates: Record<string, unknown>) => {
+      pendingStateRef.current = updates.state as string | undefined;
+      return api.updateAgeReviewCase(c.id, updates);
+    },
+    onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['age-review-cases'] });
+      const requestedState = pendingStateRef.current as AgeReviewState | undefined;
+      if (requestedState && KEYCAST_STATES.includes(requestedState) && data.keycastUpdated === false) {
+        toast({
+          title: 'Account enforcement failed',
+          description: 'Case was updated but Keycast account suspension did not apply. The user\'s account may still be active. Retry or escalate.',
+          variant: 'destructive',
+        });
+      }
     },
   });
 
