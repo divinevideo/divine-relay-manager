@@ -168,7 +168,7 @@ export async function allowEvent(
   eventId: string,
   env: Nip86Env
 ): Promise<Nip86RpcResult> {
-  return callNip86Rpc('unbanevent', [eventId], env);
+  return callNip86Rpc('allowevent', [eventId], env);
 }
 
 /**

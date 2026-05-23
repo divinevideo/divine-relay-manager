@@ -566,7 +566,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
 
   const restoreMutation = useMutation({
     mutationFn: async ({ eventId }: { eventId: string }) => {
-      await callRelayRpc('unbanevent', [eventId]);
+      await callRelayRpc('allowevent', [eventId]);
       await logDecision({
         targetType: 'event',
         targetId: eventId,

@@ -54,7 +54,7 @@ export function EventModeration() {
   // Mutation for allowing events
   const allowEventMutation = useMutation({
     mutationFn: ({ eventId, reason }: { eventId: string; reason?: string }) =>
-      callRelayRpc('unbanevent', [eventId, reason]),
+      callRelayRpc('allowevent', [eventId, reason]),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['events-needing-moderation'] });
       toast({ title: "Event approved successfully" });
