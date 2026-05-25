@@ -13,7 +13,7 @@ CF Pages                               CF Workers (staging + prod)
   |                                      |
   |-- useThread, useAuthor, etc.         |-- handleModerate() --> relay RPC
   |   (direct relay WebSocket)           |-- syncZendeskAfterAction()
-  |                                      |-- notifyBlossom()
+  |                                      |-- handleMediaProxy()
   |                                      |-- ReportWatcher (Durable Object)
   v                                      v
 Funnelcake relay (GKE)               D1 (moderation_decisions, zendesk_tickets,
@@ -64,7 +64,6 @@ When a moderation action completes, `handleModerate()` triggers side effects:
 | Relay RPC (banevent/banpubkey/etc.) | **YES** | Return error to UI. Do not proceed. |
 | `markHumanReviewed()` | No | Log error, continue. Prevents auto-hide from overriding human decisions. |
 | `syncZendeskAfterAction()` | No | Log error, continue. Zendesk ticket state may lag. |
-| `notifyBlossom()` | No | Log error, continue. Media moderation state may lag. |
 
 **Rules:**
 - Critical side effects: `await`, return error on failure.
@@ -78,11 +77,12 @@ When a moderation action completes, `handleModerate()` triggers side effects:
 - Only resolves tickets for actions in the `resolutionActions` array
 - **When adding new moderation actions, check whether they should resolve tickets and add to `resolutionActions` if so.**
 
-### notifyBlossom()
+### handleMediaProxy()
 
-- POSTs to the Blossom media server admin moderation endpoint with Bearer token auth
-- Payload: `{ sha256, action: "BLOCK"|"RESTRICT"|"APPROVE" }`
-- Auth token is a per-worker secret (not in wrangler config)
+- Proxies blocked media to moderators via Blossom's admin blob endpoint
+- Requires `BLOSSOM_WEBHOOK_SECRET` Bearer auth and returns a clear 500 if the secret is unbound
+- Uses `CDN_DOMAIN` from `wrangler.*.toml`, defaulting to `media.divine.video`
+- Forwards `Range` requests and streams the upstream response body through without buffering
 
 ### ReportWatcher (Durable Object)
 
@@ -144,6 +144,46 @@ Schema is created on-demand via `ensureDecisionsTable()` and `ensureZendeskTable
 | `moderation_decisions` | Append-only decision log (action, reason, target, moderator, timestamp) |
 | `moderation_targets` | Per-target state tracking (`ever_human_reviewed` prevents auto-hide override) |
 | `zendesk_tickets` | Maps Zendesk ticket IDs to Nostr event IDs and pubkeys |
+
+## Local Development
+
+Full local stack: Wrangler worker + Caddy HTTPS proxy + Vite frontend.
+
+### Prerequisites
+
+```bash
+brew install mkcert caddy
+sudo mkcert -install          # one-time: trust the local CA
+```
+
+### One-time setup
+
+1. Copy `.env.example` to `.env.local` and set the CF Access credentials
+2. Add `VITE_ADMIN_API_KEY=osprey-local-dev-key` to `.env.local`
+3. Create `worker/.dev.vars` with:
+   ```
+   NOSTR_NSEC=your-test-nsec
+   ADMIN_API_KEY=osprey-local-dev-key
+   ```
+
+### Running
+
+```bash
+./scripts/dev-local.sh
+```
+
+This starts:
+- **Worker** on `http://localhost:8787` (Wrangler dev with local D1 + Durable Objects)
+- **Caddy HTTPS proxy** on `https://localhost:8788` (terminates TLS, forwards to worker)
+- **Vite frontend** on `https://localhost:5173`
+
+Select "Local" in the environment selector. The frontend sends `X-Admin-Key` header (from `VITE_ADMIN_API_KEY`) for admin auth since CF Access isn't available locally.
+
+### Why HTTPS locally
+
+The frontend runs on HTTPS (Vite's built-in TLS). Browsers block mixed content: an HTTPS page cannot fetch from an HTTP endpoint. Caddy on port 8788 terminates TLS with mkcert certs so `https://localhost:8788` proxies cleanly to the HTTP worker on 8787.
+
+The same applies to the relay WebSocket: `wss://localhost:4443` proxies to `ws://localhost:4444`.
 
 ## Gotchas
 

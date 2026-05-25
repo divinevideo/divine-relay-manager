@@ -9,11 +9,26 @@ import {
   banEvent,
   banPubkey,
   unbanPubkey,
+  publishKind5Deletion,
   type SecretStoreSecret,
 } from './nip86';
 import { ensureSchema } from './db';
 import { generatePreAuthToken, verifyPreAuthToken, base64UrlEncode } from './zendesk-preauth';
 import { deriveFunnelcakeApiUrl, proxyFunnelcakeRequest } from './funnelcake-proxy';
+import type { KeycastEnv } from './keycast-client';
+import {
+  handleGetAgeReviewCases,
+  handleGetAgeReviewCase,
+  handleUpdateAgeReviewCase,
+  handleGetModerationStatus,
+  handleParentContact,
+  handleAgeReviewReplyWebhook,
+  checkAgeReviewDeadlines,
+  getAgeReviewConfig,
+  updateAgeReviewConfig,
+} from './age-review';
+import { handleBulkModerate } from './bulk-moderate';
+import { ensureZendeskTable, addZendeskInternalNote, syncZendeskAfterAction, resolveZendeskCreds } from './zendesk-sync';
 
 let schemaReady = false;
 async function ensureSchemaOnce(db: D1Database): Promise<void> {
@@ -25,7 +40,7 @@ async function ensureSchemaOnce(db: D1Database): Promise<void> {
 // Re-export ReportWatcher Durable Object for wrangler
 export { ReportWatcher } from './ReportWatcher';
 
-interface Env {
+interface Env extends KeycastEnv {
   NOSTR_NSEC: string | SecretStoreSecret;
   RELAY_URL: string;
   ALLOWED_ORIGINS: string;
@@ -38,17 +53,21 @@ interface Env {
   // Service binding to divine-moderation-service (bypasses CF Access + no cold starts)
   MODERATION_API?: Fetcher;
   // Zendesk integration
-  ZENDESK_SUBDOMAIN?: string;
+  ZENDESK_SUBDOMAIN?: string | SecretStoreSecret;
+  // These four are per-worker secrets (not Secrets Store). If migrated to SecretStoreSecret,
+  // update the call sites — they pass these directly to crypto/TextEncoder without resolving.
   ZENDESK_JWT_SECRET?: string;
-  ZENDESK_PREAUTH_SECRET?: string;  // HMAC secret for pre-auth token generation/verification
-  ZENDESK_WEBHOOK_SECRET?: string;  // For /api/zendesk/webhook
-  ZENDESK_PARSE_REPORT_SECRET?: string;  // For /api/zendesk/parse-report
-  ZENDESK_API_TOKEN?: string;
-  ZENDESK_EMAIL?: string;
+  ZENDESK_PREAUTH_SECRET?: string;
+  ZENDESK_WEBHOOK_SECRET?: string;
+  ZENDESK_PARSE_REPORT_SECRET?: string;
+  ZENDESK_AGE_REVIEW_WEBHOOK_SECRET?: string | SecretStoreSecret;  // For /api/zendesk/age-review-reply
+  ZENDESK_API_TOKEN?: string | SecretStoreSecret;
+  ZENDESK_EMAIL?: string | SecretStoreSecret;
   ZENDESK_FIELD_ACTION_STATUS?: string;
   ZENDESK_FIELD_ACTION_REQUESTED?: string;
   ZENDESK_FIELD_CATEGORY?: string;       // For auto-solve required fields
   ZENDESK_FIELD_ISSUE?: string;          // For auto-solve required fields
+  ZENDESK_FIELD_AGE_REVIEW_DEADLINE?: string;
   KV?: KVNamespace;
   DB?: D1Database;
   // Relay management configuration
@@ -56,7 +75,7 @@ interface Env {
   MANAGEMENT_URL?: string;   // Full URL override for NIP-86 management API (for local dev with HTTP)
   MODERATION_SERVICE_URL?: string;  // URL for public moderation API (check-result, status)
   MODERATION_ADMIN_URL?: string;    // URL for CF Access-protected moderation service (/api/v1/moderate, /api/v1/notify)
-  SERVICE_API_TOKEN?: string;       // Bearer token for moderation-service API auth (via service binding)
+  SERVICE_API_TOKEN?: string | SecretStoreSecret;  // Bearer token for moderation-service API auth (via Secrets Store)
   REALNESS_API_URL?: string;  // URL for AI detection/realness service
   FUNNELCAKE_API_URL?: string;  // Explicit Funnelcake REST API URL (derived from RELAY_URL if not set)
   // Durable Object bindings
@@ -65,6 +84,8 @@ interface Env {
   AUTO_HIDE_ENABLED?: string;
   // Admin API key — required on all admin endpoints when request doesn't come through CF Access
   ADMIN_API_KEY?: string;
+  // Slack webhook for age review deadline alerts
+  SLACK_WEBHOOK_URL?: string;
   // Environment identifier for deep links (e.g., "production", "staging")
   ENVIRONMENT?: string;
   // Blossom admin bypass (for proxying blocked media to moderators)
@@ -100,18 +121,20 @@ function getModerationAdminUrl(env: Env): string {
   return env.MODERATION_ADMIN_URL;
 }
 
+async function resolveSecret(binding: string | SecretStoreSecret | undefined): Promise<string | null> {
+  if (!binding) return null;
+  const value = typeof binding === 'string' ? binding : await binding.get();
+  return value ?? null;
+}
+
 /**
  * Resolve CF Access credentials from env (supports both plain strings and SecretStoreSecret bindings).
  */
 async function getCfAccessCredentials(env: Env): Promise<{ clientId: string; clientSecret: string } | null> {
   if (!env.CF_ACCESS_CLIENT_ID || !env.CF_ACCESS_CLIENT_SECRET) return null;
 
-  const clientId = typeof env.CF_ACCESS_CLIENT_ID === 'string'
-    ? env.CF_ACCESS_CLIENT_ID
-    : await env.CF_ACCESS_CLIENT_ID.get();
-  const clientSecret = typeof env.CF_ACCESS_CLIENT_SECRET === 'string'
-    ? env.CF_ACCESS_CLIENT_SECRET
-    : await env.CF_ACCESS_CLIENT_SECRET.get();
+  const clientId = await resolveSecret(env.CF_ACCESS_CLIENT_ID);
+  const clientSecret = await resolveSecret(env.CF_ACCESS_CLIENT_SECRET);
 
   if (!clientId || !clientSecret) return null;
   return { clientId, clientSecret };
@@ -121,8 +144,8 @@ async function getCfAccessCredentials(env: Env): Promise<{ clientId: string; cli
  * Notify moderation-service to send a DM to an affected user.
  * Non-critical side effect — caller must wrap in try/catch.
  *
- * Uses service binding (MODERATION_API) with Bearer token when available,
- * falls back to fetch() with CF Access headers.
+ * Uses Bearer auth when SERVICE_API_TOKEN is configured,
+ * falls back to CF Access headers otherwise.
  * If a dedicated DM service is extracted later (support-trust-safety#118),
  * this function is the single call site to update.
  */
@@ -138,11 +161,13 @@ async function notifyModerationService(
     'Content-Type': 'application/json',
   };
 
-  if (env.MODERATION_API && env.SERVICE_API_TOKEN) {
-    // Service binding: authenticate via Bearer token
-    headers['Authorization'] = `Bearer ${env.SERVICE_API_TOKEN}`;
+  if (env.SERVICE_API_TOKEN) {
+    const token = await resolveSecret(env.SERVICE_API_TOKEN);
+    if (!token) {
+      throw new Error('SERVICE_API_TOKEN binding exists but resolved to empty — secret misconfigured');
+    }
+    headers['Authorization'] = `Bearer ${token}`;
   } else {
-    // HTTP fallback: authenticate via CF Access service token
     const cfAccess = await getCfAccessCredentials(env);
     if (!cfAccess) {
       console.warn('[notifyModerationService] No auth credentials configured, skipping DM');
@@ -221,7 +246,7 @@ function hostnameMatchesWildcard(hostname: string, suffix: string): boolean {
 
 function buildCorsHeaders(allowedOrigin: string | null): Record<string, string> {
   const headers: Record<string, string> = {
-    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With, Range, X-Admin-Key, CF-Access-Client-Id, CF-Access-Client-Secret',
     'Access-Control-Expose-Headers': 'Content-Range, Accept-Ranges, X-Admin-Proxy, X-Moderation-Status',
     'Access-Control-Max-Age': '86400',
@@ -307,6 +332,23 @@ export default {
         return handleZendeskRoutes(request, path, env, corsHeaders);
       }
 
+      // Mobile-facing endpoints: NIP-98 user auth, not admin auth
+      if (path === '/v1/account/moderation-status' && request.method === 'GET') {
+        const authResult = await verifyNip98Auth(request, request.url);
+        if (!authResult.valid || !authResult.pubkey) return jsonResponse({ success: false, error: authResult.error ?? 'Unauthorized' }, 401, corsHeaders);
+        if (env.DB) await ensureSchemaOnce(env.DB);
+        return handleGetModerationStatus(authResult.pubkey, env, corsHeaders);
+      }
+
+      if (path.startsWith('/v1/minor-review-cases/') && path.endsWith('/parent-contact') && request.method === 'POST') {
+        const authResult = await verifyNip98Auth(request, request.url);
+        if (!authResult.valid || !authResult.pubkey) return jsonResponse({ success: false, error: authResult.error ?? 'Unauthorized' }, 401, corsHeaders);
+        if (env.DB) await ensureSchemaOnce(env.DB);
+        const caseId = path.replace('/v1/minor-review-cases/', '').replace('/parent-contact', '');
+        if (!caseId) return jsonResponse({ success: false, error: 'Invalid caseId' }, 400, corsHeaders);
+        return handleParentContact(request, caseId, authResult.pubkey, env, corsHeaders);
+      }
+
       // All other /api/* endpoints require admin access (CF Access or API key)
       const adminAuthError = verifyAdminAccess(request, env);
       if (adminAuthError) {
@@ -331,6 +373,18 @@ export default {
 
       if (path === '/api/moderate-media' && request.method === 'POST') {
         return handleModerateMedia(request, env, corsHeaders);
+      }
+
+      if (path === '/api/publish-deletion' && request.method === 'POST') {
+        const body = await request.json() as { eventId?: string; reason?: string };
+        if (!body.eventId) {
+          return jsonResponse({ success: false, error: 'Missing eventId' }, 400, corsHeaders);
+        }
+        const result = await publishKind5Deletion(body.eventId, body.reason || 'Deleted by moderator', env);
+        if (!result.success) {
+          return jsonResponse({ success: false, error: result.error || 'Failed to publish deletion' }, 500, corsHeaders);
+        }
+        return jsonResponse({ success: true }, 200, corsHeaders);
       }
 
       if (path === '/api/decisions' && request.method === 'POST') {
@@ -397,6 +451,49 @@ export default {
         return jsonResponse({ success: true, events: result.events }, 200, corsHeaders);
       }
 
+      // Bulk moderation (server-side iteration for batch operations)
+      if (path === '/api/bulk-moderate' && request.method === 'POST') {
+        if (env.DB) await ensureSchemaOnce(env.DB);
+        return handleBulkModerate(request, env, corsHeaders);
+      }
+
+      // Age review config
+      if (path === '/api/age-review/config' && request.method === 'GET') {
+        if (!env.DB) return jsonResponse({ success: false, error: 'Database not configured' }, 500, corsHeaders);
+        await ensureSchemaOnce(env.DB);
+        const config = await getAgeReviewConfig(env.DB);
+        return new Response(JSON.stringify(config), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders },
+        });
+      }
+      if (path === '/api/age-review/config' && request.method === 'PUT') {
+        if (!env.DB) return jsonResponse({ success: false, error: 'Database not configured' }, 500, corsHeaders);
+        await ensureSchemaOnce(env.DB);
+        const configBody = await request.json() as Record<string, unknown>;
+        const config = await updateAgeReviewConfig(env.DB, configBody);
+        return new Response(JSON.stringify(config), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders },
+        });
+      }
+
+      // Age review case management
+      if (path === '/api/age-review/cases' && request.method === 'GET') {
+        if (env.DB) await ensureSchemaOnce(env.DB);
+        return handleGetAgeReviewCases(request, env, corsHeaders);
+      }
+      if (path.startsWith('/api/age-review/cases/') && request.method === 'GET') {
+        if (env.DB) await ensureSchemaOnce(env.DB);
+        const caseId = path.replace('/api/age-review/cases/', '');
+        return handleGetAgeReviewCase(caseId, env, corsHeaders);
+      }
+      if (path.startsWith('/api/age-review/cases/') && request.method === 'PATCH') {
+        if (env.DB) await ensureSchemaOnce(env.DB);
+        const caseId = path.replace('/api/age-review/cases/', '');
+        return handleUpdateAgeReviewCase(request, caseId, env, corsHeaders);
+      }
+
       // 404 for unknown routes
       return jsonResponse({ success: false, error: 'Not found' }, 404, corsHeaders);
     } catch (error) {
@@ -438,6 +535,14 @@ export default {
         }
       } catch (error) {
         console.error('[scheduled] Failed to clean up pre-auth nonces:', error);
+      }
+
+      // Check age review deadlines and auto-close expired cases
+      try {
+        await ensureSchemaOnce(env.DB);
+        await checkAgeReviewDeadlines(env);
+      } catch (error) {
+        console.error('[scheduled] Age review deadline check failed:', error);
       }
     }
   },
@@ -591,11 +696,6 @@ async function handleModerate(
 
   const secretKey = await getSecretKey(env);
 
-  // Build NIP-86 moderation event (kind 10000 + action-specific kinds)
-  let kind: number;
-  let content: string;
-  const tags: string[][] = [];
-
   switch (body.action) {
     case 'delete_event': {
       // Use banevent RPC directly instead of publishing kind 5 events.
@@ -653,76 +753,75 @@ async function handleModerate(
       }
     }
 
-    case 'ban_pubkey':
+    case 'ban_pubkey': {
       if (!body.pubkey) {
         return jsonResponse({ success: false, error: 'Missing pubkey for ban_pubkey' }, 400, corsHeaders);
       }
-      // NIP-86 relay management event
-      kind = 10000;
-      content = JSON.stringify({
-        method: 'banpubkey',
-        params: [body.pubkey, body.reason || ''],
-      });
-      break;
+      try {
+        const rpcRequest = new Request(request.url.replace(/\/api\/moderate$/, '/api/relay-rpc'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            method: 'banpubkey',
+            params: [body.pubkey, body.reason || ''],
+          }),
+        });
+        const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders, ctx);
+        const rpcResult = await rpcResponse.json() as { success: boolean; error?: string };
+        if (!rpcResult.success) {
+          return jsonResponse({ success: false, error: rpcResult.error || 'banpubkey RPC failed' }, 500, corsHeaders);
+        }
+        if (env.DB) {
+          await markHumanReviewed(env.DB, 'pubkey', body.pubkey);
+        }
+        try {
+          await syncZendeskAfterAction(env, body.action, 'pubkey', body.pubkey, getPublicKey(secretKey));
+        } catch (err) {
+          console.error('[handleModerate] Zendesk sync error:', err);
+        }
+        return jsonResponse({ success: true, pubkey: body.pubkey }, 200, corsHeaders);
+      } catch (error) {
+        console.error('[handleModerate] ban_pubkey error:', error);
+        return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Unknown error' }, 500, corsHeaders);
+      }
+    }
 
-    case 'allow_pubkey':
+    case 'allow_pubkey': {
       if (!body.pubkey) {
         return jsonResponse({ success: false, error: 'Missing pubkey for allow_pubkey' }, 400, corsHeaders);
       }
-      kind = 10000;
-      content = JSON.stringify({
-        method: 'allowpubkey',
-        params: [body.pubkey],
-      });
-      break;
+      try {
+        const rpcRequest = new Request(request.url.replace(/\/api\/moderate$/, '/api/relay-rpc'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            method: 'unbanpubkey',
+            params: [body.pubkey],
+          }),
+        });
+        const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders);
+        const rpcResult = await rpcResponse.json() as { success: boolean; error?: string };
+        if (!rpcResult.success) {
+          return jsonResponse({ success: false, error: rpcResult.error || 'unbanpubkey RPC failed' }, 500, corsHeaders);
+        }
+        if (env.DB) {
+          await markHumanReviewed(env.DB, 'pubkey', body.pubkey);
+        }
+        try {
+          await syncZendeskAfterAction(env, body.action, 'pubkey', body.pubkey, getPublicKey(secretKey));
+        } catch (err) {
+          console.error('[handleModerate] Zendesk sync error:', err);
+        }
+        return jsonResponse({ success: true, pubkey: body.pubkey }, 200, corsHeaders);
+      } catch (error) {
+        console.error('[handleModerate] allow_pubkey error:', error);
+        return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Unknown error' }, 500, corsHeaders);
+      }
+    }
 
     default:
       return jsonResponse({ success: false, error: `Unknown action: ${body.action}` }, 400, corsHeaders);
   }
-
-  const event = finalizeEvent(
-    {
-      kind,
-      content,
-      tags,
-      created_at: Math.floor(Date.now() / 1000),
-    },
-    secretKey
-  );
-
-  // Publish to relay
-  const publishResult = await publishToRelay(event, env.RELAY_URL);
-
-  if (!publishResult.success) {
-    return jsonResponse({ success: false, error: publishResult.error }, 500, corsHeaders);
-  }
-
-  if (env.DB && body.pubkey) {
-    await markHumanReviewed(env.DB, 'pubkey', body.pubkey);
-  }
-
-  // Sync linked Zendesk tickets for both event and pubkey targets if present
-  // (delete_event has its own early-return sync above)
-  const moderator = getPublicKey(secretKey);
-  try {
-    if (body.eventId) {
-      await syncZendeskAfterAction(env, body.action, 'event', body.eventId, moderator);
-    }
-    if (body.pubkey) {
-      await syncZendeskAfterAction(env, body.action, 'pubkey', body.pubkey, moderator);
-    }
-  } catch (err) {
-    console.error('[handleModerate] Zendesk sync error:', err);
-  }
-
-  // DM the banned user (non-critical, off response path)
-  if (body.action === 'ban_pubkey' && body.pubkey) {
-    const dmPromise = notifyModerationService(env, body.pubkey, 'ACCOUNT_SUSPENDED', body.reason || 'Account suspended by moderator')
-      .catch(err => console.error('[handleModerate] DM notification error:', err));
-    if (ctx) ctx.waitUntil(dmPromise);
-  }
-
-  return jsonResponse({ success: true, event }, 200, corsHeaders);
 }
 
 async function handleRelayRpc(
@@ -885,42 +984,6 @@ async function markHumanReviewed(db: D1Database, targetType: string, targetId: s
     `).bind(targetId, targetType).run();
   } catch (error) {
     console.error('[markHumanReviewed] Failed to update moderation_targets:', error);
-  }
-}
-
-// Ensure zendesk_tickets table exists for tracking Zendesk ↔ Nostr mappings
-async function ensureZendeskTable(db: D1Database): Promise<void> {
-  await db.prepare(`
-    CREATE TABLE IF NOT EXISTS zendesk_tickets (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      ticket_id INTEGER NOT NULL UNIQUE,
-      event_id TEXT,
-      author_pubkey TEXT,
-      violation_type TEXT,
-      status TEXT DEFAULT 'open',
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-      resolved_at TEXT,
-      resolution_action TEXT,
-      resolution_moderator TEXT
-    )
-  `).run();
-
-  try {
-    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_zendesk_event ON zendesk_tickets(event_id)`).run();
-  } catch {
-    // Index might already exist
-  }
-
-  try {
-    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_zendesk_pubkey ON zendesk_tickets(author_pubkey)`).run();
-  } catch {
-    // Index might already exist
-  }
-
-  try {
-    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_zendesk_status ON zendesk_tickets(status)`).run();
-  } catch {
-    // Index might already exist
   }
 }
 
@@ -1187,7 +1250,7 @@ async function handleModerateMedia(
   try {
     const body = await request.json() as {
       sha256: string;
-      action: 'SAFE' | 'REVIEW' | 'AGE_RESTRICTED' | 'PERMANENT_BAN';
+      action: 'SAFE' | 'REVIEW' | 'AGE_RESTRICTED' | 'PERMANENT_BAN' | 'DELETE';
       reason?: string;
     };
 
@@ -1199,16 +1262,18 @@ async function handleModerateMedia(
       return jsonResponse({ success: false, error: 'Missing action' }, 400, corsHeaders);
     }
 
-    // Build auth headers: Bearer token for service binding, CF Access for HTTP fallback
+    // Build auth headers: Bearer when SERVICE_API_TOKEN is configured, CF Access otherwise
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     };
 
-    if (env.MODERATION_API && env.SERVICE_API_TOKEN) {
-      // Service binding: authenticate via Bearer token
-      headers['Authorization'] = `Bearer ${env.SERVICE_API_TOKEN}`;
+    if (env.SERVICE_API_TOKEN) {
+      const token = await resolveSecret(env.SERVICE_API_TOKEN);
+      if (!token) {
+        return jsonResponse({ success: false, error: 'SERVICE_API_TOKEN binding exists but resolved to empty' }, 500, corsHeaders);
+      }
+      headers['Authorization'] = `Bearer ${token}`;
     } else {
-      // HTTP fallback: authenticate via CF Access service token
       const cfAccess = await getCfAccessCredentials(env);
       if (!cfAccess) {
         return jsonResponse({ success: false, error: 'CF_ACCESS credentials not configured' }, 500, corsHeaders);
@@ -1602,7 +1667,8 @@ async function updateZendeskTicket(
   note: string,
   env: Env
 ): Promise<void> {
-  if (!env.ZENDESK_SUBDOMAIN || !env.ZENDESK_API_TOKEN || !env.ZENDESK_EMAIL) {
+  const creds = await resolveZendeskCreds(env);
+  if (!creds) {
     console.warn('[updateZendeskTicket] Missing Zendesk API credentials, skipping callback');
     return;
   }
@@ -1613,8 +1679,8 @@ async function updateZendeskTicket(
   }
 
   try {
-    const auth = btoa(`${env.ZENDESK_EMAIL}/token:${env.ZENDESK_API_TOKEN}`);
-    const url = `https://${env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets/${ticketId}`;
+    const auth = btoa(`${creds.email}/token:${creds.apiToken}`);
+    const url = `https://${creds.subdomain}.zendesk.com/api/v2/tickets/${ticketId}`;
 
     const customFields = [
       { id: parseInt(env.ZENDESK_FIELD_ACTION_STATUS, 10), value: success ? 'success' : 'failed' },
@@ -1652,65 +1718,6 @@ async function updateZendeskTicket(
 }
 
 // Add internal note to Zendesk ticket (simpler than updateZendeskTicket - just adds comment, optionally solves)
-async function addZendeskInternalNote(
-  ticketId: number,
-  note: string,
-  env: Env,
-  solve: boolean = false
-): Promise<void> {
-  if (!env.ZENDESK_SUBDOMAIN || !env.ZENDESK_API_TOKEN || !env.ZENDESK_EMAIL) {
-    console.warn('[addZendeskInternalNote] Missing Zendesk credentials, skipping');
-    return;
-  }
-
-  try {
-    const auth = btoa(`${env.ZENDESK_EMAIL}/token:${env.ZENDESK_API_TOKEN}`);
-    const url = `https://${env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets/${ticketId}`;
-
-    const payload: { ticket: { comment: { body: string; public: boolean }; status?: string; assignee_email?: string; custom_fields?: Array<{ id: number; value: string }> } } = {
-      ticket: {
-        comment: {
-          body: note,
-          public: false,
-        },
-      },
-    };
-
-    if (solve) {
-      payload.ticket.status = 'solved';
-      // Zendesk requires an assignee to solve a ticket (system rule, not enforced via API error).
-      // Without this, the comment is added but the status change is silently ignored.
-      payload.ticket.assignee_email = env.ZENDESK_EMAIL;
-      // Category and Issue are required fields. These values are set unconditionally. Safe
-      // because auto-categorize triggers fire at ticket creation, and this solve call runs
-      // later only for report types where triggers didn't set specific values (e.g., "other"
-      // reports with the previously misconfigured trigger).
-      if (env.ZENDESK_FIELD_CATEGORY && env.ZENDESK_FIELD_ISSUE) {
-        payload.ticket.custom_fields = [
-          { id: parseInt(env.ZENDESK_FIELD_CATEGORY, 10), value: 'trust___safety' },
-          { id: parseInt(env.ZENDESK_FIELD_ISSUE, 10), value: 'other_content_report' },
-        ];
-      }
-    }
-
-    const response = await fetch(url, {
-      method: 'PUT',
-      headers: {
-        'Authorization': `Basic ${auth}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(payload),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`[addZendeskInternalNote] Failed: ${response.status} - ${errorText}`);
-    }
-  } catch (error) {
-    console.error('[addZendeskInternalNote] Error:', error);
-  }
-}
-
 // Proxy handler for blocked media preview (Blossom admin bypass)
 // Moderators need to see media that Blossom blocks (Banned/Restricted status returns 404 on CDN).
 // This endpoint authenticates against Blossom's admin bypass and streams the content through.
@@ -1728,9 +1735,10 @@ async function handleMediaProxy(
     return jsonResponse({ success: false, error: 'BLOSSOM_WEBHOOK_SECRET not configured' }, 500, corsHeaders);
   }
 
-  const secret = typeof env.BLOSSOM_WEBHOOK_SECRET === 'string'
-    ? env.BLOSSOM_WEBHOOK_SECRET
-    : await env.BLOSSOM_WEBHOOK_SECRET.get();
+  const secret = await resolveSecret(env.BLOSSOM_WEBHOOK_SECRET);
+  if (!secret) {
+    return jsonResponse({ success: false, error: 'BLOSSOM_WEBHOOK_SECRET binding exists but resolved to empty' }, 500, corsHeaders);
+  }
 
   const cdnDomain = env.CDN_DOMAIN || 'media.divine.video';
   const upstreamUrl = `https://${cdnDomain}/admin/api/blob/${sha256.toLowerCase()}/content`;
@@ -1987,6 +1995,7 @@ async function handleReportWatcherRoutes(
     const doRequest = new Request(`https://do${subPath}`, {
       method: request.method,
       headers: request.headers,
+      body: request.body,
     });
 
     const response = await stub.fetch(doRequest);
@@ -2018,6 +2027,23 @@ async function handleZendeskRoutes(
   // Webhook endpoint uses signature verification instead of JWT
   if (subPath === '/webhook' && request.method === 'POST') {
     return handleZendeskWebhook(request, env, corsHeaders);
+  }
+
+  // Age review: parent replied to Zendesk ticket
+  if (subPath === '/age-review-reply' && request.method === 'POST') {
+    const bodyText = await request.text();
+    const ageReviewWebhookSecret = await resolveSecret(env.ZENDESK_AGE_REVIEW_WEBHOOK_SECRET) ?? undefined;
+    if (!await verifyZendeskWebhook(request, bodyText, ageReviewWebhookSecret)) {
+      return jsonResponse({ success: false, error: 'Invalid webhook signature' }, 401, corsHeaders);
+    }
+    if (env.DB) await ensureSchemaOnce(env.DB);
+    // Body was consumed by request.text() for signature verification; reconstruct
+    const syntheticRequest = new Request(request.url, {
+      method: request.method,
+      headers: request.headers,
+      body: bodyText,
+    });
+    return handleAgeReviewReplyWebhook(syntheticRequest, env, corsHeaders);
   }
 
   // Parse report endpoint - extracts Nostr IDs from ticket description, stores mapping, adds links
@@ -2196,9 +2222,11 @@ async function handleZendeskWebhook(
         }
       }
 
-      // Fire-and-forget: don't await, don't let errors break the response
-      updateZendeskTicket(body.ticket_id, actionResult.success, body.action_requested, zendeskNote, env)
-        .catch((err) => console.error('[handleZendeskWebhook] Zendesk callback error:', err));
+      try {
+        await updateZendeskTicket(body.ticket_id, actionResult.success, body.action_requested, zendeskNote, env);
+      } catch (err) {
+        console.error('[handleZendeskWebhook] Zendesk callback error:', err);
+      }
     }
 
     return new Response(JSON.stringify({
@@ -2560,85 +2588,6 @@ async function handleMobileJwt(
 }
 
 // Sync Zendesk ticket after moderation action in relay-manager
-async function syncZendeskAfterAction(
-  env: Env,
-  action: string,
-  targetType: 'event' | 'pubkey' | 'media',
-  targetId: string,
-  moderator: string
-): Promise<void> {
-  console.log('[syncZendeskAfterAction] Called with:', { action, targetType, targetId, moderator });
-
-  if (!env.DB) {
-    console.log('[syncZendeskAfterAction] No DB configured, skipping');
-    return;
-  }
-
-  try {
-    await ensureZendeskTable(env.DB);
-
-    // Find linked open ticket
-    let linked: { ticket_id: number } | null = null;
-
-    if (targetType === 'event') {
-      console.log('[syncZendeskAfterAction] Querying for event_id:', targetId);
-      linked = await env.DB.prepare(
-        `SELECT ticket_id FROM zendesk_tickets WHERE event_id = ? AND status = 'open'`
-      ).bind(targetId).first();
-    } else if (targetType === 'pubkey') {
-      console.log('[syncZendeskAfterAction] Querying for author_pubkey:', targetId);
-      linked = await env.DB.prepare(
-        `SELECT ticket_id FROM zendesk_tickets WHERE author_pubkey = ? AND status = 'open'`
-      ).bind(targetId).first();
-    }
-
-    console.log('[syncZendeskAfterAction] Query result:', linked);
-
-    if (!linked?.ticket_id) {
-      console.log('[syncZendeskAfterAction] No linked open ticket found, skipping');
-      return;
-    }
-
-    // Determine if this is a resolution action (should solve ticket)
-    // Note: ban_user is Zendesk webhook naming, ban_pubkey is UI naming - same effect
-    const resolutionActions = ['reviewed', 'dismissed', 'no-action', 'false-positive', 'delete_event', 'ban_pubkey', 'ban_user', 'auto_hide_confirmed', 'auto_hide_restored'];
-    const isResolution = resolutionActions.includes(action);
-
-    // Build note
-    const actionDisplay = action.replace(/_/g, ' ').replace(/([A-Z])/g, ' $1').trim();
-    const timestamp = new Date().toISOString();
-
-    const note = [
-      '📋 **Moderation Action Taken**',
-      '',
-      `**Action:** ${actionDisplay}`,
-      `**Target:** \`${targetId}\``,
-      `**Moderator:** ${moderator}`,
-      `**Time:** ${timestamp}`,
-    ].join('\n');
-
-    // Add note (and solve if resolution action)
-    await addZendeskInternalNote(linked.ticket_id, note, env, isResolution);
-
-    // Update our tracking if resolved
-    if (isResolution) {
-      await env.DB.prepare(`
-        UPDATE zendesk_tickets
-        SET status = 'resolved',
-            resolved_at = CURRENT_TIMESTAMP,
-            resolution_action = ?,
-            resolution_moderator = ?
-        WHERE ticket_id = ?
-      `).bind(action, moderator, linked.ticket_id).run();
-    }
-
-    console.log(`[syncZendeskAfterAction] Updated ticket #${linked.ticket_id} with action: ${action}`);
-  } catch (error) {
-    console.error('[syncZendeskAfterAction] Error:', error);
-    // Don't throw - Zendesk sync failure shouldn't break moderation
-  }
-}
-
 // Get context for Zendesk sidebar app
 async function handleZendeskContext(
   request: Request,
@@ -2780,7 +2729,7 @@ async function handleZendeskAction(
       case 'allow_user':
         if (body.pubkey) {
           const httpUrl = getManagementUrl(env);
-          const payload = JSON.stringify({ method: 'allowpubkey', params: [body.pubkey] });
+          const payload = JSON.stringify({ method: 'unbanpubkey', params: [body.pubkey] });
           const payloadHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
           const payloadHashHex = Array.from(new Uint8Array(payloadHash)).map(b => b.toString(16).padStart(2, '0')).join('');
 

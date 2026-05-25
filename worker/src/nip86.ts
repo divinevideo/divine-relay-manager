@@ -168,7 +168,7 @@ export async function allowEvent(
   eventId: string,
   env: Nip86Env
 ): Promise<Nip86RpcResult> {
-  return callNip86Rpc('allowevent', [eventId], env);
+  return callNip86Rpc('unbanevent', [eventId], env);
 }
 
 /**
@@ -190,4 +190,67 @@ export async function unbanPubkey(
   env: Nip86Env
 ): Promise<Nip86RpcResult> {
   return callNip86Rpc('unbanpubkey', [pubkey], env);
+}
+
+const KIND5_PUBLISH_TIMEOUT_MS = 10_000;
+
+/**
+ * Publish a NIP-09 kind 5 deletion request to the relay via WebSocket.
+ * Published from the admin key -- Funnelcake honors admin deletions.
+ * Other relays may ignore kind 5 from non-authors.
+ */
+export async function publishKind5Deletion(
+  targetEventId: string,
+  reason: string,
+  env: Nip86Env,
+): Promise<{ success: boolean; error?: string }> {
+  const secretKey = await getSecretKey(env);
+
+  const event = finalizeEvent(
+    {
+      kind: 5,
+      content: reason,
+      tags: [['e', targetEventId]],
+      created_at: Math.floor(Date.now() / 1000),
+    },
+    secretKey,
+  );
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result: { success: boolean; error?: string }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      try { ws.close(); } catch { /* ignore */ }
+      resolve(result);
+    };
+
+    const timeout = setTimeout(() => {
+      finish({ success: false, error: 'Relay did not respond to EVENT within timeout' });
+    }, KIND5_PUBLISH_TIMEOUT_MS);
+
+    const ws = new WebSocket(env.RELAY_URL);
+
+    ws.addEventListener('open', () => {
+      ws.send(JSON.stringify(['EVENT', event]));
+    });
+
+    ws.addEventListener('message', (msg) => {
+      try {
+        const data = JSON.parse(msg.data as string);
+        if (data[0] === 'OK' && data[1] === event.id) {
+          if (data[2] === true) {
+            finish({ success: true });
+          } else {
+            finish({ success: false, error: data[3] || 'Relay rejected kind 5 event' });
+          }
+        }
+      } catch { /* ignore malformed frames */ }
+    });
+
+    ws.addEventListener('error', () => {
+      finish({ success: false, error: 'WebSocket connection to relay failed' });
+    });
+  });
 }

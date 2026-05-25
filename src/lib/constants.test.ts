@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
+import {
+  CHILD_SAFETY_CATEGORIES,
+  UNDERAGE_CATEGORIES,
+} from '../../shared/categories';
 import { CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, getReportCategory } from './constants';
 
 describe('CATEGORY_LABELS', () => {
@@ -34,10 +38,19 @@ describe('CATEGORY_LABELS', () => {
 });
 
 describe('HIGH_PRIORITY_CATEGORIES', () => {
-  it('includes child-safety aliases for moderator-safety treatment', () => {
-    expect(HIGH_PRIORITY_CATEGORIES).toContain('NS-childSafety');
-    expect(HIGH_PRIORITY_CATEGORIES).toContain('NS-child-safety');
-  });
+  it.each([...CHILD_SAFETY_CATEGORIES])(
+    'includes child-safety alias %s for moderator-safety treatment',
+    (alias) => {
+      expect(HIGH_PRIORITY_CATEGORIES).toContain(alias);
+    },
+  );
+
+  it.each([...UNDERAGE_CATEGORIES])(
+    'includes underage alias %s for moderator-safety treatment',
+    (alias) => {
+      expect(HIGH_PRIORITY_CATEGORIES).toContain(alias);
+    },
+  );
 });
 
 describe('getReportCategory', () => {

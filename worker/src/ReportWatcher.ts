@@ -3,6 +3,21 @@
 
 import { type Nip86Env, banEvent } from './nip86';
 import { ensureSchema } from './db';
+import {
+  AUTO_HIDE_ACTION,
+  AUTO_HIDE_TIER_KINDS,
+  isImmediateAutoHideTier,
+  isThresholdAutoHideTier,
+  type AutoHideConfig,
+  type AutoHideTier,
+} from '../../shared/autohide';
+import {
+  AGE_REVIEW_ACTION,
+  DEADLINE_DAYS,
+  TERMINAL_STATES,
+  defaultResolutionForBand,
+} from '../../shared/age-review';
+import { isUnderageCategory } from '../../shared/categories';
 
 /**
  * Extended environment for ReportWatcher DO
@@ -38,6 +53,13 @@ export interface ReportEvent {
   tags: string[][];
   created_at: number;
 }
+export type { AutoHideConfig, AutoHideTier } from '../../shared/autohide';
+
+type StoredAutoHideTier = Omit<AutoHideTier, 'kind'> & { kind?: string };
+type StoredAutoHideConfig = Omit<AutoHideConfig, 'tiers'> & { tiers: StoredAutoHideTier[] };
+
+const DEFAULT_IMMEDIATE_CATEGORIES = ['sexual_minors', 'csam', 'NS-csam'];
+const DEFAULT_THRESHOLD_CATEGORIES = ['NS-sexualContent', 'NS-sexual-content', 'NS-violence', 'NS-extremism'];
 
 // Reconnection settings
 const INITIAL_RECONNECT_DELAY_MS = 1000;
@@ -46,13 +68,6 @@ const RECONNECT_BACKOFF_MULTIPLIER = 2;
 
 // Alarm interval for connection health checks
 const HEALTH_CHECK_INTERVAL_MS = 30000;
-
-// Categories that trigger auto-hide (MVP: CSAM-related categories)
-// Maps various client formats to a normalized category for auto-hide
-// - 'sexual_minors' - NIP-56 standard
-// - 'csam' - Divine mobile/web app format
-// - 'NS-csam' - Divine web app with NIP-32 prefix
-const AUTO_HIDE_CATEGORIES = ['sexual_minors', 'csam', 'NS-csam'];
 
 /**
  * ReportWatcher Durable Object
@@ -77,6 +92,8 @@ export class ReportWatcher implements DurableObject {
   private reconnectAttempts: number = 0;
   private reconnectDelay: number = INITIAL_RECONNECT_DELAY_MS;
   private subscriptionId: string = 'auto-hide-reports';
+  private autoHideConfig: AutoHideConfig | null = null;
+  private pendingAgeReviewPubkeys = new Set<string>();
 
   constructor(state: DurableObjectState, env: ReportWatcherEnv) {
     this.state = state;
@@ -95,10 +112,25 @@ export class ReportWatcher implements DurableObject {
         this.eventsProcessed = stored.eventsProcessed;
         this.eventsAutoHidden = stored.eventsAutoHidden || 0;
 
-        // If we were running, reconnect
         if (this.running) {
           console.log('[ReportWatcher] Restoring connection after restart');
           this.connect();
+        }
+      }
+
+      // Load or seed auto-hide config.
+      // Older stored configs predate tier.kind and need to be normalized forward.
+      const storedConfig = await this.state.storage.get<StoredAutoHideConfig>('autoHideConfig') ?? null;
+      if (!storedConfig) {
+        this.autoHideConfig = this.buildDefaultConfig();
+        await this.state.storage.put('autoHideConfig', this.autoHideConfig);
+        console.log('[ReportWatcher] Seeded default auto-hide config');
+      } else {
+        const { config, changed } = this.normalizeStoredConfig(storedConfig);
+        this.autoHideConfig = config;
+        if (changed) {
+          await this.state.storage.put('autoHideConfig', config);
+          console.log('[ReportWatcher] Migrated stored auto-hide config');
         }
       }
     });
@@ -122,6 +154,14 @@ export class ReportWatcher implements DurableObject {
 
       if (path === '/status' && request.method === 'GET') {
         return this.handleStatus();
+      }
+
+      if (path === '/config' && request.method === 'GET') {
+        return this.handleGetConfig();
+      }
+
+      if (path === '/config' && request.method === 'PUT') {
+        return this.handlePutConfig(request);
       }
 
       return new Response(JSON.stringify({ error: 'Not found' }), {
@@ -223,6 +263,142 @@ export class ReportWatcher implements DurableObject {
     });
   }
 
+  private handleGetConfig(): Response {
+    return new Response(JSON.stringify({
+      success: true,
+      config: this.autoHideConfig,
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  private async handlePutConfig(request: Request): Promise<Response> {
+    let config: AutoHideConfig;
+    try {
+      config = await request.json() as AutoHideConfig;
+    } catch {
+      return new Response(JSON.stringify({ success: false, error: 'Invalid JSON body' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    const validationError = this.validateConfig(config);
+    if (validationError) {
+      return new Response(JSON.stringify({ success: false, error: validationError }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    this.autoHideConfig = config;
+    await this.state.storage.put('autoHideConfig', config);
+    console.log('[ReportWatcher] Auto-hide config updated');
+
+    return new Response(JSON.stringify({
+      success: true,
+      config: this.autoHideConfig,
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  private validateConfig(config: AutoHideConfig): string | null {
+    if (!config || typeof config.enabled !== 'boolean') {
+      return 'Missing or invalid "enabled" field';
+    }
+    if (!Array.isArray(config.trustedClients)) {
+      return 'Missing or invalid "trustedClients" field';
+    }
+    if (!Array.isArray(config.tiers) || config.tiers.length === 0) {
+      return 'Must have at least one tier';
+    }
+
+    const allCategories = new Set<string>();
+    for (const tier of config.tiers) {
+      if (!tier.name || typeof tier.name !== 'string') {
+        return 'Each tier must have a name';
+      }
+      if (!Array.isArray(tier.categories)) {
+        return `Tier "${tier.name}": categories must be an array`;
+      }
+      if (typeof tier.threshold !== 'number' || tier.threshold < 1) {
+        return `Tier "${tier.name}": threshold must be >= 1`;
+      }
+      if (!AUTO_HIDE_TIER_KINDS.includes(tier.kind)) {
+        return `Tier "${tier.name}": kind must be "immediate" or "threshold"`;
+      }
+      if (isImmediateAutoHideTier(tier) && tier.threshold !== 1) {
+        return `Tier "${tier.name}": immediate tier threshold must be exactly 1`;
+      }
+      if (isThresholdAutoHideTier(tier) && tier.threshold < 2) {
+        return `Tier "${tier.name}": threshold tier minimum is 2`;
+      }
+
+      for (const cat of tier.categories) {
+        if (allCategories.has(cat)) {
+          return `Category "${cat}" appears in multiple tiers (duplicate not allowed)`;
+        }
+        allCategories.add(cat);
+      }
+    }
+
+    if (config.trustedClients.length === 0 && config.tiers.some(t => t.requireTrustedClient)) {
+      return 'At least one trusted client required when a tier has requireTrustedClient enabled';
+    }
+
+    return null;
+  }
+
+  private buildDefaultConfig(): AutoHideConfig {
+    return {
+      enabled: this.env.AUTO_HIDE_ENABLED === 'true',
+      trustedClients: (this.env.TRUSTED_CLIENTS || 'diVine,divine-web,divine-mobile').split(','),
+      tiers: [
+        {
+          kind: 'immediate',
+          name: 'Immediate',
+          categories: [...DEFAULT_IMMEDIATE_CATEGORIES],
+          threshold: 1,
+          requireTrustedClient: true,
+        },
+        {
+          kind: 'threshold',
+          name: 'Threshold',
+          categories: [...DEFAULT_THRESHOLD_CATEGORIES],
+          threshold: 2,
+          requireTrustedClient: false,
+        },
+      ],
+    };
+  }
+
+  private normalizeStoredConfig(config: StoredAutoHideConfig): { config: AutoHideConfig; changed: boolean } {
+    let changed = false;
+
+    const tiers = config.tiers.map((tier) => {
+      if (AUTO_HIDE_TIER_KINDS.includes(tier.kind as AutoHideTier['kind'])) {
+        return tier as AutoHideTier;
+      }
+
+      changed = true;
+      return {
+        ...tier,
+        kind: tier.threshold <= 1 ? 'immediate' : 'threshold',
+      } satisfies AutoHideTier;
+    });
+
+    return {
+      config: {
+        ...config,
+        tiers,
+      },
+      changed,
+    };
+  }
+
   /**
    * Build status object
    */
@@ -234,7 +410,7 @@ export class ReportWatcher implements DurableObject {
       lastEventAt: this.lastEventAt,
       eventsProcessed: this.eventsProcessed,
       eventsAutoHidden: this.eventsAutoHidden,
-      autoHideEnabled: this.env.AUTO_HIDE_ENABLED === 'true',
+      autoHideEnabled: this.autoHideConfig?.enabled ?? false,
       reconnectAttempts: this.reconnectAttempts,
     };
   }
@@ -434,10 +610,10 @@ export class ReportWatcher implements DurableObject {
 
     console.log(`[ReportWatcher] Report received:`, {
       reportId: event.id,
-      reporter: event.pubkey.slice(0, 8) + '...',
+      reporter: event.pubkey,
       category,
       targetType,
-      targetId: targetId.slice(0, 8) + '...',
+      targetId,
       content: event.content.slice(0, 50) + (event.content.length > 50 ? '...' : ''),
     });
 
@@ -447,17 +623,24 @@ export class ReportWatcher implements DurableObject {
         console.error('[ReportWatcher] Auto-hide processing failed:', error);
       });
     }
+
+    // Create age review case for under-16 reports (pubkey-level, independent of auto-hide).
+    // In-memory Set guards against the SELECT-then-INSERT race: the Set check+add is
+    // synchronous, so concurrent WebSocket messages can't interleave between them.
+    const reportedPubkey = targetPubkeyTag?.[1];
+    if (isUnderageCategory(category) && reportedPubkey && !this.pendingAgeReviewPubkeys.has(reportedPubkey)) {
+      this.pendingAgeReviewPubkeys.add(reportedPubkey);
+      this.createAgeReviewCase(event, reportedPubkey)
+        .catch(error => console.error('[ReportWatcher] Age review case creation failed:', error))
+        .finally(() => this.pendingAgeReviewPubkeys.delete(reportedPubkey));
+    }
   }
 
-  /**
-   * Process auto-hide for a report
-   */
   private async processAutoHide(
     event: ReportEvent,
     category: string,
     targetEventId: string
   ): Promise<void> {
-    // Ensure D1 schema exists before any DB access
     if (!this.schemaReady && this.env.DB) {
       try {
         await ensureSchema(this.env.DB);
@@ -467,64 +650,107 @@ export class ReportWatcher implements DurableObject {
       }
     }
 
-    // Check if auto-hide is enabled
-    if (this.env.AUTO_HIDE_ENABLED !== 'true') {
+    const config = this.autoHideConfig;
+    if (!config || !config.enabled) {
       console.log('[ReportWatcher] Auto-hide disabled, skipping');
       return;
     }
 
-    // Check if category qualifies for auto-hide
-    if (!AUTO_HIDE_CATEGORIES.includes(category)) {
-      console.log(`[ReportWatcher] Category '${category}' not in auto-hide list, skipping`);
+    // Find which tier this category belongs to
+    const tier = config.tiers.find(t => t.categories.includes(category));
+    if (!tier) {
+      console.log(`[ReportWatcher] Category '${category}' not in any auto-hide tier, skipping`);
       return;
     }
 
-    // Check if report is from a trusted client (Divine apps)
-    const trustedClients = (this.env.TRUSTED_CLIENTS || 'diVine,divine-web,divine-mobile').split(',');
-    const clientTag = event.tags.find((t: string[]) => t[0] === 'client');
-    const clientName = clientTag?.[1];
+    // Check trusted-client gate if tier requires it
+    if (tier.requireTrustedClient) {
+      const clientTag = event.tags.find((t: string[]) => t[0] === 'client');
+      const clientName = clientTag?.[1];
 
-    if (!clientName || !trustedClients.includes(clientName)) {
-      console.log(`[ReportWatcher] Report from untrusted client '${clientName || 'none'}', skipping auto-hide`);
-      await this.logDecision({
-        targetType: 'event',
-        targetId: targetEventId,
-        action: 'auto_hide_skipped',
-        reason: `${category}: untrusted client (${clientName || 'no client tag'})`,
-        reportId: event.id,
-        reporterPubkey: event.pubkey,
-      });
-      return;
+      if (!clientName || !config.trustedClients.includes(clientName)) {
+        console.log(`[ReportWatcher] Report from untrusted client '${clientName || 'none'}', skipping (tier: ${tier.name})`);
+        await this.logDecision({
+          targetType: 'event',
+          targetId: targetEventId,
+          action: AUTO_HIDE_ACTION.skipped,
+          reason: `${category}: untrusted client (${clientName || 'no client tag'})`,
+          reportId: event.id,
+          reporterPubkey: event.pubkey,
+        });
+        return;
+      }
     }
 
-    // Check if a human has already reviewed this target — their decision stands
     if (await this.hasHumanResolution(targetEventId)) {
-      console.log(`[ReportWatcher] Event ${targetEventId.slice(0, 8)}... has human resolution, skipping auto-hide`);
+      console.log(`[ReportWatcher] Event ${targetEventId} has human resolution, skipping auto-hide`);
       return;
     }
 
-    // Check if this event was already auto-hidden (deduplication)
     if (await this.isAlreadyAutoHidden(targetEventId)) {
-      console.log(`[ReportWatcher] Event ${targetEventId.slice(0, 8)}... already auto-hidden, skipping`);
+      console.log(`[ReportWatcher] Event ${targetEventId} already auto-hidden, skipping`);
       return;
     }
 
-    console.log(`[ReportWatcher] Processing auto-hide for event ${targetEventId.slice(0, 8)}...`);
+    // Immediate tier: single report triggers ban
+    if (isImmediateAutoHideTier(tier)) {
+      await this.executeAutoHide(event, category, targetEventId, tier.name);
+      return;
+    }
 
-    // Call banevent RPC to hide the content
-    const reason = `Auto-hidden: ${category} report (report_id: ${event.id})`;
+    // Threshold tier: count unique reporters, ban when threshold met
+    await this.processThresholdAutoHide(event, category, targetEventId, tier);
+  }
+
+  private async processThresholdAutoHide(
+    event: ReportEvent,
+    category: string,
+    targetEventId: string,
+    tier: AutoHideTier
+  ): Promise<void> {
+    if (!isThresholdAutoHideTier(tier)) {
+      return;
+    }
+
+    await this.logDecision({
+      targetType: 'event',
+      targetId: targetEventId,
+      action: AUTO_HIDE_ACTION.pending,
+      reason: `${category}: awaiting threshold (${tier.name}, need ${tier.threshold})`,
+      reportId: event.id,
+      reporterPubkey: event.pubkey,
+    });
+
+    const count = await this.countUniqueReporters(targetEventId, category);
+
+    if (count >= tier.threshold) {
+      console.log(`[ReportWatcher] Threshold met for ${targetEventId} (${count}/${tier.threshold})`);
+      await this.executeAutoHide(event, category, targetEventId, tier.name);
+    } else {
+      console.log(`[ReportWatcher] Below threshold for ${targetEventId} (${count}/${tier.threshold})`);
+    }
+  }
+
+  private async executeAutoHide(
+    event: ReportEvent,
+    category: string,
+    targetEventId: string,
+    tierName: string
+  ): Promise<void> {
+    console.log(`[ReportWatcher] Auto-hiding event ${targetEventId} (tier: ${tierName})`);
+
+    const reason = `Auto-hidden: ${category} report (tier: ${tierName}, report_id: ${event.id})`;
     const result = await banEvent(targetEventId, reason, this.env);
 
     if (result.success) {
-      console.log(`[ReportWatcher] Successfully auto-hidden event ${targetEventId.slice(0, 8)}...`);
+      console.log(`[ReportWatcher] Successfully auto-hidden event ${targetEventId}`);
       this.eventsAutoHidden++;
       await this.persistState();
 
-      // Log to D1
       await this.logDecision({
         targetType: 'event',
         targetId: targetEventId,
-        action: 'auto_hidden',
+        action: AUTO_HIDE_ACTION.hidden,
         reason: category,
         reportId: event.id,
         reporterPubkey: event.pubkey,
@@ -532,15 +758,42 @@ export class ReportWatcher implements DurableObject {
     } else {
       console.error(`[ReportWatcher] Failed to auto-hide event: ${result.error}`);
 
-      // Log failure to D1 for monitoring
       await this.logDecision({
         targetType: 'event',
         targetId: targetEventId,
-        action: 'auto_hide_failed',
+        action: AUTO_HIDE_ACTION.failed,
         reason: `${category}: ${result.error}`,
         reportId: event.id,
         reporterPubkey: event.pubkey,
       });
+    }
+  }
+
+  private async countUniqueReporters(targetEventId: string, category: string): Promise<number> {
+    if (!this.env.DB) {
+      console.warn('[ReportWatcher] D1 not available for reporter count');
+      return 0;
+    }
+
+    try {
+      const result = await this.env.DB.prepare(`
+        SELECT COUNT(DISTINCT reporter_pubkey) as count
+        FROM moderation_decisions
+        WHERE target_id = ?
+          AND action IN (?, ?)
+          AND (reason = ? OR reason LIKE ?)
+      `).bind(
+        targetEventId,
+        AUTO_HIDE_ACTION.pending,
+        AUTO_HIDE_ACTION.hidden,
+        category,
+        `${category}:%`
+      ).first<{ count: number }>();
+
+      return result?.count ?? 0;
+    } catch (error) {
+      console.error('[ReportWatcher] Failed to count reporters:', error);
+      return 0;
     }
   }
 
@@ -559,9 +812,9 @@ export class ReportWatcher implements DurableObject {
         SELECT 1 FROM moderation_decisions
         WHERE target_type = 'event'
           AND target_id = ?
-          AND action IN ('auto_hidden', 'auto_hide_confirmed')
+          AND action IN (?, ?)
         LIMIT 1
-      `).bind(targetEventId).first();
+      `).bind(targetEventId, AUTO_HIDE_ACTION.hidden, 'auto_hide_confirmed').first();
 
       return result !== null;
     } catch (error) {
@@ -611,9 +864,8 @@ export class ReportWatcher implements DurableObject {
     }
 
     try {
-      const insertVerb = decision.action === 'auto_hidden' ? 'INSERT OR IGNORE INTO' : 'INSERT INTO';
       await this.env.DB.prepare(`
-        ${insertVerb} moderation_decisions
+        INSERT INTO moderation_decisions
         (target_type, target_id, action, reason, moderator_pubkey, report_id, reporter_pubkey, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
       `).bind(
@@ -626,10 +878,68 @@ export class ReportWatcher implements DurableObject {
         decision.reporterPubkey
       ).run();
 
-      console.log(`[ReportWatcher] Logged decision: ${decision.action} for ${decision.targetId.slice(0, 8)}...`);
+      console.log(`[ReportWatcher] Logged decision: ${decision.action} for ${decision.targetId}`);
     } catch (error) {
       console.error('[ReportWatcher] Failed to log decision:', error);
     }
+  }
+
+  private async createAgeReviewCase(event: ReportEvent, reportedPubkey: string): Promise<void> {
+    if (!this.env.DB) {
+      console.warn('[ReportWatcher] D1 database not available, cannot create age review case');
+      return;
+    }
+
+    if (!this.schemaReady) {
+      try {
+        await ensureSchema(this.env.DB);
+        this.schemaReady = true;
+      } catch (error) {
+        console.error('[ReportWatcher] Failed to ensure schema:', error);
+        return;
+      }
+    }
+
+    // Skip if an active case already exists for this pubkey
+    const existing = await this.env.DB.prepare(`
+      SELECT id, state FROM age_review_cases
+      WHERE pubkey = ? AND state NOT IN (${TERMINAL_STATES.map(() => '?').join(',')})
+      LIMIT 1
+    `).bind(reportedPubkey, ...TERMINAL_STATES).first<{ id: string; state: string }>();
+
+    if (existing) {
+      console.log(`[ReportWatcher] Active age review case ${existing.id} already exists for ${reportedPubkey}, skipping`);
+      return;
+    }
+
+    const caseId = crypto.randomUUID();
+    const band = 'age_13_15' as const;
+    const deadline = new Date(Date.now() + DEADLINE_DAYS * 24 * 60 * 60 * 1000).toISOString();
+
+    await this.env.DB.prepare(`
+      INSERT INTO age_review_cases
+      (id, pubkey, reporter_pubkey, report_id, suspected_age_band, state, allowed_resolution, deadline_at)
+      VALUES (?, ?, ?, ?, ?, 'open_reported', ?, ?)
+    `).bind(
+      caseId,
+      reportedPubkey,
+      event.pubkey,
+      event.id,
+      band,
+      defaultResolutionForBand(band),
+      deadline,
+    ).run();
+
+    await this.logDecision({
+      targetType: 'pubkey',
+      targetId: reportedPubkey,
+      action: AGE_REVIEW_ACTION.caseCreated,
+      reason: `Under-16 report: age review case ${caseId} created (default band: ${band})`,
+      reportId: event.id,
+      reporterPubkey: event.pubkey,
+    });
+
+    console.log(`[ReportWatcher] Age review case created: ${caseId} for ${reportedPubkey} (deadline: ${deadline})`);
   }
 
   /**

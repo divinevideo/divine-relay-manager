@@ -1,4 +1,9 @@
 import { getEnvironmentByApiUrl } from "@/lib/environments";
+import {
+  CHILD_SAFETY_CATEGORIES,
+  UNDERAGE_CATEGORIES,
+} from "../../shared/categories";
+export { AUTO_HIDE_ACTION, AUTO_HIDE_ACTIONS, type AutoHideAction } from "../../shared/autohide";
 
 // ABOUTME: Shared constants for moderation categories and labels
 // ABOUTME: DTSP (Digital Trust & Safety Partnership) category mappings
@@ -8,7 +13,7 @@ export const CATEGORY_LABELS: Record<string, string> = {
   'csam': 'CSAM',
   'NS-csam': 'CSAM',
   // NIP-32 social.nos.ontology labels emitted by divine-mobile and divine-web.
-  // Keep both kebab- and camel-case aliases where clients already differ on wire values.
+  // Keep both kebab- and camelCase aliases where clients already differ on wire values.
   'NS-spam': 'Spam',
   'NS-harassment': 'Harassment',
   'NS-violence': 'Violence',
@@ -65,7 +70,8 @@ export type ResolutionStatus = typeof RESOLUTION_STATUSES[number];
 // Categories where media should be hidden by default for moderator safety
 export const HIGH_PRIORITY_CATEGORIES = [
   'sexual_minors', 'csam', 'NS-csam',
-  'NS-childSafety', 'NS-child-safety',
+  ...CHILD_SAFETY_CATEGORIES,
+  ...UNDERAGE_CATEGORIES,
   'nonconsensual_sexual_content', 'terrorism_extremism', 'credible_threats',
 ];
 

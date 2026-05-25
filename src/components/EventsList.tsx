@@ -535,7 +535,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
   }, [directEventLookup, searchMode]);
 
   // Flatten all pages into a single events array
-  const events = eventsData?.pages.flat() ?? [];
+  const events = useMemo(() => eventsData?.pages.flat() ?? [], [eventsData?.pages]);
 
   // Auto-load more when scrolling near bottom of the scroll area
   useEffect(() => {
@@ -628,7 +628,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
   // Mutation for event moderation
   const moderateEventMutation = useMutation({
     mutationFn: async ({ eventId, action, reason }: { eventId: string; action: 'allow' | 'ban'; reason?: string }) => {
-      const method = action === 'allow' ? 'allowevent' : 'banevent';
+      const method = action === 'allow' ? 'unbanevent' : 'banevent';
       await callRelayRpc(method, [eventId, reason]);
       return { eventId, action };
     },

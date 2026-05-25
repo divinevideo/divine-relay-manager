@@ -1,11 +1,11 @@
 // ABOUTME: Displays media (images/videos) from Nostr events with proper handling
 // ABOUTME: Extracts URLs from content and imeta tags, renders with appropriate player
 
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Image, Video, Eye, EyeOff, AlertTriangle, ExternalLink } from "lucide-react";
+import { Image, Video, Eye, EyeOff, AlertTriangle, ExternalLink, ImageOff } from "lucide-react";
 import type { NostrEvent } from "@nostrify/nostrify";
 import { useApiUrl } from "@/hooks/useAdminApi";
 import { getApiHeaders } from "@/lib/adminApi";
@@ -132,6 +132,70 @@ function extractMediaItems(content: string, tags: string[][]): MediaItem[] {
   return Array.from(items.values());
 }
 
+function getHlsUrl(sha256?: string): string | null {
+  if (!sha256) return null;
+  const cdnDomain = import.meta.env.VITE_CDN_DOMAIN || 'media.divine.video';
+  return `https://${cdnDomain}/${sha256}/hls/master.m3u8`;
+}
+
+// Native <video> with HLS.js fallback for C2PA-signed videos that Chrome can't decode natively.
+// Mirrors divine-web's approach: try native MP4 first, fall back to transcoded HLS segments.
+// hls.js is loaded dynamically to avoid pulling ~500kB into the main bundle for a rare fallback.
+function HlsVideo({
+  src,
+  hlsSrc,
+  onError,
+  ...props
+}: {
+  src: string;
+  hlsSrc: string | null;
+  onError: () => void;
+} & Omit<React.VideoHTMLAttributes<HTMLVideoElement>, 'onError' | 'src'>) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const destroyRef = useRef<(() => void) | null>(null);
+  const triedHlsRef = useRef(false);
+
+  useEffect(() => {
+    return () => { destroyRef.current?.(); };
+  }, []);
+
+  const handleError = async () => {
+    const video = videoRef.current;
+    if (hlsSrc && !triedHlsRef.current && video) {
+      triedHlsRef.current = true;
+      try {
+        const { default: Hls } = await import('hls.js');
+        if (Hls.isSupported()) {
+          const hls = new Hls();
+          destroyRef.current = () => hls.destroy();
+          hls.loadSource(hlsSrc);
+          hls.attachMedia(video);
+          hls.on(Hls.Events.ERROR, (_, data) => {
+            if (data.fatal) {
+              hls.destroy();
+              destroyRef.current = null;
+              onError();
+            }
+          });
+        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+          video.src = hlsSrc;
+          video.load();
+        } else {
+          onError();
+        }
+      } catch {
+        onError();
+      }
+    } else {
+      onError();
+    }
+  };
+
+  return (
+    <video ref={videoRef} src={src} onError={handleError} {...props} />
+  );
+}
+
 export function MediaPreview({
   event,
   content: propContent,
@@ -141,26 +205,31 @@ export function MediaPreview({
   maxItems = 4,
 }: MediaPreviewProps) {
   const [showMedia, setShowMedia] = useState(showByDefault);
-  const [failedUrls, setFailedUrls] = useState<Set<string>>(new Set());
+  const userToggledRef = useRef(false);
+  const [failedUrls, setFailedUrls] = useState<Map<string, 'unavailable' | 'error'>>(new Map());
   const [proxyUrls, setProxyUrls] = useState<Map<string, string>>(new Map());
+  const proxyUrlsRef = useRef(proxyUrls);
+  proxyUrlsRef.current = proxyUrls;
   const apiUrl = useApiUrl();
 
-  // Collapse media if showByDefault changes to false (e.g., high-priority reports loaded)
-  // This handles the race condition where reports load after initial render
+  const eventId = event?.id;
   useEffect(() => {
-    if (!showByDefault) {
-      setShowMedia(false);
+    userToggledRef.current = false;
+  }, [eventId]);
+
+  useEffect(() => {
+    if (!userToggledRef.current) {
+      setShowMedia(showByDefault);
     }
   }, [showByDefault]);
 
-  // Clean up blob URLs on unmount to avoid memory leaks
   useEffect(() => {
     return () => {
-      proxyUrls.forEach(url => {
+      proxyUrlsRef.current.forEach(url => {
         if (url.startsWith('blob:')) URL.revokeObjectURL(url);
       });
     };
-  }, [proxyUrls]);
+  }, []);
 
   const content = propContent ?? event?.content ?? '';
   const tags = useMemo(() => propTags ?? event?.tags ?? [], [propTags, event?.tags]);
@@ -176,23 +245,30 @@ export function MediaPreview({
   const imageCount = mediaItems.filter(m => m.type === 'image').length;
   const videoCount = mediaItems.filter(m => m.type === 'video').length;
 
+  const markFailed = (url: string, reason: 'unavailable' | 'error') => {
+    setFailedUrls(prev => new Map(prev).set(url, reason));
+  };
+
   const handleError = async (url: string, sha256?: string) => {
     if (sha256 && !proxyUrls.has(url) && !failedUrls.has(url)) {
-      // First failure: fetch through authenticated proxy via JS (not <img src>)
-      // CF Access blocks unauthenticated browser requests to the API domain,
-      // so we fetch with service token headers and create a blob URL.
       try {
         const proxyUrl = `${apiUrl}/api/media-proxy/${sha256}`;
         const resp = await fetch(proxyUrl, { headers: getApiHeaders('') });
-        if (!resp.ok) throw new Error(`${resp.status}`);
-        const blob = await resp.blob();
+        if (resp.status === 404) { markFailed(url, 'unavailable'); return; }
+        if (!resp.ok) { markFailed(url, 'error'); return; }
+        const ct = resp.headers.get('content-type') || '';
+        const buf = await resp.arrayBuffer();
+        const blob = new Blob([buf], { type: ct || 'application/octet-stream' });
         const blobUrl = URL.createObjectURL(blob);
         setProxyUrls(prev => new Map(prev).set(url, blobUrl));
       } catch {
-        setFailedUrls(prev => new Set(prev).add(url));
+        markFailed(url, 'error');
       }
+    } else if (proxyUrls.has(url)) {
+      setProxyUrls(prev => { const next = new Map(prev); next.delete(url); return next; });
+      markFailed(url, 'error');
     } else {
-      setFailedUrls(prev => new Set(prev).add(url));
+      markFailed(url, 'error');
     }
   };
 
@@ -219,7 +295,7 @@ export function MediaPreview({
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => setShowMedia(!showMedia)}
+            onClick={() => { userToggledRef.current = true; setShowMedia(!showMedia); }}
             className="h-7 px-2"
           >
             {showMedia ? (
@@ -242,15 +318,24 @@ export function MediaPreview({
           <div className="grid grid-cols-2 gap-2">
             {visibleItems.map((item, index) => {
               const displayUrl = proxyUrls.get(item.url) || item.url;
+              const failReason = failedUrls.get(item.url);
               return (
               <div key={item.url} className="relative">
-                {failedUrls.has(item.url) ? (
-                  <div className="aspect-video bg-muted rounded flex items-center justify-center text-muted-foreground">
+                {failReason === 'unavailable' ? (
+                  <div className="aspect-video bg-muted rounded flex flex-col items-center justify-center text-muted-foreground gap-1">
+                    <ImageOff className="h-6 w-6" />
+                    <span className="text-xs">Content not available</span>
+                  </div>
+                ) : failReason === 'error' ? (
+                  <div className="aspect-video bg-muted rounded flex flex-col items-center justify-center text-muted-foreground gap-1">
                     <AlertTriangle className="h-6 w-6" />
+                    <span className="text-xs">Failed to load</span>
                   </div>
                 ) : item.type === 'video' ? (
-                  <video
+                  <HlsVideo
+                    key={displayUrl}
                     src={displayUrl}
+                    hlsSrc={getHlsUrl(item.sha256)}
                     controls
                     className="w-full rounded aspect-video object-contain bg-black"
                     onError={() => handleError(item.url, item.sha256)}
@@ -258,6 +343,7 @@ export function MediaPreview({
                   />
                 ) : (
                   <img
+                    key={displayUrl}
                     src={displayUrl}
                     alt={`Media ${index + 1}`}
                     className="w-full rounded aspect-square object-cover cursor-pointer hover:opacity-90 transition-opacity"
@@ -293,8 +379,8 @@ export function MediaPreview({
           {/* Show sha256 hashes for reference */}
           <div className="mt-2 space-y-1">
             {visibleItems.filter(m => m.sha256).slice(0, 2).map(item => (
-              <p key={item.sha256} className="text-xs text-muted-foreground font-mono truncate">
-                sha256: {item.sha256?.slice(0, 16)}...
+              <p key={item.sha256} className="text-xs text-muted-foreground font-mono break-all">
+                sha256: {item.sha256}
               </p>
             ))}
           </div>
@@ -315,9 +401,19 @@ export function InlineMediaPreview({
   className?: string;
 }) {
   const [showMedia, setShowMedia] = useState(true);
-  const [failedUrls, setFailedUrls] = useState<Set<string>>(new Set());
+  const [failedUrls, setFailedUrls] = useState<Map<string, 'unavailable' | 'error'>>(new Map());
   const [proxyUrls, setProxyUrls] = useState<Map<string, string>>(new Map());
+  const proxyUrlsRef = useRef(proxyUrls);
+  proxyUrlsRef.current = proxyUrls;
   const apiUrl = useApiUrl();
+
+  useEffect(() => {
+    return () => {
+      proxyUrlsRef.current.forEach(url => {
+        if (url.startsWith('blob:')) URL.revokeObjectURL(url);
+      });
+    };
+  }, []);
 
   const mediaItems = useMemo(() => extractMediaItems(content, tags), [content, tags]);
 
@@ -325,20 +421,30 @@ export function InlineMediaPreview({
     return null;
   }
 
+  const markFailed = (url: string, reason: 'unavailable' | 'error') => {
+    setFailedUrls(prev => new Map(prev).set(url, reason));
+  };
+
   const handleError = async (url: string, sha256?: string) => {
     if (sha256 && !proxyUrls.has(url) && !failedUrls.has(url)) {
       try {
         const proxyUrl = `${apiUrl}/api/media-proxy/${sha256}`;
         const resp = await fetch(proxyUrl, { headers: getApiHeaders('') });
-        if (!resp.ok) throw new Error(`${resp.status}`);
-        const blob = await resp.blob();
+        if (resp.status === 404) { markFailed(url, 'unavailable'); return; }
+        if (!resp.ok) { markFailed(url, 'error'); return; }
+        const ct = resp.headers.get('content-type') || '';
+        const buf = await resp.arrayBuffer();
+        const blob = new Blob([buf], { type: ct || 'application/octet-stream' });
         const blobUrl = URL.createObjectURL(blob);
         setProxyUrls(prev => new Map(prev).set(url, blobUrl));
       } catch {
-        setFailedUrls(prev => new Set(prev).add(url));
+        markFailed(url, 'error');
       }
+    } else if (proxyUrls.has(url)) {
+      setProxyUrls(prev => { const next = new Map(prev); next.delete(url); return next; });
+      markFailed(url, 'error');
     } else {
-      setFailedUrls(prev => new Set(prev).add(url));
+      markFailed(url, 'error');
     }
   };
 
@@ -360,15 +466,23 @@ export function InlineMediaPreview({
         <div className="grid grid-cols-2 gap-2">
           {mediaItems.slice(0, 4).map((item, index) => {
             const displayUrl = proxyUrls.get(item.url) || item.url;
+            const failReason = failedUrls.get(item.url);
             return (
             <div key={item.url} className="relative">
-              {failedUrls.has(item.url) ? (
+              {failReason === 'unavailable' ? (
+                <div className="aspect-video bg-muted rounded flex flex-col items-center justify-center gap-1">
+                  <ImageOff className="h-4 w-4 text-muted-foreground" />
+                  <span className="text-[10px] text-muted-foreground">Not available</span>
+                </div>
+              ) : failReason === 'error' ? (
                 <div className="aspect-video bg-muted rounded flex items-center justify-center">
                   <AlertTriangle className="h-4 w-4 text-muted-foreground" />
                 </div>
               ) : item.type === 'video' ? (
-                <video
+                <HlsVideo
+                  key={displayUrl}
                   src={displayUrl}
+                  hlsSrc={getHlsUrl(item.sha256)}
                   controls
                   className="w-full rounded aspect-video object-contain bg-black"
                   onError={() => handleError(item.url, item.sha256)}
@@ -376,6 +490,7 @@ export function InlineMediaPreview({
                 />
               ) : (
                 <img
+                  key={displayUrl}
                   src={displayUrl}
                   alt={`Media ${index + 1}`}
                   className="w-full rounded aspect-square object-cover cursor-pointer"

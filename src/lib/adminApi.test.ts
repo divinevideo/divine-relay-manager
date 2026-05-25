@@ -24,10 +24,12 @@ import {
   logDecision,
   getDecisions,
   extractMediaHashes,
+  isBlockedMediaAction,
   type UnsignedEvent,
   type ApiResponse,
   type LabelParams,
   type ModerationAction,
+  type MediaStatusAction,
 } from './adminApi';
 
 // Mock fetch globally
@@ -757,6 +759,24 @@ describe('adminApi', () => {
     });
   });
 
+  describe('isBlockedMediaAction', () => {
+    it('treats permanently banned media as blocked', () => {
+      expect(isBlockedMediaAction('PERMANENT_BAN')).toBe(true);
+    });
+
+    it('treats quarantined media as blocked', () => {
+      expect(isBlockedMediaAction('QUARANTINE')).toBe(true);
+    });
+
+    it('does not treat non-blocking statuses as blocked', () => {
+      const actions: MediaStatusAction[] = ['SAFE', 'REVIEW', 'AGE_RESTRICTED'];
+
+      for (const action of actions) {
+        expect(isBlockedMediaAction(action)).toBe(false);
+      }
+    });
+  });
+
   describe('logDecision', () => {
     it('should POST decision to /api/decisions', async () => {
       mockFetch.mockResolvedValueOnce({
@@ -867,6 +887,27 @@ describe('adminApi', () => {
       const hashes = extractMediaHashes('', tags);
 
       expect(hashes).toContain('abc123def4567890abc123def4567890abc123def4567890abc123def4567890');
+    });
+
+    it('should ignore imeta image thumbnail hashes for video moderation actions', () => {
+      const videoHash = '81661ca024bec2be842557ff7e07c833660038f134203f10293568f5ea11863f';
+      const thumbnailHash = 'b06e68dbec25463be257e44b06b0bcbb376d3cd1d5fa47e41747ead9e290e068';
+      const tags = [
+        [
+          'imeta',
+          `url https://media.divine.video/${videoHash}`,
+          'm video/mp4',
+          `image https://media.divine.video/${thumbnailHash}`,
+          'dim 608x608',
+          'size 1397120',
+          `x ${videoHash}`,
+          'blurhash UD0WGxgXghf[h2gagff_e6f~feg5g7f9e@e-',
+        ],
+      ];
+
+      const hashes = extractMediaHashes('', tags);
+
+      expect(hashes).toEqual([videoHash]);
     });
 
     it('should extract hashes from content URLs', () => {

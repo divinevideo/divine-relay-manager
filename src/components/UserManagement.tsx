@@ -1,4 +1,4 @@
-// ABOUTME: User management interface for banning and allowing users on the relay
+// ABOUTME: User management interface for banning, suspending, and allowing users on the relay
 // ABOUTME: Includes verification to confirm NIP-86 actions succeeded and D1 audit logging
 
 import { useState } from "react";
@@ -14,10 +14,11 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/useToast";
-import { UserX, UserCheck, Plus, Users, Trash2, User, X } from "lucide-react";
+import { UserX, UserCheck, Plus, Users, Trash2, User, X, Pause, Play } from "lucide-react";
 import { BannedUserCard } from "@/components/BannedUserCard";
 import { nip19 } from "nostr-tools";
 import { useAdminApi } from "@/hooks/useAdminApi";
+import { UserActions } from "@/components/UserActions";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { UserDisplayName } from "@/components/UserIdentifier";
 import { CopyableId } from "@/components/CopyableId";
@@ -41,7 +42,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
   const { toast } = useToast();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { callRelayRpc, verifyPubkeyBanned, verifyPubkeyUnbanned, unbanPubkey, logDecision } = useAdminApi();
+  const { callRelayRpc, verifyPubkeyBanned, verifyPubkeyUnbanned, unbanPubkey, unsuspendPubkey, logDecision } = useAdminApi();
   const { user } = useCurrentUser();
   const [newPubkey, setNewPubkey] = useState("");
   const [newReason, setNewReason] = useState("");
@@ -58,6 +59,8 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
     queryClient.invalidateQueries({ queryKey: ['banned-users'] });
     queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
     queryClient.invalidateQueries({ queryKey: ['allowed-users'] });
+    queryClient.invalidateQueries({ queryKey: ['suspended-users'] });
+    queryClient.invalidateQueries({ queryKey: ['suspended-pubkeys'] });
   };
 
   // Query for banned users
@@ -70,6 +73,12 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
   const { data: allowedUsers, isLoading: loadingAllowed, error: allowedError } = useQuery({
     queryKey: ['allowed-users'],
     queryFn: () => callRelayRpc<BannedPubkeyEntry[]>('listallowedpubkeys'),
+  });
+
+  // Query for suspended users
+  const { data: suspendedUsers, isLoading: loadingSuspended, error: suspendedError } = useQuery({
+    queryKey: ['suspended-users'],
+    queryFn: () => callRelayRpc<BannedPubkeyEntry[]>('listsuspendedpubkeys'),
   });
 
   // Mutation for banning users
@@ -113,7 +122,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
   // Mutation for allowing users
   const allowUserMutation = useMutation({
     mutationFn: async ({ pubkey, reason }: { pubkey: string; reason?: string }) => {
-      await callRelayRpc('allowpubkey', [pubkey, reason]);
+      await callRelayRpc('unbanpubkey', [pubkey, reason]);
       // Log to D1 for audit trail
       await logDecision({
         targetType: 'pubkey',
@@ -210,11 +219,37 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
     },
   });
 
-  const handleRemoveUser = async (pubkey: string, type: 'ban' | 'allow') => {
+  const unsuspendUserMutation = useMutation({
+    mutationFn: async ({ pubkey }: { pubkey: string }) => {
+      await unsuspendPubkey(pubkey);
+      await logDecision({
+        targetType: 'pubkey',
+        targetId: pubkey,
+        action: 'unsuspend_user',
+        reason: 'Unsuspended via User Management',
+        moderatorPubkey: user?.pubkey,
+      });
+      return pubkey;
+    },
+    onSuccess: () => {
+      invalidateUserQueries();
+      toast({ title: "User unsuspended successfully" });
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Failed to unsuspend user",
+        description: error.message,
+        variant: "destructive"
+      });
+    },
+  });
+
+  const handleRemoveUser = async (pubkey: string, type: 'ban' | 'allow' | 'suspend') => {
     if (type === 'ban') {
       unbanUserMutation.mutate({ pubkey });
+    } else if (type === 'suspend') {
+      unsuspendUserMutation.mutate({ pubkey });
     } else {
-      // NIP-86 doesn't define a method to remove from allow list
       toast({
         title: "Not yet supported",
         description: "Removing from allow list requires an RPC method which is not defined in NIP-86",
@@ -228,7 +263,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-2xl font-bold">User Management</h2>
-          <p className="text-muted-foreground">Manage banned and allowed users on your relay</p>
+          <p className="text-muted-foreground">Manage banned, suspended, and allowed users on your relay</p>
         </div>
         <Dialog open={isAddDialogOpen} onOpenChange={setIsAddDialogOpen}>
           <DialogTrigger asChild>
@@ -324,24 +359,26 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
             <div className="flex items-center gap-2 text-sm">
               {bannedUsers?.some((u: BannedUser) => u.pubkey === selectedPubkey) ? (
                 <span className="flex items-center gap-1 text-red-600"><UserX className="h-4 w-4" />Banned</span>
+              ) : suspendedUsers?.some((u: BannedPubkeyEntry) => u.pubkey === selectedPubkey) ? (
+                <span className="flex items-center gap-1 text-amber-600"><Pause className="h-4 w-4" />Suspended</span>
               ) : allowedUsers?.some((u: AllowedUser) => u.pubkey === selectedPubkey) ? (
                 <span className="flex items-center gap-1 text-green-600"><UserCheck className="h-4 w-4" />Allowed</span>
               ) : (
                 <span className="text-muted-foreground">No restrictions</span>
               )}
             </div>
-            <div className="flex gap-2">
-              {!bannedUsers?.some((u: BannedUser) => u.pubkey === selectedPubkey) && (
-                <Button variant="destructive" size="sm" onClick={() => banUserMutation.mutate({ pubkey: selectedPubkey })} disabled={banUserMutation.isPending}>
-                  <UserX className="h-4 w-4 mr-1" />Ban
-                </Button>
-              )}
-              {!allowedUsers?.some((u: AllowedUser) => u.pubkey === selectedPubkey) && (
-                <Button variant="outline" size="sm" onClick={() => allowUserMutation.mutate({ pubkey: selectedPubkey })} disabled={allowUserMutation.isPending}>
-                  <UserCheck className="h-4 w-4 mr-1" />Allow
-                </Button>
-              )}
-            </div>
+            {!allowedUsers?.some((u: AllowedUser) => u.pubkey === selectedPubkey) && (
+              <Button variant="outline" size="sm" onClick={() => allowUserMutation.mutate({ pubkey: selectedPubkey })} disabled={allowUserMutation.isPending}>
+                <UserCheck className="h-4 w-4 mr-1" />Allow
+              </Button>
+            )}
+            <UserActions
+              pubkey={selectedPubkey}
+              context="users"
+              isBanned={bannedUsers?.some((u: BannedUser) => u.pubkey === selectedPubkey) ?? false}
+              isSuspended={suspendedUsers?.some((u: BannedPubkeyEntry) => u.pubkey === selectedPubkey) ?? false}
+              onActionComplete={invalidateUserQueries}
+            />
           </CardContent>
         </Card>
       )}
@@ -351,6 +388,10 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
           <TabsTrigger value="banned" className="flex items-center space-x-2">
             <UserX className="h-4 w-4" />
             <span>Banned Users</span>
+          </TabsTrigger>
+          <TabsTrigger value="suspended" className="flex items-center space-x-2">
+            <Pause className="h-4 w-4" />
+            <span>Suspended Users</span>
           </TabsTrigger>
           <TabsTrigger value="allowed" className="flex items-center space-x-2">
             <UserCheck className="h-4 w-4" />
@@ -401,6 +442,67 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
                       pubkey={user.pubkey}
                       reason={user.reason}
                       onUnban={() => handleRemoveUser(user.pubkey, 'ban')}
+                    />
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="suspended">
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center space-x-2">
+                <Pause className="h-5 w-5" />
+                <span>Suspended Users</span>
+              </CardTitle>
+              <CardDescription>
+                Users whose content is hidden but not deleted. Suspension can be reversed.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {loadingSuspended ? (
+                <div className="space-y-3">
+                  {[...Array(3)].map((_, i) => (
+                    <div key={i} className="flex items-center justify-between p-3 border rounded-lg">
+                      <div className="space-y-2">
+                        <Skeleton className="h-4 w-64" />
+                        <Skeleton className="h-3 w-48" />
+                      </div>
+                      <Skeleton className="h-8 w-20" />
+                    </div>
+                  ))}
+                </div>
+              ) : suspendedError ? (
+                <Alert>
+                  <AlertDescription>
+                    Failed to load suspended users: {suspendedError.message}
+                  </AlertDescription>
+                </Alert>
+              ) : !suspendedUsers || suspendedUsers.length === 0 ? (
+                <div className="text-center py-8 text-muted-foreground">
+                  <Users className="h-12 w-12 mx-auto mb-4 opacity-50" />
+                  <p>No suspended users</p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {suspendedUsers.map((user: BannedPubkeyEntry, index: number) => (
+                    <BannedUserCard
+                      key={index}
+                      pubkey={user.pubkey}
+                      reason={user.reason}
+                      actionButton={
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="border-green-500 text-green-600 hover:bg-green-50"
+                          onClick={() => handleRemoveUser(user.pubkey, 'suspend')}
+                        >
+                          <Play className="h-4 w-4 mr-1" />
+                          Unsuspend
+                        </Button>
+                      }
                     />
                   ))}
                 </div>

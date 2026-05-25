@@ -33,6 +33,40 @@ binding = "SERVICE_API_TOKEN"
 store_id = "ef490704b12a4feb91c7feb51229c364"
 secret_name = "SERVICE_API_TOKEN"
 
+# Blossom admin bypass token (proxies blocked media to moderators)
+[[secrets_store_secrets]]
+binding = "BLOSSOM_WEBHOOK_SECRET"
+store_id = "ef490704b12a4feb91c7feb51229c364"
+secret_name = "BLOSSOM_WEBHOOK_SECRET"
+
+# Keycast service token for account suspension API
+[[secrets_store_secrets]]
+binding = "KEYCAST_SERVICE_TOKEN"
+store_id = "ef490704b12a4feb91c7feb51229c364"
+secret_name = "KEYCAST_SERVICE_TOKEN"
+
+# Zendesk API credentials (shared across workers)
+[[secrets_store_secrets]]
+binding = "ZENDESK_SUBDOMAIN"
+store_id = "ef490704b12a4feb91c7feb51229c364"
+secret_name = "ZENDESK_SUBDOMAIN"
+
+[[secrets_store_secrets]]
+binding = "ZENDESK_EMAIL"
+store_id = "ef490704b12a4feb91c7feb51229c364"
+secret_name = "ZENDESK_EMAIL"
+
+[[secrets_store_secrets]]
+binding = "ZENDESK_API_TOKEN"
+store_id = "ef490704b12a4feb91c7feb51229c364"
+secret_name = "ZENDESK_API_TOKEN"
+
+# HMAC secret for verifying Zendesk age-review reply webhooks
+[[secrets_store_secrets]]
+binding = "ZENDESK_AGE_REVIEW_WEBHOOK_SECRET"
+store_id = "ef490704b12a4feb91c7feb51229c364"
+secret_name = "ZENDESK_AGE_REVIEW_WEBHOOK_SECRET"
+
 [vars]
 RELAY_URL = "wss://relay.divine.video"
 ENVIRONMENT = "production"
@@ -54,9 +88,15 @@ CDN_DOMAIN = "media.divine.video"
 # Zendesk custom field IDs for webhook callback
 ZENDESK_FIELD_ACTION_STATUS = "14545793289743"
 ZENDESK_FIELD_ACTION_REQUESTED = "14545826900367"
+# Slack webhook for age review deadline alerts (add via: wrangler secret put SLACK_WEBHOOK_URL --config wrangler.prod.toml)
+# SLACK_WEBHOOK_URL — not in [vars] because it's a secret
 # Zendesk custom field IDs for auto-solve required fields
 ZENDESK_FIELD_CATEGORY = "14559549220879"
 ZENDESK_FIELD_ISSUE = "14560383908879"
+# Age review deadline date field — create in Zendesk admin, then set the ID here
+ZENDESK_FIELD_AGE_REVIEW_DEADLINE = "16123853180303"
+# Keycast account suspension API
+KEYCAST_URL = "https://login.divine.video"
 
 # D1 Database for moderation decision log (production)
 [[d1_databases]]

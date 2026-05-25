@@ -3,6 +3,12 @@
 // ABOUTME: All functions accept apiUrl as first parameter to support environment switching
 
 import type { NostrEvent } from "@nostrify/nostrify";
+import {
+  VALID_BULK_ACTIONS,
+  type BulkAction,
+  type BulkModerateResult,
+} from "../../shared/bulk-moderation";
+import { extractMediaHashes as extractSharedMediaHashes } from "../../shared/media-hashes";
 
 // Build headers with CF Access service token for cross-origin API requests.
 // The service token authenticates the frontend to CF Access policies on api-relay-* domains.
@@ -16,6 +22,9 @@ export function getApiHeaders(contentType = 'application/json'): Record<string, 
   }
   if (import.meta.env.VITE_CF_ACCESS_CLIENT_SECRET) {
     headers['CF-Access-Client-Secret'] = import.meta.env.VITE_CF_ACCESS_CLIENT_SECRET;
+  }
+  if (import.meta.env.VITE_ADMIN_API_KEY) {
+    headers['X-Admin-Key'] = import.meta.env.VITE_ADMIN_API_KEY;
   }
   return headers;
 }
@@ -71,7 +80,7 @@ class ApiError extends Error {
 async function apiRequest<T>(
   apiUrl: string,
   endpoint: string,
-  method: 'GET' | 'POST' | 'DELETE',
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
   body?: object
 ): Promise<T> {
   if (!apiUrl) {
@@ -213,6 +222,24 @@ export async function listBannedEvents(apiUrl: string): Promise<Array<{ id: stri
   return callRelayRpc<Array<{ id: string; reason?: string }>>(apiUrl, 'listbannedevents');
 }
 
+export async function suspendPubkey(apiUrl: string, pubkey: string, reason?: string): Promise<void> {
+  await callRelayRpc(apiUrl, 'suspendpubkey', [pubkey, reason || 'Suspended via admin']);
+}
+
+export async function unsuspendPubkey(apiUrl: string, pubkey: string): Promise<void> {
+  await callRelayRpc(apiUrl, 'unsuspendpubkey', [pubkey]);
+}
+
+export async function listSuspendedPubkeys(apiUrl: string): Promise<BannedPubkeyEntry[]> {
+  const result = await callRelayRpc<string[] | BannedPubkeyEntry[]>(apiUrl, 'listsuspendedpubkeys');
+  return result.map(item => {
+    if (typeof item === 'string') {
+      return { pubkey: item };
+    }
+    return item as BannedPubkeyEntry;
+  });
+}
+
 // Fetch reports via server-side relay query (replaces browser WebSocket)
 export async function fetchReports(apiUrl: string): Promise<NostrEvent[]> {
   const data = await apiRequest<{ success: boolean; events: NostrEvent[] }>(apiUrl, '/api/reports', 'GET');
@@ -280,15 +307,21 @@ export async function markAsReviewed(
   });
 }
 
-// Media moderation actions
-export type ModerationAction = 'SAFE' | 'REVIEW' | 'AGE_RESTRICTED' | 'PERMANENT_BAN';
+// Media moderation request actions
+export type ModerationAction = 'SAFE' | 'REVIEW' | 'AGE_RESTRICTED' | 'PERMANENT_BAN' | 'DELETE';
+// Media moderation status values returned by /api/check-result/:sha256
+export type MediaStatusAction = ModerationAction | 'QUARANTINE';
 
 export interface MediaStatus {
   sha256: string;
-  action: ModerationAction;
+  action: MediaStatusAction;
   reason?: string;
   created_at?: string;
   source?: string;
+}
+
+export function isBlockedMediaAction(action: MediaStatusAction | null | undefined): boolean {
+  return action === 'PERMANENT_BAN' || action === 'QUARANTINE';
 }
 
 export async function moderateMedia(
@@ -535,35 +568,7 @@ export async function verifyModerationAction(
 
 // Extract sha256 hashes from media URLs in content or tags
 export function extractMediaHashes(content: string, tags: string[][]): string[] {
-  const hashes: Set<string> = new Set();
-
-  // Common Blossom/media URL patterns with sha256
-  // e.g., https://cdn.example.com/abc123def456.mp4
-  // e.g., https://blossom.example.com/sha256/abc123def456
-  const sha256Pattern = /\b([a-f0-9]{64})\b/gi;
-
-  // Check content for hashes
-  let match;
-  while ((match = sha256Pattern.exec(content)) !== null) {
-    hashes.add(match[1].toLowerCase());
-  }
-
-  // Check imeta tags and url tags
-  for (const tag of tags) {
-    if (tag[0] === 'imeta' || tag[0] === 'url' || tag[0] === 'x') {
-      const tagContent = tag.join(' ');
-      sha256Pattern.lastIndex = 0;
-      while ((match = sha256Pattern.exec(tagContent)) !== null) {
-        hashes.add(match[1].toLowerCase());
-      }
-    }
-    // Direct x tag with hash
-    if (tag[0] === 'x' && tag[1] && /^[a-f0-9]{64}$/i.test(tag[1])) {
-      hashes.add(tag[1].toLowerCase());
-    }
-  }
-
-  return Array.from(hashes);
+  return extractSharedMediaHashes(content, tags);
 }
 
 // Scene classification from VLM
@@ -885,4 +890,90 @@ function extractBreakdown(
   }
 
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Age Review
+// ---------------------------------------------------------------------------
+
+export type { AgeReviewCase, AgeReviewState, AgeBand } from '../../shared/age-review';
+
+interface AgeReviewCasesResponse {
+  success: boolean;
+  cases: import('../../shared/age-review').AgeReviewCase[];
+}
+
+interface AgeReviewCaseResponse {
+  success: boolean;
+  case: import('../../shared/age-review').AgeReviewCase;
+  keycastUpdated?: boolean;
+}
+
+export async function getAgeReviewCases(
+  apiUrl: string,
+  params?: { state?: string; age_band?: string },
+): Promise<AgeReviewCasesResponse> {
+  const query = new URLSearchParams();
+  if (params?.state) query.set('state', params.state);
+  if (params?.age_band) query.set('age_band', params.age_band);
+  const qs = query.toString();
+  return apiRequest<AgeReviewCasesResponse>(apiUrl, `/api/age-review/cases${qs ? `?${qs}` : ''}`, 'GET');
+}
+
+export async function getAgeReviewCase(
+  apiUrl: string,
+  caseId: string,
+): Promise<AgeReviewCaseResponse> {
+  return apiRequest<AgeReviewCaseResponse>(apiUrl, `/api/age-review/cases/${caseId}`, 'GET');
+}
+
+export async function updateAgeReviewCase(
+  apiUrl: string,
+  caseId: string,
+  updates: Record<string, unknown>,
+): Promise<AgeReviewCaseResponse> {
+  return apiRequest<AgeReviewCaseResponse>(apiUrl, `/api/age-review/cases/${caseId}`, 'PATCH', updates);
+}
+
+// Bulk moderation
+export { VALID_BULK_ACTIONS, type BulkAction, type BulkModerateResult };
+
+export async function bulkModerate(
+  apiUrl: string,
+  pubkey: string,
+  action: BulkAction,
+  reason?: string,
+): Promise<BulkModerateResult> {
+  const result = await apiRequest<BulkModerateResult>(apiUrl, '/api/bulk-moderate', 'POST', { pubkey, action, reason });
+  if (!result.success) {
+    const summary = result.failures.slice(0, 3).join('; ');
+    throw new ApiError(summary ? `Bulk moderation failed: ${summary}` : 'Bulk moderation failed');
+  }
+  return result;
+}
+
+// Delete media (convenience wrapper)
+export async function deleteMedia(apiUrl: string, sha256: string, reason?: string): Promise<ApiResponse> {
+  return moderateMedia(apiUrl, sha256, 'DELETE', reason || 'Deleted by moderator');
+}
+
+// Publish NIP-09 kind 5 deletion request via worker
+export async function publishDeletionRequest(apiUrl: string, eventId: string, reason?: string): Promise<ApiResponse> {
+  return apiRequest<ApiResponse>(apiUrl, '/api/publish-deletion', 'POST', { eventId, reason });
+}
+
+// Age review config
+export interface AgeReviewConfig {
+  auto_delete_on_deny: boolean;
+}
+
+export async function getAgeReviewConfig(apiUrl: string): Promise<AgeReviewConfig> {
+  return apiRequest<AgeReviewConfig>(apiUrl, '/api/age-review/config', 'GET');
+}
+
+export async function updateAgeReviewConfig(
+  apiUrl: string,
+  config: Partial<AgeReviewConfig>,
+): Promise<AgeReviewConfig> {
+  return apiRequest<AgeReviewConfig>(apiUrl, '/api/age-review/config', 'PUT', config);
 }

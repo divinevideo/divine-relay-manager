@@ -1,7 +1,7 @@
 // ABOUTME: Tests for NIP-86 RPC utilities
 // ABOUTME: Uses vitest with mocked fetch for relay calls
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   getSecretKey,
   getAdminPubkey,
@@ -11,6 +11,7 @@ import {
   allowEvent,
   banPubkey,
   unbanPubkey,
+  publishKind5Deletion,
   type Nip86Env,
 } from './nip86';
 
@@ -187,12 +188,12 @@ describe('convenience methods', () => {
     expect(body.params).toEqual(['event123', 'spam']);
   });
 
-  it('allowEvent should call allowevent RPC', async () => {
+  it('allowEvent should call unbanevent RPC', async () => {
     const result = await allowEvent('event123', mockEnv);
     expect(result.success).toBe(true);
 
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
-    expect(body.method).toBe('allowevent');
+    expect(body.method).toBe('unbanevent');
     expect(body.params).toEqual(['event123']);
   });
 
@@ -212,5 +213,112 @@ describe('convenience methods', () => {
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
     expect(body.method).toBe('unbanpubkey');
     expect(body.params).toEqual(['pubkey123']);
+  });
+});
+
+describe('publishKind5Deletion', () => {
+  let wsListeners: Record<string, ((...args: unknown[]) => void)[]>;
+  let wsSend: ReturnType<typeof vi.fn>;
+  let wsClose: ReturnType<typeof vi.fn>;
+  let originalWebSocket: typeof globalThis.WebSocket;
+  let autoOpen: boolean;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    wsListeners = {};
+    wsSend = vi.fn();
+    wsClose = vi.fn();
+    autoOpen = true;
+    originalWebSocket = globalThis.WebSocket;
+
+    const outerListeners = wsListeners;
+    const outerAutoOpen = () => autoOpen;
+    class MockWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSING = 2;
+      static CLOSED = 3;
+      send = wsSend;
+      close = wsClose;
+      addEventListener(event: string, cb: (...args: unknown[]) => void) {
+        (outerListeners[event] ??= []).push(cb);
+      }
+      constructor(_url: string) {
+        if (outerAutoOpen()) {
+          queueMicrotask(() => {
+            for (const cb of outerListeners['open'] ?? []) cb();
+          });
+        }
+      }
+    }
+    vi.stubGlobal('WebSocket', MockWebSocket);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    globalThis.WebSocket = originalWebSocket;
+  });
+
+  function fireWsEvent(event: string, ...args: unknown[]) {
+    for (const cb of wsListeners[event] ?? []) cb(...args);
+  }
+
+  it('publishes a kind 5 event via WebSocket and waits for OK', async () => {
+    const env: Nip86Env = { NOSTR_NSEC: TEST_NSEC, RELAY_URL: 'wss://relay.test.com' };
+
+    const promise = publishKind5Deletion('target-event-id-hex', 'Content violates policy', env);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(wsSend).toHaveBeenCalledTimes(1);
+    const sent = JSON.parse(wsSend.mock.calls[0][0]);
+    expect(sent[0]).toBe('EVENT');
+    expect(sent[1].kind).toBe(5);
+    expect(sent[1].tags).toContainEqual(['e', 'target-event-id-hex']);
+    expect(sent[1].content).toBe('Content violates policy');
+    expect(sent[1].sig).toBeDefined();
+
+    fireWsEvent('message', { data: JSON.stringify(['OK', sent[1].id, true, '']) });
+
+    const result = await promise;
+    expect(result.success).toBe(true);
+    expect(wsClose).toHaveBeenCalled();
+  });
+
+  it('returns error when relay rejects the event', async () => {
+    const env: Nip86Env = { NOSTR_NSEC: TEST_NSEC, RELAY_URL: 'wss://relay.test.com' };
+
+    const promise = publishKind5Deletion('event-id', 'reason', env);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const sent = JSON.parse(wsSend.mock.calls[0][0]);
+    fireWsEvent('message', { data: JSON.stringify(['OK', sent[1].id, false, 'blocked: not authorized']) });
+
+    const result = await promise;
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('not authorized');
+  });
+
+  it('returns error on WebSocket connection failure', async () => {
+    autoOpen = false;
+    const env: Nip86Env = { NOSTR_NSEC: TEST_NSEC, RELAY_URL: 'wss://relay.test.com' };
+
+    const promise = publishKind5Deletion('event-id', 'reason', env);
+    await vi.advanceTimersByTimeAsync(0);
+    fireWsEvent('error');
+
+    const result = await promise;
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('WebSocket');
+  });
+
+  it('times out if relay never responds', async () => {
+    const env: Nip86Env = { NOSTR_NSEC: TEST_NSEC, RELAY_URL: 'wss://relay.test.com' };
+
+    const promise = publishKind5Deletion('event-id', 'reason', env);
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    const result = await promise;
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('timeout');
   });
 });

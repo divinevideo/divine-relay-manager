@@ -3,7 +3,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { useAdminApi } from "@/hooks/useAdminApi";
-import type { MediaStatus } from "@/lib/adminApi";
+import { isBlockedMediaAction, type MediaStatus } from "@/lib/adminApi";
 
 export interface MediaStatusResult {
   hash: string;
@@ -26,7 +26,7 @@ export function useMediaStatus(hashes: string[]) {
           return {
             hash,
             status,
-            isBlocked: status?.action === 'PERMANENT_BAN',
+            isBlocked: isBlockedMediaAction(status?.action),
             isRestricted: status?.action === 'AGE_RESTRICTED',
           };
         })

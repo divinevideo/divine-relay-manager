@@ -51,6 +51,12 @@ export function useAdminApi() {
       adminApi.listBannedPubkeys(apiUrl),
     listBannedEvents: () =>
       adminApi.listBannedEvents(apiUrl),
+    suspendPubkey: (pubkey: string, reason?: string) =>
+      adminApi.suspendPubkey(apiUrl, pubkey, reason),
+    unsuspendPubkey: (pubkey: string) =>
+      adminApi.unsuspendPubkey(apiUrl, pubkey),
+    listSuspendedPubkeys: () =>
+      adminApi.listSuspendedPubkeys(apiUrl),
 
     // Server-side relay queries (replaces browser WebSocket for freshness)
     fetchReports: () =>
@@ -111,6 +117,31 @@ export function useAdminApi() {
       adminApi.verifyAgeRestricted(apiUrl, sha256),
     verifyModerationAction: (eventId: string, mediaHashes: string[]) =>
       adminApi.verifyModerationAction(apiUrl, eventId, mediaHashes, relayUrl),
+
+    // Age review
+    getAgeReviewCases: (params?: { state?: string; age_band?: string }) =>
+      adminApi.getAgeReviewCases(apiUrl, params),
+    getAgeReviewCase: (caseId: string) =>
+      adminApi.getAgeReviewCase(apiUrl, caseId),
+    updateAgeReviewCase: (caseId: string, updates: Record<string, unknown>) =>
+      adminApi.updateAgeReviewCase(apiUrl, caseId, updates),
+
+    // Bulk moderation
+    bulkModerate: (pubkey: string, action: adminApi.BulkAction, reason?: string) =>
+      adminApi.bulkModerate(apiUrl, pubkey, action, reason),
+
+    // Delete operations
+    deleteMedia: (sha256: string, reason?: string) =>
+      adminApi.deleteMedia(apiUrl, sha256, reason),
+    publishDeletionRequest: (eventId: string, reason?: string) =>
+      adminApi.publishDeletionRequest(apiUrl, eventId, reason),
+
+    // Age review config
+    getAgeReviewConfig: () =>
+      adminApi.getAgeReviewConfig(apiUrl),
+    updateAgeReviewConfig: (config: Partial<adminApi.AgeReviewConfig>) =>
+      adminApi.updateAgeReviewConfig(apiUrl, config),
+
   }), [apiUrl, relayUrl]);
 
   return boundApi;
