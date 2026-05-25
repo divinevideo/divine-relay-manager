@@ -17,6 +17,7 @@ import {
   TERMINAL_STATES,
   defaultResolutionForBand,
 } from '../../shared/age-review';
+import { isUnderageCategory } from '../../shared/categories';
 
 /**
  * Extended environment for ReportWatcher DO
@@ -627,7 +628,7 @@ export class ReportWatcher implements DurableObject {
     // In-memory Set guards against the SELECT-then-INSERT race: the Set check+add is
     // synchronous, so concurrent WebSocket messages can't interleave between them.
     const reportedPubkey = targetPubkeyTag?.[1];
-    if (category === 'NS-underageUser' && reportedPubkey && !this.pendingAgeReviewPubkeys.has(reportedPubkey)) {
+    if (isUnderageCategory(category) && reportedPubkey && !this.pendingAgeReviewPubkeys.has(reportedPubkey)) {
       this.pendingAgeReviewPubkeys.add(reportedPubkey);
       this.createAgeReviewCase(event, reportedPubkey)
         .catch(error => console.error('[ReportWatcher] Age review case creation failed:', error))

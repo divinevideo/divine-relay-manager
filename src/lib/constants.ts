@@ -1,4 +1,8 @@
 import { getEnvironmentByApiUrl } from "@/lib/environments";
+import {
+  CHILD_SAFETY_CATEGORIES,
+  UNDERAGE_CATEGORIES,
+} from "../../shared/categories";
 export { AUTO_HIDE_ACTION, AUTO_HIDE_ACTIONS, type AutoHideAction } from "../../shared/autohide";
 
 // ABOUTME: Shared constants for moderation categories and labels
@@ -9,10 +13,14 @@ export const CATEGORY_LABELS: Record<string, string> = {
   'csam': 'CSAM',
   'NS-csam': 'CSAM',
   // NIP-32 social.nos.ontology labels emitted by divine-mobile and divine-web.
-  // Keep both kebab- and camel-case aliases where clients already differ on wire values.
+  // Keep both kebab- and camelCase aliases where clients already differ on wire values.
   'NS-spam': 'Spam',
   'NS-harassment': 'Harassment',
   'NS-violence': 'Violence',
+  'NS-childSafety': 'Child Safety',
+  'NS-child-safety': 'Child Safety',
+  'NS-underageUser': 'Under 16',
+  'NS-underage-user': 'Under 16',
   'NS-sexualContent': 'Sexual Content',
   'NS-sexual-content': 'Sexual Content',
   'NS-copyright': 'Copyright',
@@ -45,13 +53,15 @@ export const CATEGORY_LABELS: Record<string, string> = {
   'ai-generated': 'AI Generated',
   'NS-ai-generated': 'AI Generated',
   'violence': 'Violence',
+  'childSafety': 'Child Safety',
+  'child-safety': 'Child Safety',
+  'underageUser': 'Under 16',
+  'underage-user': 'Under 16',
   'sexual-content': 'Sexual Content',
   'sexualContent': 'Sexual Content',
   'false-info': 'Misinformation',
   'falseInformation': 'Misinformation',
   'other': 'Other',
-  'NS-underageUser': 'Under 16',
-  'NS-childSafety': 'Child Safety',
 };
 
 export const RESOLUTION_STATUSES = ['reviewed', 'dismissed', 'no-action', 'false-positive'] as const;
@@ -60,8 +70,9 @@ export type ResolutionStatus = typeof RESOLUTION_STATUSES[number];
 // Categories where media should be hidden by default for moderator safety
 export const HIGH_PRIORITY_CATEGORIES = [
   'sexual_minors', 'csam', 'NS-csam',
+  ...CHILD_SAFETY_CATEGORIES,
+  ...UNDERAGE_CATEGORIES,
   'nonconsensual_sexual_content', 'terrorism_extremism', 'credible_threats',
-  'NS-underageUser', 'NS-childSafety',
 ];
 
 // Helper to get label with fallback
