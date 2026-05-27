@@ -17,11 +17,12 @@ import {
   TERMINAL_STATES,
   defaultResolutionForBand,
 } from '../../shared/age-review';
+import { getUserStatus, type KeycastEnv } from './keycast-client';
 
 /**
  * Extended environment for ReportWatcher DO
  */
-export interface ReportWatcherEnv extends Nip86Env {
+export interface ReportWatcherEnv extends Nip86Env, KeycastEnv {
   DB?: D1Database;
   AUTO_HIDE_ENABLED?: string;
   TRUSTED_CLIENTS?: string;
@@ -909,6 +910,33 @@ export class ReportWatcher implements DurableObject {
     if (existing) {
       console.log(`[ReportWatcher] Active age review case ${existing.id} already exists for ${reportedPubkey}, skipping`);
       return;
+    }
+
+    // Auto-clear: if user is a previously verified minor, create case as immediately cleared
+    try {
+      const keycastStatus = await getUserStatus(reportedPubkey, this.env);
+      if (keycastStatus.success && keycastStatus.verified_minor) {
+        const caseId = crypto.randomUUID();
+        await this.env.DB.prepare(`
+          INSERT INTO age_review_cases
+          (id, pubkey, reporter_pubkey, report_id, suspected_age_band, state, allowed_resolution, resolution_note, created_via)
+          VALUES (?, ?, ?, ?, 'age_13_15', 'cleared', 'parent_video_or_email', 'Auto-cleared: previously verified minor', 'report')
+        `).bind(caseId, reportedPubkey, event.pubkey, event.id).run();
+
+        await this.logDecision({
+          targetType: 'pubkey',
+          targetId: reportedPubkey,
+          action: AGE_REVIEW_ACTION.caseCreated,
+          reason: `Under-16 report auto-cleared: verified minor (case ${caseId})`,
+          reportId: event.id,
+          reporterPubkey: event.pubkey,
+        });
+
+        console.log(`[ReportWatcher] Age review case ${caseId} auto-cleared for verified minor ${reportedPubkey}`);
+        return;
+      }
+    } catch (err) {
+      console.warn(`[ReportWatcher] Keycast verified_minor check failed for ${reportedPubkey}, proceeding with normal case:`, err);
     }
 
     const caseId = crypto.randomUUID();

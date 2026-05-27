@@ -69,14 +69,28 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       resolution_note TEXT,
       last_alerted_at TEXT,
       zendesk_ticket_id INTEGER,
+      created_via TEXT DEFAULT 'report',
+      claim_link_url TEXT,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     )
   `).run();
 
-  // Add zendesk_ticket_id to existing tables that were created without it
+  // Add columns to existing tables that were created without them
   try {
     await db.prepare(`ALTER TABLE age_review_cases ADD COLUMN zendesk_ticket_id INTEGER`).run();
+  } catch {
+    // Column already exists
+  }
+
+  try {
+    await db.prepare(`ALTER TABLE age_review_cases ADD COLUMN created_via TEXT DEFAULT 'report'`).run();
+  } catch {
+    // Column already exists
+  }
+
+  try {
+    await db.prepare(`ALTER TABLE age_review_cases ADD COLUMN claim_link_url TEXT`).run();
   } catch {
     // Column already exists
   }

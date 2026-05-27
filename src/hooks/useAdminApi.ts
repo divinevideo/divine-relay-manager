@@ -141,6 +141,8 @@ export function useAdminApi() {
       adminApi.getAgeReviewConfig(apiUrl),
     updateAgeReviewConfig: (config: Partial<adminApi.AgeReviewConfig>) =>
       adminApi.updateAgeReviewConfig(apiUrl, config),
+    createMinorAccount: (username: string, displayName?: string, zendeskTicketId?: number) =>
+      adminApi.createMinorAccount(apiUrl, username, displayName, zendeskTicketId),
 
   }), [apiUrl, relayUrl]);
 

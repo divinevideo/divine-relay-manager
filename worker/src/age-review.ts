@@ -13,7 +13,7 @@ import {
 import { handleBulkModerate, type BulkModerateEnv } from './bulk-moderate';
 import { resolveZendeskCreds } from './zendesk-sync';
 import type { BulkAction, BulkModerateResult } from '../../shared/bulk-moderation';
-import { suspendUser, unsuspendUser, banUser, type KeycastEnv } from './keycast-client';
+import { suspendUser, unsuspendUser, banUser, createMinorAccount, type KeycastEnv } from './keycast-client';
 import type { SecretStoreSecret } from './nip86';
 
 interface AgeReviewEnv extends BulkModerateEnv, KeycastEnv {
@@ -283,6 +283,64 @@ export async function handleUpdateAgeReviewCase(
   }
 
   return json({ success: true, case: updated, bulkActionTriggered, keycastUpdated }, 200, corsHeaders);
+}
+
+// ---------------------------------------------------------------------------
+// Minor onboarding (behind admin auth)
+// ---------------------------------------------------------------------------
+
+export async function handleCreateMinorAccount(
+  request: Request,
+  env: AgeReviewEnv,
+  corsHeaders: Record<string, string>,
+): Promise<Response> {
+  if (!env.DB) return json({ success: false, error: 'Database not configured' }, 500, corsHeaders);
+
+  let body: { username?: string; display_name?: string; zendesk_ticket_id?: number };
+  try {
+    body = await request.json();
+  } catch {
+    return json({ success: false, error: 'Invalid JSON body' }, 400, corsHeaders);
+  }
+
+  const username = body.username?.trim().toLowerCase();
+  if (!username) {
+    return json({ success: false, error: 'username is required' }, 400, corsHeaders);
+  }
+  if (username.length > 64 || !/^[a-z0-9_-]+$/.test(username)) {
+    return json({ success: false, error: 'username must be 1-64 characters, lowercase alphanumeric, hyphens, or underscores' }, 400, corsHeaders);
+  }
+
+  const result = await createMinorAccount(username, body.display_name, env);
+  if (!result.success || !result.pubkey || !result.claim_url) {
+    const is409 = result.error?.startsWith('409:');
+    const is4xx = result.error?.match(/^4\d{2}:/);
+    const status = is409 ? 409 : is4xx ? 400 : 502;
+    return json({ success: false, error: result.error ?? 'Keycast account creation failed' }, status, corsHeaders);
+  }
+
+  // Create a cleared audit record in D1. If this fails, the Keycast account
+  // exists but has no audit trail -- log enough context to recover manually.
+  const caseId = crypto.randomUUID();
+  try {
+    await env.DB.prepare(`
+      INSERT INTO age_review_cases
+      (id, pubkey, suspected_age_band, state, allowed_resolution, resolution_note, created_via, claim_link_url, zendesk_ticket_id)
+      VALUES (?, ?, 'age_13_15', 'cleared', 'parent_video_or_email', 'Approved via parental consent (minor onboarding)', 'minor_onboarding', ?, ?)
+    `).bind(caseId, result.pubkey, result.claim_url, body.zendesk_ticket_id ?? null).run();
+  } catch (err) {
+    console.error(`[age-review] D1 audit record failed for minor account: pubkey=${result.pubkey}, claim_url=${result.claim_url}, case=${caseId}`, err);
+  }
+
+  console.log(`[age-review] Minor account created: pubkey=${result.pubkey}, case=${caseId}, username=${username}`);
+
+  return json({
+    success: true,
+    pubkey: result.pubkey,
+    claim_url: result.claim_url,
+    expires_at: result.expires_at,
+    case_id: caseId,
+  }, 200, corsHeaders);
 }
 
 // ---------------------------------------------------------------------------

@@ -91,6 +91,8 @@ export interface AgeReviewCase {
   resolution_note: string | null;
   last_alerted_at: string | null;
   zendesk_ticket_id: number | null;
+  created_via: string | null;
+  claim_link_url: string | null;
   created_at: string;
   updated_at: string;
 }

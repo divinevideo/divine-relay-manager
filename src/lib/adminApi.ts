@@ -935,6 +935,28 @@ export async function updateAgeReviewCase(
   return apiRequest<AgeReviewCaseResponse>(apiUrl, `/api/age-review/cases/${caseId}`, 'PATCH', updates);
 }
 
+// Minor onboarding
+export interface CreateMinorAccountResponse {
+  success: boolean;
+  pubkey?: string;
+  claim_url?: string;
+  expires_at?: string;
+  case_id?: string;
+  error?: string;
+}
+
+export async function createMinorAccount(
+  apiUrl: string,
+  username: string,
+  displayName?: string,
+  zendeskTicketId?: number,
+): Promise<CreateMinorAccountResponse> {
+  const body: Record<string, unknown> = { username };
+  if (displayName != null) body.display_name = displayName;
+  if (zendeskTicketId != null) body.zendesk_ticket_id = zendeskTicketId;
+  return apiRequest<CreateMinorAccountResponse>(apiUrl, '/api/age-review/create-minor-account', 'POST', body);
+}
+
 // Bulk moderation
 export { VALID_BULK_ACTIONS, type BulkAction, type BulkModerateResult };
 
