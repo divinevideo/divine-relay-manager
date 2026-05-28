@@ -458,7 +458,9 @@ export class ReportWatcher implements DurableObject {
       });
 
       this.ws.addEventListener('message', (event) => {
-        this.handleMessage(event.data as string);
+        this.handleMessage(event.data as string).catch(error => {
+          console.error('[ReportWatcher] Message handler failed:', error);
+        });
       });
 
       this.ws.addEventListener('close', (event) => {
@@ -530,7 +532,7 @@ export class ReportWatcher implements DurableObject {
   /**
    * Handle incoming WebSocket message
    */
-  private handleMessage(data: string): void {
+  private async handleMessage(data: string): Promise<void> {
     try {
       const message = JSON.parse(data) as unknown[];
 
@@ -544,7 +546,7 @@ export class ReportWatcher implements DurableObject {
         case 'EVENT': {
           const [subId, event] = rest as [string, ReportEvent];
           if (subId === this.subscriptionId && event.kind === 1984) {
-            this.handleReportEvent(event);
+            await this.handleReportEvent(event);
           }
           break;
         }
@@ -578,7 +580,7 @@ export class ReportWatcher implements DurableObject {
   /**
    * Handle a kind 1984 report event
    */
-  private handleReportEvent(event: ReportEvent): void {
+  private async handleReportEvent(event: ReportEvent): Promise<void> {
     this.lastEventAt = Date.now();
     this.eventsProcessed++;
 
@@ -619,20 +621,25 @@ export class ReportWatcher implements DurableObject {
 
     // Process auto-hide if enabled and category qualifies
     if (targetType === 'event' && targetId !== 'unknown') {
-      this.processAutoHide(event, category, targetId).catch(error => {
+      try {
+        await this.processAutoHide(event, category, targetId);
+      } catch (error) {
         console.error('[ReportWatcher] Auto-hide processing failed:', error);
-      });
+      }
     }
 
-    // Create age review case for under-16 reports (pubkey-level, independent of auto-hide).
-    // In-memory Set guards against the SELECT-then-INSERT race: the Set check+add is
-    // synchronous, so concurrent WebSocket messages can't interleave between them.
+    // Create age review case for under-16 reports (pubkey-level).
+    // Runs after auto-hide completes; both awaited so work survives DO eviction.
     const reportedPubkey = targetPubkeyTag?.[1];
     if (category === 'NS-underageUser' && reportedPubkey && !this.pendingAgeReviewPubkeys.has(reportedPubkey)) {
       this.pendingAgeReviewPubkeys.add(reportedPubkey);
-      this.createAgeReviewCase(event, reportedPubkey)
-        .catch(error => console.error('[ReportWatcher] Age review case creation failed:', error))
-        .finally(() => this.pendingAgeReviewPubkeys.delete(reportedPubkey));
+      try {
+        await this.createAgeReviewCase(event, reportedPubkey);
+      } catch (error) {
+        console.error('[ReportWatcher] Age review case creation failed:', error);
+      } finally {
+        this.pendingAgeReviewPubkeys.delete(reportedPubkey);
+      }
     }
   }
 

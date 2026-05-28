@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest';
-import { suspendUser, unsuspendUser, banUser, type KeycastEnv } from './keycast-client';
+import { suspendUser, unsuspendUser, banUser, getUserStatus, type KeycastEnv } from './keycast-client';
 
 const VALID_PUBKEY = 'a'.repeat(64);
 
@@ -110,6 +110,70 @@ describe('keycast-client', () => {
       const result = await suspendUser('g'.repeat(64), 'age_review', makeEnv());
       expect(result).toEqual({ success: false, error: expect.stringContaining('pubkey') });
       expect(fetchMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('getUserStatus', () => {
+    it('returns verified_minor true only for boolean true', async () => {
+      fetchMock.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ pubkey: VALID_PUBKEY, status: 'active', verified_minor: true }),
+      });
+      const result = await getUserStatus(VALID_PUBKEY, makeEnv());
+      expect(result.success).toBe(true);
+      expect(result.verified_minor).toBe(true);
+    });
+
+    it('returns verified_minor false for string "true"', async () => {
+      fetchMock.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ pubkey: VALID_PUBKEY, status: 'active', verified_minor: 'true' }),
+      });
+      const result = await getUserStatus(VALID_PUBKEY, makeEnv());
+      expect(result.verified_minor).toBe(false);
+    });
+
+    it('returns verified_minor false for string "false"', async () => {
+      fetchMock.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ pubkey: VALID_PUBKEY, status: 'active', verified_minor: 'false' }),
+      });
+      const result = await getUserStatus(VALID_PUBKEY, makeEnv());
+      expect(result.verified_minor).toBe(false);
+    });
+
+    it('returns verified_minor false for numeric 1', async () => {
+      fetchMock.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ pubkey: VALID_PUBKEY, status: 'active', verified_minor: 1 }),
+      });
+      const result = await getUserStatus(VALID_PUBKEY, makeEnv());
+      expect(result.verified_minor).toBe(false);
+    });
+
+    it('returns verified_minor false when field is missing', async () => {
+      fetchMock.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ pubkey: VALID_PUBKEY, status: 'active' }),
+      });
+      const result = await getUserStatus(VALID_PUBKEY, makeEnv());
+      expect(result.verified_minor).toBe(false);
+    });
+
+    it('returns verified_minor false for null', async () => {
+      fetchMock.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ pubkey: VALID_PUBKEY, status: 'active', verified_minor: null }),
+      });
+      const result = await getUserStatus(VALID_PUBKEY, makeEnv());
+      expect(result.verified_minor).toBe(false);
+    });
+
+    it('returns error on non-OK response', async () => {
+      fetchMock.mockResolvedValue({ ok: false, status: 500, text: () => Promise.resolve('Server error') });
+      const result = await getUserStatus(VALID_PUBKEY, makeEnv());
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('500');
     });
   });
 });

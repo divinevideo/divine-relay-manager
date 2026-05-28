@@ -311,6 +311,12 @@ export async function handleCreateMinorAccount(
     return json({ success: false, error: 'username must be 1-64 characters, lowercase alphanumeric, hyphens, or underscores' }, 400, corsHeaders);
   }
 
+  if (body.zendesk_ticket_id !== undefined && body.zendesk_ticket_id !== null) {
+    if (typeof body.zendesk_ticket_id !== 'number' || !Number.isInteger(body.zendesk_ticket_id) || body.zendesk_ticket_id <= 0) {
+      return json({ success: false, error: 'zendesk_ticket_id must be a positive integer' }, 400, corsHeaders);
+    }
+  }
+
   const result = await createMinorAccount(username, body.display_name, env);
   if (!result.success || !result.pubkey || !result.claim_url) {
     const is409 = result.error?.startsWith('409:');
@@ -319,8 +325,6 @@ export async function handleCreateMinorAccount(
     return json({ success: false, error: result.error ?? 'Keycast account creation failed' }, status, corsHeaders);
   }
 
-  // Create a cleared audit record in D1. If this fails, the Keycast account
-  // exists but has no audit trail -- log enough context to recover manually.
   const caseId = crypto.randomUUID();
   try {
     await env.DB.prepare(`
@@ -329,7 +333,13 @@ export async function handleCreateMinorAccount(
       VALUES (?, ?, 'age_13_15', 'cleared', 'parent_video_or_email', 'Approved via parental consent (minor onboarding)', 'minor_onboarding', ?, ?)
     `).bind(caseId, result.pubkey, result.claim_url, body.zendesk_ticket_id ?? null).run();
   } catch (err) {
-    console.error(`[age-review] D1 audit record failed for minor account: pubkey=${result.pubkey}, claim_url=${result.claim_url}, case=${caseId}`, err);
+    console.error(`[age-review] D1 audit record failed for minor account: pubkey=${result.pubkey}, case=${caseId}`, err);
+    return json({
+      success: false,
+      error: 'Account created in Keycast but audit record failed. Contact engineering to reconcile.',
+      pubkey: result.pubkey,
+      case_id: caseId,
+    }, 500, corsHeaders);
   }
 
   console.log(`[age-review] Minor account created: pubkey=${result.pubkey}, case=${caseId}, username=${username}`);

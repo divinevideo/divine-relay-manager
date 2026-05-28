@@ -4,6 +4,15 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ReportWatcher, type ReportWatcherEnv, type ReportEvent, type ReportWatcherStatus, type AutoHideConfig } from './ReportWatcher';
 
+vi.mock('./keycast-client', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./keycast-client')>();
+  return {
+    ...actual,
+    getUserStatus: vi.fn().mockResolvedValue({ success: false, error: 'not configured' }),
+  };
+});
+import { getUserStatus } from './keycast-client';
+
 // Mock WebSocket instances created during tests
 let mockWebSockets: MockWebSocket[] = [];
 
@@ -1415,6 +1424,116 @@ describe('ReportWatcher', () => {
       expect(response.status).toBe(400);
       const body = await response.json() as { error: string };
       expect(body.error).toContain('trusted');
+    });
+  });
+
+  describe('age review case creation', () => {
+    let ageWatcher: ReportWatcher;
+    let ageEnv: ReportWatcherEnv;
+    let mockDbRun: ReturnType<typeof vi.fn>;
+    let mockDbFirst: ReturnType<typeof vi.fn>;
+    const mockGetUserStatus = getUserStatus as ReturnType<typeof vi.fn>;
+
+    function makeMockDb() {
+      mockDbRun = vi.fn().mockResolvedValue({ success: true });
+      mockDbFirst = vi.fn().mockResolvedValue(null);
+      const boundMock = { run: mockDbRun, first: mockDbFirst };
+      const stmtMock = {
+        run: mockDbRun,
+        first: mockDbFirst,
+        bind: vi.fn().mockReturnValue(boundMock),
+      };
+      return {
+        prepare: vi.fn().mockReturnValue(stmtMock),
+      } as unknown as D1Database;
+    }
+
+    beforeEach(async () => {
+      mockGetUserStatus.mockReset();
+      mockGetUserStatus.mockResolvedValue({ success: false, error: 'not configured' });
+
+      const ageState = createMockState();
+      ageEnv = createMockEnv({
+        AUTO_HIDE_ENABLED: 'false',
+        KEYCAST_URL: 'https://login.test.divine.video',
+        KEYCAST_SERVICE_TOKEN: 'test-token',
+      } as Partial<ReportWatcherEnv>);
+      ageEnv.DB = makeMockDb();
+      ageWatcher = new ReportWatcher(ageState, ageEnv);
+      await new Promise(resolve => setTimeout(resolve, 10));
+    });
+
+    it('should create age review case for NS-underageUser reports and await completion', async () => {
+      mockGetUserStatus.mockResolvedValue({
+        success: true,
+        pubkey: 'reported_pubkey_abc',
+        status: 'active',
+        verified_minor: false,
+      });
+
+      await ageWatcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const ws = getLastMockWebSocket();
+      const reportEvent: ReportEvent = {
+        id: 'underage_report_1',
+        pubkey: 'reporter_pubkey',
+        kind: 1984,
+        content: 'Underage user report',
+        tags: [
+          ['p', 'reported_pubkey_abc'],
+          ['l', 'NS-underageUser', 'social.nos.ontology'],
+          ['client', 'diVine'],
+        ],
+        created_at: Math.floor(Date.now() / 1000),
+      };
+
+      ws!.simulateMessage(JSON.stringify(['EVENT', 'auto-hide-reports', reportEvent]));
+
+      await vi.waitFor(() => {
+        const prepareCalls = (ageEnv.DB!.prepare as ReturnType<typeof vi.fn>).mock.calls;
+        const insertCall = prepareCalls.find(
+          (c: unknown[]) => typeof c[0] === 'string' && c[0].includes('age_review_cases') && c[0].includes('INSERT')
+        );
+        expect(insertCall).toBeDefined();
+      }, { timeout: 2000 });
+    });
+
+    it('should auto-clear age review case for verified minors', async () => {
+      mockGetUserStatus.mockResolvedValue({
+        success: true,
+        pubkey: 'verified_minor_pubkey',
+        status: 'active',
+        verified_minor: true,
+      });
+
+      await ageWatcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const ws = getLastMockWebSocket();
+      const reportEvent: ReportEvent = {
+        id: 'underage_report_2',
+        pubkey: 'reporter_pubkey',
+        kind: 1984,
+        content: 'Underage user report',
+        tags: [
+          ['p', 'verified_minor_pubkey'],
+          ['l', 'NS-underageUser', 'social.nos.ontology'],
+          ['client', 'diVine'],
+        ],
+        created_at: Math.floor(Date.now() / 1000),
+      };
+
+      ws!.simulateMessage(JSON.stringify(['EVENT', 'auto-hide-reports', reportEvent]));
+
+      await vi.waitFor(() => {
+        const prepareCalls = (ageEnv.DB!.prepare as ReturnType<typeof vi.fn>).mock.calls;
+        const insertCall = prepareCalls.find(
+          (c: unknown[]) => typeof c[0] === 'string' && c[0].includes('age_review_cases') && c[0].includes('INSERT')
+        );
+        expect(insertCall).toBeDefined();
+        expect(insertCall![0]).toContain('cleared');
+      }, { timeout: 2000 });
     });
   });
 });

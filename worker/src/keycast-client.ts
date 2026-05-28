@@ -108,12 +108,12 @@ export async function getUserStatus(pubkey: string, env: KeycastEnv): Promise<Us
     const data = await res.json() as Record<string, unknown>;
     return {
       success: true,
-      pubkey: data.pubkey as string,
-      status: data.status as string,
-      suspended_reason: data.suspended_reason as string | undefined,
-      suspended_at: data.suspended_at as string | undefined,
-      verified_minor: data.verified_minor as boolean | undefined,
-      verified_minor_at: data.verified_minor_at as string | undefined,
+      pubkey: typeof data.pubkey === 'string' ? data.pubkey : undefined,
+      status: typeof data.status === 'string' ? data.status : undefined,
+      suspended_reason: typeof data.suspended_reason === 'string' ? data.suspended_reason : undefined,
+      suspended_at: typeof data.suspended_at === 'string' ? data.suspended_at : undefined,
+      verified_minor: data.verified_minor === true,
+      verified_minor_at: typeof data.verified_minor_at === 'string' ? data.verified_minor_at : undefined,
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -161,9 +161,9 @@ export async function createMinorAccount(
     const data = await res.json() as Record<string, unknown>;
     return {
       success: true,
-      pubkey: data.pubkey as string,
-      claim_url: data.claim_url as string,
-      expires_at: data.expires_at as string,
+      pubkey: typeof data.pubkey === 'string' ? data.pubkey : undefined,
+      claim_url: typeof data.claim_url === 'string' ? data.claim_url : undefined,
+      expires_at: typeof data.expires_at === 'string' ? data.expires_at : undefined,
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
