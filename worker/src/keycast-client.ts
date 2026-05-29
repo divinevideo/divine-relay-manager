@@ -143,7 +143,7 @@ export async function createMinorAccount(
   }
   try {
     const body: Record<string, string> = { username };
-    if (displayName) body.display_name = displayName;
+    if (displayName !== undefined) body.display_name = displayName;
 
     const res = await fetch(`${env.KEYCAST_URL}/api/admin/create-minor-account`, {
       method: 'POST',

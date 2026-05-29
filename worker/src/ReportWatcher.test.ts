@@ -1430,6 +1430,7 @@ describe('ReportWatcher', () => {
   describe('age review case creation', () => {
     let ageWatcher: ReportWatcher;
     let ageEnv: ReportWatcherEnv;
+    let ageState: DurableObjectState;
     let mockDbRun: ReturnType<typeof vi.fn>;
     let mockDbFirst: ReturnType<typeof vi.fn>;
     const mockGetUserStatus = getUserStatus as ReturnType<typeof vi.fn>;
@@ -1452,7 +1453,7 @@ describe('ReportWatcher', () => {
       mockGetUserStatus.mockReset();
       mockGetUserStatus.mockResolvedValue({ success: false, error: 'not configured' });
 
-      const ageState = createMockState();
+      ageState = createMockState();
       ageEnv = createMockEnv({
         AUTO_HIDE_ENABLED: 'false',
         KEYCAST_URL: 'https://login.test.divine.video',
@@ -1533,6 +1534,38 @@ describe('ReportWatcher', () => {
         );
         expect(insertCall).toBeDefined();
         expect(insertCall![0]).toContain('cleared');
+      }, { timeout: 2000 });
+    });
+
+    it('should attach message handler work to DO lifecycle via waitUntil', async () => {
+      mockGetUserStatus.mockResolvedValue({
+        success: true,
+        pubkey: 'lifecycle_pubkey',
+        status: 'active',
+        verified_minor: false,
+      });
+
+      await ageWatcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const ws = getLastMockWebSocket();
+      const reportEvent: ReportEvent = {
+        id: 'lifecycle_report_1',
+        pubkey: 'reporter_pubkey',
+        kind: 1984,
+        content: 'Underage user report',
+        tags: [
+          ['p', 'lifecycle_pubkey'],
+          ['l', 'NS-underageUser', 'social.nos.ontology'],
+          ['client', 'diVine'],
+        ],
+        created_at: Math.floor(Date.now() / 1000),
+      };
+
+      ws!.simulateMessage(JSON.stringify(['EVENT', 'auto-hide-reports', reportEvent]));
+
+      await vi.waitFor(() => {
+        expect((ageState.waitUntil as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(0);
       }, { timeout: 2000 });
     });
   });

@@ -76,7 +76,8 @@ export function CreateMinorAccountDialog() {
               <Input
                 placeholder="username"
                 value={username}
-                onChange={(e) => setUsername(e.target.value)}
+                onChange={(e) => setUsername(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))}
+                maxLength={63}
                 className="h-8 text-sm"
                 disabled={createAccount.isPending}
               />
@@ -103,7 +104,7 @@ export function CreateMinorAccountDialog() {
             </div>
             <Button
               className="w-full h-8 text-xs"
-              disabled={!username.trim() || createAccount.isPending}
+              disabled={!username.trim() || username.length < 3 || username.startsWith('-') || username.endsWith('-') || createAccount.isPending}
               onClick={() => createAccount.mutate()}
             >
               {createAccount.isPending ? (

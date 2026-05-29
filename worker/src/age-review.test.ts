@@ -6,18 +6,20 @@ import {
   handleGetModerationStatus,
   handleParentContact,
   handleAgeReviewReplyWebhook,
+  handleCreateMinorAccount,
   checkAgeReviewDeadlines,
   syncAgeReviewTicketResolution,
   getAgeReviewConfig,
   updateAgeReviewConfig,
 } from './age-review';
 import type { AgeReviewCase } from '../../shared/age-review';
-import { suspendUser, unsuspendUser, banUser } from './keycast-client';
+import { suspendUser, unsuspendUser, banUser, createMinorAccount } from './keycast-client';
 
 vi.mock('./keycast-client', () => ({
   suspendUser: vi.fn().mockResolvedValue({ success: true }),
   unsuspendUser: vi.fn().mockResolvedValue({ success: true }),
   banUser: vi.fn().mockResolvedValue({ success: true }),
+  createMinorAccount: vi.fn().mockResolvedValue({ success: true, pubkey: 'a'.repeat(64), claim_url: 'https://login.test/claim/abc' }),
 }));
 
 const corsHeaders = { 'Access-Control-Allow-Origin': '*' };
@@ -1446,5 +1448,126 @@ describe('updateAgeReviewConfig', () => {
     };
     const config = await updateAgeReviewConfig(db as unknown as D1Database, { auto_delete_on_deny: false });
     expect(config.auto_delete_on_deny).toBe(false);
+  });
+});
+
+// -- handleCreateMinorAccount -------------------------------------------------
+
+describe('handleCreateMinorAccount', () => {
+  const mockCreateMinorAccount = createMinorAccount as ReturnType<typeof vi.fn>;
+
+  function makeRequest(body: unknown) {
+    return new Request('https://api.test/api/age-review/minor-account', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
+  function makeMinorDb(runImpl?: () => Promise<unknown>) {
+    return {
+      prepare: vi.fn().mockReturnValue({
+        bind: vi.fn().mockReturnValue({
+          run: vi.fn().mockImplementation(runImpl ?? (() => Promise.resolve({ success: true }))),
+        }),
+      }),
+    } as unknown as D1Database;
+  }
+
+  beforeEach(() => {
+    mockCreateMinorAccount.mockReset();
+    mockCreateMinorAccount.mockResolvedValue({
+      success: true,
+      pubkey: 'a'.repeat(64),
+      claim_url: 'https://login.test/claim/abc',
+      expires_at: '2026-06-15T00:00:00Z',
+    });
+  });
+
+  it('creates account and returns success with claim_url', async () => {
+    const db = makeMinorDb();
+    const res = await handleCreateMinorAccount(makeRequest({ username: 'testuser' }), { DB: db } as any, corsHeaders);
+    const body = await res.json() as Record<string, unknown>;
+
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+    expect(body.claim_url).toBe('https://login.test/claim/abc');
+    expect(body.pubkey).toBe('a'.repeat(64));
+    expect(body.case_id).toBeDefined();
+  });
+
+  it('rejects missing username', async () => {
+    const db = makeMinorDb();
+    const res = await handleCreateMinorAccount(makeRequest({}), { DB: db } as any, corsHeaders);
+    expect(res.status).toBe(400);
+    expect(mockCreateMinorAccount).not.toHaveBeenCalled();
+  });
+
+  it('rejects invalid username characters', async () => {
+    const db = makeMinorDb();
+    const res = await handleCreateMinorAccount(makeRequest({ username: 'BAD USER!' }), { DB: db } as any, corsHeaders);
+    expect(res.status).toBe(400);
+    expect(mockCreateMinorAccount).not.toHaveBeenCalled();
+  });
+
+  it('rejects non-string display_name', async () => {
+    const db = makeMinorDb();
+    const res = await handleCreateMinorAccount(
+      makeRequest({ username: 'test', display_name: 12345 }),
+      { DB: db } as any,
+      corsHeaders,
+    );
+    expect(res.status).toBe(400);
+    expect(mockCreateMinorAccount).not.toHaveBeenCalled();
+  });
+
+  it('strips empty display_name before calling Keycast', async () => {
+    const db = makeMinorDb();
+    await handleCreateMinorAccount(makeRequest({ username: 'test', display_name: '  ' }), { DB: db } as any, corsHeaders);
+    expect(mockCreateMinorAccount).toHaveBeenCalledWith('test', undefined, expect.anything());
+  });
+
+  it('rejects non-integer zendesk_ticket_id', async () => {
+    const db = makeMinorDb();
+    const res = await handleCreateMinorAccount(
+      makeRequest({ username: 'test', zendesk_ticket_id: 'abc' }),
+      { DB: db } as any,
+      corsHeaders,
+    );
+    expect(res.status).toBe(400);
+    expect(mockCreateMinorAccount).not.toHaveBeenCalled();
+  });
+
+  it('returns 500 without claim_url when D1 insert fails after Keycast success', async () => {
+    const db = makeMinorDb(() => Promise.reject(new Error('D1 write failed')));
+    const res = await handleCreateMinorAccount(makeRequest({ username: 'testuser' }), { DB: db } as any, corsHeaders);
+    const body = await res.json() as Record<string, unknown>;
+
+    expect(res.status).toBe(500);
+    expect(body.success).toBe(false);
+    expect(body.claim_url).toBeUndefined();
+    expect(body.pubkey).toBe('a'.repeat(64));
+    expect(body.error).toContain('audit record failed');
+  });
+
+  it('maps Keycast 409 to 409 status', async () => {
+    mockCreateMinorAccount.mockResolvedValue({ success: false, error: '409: Username taken' });
+    const db = makeMinorDb();
+    const res = await handleCreateMinorAccount(makeRequest({ username: 'taken' }), { DB: db } as any, corsHeaders);
+    expect(res.status).toBe(409);
+  });
+
+  it('maps other Keycast 4xx to 400 status', async () => {
+    mockCreateMinorAccount.mockResolvedValue({ success: false, error: '422: Invalid input' });
+    const db = makeMinorDb();
+    const res = await handleCreateMinorAccount(makeRequest({ username: 'test' }), { DB: db } as any, corsHeaders);
+    expect(res.status).toBe(400);
+  });
+
+  it('maps Keycast server errors to 502 status', async () => {
+    mockCreateMinorAccount.mockResolvedValue({ success: false, error: 'Connection refused' });
+    const db = makeMinorDb();
+    const res = await handleCreateMinorAccount(makeRequest({ username: 'test' }), { DB: db } as any, corsHeaders);
+    expect(res.status).toBe(502);
   });
 });

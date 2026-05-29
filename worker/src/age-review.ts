@@ -307,9 +307,15 @@ export async function handleCreateMinorAccount(
   if (!username) {
     return json({ success: false, error: 'username is required' }, 400, corsHeaders);
   }
-  if (username.length > 64 || !/^[a-z0-9_-]+$/.test(username)) {
-    return json({ success: false, error: 'username must be 1-64 characters, lowercase alphanumeric, hyphens, or underscores' }, 400, corsHeaders);
+  // Matches divine-mobile's DivineUsernamePolicy (3-63 chars, [a-z0-9-], no leading/trailing hyphens)
+  if (username.length < 3 || username.length > 63 || !/^[a-z0-9-]+$/.test(username) || username.startsWith('-') || username.endsWith('-')) {
+    return json({ success: false, error: 'username must be 3-63 characters, lowercase alphanumeric or hyphens, cannot start or end with a hyphen' }, 400, corsHeaders);
   }
+
+  if (body.display_name !== undefined && typeof body.display_name !== 'string') {
+    return json({ success: false, error: 'display_name must be a string' }, 400, corsHeaders);
+  }
+  const displayName = body.display_name?.trim() || undefined;
 
   if (body.zendesk_ticket_id !== undefined && body.zendesk_ticket_id !== null) {
     if (typeof body.zendesk_ticket_id !== 'number' || !Number.isInteger(body.zendesk_ticket_id) || body.zendesk_ticket_id <= 0) {
@@ -317,7 +323,7 @@ export async function handleCreateMinorAccount(
     }
   }
 
-  const result = await createMinorAccount(username, body.display_name, env);
+  const result = await createMinorAccount(username, displayName, env);
   if (!result.success || !result.pubkey || !result.claim_url) {
     const is409 = result.error?.startsWith('409:');
     const is4xx = result.error?.match(/^4\d{2}:/);

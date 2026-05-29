@@ -458,9 +458,10 @@ export class ReportWatcher implements DurableObject {
       });
 
       this.ws.addEventListener('message', (event) => {
-        this.handleMessage(event.data as string).catch(error => {
+        const work = this.handleMessage(event.data as string).catch(error => {
           console.error('[ReportWatcher] Message handler failed:', error);
         });
+        this.state.waitUntil(work);
       });
 
       this.ws.addEventListener('close', (event) => {
