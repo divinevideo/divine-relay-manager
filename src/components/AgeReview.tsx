@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/select";
 import { Clock, RefreshCw, Filter, AlertTriangle } from "lucide-react";
 import { AgeReviewDetail } from "@/components/AgeReviewDetail";
+import { CreateMinorAccountDialog } from "@/components/CreateMinorAccountDialog";
 import { UserIdentifier } from "@/components/UserIdentifier";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
@@ -108,14 +109,17 @@ export function AgeReview() {
               )}
             </span>
           </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => refetch()}
-            className="h-7"
-          >
-            <RefreshCw className="h-3.5 w-3.5" />
-          </Button>
+          <div className="flex items-center gap-1">
+            <CreateMinorAccountDialog />
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => refetch()}
+              className="h-7"
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+            </Button>
+          </div>
         </div>
 
         <div className="flex gap-2">

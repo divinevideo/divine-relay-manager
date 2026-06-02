@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest';
-import { suspendUser, unsuspendUser, banUser, type KeycastEnv } from './keycast-client';
+import { suspendUser, unsuspendUser, banUser, getUserStatus, createMinorAccount, type KeycastEnv } from './keycast-client';
 
 const VALID_PUBKEY = 'a'.repeat(64);
 
@@ -109,6 +109,126 @@ describe('keycast-client', () => {
     it('rejects pubkey with non-hex characters', async () => {
       const result = await suspendUser('g'.repeat(64), 'age_review', makeEnv());
       expect(result).toEqual({ success: false, error: expect.stringContaining('pubkey') });
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('getUserStatus', () => {
+    it('returns verified_minor true only for boolean true', async () => {
+      fetchMock.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ pubkey: VALID_PUBKEY, status: 'active', verified_minor: true }),
+      });
+      const result = await getUserStatus(VALID_PUBKEY, makeEnv());
+      expect(result.success).toBe(true);
+      expect(result.verified_minor).toBe(true);
+    });
+
+    it('returns verified_minor false for string "true"', async () => {
+      fetchMock.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ pubkey: VALID_PUBKEY, status: 'active', verified_minor: 'true' }),
+      });
+      const result = await getUserStatus(VALID_PUBKEY, makeEnv());
+      expect(result.verified_minor).toBe(false);
+    });
+
+    it('returns verified_minor false for string "false"', async () => {
+      fetchMock.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ pubkey: VALID_PUBKEY, status: 'active', verified_minor: 'false' }),
+      });
+      const result = await getUserStatus(VALID_PUBKEY, makeEnv());
+      expect(result.verified_minor).toBe(false);
+    });
+
+    it('returns verified_minor false for numeric 1', async () => {
+      fetchMock.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ pubkey: VALID_PUBKEY, status: 'active', verified_minor: 1 }),
+      });
+      const result = await getUserStatus(VALID_PUBKEY, makeEnv());
+      expect(result.verified_minor).toBe(false);
+    });
+
+    it('returns verified_minor false when field is missing', async () => {
+      fetchMock.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ pubkey: VALID_PUBKEY, status: 'active' }),
+      });
+      const result = await getUserStatus(VALID_PUBKEY, makeEnv());
+      expect(result.verified_minor).toBe(false);
+    });
+
+    it('returns verified_minor false for null', async () => {
+      fetchMock.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ pubkey: VALID_PUBKEY, status: 'active', verified_minor: null }),
+      });
+      const result = await getUserStatus(VALID_PUBKEY, makeEnv());
+      expect(result.verified_minor).toBe(false);
+    });
+
+    it('returns error on non-OK response', async () => {
+      fetchMock.mockResolvedValue({ ok: false, status: 500, text: () => Promise.resolve('Server error') });
+      const result = await getUserStatus(VALID_PUBKEY, makeEnv());
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('500');
+    });
+  });
+
+  describe('createMinorAccount', () => {
+    it('sends POST with username and returns pubkey and claim_url', async () => {
+      fetchMock.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({
+          pubkey: VALID_PUBKEY,
+          claim_url: 'https://login.test/claim/abc',
+          expires_at: '2026-06-15T00:00:00Z',
+        }),
+      });
+      const result = await createMinorAccount('testuser', undefined, makeEnv());
+      expect(result.success).toBe(true);
+      expect(result.pubkey).toBe(VALID_PUBKEY);
+      expect(result.claim_url).toBe('https://login.test/claim/abc');
+      expect(result.expires_at).toBe('2026-06-15T00:00:00Z');
+
+      const [url, opts] = fetchMock.mock.calls[0];
+      expect(url).toBe('https://login.test.divine.video/api/admin/create-minor-account');
+      expect(opts.method).toBe('POST');
+      expect(JSON.parse(opts.body)).toEqual({ username: 'testuser' });
+    });
+
+    it('includes display_name when provided', async () => {
+      fetchMock.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ pubkey: VALID_PUBKEY, claim_url: 'https://x' }),
+      });
+      await createMinorAccount('testuser', 'Test User', makeEnv());
+      expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+        username: 'testuser',
+        display_name: 'Test User',
+      });
+    });
+
+    it('returns error on non-OK response', async () => {
+      fetchMock.mockResolvedValue({ ok: false, status: 409, text: () => Promise.resolve('Username taken') });
+      const result = await createMinorAccount('taken', undefined, makeEnv());
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('409');
+    });
+
+    it('returns error on network failure', async () => {
+      fetchMock.mockRejectedValue(new Error('DNS lookup failed'));
+      const result = await createMinorAccount('testuser', undefined, makeEnv());
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('DNS lookup failed');
+    });
+
+    it('returns not configured when env is missing', async () => {
+      const result = await createMinorAccount('testuser', undefined, makeEnv({ KEYCAST_URL: undefined }));
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('not configured');
       expect(fetchMock).not.toHaveBeenCalled();
     });
   });

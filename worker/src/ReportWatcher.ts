@@ -17,11 +17,12 @@ import {
   TERMINAL_STATES,
   defaultResolutionForBand,
 } from '../../shared/age-review';
+import { getUserStatus, type KeycastEnv } from './keycast-client';
 
 /**
  * Extended environment for ReportWatcher DO
  */
-export interface ReportWatcherEnv extends Nip86Env {
+export interface ReportWatcherEnv extends Nip86Env, KeycastEnv {
   DB?: D1Database;
   AUTO_HIDE_ENABLED?: string;
   TRUSTED_CLIENTS?: string;
@@ -457,7 +458,10 @@ export class ReportWatcher implements DurableObject {
       });
 
       this.ws.addEventListener('message', (event) => {
-        this.handleMessage(event.data as string);
+        const work = this.handleMessage(event.data as string).catch(error => {
+          console.error('[ReportWatcher] Message handler failed:', error);
+        });
+        this.state.waitUntil(work);
       });
 
       this.ws.addEventListener('close', (event) => {
@@ -529,7 +533,7 @@ export class ReportWatcher implements DurableObject {
   /**
    * Handle incoming WebSocket message
    */
-  private handleMessage(data: string): void {
+  private async handleMessage(data: string): Promise<void> {
     try {
       const message = JSON.parse(data) as unknown[];
 
@@ -543,7 +547,7 @@ export class ReportWatcher implements DurableObject {
         case 'EVENT': {
           const [subId, event] = rest as [string, ReportEvent];
           if (subId === this.subscriptionId && event.kind === 1984) {
-            this.handleReportEvent(event);
+            await this.handleReportEvent(event);
           }
           break;
         }
@@ -577,7 +581,7 @@ export class ReportWatcher implements DurableObject {
   /**
    * Handle a kind 1984 report event
    */
-  private handleReportEvent(event: ReportEvent): void {
+  private async handleReportEvent(event: ReportEvent): Promise<void> {
     this.lastEventAt = Date.now();
     this.eventsProcessed++;
 
@@ -618,20 +622,25 @@ export class ReportWatcher implements DurableObject {
 
     // Process auto-hide if enabled and category qualifies
     if (targetType === 'event' && targetId !== 'unknown') {
-      this.processAutoHide(event, category, targetId).catch(error => {
+      try {
+        await this.processAutoHide(event, category, targetId);
+      } catch (error) {
         console.error('[ReportWatcher] Auto-hide processing failed:', error);
-      });
+      }
     }
 
-    // Create age review case for under-16 reports (pubkey-level, independent of auto-hide).
-    // In-memory Set guards against the SELECT-then-INSERT race: the Set check+add is
-    // synchronous, so concurrent WebSocket messages can't interleave between them.
+    // Create age review case for under-16 reports (pubkey-level).
+    // Runs after auto-hide completes; both awaited so work survives DO eviction.
     const reportedPubkey = targetPubkeyTag?.[1];
     if (category === 'NS-underageUser' && reportedPubkey && !this.pendingAgeReviewPubkeys.has(reportedPubkey)) {
       this.pendingAgeReviewPubkeys.add(reportedPubkey);
-      this.createAgeReviewCase(event, reportedPubkey)
-        .catch(error => console.error('[ReportWatcher] Age review case creation failed:', error))
-        .finally(() => this.pendingAgeReviewPubkeys.delete(reportedPubkey));
+      try {
+        await this.createAgeReviewCase(event, reportedPubkey);
+      } catch (error) {
+        console.error('[ReportWatcher] Age review case creation failed:', error);
+      } finally {
+        this.pendingAgeReviewPubkeys.delete(reportedPubkey);
+      }
     }
   }
 
@@ -909,6 +918,33 @@ export class ReportWatcher implements DurableObject {
     if (existing) {
       console.log(`[ReportWatcher] Active age review case ${existing.id} already exists for ${reportedPubkey}, skipping`);
       return;
+    }
+
+    // Auto-clear: if user is a previously verified minor, create case as immediately cleared
+    try {
+      const keycastStatus = await getUserStatus(reportedPubkey, this.env);
+      if (keycastStatus.success && keycastStatus.verified_minor) {
+        const caseId = crypto.randomUUID();
+        await this.env.DB.prepare(`
+          INSERT INTO age_review_cases
+          (id, pubkey, reporter_pubkey, report_id, suspected_age_band, state, allowed_resolution, resolution_note, created_via)
+          VALUES (?, ?, ?, ?, 'age_13_15', 'cleared', 'parent_video_or_email', 'Auto-cleared: previously verified minor', 'report')
+        `).bind(caseId, reportedPubkey, event.pubkey, event.id).run();
+
+        await this.logDecision({
+          targetType: 'pubkey',
+          targetId: reportedPubkey,
+          action: AGE_REVIEW_ACTION.caseCreated,
+          reason: `Under-16 report auto-cleared: verified minor (case ${caseId})`,
+          reportId: event.id,
+          reporterPubkey: event.pubkey,
+        });
+
+        console.log(`[ReportWatcher] Age review case ${caseId} auto-cleared for verified minor ${reportedPubkey}`);
+        return;
+      }
+    } catch (err) {
+      console.warn(`[ReportWatcher] Keycast verified_minor check failed for ${reportedPubkey}, proceeding with normal case:`, err);
     }
 
     const caseId = crypto.randomUUID();

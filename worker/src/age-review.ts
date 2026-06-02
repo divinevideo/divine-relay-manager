@@ -13,7 +13,7 @@ import {
 import { handleBulkModerate, type BulkModerateEnv } from './bulk-moderate';
 import { resolveZendeskCreds } from './zendesk-sync';
 import type { BulkAction, BulkModerateResult } from '../../shared/bulk-moderation';
-import { suspendUser, unsuspendUser, banUser, type KeycastEnv } from './keycast-client';
+import { suspendUser, unsuspendUser, banUser, createMinorAccount, type KeycastEnv } from './keycast-client';
 import type { SecretStoreSecret } from './nip86';
 
 interface AgeReviewEnv extends BulkModerateEnv, KeycastEnv {
@@ -283,6 +283,80 @@ export async function handleUpdateAgeReviewCase(
   }
 
   return json({ success: true, case: updated, bulkActionTriggered, keycastUpdated }, 200, corsHeaders);
+}
+
+// ---------------------------------------------------------------------------
+// Minor onboarding (behind admin auth)
+// ---------------------------------------------------------------------------
+
+export async function handleCreateMinorAccount(
+  request: Request,
+  env: AgeReviewEnv,
+  corsHeaders: Record<string, string>,
+): Promise<Response> {
+  if (!env.DB) return json({ success: false, error: 'Database not configured' }, 500, corsHeaders);
+
+  let body: { username?: string; display_name?: string; zendesk_ticket_id?: number };
+  try {
+    body = await request.json();
+  } catch {
+    return json({ success: false, error: 'Invalid JSON body' }, 400, corsHeaders);
+  }
+
+  const username = body.username?.trim().toLowerCase();
+  if (!username) {
+    return json({ success: false, error: 'username is required' }, 400, corsHeaders);
+  }
+  // Matches divine-mobile's DivineUsernamePolicy (3-63 chars, [a-z0-9-], no leading/trailing hyphens)
+  if (username.length < 3 || username.length > 63 || !/^[a-z0-9-]+$/.test(username) || username.startsWith('-') || username.endsWith('-')) {
+    return json({ success: false, error: 'username must be 3-63 characters, lowercase alphanumeric or hyphens, cannot start or end with a hyphen' }, 400, corsHeaders);
+  }
+
+  if (body.display_name !== undefined && typeof body.display_name !== 'string') {
+    return json({ success: false, error: 'display_name must be a string' }, 400, corsHeaders);
+  }
+  const displayName = body.display_name?.trim() || undefined;
+
+  if (body.zendesk_ticket_id !== undefined && body.zendesk_ticket_id !== null) {
+    if (typeof body.zendesk_ticket_id !== 'number' || !Number.isInteger(body.zendesk_ticket_id) || body.zendesk_ticket_id <= 0) {
+      return json({ success: false, error: 'zendesk_ticket_id must be a positive integer' }, 400, corsHeaders);
+    }
+  }
+
+  const result = await createMinorAccount(username, displayName, env);
+  if (!result.success || !result.pubkey || !result.claim_url) {
+    const is409 = result.error?.startsWith('409:');
+    const is4xx = result.error?.match(/^4\d{2}:/);
+    const status = is409 ? 409 : is4xx ? 400 : 502;
+    return json({ success: false, error: result.error ?? 'Keycast account creation failed' }, status, corsHeaders);
+  }
+
+  const caseId = crypto.randomUUID();
+  try {
+    await env.DB.prepare(`
+      INSERT INTO age_review_cases
+      (id, pubkey, suspected_age_band, state, allowed_resolution, resolution_note, created_via, claim_link_url, zendesk_ticket_id)
+      VALUES (?, ?, 'age_13_15', 'cleared', 'parent_video_or_email', 'Approved via parental consent (minor onboarding)', 'minor_onboarding', ?, ?)
+    `).bind(caseId, result.pubkey, result.claim_url, body.zendesk_ticket_id ?? null).run();
+  } catch (err) {
+    console.error(`[age-review] D1 audit record failed for minor account: pubkey=${result.pubkey}, case=${caseId}`, err);
+    return json({
+      success: false,
+      error: 'Account created in Keycast but audit record failed. Contact engineering to reconcile.',
+      pubkey: result.pubkey,
+      case_id: caseId,
+    }, 500, corsHeaders);
+  }
+
+  console.log(`[age-review] Minor account created: pubkey=${result.pubkey}, case=${caseId}, username=${username}`);
+
+  return json({
+    success: true,
+    pubkey: result.pubkey,
+    claim_url: result.claim_url,
+    expires_at: result.expires_at,
+    case_id: caseId,
+  }, 200, corsHeaders);
 }
 
 // ---------------------------------------------------------------------------

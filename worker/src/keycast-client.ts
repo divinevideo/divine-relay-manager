@@ -74,3 +74,100 @@ export async function unsuspendUser(pubkey: string, env: KeycastEnv): Promise<Ke
 export async function banUser(pubkey: string, reason: KeycastReason, env: KeycastEnv): Promise<KeycastResult> {
   return callKeycast(pubkey, { status: 'banned', reason }, env);
 }
+
+export interface UserStatusResult {
+  success: boolean;
+  pubkey?: string;
+  status?: string;
+  suspended_reason?: string;
+  suspended_at?: string;
+  verified_minor?: boolean;
+  verified_minor_at?: string;
+  error?: string;
+}
+
+export async function getUserStatus(pubkey: string, env: KeycastEnv): Promise<UserStatusResult> {
+  if (!env.KEYCAST_URL || !env.KEYCAST_SERVICE_TOKEN) {
+    return { success: false, error: 'not configured' };
+  }
+  if (!HEX_64.test(pubkey)) {
+    return { success: false, error: 'invalid pubkey: must be 64 hex chars' };
+  }
+  const token = await resolveToken(env.KEYCAST_SERVICE_TOKEN);
+  if (!token) {
+    return { success: false, error: 'not configured' };
+  }
+  try {
+    const res = await fetch(`${env.KEYCAST_URL}/api/admin/users/${pubkey}/status`, {
+      headers: { 'Authorization': `Bearer ${token}` },
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      return { success: false, error: `${res.status}: ${text}` };
+    }
+    const data = await res.json() as Record<string, unknown>;
+    return {
+      success: true,
+      pubkey: typeof data.pubkey === 'string' ? data.pubkey : undefined,
+      status: typeof data.status === 'string' ? data.status : undefined,
+      suspended_reason: typeof data.suspended_reason === 'string' ? data.suspended_reason : undefined,
+      suspended_at: typeof data.suspended_at === 'string' ? data.suspended_at : undefined,
+      verified_minor: data.verified_minor === true,
+      verified_minor_at: typeof data.verified_minor_at === 'string' ? data.verified_minor_at : undefined,
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { success: false, error: msg };
+  }
+}
+
+export interface CreateMinorAccountResult {
+  success: boolean;
+  pubkey?: string;
+  claim_url?: string;
+  expires_at?: string;
+  error?: string;
+}
+
+export async function createMinorAccount(
+  username: string,
+  displayName: string | undefined,
+  env: KeycastEnv,
+): Promise<CreateMinorAccountResult> {
+  if (!env.KEYCAST_URL || !env.KEYCAST_SERVICE_TOKEN) {
+    return { success: false, error: 'not configured' };
+  }
+  const token = await resolveToken(env.KEYCAST_SERVICE_TOKEN);
+  if (!token) {
+    return { success: false, error: 'not configured' };
+  }
+  try {
+    const body: Record<string, string> = { username };
+    if (displayName !== undefined) body.display_name = displayName;
+
+    const res = await fetch(`${env.KEYCAST_URL}/api/admin/create-minor-account`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      console.error(`[keycast] create-minor-account failed: ${res.status} ${text}`);
+      return { success: false, error: `${res.status}: ${text}` };
+    }
+    const data = await res.json() as Record<string, unknown>;
+    return {
+      success: true,
+      pubkey: typeof data.pubkey === 'string' ? data.pubkey : undefined,
+      claim_url: typeof data.claim_url === 'string' ? data.claim_url : undefined,
+      expires_at: typeof data.expires_at === 'string' ? data.expires_at : undefined,
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[keycast] create-minor-account failed: ${msg}`);
+    return { success: false, error: msg };
+  }
+}

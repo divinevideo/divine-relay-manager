@@ -20,6 +20,7 @@ import {
   handleGetAgeReviewCases,
   handleGetAgeReviewCase,
   handleUpdateAgeReviewCase,
+  handleCreateMinorAccount,
   handleGetModerationStatus,
   handleParentContact,
   handleAgeReviewReplyWebhook,
@@ -492,6 +493,10 @@ export default {
         if (env.DB) await ensureSchemaOnce(env.DB);
         const caseId = path.replace('/api/age-review/cases/', '');
         return handleUpdateAgeReviewCase(request, caseId, env, corsHeaders);
+      }
+      if (path === '/api/age-review/create-minor-account' && request.method === 'POST') {
+        if (env.DB) await ensureSchemaOnce(env.DB);
+        return handleCreateMinorAccount(request, env, corsHeaders);
       }
 
       // 404 for unknown routes

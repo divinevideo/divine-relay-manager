@@ -407,6 +407,16 @@ export function AgeReviewDetail({ caseData: c }: Props) {
             <Separator />
             <div className="space-y-1">
               <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Resolution</h4>
+              {c.created_via === 'minor_onboarding' && (
+                <Badge className="bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-400 text-[10px]">
+                  Minor Onboarding
+                </Badge>
+              )}
+              {c.resolution_note.startsWith('Auto-cleared:') && (
+                <Badge className="bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400 text-[10px]">
+                  Auto-cleared
+                </Badge>
+              )}
               <p className="text-sm">{c.resolution_note}</p>
             </div>
           </>
