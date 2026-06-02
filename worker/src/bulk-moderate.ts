@@ -7,6 +7,7 @@ const BULK_ACTION_CONCURRENCY = 5;
 const RELAY_QUERY_LIMIT = 500;
 const RELAY_QUERY_FETCH_LIMIT = RELAY_QUERY_LIMIT + 1;
 const RELAY_QUERY_TIMEOUT_MS = 10000;
+const SHA256_HEX = /^[a-f0-9]{64}$/i;
 
 export interface BulkModerateEnv extends Nip86Env, ZendeskSyncEnv {
   DB?: D1Database;
@@ -46,12 +47,15 @@ export async function handleBulkModerate(
   const action = body.action as BulkAction;
   const reason = body.reason || `Bulk ${action} by moderator`;
 
-  const events = await queryRelayEvents(body.pubkey, env);
-  const mediaHashes = extractMediaHashes(events);
   const moderatorPubkey = await getAdminPubkey(env);
   const result: BulkModerateResult = { success: true, eventsProcessed: 0, mediaProcessed: 0, failures: [] };
 
   if (action === 'delete-all') {
+    const [events, mediaHashes] = await Promise.all([
+      queryRelayEvents(body.pubkey, env),
+      queryUserMediaHashes(body.pubkey, env),
+    ]);
+
     const successfulEventIds: string[] = [];
 
     await runWithConcurrency(events, BULK_ACTION_CONCURRENCY, async (event) => {
@@ -98,7 +102,7 @@ export async function handleBulkModerate(
       }
     });
   } else {
-    result.eventsProcessed = events.length;
+    const mediaHashes = await queryUserMediaHashes(body.pubkey, env);
     const mediaAction = action === 'age-restrict-all' ? 'AGE_RESTRICTED' : 'SAFE';
     await runWithConcurrency(mediaHashes, BULK_ACTION_CONCURRENCY, async (sha256) => {
       try {
@@ -170,6 +174,28 @@ export async function queryRelayEvents(
       reject(error);
     }
   });
+}
+
+export async function queryUserMediaHashes(
+  pubkey: string,
+  env: Pick<BulkModerateEnv, 'RELAY_URL'>,
+): Promise<string[]> {
+  const baseUrl = env.RELAY_URL.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:');
+  const res = await fetch(`${baseUrl}/api/users/${pubkey}/videos?limit=${RELAY_QUERY_FETCH_LIMIT}`);
+  if (!res.ok) {
+    throw new Error(`Video query failed: ${res.status}`);
+  }
+  const videos = await res.json() as Array<{ sha256?: string }>;
+  if (videos.length > RELAY_QUERY_LIMIT) {
+    throw new Error(`More than ${RELAY_QUERY_LIMIT} videos; narrow the scope or add pagination`);
+  }
+  const hashes = new Set<string>();
+  for (const v of videos) {
+    if (v.sha256 && SHA256_HEX.test(v.sha256)) {
+      hashes.add(v.sha256.toLowerCase());
+    }
+  }
+  return Array.from(hashes);
 }
 
 export function extractMediaHashes(events: RelayEventSummary[]): string[] {

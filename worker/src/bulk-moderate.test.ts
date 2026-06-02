@@ -1,5 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { handleBulkModerate, extractMediaHashes, type BulkModerateEnv } from './bulk-moderate';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { handleBulkModerate, extractMediaHashes, queryUserMediaHashes, type BulkModerateEnv } from './bulk-moderate';
+import type { BulkModerateResult } from '../../shared/bulk-moderation';
 
 vi.mock('./nip86', () => ({
   getAdminPubkey: vi.fn().mockResolvedValue('moderator-pubkey'),
@@ -42,6 +43,12 @@ function mockRelay(events: Array<{ id: string; kind: number; content?: string; t
       close: vi.fn(),
     };
   } as unknown as typeof WebSocket));
+}
+
+function mockRestVideos(videos: Array<{ sha256: string }>) {
+  vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+    new Response(JSON.stringify(videos), { status: 200 }),
+  );
 }
 
 describe('handleBulkModerate', () => {
@@ -96,9 +103,10 @@ describe('handleBulkModerate', () => {
   });
 
   it('accepts all three valid actions', async () => {
-    mockRelay([]);
-
     for (const action of ['age-restrict-all', 'un-age-restrict-all', 'delete-all'] as const) {
+      vi.restoreAllMocks();
+      mockRestVideos([]);
+      mockRelay([]);
       const request = new Request('https://test/api/bulk-moderate', {
         method: 'POST',
         body: JSON.stringify({ pubkey: 'a'.repeat(64), action }),
@@ -108,9 +116,73 @@ describe('handleBulkModerate', () => {
     }
   });
 
+  it('calls moderation service with AGE_RESTRICTED for age-restrict-all', async () => {
+    mockRestVideos([{ sha256: hashA }, { sha256: hashB }]);
+
+    const request = new Request('https://test/api/bulk-moderate', {
+      method: 'POST',
+      body: JSON.stringify({ pubkey: 'a'.repeat(64), action: 'age-restrict-all', reason: 'test restrict' }),
+    });
+    const response = await handleBulkModerate(request, mockEnv, {});
+    const body = await response.json() as BulkModerateResult;
+
+    expect(response.status).toBe(200);
+    expect(body.success).toBe(true);
+    expect(body.mediaProcessed).toBe(2);
+
+    const fetchMock = mockEnv.MODERATION_API!.fetch as ReturnType<typeof vi.fn>;
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    const calls = fetchMock.mock.calls;
+    for (const [url, opts] of calls) {
+      expect(url).toContain('/api/v1/moderate');
+      const payload = JSON.parse(opts.body as string);
+      expect(payload.action).toBe('AGE_RESTRICTED');
+      expect(payload.source).toBe('relay-manager-bulk');
+      expect([hashA, hashB]).toContain(payload.sha256);
+    }
+  });
+
+  it('calls moderation service with SAFE for un-age-restrict-all', async () => {
+    mockRestVideos([{ sha256: hashA }]);
+
+    const request = new Request('https://test/api/bulk-moderate', {
+      method: 'POST',
+      body: JSON.stringify({ pubkey: 'a'.repeat(64), action: 'un-age-restrict-all' }),
+    });
+    const response = await handleBulkModerate(request, mockEnv, {});
+    const body = await response.json() as BulkModerateResult;
+
+    expect(body.success).toBe(true);
+    expect(body.mediaProcessed).toBe(1);
+
+    const fetchMock = mockEnv.MODERATION_API!.fetch as ReturnType<typeof vi.fn>;
+    const payload = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(payload.action).toBe('SAFE');
+  });
+
+  it('reports failure when moderation service returns non-200', async () => {
+    (mockEnv.MODERATION_API!.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response(null, { status: 500 })
+    );
+    mockRestVideos([{ sha256: hashA }]);
+
+    const request = new Request('https://test/api/bulk-moderate', {
+      method: 'POST',
+      body: JSON.stringify({ pubkey: 'a'.repeat(64), action: 'age-restrict-all' }),
+    });
+    const response = await handleBulkModerate(request, mockEnv, {});
+    const body = await response.json() as BulkModerateResult;
+
+    expect(body.success).toBe(false);
+    expect(body.mediaProcessed).toBe(0);
+    expect(body.failures[0]).toContain('500');
+  });
+
   it('marks bulk delete as failed when relay deletion returns success false', async () => {
     const { banEvent } = await import('./nip86');
     vi.mocked(banEvent).mockResolvedValueOnce({ success: false, error: 'relay refused' });
+    mockRestVideos([]);
     mockRelay([{ id: 'e'.repeat(64), kind: 1, content: '', tags: [] }]);
 
     const request = new Request('https://test/api/bulk-moderate', {
@@ -192,5 +264,52 @@ describe('extractMediaHashes', () => {
       { id: 'e2', kind: 30023, content: '', tags: [['x', 'not-a-hash']] },
     ];
     expect(extractMediaHashes(events)).toEqual([]);
+  });
+});
+
+describe('queryUserMediaHashes', () => {
+  const pubkey = 'a'.repeat(64);
+  const env = { RELAY_URL: 'wss://relay.test' };
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it('converts wss:// to https:// and calls REST API', async () => {
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify([{ sha256: hashA }]), { status: 200 }),
+    );
+    await queryUserMediaHashes(pubkey, env);
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining('https://relay.test/api/users/'));
+  });
+
+  it('extracts and deduplicates sha256 from video response', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify([
+        { sha256: hashA },
+        { sha256: hashB },
+        { sha256: hashA },
+      ]), { status: 200 }),
+    );
+    const hashes = await queryUserMediaHashes(pubkey, env);
+    expect(hashes).toEqual(expect.arrayContaining([hashA, hashB]));
+    expect(hashes).toHaveLength(2);
+  });
+
+  it('skips entries without valid sha256', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify([
+        { sha256: hashA },
+        { sha256: 'not-a-hash' },
+        { sha256: null },
+        {},
+      ]), { status: 200 }),
+    );
+    expect(await queryUserMediaHashes(pubkey, env)).toEqual([hashA]);
+  });
+
+  it('throws on non-200 response', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(null, { status: 404 }),
+    );
+    await expect(queryUserMediaHashes(pubkey, env)).rejects.toThrow('Video query failed: 404');
   });
 });
