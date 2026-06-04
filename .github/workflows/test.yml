@@ -36,7 +36,7 @@ jobs:
       # Split into separate steps so a typecheck vs test failure is obvious.
       - name: Worker install
         working-directory: worker
-        run: npm install --legacy-peer-deps
+        run: npm ci --legacy-peer-deps
 
       - name: Worker typecheck
         working-directory: worker
