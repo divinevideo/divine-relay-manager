@@ -195,7 +195,7 @@ describe('notifyModerationService null token', () => {
     expect(waitUntil).toHaveBeenCalledOnce();
     await waitUntil.mock.calls[0][0];
     expect(errorSpy).toHaveBeenCalledWith(
-      '[handleRelayRpc] DM notification error:',
+      '[notifyAccountState] DM notification error:',
       expect.objectContaining({
         message: expect.stringContaining('SERVICE_API_TOKEN'),
       }),
