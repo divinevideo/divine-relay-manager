@@ -424,7 +424,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
                       </Badge>
                     )}
                   </div>
-                  <CopyableId value={c.claim_link_url} type="hex" size="xs" truncateStart={32} truncateEnd={12} />
+                  <CopyableId value={c.claim_link_url} type="url" size="xs" truncateStart={32} truncateEnd={12} />
                   <div className="text-xs text-muted-foreground">
                     Expires: {c.claim_link_expires_at ? new Date(c.claim_link_expires_at).toLocaleDateString() : 'N/A'}
                   </div>

@@ -140,4 +140,18 @@ describe('AgeReviewDetail', () => {
 
     expect(screen.getByText('Expired')).toBeInTheDocument();
   });
+
+  it('shows N/A expiry and no Expired badge when claim link has no expiry', () => {
+    renderDetail(makeCase({
+      state: 'cleared',
+      created_via: 'minor_onboarding',
+      resolution_note: 'Approved via parental consent (minor onboarding)',
+      claim_link_url: 'https://login.test/claim/xyz',
+      claim_link_expires_at: null,
+    }));
+
+    expect(screen.getByText('Claim Link')).toBeInTheDocument();
+    expect(screen.getByText(/Expires: N\/A/)).toBeInTheDocument();
+    expect(screen.queryByText('Expired')).not.toBeInTheDocument();
+  });
 });
