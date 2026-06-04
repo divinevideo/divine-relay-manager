@@ -93,6 +93,7 @@ export interface AgeReviewCase {
   zendesk_ticket_id: number | null;
   created_via: string | null;
   claim_link_url: string | null;
+  claim_link_expires_at: string | null;
   created_at: string;
   updated_at: string;
 }

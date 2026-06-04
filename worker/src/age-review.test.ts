@@ -1486,7 +1486,7 @@ describe('handleCreateMinorAccount', () => {
 
   it('creates account and returns success with claim_url', async () => {
     const db = makeMinorDb();
-    const res = await handleCreateMinorAccount(makeRequest({ username: 'testuser' }), { DB: db } as any, corsHeaders);
+    const res = await handleCreateMinorAccount(makeRequest({ username: 'testuser' }), { DB: db }, corsHeaders);
     const body = await res.json() as Record<string, unknown>;
 
     expect(res.status).toBe(200);
@@ -1498,14 +1498,14 @@ describe('handleCreateMinorAccount', () => {
 
   it('rejects missing username', async () => {
     const db = makeMinorDb();
-    const res = await handleCreateMinorAccount(makeRequest({}), { DB: db } as any, corsHeaders);
+    const res = await handleCreateMinorAccount(makeRequest({}), { DB: db }, corsHeaders);
     expect(res.status).toBe(400);
     expect(mockCreateMinorAccount).not.toHaveBeenCalled();
   });
 
   it('rejects invalid username characters', async () => {
     const db = makeMinorDb();
-    const res = await handleCreateMinorAccount(makeRequest({ username: 'BAD USER!' }), { DB: db } as any, corsHeaders);
+    const res = await handleCreateMinorAccount(makeRequest({ username: 'BAD USER!' }), { DB: db }, corsHeaders);
     expect(res.status).toBe(400);
     expect(mockCreateMinorAccount).not.toHaveBeenCalled();
   });
@@ -1514,7 +1514,7 @@ describe('handleCreateMinorAccount', () => {
     const db = makeMinorDb();
     const res = await handleCreateMinorAccount(
       makeRequest({ username: 'test', display_name: 12345 }),
-      { DB: db } as any,
+      { DB: db },
       corsHeaders,
     );
     expect(res.status).toBe(400);
@@ -1523,7 +1523,7 @@ describe('handleCreateMinorAccount', () => {
 
   it('strips empty display_name before calling Keycast', async () => {
     const db = makeMinorDb();
-    await handleCreateMinorAccount(makeRequest({ username: 'test', display_name: '  ' }), { DB: db } as any, corsHeaders);
+    await handleCreateMinorAccount(makeRequest({ username: 'test', display_name: '  ' }), { DB: db }, corsHeaders);
     expect(mockCreateMinorAccount).toHaveBeenCalledWith('test', undefined, expect.anything());
   });
 
@@ -1531,7 +1531,7 @@ describe('handleCreateMinorAccount', () => {
     const db = makeMinorDb();
     const res = await handleCreateMinorAccount(
       makeRequest({ username: 'test', zendesk_ticket_id: 'abc' }),
-      { DB: db } as any,
+      { DB: db },
       corsHeaders,
     );
     expect(res.status).toBe(400);
@@ -1540,7 +1540,7 @@ describe('handleCreateMinorAccount', () => {
 
   it('returns 500 without claim_url when D1 insert fails after Keycast success', async () => {
     const db = makeMinorDb(() => Promise.reject(new Error('D1 write failed')));
-    const res = await handleCreateMinorAccount(makeRequest({ username: 'testuser' }), { DB: db } as any, corsHeaders);
+    const res = await handleCreateMinorAccount(makeRequest({ username: 'testuser' }), { DB: db }, corsHeaders);
     const body = await res.json() as Record<string, unknown>;
 
     expect(res.status).toBe(500);
@@ -1553,21 +1553,72 @@ describe('handleCreateMinorAccount', () => {
   it('maps Keycast 409 to 409 status', async () => {
     mockCreateMinorAccount.mockResolvedValue({ success: false, error: '409: Username taken' });
     const db = makeMinorDb();
-    const res = await handleCreateMinorAccount(makeRequest({ username: 'taken' }), { DB: db } as any, corsHeaders);
+    const res = await handleCreateMinorAccount(makeRequest({ username: 'taken' }), { DB: db }, corsHeaders);
     expect(res.status).toBe(409);
   });
 
   it('maps other Keycast 4xx to 400 status', async () => {
     mockCreateMinorAccount.mockResolvedValue({ success: false, error: '422: Invalid input' });
     const db = makeMinorDb();
-    const res = await handleCreateMinorAccount(makeRequest({ username: 'test' }), { DB: db } as any, corsHeaders);
+    const res = await handleCreateMinorAccount(makeRequest({ username: 'test' }), { DB: db }, corsHeaders);
     expect(res.status).toBe(400);
   });
 
   it('maps Keycast server errors to 502 status', async () => {
     mockCreateMinorAccount.mockResolvedValue({ success: false, error: 'Connection refused' });
     const db = makeMinorDb();
-    const res = await handleCreateMinorAccount(makeRequest({ username: 'test' }), { DB: db } as any, corsHeaders);
+    const res = await handleCreateMinorAccount(makeRequest({ username: 'test' }), { DB: db }, corsHeaders);
     expect(res.status).toBe(502);
+  });
+
+  it('persists claim_link_expires_at from the Keycast response', async () => {
+    const bindArgs: unknown[] = [];
+    const db = {
+      prepare: vi.fn().mockReturnValue({
+        bind: vi.fn().mockImplementation((...args: unknown[]) => {
+          bindArgs.push(...args);
+          return { run: vi.fn().mockResolvedValue({ success: true }) };
+        }),
+      }),
+    };
+
+    const res = await handleCreateMinorAccount(
+      makeRequest({ username: 'testuser' }),
+      { DB: db as unknown as D1Database },
+      corsHeaders,
+    );
+
+    expect(res.status).toBe(200);
+    // The INSERT binds claim_link_expires_at; the Keycast mock returns 2026-06-15T00:00:00Z
+    expect(bindArgs).toContain('2026-06-15T00:00:00Z');
+  });
+
+  it('persists null claim_link_expires_at when Keycast omits expires_at', async () => {
+    mockCreateMinorAccount.mockResolvedValue({
+      success: true,
+      pubkey: 'a'.repeat(64),
+      claim_url: 'https://login.test/claim/abc',
+    });
+
+    const bindArgs: unknown[] = [];
+    const db = {
+      prepare: vi.fn().mockReturnValue({
+        bind: vi.fn().mockImplementation((...args: unknown[]) => {
+          bindArgs.push(...args);
+          return { run: vi.fn().mockResolvedValue({ success: true }) };
+        }),
+      }),
+    };
+
+    const res = await handleCreateMinorAccount(
+      makeRequest({ username: 'testuser' }),
+      { DB: db as unknown as D1Database },
+      corsHeaders,
+    );
+
+    expect(res.status).toBe(200);
+    // claim_url is present (so it binds), but expires_at is absent -> bound as null
+    expect(bindArgs).toContain('https://login.test/claim/abc');
+    expect(bindArgs).toContain(null);
   });
 });
