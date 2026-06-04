@@ -16,6 +16,7 @@ import { ensureSchema } from './db';
 import { generatePreAuthToken, verifyPreAuthToken, base64UrlEncode } from './zendesk-preauth';
 import { deriveFunnelcakeApiUrl, proxyFunnelcakeRequest } from './funnelcake-proxy';
 import type { KeycastEnv } from './keycast-client';
+import { suspendUser, unsuspendUser } from './keycast-client';
 import {
   handleGetAgeReviewCases,
   handleGetAgeReviewCase,
@@ -201,6 +202,25 @@ async function notifyModerationService(
     const result = await response.json() as { dm_sent: boolean; reason?: string };
     console.log(`[notifyModerationService] DM sent=${result.dm_sent}${result.reason ? ` (${result.reason})` : ''}`);
   }
+}
+
+/**
+ * Send an account-state DM (suspended / banned / restored) to an affected user
+ * as a NON-CRITICAL side effect. The DM is dispatched via ctx.waitUntil so it
+ * runs off the response path; failures are logged and swallowed, never
+ * propagated to the caller. Never fire-and-forget: the promise is always
+ * handed to waitUntil so the runtime keeps it alive.
+ */
+function notifyAccountState(
+  env: Env,
+  pubkey: string,
+  action: 'ACCOUNT_SUSPENDED' | 'ACCOUNT_BANNED' | 'ACCOUNT_RESTORED',
+  reason: string,
+  ctx?: ExecutionContext
+): void {
+  const dmPromise = notifyModerationService(env, pubkey, action, reason)
+    .catch(err => console.error('[handleRelayRpc] DM notification error:', err));
+  if (ctx) ctx.waitUntil(dmPromise);
 }
 
 function getAllowedOrigin(requestOrigin: string | null, allowedOriginsEnv: string | undefined): string | null {
@@ -851,15 +871,41 @@ async function handleRelayRpc(
     return jsonResponse({ success: false, error: result.error }, 400, corsHeaders);
   }
 
-  // DM the banned user (non-critical, off response path)
-  // This is the actual ban path used by the UI -- handleModerate's ban_pubkey
-  // case exists but is not called by any frontend component.
-  if (body.method === 'banpubkey' && body.params?.[0]) {
+  // Account-state side effects (all non-critical, off the response path).
+  // This is the actual moderation path used by the UI -- handleModerate's
+  // ban_pubkey case exists but is not called by any frontend component.
+  // params[0] = pubkey, params[1] = reason.
+  if (body.params?.[0]) {
     const pubkey = String(body.params[0]);
     const reason = body.params[1] ? String(body.params[1]) : undefined;
-    const dmPromise = notifyModerationService(env, pubkey, 'ACCOUNT_SUSPENDED', reason || 'Account suspended by moderator')
-      .catch(err => console.error('[handleRelayRpc] DM notification error:', err));
-    if (ctx) ctx.waitUntil(dmPromise);
+
+    switch (body.method) {
+      case 'banpubkey':
+        notifyAccountState(env, pubkey, 'ACCOUNT_BANNED', reason || 'Account banned by moderator', ctx);
+        break;
+      case 'suspendpubkey':
+        // Keycast suspend is a non-critical enrichment here: log on failure,
+        // do not fail the RPC the relay already accepted.
+        if (ctx) {
+          ctx.waitUntil(
+            suspendUser(pubkey, 'moderation', env).then(res => {
+              if (!res.success) console.error(`[handleRelayRpc] Keycast suspend failed for ${pubkey}: ${res.error}`);
+            }).catch(err => console.error('[handleRelayRpc] Keycast suspend error:', err))
+          );
+        }
+        notifyAccountState(env, pubkey, 'ACCOUNT_SUSPENDED', reason || 'Account suspended by moderator', ctx);
+        break;
+      case 'unsuspendpubkey':
+        if (ctx) {
+          ctx.waitUntil(
+            unsuspendUser(pubkey, env).then(res => {
+              if (!res.success) console.error(`[handleRelayRpc] Keycast unsuspend failed for ${pubkey}: ${res.error}`);
+            }).catch(err => console.error('[handleRelayRpc] Keycast unsuspend error:', err))
+          );
+        }
+        notifyAccountState(env, pubkey, 'ACCOUNT_RESTORED', reason || 'Account restored by moderator', ctx);
+        break;
+    }
   }
 
   return new Response(JSON.stringify({ success: true, result: result.result }), {
