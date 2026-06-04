@@ -1589,8 +1589,10 @@ describe('handleCreateMinorAccount', () => {
     );
 
     expect(res.status).toBe(200);
-    // The INSERT binds claim_link_expires_at; the Keycast mock returns 2026-06-15T00:00:00Z
-    expect(bindArgs).toContain('2026-06-15T00:00:00Z');
+    // INSERT bind order: caseId, pubkey, claim_url, claim_link_expires_at, zendesk_ticket_id.
+    // Assert positionally so this also guards the column/bind ordering.
+    expect(bindArgs[2]).toBe('https://login.test/claim/abc');
+    expect(bindArgs[3]).toBe('2026-06-15T00:00:00Z');
   });
 
   it('persists null claim_link_expires_at when Keycast omits expires_at', async () => {
@@ -1617,8 +1619,9 @@ describe('handleCreateMinorAccount', () => {
     );
 
     expect(res.status).toBe(200);
-    // claim_url is present (so it binds), but expires_at is absent -> bound as null
-    expect(bindArgs).toContain('https://login.test/claim/abc');
-    expect(bindArgs).toContain(null);
+    // claim_url is present (binds at index 2), but expires_at is absent -> bound as null at index 3.
+    // Assert positionally: toContain(null) would also match the null zendesk_ticket_id.
+    expect(bindArgs[2]).toBe('https://login.test/claim/abc');
+    expect(bindArgs[3]).toBeNull();
   });
 });
