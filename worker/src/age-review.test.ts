@@ -1150,8 +1150,7 @@ describe('handleParentContact Zendesk integration', () => {
       method: 'POST',
       body: JSON.stringify({ email: 'parent@example.com' }),
     });
-    const res = await handleParentContact(req, 'case-1', c.pubkey, makeEnv(db, {
-    }), corsHeaders);
+    const res = await handleParentContact(req, 'case-1', c.pubkey, makeEnv(db), corsHeaders);
 
     expect(res.status).toBe(200);
     // No Zendesk API call made
