@@ -104,6 +104,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
 
   const isTerminal = TERMINAL_STATES.includes(c.state);
   const daysRemaining = getDaysRemaining(c);
+  const claimLinkExpired = c.claim_link_expires_at != null && new Date(c.claim_link_expires_at).getTime() < Date.now();
 
   const updateCase = useMutation({
     mutationFn: (updates: Record<string, unknown>) => {
@@ -411,6 +412,23 @@ export function AgeReviewDetail({ caseData: c }: Props) {
                 <Badge className="bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-400 text-[10px]">
                   Minor Onboarding
                 </Badge>
+              )}
+              {c.created_via === 'minor_onboarding' && c.claim_link_url && (
+                <div className="space-y-1.5 pt-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-medium text-muted-foreground">Claim Link</span>
+                    {claimLinkExpired && (
+                      <Badge className="bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400 text-[10px] gap-1">
+                        <AlertTriangle className="h-3 w-3" />
+                        Expired
+                      </Badge>
+                    )}
+                  </div>
+                  <CopyableId value={c.claim_link_url} type="hex" size="xs" truncateStart={32} truncateEnd={12} />
+                  <div className="text-xs text-muted-foreground">
+                    Expires: {c.claim_link_expires_at ? new Date(c.claim_link_expires_at).toLocaleDateString() : 'N/A'}
+                  </div>
+                </div>
               )}
               {c.resolution_note.startsWith('Auto-cleared:') && (
                 <Badge className="bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400 text-[10px]">
