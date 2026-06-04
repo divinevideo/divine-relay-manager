@@ -40,6 +40,13 @@ describe('keycast-client', () => {
       expect(opts.headers['Content-Type']).toBe('application/json');
     });
 
+    it('sends reason "moderation" for general moderation suspends', async () => {
+      const result = await suspendUser(VALID_PUBKEY, 'moderation', makeEnv());
+      expect(result).toEqual({ success: true });
+      const [, opts] = fetchMock.mock.calls[0];
+      expect(JSON.parse(opts.body)).toEqual({ status: 'suspended', reason: 'moderation' });
+    });
+
     it('returns success false with status on 4xx', async () => {
       fetchMock.mockResolvedValue({ ok: false, status: 404, text: () => Promise.resolve('Not found') });
       const result = await suspendUser(VALID_PUBKEY, 'age_review', makeEnv());
