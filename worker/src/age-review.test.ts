@@ -1570,4 +1570,58 @@ describe('handleCreateMinorAccount', () => {
     const res = await handleCreateMinorAccount(makeRequest({ username: 'test' }), { DB: db as unknown as D1Database }, corsHeaders);
     expect(res.status).toBe(502);
   });
+
+  it('persists claim_link_expires_at from the Keycast response', async () => {
+    const bindArgs: unknown[] = [];
+    const db = {
+      prepare: vi.fn().mockReturnValue({
+        bind: vi.fn().mockImplementation((...args: unknown[]) => {
+          bindArgs.push(...args);
+          return { run: vi.fn().mockResolvedValue({ success: true }) };
+        }),
+      }),
+    };
+
+    const res = await handleCreateMinorAccount(
+      makeRequest({ username: 'testuser' }),
+      { DB: db as unknown as D1Database },
+      corsHeaders,
+    );
+
+    expect(res.status).toBe(200);
+    // INSERT bind order: caseId, pubkey, claim_url, claim_link_expires_at, zendesk_ticket_id.
+    // Assert positionally so this also guards the column/bind ordering.
+    expect(bindArgs[2]).toBe('https://login.test/claim/abc');
+    expect(bindArgs[3]).toBe('2026-06-15T00:00:00Z');
+  });
+
+  it('persists null claim_link_expires_at when Keycast omits expires_at', async () => {
+    mockCreateMinorAccount.mockResolvedValue({
+      success: true,
+      pubkey: 'a'.repeat(64),
+      claim_url: 'https://login.test/claim/abc',
+    });
+
+    const bindArgs: unknown[] = [];
+    const db = {
+      prepare: vi.fn().mockReturnValue({
+        bind: vi.fn().mockImplementation((...args: unknown[]) => {
+          bindArgs.push(...args);
+          return { run: vi.fn().mockResolvedValue({ success: true }) };
+        }),
+      }),
+    };
+
+    const res = await handleCreateMinorAccount(
+      makeRequest({ username: 'testuser' }),
+      { DB: db as unknown as D1Database },
+      corsHeaders,
+    );
+
+    expect(res.status).toBe(200);
+    // claim_url is present (binds at index 2), but expires_at is absent -> bound as null at index 3.
+    // Assert positionally: toContain(null) would also match the null zendesk_ticket_id.
+    expect(bindArgs[2]).toBe('https://login.test/claim/abc');
+    expect(bindArgs[3]).toBeNull();
+  });
 });

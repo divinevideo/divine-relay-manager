@@ -1,5 +1,5 @@
 // ABOUTME: Reusable component for displaying truncated IDs with click-to-copy functionality
-// ABOUTME: Handles event IDs, note IDs, hashes, and npubs with appropriate formatting
+// ABOUTME: Handles event IDs, note IDs, hashes, npubs, and URLs with appropriate formatting
 
 import { useState } from "react";
 import { nip19 } from "nostr-tools";
@@ -15,8 +15,8 @@ import { cn } from "@/lib/utils";
 interface CopyableIdProps {
   /** The raw value to copy (hex id, hash, etc.) */
   value: string;
-  /** Type of ID for formatting. 'note' and 'npub' will encode to bech32 */
-  type?: 'event' | 'note' | 'npub' | 'hash' | 'hex';
+  /** Type of ID for formatting. 'note' and 'npub' will encode to bech32; 'url' and 'hex' are shown verbatim */
+  type?: 'event' | 'note' | 'npub' | 'hash' | 'hex' | 'url';
   /** Number of characters to show at start */
   truncateStart?: number;
   /** Number of characters to show at end */

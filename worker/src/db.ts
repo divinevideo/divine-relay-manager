@@ -71,6 +71,7 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       zendesk_ticket_id INTEGER,
       created_via TEXT DEFAULT 'report',
       claim_link_url TEXT,
+      claim_link_expires_at TEXT,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     )
@@ -91,6 +92,12 @@ export async function ensureSchema(db: D1Database): Promise<void> {
 
   try {
     await db.prepare(`ALTER TABLE age_review_cases ADD COLUMN claim_link_url TEXT`).run();
+  } catch {
+    // Column already exists
+  }
+
+  try {
+    await db.prepare(`ALTER TABLE age_review_cases ADD COLUMN claim_link_expires_at TEXT`).run();
   } catch {
     // Column already exists
   }

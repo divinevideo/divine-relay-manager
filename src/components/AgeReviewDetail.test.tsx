@@ -40,6 +40,7 @@ function makeCase(overrides: Partial<AgeReviewCase> = {}): AgeReviewCase {
     zendesk_ticket_id: null,
     created_via: null,
     claim_link_url: null,
+    claim_link_expires_at: null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     ...overrides,
@@ -112,5 +113,67 @@ describe('AgeReviewDetail', () => {
     await waitFor(() => {
       expect(writeText).toHaveBeenCalledWith(caseData.pubkey);
     });
+  });
+
+  it('renders the claim link and expiry for a minor_onboarding case', () => {
+    renderDetail(makeCase({
+      state: 'cleared',
+      created_via: 'minor_onboarding',
+      resolution_note: 'Approved via parental consent (minor onboarding)',
+      claim_link_url: 'https://login.test/claim/xyz',
+      claim_link_expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+    }));
+
+    expect(screen.getByText('Claim Link')).toBeInTheDocument();
+    expect(screen.getByText(/Expires:/)).toBeInTheDocument();
+    expect(screen.queryByText('Expired')).not.toBeInTheDocument();
+  });
+
+  it('shows an Expired badge when the claim link expiry is in the past', () => {
+    renderDetail(makeCase({
+      state: 'cleared',
+      created_via: 'minor_onboarding',
+      resolution_note: 'Approved via parental consent (minor onboarding)',
+      claim_link_url: 'https://login.test/claim/xyz',
+      claim_link_expires_at: new Date(Date.now() - 1000).toISOString(),
+    }));
+
+    expect(screen.getByText('Expired')).toBeInTheDocument();
+  });
+
+  it('shows N/A expiry and no Expired badge when claim link has no expiry', () => {
+    renderDetail(makeCase({
+      state: 'cleared',
+      created_via: 'minor_onboarding',
+      resolution_note: 'Approved via parental consent (minor onboarding)',
+      claim_link_url: 'https://login.test/claim/xyz',
+      claim_link_expires_at: null,
+    }));
+
+    expect(screen.getByText('Claim Link')).toBeInTheDocument();
+    expect(screen.getByText(/Expires: N\/A/)).toBeInTheDocument();
+    expect(screen.queryByText('Expired')).not.toBeInTheDocument();
+  });
+
+  it('does not render the claim link for a non-minor-onboarding terminal case', () => {
+    renderDetail(makeCase({
+      state: 'cleared',
+      created_via: 'report',
+      resolution_note: 'Cleared after review',
+      claim_link_url: 'https://login.test/claim/xyz',
+    }));
+
+    expect(screen.queryByText('Claim Link')).not.toBeInTheDocument();
+  });
+
+  it('does not render the claim link for a minor_onboarding case missing the link', () => {
+    renderDetail(makeCase({
+      state: 'cleared',
+      created_via: 'minor_onboarding',
+      resolution_note: 'Approved via parental consent (minor onboarding)',
+      claim_link_url: null,
+    }));
+
+    expect(screen.queryByText('Claim Link')).not.toBeInTheDocument();
   });
 });
