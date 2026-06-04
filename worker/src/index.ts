@@ -219,7 +219,7 @@ function notifyAccountState(
   ctx?: ExecutionContext
 ): void {
   const dmPromise = notifyModerationService(env, pubkey, action, reason)
-    .catch(err => console.error('[handleRelayRpc] DM notification error:', err));
+    .catch(err => console.error('[notifyAccountState] DM notification error:', err));
   if (ctx) ctx.waitUntil(dmPromise);
 }
 
