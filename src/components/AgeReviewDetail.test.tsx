@@ -154,4 +154,26 @@ describe('AgeReviewDetail', () => {
     expect(screen.getByText(/Expires: N\/A/)).toBeInTheDocument();
     expect(screen.queryByText('Expired')).not.toBeInTheDocument();
   });
+
+  it('does not render the claim link for a non-minor-onboarding terminal case', () => {
+    renderDetail(makeCase({
+      state: 'cleared',
+      created_via: 'report',
+      resolution_note: 'Cleared after review',
+      claim_link_url: 'https://login.test/claim/xyz',
+    }));
+
+    expect(screen.queryByText('Claim Link')).not.toBeInTheDocument();
+  });
+
+  it('does not render the claim link for a minor_onboarding case missing the link', () => {
+    renderDetail(makeCase({
+      state: 'cleared',
+      created_via: 'minor_onboarding',
+      resolution_note: 'Approved via parental consent (minor onboarding)',
+      claim_link_url: null,
+    }));
+
+    expect(screen.queryByText('Claim Link')).not.toBeInTheDocument();
+  });
 });
