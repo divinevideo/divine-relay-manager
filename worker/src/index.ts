@@ -208,8 +208,9 @@ async function notifyModerationService(
  * Send an account-state DM (suspended / banned / restored) to an affected user
  * as a NON-CRITICAL side effect. The DM is dispatched via ctx.waitUntil so it
  * runs off the response path; failures are logged and swallowed, never
- * propagated to the caller. Never fire-and-forget: the promise is always
- * handed to waitUntil so the runtime keeps it alive.
+ * propagated to the caller. A ctx is required: without it the work cannot
+ * outlive the response, so the DM is skipped with a warning rather than
+ * started and silently dropped.
  */
 function notifyAccountState(
   env: Env,
@@ -218,9 +219,13 @@ function notifyAccountState(
   reason: string,
   ctx?: ExecutionContext
 ): void {
+  if (!ctx) {
+    console.warn(`[notifyAccountState] No ExecutionContext; skipping ${action} DM for ${pubkey}`);
+    return;
+  }
   const dmPromise = notifyModerationService(env, pubkey, action, reason)
     .catch(err => console.error('[notifyAccountState] DM notification error:', err));
-  if (ctx) ctx.waitUntil(dmPromise);
+  ctx.waitUntil(dmPromise);
 }
 
 function getAllowedOrigin(requestOrigin: string | null, allowedOriginsEnv: string | undefined): string | null {
@@ -879,6 +884,8 @@ async function handleRelayRpc(
     const pubkey = String(body.params[0]);
     const reason = body.params[1] ? String(body.params[1]) : undefined;
 
+    // Note: unbanpubkey intentionally sends no DM here. A restore-on-unban DM
+    // is tracked in #96 (moderation-DM coverage gaps).
     switch (body.method) {
       case 'banpubkey':
         notifyAccountState(env, pubkey, 'ACCOUNT_BANNED', reason || 'Account banned by moderator', ctx);
@@ -892,6 +899,8 @@ async function handleRelayRpc(
               if (!res.success) console.error(`[handleRelayRpc] Keycast suspend failed for ${pubkey}: ${res.error}`);
             }).catch(err => console.error('[handleRelayRpc] Keycast suspend error:', err))
           );
+        } else {
+          console.warn(`[handleRelayRpc] No ExecutionContext; skipping Keycast suspend for ${pubkey}`);
         }
         notifyAccountState(env, pubkey, 'ACCOUNT_SUSPENDED', reason || 'Account suspended by moderator', ctx);
         break;
@@ -902,6 +911,8 @@ async function handleRelayRpc(
               if (!res.success) console.error(`[handleRelayRpc] Keycast unsuspend failed for ${pubkey}: ${res.error}`);
             }).catch(err => console.error('[handleRelayRpc] Keycast unsuspend error:', err))
           );
+        } else {
+          console.warn(`[handleRelayRpc] No ExecutionContext; skipping Keycast unsuspend for ${pubkey}`);
         }
         notifyAccountState(env, pubkey, 'ACCOUNT_RESTORED', reason || 'Account restored by moderator', ctx);
         break;

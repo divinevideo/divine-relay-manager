@@ -341,4 +341,56 @@ describe('relay-rpc account-state side effects', () => {
 
     fetchSpy.mockRestore();
   });
+
+  it('ban_pubkey via /api/moderate sends exactly one ACCOUNT_BANNED DM (no double)', async () => {
+    const fetchSpy = makeFetchSpy();
+    const waitUntil = vi.fn();
+    const testCtx = { waitUntil } as unknown as ExecutionContext;
+
+    const response = await worker.fetch(
+      new Request('https://api-relay-prod.divine.video/api/moderate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Admin-Key': 'test-admin-key',
+          Origin: 'https://app.divine.video',
+        },
+        body: JSON.stringify({ action: 'ban_pubkey', pubkey: VALID_PUBKEY, reason: 'spam' }),
+      }),
+      makeAccountStateEnv(),
+      testCtx,
+    );
+    expect(response.status).toBe(200);
+    await drain(waitUntil);
+
+    // handleModerate's ban_pubkey routes through handleRelayRpc; only the helper
+    // DMs, so there must be exactly one ACCOUNT_BANNED, never a duplicate.
+    const bodies = await notifyBodies(fetchSpy);
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0].action).toBe('ACCOUNT_BANNED');
+
+    fetchSpy.mockRestore();
+  });
+
+  it('skips account-state side effects with a warning when no ExecutionContext is available', async () => {
+    const fetchSpy = makeFetchSpy();
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const response = await callRelayRpc(
+      'suspendpubkey',
+      [VALID_PUBKEY, 'policy'],
+      makeAccountStateEnv(),
+      undefined as unknown as ExecutionContext,
+    );
+    expect(response.status).toBe(200);
+
+    // Without a ctx to keep them alive, neither the DM nor the Keycast call is
+    // dispatched, and the skip is logged rather than silently dropped.
+    expect(await notifyBodies(fetchSpy)).toHaveLength(0);
+    expect(keycastCalls(fetchSpy)).toHaveLength(0);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('No ExecutionContext'));
+
+    warnSpy.mockRestore();
+    fetchSpy.mockRestore();
+  });
 });
