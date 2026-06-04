@@ -769,7 +769,10 @@ async function handleModerate(
           console.error('[handleModerate] Zendesk sync error:', err);
         }
 
-        // DM the content creator about the deletion (non-critical, off response path)
+        // DM the content creator about the deletion (non-critical, off response path).
+        // Stays inline rather than using notifyAccountState: this is a content-level
+        // notice (PERMANENT_BAN, with eventId), not an account-state change, so it
+        // does not fit the account-state helper's action union or signature.
         if (body.pubkey) {
           const dmPromise = notifyModerationService(env, body.pubkey, 'PERMANENT_BAN', body.reason || 'Content removed by moderator', undefined, body.eventId)
             .catch(err => console.error('[handleModerate] DM notification error:', err));
@@ -888,6 +891,9 @@ async function handleRelayRpc(
     // is tracked in #96 (moderation-DM coverage gaps).
     switch (body.method) {
       case 'banpubkey':
+        // Unlike suspend, banpubkey does not yet call Keycast (banUser), so a
+        // relay ban leaves the Keycast account active. Enforcement parity is
+        // tracked in #100; this PR is scoped to the suspend path.
         notifyAccountState(env, pubkey, 'ACCOUNT_BANNED', reason || 'Account banned by moderator', ctx);
         break;
       case 'suspendpubkey':

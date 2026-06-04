@@ -385,10 +385,11 @@ describe('relay-rpc account-state side effects', () => {
     expect(response.status).toBe(200);
 
     // Without a ctx to keep them alive, neither the DM nor the Keycast call is
-    // dispatched, and the skip is logged rather than silently dropped.
+    // dispatched, and BOTH skips are logged rather than silently dropped.
     expect(await notifyBodies(fetchSpy)).toHaveLength(0);
     expect(keycastCalls(fetchSpy)).toHaveLength(0);
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('No ExecutionContext'));
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('skipping Keycast suspend'));
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('[notifyAccountState] No ExecutionContext'));
 
     warnSpy.mockRestore();
     fetchSpy.mockRestore();
