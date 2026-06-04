@@ -40,6 +40,7 @@ function makeCase(overrides: Partial<AgeReviewCase> = {}): AgeReviewCase {
     zendesk_ticket_id: null,
     created_via: null,
     claim_link_url: null,
+    claim_link_expires_at: null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     ...overrides,
