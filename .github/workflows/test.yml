@@ -44,4 +44,4 @@ jobs:
 
       - name: Worker tests
         working-directory: worker
-        run: npx vitest run
+        run: npm run test:run
