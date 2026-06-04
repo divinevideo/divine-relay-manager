@@ -10,6 +10,8 @@ import {
   banPubkeyViaModerate,
   allowPubkey,
   callRelayRpc,
+  banEvent,
+  allowEvent,
   banPubkey,
   unbanPubkey,
   listBannedPubkeys,
@@ -380,6 +382,42 @@ describe('adminApi', () => {
         expect.stringContaining('/api/relay-rpc'),
         expect.objectContaining({
           body: JSON.stringify({ method: 'unbanpubkey', params: ['pubkey123'] }),
+        })
+      );
+    });
+  });
+
+  describe('banEvent', () => {
+    it('should call banevent RPC method with event id and reason', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, result: null }),
+      });
+
+      await banEvent(API_URL, 'event123', 'Spam');
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/relay-rpc'),
+        expect.objectContaining({
+          body: JSON.stringify({ method: 'banevent', params: ['event123', 'Spam'] }),
+        })
+      );
+    });
+  });
+
+  describe('allowEvent', () => {
+    it('should call allowevent RPC method with only the event id', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, result: null }),
+      });
+
+      await allowEvent(API_URL, 'event123');
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/relay-rpc'),
+        expect.objectContaining({
+          body: JSON.stringify({ method: 'allowevent', params: ['event123'] }),
         })
       );
     });

@@ -358,7 +358,7 @@ function TagsTable({ tags }: { tags: string[][] }) {
 export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReports }: EventDetailProps) {
   const { nostr } = useNostr();
   const { toast } = useToast();
-  const { banPubkey, deleteEvent, unbanPubkey, verifyPubkeyBanned, verifyPubkeyUnbanned, verifyEventDeleted, callRelayRpc, logDecision } = useAdminApi();
+  const { banPubkey, deleteEvent, unbanPubkey, allowEvent, verifyPubkeyBanned, verifyPubkeyUnbanned, verifyEventDeleted, logDecision } = useAdminApi();
   const queryClient = useQueryClient();
 
   const [_showRawJson, _setShowRawJson] = useState(false);
@@ -566,7 +566,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
 
   const restoreMutation = useMutation({
     mutationFn: async ({ eventId }: { eventId: string }) => {
-      await callRelayRpc('unbanevent', [eventId]);
+      await allowEvent(eventId);
       await logDecision({
         targetType: 'event',
         targetId: eventId,

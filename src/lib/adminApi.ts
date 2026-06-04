@@ -191,6 +191,15 @@ export async function banPubkey(apiUrl: string, pubkey: string, reason?: string)
   await callRelayRpc(apiUrl, 'banpubkey', [pubkey, reason || 'Banned via admin']);
 }
 
+export async function banEvent(apiUrl: string, eventId: string, reason?: string): Promise<void> {
+  await callRelayRpc(apiUrl, 'banevent', [eventId, reason]);
+}
+
+// Funnelcake's event unban method is intentionally named allowevent, not unbanevent.
+export async function allowEvent(apiUrl: string, eventId: string): Promise<void> {
+  await callRelayRpc(apiUrl, 'allowevent', [eventId]);
+}
+
 // Convenience function for unbanning pubkey
 // Note: 'unbanpubkey' is not in NIP-86 spec but is a necessary extension
 // This will fail on relays that don't support it until they add the method

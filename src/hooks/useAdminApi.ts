@@ -43,6 +43,10 @@ export function useAdminApi() {
     // NIP-86 RPC
     callRelayRpc: <T = unknown>(method: string, params?: (string | number | undefined)[]) =>
       adminApi.callRelayRpc<T>(apiUrl, method, params),
+    banEvent: (eventId: string, reason?: string) =>
+      adminApi.banEvent(apiUrl, eventId, reason),
+    allowEvent: (eventId: string) =>
+      adminApi.allowEvent(apiUrl, eventId),
     banPubkey: (pubkey: string, reason?: string) =>
       adminApi.banPubkey(apiUrl, pubkey, reason),
     unbanPubkey: (pubkey: string) =>

@@ -382,7 +382,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
   const { nostr } = useNostr();
   const { user } = useCurrentUser();
   const { toast } = useToast();
-  const { callRelayRpc, verifyEventDeleted } = useAdminApi();
+  const { callRelayRpc, banEvent, allowEvent, verifyEventDeleted } = useAdminApi();
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const [isVerifying, setIsVerifying] = useState(false);
@@ -628,8 +628,11 @@ export function EventsList({ relayUrl }: EventsListProps) {
   // Mutation for event moderation
   const moderateEventMutation = useMutation({
     mutationFn: async ({ eventId, action, reason }: { eventId: string; action: 'allow' | 'ban'; reason?: string }) => {
-      const method = action === 'allow' ? 'unbanevent' : 'banevent';
-      await callRelayRpc(method, [eventId, reason]);
+      if (action === 'allow') {
+        await allowEvent(eventId);
+      } else {
+        await banEvent(eventId, reason);
+      }
       return { eventId, action };
     },
     onSuccess: async ({ eventId, action }) => {

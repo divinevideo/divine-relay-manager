@@ -28,7 +28,7 @@ interface BannedEvent {
 export function EventModeration() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const { callRelayRpc, verifyEventDeleted } = useAdminApi();
+  const { callRelayRpc, banEvent, allowEvent, verifyEventDeleted } = useAdminApi();
   const [newEventId, setNewEventId] = useState("");
   const [newReason, setNewReason] = useState("");
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
@@ -53,8 +53,8 @@ export function EventModeration() {
 
   // Mutation for allowing events
   const allowEventMutation = useMutation({
-    mutationFn: ({ eventId, reason }: { eventId: string; reason?: string }) =>
-      callRelayRpc('unbanevent', [eventId, reason]),
+    mutationFn: ({ eventId }: { eventId: string; reason?: string }) =>
+      allowEvent(eventId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['events-needing-moderation'] });
       toast({ title: "Event approved successfully" });
@@ -71,7 +71,7 @@ export function EventModeration() {
   // Mutation for banning events
   const banEventMutation = useMutation({
     mutationFn: async ({ eventId, reason }: { eventId: string; reason?: string }) => {
-      await callRelayRpc('banevent', [eventId, reason]);
+      await banEvent(eventId, reason);
       return eventId;
     },
     onSuccess: async (eventId) => {
