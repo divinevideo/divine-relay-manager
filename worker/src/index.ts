@@ -296,6 +296,8 @@ interface UnsignedEvent {
 interface ApiResponse {
   success: boolean;
   event?: object;
+  // Relay query responses (e.g. /api/reports, /api/resolution-labels) return arrays.
+  events?: object[];
   error?: string;
   pubkey?: string;
   // Moderation action responses

@@ -16,7 +16,7 @@ import type { BulkAction, BulkModerateResult } from '../../shared/bulk-moderatio
 import { suspendUser, unsuspendUser, banUser, createMinorAccount, type KeycastEnv } from './keycast-client';
 import type { SecretStoreSecret } from './nip86';
 
-interface AgeReviewEnv extends BulkModerateEnv, KeycastEnv {
+export interface AgeReviewEnv extends BulkModerateEnv, KeycastEnv {
   SLACK_WEBHOOK_URL?: string;
   ZENDESK_SUBDOMAIN?: string | SecretStoreSecret;
   ZENDESK_API_TOKEN?: string | SecretStoreSecret;

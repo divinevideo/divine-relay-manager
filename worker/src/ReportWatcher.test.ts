@@ -1211,10 +1211,14 @@ describe('ReportWatcher', () => {
           { kind: 'threshold', name: 'Threshold', categories: ['NS-spam'], threshold: 5, requireTrustedClient: true },
         ],
       };
-      vi.mocked(mockState.storage.get).mockImplementation(async (key: string) => {
-        if (key === 'autoHideConfig') return storedConfig;
-        return undefined;
-      });
+      // storage.get is an overloaded method (single key vs. key array). The DO only
+      // calls the single-key form, so cast the single-key impl onto the mocked overload.
+      vi.mocked(mockState.storage.get).mockImplementation(
+        (async (key: string) => {
+          if (key === 'autoHideConfig') return storedConfig;
+          return undefined;
+        }) as unknown as DurableObjectStorage['get'],
+      );
 
       watcher = new ReportWatcher(mockState, mockEnv);
       await new Promise(resolve => setTimeout(resolve, 10));
@@ -1238,10 +1242,12 @@ describe('ReportWatcher', () => {
           { name: 'Threshold', categories: ['NS-spam'], threshold: 3, requireTrustedClient: false },
         ],
       };
-      vi.mocked(mockState.storage.get).mockImplementation(async (key: string) => {
-        if (key === 'autoHideConfig') return legacyStoredConfig;
-        return undefined;
-      });
+      vi.mocked(mockState.storage.get).mockImplementation(
+        (async (key: string) => {
+          if (key === 'autoHideConfig') return legacyStoredConfig;
+          return undefined;
+        }) as unknown as DurableObjectStorage['get'],
+      );
 
       watcher = new ReportWatcher(mockState, mockEnv);
       await new Promise(resolve => setTimeout(resolve, 10));

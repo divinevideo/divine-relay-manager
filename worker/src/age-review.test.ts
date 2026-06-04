@@ -11,6 +11,7 @@ import {
   syncAgeReviewTicketResolution,
   getAgeReviewConfig,
   updateAgeReviewConfig,
+  type AgeReviewEnv,
 } from './age-review';
 import type { AgeReviewCase } from '../../shared/age-review';
 import { suspendUser, unsuspendUser, banUser, createMinorAccount } from './keycast-client';
@@ -23,6 +24,15 @@ vi.mock('./keycast-client', () => ({
 }));
 
 const corsHeaders = { 'Access-Control-Allow-Origin': '*' };
+
+function makeEnv(db?: unknown, overrides: Partial<AgeReviewEnv> = {}): AgeReviewEnv {
+  return {
+    NOSTR_NSEC: 'nsec1test',
+    RELAY_URL: 'wss://relay.test',
+    ...(db !== undefined ? { DB: db as D1Database } : {}),
+    ...overrides,
+  };
+}
 
 function makeCase(overrides: Partial<AgeReviewCase> = {}): AgeReviewCase {
   return {
@@ -42,6 +52,9 @@ function makeCase(overrides: Partial<AgeReviewCase> = {}): AgeReviewCase {
     resolution_note: null,
     last_alerted_at: null,
     zendesk_ticket_id: null,
+    created_via: null,
+    claim_link_url: null,
+    claim_link_expires_at: null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     ...overrides,
@@ -79,7 +92,7 @@ describe('handleGetAgeReviewCases', () => {
     const c = makeCase();
     const db = createMockDb([c]);
     const req = new Request('https://api.test/api/age-review/cases');
-    const res = await handleGetAgeReviewCases(req, { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleGetAgeReviewCases(req, makeEnv(db), corsHeaders);
     const body = await res.json() as { success: boolean; cases: AgeReviewCase[] };
 
     expect(res.status).toBe(200);
@@ -89,7 +102,7 @@ describe('handleGetAgeReviewCases', () => {
 
   it('returns 500 when DB not configured', async () => {
     const req = new Request('https://api.test/api/age-review/cases');
-    const res = await handleGetAgeReviewCases(req, {}, corsHeaders);
+    const res = await handleGetAgeReviewCases(req, makeEnv(), corsHeaders);
     expect(res.status).toBe(500);
   });
 });
@@ -100,7 +113,7 @@ describe('handleGetAgeReviewCase', () => {
   it('returns a single case', async () => {
     const c = makeCase();
     const db = createMockDb([c]);
-    const res = await handleGetAgeReviewCase('case-1', { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleGetAgeReviewCase('case-1', makeEnv(db), corsHeaders);
     const body = await res.json() as { success: boolean; case: AgeReviewCase };
 
     expect(res.status).toBe(200);
@@ -109,7 +122,7 @@ describe('handleGetAgeReviewCase', () => {
 
   it('returns 404 for unknown case', async () => {
     const db = createMockDb([]);
-    const res = await handleGetAgeReviewCase('nonexistent', { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleGetAgeReviewCase('nonexistent', makeEnv(db), corsHeaders);
     expect(res.status).toBe(404);
   });
 });
@@ -133,7 +146,7 @@ describe('handleUpdateAgeReviewCase', () => {
       method: 'PATCH',
       body: JSON.stringify({ state: 'under_moderator_review' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
     expect(res.status).toBe(200);
 
     const updateCall = db.prepare.mock.calls.find(
@@ -147,7 +160,7 @@ describe('handleUpdateAgeReviewCase', () => {
       method: 'PATCH',
       body: JSON.stringify({ state: 'bogus_state' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
     expect(res.status).toBe(400);
     const body = await res.json() as { error: string };
     expect(body.error).toContain('Invalid state');
@@ -158,7 +171,7 @@ describe('handleUpdateAgeReviewCase', () => {
       method: 'PATCH',
       body: JSON.stringify({ state: 'submitted_for_review' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
     expect(res.status).toBe(400);
     const body = await res.json() as { error: string };
     expect(body.error).toContain('Cannot transition');
@@ -171,7 +184,7 @@ describe('handleUpdateAgeReviewCase', () => {
       method: 'PATCH',
       body: JSON.stringify({ state: 'under_moderator_review' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', { DB: closedDb as unknown as D1Database }, corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(closedDb), corsHeaders);
     expect(res.status).toBe(400);
     const body = await res.json() as { error: string };
     expect(body.error).toContain('closed case');
@@ -182,7 +195,7 @@ describe('handleUpdateAgeReviewCase', () => {
       method: 'PATCH',
       body: JSON.stringify({ clock_paused: true }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
     expect(res.status).toBe(200);
 
     const updateCall = db.prepare.mock.calls.find(
@@ -203,7 +216,7 @@ describe('handleUpdateAgeReviewCase', () => {
       method: 'PATCH',
       body: JSON.stringify({ clock_paused: false }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', { DB: pausedDb as unknown as D1Database }, corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(pausedDb), corsHeaders);
     expect(res.status).toBe(200);
 
     const updateCall = pausedDb.prepare.mock.calls.find(
@@ -217,7 +230,7 @@ describe('handleUpdateAgeReviewCase', () => {
       method: 'PATCH',
       body: JSON.stringify({ parent_contact_email: 'not-an-email' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
     expect(res.status).toBe(400);
     const body = await res.json() as { error: string };
     expect(body.error).toContain('email');
@@ -228,7 +241,7 @@ describe('handleUpdateAgeReviewCase', () => {
       method: 'PATCH',
       body: JSON.stringify({ parent_contact_email: null }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
     expect(res.status).toBe(200);
   });
 
@@ -246,12 +259,11 @@ describe('handleUpdateAgeReviewCase', () => {
       method: 'PATCH',
       body: JSON.stringify({ state: 'cleared', resolution_note: 'Age verified' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', {
-      DB: reviewDb as unknown as D1Database,
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(reviewDb, {
       ZENDESK_SUBDOMAIN: 'test',
       ZENDESK_API_TOKEN: 'tok',
       ZENDESK_EMAIL: 'agent@test.com',
-    }, corsHeaders);
+    }), corsHeaders);
     expect(res.status).toBe(200);
 
     const zendeskCall = mockFetch.mock.calls.find(
@@ -306,15 +318,14 @@ describe('handleUpdateAgeReviewCase', () => {
       method: 'PATCH',
       body: JSON.stringify({ state: 'restricted_pending_support_email' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', {
-      DB: db as unknown as D1Database,
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db, {
       ZENDESK_SUBDOMAIN: 'test',
       ZENDESK_API_TOKEN: 'tok',
       ZENDESK_EMAIL: 'agent@test.com',
       ZENDESK_FIELD_CATEGORY: '1001',
       ZENDESK_FIELD_ISSUE: '1002',
       ZENDESK_FIELD_AGE_REVIEW_DEADLINE: '1003',
-    }, corsHeaders);
+    }), corsHeaders);
     const body = await res.json() as { success: boolean; case: AgeReviewCase };
 
     expect(res.status).toBe(200);
@@ -374,7 +385,7 @@ describe('Keycast suspension wiring', () => {
       method: 'PATCH',
       body: JSON.stringify({ state: 'restricted_pending_user_response' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
     const body = await res.json() as { success: boolean; keycastUpdated: boolean };
 
     expect(res.status).toBe(200);
@@ -408,7 +419,7 @@ describe('Keycast suspension wiring', () => {
       method: 'PATCH',
       body: JSON.stringify({ state: 'cleared' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
     const body = await res.json() as { success: boolean; keycastUpdated: boolean };
 
     expect(res.status).toBe(200);
@@ -442,7 +453,7 @@ describe('Keycast suspension wiring', () => {
       method: 'PATCH',
       body: JSON.stringify({ state: 'cleared' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
     const body = await res.json() as { success: boolean; keycastUpdated: boolean };
 
     expect(res.status).toBe(200);
@@ -475,7 +486,7 @@ describe('Keycast suspension wiring', () => {
       method: 'PATCH',
       body: JSON.stringify({ state: 'restricted_pending_parental_consent' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
     const body = await res.json() as { success: boolean; keycastUpdated: boolean; bulkActionTriggered?: string };
 
     expect(res.status).toBe(200);
@@ -509,7 +520,7 @@ describe('Keycast suspension wiring', () => {
       method: 'PATCH',
       body: JSON.stringify({ state: 'cleared' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
     const body = await res.json() as { success: boolean; keycastUpdated: boolean };
 
     expect(res.status).toBe(200);
@@ -542,7 +553,7 @@ describe('Keycast suspension wiring', () => {
       method: 'PATCH',
       body: JSON.stringify({ state: 'cleared' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
     const body = await res.json() as { success: boolean; keycastUpdated: boolean };
 
     expect(res.status).toBe(200);
@@ -575,7 +586,7 @@ describe('Keycast suspension wiring', () => {
       method: 'PATCH',
       body: JSON.stringify({ state: 'denied_closed' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
     const body = await res.json() as { success: boolean; keycastUpdated: boolean };
 
     expect(res.status).toBe(200);
@@ -611,7 +622,7 @@ describe('Keycast suspension wiring', () => {
       method: 'PATCH',
       body: JSON.stringify({ state: 'restricted_pending_user_response' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
     const body = await res.json() as { success: boolean; keycastUpdated: boolean };
 
     expect(res.status).toBe(200);
@@ -645,7 +656,7 @@ describe('Keycast suspension wiring', () => {
       method: 'PATCH',
       body: JSON.stringify({ state: 'denied_closed' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
     const body = await res.json() as { success: boolean };
 
     expect(res.status).toBe(200);
@@ -658,7 +669,7 @@ describe('Keycast suspension wiring', () => {
 describe('handleGetModerationStatus', () => {
   it('returns active when no case exists', async () => {
     const db = createMockDb([]);
-    const res = await handleGetModerationStatus('a'.repeat(64), { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleGetModerationStatus('a'.repeat(64), makeEnv(db), corsHeaders);
     const body = await res.json() as { restriction: { status: string } };
 
     expect(res.status).toBe(200);
@@ -677,7 +688,7 @@ describe('handleGetModerationStatus', () => {
       }),
     }));
 
-    const res = await handleGetModerationStatus(c.pubkey, { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleGetModerationStatus(c.pubkey, makeEnv(db), corsHeaders);
     const body = await res.json() as {
       restriction: { status: string };
       minorReviewCase: { id: string; state: string };
@@ -700,7 +711,7 @@ describe('handleGetModerationStatus', () => {
       }),
     }));
 
-    const res = await handleGetModerationStatus(c.pubkey, { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleGetModerationStatus(c.pubkey, makeEnv(db), corsHeaders);
     const body = await res.json() as { restriction: { status: string } };
 
     expect(res.status).toBe(200);
@@ -708,7 +719,7 @@ describe('handleGetModerationStatus', () => {
   });
 
   it('returns active (fail-open) when DB unavailable', async () => {
-    const res = await handleGetModerationStatus('a'.repeat(64), {}, corsHeaders);
+    const res = await handleGetModerationStatus('a'.repeat(64), makeEnv(), corsHeaders);
     const body = await res.json() as { restriction: { status: string } };
 
     expect(res.status).toBe(200);
@@ -736,7 +747,7 @@ describe('handleParentContact', () => {
       method: 'POST',
       body: JSON.stringify({ email: 'parent@example.com' }),
     });
-    const res = await handleParentContact(req, 'case-1', c.pubkey, { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleParentContact(req, 'case-1', c.pubkey, makeEnv(db), corsHeaders);
     expect(res.status).toBe(200);
 
     const updateCall = db.prepare.mock.calls.find(
@@ -760,7 +771,7 @@ describe('handleParentContact', () => {
       method: 'POST',
       body: JSON.stringify({ email: 'parent@example.com' }),
     });
-    const res = await handleParentContact(req, 'case-1', c.pubkey, { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleParentContact(req, 'case-1', c.pubkey, makeEnv(db), corsHeaders);
     expect(res.status).toBe(400);
     const body = await res.json() as { error: string };
     expect(body.error).toContain('Under-13');
@@ -780,7 +791,7 @@ describe('handleParentContact', () => {
       method: 'POST',
       body: JSON.stringify({ email: 'parent@example.com' }),
     });
-    const res = await handleParentContact(req, 'case-1', 'c'.repeat(64), { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleParentContact(req, 'case-1', 'c'.repeat(64), makeEnv(db), corsHeaders);
     expect(res.status).toBe(404);
   });
 
@@ -799,7 +810,7 @@ describe('handleParentContact', () => {
       method: 'POST',
       body: JSON.stringify({ email: 'parent@example.com' }),
     });
-    const res = await handleParentContact(req, 'case-1', c.pubkey, { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleParentContact(req, 'case-1', c.pubkey, makeEnv(db), corsHeaders);
     expect(res.status).toBe(400);
     const body = await res.json() as { error: string };
     expect(body.error).toContain('closed');
@@ -821,7 +832,7 @@ describe('handleParentContact', () => {
       method: 'POST',
       body: JSON.stringify({ email: 'parent@example.com' }),
     });
-    const res = await handleParentContact(req, 'case-1', c.pubkey, { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleParentContact(req, 'case-1', c.pubkey, makeEnv(db), corsHeaders);
     expect(res.status).toBe(400);
     const body = await res.json() as { error: string };
     expect(body.error).toContain('Cannot submit parent contact');
@@ -842,7 +853,7 @@ describe('handleParentContact', () => {
       method: 'POST',
       body: JSON.stringify({ email: 'not-valid' }),
     });
-    const res = await handleParentContact(req, 'case-1', c.pubkey, { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleParentContact(req, 'case-1', c.pubkey, makeEnv(db), corsHeaders);
     expect(res.status).toBe(400);
   });
 });
@@ -857,7 +868,7 @@ describe('checkAgeReviewDeadlines', () => {
   });
 
   it('does nothing when DB unavailable', async () => {
-    await checkAgeReviewDeadlines({});
+    await checkAgeReviewDeadlines(makeEnv());
     // No throw — just returns
   });
 
@@ -885,12 +896,11 @@ describe('checkAgeReviewDeadlines', () => {
       })),
     };
 
-    await checkAgeReviewDeadlines({
-      DB: db as unknown as D1Database,
+    await checkAgeReviewDeadlines(makeEnv(db, {
       ZENDESK_SUBDOMAIN: 'test',
       ZENDESK_API_TOKEN: 'tok',
       ZENDESK_EMAIL: 'agent@test.com',
-    });
+    }));
 
     const closeCalls = db.prepare.mock.calls.filter(
       (c: string[]) => c[0]?.includes('denied_closed')
@@ -933,7 +943,7 @@ describe('checkAgeReviewDeadlines', () => {
       })),
     };
 
-    await checkAgeReviewDeadlines({ DB: db as unknown as D1Database });
+    await checkAgeReviewDeadlines(makeEnv(db));
 
     const closeCalls = db.prepare.mock.calls.filter(
       (c: string[]) => c[0]?.includes('denied_closed')
@@ -961,10 +971,9 @@ describe('checkAgeReviewDeadlines', () => {
       })),
     };
 
-    await checkAgeReviewDeadlines({
-      DB: db as unknown as D1Database,
+    await checkAgeReviewDeadlines(makeEnv(db, {
       SLACK_WEBHOOK_URL: 'https://hooks.slack.com/test',
-    });
+    }));
 
     expect(mockFetch).toHaveBeenCalledTimes(1);
     expect(mockFetch.mock.calls[0][0]).toBe('https://hooks.slack.com/test');
@@ -996,10 +1005,9 @@ describe('checkAgeReviewDeadlines', () => {
       })),
     };
 
-    await checkAgeReviewDeadlines({
-      DB: db as unknown as D1Database,
+    await checkAgeReviewDeadlines(makeEnv(db, {
       SLACK_WEBHOOK_URL: 'https://hooks.slack.com/test',
-    });
+    }));
 
     const stampCalls = db.prepare.mock.calls.filter(
       (c: string[]) => c[0]?.includes('UPDATE') && c[0]?.includes('last_alerted_at')
@@ -1027,7 +1035,7 @@ describe('checkAgeReviewDeadlines', () => {
       })),
     };
 
-    await checkAgeReviewDeadlines({ DB: db as unknown as D1Database });
+    await checkAgeReviewDeadlines(makeEnv(db));
     expect(mockFetch).not.toHaveBeenCalled();
 
     vi.unstubAllGlobals();
@@ -1061,12 +1069,11 @@ describe('handleParentContact Zendesk integration', () => {
       method: 'POST',
       body: JSON.stringify({ email: 'parent@example.com' }),
     });
-    const res = await handleParentContact(req, 'case-1', c.pubkey, {
-      DB: db as unknown as D1Database,
+    const res = await handleParentContact(req, 'case-1', c.pubkey, makeEnv(db, {
       ZENDESK_SUBDOMAIN: 'test',
       ZENDESK_API_TOKEN: 'tok',
       ZENDESK_EMAIL: 'agent@test.com',
-    }, corsHeaders);
+    }), corsHeaders);
     expect(res.status).toBe(200);
 
     // Zendesk API was called to create ticket
@@ -1111,12 +1118,11 @@ describe('handleParentContact Zendesk integration', () => {
       method: 'POST',
       body: JSON.stringify({ email: 'parent@example.com' }),
     });
-    const res = await handleParentContact(req, 'case-1', c.pubkey, {
-      DB: db as unknown as D1Database,
+    const res = await handleParentContact(req, 'case-1', c.pubkey, makeEnv(db, {
       ZENDESK_SUBDOMAIN: 'test',
       ZENDESK_API_TOKEN: 'tok',
       ZENDESK_EMAIL: 'agent@test.com',
-    }, corsHeaders);
+    }), corsHeaders);
 
     // Still succeeds — Zendesk is non-critical
     expect(res.status).toBe(200);
@@ -1144,9 +1150,8 @@ describe('handleParentContact Zendesk integration', () => {
       method: 'POST',
       body: JSON.stringify({ email: 'parent@example.com' }),
     });
-    const res = await handleParentContact(req, 'case-1', c.pubkey, {
-      DB: db as unknown as D1Database,
-    }, corsHeaders);
+    const res = await handleParentContact(req, 'case-1', c.pubkey, makeEnv(db, {
+    }), corsHeaders);
 
     expect(res.status).toBe(200);
     // No Zendesk API call made
@@ -1175,12 +1180,11 @@ describe('handleParentContact Zendesk integration', () => {
       method: 'POST',
       body: JSON.stringify({ email: 'parent@example.com' }),
     });
-    const res = await handleParentContact(req, 'case-1', c.pubkey, {
-      DB: db as unknown as D1Database,
+    const res = await handleParentContact(req, 'case-1', c.pubkey, makeEnv(db, {
       ZENDESK_SUBDOMAIN: 'test',
       ZENDESK_API_TOKEN: 'tok',
       ZENDESK_EMAIL: 'agent@test.com',
-    }, corsHeaders);
+    }), corsHeaders);
 
     expect(res.status).toBe(200);
     expect(mockFetch).toHaveBeenCalledOnce();
@@ -1210,12 +1214,11 @@ describe('syncAgeReviewTicketResolution', () => {
       })),
     };
 
-    await syncAgeReviewTicketResolution('case-1', 'cleared', 'All good', {
-      DB: db as unknown as D1Database,
+    await syncAgeReviewTicketResolution('case-1', 'cleared', 'All good', makeEnv(db, {
       ZENDESK_SUBDOMAIN: 'test',
       ZENDESK_API_TOKEN: 'tok',
       ZENDESK_EMAIL: 'agent@test.com',
-    });
+    }));
 
     expect(mockFetch).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
@@ -1233,12 +1236,11 @@ describe('syncAgeReviewTicketResolution', () => {
       })),
     };
 
-    await syncAgeReviewTicketResolution('case-1', 'denied_closed', 'Expired', {
-      DB: db as unknown as D1Database,
+    await syncAgeReviewTicketResolution('case-1', 'denied_closed', 'Expired', makeEnv(db, {
       ZENDESK_SUBDOMAIN: 'test',
       ZENDESK_API_TOKEN: 'tok',
       ZENDESK_EMAIL: 'agent@test.com',
-    });
+    }));
 
     expect(mockFetch).toHaveBeenCalledOnce();
     const [url, opts] = mockFetch.mock.calls[0] as [string, RequestInit];
@@ -1263,14 +1265,13 @@ describe('syncAgeReviewTicketResolution', () => {
       })),
     };
 
-    await syncAgeReviewTicketResolution('case-1', 'cleared', null, {
-      DB: db as unknown as D1Database,
+    await syncAgeReviewTicketResolution('case-1', 'cleared', null, makeEnv(db, {
       ZENDESK_SUBDOMAIN: 'test',
       ZENDESK_API_TOKEN: 'tok',
       ZENDESK_EMAIL: 'agent@test.com',
       ZENDESK_FIELD_CATEGORY: '12345',
       ZENDESK_FIELD_ISSUE: '67890',
-    });
+    }));
 
     const payload = JSON.parse((mockFetch.mock.calls[0] as [string, RequestInit])[1].body as string);
     expect(payload.ticket.custom_fields).toEqual([
@@ -1306,7 +1307,7 @@ describe('handleAgeReviewReplyWebhook', () => {
       method: 'POST',
       body: JSON.stringify({ ticket_id: 42 }),
     });
-    const res = await handleAgeReviewReplyWebhook(req, { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleAgeReviewReplyWebhook(req, makeEnv(db), corsHeaders);
     const body = await res.json() as { success: boolean; new_state: string };
 
     expect(res.status).toBe(200);
@@ -1347,7 +1348,7 @@ describe('handleAgeReviewReplyWebhook', () => {
       method: 'POST',
       body: JSON.stringify({ ticket_id: 42 }),
     });
-    const res = await handleAgeReviewReplyWebhook(req, { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleAgeReviewReplyWebhook(req, makeEnv(db), corsHeaders);
     expect(res.status).toBe(200);
 
     // Should have bound an ISO timestamp and remaining days (~5)
@@ -1370,7 +1371,7 @@ describe('handleAgeReviewReplyWebhook', () => {
       method: 'POST',
       body: JSON.stringify({ ticket_id: 999 }),
     });
-    const res = await handleAgeReviewReplyWebhook(req, { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleAgeReviewReplyWebhook(req, makeEnv(db), corsHeaders);
     expect(res.status).toBe(404);
   });
 
@@ -1394,7 +1395,7 @@ describe('handleAgeReviewReplyWebhook', () => {
       method: 'POST',
       body: JSON.stringify({ ticket_id: 42 }),
     });
-    const res = await handleAgeReviewReplyWebhook(req, { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleAgeReviewReplyWebhook(req, makeEnv(db), corsHeaders);
     const body = await res.json() as { success: boolean; message: string };
 
     expect(res.status).toBe(200);
@@ -1407,7 +1408,7 @@ describe('handleAgeReviewReplyWebhook', () => {
       method: 'POST',
       body: JSON.stringify({}),
     });
-    const res = await handleAgeReviewReplyWebhook(req, { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleAgeReviewReplyWebhook(req, makeEnv(db), corsHeaders);
     expect(res.status).toBe(400);
   });
 });
@@ -1486,7 +1487,7 @@ describe('handleCreateMinorAccount', () => {
 
   it('creates account and returns success with claim_url', async () => {
     const db = makeMinorDb();
-    const res = await handleCreateMinorAccount(makeRequest({ username: 'testuser' }), { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleCreateMinorAccount(makeRequest({ username: 'testuser' }), makeEnv(db), corsHeaders);
     const body = await res.json() as Record<string, unknown>;
 
     expect(res.status).toBe(200);
@@ -1498,14 +1499,14 @@ describe('handleCreateMinorAccount', () => {
 
   it('rejects missing username', async () => {
     const db = makeMinorDb();
-    const res = await handleCreateMinorAccount(makeRequest({}), { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleCreateMinorAccount(makeRequest({}), makeEnv(db), corsHeaders);
     expect(res.status).toBe(400);
     expect(mockCreateMinorAccount).not.toHaveBeenCalled();
   });
 
   it('rejects invalid username characters', async () => {
     const db = makeMinorDb();
-    const res = await handleCreateMinorAccount(makeRequest({ username: 'BAD USER!' }), { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleCreateMinorAccount(makeRequest({ username: 'BAD USER!' }), makeEnv(db), corsHeaders);
     expect(res.status).toBe(400);
     expect(mockCreateMinorAccount).not.toHaveBeenCalled();
   });
@@ -1514,7 +1515,7 @@ describe('handleCreateMinorAccount', () => {
     const db = makeMinorDb();
     const res = await handleCreateMinorAccount(
       makeRequest({ username: 'test', display_name: 12345 }),
-      { DB: db as unknown as D1Database },
+      makeEnv(db),
       corsHeaders,
     );
     expect(res.status).toBe(400);
@@ -1523,7 +1524,7 @@ describe('handleCreateMinorAccount', () => {
 
   it('strips empty display_name before calling Keycast', async () => {
     const db = makeMinorDb();
-    await handleCreateMinorAccount(makeRequest({ username: 'test', display_name: '  ' }), { DB: db as unknown as D1Database }, corsHeaders);
+    await handleCreateMinorAccount(makeRequest({ username: 'test', display_name: '  ' }), makeEnv(db), corsHeaders);
     expect(mockCreateMinorAccount).toHaveBeenCalledWith('test', undefined, expect.anything());
   });
 
@@ -1531,7 +1532,7 @@ describe('handleCreateMinorAccount', () => {
     const db = makeMinorDb();
     const res = await handleCreateMinorAccount(
       makeRequest({ username: 'test', zendesk_ticket_id: 'abc' }),
-      { DB: db as unknown as D1Database },
+      makeEnv(db),
       corsHeaders,
     );
     expect(res.status).toBe(400);
@@ -1540,7 +1541,7 @@ describe('handleCreateMinorAccount', () => {
 
   it('returns 500 without claim_url when D1 insert fails after Keycast success', async () => {
     const db = makeMinorDb(() => Promise.reject(new Error('D1 write failed')));
-    const res = await handleCreateMinorAccount(makeRequest({ username: 'testuser' }), { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleCreateMinorAccount(makeRequest({ username: 'testuser' }), makeEnv(db), corsHeaders);
     const body = await res.json() as Record<string, unknown>;
 
     expect(res.status).toBe(500);
@@ -1553,21 +1554,21 @@ describe('handleCreateMinorAccount', () => {
   it('maps Keycast 409 to 409 status', async () => {
     mockCreateMinorAccount.mockResolvedValue({ success: false, error: '409: Username taken' });
     const db = makeMinorDb();
-    const res = await handleCreateMinorAccount(makeRequest({ username: 'taken' }), { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleCreateMinorAccount(makeRequest({ username: 'taken' }), makeEnv(db), corsHeaders);
     expect(res.status).toBe(409);
   });
 
   it('maps other Keycast 4xx to 400 status', async () => {
     mockCreateMinorAccount.mockResolvedValue({ success: false, error: '422: Invalid input' });
     const db = makeMinorDb();
-    const res = await handleCreateMinorAccount(makeRequest({ username: 'test' }), { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleCreateMinorAccount(makeRequest({ username: 'test' }), makeEnv(db), corsHeaders);
     expect(res.status).toBe(400);
   });
 
   it('maps Keycast server errors to 502 status', async () => {
     mockCreateMinorAccount.mockResolvedValue({ success: false, error: 'Connection refused' });
     const db = makeMinorDb();
-    const res = await handleCreateMinorAccount(makeRequest({ username: 'test' }), { DB: db as unknown as D1Database }, corsHeaders);
+    const res = await handleCreateMinorAccount(makeRequest({ username: 'test' }), makeEnv(db), corsHeaders);
     expect(res.status).toBe(502);
   });
 
@@ -1584,7 +1585,7 @@ describe('handleCreateMinorAccount', () => {
 
     const res = await handleCreateMinorAccount(
       makeRequest({ username: 'testuser' }),
-      { DB: db as unknown as D1Database },
+      makeEnv(db),
       corsHeaders,
     );
 
@@ -1614,7 +1615,7 @@ describe('handleCreateMinorAccount', () => {
 
     const res = await handleCreateMinorAccount(
       makeRequest({ username: 'testuser' }),
-      { DB: db as unknown as D1Database },
+      makeEnv(db),
       corsHeaders,
     );
 
