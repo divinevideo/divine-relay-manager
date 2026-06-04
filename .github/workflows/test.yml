@@ -28,3 +28,20 @@ jobs:
           
       - name: Run tests
         run: npm run test
+
+      # The worker has its own package/lockfile and was previously not
+      # type-checked or tested in CI (root vitest excludes worker/**).
+      # --legacy-peer-deps: worker lockfile has a known peer-dep conflict
+      # (@cloudflare/vitest-pool-workers wants vitest 2-3.x, lockfile pins 4.x).
+      # Split into separate steps so a typecheck vs test failure is obvious.
+      - name: Worker install
+        working-directory: worker
+        run: npm ci --legacy-peer-deps
+
+      - name: Worker typecheck
+        working-directory: worker
+        run: npm run typecheck
+
+      - name: Worker tests
+        working-directory: worker
+        run: npm run test:run

@@ -125,12 +125,18 @@ export async function queryRelayEvents(
       const events: RelayEventSummary[] = [];
       const subId = `bulk-${Date.now()}`;
 
-      const finish = (fn: (value?: unknown) => void, value?: unknown) => {
+      // `resolve` expects RelayEventSummary[]; `reject` expects an Error. The helper
+      // accepts whichever terminator and its matching value as a single union, so the
+      // settle path (close socket, clear timeout, guard against double-settle) is shared.
+      type Settle =
+        | { fn: typeof resolve; value: RelayEventSummary[] }
+        | { fn: typeof reject; value: Error };
+      const finish = (fn: Settle['fn'], value: RelayEventSummary[] | Error) => {
         if (resolved) return;
         resolved = true;
         clearTimeout(timeout);
         ws.close();
-        fn(value);
+        (fn as (value: RelayEventSummary[] | Error) => void)(value);
       };
 
       const timeout = setTimeout(() => {
