@@ -16,7 +16,7 @@ import { ensureSchema } from './db';
 import { generatePreAuthToken, verifyPreAuthToken, base64UrlEncode } from './zendesk-preauth';
 import { deriveFunnelcakeApiUrl, proxyFunnelcakeRequest } from './funnelcake-proxy';
 import type { KeycastEnv } from './keycast-client';
-import { suspendUser, unsuspendUser } from './keycast-client';
+import { suspendUser, unsuspendUser, banUser } from './keycast-client';
 import {
   handleGetAgeReviewCases,
   handleGetAgeReviewCase,
@@ -226,6 +226,31 @@ function notifyAccountState(
   const dmPromise = notifyModerationService(env, pubkey, action, reason)
     .catch(err => console.error('[notifyAccountState] DM notification error:', err));
   ctx.waitUntil(dmPromise);
+}
+
+/**
+ * Apply a Keycast account-state change (ban / suspend / restore) as a
+ * NON-CRITICAL enrichment alongside the relay RPC the caller already accepted:
+ * dispatched via ctx.waitUntil, failures logged and swallowed, never
+ * propagated. Without a ctx the work cannot outlive the response, so it is
+ * skipped with a warning rather than started and silently dropped. `op` only
+ * labels the log lines.
+ */
+function enforceKeycastState(
+  op: string,
+  pubkey: string,
+  fn: () => Promise<{ success: boolean; error?: string }>,
+  ctx?: ExecutionContext
+): void {
+  if (!ctx) {
+    console.warn(`[handleRelayRpc] No ExecutionContext; skipping Keycast ${op} for ${pubkey}`);
+    return;
+  }
+  ctx.waitUntil(
+    fn().then(res => {
+      if (!res.success) console.error(`[handleRelayRpc] Keycast ${op} failed for ${pubkey}: ${res.error}`);
+    }).catch(err => console.error(`[handleRelayRpc] Keycast ${op} error:`, err))
+  );
 }
 
 function getAllowedOrigin(requestOrigin: string | null, allowedOriginsEnv: string | undefined): string | null {
@@ -834,7 +859,8 @@ async function handleModerate(
             params: [body.pubkey],
           }),
         });
-        const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders);
+        // Pass ctx so the unbanpubkey Keycast restore (non-critical) is kept alive.
+        const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders, ctx);
         const rpcResult = await rpcResponse.json() as { success: boolean; error?: string };
         if (!rpcResult.success) {
           return jsonResponse({ success: false, error: rpcResult.error || 'unbanpubkey RPC failed' }, 500, corsHeaders);
@@ -889,39 +915,24 @@ async function handleRelayRpc(
     const pubkey = String(body.params[0]);
     const reason = body.params[1] ? String(body.params[1]) : undefined;
 
-    // Note: unbanpubkey intentionally sends no DM here. A restore-on-unban DM
-    // is tracked in #96 (moderation-DM coverage gaps).
+    // Mirror each account-state relay action into Keycast (non-critical) and DM
+    // the user. unbanpubkey lifts the Keycast ban (status -> active) so a
+    // reinstated user can log in again, but sends no DM here -- restore-on-unban
+    // DM is tracked in #96.
     switch (body.method) {
       case 'banpubkey':
-        // Unlike suspend, banpubkey does not yet call Keycast (banUser), so a
-        // relay ban leaves the Keycast account active. Enforcement parity is
-        // tracked in #100; this PR is scoped to the suspend path.
+        enforceKeycastState('ban', pubkey, () => banUser(pubkey, 'moderation', env), ctx);
         notifyAccountState(env, pubkey, 'ACCOUNT_BANNED', reason || 'Account banned by moderator', ctx);
         break;
+      case 'unbanpubkey':
+        enforceKeycastState('unban', pubkey, () => unsuspendUser(pubkey, env), ctx);
+        break;
       case 'suspendpubkey':
-        // Keycast suspend is a non-critical enrichment here: log on failure,
-        // do not fail the RPC the relay already accepted.
-        if (ctx) {
-          ctx.waitUntil(
-            suspendUser(pubkey, 'moderation', env).then(res => {
-              if (!res.success) console.error(`[handleRelayRpc] Keycast suspend failed for ${pubkey}: ${res.error}`);
-            }).catch(err => console.error('[handleRelayRpc] Keycast suspend error:', err))
-          );
-        } else {
-          console.warn(`[handleRelayRpc] No ExecutionContext; skipping Keycast suspend for ${pubkey}`);
-        }
+        enforceKeycastState('suspend', pubkey, () => suspendUser(pubkey, 'moderation', env), ctx);
         notifyAccountState(env, pubkey, 'ACCOUNT_SUSPENDED', reason || 'Account suspended by moderator', ctx);
         break;
       case 'unsuspendpubkey':
-        if (ctx) {
-          ctx.waitUntil(
-            unsuspendUser(pubkey, env).then(res => {
-              if (!res.success) console.error(`[handleRelayRpc] Keycast unsuspend failed for ${pubkey}: ${res.error}`);
-            }).catch(err => console.error('[handleRelayRpc] Keycast unsuspend error:', err))
-          );
-        } else {
-          console.warn(`[handleRelayRpc] No ExecutionContext; skipping Keycast unsuspend for ${pubkey}`);
-        }
+        enforceKeycastState('unsuspend', pubkey, () => unsuspendUser(pubkey, env), ctx);
         notifyAccountState(env, pubkey, 'ACCOUNT_RESTORED', reason || 'Account restored by moderator', ctx);
         break;
     }

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import worker from './index';
 
 const env = {
@@ -192,8 +192,9 @@ describe('notifyModerationService null token', () => {
     );
 
     expect(response.status).toBe(200);
-    expect(waitUntil).toHaveBeenCalledOnce();
-    await waitUntil.mock.calls[0][0];
+    // banpubkey schedules two non-critical tasks: the Keycast ban and the DM.
+    expect(waitUntil).toHaveBeenCalledTimes(2);
+    await Promise.all(waitUntil.mock.calls.map(c => c[0]));
     expect(errorSpy).toHaveBeenCalledWith(
       '[notifyAccountState] DM notification error:',
       expect.objectContaining({
@@ -207,6 +208,10 @@ describe('notifyModerationService null token', () => {
 });
 
 describe('relay-rpc account-state side effects', () => {
+  // Restore the global fetch spy even if a test throws mid-assertion, so a
+  // failure can't leak its spy and cascade into later tests.
+  afterEach(() => { vi.restoreAllMocks(); });
+
   const VALID_PUBKEY = 'abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234';
 
   function makeAccountStateEnv() {
@@ -282,7 +287,7 @@ describe('relay-rpc account-state side effects', () => {
     await Promise.all(waitUntil.mock.calls.map(c => c[0]));
   }
 
-  it('banpubkey sends DM action ACCOUNT_BANNED', async () => {
+  it('banpubkey triggers Keycast ban and DM action ACCOUNT_BANNED', async () => {
     const fetchSpy = makeFetchSpy();
     const waitUntil = vi.fn();
     const testCtx = { waitUntil } as unknown as ExecutionContext;
@@ -295,8 +300,11 @@ describe('relay-rpc account-state side effects', () => {
     expect(bodies).toHaveLength(1);
     expect(bodies[0].action).toBe('ACCOUNT_BANNED');
     expect(bodies[0].recipientPubkey).toBe(VALID_PUBKEY);
-    // No Keycast suspend/unsuspend on ban
-    expect(keycastCalls(fetchSpy)).toHaveLength(0);
+
+    const kc = keycastCalls(fetchSpy);
+    expect(kc).toHaveLength(1);
+    expect(kc[0].url).toContain(`/api/admin/users/${VALID_PUBKEY}/status`);
+    expect(kc[0].status).toBe('banned');
 
     fetchSpy.mockRestore();
   });
@@ -342,6 +350,25 @@ describe('relay-rpc account-state side effects', () => {
     fetchSpy.mockRestore();
   });
 
+  it('unbanpubkey triggers Keycast restore (active) and sends no DM', async () => {
+    const fetchSpy = makeFetchSpy();
+    const waitUntil = vi.fn();
+    const testCtx = { waitUntil } as unknown as ExecutionContext;
+
+    const response = await callRelayRpc('unbanpubkey', [VALID_PUBKEY], makeAccountStateEnv(), testCtx);
+    expect(response.status).toBe(200);
+    await drain(waitUntil);
+
+    const kc = keycastCalls(fetchSpy);
+    expect(kc).toHaveLength(1);
+    expect(kc[0].url).toContain(`/api/admin/users/${VALID_PUBKEY}/status`);
+    expect(kc[0].status).toBe('active');
+    // unban lifts the Keycast ban but sends no DM (restore-on-unban DM tracked in #96)
+    expect(await notifyBodies(fetchSpy)).toHaveLength(0);
+
+    fetchSpy.mockRestore();
+  });
+
   it('ban_pubkey via /api/moderate sends exactly one ACCOUNT_BANNED DM (no double)', async () => {
     const fetchSpy = makeFetchSpy();
     const waitUntil = vi.fn();
@@ -368,6 +395,40 @@ describe('relay-rpc account-state side effects', () => {
     const bodies = await notifyBodies(fetchSpy);
     expect(bodies).toHaveLength(1);
     expect(bodies[0].action).toBe('ACCOUNT_BANNED');
+    // ...and the same path reaches Keycast (status banned).
+    const kc = keycastCalls(fetchSpy);
+    expect(kc).toHaveLength(1);
+    expect(kc[0].status).toBe('banned');
+
+    fetchSpy.mockRestore();
+  });
+
+  it('allow_pubkey via /api/moderate restores the Keycast account (active)', async () => {
+    const fetchSpy = makeFetchSpy();
+    const waitUntil = vi.fn();
+    const testCtx = { waitUntil } as unknown as ExecutionContext;
+
+    const response = await worker.fetch(
+      new Request('https://api-relay-prod.divine.video/api/moderate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Admin-Key': 'test-admin-key',
+          Origin: 'https://app.divine.video',
+        },
+        body: JSON.stringify({ action: 'allow_pubkey', pubkey: VALID_PUBKEY }),
+      }),
+      makeAccountStateEnv(),
+      testCtx,
+    );
+    expect(response.status).toBe(200);
+    await drain(waitUntil);
+
+    // allow_pubkey -> unbanpubkey -> Keycast active. Requires ctx to be passed
+    // through handleModerate's allow_pubkey case.
+    const kc = keycastCalls(fetchSpy);
+    expect(kc).toHaveLength(1);
+    expect(kc[0].status).toBe('active');
 
     fetchSpy.mockRestore();
   });
