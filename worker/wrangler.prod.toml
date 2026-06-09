@@ -17,8 +17,8 @@ store_id = "ef490704b12a4feb91c7feb51229c364"
 secret_name = "NOSTR_NSEC"
 
 # Shared X-Admin-Key for the divine-moderation-service -> /api/relay-rpc connection (#170).
-# verifyAdminAccess accepts this in addition to ADMIN_API_KEY / CF Access, so the
-# moderation-service ban path can reach the worker via service binding without CF Access.
+# verifyAdminAccess accepts this only for POST /api/relay-rpc, so the moderation-service
+# ban path can reach the worker via service binding without CF Access.
 [[secrets_store_secrets]]
 binding = "MOD_RELAY_ADMIN_KEY"
 store_id = "ef490704b12a4feb91c7feb51229c364"

@@ -396,7 +396,7 @@ describe('relay-rpc account-state side effects', () => {
   });
 });
 
-describe('admin access via MOD_RELAY_ADMIN_KEY (Secrets Store shared key)', () => {
+describe('relay-rpc admin access via MOD_RELAY_ADMIN_KEY (Secrets Store shared key)', () => {
   function makeEnvWithModKey(modKeyValue: string) {
     return {
       ALLOWED_ORIGINS: 'https://app.divine.video',
@@ -411,7 +411,28 @@ describe('admin access via MOD_RELAY_ADMIN_KEY (Secrets Store shared key)', () =
     } as never;
   }
 
-  it('authorizes a request whose X-Admin-Key matches the resolved MOD_RELAY_ADMIN_KEY (not ADMIN_API_KEY)', async () => {
+  it('authorizes relay-rpc when X-Admin-Key matches the resolved MOD_RELAY_ADMIN_KEY (not ADMIN_API_KEY)', async () => {
+    const testEnv = makeEnvWithModKey('mod-shared-key');
+    const response = await worker.fetch(
+      new Request('https://api-relay-prod.divine.video/api/relay-rpc', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Admin-Key': 'mod-shared-key',
+          Origin: 'https://app.divine.video',
+        },
+        body: JSON.stringify({}),
+      }),
+      testEnv,
+      ctx,
+    );
+
+    expect(response.status).toBe(400);
+    const body = await response.json() as { success: boolean; error: string };
+    expect(body.error).toBe('Missing method');
+  });
+
+  it('does not authorize other admin endpoints with MOD_RELAY_ADMIN_KEY', async () => {
     const testEnv = makeEnvWithModKey('mod-shared-key');
     const response = await worker.fetch(
       new Request('https://api-relay-prod.divine.video/api/moderate-media', {
@@ -427,20 +448,20 @@ describe('admin access via MOD_RELAY_ADMIN_KEY (Secrets Store shared key)', () =
       ctx,
     );
 
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(401);
   });
 
-  it('rejects a request whose X-Admin-Key matches neither ADMIN_API_KEY nor MOD_RELAY_ADMIN_KEY', async () => {
+  it('rejects relay-rpc when X-Admin-Key matches neither ADMIN_API_KEY nor MOD_RELAY_ADMIN_KEY', async () => {
     const testEnv = makeEnvWithModKey('mod-shared-key');
     const response = await worker.fetch(
-      new Request('https://api-relay-prod.divine.video/api/moderate-media', {
+      new Request('https://api-relay-prod.divine.video/api/relay-rpc', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'X-Admin-Key': 'totally-wrong-key',
           Origin: 'https://app.divine.video',
         },
-        body: JSON.stringify({ sha256: 'abc123', action: 'AGE_RESTRICTED' }),
+        body: JSON.stringify({}),
       }),
       testEnv,
       ctx,

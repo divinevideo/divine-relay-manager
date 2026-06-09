@@ -88,7 +88,7 @@ interface Env extends KeycastEnv {
   ADMIN_API_KEY?: string;
   // Dedicated shared key for the divine-moderation-service -> /api/relay-rpc connection.
   // Secrets Store secret (MODERATION_TO_RELAY_ADMIN_KEY), accepted in addition to
-  // ADMIN_API_KEY so it can be rotated independently of other callers (#170).
+  // ADMIN_API_KEY on that route so it can be rotated independently of other callers (#170).
   MOD_RELAY_ADMIN_KEY?: string | SecretStoreSecret;
   // Slack webhook for age review deadline alerts
   SLACK_WEBHOOK_URL?: string;
@@ -322,10 +322,14 @@ interface ApiResponse {
 // Accepts any of:
 //   1. Cf-Access-Jwt-Assertion header (request came through CF Access on relay.admin.divine.video)
 //   2. X-Admin-Key header matching ADMIN_API_KEY env var (server-to-server callers)
-//   3. X-Admin-Key header matching MOD_RELAY_ADMIN_KEY (Secrets Store shared key for the
-//      divine-moderation-service -> /api/relay-rpc connection, #170)
+//   3. X-Admin-Key header matching MOD_RELAY_ADMIN_KEY, only when allowModRelayAdminKey
+//      is true for the divine-moderation-service -> /api/relay-rpc connection (#170)
 // Returns null if authorized, or an error string if not.
-async function verifyAdminAccess(request: Request, env: Env): Promise<string | null> {
+async function verifyAdminAccess(
+  request: Request,
+  env: Env,
+  options: { allowModRelayAdminKey?: boolean } = {}
+): Promise<string | null> {
   // CF Access validates the JWT at the edge before the request reaches the worker.
   // Header presence here means the request passed CF Access authentication.
   if (request.headers.get('Cf-Access-Jwt-Assertion')) {
@@ -338,11 +342,13 @@ async function verifyAdminAccess(request: Request, env: Env): Promise<string | n
     if (env.ADMIN_API_KEY && adminKey === env.ADMIN_API_KEY) {
       return null;
     }
-    // Dedicated moderation-service key (Secrets Store), accepted in addition to
-    // ADMIN_API_KEY so it can be rotated without disrupting other callers.
-    const modRelayKey = await resolveSecret(env.MOD_RELAY_ADMIN_KEY);
-    if (modRelayKey && adminKey === modRelayKey) {
-      return null;
+    if (options.allowModRelayAdminKey) {
+      // Dedicated moderation-service key (Secrets Store), accepted in addition to
+      // ADMIN_API_KEY for relay-rpc so it can be rotated without disrupting other callers.
+      const modRelayKey = await resolveSecret(env.MOD_RELAY_ADMIN_KEY);
+      if (modRelayKey && adminKey === modRelayKey) {
+        return null;
+      }
     }
   }
 
@@ -392,7 +398,9 @@ export default {
       }
 
       // All other /api/* endpoints require admin access (CF Access or API key)
-      const adminAuthError = await verifyAdminAccess(request, env);
+      const adminAuthError = await verifyAdminAccess(request, env, {
+        allowModRelayAdminKey: path === '/api/relay-rpc' && request.method === 'POST',
+      });
       if (adminAuthError) {
         return jsonResponse({ success: false, error: adminAuthError }, 401, corsHeaders);
       }
