@@ -86,6 +86,10 @@ interface Env extends KeycastEnv {
   AUTO_HIDE_ENABLED?: string;
   // Admin API key — required on all admin endpoints when request doesn't come through CF Access
   ADMIN_API_KEY?: string;
+  // Dedicated shared key for the divine-moderation-service -> /api/relay-rpc connection.
+  // Secrets Store secret (MODERATION_TO_RELAY_ADMIN_KEY), accepted in addition to
+  // ADMIN_API_KEY so it can be rotated independently of other callers (#170).
+  MOD_RELAY_ADMIN_KEY?: string | SecretStoreSecret;
   // Slack webhook for age review deadline alerts
   SLACK_WEBHOOK_URL?: string;
   // Environment identifier for deep links (e.g., "production", "staging")
@@ -315,21 +319,31 @@ interface ApiResponse {
 }
 
 // Verify that the request is authorized for admin API access.
-// Accepts either:
+// Accepts any of:
 //   1. Cf-Access-Jwt-Assertion header (request came through CF Access on relay.admin.divine.video)
 //   2. X-Admin-Key header matching ADMIN_API_KEY env var (server-to-server callers)
+//   3. X-Admin-Key header matching MOD_RELAY_ADMIN_KEY (Secrets Store shared key for the
+//      divine-moderation-service -> /api/relay-rpc connection, #170)
 // Returns null if authorized, or an error string if not.
-function verifyAdminAccess(request: Request, env: Env): string | null {
+async function verifyAdminAccess(request: Request, env: Env): Promise<string | null> {
   // CF Access validates the JWT at the edge before the request reaches the worker.
   // Header presence here means the request passed CF Access authentication.
   if (request.headers.get('Cf-Access-Jwt-Assertion')) {
     return null;
   }
 
-  // Server-to-server callers use a shared API key
+  // Server-to-server callers use a shared API key.
   const adminKey = request.headers.get('X-Admin-Key');
-  if (env.ADMIN_API_KEY && adminKey === env.ADMIN_API_KEY) {
-    return null;
+  if (adminKey) {
+    if (env.ADMIN_API_KEY && adminKey === env.ADMIN_API_KEY) {
+      return null;
+    }
+    // Dedicated moderation-service key (Secrets Store), accepted in addition to
+    // ADMIN_API_KEY so it can be rotated without disrupting other callers.
+    const modRelayKey = await resolveSecret(env.MOD_RELAY_ADMIN_KEY);
+    if (modRelayKey && adminKey === modRelayKey) {
+      return null;
+    }
   }
 
   return 'Unauthorized: admin access requires CF Access or X-Admin-Key header';
@@ -378,7 +392,7 @@ export default {
       }
 
       // All other /api/* endpoints require admin access (CF Access or API key)
-      const adminAuthError = verifyAdminAccess(request, env);
+      const adminAuthError = await verifyAdminAccess(request, env);
       if (adminAuthError) {
         return jsonResponse({ success: false, error: adminAuthError }, 401, corsHeaders);
       }

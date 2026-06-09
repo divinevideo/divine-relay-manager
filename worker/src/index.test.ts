@@ -395,3 +395,57 @@ describe('relay-rpc account-state side effects', () => {
     fetchSpy.mockRestore();
   });
 });
+
+describe('admin access via MOD_RELAY_ADMIN_KEY (Secrets Store shared key)', () => {
+  function makeEnvWithModKey(modKeyValue: string) {
+    return {
+      ALLOWED_ORIGINS: 'https://app.divine.video',
+      RELAY_URL: 'wss://relay.divine.video',
+      ADMIN_API_KEY: 'test-admin-key',
+      MOD_RELAY_ADMIN_KEY: { get: vi.fn(async () => modKeyValue) },
+      MODERATION_ADMIN_URL: 'https://moderation-api.divine.video',
+      SERVICE_API_TOKEN: 'svc-token',
+      MODERATION_API: {
+        fetch: vi.fn(async () => new Response(JSON.stringify({ success: true, sha256: 'abc123', action: 'AGE_RESTRICTED' }), { status: 200 })),
+      },
+    } as never;
+  }
+
+  it('authorizes a request whose X-Admin-Key matches the resolved MOD_RELAY_ADMIN_KEY (not ADMIN_API_KEY)', async () => {
+    const testEnv = makeEnvWithModKey('mod-shared-key');
+    const response = await worker.fetch(
+      new Request('https://api-relay-prod.divine.video/api/moderate-media', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Admin-Key': 'mod-shared-key',
+          Origin: 'https://app.divine.video',
+        },
+        body: JSON.stringify({ sha256: 'abc123', action: 'AGE_RESTRICTED' }),
+      }),
+      testEnv,
+      ctx,
+    );
+
+    expect(response.status).toBe(200);
+  });
+
+  it('rejects a request whose X-Admin-Key matches neither ADMIN_API_KEY nor MOD_RELAY_ADMIN_KEY', async () => {
+    const testEnv = makeEnvWithModKey('mod-shared-key');
+    const response = await worker.fetch(
+      new Request('https://api-relay-prod.divine.video/api/moderate-media', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Admin-Key': 'totally-wrong-key',
+          Origin: 'https://app.divine.video',
+        },
+        body: JSON.stringify({ sha256: 'abc123', action: 'AGE_RESTRICTED' }),
+      }),
+      testEnv,
+      ctx,
+    );
+
+    expect(response.status).toBe(401);
+  });
+});
