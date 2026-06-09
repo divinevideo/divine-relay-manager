@@ -67,6 +67,11 @@ export async function suspendUser(pubkey: string, reason: KeycastReason, env: Ke
   return callKeycast(pubkey, { status: 'suspended', reason }, env);
 }
 
+/**
+ * Set a Keycast account back to `active`. Lifts BOTH `suspended` and `banned`
+ * (Keycast uses a single status transition), so this is the restore path for
+ * unsuspend AND unban.
+ */
 export async function unsuspendUser(pubkey: string, env: KeycastEnv): Promise<KeycastResult> {
   return callKeycast(pubkey, { status: 'active' }, env);
 }
