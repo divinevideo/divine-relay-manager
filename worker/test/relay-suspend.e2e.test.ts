@@ -1,8 +1,8 @@
 // END-TO-END: relay-manager's REAL NIP-86 client (suspendPubkey/unsuspendPubkey/
 // banPubkey) against a LIVE funnelcake (cake relay + funnel management) backed by
-// real ClickHouse. Proves the downstream effect C1/C9 depend on:
-//   - suspendpubkey actually HIDES the user's existing events at the relay (C1)
-//   - banpubkey actually purges/hides them (C9)
+// real ClickHouse. Proves the downstream effects the relay enforcement depends on:
+//   - suspendpubkey actually HIDES the user's existing events at the relay
+//   - banpubkey actually purges/hides them
 // This is the cross-system validation that worker-only tests can't give.
 //
 // Prereqs (started out-of-band):
@@ -73,8 +73,8 @@ async function makeAuthorWithEvent() {
   return { pk, id: ev.id };
 }
 
-describe('C1/C9 e2e: relay-manager NIP-86 -> live funnelcake', () => {
-  it('C1: suspendPubkey hides the author\'s existing events at the relay', async () => {
+describe('e2e: relay-manager NIP-86 -> live funnelcake', () => {
+  it('suspendPubkey hides the author\'s existing events at the relay', async () => {
     const { pk, id } = await makeAuthorWithEvent();
     expect((await reqAuthorIds(pk))).toContain(id); // visible before
 
@@ -85,7 +85,7 @@ describe('C1/C9 e2e: relay-manager NIP-86 -> live funnelcake', () => {
     expect((await reqAuthorIds(pk))).not.toContain(id); // hidden after
   });
 
-  it('C9: banPubkey hides/purges the author\'s events at the relay', async () => {
+  it('banPubkey hides/purges the author\'s events at the relay', async () => {
     const { pk, id } = await makeAuthorWithEvent();
     expect((await reqAuthorIds(pk))).toContain(id);
 

@@ -184,24 +184,27 @@ export async function handleUpdateAgeReviewCase(
     return json({ success: false, error: 'No valid fields to update' }, 400, corsHeaders);
   }
 
-  // C7: optimistic locking. Reject a stale client write up front (the UI may
-  // send the version it last read) ...
-  if (
-    body.expected_version !== undefined &&
-    (typeof body.expected_version !== 'number' || body.expected_version !== existing.version)
-  ) {
-    return json({
-      success: false,
-      error: 'Case was modified by another request',
-      code: 'version_conflict',
-      current_version: existing.version,
-    }, 409, corsHeaders);
+  // optimistic locking. Validate expected_version's type like every other
+  // field (a bad type is a 400, not a conflict), then reject a stale client
+  // write up front; the server-read CAS below is the real guard.
+  const versionConflict = () => json({
+    success: false,
+    error: 'Case was modified by another request',
+    code: 'version_conflict',
+    current_version: existing.version,
+  }, 409, corsHeaders);
+
+  if (body.expected_version !== undefined && typeof body.expected_version !== 'number') {
+    return json({ success: false, error: 'expected_version must be a number' }, 400, corsHeaders);
+  }
+  if (body.expected_version !== undefined && body.expected_version !== existing.version) {
+    return versionConflict();
   }
 
   updates.push("updated_at = datetime('now')");
   updates.push('version = version + 1');
 
-  // C7: ... and compare-and-swap on the version we read. If a concurrent
+  // ... and compare-and-swap on the version we read. If a concurrent
   // writer (another moderator, or the deadline cron) committed between our
   // read and this write, changes === 0 and we abort BEFORE running any
   // enforcement -- the loser must not apply side effects for a state it no
@@ -211,12 +214,7 @@ export async function handleUpdateAgeReviewCase(
   ).bind(...binds, caseId, existing.version).run();
 
   if (updateResult.meta?.changes !== 1) {
-    return json({
-      success: false,
-      error: 'Case was modified by another request',
-      code: 'version_conflict',
-      current_version: existing.version,
-    }, 409, corsHeaders);
+    return versionConflict();
   }
 
   let updated = await env.DB.prepare('SELECT * FROM age_review_cases WHERE id = ?')
@@ -266,49 +264,53 @@ export async function handleUpdateAgeReviewCase(
     }
   }
 
-  // C5: enforcement legs are SAFETY-CRITICAL, not "non-critical". Track each
-  // leg's real outcome and surface failure -- the API must not report success
-  // when a minor's content was not actually restricted or their account not
-  // actually suspended. (Zendesk above stays non-critical and swallowed.)
+  // Enforcement legs are safety-critical: track each leg's real outcome and
+  // surface failure -- the API must not report success when a minor's content
+  // was not actually restricted or their account not suspended. (Zendesk above
+  // stays non-critical and swallowed.)
   type LegStatus = 'not_attempted' | 'ok' | 'failed';
   let bulk: LegStatus = 'not_attempted';
   let bulkError: string | undefined;
   let bulkActionTriggered: string | undefined;
-  let keycast: LegStatus = 'not_attempted';
-  let keycastError: string | undefined;
   let relay: LegStatus = 'not_attempted';
   let relayError: string | undefined;
+  let keycast: LegStatus = 'not_attempted';
+  let keycastError: string | undefined;
+
+  // Shared wrapper for the relay and Keycast legs (both resolve to
+  // { success, error }). Returns not_attempted when no call applies.
+  const runStatusLeg = async (
+    label: string,
+    call: () => Promise<{ success: boolean; error?: string }> | undefined,
+  ): Promise<{ status: LegStatus; error?: string }> => {
+    try {
+      const result = await call();
+      if (!result) return { status: 'not_attempted' };
+      if (result.success) return { status: 'ok' };
+      console.error(`[age-review] ${label} ${requestedState} failed for case ${caseId}: ${result.error}`);
+      return { status: 'failed', error: result.error };
+    } catch (error) {
+      console.error(`[age-review] ${label} action failed for case ${caseId}:`, error);
+      return { status: 'failed', error: error instanceof Error ? error.message : String(error) };
+    }
+  };
 
   if (requestedState !== undefined) {
-    // C1/C9: relay-level pubkey enforcement. suspendpubkey (reversible) hides
-    // the user's existing events AND blocks new writes at the relay -- the only
-    // layer that does so regardless of key custody (Keycast suspend does not
-    // stop a self-custody / local-key signer). Reversed by unsuspendpubkey on
-    // clear (existing content reappears on the ~5-min MV refresh). On
-    // deny/expiry, banpubkey purges (one-way) per the closure outcome.
-    try {
-      let relayResult;
-      if (enteredRestrictedState) {
-        relayResult = await suspendPubkey(existing.pubkey, 'age_review', env);
-      } else if (clearedCase) {
-        relayResult = await unsuspendPubkey(existing.pubkey, env);
-      } else if (deniedCase) {
-        relayResult = await banPubkey(existing.pubkey, 'age_review_denied', env);
-      }
-      if (relayResult) {
-        relay = relayResult.success ? 'ok' : 'failed';
-        if (!relayResult.success) {
-          relayError = relayResult.error;
-          console.error(`[age-review] Relay ${requestedState} failed for case ${caseId}: ${relayResult.error}`);
-        }
-      }
-    } catch (error) {
-      relay = 'failed';
-      relayError = error instanceof Error ? error.message : String(error);
-      console.error(`[age-review] Relay action failed for case ${caseId}:`, error);
-    }
+    // Relay-level pubkey enforcement: suspendpubkey (reversible) hides the user's
+    // existing events AND blocks new writes regardless of key custody (Keycast
+    // suspend does not stop a self-custody / local-key signer); unsuspendpubkey
+    // reverses it on clear (existing content reappears on the ~5-min MV refresh);
+    // banpubkey purges (one-way) on deny/expiry.
+    const relayLeg = await runStatusLeg('Relay', () =>
+      enteredRestrictedState ? suspendPubkey(existing.pubkey, 'age_review', env)
+      : clearedCase ? unsuspendPubkey(existing.pubkey, env)
+      : deniedCase ? banPubkey(existing.pubkey, 'age_review_denied', env)
+      : undefined);
+    relay = relayLeg.status;
+    relayError = relayLeg.error;
 
-    // Relay/media bulk content action
+    // Relay/media bulk content action (own shape: throws on failure, and deny
+    // only deletes when auto_delete_on_deny is set).
     try {
       if (enteredRestrictedState) {
         await triggerBulkModerate(existing.pubkey, 'age-restrict-all', 'Age review restriction', env);
@@ -332,31 +334,17 @@ export async function handleUpdateAgeReviewCase(
       console.error(`[age-review] Bulk action failed for case ${caseId}:`, error);
     }
 
-    // Keycast account status
-    try {
-      let keycastResult;
-      if (enteredRestrictedState) {
-        keycastResult = await suspendUser(existing.pubkey, 'age_review', env);
-      } else if (clearedCase) {
-        keycastResult = await unsuspendUser(existing.pubkey, env);
-      } else if (deniedCase) {
-        keycastResult = await banUser(existing.pubkey, 'age_review_denied', env);
-      }
-      if (keycastResult) {
-        keycast = keycastResult.success ? 'ok' : 'failed';
-        if (!keycastResult.success) {
-          keycastError = keycastResult.error;
-          console.error(`[age-review] Keycast ${requestedState} failed for case ${caseId}: ${keycastResult.error}`);
-        }
-      }
-    } catch (error) {
-      keycast = 'failed';
-      keycastError = error instanceof Error ? error.message : String(error);
-      console.error(`[age-review] Keycast call failed for case ${caseId}:`, error);
-    }
+    // Keycast account status.
+    const keycastLeg = await runStatusLeg('Keycast', () =>
+      enteredRestrictedState ? suspendUser(existing.pubkey, 'age_review', env)
+      : clearedCase ? unsuspendUser(existing.pubkey, env)
+      : deniedCase ? banUser(existing.pubkey, 'age_review_denied', env)
+      : undefined);
+    keycast = keycastLeg.status;
+    keycastError = keycastLeg.error;
   }
 
-  // C5: a failed critical leg is reported (success:false, HTTP 207) so the
+  // a failed critical leg is reported (success:false, HTTP 207) so the
   // moderator/UI sees enforcement is incomplete and can retry. The DB state
   // change persisted; re-issuing the PATCH (with the new version) is a safe,
   // CAS-guarded retry of the enforcement.
@@ -930,7 +918,12 @@ export async function handleAgeReviewReplyWebhook(
 export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> {
   if (!env.DB) return;
 
-  // Alert on cases approaching deadline (within 2 days), skip if alerted in last 12h
+  // Alert on cases approaching deadline (within 2 days), skip if alerted in last 12h.
+  // Note the deliberate asymmetry: this alert window covers ALL non-terminal cases,
+  // whereas auto-close (below) only fires for the restricted set. An expired case in
+  // a non-restricted state would therefore be neither auto-closed nor in this window
+  // (its deadline is in the past) -- the expired-needs-action alert further down closes
+  // that blind spot so such cases still reach a moderator.
   const approaching = await env.DB.prepare(`
     SELECT * FROM age_review_cases
     WHERE state NOT IN (${TERMINAL_STATES.map(() => '?').join(',')})
@@ -954,13 +947,13 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
   }
 
   // Auto-close expired cases and ban via Keycast.
-  // C6: only auto-close cases the moderator actually RESTRICTED and that are
+  // only auto-close cases the moderator actually RESTRICTED and that are
   // still awaiting a user/parent response. This deliberately excludes
   // open_reported / under_moderator_review (never restricted -- a single
   // unsolicited report must not auto-ban an account no human confirmed) and
   // submitted_for_review / needs_follow_up (the user already responded -- a
   // moderator must act, the clock must not auto-deny them).
-  // C8: compare via datetime() so the ISO-8601 (`...T...Z`) deadline_at is
+  // compare via datetime() so the ISO-8601 (`...T...Z`) deadline_at is
   // parsed rather than lexically compared against datetime('now') (space form),
   // which otherwise delays expiry until the next UTC midnight.
   const expired = await env.DB.prepare(`
@@ -972,7 +965,7 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
   `).bind(...ACCOUNT_RESTRICTED_AGE_REVIEW_STATES).all<AgeReviewCase>();
 
   for (const row of expired.results) {
-    // C7: CAS on the version we read so the cron doesn't auto-close (and then
+    // CAS on the version we read so the cron doesn't auto-close (and then
     // ban/delete) a case a moderator is concurrently acting on. If the row
     // changed since the SELECT above, skip it -- the moderator's action wins and
     // the next tick re-evaluates. This prevents the cron from clobbering a
@@ -1014,7 +1007,7 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
       console.error(`[age-review] Keycast ban failed for expired case ${row.id}:`, error);
     }
 
-    // C9: purge the user's events at the relay (one-way) -- the case is closed
+    // purge the user's events at the relay (one-way) -- the case is closed
     // by deadline, matching the deny outcome. Best-effort; logged on failure.
     try {
       const relayBan = await banPubkey(row.pubkey, 'age_review_expired', env);
@@ -1031,17 +1024,47 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
   if (expired.results.length > 0 && env.SLACK_WEBHOOK_URL) {
     await sendSlackAlert(env.SLACK_WEBHOOK_URL, 'expired', expired.results);
   }
+
+  // Expired but NOT auto-closable: non-terminal cases the cron deliberately does
+  // not auto-close (never restricted, e.g. open_reported / under_moderator_review,
+  // or the user already responded, e.g. submitted_for_review / needs_follow_up).
+  // Without this they would silently sit past deadline -- out of the approaching
+  // window and out of the auto-close set -- so alert (throttled to 12h) to keep a
+  // human in the loop.
+  const expiredNeedsAction = await env.DB.prepare(`
+    SELECT * FROM age_review_cases
+    WHERE state NOT IN (${TERMINAL_STATES.map(() => '?').join(',')})
+      AND state NOT IN (${ACCOUNT_RESTRICTED_AGE_REVIEW_STATES.map(() => '?').join(',')})
+      AND clock_paused = 0
+      AND deadline_at IS NOT NULL
+      AND datetime(deadline_at) < datetime('now')
+      AND (last_alerted_at IS NULL OR last_alerted_at < datetime('now', '-12 hours'))
+    ORDER BY deadline_at ASC
+  `).bind(...TERMINAL_STATES, ...ACCOUNT_RESTRICTED_AGE_REVIEW_STATES).all<AgeReviewCase>();
+
+  if (expiredNeedsAction.results.length > 0 && env.SLACK_WEBHOOK_URL) {
+    const sent = await sendSlackAlert(env.SLACK_WEBHOOK_URL, 'expired_needs_action', expiredNeedsAction.results);
+    if (sent) {
+      for (const row of expiredNeedsAction.results) {
+        await env.DB.prepare(
+          `UPDATE age_review_cases SET last_alerted_at = datetime('now') WHERE id = ?`
+        ).bind(row.id).run();
+      }
+    }
+  }
 }
 
 async function sendSlackAlert(
   webhookUrl: string,
-  alertType: 'approaching' | 'expired',
+  alertType: 'approaching' | 'expired' | 'expired_needs_action',
   cases: AgeReviewCase[],
 ): Promise<boolean> {
-  const emoji = alertType === 'expired' ? ':rotating_light:' : ':warning:';
-  const header = alertType === 'expired'
-    ? `${emoji} ${cases.length} age review case(s) expired`
-    : `${emoji} ${cases.length} age review case(s) approaching deadline`;
+  const emoji = alertType === 'approaching' ? ':warning:' : ':rotating_light:';
+  const header = alertType === 'approaching'
+    ? `${emoji} ${cases.length} age review case(s) approaching deadline`
+    : alertType === 'expired'
+      ? `${emoji} ${cases.length} age review case(s) expired`
+      : `${emoji} ${cases.length} age review case(s) past deadline awaiting moderator action`;
 
   const lines = cases.map(c => {
     const deadline = c.deadline_at ? new Date(c.deadline_at).toISOString().split('T')[0] : 'no deadline';

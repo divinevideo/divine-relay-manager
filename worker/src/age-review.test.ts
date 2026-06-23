@@ -26,7 +26,7 @@ vi.mock('./keycast-client', () => ({
 
 // Isolate the handler from the relay: these tests exercise state transitions +
 // Keycast wiring, not bulk content moderation. By default the bulk leg succeeds;
-// individual tests can override to assert C5 failure-surfacing.
+// individual tests can override to assert failure-surfacing.
 vi.mock('./bulk-moderate', () => ({
   // mockImplementation (not mockResolvedValue) so each call gets a FRESH Response
   // -- a Response body can only be read once, and triggerBulkModerate consumes it.
@@ -37,7 +37,7 @@ vi.mock('./bulk-moderate', () => ({
   ),
 }));
 
-// Relay-level NIP-86 enforcement (C1/C9). Stubbed to succeed by default; the
+// Relay-level NIP-86 enforcement. Stubbed to succeed by default; the
 // real wire contract is verified separately in nip86.test.ts.
 vi.mock('./nip86', () => ({
   suspendPubkey: vi.fn().mockResolvedValue({ success: true }),
@@ -655,7 +655,7 @@ describe('Keycast suspension wiring', () => {
       enforcement: { keycast: string }; case: { state: string };
     };
 
-    // C5: the failure is surfaced, not masked as success...
+    // the failure is surfaced, not masked as success...
     expect(res.status).toBe(207);
     expect(body.success).toBe(false);
     expect(body.keycastUpdated).toBe(false);
@@ -705,9 +705,9 @@ describe('Keycast suspension wiring', () => {
   });
 });
 
-// -- Relay pubkey enforcement wiring (C1 / C9) --------------------------------
+// -- Relay pubkey enforcement wiring --------------------------------
 
-describe('Relay pubkey enforcement wiring (C1/C9)', () => {
+describe('Relay pubkey enforcement wiring', () => {
   beforeEach(() => {
     vi.mocked(suspendPubkey).mockClear().mockResolvedValue({ success: true });
     vi.mocked(unsuspendPubkey).mockClear().mockResolvedValue({ success: true });

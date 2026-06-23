@@ -1,13 +1,13 @@
 // Real-D1 (Miniflare SQLite) validation for the age-review cron fixes:
-//   C8 -- deadline comparison must use datetime(deadline_at), not a lexical
+//   deadline comparison must use datetime(deadline_at), not a lexical
 //         TEXT compare of an ISO-8601 (`...T...Z`) value against datetime('now').
-//   C6 -- the auto-close cron must only act on cases that were actually
+//   the auto-close cron must only act on cases that were actually
 //         RESTRICTED and are still awaiting a response.
 // The existing vitest.config.ts runs on node with a MOCKED DB, so it never
-// exercised SQLite and could not have caught the C8 bug. This suite runs the
+// exercised SQLite and could not have caught the bug. This suite runs the
 // real checkAgeReviewDeadlines against a real Miniflare-backed D1.
 import { Miniflare } from 'miniflare';
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { ensureSchema } from '../src/db';
 import { checkAgeReviewDeadlines } from '../src/age-review';
 
@@ -58,10 +58,11 @@ async function stateOf(id: string): Promise<string | undefined> {
   return row?.state;
 }
 
-describe('age-review cron on real D1 (C6 + C8)', () => {
+describe('age-review cron on real D1', () => {
   beforeEach(reset);
+  afterEach(() => vi.restoreAllMocks());
 
-  it('C8 mechanism: lexical TEXT compare misfires where datetime() is correct', async () => {
+  it('mechanism: lexical TEXT compare misfires where datetime() is correct', async () => {
     // 08:00 is clearly before 12:00 on the same day, but the ISO string sorts
     // AFTER the space-form because 'T'(0x54) > ' '(0x20).
     const r = await DB.prepare(
@@ -72,32 +73,32 @@ describe('age-review cron on real D1 (C6 + C8)', () => {
     expect(r!.fixed).toBe(1);   // the fix: correct temporal comparison
   });
 
-  it('C8: a restricted case that expired earlier TODAY (same UTC day) is auto-closed', async () => {
+  it('a restricted case that expired earlier TODAY (same UTC day) is auto-closed', async () => {
     const deadline = new Date(Date.now() - 60_000).toISOString(); // 1 min ago
     await insertCase('c8-today', 'restricted_pending_user_response', deadline);
     await checkAgeReviewDeadlines(cronEnv);
     expect(await stateOf('c8-today')).toBe('denied_closed');
   });
 
-  it('C6: a never-restricted (open_reported) expired case is NOT auto-closed/banned', async () => {
+  it('a never-restricted (open_reported) expired case is NOT auto-closed/banned', async () => {
     await insertCase('c6-open', 'open_reported', '2020-01-01T00:00:00.000Z');
     await checkAgeReviewDeadlines(cronEnv);
     expect(await stateOf('c6-open')).toBe('open_reported');
   });
 
-  it('C6: a never-restricted (under_moderator_review) expired case is NOT auto-closed', async () => {
+  it('a never-restricted (under_moderator_review) expired case is NOT auto-closed', async () => {
     await insertCase('c6-umr', 'under_moderator_review', '2020-01-01T00:00:00.000Z');
     await checkAgeReviewDeadlines(cronEnv);
     expect(await stateOf('c6-umr')).toBe('under_moderator_review');
   });
 
-  it('C6: an already-responded (submitted_for_review) expired case is NOT auto-closed', async () => {
+  it('an already-responded (submitted_for_review) expired case is NOT auto-closed', async () => {
     await insertCase('c6-sub', 'submitted_for_review', '2020-01-01T00:00:00.000Z');
     await checkAgeReviewDeadlines(cronEnv);
     expect(await stateOf('c6-sub')).toBe('submitted_for_review');
   });
 
-  it('C6: a restricted + pending expired case IS auto-closed', async () => {
+  it('a restricted + pending expired case IS auto-closed', async () => {
     await insertCase('c6-restricted', 'restricted_pending_parental_consent', '2020-01-01T00:00:00.000Z');
     await checkAgeReviewDeadlines(cronEnv);
     expect(await stateOf('c6-restricted')).toBe('denied_closed');
@@ -110,7 +111,28 @@ describe('age-review cron on real D1 (C6 + C8)', () => {
     expect(await stateOf('c6-paused')).toBe('restricted_pending_user_response');
   });
 
-  it('C7: cron auto-close uses CAS and bumps the version', async () => {
+  it('an expired non-restricted case is surfaced via the awaiting-moderator-action alert', async () => {
+    // submitted_for_review is past deadline: the cron must NOT auto-close it (the
+    // user responded; a moderator must decide) but must still alert so it does not
+    // sit in the blind spot between the approaching window and the auto-close set.
+    const bodies: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation((_input, init) => {
+      bodies.push(String(init?.body ?? ''));
+      return Promise.resolve(new Response('ok', { status: 200 }));
+    });
+    await insertCase('na-sub', 'submitted_for_review', '2020-01-01T00:00:00.000Z');
+    await checkAgeReviewDeadlines({ ...cronEnv, SLACK_WEBHOOK_URL: 'https://hooks.test/x' });
+
+    expect(await stateOf('na-sub')).toBe('submitted_for_review'); // not auto-closed
+    const alert = bodies.find((b) => b.includes('awaiting moderator action'));
+    expect(alert).toBeTruthy();
+    expect(alert).toContain('pk_na-sub');
+    const row = await DB.prepare('SELECT last_alerted_at FROM age_review_cases WHERE id = ?')
+      .bind('na-sub').first<{ last_alerted_at: string | null }>();
+    expect(row!.last_alerted_at).not.toBeNull(); // 12h throttle stamp written
+  });
+
+  it('cron auto-close uses CAS and bumps the version', async () => {
     await insertCase('c7-cron', 'restricted_pending_user_response', '2020-01-01T00:00:00.000Z');
     await checkAgeReviewDeadlines(cronEnv);
     const row = await DB.prepare('SELECT state, version FROM age_review_cases WHERE id = ?')
