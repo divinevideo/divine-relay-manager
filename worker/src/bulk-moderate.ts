@@ -49,10 +49,18 @@ export async function handleBulkModerate(
   const action = body.action as BulkAction;
   const reason = body.reason || `Bulk ${action} by moderator`;
 
-  const events = await queryRelayEvents(body.pubkey, env);
+  const { events, complete } = await queryRelayEvents(body.pubkey, env);
   const mediaHashes = extractMediaHashes(events);
   const moderatorPubkey = await getAdminPubkey(env);
   const result: BulkModerateResult = { success: true, eventsProcessed: 0, mediaProcessed: 0, failures: [] };
+
+  // If the relay could not be fully paginated (e.g. more than one page of events
+  // share a single created_at second, which an until-cursor cannot subdivide),
+  // surface it rather than silently enforcing over a partial set. The events we
+  // did gather are still actioned below (best effort).
+  if (!complete) {
+    result.failures.push(`enumeration:${body.pubkey}:relay could not be fully paginated; actioned a partial set`);
+  }
 
   if (action === 'delete-all') {
     const successfulEventIds: string[] = [];
@@ -120,7 +128,8 @@ export async function handleBulkModerate(
 export async function queryRelayEvents(
   pubkey: string,
   env: Pick<BulkModerateEnv, 'RELAY_URL'>,
-): Promise<RelayEventSummary[]> {
+): Promise<{ events: RelayEventSummary[]; complete: boolean }> {
+  type Result = { events: RelayEventSummary[]; complete: boolean };
   return new Promise((resolve, reject) => {
     try {
       const ws = new WebSocket(env.RELAY_URL);
@@ -129,16 +138,19 @@ export async function queryRelayEvents(
       let page = 0;
       let currentSub = '';
       let pageEvents = 0;        // events seen in the current page
+      let pageStartSize = 0;     // byId.size at page start -> detects whether the page added anything new
       let pageOldest = Infinity; // min created_at in the current page -> next `until`
+      let incomplete = false;    // true if the relay could not be fully paginated (surfaced to caller)
       let timeout: ReturnType<typeof setTimeout>;
 
-      const finish = (fn: typeof resolve | typeof reject, value: RelayEventSummary[] | Error) => {
+      const finish = (fn: ((v: Result) => void) | ((e: Error) => void), value: Result | Error) => {
         if (resolved) return;
         resolved = true;
         clearTimeout(timeout);
         ws.close();
-        (fn as (value: RelayEventSummary[] | Error) => void)(value);
+        (fn as (value: Result | Error) => void)(value);
       };
+      const done = () => finish(resolve, { events: Array.from(byId.values()), complete: !incomplete });
 
       const armTimeout = () => {
         clearTimeout(timeout);
@@ -152,6 +164,7 @@ export async function queryRelayEvents(
         currentSub = `bulk-${Date.now()}-${page}`;
         pageEvents = 0;
         pageOldest = Infinity;
+        pageStartSize = byId.size;
         const filter: { authors: string[]; limit: number; until?: number } = { authors: [pubkey], limit: RELAY_QUERY_PAGE_SIZE };
         if (until !== undefined) filter.until = until;
         armTimeout();
@@ -174,13 +187,31 @@ export async function queryRelayEvents(
             ws.send(JSON.stringify(['CLOSE', currentSub]));
             // Last page reached: a partial page means the relay has no more events.
             if (pageEvents < RELAY_QUERY_PAGE_SIZE) {
-              finish(resolve, Array.from(byId.values()));
+              done();
               return;
             }
             if (page >= RELAY_QUERY_MAX_PAGES) {
-              // Never silently truncate: surface that we bounded coverage.
-              console.warn(`[bulk-moderate] hit RELAY_QUERY_MAX_PAGES (${RELAY_QUERY_MAX_PAGES}, ~${page * RELAY_QUERY_PAGE_SIZE} events) for ${pubkey}; processing collected subset`);
-              finish(resolve, Array.from(byId.values()));
+              // Bound coverage rather than loop forever; surface it (not silent).
+              incomplete = true;
+              console.warn(`[bulk-moderate] hit RELAY_QUERY_MAX_PAGES (${RELAY_QUERY_MAX_PAGES}, ~${page * RELAY_QUERY_PAGE_SIZE} events) for ${pubkey}; returning a partial set`);
+              done();
+              return;
+            }
+            // Progress guard: a full page that added no new ids means the `until`
+            // cursor is stuck -- more than one page of events share a single
+            // created_at second (an inclusive `until` cannot subdivide a second),
+            // or the events carry no created_at. Surface incompleteness, and where
+            // we can, step strictly past the saturated second so we still
+            // enumerate everything older instead of looping to the page bound.
+            if (byId.size === pageStartSize) {
+              incomplete = true;
+              if (pageOldest === Infinity) {
+                console.warn(`[bulk-moderate] relay events lack created_at; cannot paginate further for ${pubkey}; returning a partial set`);
+                done();
+                return;
+              }
+              console.warn(`[bulk-moderate] more than one page of events share created_at=${pageOldest} for ${pubkey}; skipping past that second (some events at it may be unprocessed)`);
+              sendPage(pageOldest - 1);
               return;
             }
             // Page through older events. `until` is inclusive so the boundary

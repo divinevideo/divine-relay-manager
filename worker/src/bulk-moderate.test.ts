@@ -164,8 +164,22 @@ describe('queryRelayEvents pagination (C4)', () => {
       id: `e${i}`, kind: 1, content: '', tags: [] as string[][], created_at: 1200 - i,
     }));
     mockPaginatedRelay(all);
-    const events = await queryRelayEvents('a'.repeat(64), { RELAY_URL: 'wss://relay.test' });
+    const { events, complete } = await queryRelayEvents('a'.repeat(64), { RELAY_URL: 'wss://relay.test' });
     expect(events).toHaveLength(1200); // all collected, deduped across page boundaries; no throw
+    expect(complete).toBe(true);
+  });
+
+  it('terminates and reports incomplete when >1 page of events share one created_at', async () => {
+    // 600 events all at the same second: an inclusive `until` cursor cannot
+    // subdivide a second, so it must not loop forever or silently report success.
+    const all = Array.from({ length: 600 }, (_, i) => ({
+      id: `e${i}`, kind: 1, content: '', tags: [] as string[][], created_at: 1000,
+    }));
+    mockPaginatedRelay(all);
+    const { events, complete } = await queryRelayEvents('a'.repeat(64), { RELAY_URL: 'wss://relay.test' });
+    expect(complete).toBe(false);            // surfaced, not a silent success
+    expect(events.length).toBe(500);         // escaped the saturated second after one page
+    expect(events.length).toBeLessThan(600); // the excess at that second was not silently claimed as done
   });
 });
 
