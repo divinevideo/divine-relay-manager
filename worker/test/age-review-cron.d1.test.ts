@@ -12,10 +12,8 @@ import { ensureSchema } from '../src/db';
 import { checkAgeReviewDeadlines } from '../src/age-review';
 
 let mf: Miniflare;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let DB: any;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let cronEnv: any;
+let DB: D1Database;
+let cronEnv: Parameters<typeof checkAgeReviewDeadlines>[0];
 
 beforeAll(async () => {
   mf = new Miniflare({
@@ -25,7 +23,7 @@ beforeAll(async () => {
     compatibilityFlags: ['nodejs_compat'],
     d1Databases: ['DB'],
   });
-  DB = await mf.getD1Database('DB');
+  DB = (await mf.getD1Database('DB')) as unknown as D1Database;
   // Minimal env: no Keycast/Slack/Zendesk/moderation bindings. The cron's
   // downstream calls (banUser, Slack, Zendesk, bulk-delete) then no-op / early
   // out / are swallowed; the DB state transition we assert happens first.
@@ -56,7 +54,7 @@ async function insertCase(id: string, state: string, deadlineIso: string) {
 
 async function stateOf(id: string): Promise<string | undefined> {
   const row = await DB.prepare('SELECT state FROM age_review_cases WHERE id = ?')
-    .bind(id).first();
+    .bind(id).first<{ state: string }>();
   return row?.state;
 }
 
@@ -69,9 +67,9 @@ describe('age-review cron on real D1 (C6 + C8)', () => {
     const r = await DB.prepare(
       `SELECT ('2026-06-22T08:00:00.000Z' < '2026-06-22 12:00:00')           AS lexical,
               (datetime('2026-06-22T08:00:00.000Z') < '2026-06-22 12:00:00') AS fixed`,
-    ).first();
-    expect(r.lexical).toBe(0); // the bug: appears NOT-yet-expired
-    expect(r.fixed).toBe(1);   // the fix: correct temporal comparison
+    ).first<{ lexical: number; fixed: number }>();
+    expect(r!.lexical).toBe(0); // the bug: appears NOT-yet-expired
+    expect(r!.fixed).toBe(1);   // the fix: correct temporal comparison
   });
 
   it('C8: a restricted case that expired earlier TODAY (same UTC day) is auto-closed', async () => {
@@ -116,8 +114,8 @@ describe('age-review cron on real D1 (C6 + C8)', () => {
     await insertCase('c7-cron', 'restricted_pending_user_response', '2020-01-01T00:00:00.000Z');
     await checkAgeReviewDeadlines(cronEnv);
     const row = await DB.prepare('SELECT state, version FROM age_review_cases WHERE id = ?')
-      .bind('c7-cron').first();
-    expect(row.state).toBe('denied_closed');
-    expect(row.version).toBe(1); // CAS UPDATE applied
+      .bind('c7-cron').first<{ state: string; version: number }>();
+    expect(row!.state).toBe('denied_closed');
+    expect(row!.version).toBe(1); // CAS UPDATE applied
   });
 });

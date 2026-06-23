@@ -28,7 +28,7 @@ function publish(signed: object): Promise<void> {
       const msg = JSON.parse(e.data as string);
       if (msg[0] === 'OK') {
         clearTimeout(timer); ws.close();
-        msg[2] ? resolve() : reject(new Error(`relay rejected EVENT: ${msg[3]}`));
+        if (msg[2]) resolve(); else reject(new Error(`relay rejected EVENT: ${msg[3]}`));
       }
     };
     ws.onerror = () => { clearTimeout(timer); reject(new Error('ws error (publish)')); };

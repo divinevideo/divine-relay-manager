@@ -9,11 +9,9 @@ import { ensureSchema } from '../src/db';
 import { handleUpdateAgeReviewCase } from '../src/age-review';
 
 let mf: Miniflare;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let DB: any;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let env: any;
-const cors = {};
+let DB: D1Database;
+let env: Parameters<typeof handleUpdateAgeReviewCase>[2];
+const cors: Record<string, string> = {};
 
 beforeAll(async () => {
   mf = new Miniflare({
@@ -23,7 +21,7 @@ beforeAll(async () => {
     compatibilityFlags: ['nodejs_compat'],
     d1Databases: ['DB'],
   });
-  DB = await mf.getD1Database('DB');
+  DB = (await mf.getD1Database('DB')) as unknown as D1Database;
   // No KEYCAST_URL / RELAY_URL / MODERATION bindings: enforcement legs fail,
   // which is what we want for the C5 surfacing test.
   env = { DB };
@@ -54,7 +52,10 @@ function patch(id: string, patchBody: Record<string, unknown>) {
 }
 
 async function rowOf(id: string) {
-  return DB.prepare('SELECT state, version FROM age_review_cases WHERE id = ?').bind(id).first();
+  const row = await DB.prepare('SELECT state, version FROM age_review_cases WHERE id = ?')
+    .bind(id).first<{ state: string; version: number }>();
+  if (!row) throw new Error(`row not found: ${id}`);
+  return row;
 }
 
 describe('age-review handler on real D1 (C7 + C5)', () => {
