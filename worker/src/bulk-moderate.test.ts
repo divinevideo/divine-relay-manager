@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { handleBulkModerate, extractMediaHashes, type BulkModerateEnv } from './bulk-moderate';
+import { handleBulkModerate, extractMediaHashes, queryRelayEvents, type BulkModerateEnv } from './bulk-moderate';
 
 vi.mock('./nip86', () => ({
   getAdminPubkey: vi.fn().mockResolvedValue('moderator-pubkey'),
@@ -123,6 +123,63 @@ describe('handleBulkModerate', () => {
     expect(body.success).toBe(false);
     expect(body.eventsProcessed).toBe(0);
     expect(body.failures[0]).toContain('relay refused');
+  });
+});
+
+// Paginating mock relay: responds to each REQ with up to `limit` events whose
+// created_at <= filter.until (descending), then EOSE for that sub. Models a
+// relay that supports until-cursoring.
+function mockPaginatedRelay(all: Array<{ id: string; kind: number; content: string; tags: string[][]; created_at: number }>) {
+  const sorted = [...all].sort((a, b) => b.created_at - a.created_at);
+  vi.spyOn(globalThis, 'WebSocket').mockImplementation((function () {
+    const listeners = new Map<string, Array<(value?: unknown) => void>>();
+    const emit = (type: string, value?: unknown) => listeners.get(type)?.forEach((h) => h(value));
+    const sock = {
+      addEventListener: (t: string, h: (value?: unknown) => void) => listeners.set(t, [...(listeners.get(t) || []), h]),
+      send: (payload: string) => {
+        const data = JSON.parse(payload);
+        if (data[0] !== 'REQ') return; // ignore CLOSE
+        const sub = data[1];
+        const until = data[2].until ?? Infinity;
+        const limit = data[2].limit ?? 500;
+        const page = sorted.filter((e) => e.created_at <= until).slice(0, limit);
+        queueMicrotask(() => {
+          for (const ev of page) emit('message', { data: JSON.stringify(['EVENT', sub, ev]) });
+          emit('message', { data: JSON.stringify(['EOSE', sub]) });
+        });
+      },
+      close: vi.fn(),
+    };
+    queueMicrotask(() => emit('open'));
+    return sock;
+  } as unknown as typeof WebSocket));
+}
+
+describe('queryRelayEvents pagination', () => {
+  beforeEach(() => vi.restoreAllMocks());
+
+  it('pages through >500 events via until cursor instead of rejecting', async () => {
+    // 1200 events with distinct descending created_at -> 3 pages (500/500/200).
+    const all = Array.from({ length: 1200 }, (_, i) => ({
+      id: `e${i}`, kind: 1, content: '', tags: [] as string[][], created_at: 1200 - i,
+    }));
+    mockPaginatedRelay(all);
+    const { events, complete } = await queryRelayEvents('a'.repeat(64), { RELAY_URL: 'wss://relay.test' });
+    expect(events).toHaveLength(1200); // all collected, deduped across page boundaries; no throw
+    expect(complete).toBe(true);
+  });
+
+  it('terminates and reports incomplete when >1 page of events share one created_at', async () => {
+    // 600 events all at the same second: an inclusive `until` cursor cannot
+    // subdivide a second, so it must not loop forever or silently report success.
+    const all = Array.from({ length: 600 }, (_, i) => ({
+      id: `e${i}`, kind: 1, content: '', tags: [] as string[][], created_at: 1000,
+    }));
+    mockPaginatedRelay(all);
+    const { events, complete } = await queryRelayEvents('a'.repeat(64), { RELAY_URL: 'wss://relay.test' });
+    expect(complete).toBe(false);            // surfaced, not a silent success
+    expect(events.length).toBe(500);         // escaped the saturated second after one page
+    expect(events.length).toBeLessThan(600); // the excess at that second was not silently claimed as done
   });
 });
 
