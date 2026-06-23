@@ -187,11 +187,11 @@ export async function handleUpdateAgeReviewCase(
   // optimistic locking. Validate expected_version's type like every other
   // field (a bad type is a 400, not a conflict), then reject a stale client
   // write up front; the server-read CAS below is the real guard.
-  const versionConflict = () => json({
+  const versionConflict = (currentVersion: number = existing.version) => json({
     success: false,
     error: 'Case was modified by another request',
     code: 'version_conflict',
-    current_version: existing.version,
+    current_version: currentVersion,
   }, 409, corsHeaders);
 
   if (body.expected_version !== undefined && typeof body.expected_version !== 'number') {
@@ -214,7 +214,13 @@ export async function handleUpdateAgeReviewCase(
   ).bind(...binds, caseId, existing.version).run();
 
   if (updateResult.meta?.changes !== 1) {
-    return versionConflict();
+    // A concurrent writer bumped the version between our read and this write, so
+    // existing.version is now stale. Re-read the row to report the TRUE current
+    // version. (The up-front check above can safely return existing.version
+    // because no write has happened yet; on a CAS miss one has.)
+    const fresh = await env.DB.prepare('SELECT version FROM age_review_cases WHERE id = ?')
+      .bind(caseId).first<{ version: number }>();
+    return versionConflict(fresh?.version ?? existing.version);
   }
 
   let updated = await env.DB.prepare('SELECT * FROM age_review_cases WHERE id = ?')
