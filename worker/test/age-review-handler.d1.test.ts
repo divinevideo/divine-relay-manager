@@ -6,7 +6,7 @@
 import { Miniflare } from 'miniflare';
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { ensureSchema } from '../src/db';
-import { handleUpdateAgeReviewCase } from '../src/age-review';
+import { handleUpdateAgeReviewCase, handleAgeReviewReplyWebhook } from '../src/age-review';
 
 let mf: Miniflare;
 let DB: D1Database;
@@ -70,6 +70,34 @@ describe('age-review handler on real D1', () => {
     const row = await rowOf('c7-stale');
     expect(row.state).toBe('open_reported'); // unchanged
     expect(row.version).toBe(0);
+  });
+
+  it('the parent-reply webhook bumps version, so a stale moderator write 409s', async () => {
+    // restricted case linked to a Zendesk ticket; a moderator has it open at version 0.
+    await DB.prepare(
+      `INSERT INTO age_review_cases (id, pubkey, state, zendesk_ticket_id, deadline_at, clock_paused, version)
+       VALUES (?, ?, 'restricted_pending_user_response', ?, ?, 0, 0)`,
+    ).bind('wh-case', 'pk_wh', 99001, new Date(Date.now() + 9 * 864e5).toISOString()).run();
+
+    // Parent replies -> webhook advances the case AND bumps version.
+    const webhookReq = new Request('https://api.test/api/age-review/reply-webhook', {
+      method: 'POST',
+      body: JSON.stringify({ ticket_id: 99001 }),
+    });
+    const webhookRes = await handleAgeReviewReplyWebhook(webhookReq, env, cors);
+    expect(webhookRes.status).toBe(200);
+    const after = await rowOf('wh-case');
+    expect(after.state).toBe('submitted_for_review');
+    expect(after.version).toBe(1); // version bumped by the webhook
+
+    // The moderator who loaded the case before the reply (version 0) must now 409,
+    // not silently overwrite the parent-reply transition.
+    const stale = await patch('wh-case', { state: 'under_moderator_review', expected_version: 0 });
+    expect(stale.status).toBe(409);
+    const body = await stale.json() as { code: string; current_version: number };
+    expect(body.code).toBe('version_conflict');
+    expect(body.current_version).toBe(1);
+    expect((await rowOf('wh-case')).state).toBe('submitted_for_review'); // unchanged by the stale write
   });
 
   it('a matching version succeeds and increments version', async () => {
