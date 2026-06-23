@@ -184,12 +184,40 @@ export async function handleUpdateAgeReviewCase(
     return json({ success: false, error: 'No valid fields to update' }, 400, corsHeaders);
   }
 
-  updates.push("updated_at = datetime('now')");
-  binds.push(caseId);
+  // C7: optimistic locking. Reject a stale client write up front (the UI may
+  // send the version it last read) ...
+  if (
+    body.expected_version !== undefined &&
+    (typeof body.expected_version !== 'number' || body.expected_version !== existing.version)
+  ) {
+    return json({
+      success: false,
+      error: 'Case was modified by another request',
+      code: 'version_conflict',
+      current_version: existing.version,
+    }, 409, corsHeaders);
+  }
 
-  await env.DB.prepare(
-    `UPDATE age_review_cases SET ${updates.join(', ')} WHERE id = ?`
-  ).bind(...binds).run();
+  updates.push("updated_at = datetime('now')");
+  updates.push('version = version + 1');
+
+  // C7: ... and compare-and-swap on the version we read. If a concurrent
+  // writer (another moderator, or the deadline cron) committed between our
+  // read and this write, changes === 0 and we abort BEFORE running any
+  // enforcement -- the loser must not apply side effects for a state it no
+  // longer owns.
+  const updateResult = await env.DB.prepare(
+    `UPDATE age_review_cases SET ${updates.join(', ')} WHERE id = ? AND version = ?`
+  ).bind(...binds, caseId, existing.version).run();
+
+  if (updateResult.meta?.changes !== 1) {
+    return json({
+      success: false,
+      error: 'Case was modified by another request',
+      code: 'version_conflict',
+      current_version: existing.version,
+    }, 409, corsHeaders);
+  }
 
   let updated = await env.DB.prepare('SELECT * FROM age_review_cases WHERE id = ?')
     .bind(caseId).first<AgeReviewCase>();
@@ -238,31 +266,43 @@ export async function handleUpdateAgeReviewCase(
     }
   }
 
-  // Non-critical: fire bulk content actions on state transitions
+  // C5: enforcement legs are SAFETY-CRITICAL, not "non-critical". Track each
+  // leg's real outcome and surface failure -- the API must not report success
+  // when a minor's content was not actually restricted or their account not
+  // actually suspended. (Zendesk above stays non-critical and swallowed.)
+  type LegStatus = 'not_attempted' | 'ok' | 'failed';
+  let bulk: LegStatus = 'not_attempted';
+  let bulkError: string | undefined;
   let bulkActionTriggered: string | undefined;
+  let keycast: LegStatus = 'not_attempted';
+  let keycastError: string | undefined;
+
   if (requestedState !== undefined) {
+    // Relay/media bulk content action
     try {
       if (enteredRestrictedState) {
         await triggerBulkModerate(existing.pubkey, 'age-restrict-all', 'Age review restriction', env);
+        bulk = 'ok';
         bulkActionTriggered = 'age-restrict-all';
       } else if (clearedCase) {
         await triggerBulkModerate(existing.pubkey, 'un-age-restrict-all', 'Age review cleared', env);
+        bulk = 'ok';
         bulkActionTriggered = 'un-age-restrict-all';
       } else if (deniedCase) {
         const config = await getAgeReviewConfig(env.DB!);
         if (config.auto_delete_on_deny) {
           await triggerBulkModerate(existing.pubkey, 'delete-all', 'Age review denied', env);
+          bulk = 'ok';
           bulkActionTriggered = 'delete-all';
         }
       }
     } catch (error) {
+      bulk = 'failed';
+      bulkError = error instanceof Error ? error.message : String(error);
       console.error(`[age-review] Bulk action failed for case ${caseId}:`, error);
     }
-  }
 
-  // Non-critical: sync account status with Keycast
-  let keycastUpdated = false;
-  if (requestedState !== undefined) {
+    // Keycast account status
     try {
       let keycastResult;
       if (enteredRestrictedState) {
@@ -273,17 +313,32 @@ export async function handleUpdateAgeReviewCase(
         keycastResult = await banUser(existing.pubkey, 'age_review_denied', env);
       }
       if (keycastResult) {
-        keycastUpdated = keycastResult.success;
+        keycast = keycastResult.success ? 'ok' : 'failed';
         if (!keycastResult.success) {
+          keycastError = keycastResult.error;
           console.error(`[age-review] Keycast ${requestedState} failed for case ${caseId}: ${keycastResult.error}`);
         }
       }
     } catch (error) {
+      keycast = 'failed';
+      keycastError = error instanceof Error ? error.message : String(error);
       console.error(`[age-review] Keycast call failed for case ${caseId}:`, error);
     }
   }
 
-  return json({ success: true, case: updated, bulkActionTriggered, keycastUpdated }, 200, corsHeaders);
+  // C5: a failed critical leg is reported (success:false, HTTP 207) so the
+  // moderator/UI sees enforcement is incomplete and can retry. The DB state
+  // change persisted; re-issuing the PATCH (with the new version) is a safe,
+  // CAS-guarded retry of the enforcement.
+  const enforcementComplete = bulk !== 'failed' && keycast !== 'failed';
+  return json({
+    success: enforcementComplete,
+    case: updated,
+    bulkActionTriggered,
+    keycastUpdated: keycast === 'ok',
+    enforcementComplete,
+    enforcement: { bulk, bulkError, keycast, keycastError },
+  }, enforcementComplete ? 200 : 207, corsHeaders);
 }
 
 // ---------------------------------------------------------------------------

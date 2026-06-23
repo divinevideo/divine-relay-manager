@@ -23,6 +23,19 @@ vi.mock('./keycast-client', () => ({
   createMinorAccount: vi.fn().mockResolvedValue({ success: true, pubkey: 'a'.repeat(64), claim_url: 'https://login.test/claim/abc' }),
 }));
 
+// Isolate the handler from the relay: these tests exercise state transitions +
+// Keycast wiring, not bulk content moderation. By default the bulk leg succeeds;
+// individual tests can override to assert C5 failure-surfacing.
+vi.mock('./bulk-moderate', () => ({
+  // mockImplementation (not mockResolvedValue) so each call gets a FRESH Response
+  // -- a Response body can only be read once, and triggerBulkModerate consumes it.
+  handleBulkModerate: vi.fn().mockImplementation(() =>
+    Promise.resolve(
+      new Response(JSON.stringify({ success: true, eventsProcessed: 0, mediaProcessed: 0, failures: [] }), { status: 200 }),
+    ),
+  ),
+}));
+
 const corsHeaders = { 'Access-Control-Allow-Origin': '*' };
 
 function makeEnv(db?: unknown, overrides: Partial<AgeReviewEnv> = {}): AgeReviewEnv {
@@ -57,6 +70,7 @@ function makeCase(overrides: Partial<AgeReviewCase> = {}): AgeReviewCase {
     claim_link_expires_at: null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
+    version: 0,
     ...overrides,
   };
 }
@@ -567,16 +581,20 @@ describe('Keycast suspension wiring', () => {
     const updatedCase = { ...restrictedCase, state: 'denied_closed' as const };
 
     let selectCount = 0;
+    // The denied path also reads age_review_config via prepare().first() (no
+    // bind), so the mock exposes a top-level first() as well as bind().first().
+    const firstFor = (sql: string) => async () => {
+      if (sql.includes('WHERE id = ?')) {
+        selectCount += 1;
+        return selectCount === 1 ? restrictedCase : updatedCase;
+      }
+      return null; // age_review_config -> default config
+    };
     const db = {
       prepare: vi.fn().mockImplementation((sql: string) => ({
+        first: vi.fn().mockImplementation(firstFor(sql)),
         bind: vi.fn().mockReturnValue({
-          first: vi.fn().mockImplementation(async () => {
-            if (sql.includes('WHERE id = ?')) {
-              selectCount += 1;
-              return selectCount === 1 ? restrictedCase : updatedCase;
-            }
-            return null;
-          }),
+          first: vi.fn().mockImplementation(firstFor(sql)),
           run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
         }),
       })),
@@ -596,7 +614,7 @@ describe('Keycast suspension wiring', () => {
     expect(banUser).toHaveBeenCalledWith(restrictedCase.pubkey, 'age_review_denied', expect.objectContaining({ DB: expect.anything() }));
   });
 
-  it('does not block state transition when Keycast fails', async () => {
+  it('surfaces a Keycast failure (success:false / 207) but still applies the state transition', async () => {
     vi.mocked(suspendUser).mockResolvedValue({ success: false, error: 'Connection refused' });
 
     const reviewCase = makeCase({ state: 'under_moderator_review' });
@@ -623,30 +641,40 @@ describe('Keycast suspension wiring', () => {
       body: JSON.stringify({ state: 'restricted_pending_user_response' }),
     });
     const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
-    const body = await res.json() as { success: boolean; keycastUpdated: boolean };
+    const body = await res.json() as {
+      success: boolean; keycastUpdated: boolean;
+      enforcement: { keycast: string }; case: { state: string };
+    };
 
-    expect(res.status).toBe(200);
-    expect(body.success).toBe(true);
+    // C5: the failure is surfaced, not masked as success...
+    expect(res.status).toBe(207);
+    expect(body.success).toBe(false);
     expect(body.keycastUpdated).toBe(false);
+    expect(body.enforcement.keycast).toBe('failed');
+    // ...but the DB state transition still persisted (enforcement is best-effort,
+    // retryable; it does not roll back the case state).
+    expect(body.case.state).toBe('restricted_pending_user_response');
   });
 
-  it('does not block state transition when Keycast throws', async () => {
+  it('surfaces a thrown Keycast error (success:false / 207) but still applies the state transition', async () => {
     vi.mocked(banUser).mockRejectedValue(new Error('Network error'));
 
     const restrictedCase = makeCase({ state: 'restricted_pending_user_response' });
     const updatedCase = { ...restrictedCase, state: 'denied_closed' as const };
 
     let selectCount = 0;
+    const firstFor = (sql: string) => async () => {
+      if (sql.includes('WHERE id = ?')) {
+        selectCount += 1;
+        return selectCount === 1 ? restrictedCase : updatedCase;
+      }
+      return null; // age_review_config -> default config
+    };
     const db = {
       prepare: vi.fn().mockImplementation((sql: string) => ({
+        first: vi.fn().mockImplementation(firstFor(sql)),
         bind: vi.fn().mockReturnValue({
-          first: vi.fn().mockImplementation(async () => {
-            if (sql.includes('WHERE id = ?')) {
-              selectCount += 1;
-              return selectCount === 1 ? restrictedCase : updatedCase;
-            }
-            return null;
-          }),
+          first: vi.fn().mockImplementation(firstFor(sql)),
           run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
         }),
       })),
@@ -657,10 +685,14 @@ describe('Keycast suspension wiring', () => {
       body: JSON.stringify({ state: 'denied_closed' }),
     });
     const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
-    const body = await res.json() as { success: boolean };
+    const body = await res.json() as {
+      success: boolean; enforcement: { keycast: string }; case: { state: string };
+    };
 
-    expect(res.status).toBe(200);
-    expect(body.success).toBe(true);
+    expect(res.status).toBe(207);
+    expect(body.success).toBe(false);
+    expect(body.enforcement.keycast).toBe('failed');
+    expect(body.case.state).toBe('denied_closed');
   });
 });
 
