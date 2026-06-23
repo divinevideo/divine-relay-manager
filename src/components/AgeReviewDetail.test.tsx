@@ -43,6 +43,7 @@ function makeCase(overrides: Partial<AgeReviewCase> = {}): AgeReviewCase {
     claim_link_expires_at: null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
+    version: 0,
     ...overrides,
   };
 }
