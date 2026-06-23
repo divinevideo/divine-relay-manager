@@ -84,7 +84,7 @@ interface Props {
   caseData: AgeReviewCase;
 }
 
-const KEYCAST_STATES: AgeReviewState[] = [
+const ENFORCEMENT_STATES: AgeReviewState[] = [
   'restricted_pending_user_response',
   'restricted_pending_parental_consent',
   'restricted_pending_support_email',
@@ -110,36 +110,22 @@ export function AgeReviewDetail({ caseData: c }: Props) {
   const updateCase = useMutation({
     mutationFn: (updates: Record<string, unknown>) => {
       pendingStateRef.current = updates.state as string | undefined;
-      return api.updateAgeReviewCase(c.id, updates);
+      return api.updateAgeReviewCase(c.id, { ...updates, expected_version: c.version });
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['age-review-cases'] });
-
-      // Surface any enforcement leg that did not apply. The case state persists
-      // even when enforcement is partial (the server returns HTTP 207), so the
-      // moderator must be told the content/account may still be reachable.
-      const enforcement = data.enforcement;
-      if (enforcement) {
+      const requestedState = pendingStateRef.current as AgeReviewState | undefined;
+      if (requestedState && ENFORCEMENT_STATES.includes(requestedState) && data.enforcementComplete === false) {
+        // Surface only actual failed enforcement legs. `not_attempted` is valid
+        // for transitions where a leg does not apply.
+        const enforcement = data.enforcement;
         const failed: string[] = [];
-        if (enforcement.relay === 'failed') failed.push('relay (existing posts and feed)');
-        if (enforcement.bulk === 'failed') failed.push('media and content');
-        if (enforcement.keycast === 'failed') failed.push('account sign-in');
-        if (failed.length > 0) {
-          toast({
-            title: 'Enforcement incomplete',
-            description: `Case updated, but these did not apply: ${failed.join(', ')}. The user's content or account may still be reachable. Retry the action or escalate.`,
-            variant: 'destructive',
-          });
-        }
-      } else if (
-        // Fallback for a worker that predates the per-leg enforcement contract.
-        pendingStateRef.current &&
-        KEYCAST_STATES.includes(pendingStateRef.current as AgeReviewState) &&
-        data.keycastUpdated === false
-      ) {
+        if (enforcement?.relay === 'failed') failed.push('relay (existing posts and feed)');
+        if (enforcement?.bulk === 'failed') failed.push('media and content');
+        if (enforcement?.keycast === 'failed') failed.push('account sign-in');
         toast({
-          title: 'Account enforcement failed',
-          description: 'Case was updated but Keycast account suspension did not apply. The user\'s account may still be active. Retry or escalate.',
+          title: 'Enforcement incomplete',
+          description: `Case updated, but these did not apply: ${failed.join(', ') || 'one or more enforcement steps'}. The user's content or account may still be reachable. Retry the action or escalate.`,
           variant: 'destructive',
         });
       }

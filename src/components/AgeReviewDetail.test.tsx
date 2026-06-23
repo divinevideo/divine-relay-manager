@@ -26,6 +26,10 @@ vi.mock('@/hooks/useAuthor', () => ({
   useAuthor: () => ({ data: undefined, isLoading: false }),
 }));
 
+vi.mock('@/hooks/useToast', () => ({
+  useToast: () => ({ toast }),
+}));
+
 function makeCase(overrides: Partial<AgeReviewCase> = {}): AgeReviewCase {
   return {
     id: 'case-1',
@@ -49,6 +53,7 @@ function makeCase(overrides: Partial<AgeReviewCase> = {}): AgeReviewCase {
     claim_link_expires_at: null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
+    version: 0,
     ...overrides,
   };
 }
@@ -93,7 +98,34 @@ describe('AgeReviewDetail', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Restrict Account' }));
 
     await waitFor(() => {
-      expect(updateAgeReviewCase).toHaveBeenCalledWith('case-1', { state: expectedState });
+      expect(updateAgeReviewCase).toHaveBeenCalledWith('case-1', { state: expectedState, expected_version: 0 });
+    });
+  });
+
+  it('toasts when relay or bulk enforcement fails even if Keycast succeeds', async () => {
+    updateAgeReviewCase.mockResolvedValue({
+      success: false,
+      keycastUpdated: true,
+      enforcementComplete: false,
+      enforcement: {
+        relay: 'failed',
+        bulk: 'failed',
+        keycast: 'ok',
+      },
+    });
+    renderDetail(makeCase({ version: 3 }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Restrict Account' }));
+
+    await waitFor(() => {
+      expect(updateAgeReviewCase).toHaveBeenCalledWith('case-1', {
+        state: 'restricted_pending_user_response',
+        expected_version: 3,
+      });
+      expect(toast).toHaveBeenCalledWith(expect.objectContaining({
+        title: 'Enforcement incomplete',
+        variant: 'destructive',
+      }));
     });
   });
 

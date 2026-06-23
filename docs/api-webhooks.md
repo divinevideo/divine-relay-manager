@@ -99,7 +99,7 @@ Moderate media content (images/videos) by SHA-256 hash.
 ```json
 {
   "sha256": "abc123...",
-  "action": "PERMANENT_BAN" | "SAFE" | "AGE_RESTRICTED" | "REVIEW",
+  "action": "SAFE" | "REVIEW" | "QUARANTINE" | "AGE_RESTRICTED" | "PERMANENT_BAN" | "DELETE",
   "reason": "CSAM content"
 }
 ```
@@ -118,8 +118,10 @@ Moderate media content (images/videos) by SHA-256 hash.
 |--------|-------------|
 | `PERMANENT_BAN` | Block this media hash permanently |
 | `SAFE` | Mark as safe, allow serving |
+| `QUARANTINE` | Withhold this media hash while preserving reversibility |
 | `AGE_RESTRICTED` | Allow but flag as adult content |
 | `REVIEW` | Queue for manual review |
+| `DELETE` | Delete this media hash |
 
 ---
 

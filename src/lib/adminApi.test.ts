@@ -782,7 +782,7 @@ describe('adminApi', () => {
         json: async () => ({ success: true }),
       });
 
-      const actions: ModerationAction[] = ['SAFE', 'REVIEW', 'AGE_RESTRICTED', 'PERMANENT_BAN'];
+      const actions: ModerationAction[] = ['SAFE', 'REVIEW', 'QUARANTINE', 'AGE_RESTRICTED', 'PERMANENT_BAN', 'DELETE'];
 
       for (const action of actions) {
         await moderateMedia(API_URL, 'hash123', action);

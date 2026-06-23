@@ -96,4 +96,5 @@ export interface AgeReviewCase {
   claim_link_expires_at: string | null;
   created_at: string;
   updated_at: string;
+  version: number;
 }
