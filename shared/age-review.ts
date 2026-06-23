@@ -98,3 +98,30 @@ export interface AgeReviewCase {
   updated_at: string;
   version: number;
 }
+
+// --- Case-update enforcement contract (shared by the worker API and the admin client) ---
+
+export type EnforcementLegStatus = 'not_attempted' | 'ok' | 'failed';
+
+// Per-leg outcome of the enforcement a case update triggers: relay suspend/ban,
+// bulk media/content action, and Keycast account status.
+export interface AgeReviewEnforcement {
+  relay: EnforcementLegStatus;
+  relayError?: string;
+  bulk: EnforcementLegStatus;
+  bulkError?: string;
+  keycast: EnforcementLegStatus;
+  keycastError?: string;
+}
+
+// Response body for a case GET/PATCH. On a partial-enforcement PATCH the worker
+// returns HTTP 207 with `enforcementComplete: false`. `enforcement` is optional
+// so an older client still works against a worker that predates this contract.
+export interface AgeReviewCaseResponse {
+  success: boolean;
+  case: AgeReviewCase;
+  keycastUpdated?: boolean;
+  bulkActionTriggered?: string;
+  enforcementComplete?: boolean;
+  enforcement?: AgeReviewEnforcement;
+}

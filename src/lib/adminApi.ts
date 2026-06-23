@@ -9,6 +9,7 @@ import {
   type BulkModerateResult,
 } from "../../shared/bulk-moderation";
 import { extractMediaHashes as extractSharedMediaHashes } from "../../shared/media-hashes";
+import type { AgeReviewCaseResponse } from "../../shared/age-review";
 
 // Build headers with CF Access service token for cross-origin API requests.
 // The service token authenticates the frontend to CF Access policies on api-relay-* domains.
@@ -922,35 +923,20 @@ function extractBreakdown(
 // Age Review
 // ---------------------------------------------------------------------------
 
-export type { AgeReviewCase, AgeReviewState, AgeBand } from '../../shared/age-review';
+// Enforcement/response contract types live in shared/age-review.ts so the
+// worker API and this client use one definition instead of duplicating it.
+export type {
+  AgeReviewCase,
+  AgeReviewState,
+  AgeBand,
+  EnforcementLegStatus,
+  AgeReviewEnforcement,
+  AgeReviewCaseResponse,
+} from '../../shared/age-review';
 
 interface AgeReviewCasesResponse {
   success: boolean;
   cases: import('../../shared/age-review').AgeReviewCase[];
-}
-
-export type EnforcementLegStatus = 'not_attempted' | 'ok' | 'failed';
-
-// Per-leg outcome of the enforcement the case update triggers (relay
-// suspend/ban, bulk media/content action, Keycast account status). Optional so
-// the client still works against a worker that predates the enforcement contract.
-export interface AgeReviewEnforcement {
-  relay: EnforcementLegStatus;
-  relayError?: string;
-  bulk: EnforcementLegStatus;
-  bulkError?: string;
-  keycast: EnforcementLegStatus;
-  keycastError?: string;
-}
-
-export interface AgeReviewCaseResponse {
-  success: boolean;
-  case: import('../../shared/age-review').AgeReviewCase;
-  keycastUpdated?: boolean;
-  bulkActionTriggered?: string;
-  // false when any enforcement leg failed (the server returns HTTP 207 then).
-  enforcementComplete?: boolean;
-  enforcement?: AgeReviewEnforcement;
 }
 
 export async function getAgeReviewCases(
