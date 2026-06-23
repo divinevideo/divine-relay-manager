@@ -110,7 +110,13 @@ export async function handleBulkModerate(
     });
   } else {
     result.eventsProcessed = events.length;
-    const mediaAction = action === 'age-restrict-all' ? 'AGE_RESTRICTED' : 'SAFE';
+    // Age-review restriction must WITHHOLD the media, not adult-gate it.
+    // QUARANTINE -> (moderation-service) RESTRICT -> blossom BlobStatus::Restricted,
+    // which 404s to everyone except the owner and is reversible to Active. The
+    // old 'AGE_RESTRICTED' -> BlobStatus::AgeRestricted serves full bytes to ANY
+    // signed-in viewer (a throwaway key), so it does not hide a minor's content.
+    // Clear ('un-age-restrict-all') sends 'SAFE' -> Active to restore.
+    const mediaAction = action === 'age-restrict-all' ? 'QUARANTINE' : 'SAFE';
     await runWithConcurrency(mediaHashes, BULK_ACTION_CONCURRENCY, async (sha256) => {
       try {
         await callModerateMedia(sha256, mediaAction, reason, env);

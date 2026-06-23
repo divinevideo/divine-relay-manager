@@ -108,6 +108,37 @@ describe('handleBulkModerate', () => {
     }
   });
 
+  function moderationActionFor(sha256: string): string | undefined {
+    const fetchMock = vi.mocked((mockEnv.MODERATION_API as unknown as { fetch: ReturnType<typeof vi.fn> }).fetch);
+    for (const call of fetchMock.mock.calls) {
+      const body = JSON.parse((call[1] as RequestInit).body as string);
+      if (body.sha256 === sha256) return body.action;
+    }
+    return undefined;
+  }
+
+  it('age-restrict-all sends QUARANTINE (reversible withhold) for media', async () => {
+    mockRelay([{ id: 'e'.repeat(64), kind: 34235, content: '', tags: [['x', hashA]] }]);
+    const request = new Request('https://test/api/bulk-moderate', {
+      method: 'POST',
+      body: JSON.stringify({ pubkey: 'a'.repeat(64), action: 'age-restrict-all' }),
+    });
+    const response = await handleBulkModerate(request, mockEnv, {});
+    expect(response.status).toBe(200);
+    // NOT 'AGE_RESTRICTED' (which would serve bytes to any signed-in viewer).
+    expect(moderationActionFor(hashA)).toBe('QUARANTINE');
+  });
+
+  it('un-age-restrict-all sends SAFE (restore) for media', async () => {
+    mockRelay([{ id: 'e'.repeat(64), kind: 34235, content: '', tags: [['x', hashA]] }]);
+    const request = new Request('https://test/api/bulk-moderate', {
+      method: 'POST',
+      body: JSON.stringify({ pubkey: 'a'.repeat(64), action: 'un-age-restrict-all' }),
+    });
+    await handleBulkModerate(request, mockEnv, {});
+    expect(moderationActionFor(hashA)).toBe('SAFE');
+  });
+
   it('marks bulk delete as failed when relay deletion returns success false', async () => {
     const { banEvent } = await import('./nip86');
     vi.mocked(banEvent).mockResolvedValueOnce({ success: false, error: 'relay refused' });
