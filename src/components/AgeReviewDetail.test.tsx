@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
 import { AgeReviewDetail } from './AgeReviewDetail';
+import { ApiError } from '@/lib/adminApi';
 import type { AgeReviewCase, AgeBand, AgeReviewState } from '../../shared/age-review';
 
 const updateAgeReviewCase = vi.fn().mockResolvedValue({ success: true });
@@ -15,6 +16,10 @@ vi.mock('@/hooks/useAdminApi', () => ({
     updateAgeReviewCase,
     getAgeReviewConfig,
   }),
+}));
+
+vi.mock('@/hooks/useToast', () => ({
+  useToast: () => ({ toast }),
 }));
 
 vi.mock('@/hooks/useAuthor', () => ({
@@ -71,9 +76,9 @@ function renderDetail(caseData: AgeReviewCase) {
 describe('AgeReviewDetail', () => {
   beforeEach(() => {
     updateAgeReviewCase.mockClear();
+    updateAgeReviewCase.mockResolvedValue({ success: true });
     getAgeReviewConfig.mockClear();
     getAgeReviewConfig.mockResolvedValue({ auto_delete_on_deny: false });
-    updateAgeReviewCase.mockResolvedValue({ success: true });
     toast.mockClear();
     writeText.mockClear();
     Object.assign(navigator, {
@@ -118,10 +123,65 @@ describe('AgeReviewDetail', () => {
         expected_version: 3,
       });
       expect(toast).toHaveBeenCalledWith(expect.objectContaining({
-        title: 'Account enforcement incomplete',
+        title: 'Enforcement incomplete',
         variant: 'destructive',
       }));
     });
+  });
+
+  it('toasts when an enforcement leg fails (HTTP 207 partial)', async () => {
+    updateAgeReviewCase.mockResolvedValueOnce({
+      success: false,
+      case: makeCase({ state: 'restricted_pending_user_response' }),
+      enforcementComplete: false,
+      enforcement: { relay: 'failed', bulk: 'ok', keycast: 'ok' },
+    });
+    renderDetail(makeCase({ suspected_age_band: 'age_13_15' }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Restrict Account' }));
+
+    await waitFor(() => {
+      expect(toast).toHaveBeenCalledWith(expect.objectContaining({
+        title: 'Enforcement incomplete',
+        variant: 'destructive',
+      }));
+    });
+    expect(toast.mock.calls[0][0].description).toMatch(/relay/);
+  });
+
+  it('does not toast when no enforcement leg failed (ok and not_attempted)', async () => {
+    updateAgeReviewCase.mockResolvedValueOnce({
+      success: true,
+      case: makeCase({ state: 'restricted_pending_user_response' }),
+      enforcementComplete: true,
+      // not_attempted must NOT be treated as a failure (the old keycastUpdated
+      // check false-fired on restricted->restricted transitions).
+      enforcement: { relay: 'ok', bulk: 'ok', keycast: 'not_attempted' },
+    });
+    renderDetail(makeCase({ suspected_age_band: 'age_13_15' }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Restrict Account' }));
+
+    await waitFor(() => expect(updateAgeReviewCase).toHaveBeenCalled());
+    expect(toast).not.toHaveBeenCalled();
+  });
+
+  it('toasts a reload notice on a 409 version_conflict', async () => {
+    updateAgeReviewCase.mockRejectedValueOnce(
+      new ApiError('Case was modified by another request', 409, 'Conflict', 'version_conflict', 5),
+    );
+    renderDetail(makeCase({ suspected_age_band: 'age_13_15' }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Restrict Account' }));
+
+    await waitFor(() => {
+      expect(toast).toHaveBeenCalledWith(expect.objectContaining({
+        title: 'Case changed since you opened it',
+        variant: 'destructive',
+      }));
+    });
+    // the toast covers the conflict; the inline error must not also fire for it
+    expect(screen.queryByText(/Failed to update/)).not.toBeInTheDocument();
   });
 
   it('shows Deny & Close without confirmation when auto-delete is off', () => {

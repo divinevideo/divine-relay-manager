@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAdminApi } from "@/hooks/useAdminApi";
+import { ApiError } from "@/lib/adminApi";
 import { useToast } from "@/hooks/useToast";
 import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
 import { UserActions } from "@/components/UserActions";
@@ -115,17 +116,34 @@ export function AgeReviewDetail({ caseData: c }: Props) {
       queryClient.invalidateQueries({ queryKey: ['age-review-cases'] });
       const requestedState = pendingStateRef.current as AgeReviewState | undefined;
       if (requestedState && ENFORCEMENT_STATES.includes(requestedState) && data.enforcementComplete === false) {
-        const failedLegs = [
-          data.enforcement?.relay === 'failed' ? 'relay' : null,
-          data.enforcement?.bulk === 'failed' ? 'content' : null,
-          data.enforcement?.keycast === 'failed' ? 'Keycast' : null,
-        ].filter(Boolean).join(', ');
+        // Surface only actual failed enforcement legs. `not_attempted` is valid
+        // for transitions where a leg does not apply.
+        const enforcement = data.enforcement;
+        const failed: string[] = [];
+        if (enforcement?.relay === 'failed') failed.push('relay (existing posts and feed)');
+        if (enforcement?.bulk === 'failed') failed.push('media and content');
+        if (enforcement?.keycast === 'failed') failed.push('account sign-in');
         toast({
-          title: 'Account enforcement incomplete',
-          description: `Case was updated but ${failedLegs || 'one or more enforcement steps'} failed. Escalate for manual remediation.`,
+          title: 'Enforcement incomplete',
+          description: `Case updated, but these did not apply: ${failed.join(', ') || 'one or more enforcement steps'}. The user's content or account may still be reachable. Retry the action or escalate.`,
           variant: 'destructive',
         });
       }
+    },
+    onError: (error) => {
+      // A concurrent writer (another moderator, or the deadline cron) changed
+      // the case between our read and this write. Reload the current state so
+      // the moderator can review it before re-applying; we deliberately do not
+      // blindly replay a possibly-stale transition.
+      if (error instanceof ApiError && error.code === 'version_conflict') {
+        queryClient.invalidateQueries({ queryKey: ['age-review-cases'] });
+        toast({
+          title: 'Case changed since you opened it',
+          description: 'Another moderator or an automated deadline action modified this case. Reloaded the latest state; review it and re-apply if still needed.',
+          variant: 'destructive',
+        });
+      }
+      // Other errors surface inline via updateCase.isError below.
     },
   });
 
@@ -399,7 +417,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
                   Updating...
                 </div>
               )}
-              {updateCase.isError && (
+              {updateCase.isError && !(updateCase.error instanceof ApiError && updateCase.error.code === 'version_conflict') && (
                 <div className="text-xs text-red-600">
                   Failed to update: {(updateCase.error as Error).message}
                 </div>

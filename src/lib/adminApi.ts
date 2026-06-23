@@ -66,11 +66,17 @@ export interface LabelParams {
   comment?: string;
 }
 
-class ApiError extends Error {
+export class ApiError extends Error {
   constructor(
     message: string,
     public statusCode?: number,
-    public statusText?: string
+    public statusText?: string,
+    // Structured fields parsed from a JSON error body, when present. `code`
+    // lets callers branch on a machine-readable reason (e.g. 'version_conflict')
+    // rather than the message string; `currentVersion` is the server's current
+    // version returned alongside a 409 conflict.
+    public code?: string,
+    public currentVersion?: number,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -93,10 +99,21 @@ async function apiRequest<T>(
   });
 
   if (!response.ok) {
+    // Read the JSON error body if there is one so callers can act on structured
+    // fields (a 409 version_conflict carries `code` + `current_version`) instead
+    // of an opaque "HTTP 409:" message. Non-JSON bodies fall back to status text.
+    let parsed: { error?: string; code?: string; current_version?: number } | undefined;
+    try {
+      parsed = await response.json() as typeof parsed;
+    } catch {
+      // body was empty or not JSON; keep the status-line fallback
+    }
     throw new ApiError(
-      `HTTP ${response.status}: ${response.statusText}`,
+      parsed?.error || `HTTP ${response.status}: ${response.statusText}`,
       response.status,
-      response.statusText
+      response.statusText,
+      parsed?.code,
+      parsed?.current_version,
     );
   }
 
@@ -912,19 +929,28 @@ interface AgeReviewCasesResponse {
   cases: import('../../shared/age-review').AgeReviewCase[];
 }
 
-interface AgeReviewCaseResponse {
+export type EnforcementLegStatus = 'not_attempted' | 'ok' | 'failed';
+
+// Per-leg outcome of the enforcement the case update triggers (relay
+// suspend/ban, bulk media/content action, Keycast account status). Optional so
+// the client still works against a worker that predates the enforcement contract.
+export interface AgeReviewEnforcement {
+  relay: EnforcementLegStatus;
+  relayError?: string;
+  bulk: EnforcementLegStatus;
+  bulkError?: string;
+  keycast: EnforcementLegStatus;
+  keycastError?: string;
+}
+
+export interface AgeReviewCaseResponse {
   success: boolean;
   case: import('../../shared/age-review').AgeReviewCase;
   keycastUpdated?: boolean;
+  bulkActionTriggered?: string;
+  // false when any enforcement leg failed (the server returns HTTP 207 then).
   enforcementComplete?: boolean;
-  enforcement?: {
-    relay?: 'not_attempted' | 'ok' | 'failed';
-    relayError?: string;
-    bulk?: 'not_attempted' | 'ok' | 'failed';
-    bulkError?: string;
-    keycast?: 'not_attempted' | 'ok' | 'failed';
-    keycastError?: string;
-  };
+  enforcement?: AgeReviewEnforcement;
 }
 
 export async function getAgeReviewCases(
