@@ -1353,7 +1353,7 @@ async function handleModerateMedia(
   try {
     const body = await request.json() as {
       sha256: string;
-      action: 'SAFE' | 'REVIEW' | 'AGE_RESTRICTED' | 'PERMANENT_BAN' | 'DELETE';
+      action: 'SAFE' | 'REVIEW' | 'QUARANTINE' | 'AGE_RESTRICTED' | 'PERMANENT_BAN' | 'DELETE';
       reason?: string;
     };
 

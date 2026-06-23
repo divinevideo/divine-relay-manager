@@ -317,9 +317,9 @@ export async function markAsReviewed(
 }
 
 // Media moderation request actions
-export type ModerationAction = 'SAFE' | 'REVIEW' | 'AGE_RESTRICTED' | 'PERMANENT_BAN' | 'DELETE';
+export type ModerationAction = 'SAFE' | 'REVIEW' | 'QUARANTINE' | 'AGE_RESTRICTED' | 'PERMANENT_BAN' | 'DELETE';
 // Media moderation status values returned by /api/check-result/:sha256
-export type MediaStatusAction = ModerationAction | 'QUARANTINE';
+export type MediaStatusAction = ModerationAction;
 
 export interface MediaStatus {
   sha256: string;
