@@ -155,7 +155,7 @@ function mockPaginatedRelay(all: Array<{ id: string; kind: number; content: stri
   } as unknown as typeof WebSocket));
 }
 
-describe('queryRelayEvents pagination (C4)', () => {
+describe('queryRelayEvents pagination', () => {
   beforeEach(() => vi.restoreAllMocks());
 
   it('pages through >500 events via until cursor instead of rejecting', async () => {

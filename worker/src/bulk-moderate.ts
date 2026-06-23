@@ -4,7 +4,7 @@ import { VALID_BULK_ACTIONS, type BulkAction, type BulkModerateResult } from '..
 import { extractMediaHashes as extractSharedMediaHashes } from '../../shared/media-hashes';
 
 const BULK_ACTION_CONCURRENCY = 5;
-// C4: page through ALL of an author's events via `until` cursoring instead of
+// Page through ALL of an author's events via `until` cursoring instead of
 // rejecting accounts with more than one page. The old reject left prolific
 // accounts entirely un-enforced (the throw was swallowed upstream).
 const RELAY_QUERY_PAGE_SIZE = 500;
