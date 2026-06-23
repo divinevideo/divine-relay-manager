@@ -15,12 +15,34 @@ import {
 } from './age-review';
 import type { AgeReviewCase } from '../../shared/age-review';
 import { suspendUser, unsuspendUser, banUser, createMinorAccount } from './keycast-client';
+import { suspendPubkey, unsuspendPubkey, banPubkey } from './nip86';
 
 vi.mock('./keycast-client', () => ({
   suspendUser: vi.fn().mockResolvedValue({ success: true }),
   unsuspendUser: vi.fn().mockResolvedValue({ success: true }),
   banUser: vi.fn().mockResolvedValue({ success: true }),
   createMinorAccount: vi.fn().mockResolvedValue({ success: true, pubkey: 'a'.repeat(64), claim_url: 'https://login.test/claim/abc' }),
+}));
+
+// Isolate the handler from the relay: these tests exercise state transitions +
+// Keycast wiring, not bulk content moderation. By default the bulk leg succeeds;
+// individual tests can override to assert failure-surfacing.
+vi.mock('./bulk-moderate', () => ({
+  // mockImplementation (not mockResolvedValue) so each call gets a FRESH Response
+  // -- a Response body can only be read once, and triggerBulkModerate consumes it.
+  handleBulkModerate: vi.fn().mockImplementation(() =>
+    Promise.resolve(
+      new Response(JSON.stringify({ success: true, eventsProcessed: 0, mediaProcessed: 0, failures: [] }), { status: 200 }),
+    ),
+  ),
+}));
+
+// Relay-level NIP-86 enforcement. Stubbed to succeed by default; the
+// real wire contract is verified separately in nip86.test.ts.
+vi.mock('./nip86', () => ({
+  suspendPubkey: vi.fn().mockResolvedValue({ success: true }),
+  unsuspendPubkey: vi.fn().mockResolvedValue({ success: true }),
+  banPubkey: vi.fn().mockResolvedValue({ success: true }),
 }));
 
 const corsHeaders = { 'Access-Control-Allow-Origin': '*' };
@@ -57,6 +79,7 @@ function makeCase(overrides: Partial<AgeReviewCase> = {}): AgeReviewCase {
     claim_link_expires_at: null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
+    version: 0,
     ...overrides,
   };
 }
@@ -567,16 +590,20 @@ describe('Keycast suspension wiring', () => {
     const updatedCase = { ...restrictedCase, state: 'denied_closed' as const };
 
     let selectCount = 0;
+    // The denied path also reads age_review_config via prepare().first() (no
+    // bind), so the mock exposes a top-level first() as well as bind().first().
+    const firstFor = (sql: string) => async () => {
+      if (sql.includes('WHERE id = ?')) {
+        selectCount += 1;
+        return selectCount === 1 ? restrictedCase : updatedCase;
+      }
+      return null; // age_review_config -> default config
+    };
     const db = {
       prepare: vi.fn().mockImplementation((sql: string) => ({
+        first: vi.fn().mockImplementation(firstFor(sql)),
         bind: vi.fn().mockReturnValue({
-          first: vi.fn().mockImplementation(async () => {
-            if (sql.includes('WHERE id = ?')) {
-              selectCount += 1;
-              return selectCount === 1 ? restrictedCase : updatedCase;
-            }
-            return null;
-          }),
+          first: vi.fn().mockImplementation(firstFor(sql)),
           run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
         }),
       })),
@@ -596,7 +623,7 @@ describe('Keycast suspension wiring', () => {
     expect(banUser).toHaveBeenCalledWith(restrictedCase.pubkey, 'age_review_denied', expect.objectContaining({ DB: expect.anything() }));
   });
 
-  it('does not block state transition when Keycast fails', async () => {
+  it('surfaces a Keycast failure (success:false / 207) but still applies the state transition', async () => {
     vi.mocked(suspendUser).mockResolvedValue({ success: false, error: 'Connection refused' });
 
     const reviewCase = makeCase({ state: 'under_moderator_review' });
@@ -623,30 +650,40 @@ describe('Keycast suspension wiring', () => {
       body: JSON.stringify({ state: 'restricted_pending_user_response' }),
     });
     const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
-    const body = await res.json() as { success: boolean; keycastUpdated: boolean };
+    const body = await res.json() as {
+      success: boolean; keycastUpdated: boolean;
+      enforcement: { keycast: string }; case: { state: string };
+    };
 
-    expect(res.status).toBe(200);
-    expect(body.success).toBe(true);
+    // the failure is surfaced, not masked as success...
+    expect(res.status).toBe(207);
+    expect(body.success).toBe(false);
     expect(body.keycastUpdated).toBe(false);
+    expect(body.enforcement.keycast).toBe('failed');
+    // ...but the DB state transition still persisted (enforcement is best-effort,
+    // retryable; it does not roll back the case state).
+    expect(body.case.state).toBe('restricted_pending_user_response');
   });
 
-  it('does not block state transition when Keycast throws', async () => {
+  it('surfaces a thrown Keycast error (success:false / 207) but still applies the state transition', async () => {
     vi.mocked(banUser).mockRejectedValue(new Error('Network error'));
 
     const restrictedCase = makeCase({ state: 'restricted_pending_user_response' });
     const updatedCase = { ...restrictedCase, state: 'denied_closed' as const };
 
     let selectCount = 0;
+    const firstFor = (sql: string) => async () => {
+      if (sql.includes('WHERE id = ?')) {
+        selectCount += 1;
+        return selectCount === 1 ? restrictedCase : updatedCase;
+      }
+      return null; // age_review_config -> default config
+    };
     const db = {
       prepare: vi.fn().mockImplementation((sql: string) => ({
+        first: vi.fn().mockImplementation(firstFor(sql)),
         bind: vi.fn().mockReturnValue({
-          first: vi.fn().mockImplementation(async () => {
-            if (sql.includes('WHERE id = ?')) {
-              selectCount += 1;
-              return selectCount === 1 ? restrictedCase : updatedCase;
-            }
-            return null;
-          }),
+          first: vi.fn().mockImplementation(firstFor(sql)),
           run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
         }),
       })),
@@ -657,10 +694,99 @@ describe('Keycast suspension wiring', () => {
       body: JSON.stringify({ state: 'denied_closed' }),
     });
     const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
-    const body = await res.json() as { success: boolean };
+    const body = await res.json() as {
+      success: boolean; enforcement: { keycast: string }; case: { state: string };
+    };
 
-    expect(res.status).toBe(200);
-    expect(body.success).toBe(true);
+    expect(res.status).toBe(207);
+    expect(body.success).toBe(false);
+    expect(body.enforcement.keycast).toBe('failed');
+    expect(body.case.state).toBe('denied_closed');
+  });
+});
+
+// -- Relay pubkey enforcement wiring --------------------------------
+
+describe('Relay pubkey enforcement wiring', () => {
+  beforeEach(() => {
+    vi.mocked(suspendPubkey).mockClear().mockResolvedValue({ success: true });
+    vi.mocked(unsuspendPubkey).mockClear().mockResolvedValue({ success: true });
+    vi.mocked(banPubkey).mockClear().mockResolvedValue({ success: true });
+  });
+
+  function dbReturning(before: AgeReviewCase, after: AgeReviewCase) {
+    let n = 0;
+    const firstFor = (sql: string) => async () => {
+      if (sql.includes('WHERE id = ?')) { n += 1; return n === 1 ? before : after; }
+      return null;
+    };
+    return {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        first: vi.fn().mockImplementation(firstFor(sql)),
+        bind: vi.fn().mockReturnValue({
+          first: vi.fn().mockImplementation(firstFor(sql)),
+          run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+        }),
+      })),
+    };
+  }
+
+  async function patchState(before: string, to: string) {
+    const c = makeCase({ state: before as AgeReviewCase['state'] });
+    const db = dbReturning(c, { ...c, state: to as AgeReviewCase['state'] });
+    const req = new Request('https://api.test/api/age-review/cases/case-1', {
+      method: 'PATCH', body: JSON.stringify({ state: to }),
+    });
+    await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
+    return c;
+  }
+
+  it('suspends the pubkey at the relay on restrict', async () => {
+    const c = await patchState('under_moderator_review', 'restricted_pending_user_response');
+    expect(suspendPubkey).toHaveBeenCalledWith(c.pubkey, 'age_review', expect.objectContaining({ DB: expect.anything() }));
+    expect(unsuspendPubkey).not.toHaveBeenCalled();
+    expect(banPubkey).not.toHaveBeenCalled();
+  });
+
+  it('un-suspends the pubkey at the relay on clear', async () => {
+    const c = await patchState('restricted_pending_user_response', 'cleared');
+    expect(unsuspendPubkey).toHaveBeenCalledWith(c.pubkey, expect.objectContaining({ DB: expect.anything() }));
+    expect(suspendPubkey).not.toHaveBeenCalled();
+  });
+
+  it('bans the pubkey at the relay on deny', async () => {
+    const c = await patchState('restricted_pending_user_response', 'denied_closed');
+    expect(banPubkey).toHaveBeenCalledWith(c.pubkey, 'age_review_denied', expect.objectContaining({ DB: expect.anything() }));
+  });
+
+  it('a failed relay leg is surfaced as success:false / 207', async () => {
+    vi.mocked(suspendPubkey).mockResolvedValue({ success: false, error: 'relay 403' });
+    const c = makeCase({ state: 'under_moderator_review' });
+    const db = dbReturning(c, { ...c, state: 'restricted_pending_user_response' });
+    const req = new Request('https://api.test/api/age-review/cases/case-1', {
+      method: 'PATCH', body: JSON.stringify({ state: 'restricted_pending_user_response' }),
+    });
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
+    const body = await res.json() as { success: boolean; enforcement: { relay: string } };
+    expect(res.status).toBe(207);
+    expect(body.success).toBe(false);
+    expect(body.enforcement.relay).toBe('failed');
+  });
+
+  it('cron auto-close bans the pubkey at the relay on expiry', async () => {
+    const expiredCase = makeCase({ state: 'restricted_pending_user_response', deadline_at: new Date(Date.now() - 1000).toISOString() });
+    const db = {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        first: vi.fn().mockResolvedValue(null), // config -> default
+        bind: vi.fn().mockReturnValue({
+          all: vi.fn().mockResolvedValue({ results: sql.includes('+2 days') ? [] : [expiredCase] }),
+          first: vi.fn().mockResolvedValue(null),
+          run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+        }),
+      })),
+    };
+    await checkAgeReviewDeadlines(makeEnv(db));
+    expect(banPubkey).toHaveBeenCalledWith(expiredCase.pubkey, 'age_review_expired', expect.objectContaining({ DB: expect.anything() }));
   });
 });
 
@@ -886,7 +1012,7 @@ describe('checkAgeReviewDeadlines', () => {
       prepare: vi.fn().mockImplementation((sql: string) => ({
         bind: vi.fn().mockReturnValue({
           all: vi.fn().mockResolvedValue({
-            results: sql.includes('deadline_at > datetime') ? [] : [expiredCase],
+            results: sql.includes('+2 days') ? [] : [expiredCase],
           }),
           first: vi.fn().mockResolvedValue(
             sql.includes('zendesk_ticket_id') ? { zendesk_ticket_id: 55 } : null
@@ -935,7 +1061,7 @@ describe('checkAgeReviewDeadlines', () => {
       prepare: vi.fn().mockImplementation((sql: string) => ({
         bind: vi.fn().mockReturnValue({
           all: vi.fn().mockResolvedValue({
-            results: sql.includes('deadline_at > datetime') ? [] : [expiredCase],
+            results: sql.includes('+2 days') ? [] : [expiredCase],
           }),
           first: vi.fn().mockResolvedValue(null),
           run: runMock,
@@ -964,7 +1090,7 @@ describe('checkAgeReviewDeadlines', () => {
       prepare: vi.fn().mockImplementation((sql: string) => ({
         bind: vi.fn().mockReturnValue({
           all: vi.fn().mockResolvedValue({
-            results: sql.includes('deadline_at > datetime') ? [approachingCase] : [],
+            results: sql.includes('+2 days') ? [approachingCase] : [],
           }),
           run: vi.fn().mockResolvedValue({ meta: { changes: 0 } }),
         }),
@@ -998,7 +1124,7 @@ describe('checkAgeReviewDeadlines', () => {
       prepare: vi.fn().mockImplementation((sql: string) => ({
         bind: vi.fn().mockReturnValue({
           all: vi.fn().mockResolvedValue({
-            results: sql.includes('deadline_at > datetime') ? [approachingCase] : [],
+            results: sql.includes('+2 days') ? [approachingCase] : [],
           }),
           run: vi.fn().mockResolvedValue({ meta: { changes: 0 } }),
         }),
@@ -1028,7 +1154,7 @@ describe('checkAgeReviewDeadlines', () => {
       prepare: vi.fn().mockImplementation((sql: string) => ({
         bind: vi.fn().mockReturnValue({
           all: vi.fn().mockResolvedValue({
-            results: sql.includes('deadline_at > datetime') ? [approachingCase] : [],
+            results: sql.includes('+2 days') ? [approachingCase] : [],
           }),
           run: vi.fn().mockResolvedValue({ meta: { changes: 0 } }),
         }),

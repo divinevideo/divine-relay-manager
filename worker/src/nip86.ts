@@ -192,6 +192,32 @@ export async function unbanPubkey(
   return callNip86Rpc('unbanpubkey', [pubkey], env);
 }
 
+/**
+ * Suspend a pubkey on the relay (REVERSIBLE). Funnelcake hides the pubkey's
+ * existing events at serve time and rejects new writes, without the destructive
+ * purge that banpubkey performs. Use for age-review restriction; reverse with
+ * unsuspendPubkey on clear. Params mirror banpubkey: [pubkey, reason].
+ */
+export async function suspendPubkey(
+  pubkey: string,
+  reason: string,
+  env: Nip86Env
+): Promise<Nip86RpcResult> {
+  return callNip86Rpc('suspendpubkey', [pubkey, reason], env);
+}
+
+/**
+ * Un-suspend a pubkey on the relay. Existing content becomes visible again once
+ * Funnelcake's suspended-pubkeys materialized view refreshes (~5 min); new
+ * writes are re-allowed immediately.
+ */
+export async function unsuspendPubkey(
+  pubkey: string,
+  env: Nip86Env
+): Promise<Nip86RpcResult> {
+  return callNip86Rpc('unsuspendpubkey', [pubkey], env);
+}
+
 const KIND5_PUBLISH_TIMEOUT_MS = 10_000;
 
 /**

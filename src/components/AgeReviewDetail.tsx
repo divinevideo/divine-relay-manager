@@ -83,7 +83,7 @@ interface Props {
   caseData: AgeReviewCase;
 }
 
-const KEYCAST_STATES: AgeReviewState[] = [
+const ENFORCEMENT_STATES: AgeReviewState[] = [
   'restricted_pending_user_response',
   'restricted_pending_parental_consent',
   'restricted_pending_support_email',
@@ -109,15 +109,20 @@ export function AgeReviewDetail({ caseData: c }: Props) {
   const updateCase = useMutation({
     mutationFn: (updates: Record<string, unknown>) => {
       pendingStateRef.current = updates.state as string | undefined;
-      return api.updateAgeReviewCase(c.id, updates);
+      return api.updateAgeReviewCase(c.id, { ...updates, expected_version: c.version });
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['age-review-cases'] });
       const requestedState = pendingStateRef.current as AgeReviewState | undefined;
-      if (requestedState && KEYCAST_STATES.includes(requestedState) && data.keycastUpdated === false) {
+      if (requestedState && ENFORCEMENT_STATES.includes(requestedState) && data.enforcementComplete === false) {
+        const failedLegs = [
+          data.enforcement?.relay === 'failed' ? 'relay' : null,
+          data.enforcement?.bulk === 'failed' ? 'content' : null,
+          data.enforcement?.keycast === 'failed' ? 'Keycast' : null,
+        ].filter(Boolean).join(', ');
         toast({
-          title: 'Account enforcement failed',
-          description: 'Case was updated but Keycast account suspension did not apply. The user\'s account may still be active. Retry or escalate.',
+          title: 'Account enforcement incomplete',
+          description: `Case was updated but ${failedLegs || 'one or more enforcement steps'} failed. Escalate for manual remediation.`,
           variant: 'destructive',
         });
       }

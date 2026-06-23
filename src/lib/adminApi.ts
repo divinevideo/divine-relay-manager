@@ -916,6 +916,15 @@ interface AgeReviewCaseResponse {
   success: boolean;
   case: import('../../shared/age-review').AgeReviewCase;
   keycastUpdated?: boolean;
+  enforcementComplete?: boolean;
+  enforcement?: {
+    relay?: 'not_attempted' | 'ok' | 'failed';
+    relayError?: string;
+    bulk?: 'not_attempted' | 'ok' | 'failed';
+    bulkError?: string;
+    keycast?: 'not_attempted' | 'ok' | 'failed';
+    keycastError?: string;
+  };
 }
 
 export async function getAgeReviewCases(

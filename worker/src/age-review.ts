@@ -5,6 +5,7 @@ import {
   AGE_BANDS,
   AGE_REVIEW_STATES,
   TERMINAL_STATES,
+  ACCOUNT_RESTRICTED_AGE_REVIEW_STATES,
   VALID_TRANSITIONS,
   isAccountRestrictedAgeReviewState,
   DEADLINE_DAYS,
@@ -14,7 +15,7 @@ import { handleBulkModerate, type BulkModerateEnv } from './bulk-moderate';
 import { resolveZendeskCreds } from './zendesk-sync';
 import type { BulkAction, BulkModerateResult } from '../../shared/bulk-moderation';
 import { suspendUser, unsuspendUser, banUser, createMinorAccount, type KeycastEnv } from './keycast-client';
-import type { SecretStoreSecret } from './nip86';
+import { suspendPubkey, unsuspendPubkey, banPubkey, type SecretStoreSecret } from './nip86';
 
 export interface AgeReviewEnv extends BulkModerateEnv, KeycastEnv {
   SLACK_WEBHOOK_URL?: string;
@@ -183,12 +184,44 @@ export async function handleUpdateAgeReviewCase(
     return json({ success: false, error: 'No valid fields to update' }, 400, corsHeaders);
   }
 
-  updates.push("updated_at = datetime('now')");
-  binds.push(caseId);
+  // optimistic locking. Validate expected_version's type like every other
+  // field (a bad type is a 400, not a conflict), then reject a stale client
+  // write up front; the server-read CAS below is the real guard.
+  const versionConflict = (currentVersion: number = existing.version) => json({
+    success: false,
+    error: 'Case was modified by another request',
+    code: 'version_conflict',
+    current_version: currentVersion,
+  }, 409, corsHeaders);
 
-  await env.DB.prepare(
-    `UPDATE age_review_cases SET ${updates.join(', ')} WHERE id = ?`
-  ).bind(...binds).run();
+  if (body.expected_version !== undefined && typeof body.expected_version !== 'number') {
+    return json({ success: false, error: 'expected_version must be a number' }, 400, corsHeaders);
+  }
+  if (body.expected_version !== undefined && body.expected_version !== existing.version) {
+    return versionConflict();
+  }
+
+  updates.push("updated_at = datetime('now')");
+  updates.push('version = version + 1');
+
+  // ... and compare-and-swap on the version we read. If a concurrent
+  // writer (another moderator, or the deadline cron) committed between our
+  // read and this write, changes === 0 and we abort BEFORE running any
+  // enforcement -- the loser must not apply side effects for a state it no
+  // longer owns.
+  const updateResult = await env.DB.prepare(
+    `UPDATE age_review_cases SET ${updates.join(', ')} WHERE id = ? AND version = ?`
+  ).bind(...binds, caseId, existing.version).run();
+
+  if (updateResult.meta?.changes !== 1) {
+    // A concurrent writer bumped the version between our read and this write, so
+    // existing.version is now stale. Re-read the row to report the TRUE current
+    // version. (The up-front check above can safely return existing.version
+    // because no write has happened yet; on a CAS miss one has.)
+    const fresh = await env.DB.prepare('SELECT version FROM age_review_cases WHERE id = ?')
+      .bind(caseId).first<{ version: number }>();
+    return versionConflict(fresh?.version ?? existing.version);
+  }
 
   let updated = await env.DB.prepare('SELECT * FROM age_review_cases WHERE id = ?')
     .bind(caseId).first<AgeReviewCase>();
@@ -237,52 +270,99 @@ export async function handleUpdateAgeReviewCase(
     }
   }
 
-  // Non-critical: fire bulk content actions on state transitions
+  // Enforcement legs are safety-critical: track each leg's real outcome and
+  // surface failure -- the API must not report success when a minor's content
+  // was not actually restricted or their account not suspended. (Zendesk above
+  // stays non-critical and swallowed.)
+  type LegStatus = 'not_attempted' | 'ok' | 'failed';
+  let bulk: LegStatus = 'not_attempted';
+  let bulkError: string | undefined;
   let bulkActionTriggered: string | undefined;
+  let relay: LegStatus = 'not_attempted';
+  let relayError: string | undefined;
+  let keycast: LegStatus = 'not_attempted';
+  let keycastError: string | undefined;
+
+  // Shared wrapper for the relay and Keycast legs (both resolve to
+  // { success, error }). Returns not_attempted when no call applies.
+  const runStatusLeg = async (
+    label: string,
+    call: () => Promise<{ success: boolean; error?: string }> | undefined,
+  ): Promise<{ status: LegStatus; error?: string }> => {
+    try {
+      const result = await call();
+      if (!result) return { status: 'not_attempted' };
+      if (result.success) return { status: 'ok' };
+      console.error(`[age-review] ${label} ${requestedState} failed for case ${caseId}: ${result.error}`);
+      return { status: 'failed', error: result.error };
+    } catch (error) {
+      console.error(`[age-review] ${label} action failed for case ${caseId}:`, error);
+      return { status: 'failed', error: error instanceof Error ? error.message : String(error) };
+    }
+  };
+
   if (requestedState !== undefined) {
+    // Relay-level pubkey enforcement: suspendpubkey (reversible) hides the user's
+    // existing events AND blocks new writes regardless of key custody (Keycast
+    // suspend does not stop a self-custody / local-key signer); unsuspendpubkey
+    // reverses it on clear (existing content reappears on the ~5-min MV refresh);
+    // banpubkey purges (one-way) on deny/expiry.
+    const relayLeg = await runStatusLeg('Relay', () =>
+      enteredRestrictedState ? suspendPubkey(existing.pubkey, 'age_review', env)
+      : clearedCase ? unsuspendPubkey(existing.pubkey, env)
+      : deniedCase ? banPubkey(existing.pubkey, 'age_review_denied', env)
+      : undefined);
+    relay = relayLeg.status;
+    relayError = relayLeg.error;
+
+    // Relay/media bulk content action (own shape: throws on failure, and deny
+    // only deletes when auto_delete_on_deny is set).
     try {
       if (enteredRestrictedState) {
         await triggerBulkModerate(existing.pubkey, 'age-restrict-all', 'Age review restriction', env);
+        bulk = 'ok';
         bulkActionTriggered = 'age-restrict-all';
       } else if (clearedCase) {
         await triggerBulkModerate(existing.pubkey, 'un-age-restrict-all', 'Age review cleared', env);
+        bulk = 'ok';
         bulkActionTriggered = 'un-age-restrict-all';
       } else if (deniedCase) {
         const config = await getAgeReviewConfig(env.DB!);
         if (config.auto_delete_on_deny) {
           await triggerBulkModerate(existing.pubkey, 'delete-all', 'Age review denied', env);
+          bulk = 'ok';
           bulkActionTriggered = 'delete-all';
         }
       }
     } catch (error) {
+      bulk = 'failed';
+      bulkError = error instanceof Error ? error.message : String(error);
       console.error(`[age-review] Bulk action failed for case ${caseId}:`, error);
     }
+
+    // Keycast account status.
+    const keycastLeg = await runStatusLeg('Keycast', () =>
+      enteredRestrictedState ? suspendUser(existing.pubkey, 'age_review', env)
+      : clearedCase ? unsuspendUser(existing.pubkey, env)
+      : deniedCase ? banUser(existing.pubkey, 'age_review_denied', env)
+      : undefined);
+    keycast = keycastLeg.status;
+    keycastError = keycastLeg.error;
   }
 
-  // Non-critical: sync account status with Keycast
-  let keycastUpdated = false;
-  if (requestedState !== undefined) {
-    try {
-      let keycastResult;
-      if (enteredRestrictedState) {
-        keycastResult = await suspendUser(existing.pubkey, 'age_review', env);
-      } else if (clearedCase) {
-        keycastResult = await unsuspendUser(existing.pubkey, env);
-      } else if (deniedCase) {
-        keycastResult = await banUser(existing.pubkey, 'age_review_denied', env);
-      }
-      if (keycastResult) {
-        keycastUpdated = keycastResult.success;
-        if (!keycastResult.success) {
-          console.error(`[age-review] Keycast ${requestedState} failed for case ${caseId}: ${keycastResult.error}`);
-        }
-      }
-    } catch (error) {
-      console.error(`[age-review] Keycast call failed for case ${caseId}:`, error);
-    }
-  }
-
-  return json({ success: true, case: updated, bulkActionTriggered, keycastUpdated }, 200, corsHeaders);
+  // A failed critical leg is reported (success:false, HTTP 207) so the
+  // moderator/UI sees enforcement is incomplete. The DB state change persists;
+  // remediation must re-run the failed downstream enforcement outside this
+  // state-transition handler.
+  const enforcementComplete = relay !== 'failed' && bulk !== 'failed' && keycast !== 'failed';
+  return json({
+    success: enforcementComplete,
+    case: updated,
+    bulkActionTriggered,
+    keycastUpdated: keycast === 'ok',
+    enforcementComplete,
+    enforcement: { relay, relayError, bulk, bulkError, keycast, keycastError },
+  }, enforcementComplete ? 200 : 207, corsHeaders);
 }
 
 // ---------------------------------------------------------------------------
@@ -844,14 +924,19 @@ export async function handleAgeReviewReplyWebhook(
 export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> {
   if (!env.DB) return;
 
-  // Alert on cases approaching deadline (within 2 days), skip if alerted in last 12h
+  // Alert on cases approaching deadline (within 2 days), skip if alerted in last 12h.
+  // Note the deliberate asymmetry: this alert window covers ALL non-terminal cases,
+  // whereas auto-close (below) only fires for the restricted set. An expired case in
+  // a non-restricted state would therefore be neither auto-closed nor in this window
+  // (its deadline is in the past) -- the expired-needs-action alert further down closes
+  // that blind spot so such cases still reach a moderator.
   const approaching = await env.DB.prepare(`
     SELECT * FROM age_review_cases
     WHERE state NOT IN (${TERMINAL_STATES.map(() => '?').join(',')})
       AND clock_paused = 0
       AND deadline_at IS NOT NULL
-      AND deadline_at < datetime('now', '+2 days')
-      AND deadline_at > datetime('now')
+      AND datetime(deadline_at) < datetime('now', '+2 days')
+      AND datetime(deadline_at) > datetime('now')
       AND (last_alerted_at IS NULL OR last_alerted_at < datetime('now', '-12 hours'))
     ORDER BY deadline_at ASC
   `).bind(...TERMINAL_STATES).all<AgeReviewCase>();
@@ -868,20 +953,38 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
   }
 
   // Auto-close expired cases and ban via Keycast.
+  // only auto-close cases the moderator actually RESTRICTED and that are
+  // still awaiting a user/parent response. This deliberately excludes
+  // open_reported / under_moderator_review (never restricted -- a single
+  // unsolicited report must not auto-ban an account no human confirmed) and
+  // submitted_for_review / needs_follow_up (the user already responded -- a
+  // moderator must act, the clock must not auto-deny them).
+  // compare via datetime() so the ISO-8601 (`...T...Z`) deadline_at is
+  // parsed rather than lexically compared against datetime('now') (space form),
+  // which otherwise delays expiry until the next UTC midnight.
   const expired = await env.DB.prepare(`
     SELECT * FROM age_review_cases
-    WHERE state NOT IN (${TERMINAL_STATES.map(() => '?').join(',')})
+    WHERE state IN (${ACCOUNT_RESTRICTED_AGE_REVIEW_STATES.map(() => '?').join(',')})
       AND clock_paused = 0
       AND deadline_at IS NOT NULL
-      AND deadline_at < datetime('now')
-  `).bind(...TERMINAL_STATES).all<AgeReviewCase>();
+      AND datetime(deadline_at) < datetime('now')
+  `).bind(...ACCOUNT_RESTRICTED_AGE_REVIEW_STATES).all<AgeReviewCase>();
 
   for (const row of expired.results) {
-    await env.DB.prepare(`
+    // CAS on the version we read so the cron doesn't auto-close (and then
+    // ban/delete) a case a moderator is concurrently acting on. If the row
+    // changed since the SELECT above, skip it -- the moderator's action wins and
+    // the next tick re-evaluates. This prevents the cron from clobbering a
+    // just-cleared case or double-firing enforcement.
+    const closeResult = await env.DB.prepare(`
       UPDATE age_review_cases
-      SET state = 'denied_closed', resolution_note = 'Auto-closed: deadline expired with no response', updated_at = datetime('now')
-      WHERE id = ?
-    `).bind(row.id).run();
+      SET state = 'denied_closed', resolution_note = 'Auto-closed: deadline expired with no response', updated_at = datetime('now'), version = version + 1
+      WHERE id = ? AND version = ?
+    `).bind(row.id, row.version).run();
+    if (closeResult.meta?.changes !== 1) {
+      console.log(`[age-review] Skipped expired case ${row.id} (modified concurrently)`);
+      continue;
+    }
     console.log(`[age-review] Auto-closed expired case ${row.id} for ${row.pubkey}`);
     try {
       await syncAgeReviewTicketResolution(row.id, 'denied_closed', 'Auto-closed: deadline expired with no response', env);
@@ -909,22 +1012,65 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
     } catch (error) {
       console.error(`[age-review] Keycast ban failed for expired case ${row.id}:`, error);
     }
+
+    // purge the user's events at the relay (one-way) -- the case is closed
+    // by deadline, matching the deny outcome. Best-effort; logged on failure.
+    try {
+      const relayBan = await banPubkey(row.pubkey, 'age_review_expired', env);
+      if (relayBan.success) {
+        console.log(`[age-review] Relay banpubkey sent for expired case ${row.id}`);
+      } else {
+        console.error(`[age-review] Relay banpubkey failed for expired case ${row.id}: ${relayBan.error}`);
+      }
+    } catch (error) {
+      console.error(`[age-review] Relay banpubkey failed for expired case ${row.id}:`, error);
+    }
   }
 
   if (expired.results.length > 0 && env.SLACK_WEBHOOK_URL) {
     await sendSlackAlert(env.SLACK_WEBHOOK_URL, 'expired', expired.results);
   }
+
+  // Expired but NOT auto-closable: non-terminal cases the cron deliberately does
+  // not auto-close (never restricted, e.g. open_reported / under_moderator_review,
+  // or the user already responded, e.g. submitted_for_review / needs_follow_up).
+  // Without this they would silently sit past deadline -- out of the approaching
+  // window and out of the auto-close set -- so alert (throttled to 12h) to keep a
+  // human in the loop.
+  const expiredNeedsAction = await env.DB.prepare(`
+    SELECT * FROM age_review_cases
+    WHERE state NOT IN (${TERMINAL_STATES.map(() => '?').join(',')})
+      AND state NOT IN (${ACCOUNT_RESTRICTED_AGE_REVIEW_STATES.map(() => '?').join(',')})
+      AND clock_paused = 0
+      AND deadline_at IS NOT NULL
+      AND datetime(deadline_at) < datetime('now')
+      AND (last_alerted_at IS NULL OR last_alerted_at < datetime('now', '-12 hours'))
+    ORDER BY deadline_at ASC
+  `).bind(...TERMINAL_STATES, ...ACCOUNT_RESTRICTED_AGE_REVIEW_STATES).all<AgeReviewCase>();
+
+  if (expiredNeedsAction.results.length > 0 && env.SLACK_WEBHOOK_URL) {
+    const sent = await sendSlackAlert(env.SLACK_WEBHOOK_URL, 'expired_needs_action', expiredNeedsAction.results);
+    if (sent) {
+      for (const row of expiredNeedsAction.results) {
+        await env.DB.prepare(
+          `UPDATE age_review_cases SET last_alerted_at = datetime('now') WHERE id = ?`
+        ).bind(row.id).run();
+      }
+    }
+  }
 }
 
 async function sendSlackAlert(
   webhookUrl: string,
-  alertType: 'approaching' | 'expired',
+  alertType: 'approaching' | 'expired' | 'expired_needs_action',
   cases: AgeReviewCase[],
 ): Promise<boolean> {
-  const emoji = alertType === 'expired' ? ':rotating_light:' : ':warning:';
-  const header = alertType === 'expired'
-    ? `${emoji} ${cases.length} age review case(s) expired`
-    : `${emoji} ${cases.length} age review case(s) approaching deadline`;
+  const emoji = alertType === 'approaching' ? ':warning:' : ':rotating_light:';
+  const header = alertType === 'approaching'
+    ? `${emoji} ${cases.length} age review case(s) approaching deadline`
+    : alertType === 'expired'
+      ? `${emoji} ${cases.length} age review case(s) expired`
+      : `${emoji} ${cases.length} age review case(s) past deadline awaiting moderator action`;
 
   const lines = cases.map(c => {
     const deadline = c.deadline_at ? new Date(c.deadline_at).toISOString().split('T')[0] : 'no deadline';
