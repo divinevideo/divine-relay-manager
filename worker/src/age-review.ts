@@ -5,6 +5,7 @@ import {
   AGE_BANDS,
   AGE_REVIEW_STATES,
   TERMINAL_STATES,
+  ACCOUNT_RESTRICTED_AGE_REVIEW_STATES,
   VALID_TRANSITIONS,
   isAccountRestrictedAgeReviewState,
   DEADLINE_DAYS,
@@ -850,8 +851,8 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
     WHERE state NOT IN (${TERMINAL_STATES.map(() => '?').join(',')})
       AND clock_paused = 0
       AND deadline_at IS NOT NULL
-      AND deadline_at < datetime('now', '+2 days')
-      AND deadline_at > datetime('now')
+      AND datetime(deadline_at) < datetime('now', '+2 days')
+      AND datetime(deadline_at) > datetime('now')
       AND (last_alerted_at IS NULL OR last_alerted_at < datetime('now', '-12 hours'))
     ORDER BY deadline_at ASC
   `).bind(...TERMINAL_STATES).all<AgeReviewCase>();
@@ -868,13 +869,22 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
   }
 
   // Auto-close expired cases and ban via Keycast.
+  // C6: only auto-close cases the moderator actually RESTRICTED and that are
+  // still awaiting a user/parent response. This deliberately excludes
+  // open_reported / under_moderator_review (never restricted -- a single
+  // unsolicited report must not auto-ban an account no human confirmed) and
+  // submitted_for_review / needs_follow_up (the user already responded -- a
+  // moderator must act, the clock must not auto-deny them).
+  // C8: compare via datetime() so the ISO-8601 (`...T...Z`) deadline_at is
+  // parsed rather than lexically compared against datetime('now') (space form),
+  // which otherwise delays expiry until the next UTC midnight.
   const expired = await env.DB.prepare(`
     SELECT * FROM age_review_cases
-    WHERE state NOT IN (${TERMINAL_STATES.map(() => '?').join(',')})
+    WHERE state IN (${ACCOUNT_RESTRICTED_AGE_REVIEW_STATES.map(() => '?').join(',')})
       AND clock_paused = 0
       AND deadline_at IS NOT NULL
-      AND deadline_at < datetime('now')
-  `).bind(...TERMINAL_STATES).all<AgeReviewCase>();
+      AND datetime(deadline_at) < datetime('now')
+  `).bind(...ACCOUNT_RESTRICTED_AGE_REVIEW_STATES).all<AgeReviewCase>();
 
   for (const row of expired.results) {
     await env.DB.prepare(`

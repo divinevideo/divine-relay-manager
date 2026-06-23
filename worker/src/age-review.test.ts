@@ -886,7 +886,7 @@ describe('checkAgeReviewDeadlines', () => {
       prepare: vi.fn().mockImplementation((sql: string) => ({
         bind: vi.fn().mockReturnValue({
           all: vi.fn().mockResolvedValue({
-            results: sql.includes('deadline_at > datetime') ? [] : [expiredCase],
+            results: sql.includes('+2 days') ? [] : [expiredCase],
           }),
           first: vi.fn().mockResolvedValue(
             sql.includes('zendesk_ticket_id') ? { zendesk_ticket_id: 55 } : null
@@ -935,7 +935,7 @@ describe('checkAgeReviewDeadlines', () => {
       prepare: vi.fn().mockImplementation((sql: string) => ({
         bind: vi.fn().mockReturnValue({
           all: vi.fn().mockResolvedValue({
-            results: sql.includes('deadline_at > datetime') ? [] : [expiredCase],
+            results: sql.includes('+2 days') ? [] : [expiredCase],
           }),
           first: vi.fn().mockResolvedValue(null),
           run: runMock,
@@ -964,7 +964,7 @@ describe('checkAgeReviewDeadlines', () => {
       prepare: vi.fn().mockImplementation((sql: string) => ({
         bind: vi.fn().mockReturnValue({
           all: vi.fn().mockResolvedValue({
-            results: sql.includes('deadline_at > datetime') ? [approachingCase] : [],
+            results: sql.includes('+2 days') ? [approachingCase] : [],
           }),
           run: vi.fn().mockResolvedValue({ meta: { changes: 0 } }),
         }),
@@ -998,7 +998,7 @@ describe('checkAgeReviewDeadlines', () => {
       prepare: vi.fn().mockImplementation((sql: string) => ({
         bind: vi.fn().mockReturnValue({
           all: vi.fn().mockResolvedValue({
-            results: sql.includes('deadline_at > datetime') ? [approachingCase] : [],
+            results: sql.includes('+2 days') ? [approachingCase] : [],
           }),
           run: vi.fn().mockResolvedValue({ meta: { changes: 0 } }),
         }),
@@ -1028,7 +1028,7 @@ describe('checkAgeReviewDeadlines', () => {
       prepare: vi.fn().mockImplementation((sql: string) => ({
         bind: vi.fn().mockReturnValue({
           all: vi.fn().mockResolvedValue({
-            results: sql.includes('deadline_at > datetime') ? [approachingCase] : [],
+            results: sql.includes('+2 days') ? [approachingCase] : [],
           }),
           run: vi.fn().mockResolvedValue({ meta: { changes: 0 } }),
         }),
