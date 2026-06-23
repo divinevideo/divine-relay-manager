@@ -12,6 +12,7 @@ import {
   defaultResolutionForBand,
   type EnforcementLegStatus,
   type AgeReviewEnforcement,
+  type AgeReviewCaseResponse,
 } from '../../shared/age-review';
 import { handleBulkModerate, type BulkModerateEnv } from './bulk-moderate';
 import { resolveZendeskCreds } from './zendesk-sync';
@@ -355,16 +356,23 @@ export async function handleUpdateAgeReviewCase(
   // moderator/UI sees enforcement is incomplete. The DB state change persists;
   // remediation must re-run the failed downstream enforcement outside this
   // state-transition handler.
+  // `updated` is the row re-read after the CAS succeeded, so it must exist;
+  // guard for the type system and surface the impossible case rather than
+  // emitting case:null.
+  if (!updated) {
+    return json({ success: false, error: 'Case not found after update' }, 500, corsHeaders);
+  }
   const enforcement: AgeReviewEnforcement = { relay, relayError, bulk, bulkError, keycast, keycastError };
   const enforcementComplete = relay !== 'failed' && bulk !== 'failed' && keycast !== 'failed';
-  return json({
+  const response: AgeReviewCaseResponse = {
     success: enforcementComplete,
     case: updated,
     bulkActionTriggered,
     keycastUpdated: keycast === 'ok',
     enforcementComplete,
     enforcement,
-  }, enforcementComplete ? 200 : 207, corsHeaders);
+  };
+  return json(response, enforcementComplete ? 200 : 207, corsHeaders);
 }
 
 // ---------------------------------------------------------------------------
