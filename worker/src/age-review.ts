@@ -889,32 +889,51 @@ export async function handleAgeReviewReplyWebhook(
     return json({ success: false, error: 'No active case linked to this ticket' }, 404, corsHeaders);
   }
 
-  const allowed = VALID_TRANSITIONS[activeCase.state as AgeReviewState];
-  if (!allowed?.includes('submitted_for_review')) {
-    return json({ success: true, message: 'Case not in a state that can advance to submitted_for_review' }, 200, corsHeaders);
+  // Advance the case with optimistic concurrency: CAS on the version we read so
+  // a concurrent moderator action isn't clobbered, AND bump version so a
+  // moderator holding the pre-reply version is forced to refetch -- their stale
+  // expected_version now returns 409 on the case-update PATCH rather than
+  // silently overwriting the fact that the parent replied. On a CAS miss we
+  // re-read once and re-apply if the case is still advanceable, so a real parent
+  // reply is never dropped just because an unrelated write bumped the row.
+  let target: AgeReviewCase | null = activeCase;
+  for (let attempt = 0; attempt < 2 && target; attempt++) {
+    const allowed = VALID_TRANSITIONS[target.state as AgeReviewState];
+    if (!allowed?.includes('submitted_for_review')) {
+      return json({ success: true, message: 'Case not in a state that can advance to submitted_for_review' }, 200, corsHeaders);
+    }
+
+    const now = new Date();
+    const deadline = target.deadline_at ? new Date(target.deadline_at) : null;
+    const remainingDays = target.clock_paused
+      ? target.remaining_days_when_paused
+      : deadline ? (deadline.getTime() - now.getTime()) / (24 * 60 * 60 * 1000) : DEADLINE_DAYS;
+
+    // This path advances an already-restricted case to moderator review, so it
+    // intentionally leaves Keycast state unchanged.
+    const result = await env.DB.prepare(`
+      UPDATE age_review_cases
+      SET state = 'submitted_for_review',
+          clock_paused = 1,
+          clock_paused_at = ?,
+          remaining_days_when_paused = ?,
+          updated_at = datetime('now'),
+          version = version + 1
+      WHERE id = ? AND version = ?
+    `).bind(now.toISOString(), remainingDays, target.id, target.version).run();
+
+    if (result.meta?.changes === 1) {
+      console.log(`[age-review] Parent replied on ticket #${ticketId}, case ${target.id} → submitted_for_review (clock paused)`);
+      return json({ success: true, case_id: target.id, new_state: 'submitted_for_review' }, 200, corsHeaders);
+    }
+
+    // CAS miss: the row changed between our read and this write. Re-read and retry.
+    target = await env.DB.prepare('SELECT * FROM age_review_cases WHERE id = ?')
+      .bind(activeCase.id).first<AgeReviewCase>();
   }
 
-  const now = new Date();
-  const deadline = activeCase.deadline_at ? new Date(activeCase.deadline_at) : null;
-  const remainingDays = activeCase.clock_paused
-    ? activeCase.remaining_days_when_paused
-    : deadline ? (deadline.getTime() - now.getTime()) / (24 * 60 * 60 * 1000) : DEADLINE_DAYS;
-
-  // This path advances an already-restricted case to moderator review, so it
-  // intentionally leaves Keycast state unchanged.
-  await env.DB.prepare(`
-    UPDATE age_review_cases
-    SET state = 'submitted_for_review',
-        clock_paused = 1,
-        clock_paused_at = ?,
-        remaining_days_when_paused = ?,
-        updated_at = datetime('now')
-    WHERE id = ?
-  `).bind(now.toISOString(), remainingDays, activeCase.id).run();
-
-  console.log(`[age-review] Parent replied on ticket #${ticketId}, case ${activeCase.id} → submitted_for_review (clock paused)`);
-
-  return json({ success: true, case_id: activeCase.id, new_state: 'submitted_for_review' }, 200, corsHeaders);
+  console.log(`[age-review] Parent reply on ticket #${ticketId}, case ${activeCase.id} not advanced (changed concurrently)`);
+  return json({ success: true, case_id: activeCase.id, message: 'Case changed concurrently; not advanced' }, 200, corsHeaders);
 }
 
 // ---------------------------------------------------------------------------
