@@ -4,9 +4,12 @@ import { VALID_BULK_ACTIONS, type BulkAction, type BulkModerateResult } from '..
 import { extractMediaHashes as extractSharedMediaHashes } from '../../shared/media-hashes';
 
 const BULK_ACTION_CONCURRENCY = 5;
-const RELAY_QUERY_LIMIT = 500;
-const RELAY_QUERY_FETCH_LIMIT = RELAY_QUERY_LIMIT + 1;
-const RELAY_QUERY_TIMEOUT_MS = 10000;
+// C4: page through ALL of an author's events via `until` cursoring instead of
+// rejecting accounts with more than one page. The old reject left prolific
+// accounts entirely un-enforced (the throw was swallowed upstream).
+const RELAY_QUERY_PAGE_SIZE = 500;
+const RELAY_QUERY_MAX_PAGES = 100; // safety bound (~50k events); logged if hit, never silent
+const RELAY_QUERY_TIMEOUT_MS = 10000; // per-page (reset each page)
 
 export interface BulkModerateEnv extends Nip86Env, ZendeskSyncEnv {
   DB?: D1Database;
@@ -122,16 +125,14 @@ export async function queryRelayEvents(
     try {
       const ws = new WebSocket(env.RELAY_URL);
       let resolved = false;
-      const events: RelayEventSummary[] = [];
-      const subId = `bulk-${Date.now()}`;
+      const byId = new Map<string, RelayEventSummary>(); // dedup across pages (until boundary overlaps)
+      let page = 0;
+      let currentSub = '';
+      let pageEvents = 0;        // events seen in the current page
+      let pageOldest = Infinity; // min created_at in the current page -> next `until`
+      let timeout: ReturnType<typeof setTimeout>;
 
-      // `resolve` expects RelayEventSummary[]; `reject` expects an Error. The helper
-      // accepts whichever terminator and its matching value as a single union, so the
-      // settle path (close socket, clear timeout, guard against double-settle) is shared.
-      type Settle =
-        | { fn: typeof resolve; value: RelayEventSummary[] }
-        | { fn: typeof reject; value: Error };
-      const finish = (fn: Settle['fn'], value: RelayEventSummary[] | Error) => {
+      const finish = (fn: typeof resolve | typeof reject, value: RelayEventSummary[] | Error) => {
         if (resolved) return;
         resolved = true;
         clearTimeout(timeout);
@@ -139,26 +140,52 @@ export async function queryRelayEvents(
         (fn as (value: RelayEventSummary[] | Error) => void)(value);
       };
 
-      const timeout = setTimeout(() => {
-        finish(reject, new Error('Relay query timed out before EOSE'));
-      }, RELAY_QUERY_TIMEOUT_MS);
+      const armTimeout = () => {
+        clearTimeout(timeout);
+        // Per-page: a prolific account legitimately needs many pages; only a
+        // stalled page (no EOSE within the window) is a failure.
+        timeout = setTimeout(() => finish(reject, new Error('Relay query timed out before EOSE')), RELAY_QUERY_TIMEOUT_MS);
+      };
 
-      ws.addEventListener('open', () => {
-        ws.send(JSON.stringify(['REQ', subId, { authors: [pubkey], limit: RELAY_QUERY_FETCH_LIMIT }]));
-      });
+      const sendPage = (until?: number) => {
+        page += 1;
+        currentSub = `bulk-${Date.now()}-${page}`;
+        pageEvents = 0;
+        pageOldest = Infinity;
+        const filter: { authors: string[]; limit: number; until?: number } = { authors: [pubkey], limit: RELAY_QUERY_PAGE_SIZE };
+        if (until !== undefined) filter.until = until;
+        armTimeout();
+        ws.send(JSON.stringify(['REQ', currentSub, filter]));
+      };
+
+      ws.addEventListener('open', () => sendPage());
 
       ws.addEventListener('message', (msg) => {
         try {
           const data = JSON.parse(msg.data as string);
-          if (data[0] === 'EVENT' && data[1] === subId) {
-            const event = data[2] as { id: string; kind: number; content?: string; tags: string[][] };
-            events.push({ id: event.id, kind: event.kind, content: event.content || '', tags: event.tags });
-          } else if (data[0] === 'EOSE' && data[1] === subId) {
-            if (events.length > RELAY_QUERY_LIMIT) {
-              finish(reject, new Error(`Bulk moderation matched more than ${RELAY_QUERY_LIMIT} events; narrow the scope or add pagination`));
+          if (data[0] === 'EVENT' && data[1] === currentSub) {
+            const event = data[2] as { id: string; kind: number; content?: string; tags: string[][]; created_at?: number };
+            pageEvents += 1;
+            if (!byId.has(event.id)) {
+              byId.set(event.id, { id: event.id, kind: event.kind, content: event.content || '', tags: event.tags });
+            }
+            if (typeof event.created_at === 'number' && event.created_at < pageOldest) pageOldest = event.created_at;
+          } else if (data[0] === 'EOSE' && data[1] === currentSub) {
+            ws.send(JSON.stringify(['CLOSE', currentSub]));
+            // Last page reached: a partial page means the relay has no more events.
+            if (pageEvents < RELAY_QUERY_PAGE_SIZE) {
+              finish(resolve, Array.from(byId.values()));
               return;
             }
-            finish(resolve, events);
+            if (page >= RELAY_QUERY_MAX_PAGES) {
+              // Never silently truncate: surface that we bounded coverage.
+              console.warn(`[bulk-moderate] hit RELAY_QUERY_MAX_PAGES (${RELAY_QUERY_MAX_PAGES}, ~${page * RELAY_QUERY_PAGE_SIZE} events) for ${pubkey}; processing collected subset`);
+              finish(resolve, Array.from(byId.values()));
+              return;
+            }
+            // Page through older events. `until` is inclusive so the boundary
+            // timestamp may repeat; the byId map dedups it.
+            sendPage(pageOldest === Infinity ? undefined : pageOldest);
           }
         } catch {
           // Ignore malformed relay frames and continue collecting.
