@@ -99,7 +99,7 @@ export async function handleBulkModerate(
     });
   } else {
     result.eventsProcessed = events.length;
-    // C3: age-review restriction must WITHHOLD the media, not adult-gate it.
+    // Age-review restriction must WITHHOLD the media, not adult-gate it.
     // QUARANTINE -> (moderation-service) RESTRICT -> blossom BlobStatus::Restricted,
     // which 404s to everyone except the owner and is reversible to Active. The
     // old 'AGE_RESTRICTED' -> BlobStatus::AgeRestricted serves full bytes to ANY

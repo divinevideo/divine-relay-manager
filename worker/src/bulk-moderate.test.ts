@@ -117,7 +117,7 @@ describe('handleBulkModerate', () => {
     return undefined;
   }
 
-  it('C3: age-restrict-all sends QUARANTINE (reversible withhold) for media', async () => {
+  it('age-restrict-all sends QUARANTINE (reversible withhold) for media', async () => {
     mockRelay([{ id: 'e'.repeat(64), kind: 34235, content: '', tags: [['x', hashA]] }]);
     const request = new Request('https://test/api/bulk-moderate', {
       method: 'POST',
@@ -129,7 +129,7 @@ describe('handleBulkModerate', () => {
     expect(moderationActionFor(hashA)).toBe('QUARANTINE');
   });
 
-  it('C3: un-age-restrict-all sends SAFE (restore) for media', async () => {
+  it('un-age-restrict-all sends SAFE (restore) for media', async () => {
     mockRelay([{ id: 'e'.repeat(64), kind: 34235, content: '', tags: [['x', hashA]] }]);
     const request = new Request('https://test/api/bulk-moderate', {
       method: 'POST',
