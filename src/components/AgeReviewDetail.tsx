@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAdminApi } from "@/hooks/useAdminApi";
+import { ApiError } from "@/lib/adminApi";
 import { useToast } from "@/hooks/useToast";
 import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
 import { UserActions } from "@/components/UserActions";
@@ -113,14 +114,50 @@ export function AgeReviewDetail({ caseData: c }: Props) {
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['age-review-cases'] });
-      const requestedState = pendingStateRef.current as AgeReviewState | undefined;
-      if (requestedState && KEYCAST_STATES.includes(requestedState) && data.keycastUpdated === false) {
+
+      // Surface any enforcement leg that did not apply. The case state persists
+      // even when enforcement is partial (the server returns HTTP 207), so the
+      // moderator must be told the content/account may still be reachable.
+      const enforcement = data.enforcement;
+      if (enforcement) {
+        const failed: string[] = [];
+        if (enforcement.relay === 'failed') failed.push('relay (existing posts and feed)');
+        if (enforcement.bulk === 'failed') failed.push('media and content');
+        if (enforcement.keycast === 'failed') failed.push('account sign-in');
+        if (failed.length > 0) {
+          toast({
+            title: 'Enforcement incomplete',
+            description: `Case updated, but these did not apply: ${failed.join(', ')}. The user's content or account may still be reachable. Retry the action or escalate.`,
+            variant: 'destructive',
+          });
+        }
+      } else if (
+        // Fallback for a worker that predates the per-leg enforcement contract.
+        pendingStateRef.current &&
+        KEYCAST_STATES.includes(pendingStateRef.current as AgeReviewState) &&
+        data.keycastUpdated === false
+      ) {
         toast({
           title: 'Account enforcement failed',
           description: 'Case was updated but Keycast account suspension did not apply. The user\'s account may still be active. Retry or escalate.',
           variant: 'destructive',
         });
       }
+    },
+    onError: (error) => {
+      // A concurrent writer (another moderator, or the deadline cron) changed
+      // the case between our read and this write. Reload the current state so
+      // the moderator can review it before re-applying; we deliberately do not
+      // blindly replay a possibly-stale transition.
+      if (error instanceof ApiError && error.code === 'version_conflict') {
+        queryClient.invalidateQueries({ queryKey: ['age-review-cases'] });
+        toast({
+          title: 'Case changed since you opened it',
+          description: 'Another moderator or an automated deadline action modified this case. Reloaded the latest state; review it and re-apply if still needed.',
+          variant: 'destructive',
+        });
+      }
+      // Other errors surface inline via updateCase.isError below.
     },
   });
 

@@ -27,6 +27,8 @@ import {
   getDecisions,
   extractMediaHashes,
   isBlockedMediaAction,
+  updateAgeReviewCase,
+  ApiError,
   type UnsignedEvent,
   type ApiResponse,
   type LabelParams,
@@ -104,6 +106,48 @@ describe('adminApi', () => {
       const result = await getWorkerInfo(API_URL);
 
       expect(result).toEqual(mockData);
+    });
+
+    it('surfaces a JSON error body (409 version_conflict) as structured ApiError fields', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 409,
+        statusText: 'Conflict',
+        json: async () => ({
+          error: 'Case was modified by another request',
+          code: 'version_conflict',
+          current_version: 3,
+        }),
+      });
+
+      expect.assertions(5);
+      try {
+        await updateAgeReviewCase(API_URL, 'case-1', { state: 'cleared' });
+      } catch (e) {
+        const err = e as ApiError;
+        expect(err).toBeInstanceOf(ApiError);
+        expect(err.message).toBe('Case was modified by another request'); // not opaque "HTTP 409:"
+        expect(err.statusCode).toBe(409);
+        expect(err.code).toBe('version_conflict');
+        expect(err.currentVersion).toBe(3);
+      }
+    });
+
+    it('returns the enforcement object (not throws) on a 207 partial-enforcement response', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true, // fetch sets ok=true across the whole 2xx range, including 207
+        status: 207,
+        json: async () => ({
+          success: false,
+          case: { id: 'case-1' },
+          enforcementComplete: false,
+          enforcement: { relay: 'failed', bulk: 'ok', keycast: 'ok' },
+        }),
+      });
+
+      const res = await updateAgeReviewCase(API_URL, 'case-1', { state: 'restricted_pending_user_response' });
+      expect(res.enforcementComplete).toBe(false);
+      expect(res.enforcement?.relay).toBe('failed');
     });
   });
 
