@@ -15,7 +15,7 @@ import { handleBulkModerate, type BulkModerateEnv } from './bulk-moderate';
 import { resolveZendeskCreds } from './zendesk-sync';
 import type { BulkAction, BulkModerateResult } from '../../shared/bulk-moderation';
 import { suspendUser, unsuspendUser, banUser, createMinorAccount, type KeycastEnv } from './keycast-client';
-import type { SecretStoreSecret } from './nip86';
+import { suspendPubkey, unsuspendPubkey, banPubkey, type SecretStoreSecret } from './nip86';
 
 export interface AgeReviewEnv extends BulkModerateEnv, KeycastEnv {
   SLACK_WEBHOOK_URL?: string;
@@ -276,8 +276,38 @@ export async function handleUpdateAgeReviewCase(
   let bulkActionTriggered: string | undefined;
   let keycast: LegStatus = 'not_attempted';
   let keycastError: string | undefined;
+  let relay: LegStatus = 'not_attempted';
+  let relayError: string | undefined;
 
   if (requestedState !== undefined) {
+    // C1/C9: relay-level pubkey enforcement. suspendpubkey (reversible) hides
+    // the user's existing events AND blocks new writes at the relay -- the only
+    // layer that does so regardless of key custody (Keycast suspend does not
+    // stop a self-custody / local-key signer). Reversed by unsuspendpubkey on
+    // clear (existing content reappears on the ~5-min MV refresh). On
+    // deny/expiry, banpubkey purges (one-way) per the closure outcome.
+    try {
+      let relayResult;
+      if (enteredRestrictedState) {
+        relayResult = await suspendPubkey(existing.pubkey, 'age_review', env);
+      } else if (clearedCase) {
+        relayResult = await unsuspendPubkey(existing.pubkey, env);
+      } else if (deniedCase) {
+        relayResult = await banPubkey(existing.pubkey, 'age_review_denied', env);
+      }
+      if (relayResult) {
+        relay = relayResult.success ? 'ok' : 'failed';
+        if (!relayResult.success) {
+          relayError = relayResult.error;
+          console.error(`[age-review] Relay ${requestedState} failed for case ${caseId}: ${relayResult.error}`);
+        }
+      }
+    } catch (error) {
+      relay = 'failed';
+      relayError = error instanceof Error ? error.message : String(error);
+      console.error(`[age-review] Relay action failed for case ${caseId}:`, error);
+    }
+
     // Relay/media bulk content action
     try {
       if (enteredRestrictedState) {
@@ -330,14 +360,14 @@ export async function handleUpdateAgeReviewCase(
   // moderator/UI sees enforcement is incomplete and can retry. The DB state
   // change persisted; re-issuing the PATCH (with the new version) is a safe,
   // CAS-guarded retry of the enforcement.
-  const enforcementComplete = bulk !== 'failed' && keycast !== 'failed';
+  const enforcementComplete = relay !== 'failed' && bulk !== 'failed' && keycast !== 'failed';
   return json({
     success: enforcementComplete,
     case: updated,
     bulkActionTriggered,
     keycastUpdated: keycast === 'ok',
     enforcementComplete,
-    enforcement: { bulk, bulkError, keycast, keycastError },
+    enforcement: { relay, relayError, bulk, bulkError, keycast, keycastError },
   }, enforcementComplete ? 200 : 207, corsHeaders);
 }
 
@@ -982,6 +1012,19 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
       }
     } catch (error) {
       console.error(`[age-review] Keycast ban failed for expired case ${row.id}:`, error);
+    }
+
+    // C9: purge the user's events at the relay (one-way) -- the case is closed
+    // by deadline, matching the deny outcome. Best-effort; logged on failure.
+    try {
+      const relayBan = await banPubkey(row.pubkey, 'age_review_expired', env);
+      if (relayBan.success) {
+        console.log(`[age-review] Relay banpubkey sent for expired case ${row.id}`);
+      } else {
+        console.error(`[age-review] Relay banpubkey failed for expired case ${row.id}: ${relayBan.error}`);
+      }
+    } catch (error) {
+      console.error(`[age-review] Relay banpubkey failed for expired case ${row.id}:`, error);
     }
   }
 
