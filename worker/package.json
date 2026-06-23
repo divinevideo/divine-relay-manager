@@ -9,6 +9,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest",
     "test:run": "vitest run",
+    "test:d1": "vitest run --config vitest.d1.config.ts",
     "generate-keys": "node scripts/generate-keys.js"
   },
   "dependencies": {
