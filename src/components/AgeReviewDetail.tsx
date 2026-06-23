@@ -431,7 +431,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
                   Updating...
                 </div>
               )}
-              {updateCase.isError && (
+              {updateCase.isError && !(updateCase.error instanceof ApiError && updateCase.error.code === 'version_conflict') && (
                 <div className="text-xs text-red-600">
                   Failed to update: {(updateCase.error as Error).message}
                 </div>

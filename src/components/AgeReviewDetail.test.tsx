@@ -148,6 +148,8 @@ describe('AgeReviewDetail', () => {
         variant: 'destructive',
       }));
     });
+    // the toast covers the conflict; the inline error must not also fire for it
+    expect(screen.queryByText(/Failed to update/)).not.toBeInTheDocument();
   });
 
   it('shows Deny & Close without confirmation when auto-delete is off', () => {
