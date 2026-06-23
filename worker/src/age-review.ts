@@ -942,11 +942,20 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
   `).bind(...ACCOUNT_RESTRICTED_AGE_REVIEW_STATES).all<AgeReviewCase>();
 
   for (const row of expired.results) {
-    await env.DB.prepare(`
+    // C7: CAS on the version we read so the cron doesn't auto-close (and then
+    // ban/delete) a case a moderator is concurrently acting on. If the row
+    // changed since the SELECT above, skip it -- the moderator's action wins and
+    // the next tick re-evaluates. This prevents the cron from clobbering a
+    // just-cleared case or double-firing enforcement.
+    const closeResult = await env.DB.prepare(`
       UPDATE age_review_cases
-      SET state = 'denied_closed', resolution_note = 'Auto-closed: deadline expired with no response', updated_at = datetime('now')
-      WHERE id = ?
-    `).bind(row.id).run();
+      SET state = 'denied_closed', resolution_note = 'Auto-closed: deadline expired with no response', updated_at = datetime('now'), version = version + 1
+      WHERE id = ? AND version = ?
+    `).bind(row.id, row.version).run();
+    if (closeResult.meta?.changes !== 1) {
+      console.log(`[age-review] Skipped expired case ${row.id} (modified concurrently)`);
+      continue;
+    }
     console.log(`[age-review] Auto-closed expired case ${row.id} for ${row.pubkey}`);
     try {
       await syncAgeReviewTicketResolution(row.id, 'denied_closed', 'Auto-closed: deadline expired with no response', env);

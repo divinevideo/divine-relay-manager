@@ -111,4 +111,13 @@ describe('age-review cron on real D1 (C6 + C8)', () => {
     await checkAgeReviewDeadlines(cronEnv);
     expect(await stateOf('c6-paused')).toBe('restricted_pending_user_response');
   });
+
+  it('C7: cron auto-close uses CAS and bumps the version', async () => {
+    await insertCase('c7-cron', 'restricted_pending_user_response', '2020-01-01T00:00:00.000Z');
+    await checkAgeReviewDeadlines(cronEnv);
+    const row = await DB.prepare('SELECT state, version FROM age_review_cases WHERE id = ?')
+      .bind('c7-cron').first();
+    expect(row.state).toBe('denied_closed');
+    expect(row.version).toBe(1); // CAS UPDATE applied
+  });
 });
