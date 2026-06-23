@@ -11,6 +11,8 @@ import {
   allowEvent,
   banPubkey,
   unbanPubkey,
+  suspendPubkey,
+  unsuspendPubkey,
   publishKind5Deletion,
   type Nip86Env,
 } from './nip86';
@@ -212,6 +214,24 @@ describe('convenience methods', () => {
 
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
     expect(body.method).toBe('unbanpubkey');
+    expect(body.params).toEqual(['pubkey123']);
+  });
+
+  it('suspendPubkey should call suspendpubkey RPC with [pubkey, reason]', async () => {
+    const result = await suspendPubkey('pubkey123', 'age_review', mockEnv);
+    expect(result.success).toBe(true);
+
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.method).toBe('suspendpubkey');
+    expect(body.params).toEqual(['pubkey123', 'age_review']);
+  });
+
+  it('unsuspendPubkey should call unsuspendpubkey RPC with [pubkey]', async () => {
+    const result = await unsuspendPubkey('pubkey123', mockEnv);
+    expect(result.success).toBe(true);
+
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.method).toBe('unsuspendpubkey');
     expect(body.params).toEqual(['pubkey123']);
   });
 });

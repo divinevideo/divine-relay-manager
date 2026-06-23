@@ -15,6 +15,7 @@ import {
 } from './age-review';
 import type { AgeReviewCase } from '../../shared/age-review';
 import { suspendUser, unsuspendUser, banUser, createMinorAccount } from './keycast-client';
+import { suspendPubkey, unsuspendPubkey, banPubkey } from './nip86';
 
 vi.mock('./keycast-client', () => ({
   suspendUser: vi.fn().mockResolvedValue({ success: true }),
@@ -34,6 +35,14 @@ vi.mock('./bulk-moderate', () => ({
       new Response(JSON.stringify({ success: true, eventsProcessed: 0, mediaProcessed: 0, failures: [] }), { status: 200 }),
     ),
   ),
+}));
+
+// Relay-level NIP-86 enforcement (C1/C9). Stubbed to succeed by default; the
+// real wire contract is verified separately in nip86.test.ts.
+vi.mock('./nip86', () => ({
+  suspendPubkey: vi.fn().mockResolvedValue({ success: true }),
+  unsuspendPubkey: vi.fn().mockResolvedValue({ success: true }),
+  banPubkey: vi.fn().mockResolvedValue({ success: true }),
 }));
 
 const corsHeaders = { 'Access-Control-Allow-Origin': '*' };
@@ -693,6 +702,91 @@ describe('Keycast suspension wiring', () => {
     expect(body.success).toBe(false);
     expect(body.enforcement.keycast).toBe('failed');
     expect(body.case.state).toBe('denied_closed');
+  });
+});
+
+// -- Relay pubkey enforcement wiring (C1 / C9) --------------------------------
+
+describe('Relay pubkey enforcement wiring (C1/C9)', () => {
+  beforeEach(() => {
+    vi.mocked(suspendPubkey).mockClear().mockResolvedValue({ success: true });
+    vi.mocked(unsuspendPubkey).mockClear().mockResolvedValue({ success: true });
+    vi.mocked(banPubkey).mockClear().mockResolvedValue({ success: true });
+  });
+
+  function dbReturning(before: AgeReviewCase, after: AgeReviewCase) {
+    let n = 0;
+    const firstFor = (sql: string) => async () => {
+      if (sql.includes('WHERE id = ?')) { n += 1; return n === 1 ? before : after; }
+      return null;
+    };
+    return {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        first: vi.fn().mockImplementation(firstFor(sql)),
+        bind: vi.fn().mockReturnValue({
+          first: vi.fn().mockImplementation(firstFor(sql)),
+          run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+        }),
+      })),
+    };
+  }
+
+  async function patchState(before: string, to: string) {
+    const c = makeCase({ state: before as AgeReviewCase['state'] });
+    const db = dbReturning(c, { ...c, state: to as AgeReviewCase['state'] });
+    const req = new Request('https://api.test/api/age-review/cases/case-1', {
+      method: 'PATCH', body: JSON.stringify({ state: to }),
+    });
+    await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
+    return c;
+  }
+
+  it('suspends the pubkey at the relay on restrict', async () => {
+    const c = await patchState('under_moderator_review', 'restricted_pending_user_response');
+    expect(suspendPubkey).toHaveBeenCalledWith(c.pubkey, 'age_review', expect.objectContaining({ DB: expect.anything() }));
+    expect(unsuspendPubkey).not.toHaveBeenCalled();
+    expect(banPubkey).not.toHaveBeenCalled();
+  });
+
+  it('un-suspends the pubkey at the relay on clear', async () => {
+    const c = await patchState('restricted_pending_user_response', 'cleared');
+    expect(unsuspendPubkey).toHaveBeenCalledWith(c.pubkey, expect.objectContaining({ DB: expect.anything() }));
+    expect(suspendPubkey).not.toHaveBeenCalled();
+  });
+
+  it('bans the pubkey at the relay on deny', async () => {
+    const c = await patchState('restricted_pending_user_response', 'denied_closed');
+    expect(banPubkey).toHaveBeenCalledWith(c.pubkey, 'age_review_denied', expect.objectContaining({ DB: expect.anything() }));
+  });
+
+  it('a failed relay leg is surfaced as success:false / 207', async () => {
+    vi.mocked(suspendPubkey).mockResolvedValue({ success: false, error: 'relay 403' });
+    const c = makeCase({ state: 'under_moderator_review' });
+    const db = dbReturning(c, { ...c, state: 'restricted_pending_user_response' });
+    const req = new Request('https://api.test/api/age-review/cases/case-1', {
+      method: 'PATCH', body: JSON.stringify({ state: 'restricted_pending_user_response' }),
+    });
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
+    const body = await res.json() as { success: boolean; enforcement: { relay: string } };
+    expect(res.status).toBe(207);
+    expect(body.success).toBe(false);
+    expect(body.enforcement.relay).toBe('failed');
+  });
+
+  it('cron auto-close bans the pubkey at the relay on expiry', async () => {
+    const expiredCase = makeCase({ state: 'restricted_pending_user_response', deadline_at: new Date(Date.now() - 1000).toISOString() });
+    const db = {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        first: vi.fn().mockResolvedValue(null), // config -> default
+        bind: vi.fn().mockReturnValue({
+          all: vi.fn().mockResolvedValue({ results: sql.includes('+2 days') ? [] : [expiredCase] }),
+          first: vi.fn().mockResolvedValue(null),
+          run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+        }),
+      })),
+    };
+    await checkAgeReviewDeadlines(makeEnv(db));
+    expect(banPubkey).toHaveBeenCalledWith(expiredCase.pubkey, 'age_review_expired', expect.objectContaining({ DB: expect.anything() }));
   });
 });
 

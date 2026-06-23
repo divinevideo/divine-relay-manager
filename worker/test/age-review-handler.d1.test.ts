@@ -109,10 +109,11 @@ describe('age-review handler on real D1 (C7 + C5)', () => {
     expect(res.status).toBe(207);
     const body = await res.json() as {
       success: boolean; enforcementComplete: boolean;
-      enforcement: { bulk: string; keycast: string }; case: { state: string };
+      enforcement: { relay: string; bulk: string; keycast: string }; case: { state: string };
     };
     expect(body.success).toBe(false);
     expect(body.enforcementComplete).toBe(false);
+    expect(body.enforcement.relay).toBe('failed'); // C1: relay suspend attempted, no relay configured
     expect(body.enforcement.bulk).toBe('failed');
     // ...but the DB state transition still applied (best-effort, retryable).
     expect(body.case.state).toBe('restricted_pending_user_response');
