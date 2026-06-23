@@ -350,10 +350,10 @@ export async function handleUpdateAgeReviewCase(
     keycastError = keycastLeg.error;
   }
 
-  // a failed critical leg is reported (success:false, HTTP 207) so the
-  // moderator/UI sees enforcement is incomplete and can retry. The DB state
-  // change persisted; re-issuing the PATCH (with the new version) is a safe,
-  // CAS-guarded retry of the enforcement.
+  // A failed critical leg is reported (success:false, HTTP 207) so the
+  // moderator/UI sees enforcement is incomplete. The DB state change persists;
+  // remediation must re-run the failed downstream enforcement outside this
+  // state-transition handler.
   const enforcementComplete = relay !== 'failed' && bulk !== 'failed' && keycast !== 'failed';
   return json({
     success: enforcementComplete,
