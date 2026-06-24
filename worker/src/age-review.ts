@@ -10,6 +10,9 @@ import {
   isAccountRestrictedAgeReviewState,
   DEADLINE_DAYS,
   defaultResolutionForBand,
+  type EnforcementLegStatus,
+  type AgeReviewEnforcement,
+  type AgeReviewCaseResponse,
 } from '../../shared/age-review';
 import { handleBulkModerate, type BulkModerateEnv } from './bulk-moderate';
 import { resolveZendeskCreds } from './zendesk-sync';
@@ -274,13 +277,12 @@ export async function handleUpdateAgeReviewCase(
   // surface failure -- the API must not report success when a minor's content
   // was not actually restricted or their account not suspended. (Zendesk above
   // stays non-critical and swallowed.)
-  type LegStatus = 'not_attempted' | 'ok' | 'failed';
-  let bulk: LegStatus = 'not_attempted';
+  let bulk: EnforcementLegStatus = 'not_attempted';
   let bulkError: string | undefined;
   let bulkActionTriggered: string | undefined;
-  let relay: LegStatus = 'not_attempted';
+  let relay: EnforcementLegStatus = 'not_attempted';
   let relayError: string | undefined;
-  let keycast: LegStatus = 'not_attempted';
+  let keycast: EnforcementLegStatus = 'not_attempted';
   let keycastError: string | undefined;
 
   // Shared wrapper for the relay and Keycast legs (both resolve to
@@ -288,7 +290,7 @@ export async function handleUpdateAgeReviewCase(
   const runStatusLeg = async (
     label: string,
     call: () => Promise<{ success: boolean; error?: string }> | undefined,
-  ): Promise<{ status: LegStatus; error?: string }> => {
+  ): Promise<{ status: EnforcementLegStatus; error?: string }> => {
     try {
       const result = await call();
       if (!result) return { status: 'not_attempted' };
@@ -354,15 +356,23 @@ export async function handleUpdateAgeReviewCase(
   // moderator/UI sees enforcement is incomplete. The DB state change persists;
   // remediation must re-run the failed downstream enforcement outside this
   // state-transition handler.
+  // `updated` is the row re-read after the CAS succeeded, so it must exist;
+  // guard for the type system and surface the impossible case rather than
+  // emitting case:null.
+  if (!updated) {
+    return json({ success: false, error: 'Case not found after update' }, 500, corsHeaders);
+  }
+  const enforcement: AgeReviewEnforcement = { relay, relayError, bulk, bulkError, keycast, keycastError };
   const enforcementComplete = relay !== 'failed' && bulk !== 'failed' && keycast !== 'failed';
-  return json({
+  const response: AgeReviewCaseResponse = {
     success: enforcementComplete,
     case: updated,
     bulkActionTriggered,
     keycastUpdated: keycast === 'ok',
     enforcementComplete,
-    enforcement: { relay, relayError, bulk, bulkError, keycast, keycastError },
-  }, enforcementComplete ? 200 : 207, corsHeaders);
+    enforcement,
+  };
+  return json(response, enforcementComplete ? 200 : 207, corsHeaders);
 }
 
 // ---------------------------------------------------------------------------
