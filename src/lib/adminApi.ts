@@ -199,7 +199,7 @@ export async function callRelayRpc<T = unknown>(
       // The relay may still have applied the action even though we stopped waiting,
       // so tell the moderator to re-check rather than blindly retry.
       throw new ApiError(
-        `Relay RPC '${method}' timed out after ${RELAY_RPC_TIMEOUT_MS / 1000}s. The action may still have applied — re-check before retrying.`,
+        `Relay RPC '${method}' timed out after ${RELAY_RPC_TIMEOUT_MS / 1000}s. The action may still have applied. Re-check before retrying.`,
       );
     }
     throw err;
