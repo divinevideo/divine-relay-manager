@@ -25,10 +25,16 @@ export function UserActions({
   const api = useAdminApi();
   const showBulkActions = context !== 'age-review';
 
+  // Audit logging is a non-critical side effect. Fire-and-forget so a slow or
+  // hung /api/decisions write can never stall the moderation action or leave the
+  // confirm dialog stuck on "Banning…". The relay action is the source of truth.
+  const logAudit = (params: Parameters<typeof api.logDecision>[0]) =>
+    void api.logDecision(params).catch((e) => console.warn('[UserActions] audit log failed', e));
+
   const suspendUserMutation = useMutation({
     mutationFn: async () => {
       await api.suspendPubkey(pubkey, 'Suspended by moderator');
-      await api.logDecision({
+      logAudit({
         targetType: 'pubkey',
         targetId: pubkey,
         action: 'suspend_user',
@@ -47,7 +53,7 @@ export function UserActions({
   const unsuspendUserMutation = useMutation({
     mutationFn: async () => {
       await api.unsuspendPubkey(pubkey);
-      await api.logDecision({
+      logAudit({
         targetType: 'pubkey',
         targetId: pubkey,
         action: 'unsuspend_user',
@@ -66,7 +72,7 @@ export function UserActions({
   const banUserMutation = useMutation({
     mutationFn: async () => {
       await api.banPubkey(pubkey, 'Banned by moderator');
-      await api.logDecision({
+      logAudit({
         targetType: 'pubkey',
         targetId: pubkey,
         action: 'ban_user',
@@ -85,7 +91,7 @@ export function UserActions({
   const unbanUserMutation = useMutation({
     mutationFn: async () => {
       await api.unbanPubkey(pubkey);
-      await api.logDecision({
+      logAudit({
         targetType: 'pubkey',
         targetId: pubkey,
         action: 'unban_user',
@@ -104,7 +110,7 @@ export function UserActions({
   const bulkAgeRestrictMutation = useMutation({
     mutationFn: async () => {
       const result = await api.bulkModerate(pubkey, 'age-restrict-all', 'Bulk age-restricted by moderator');
-      await api.logDecision({
+      logAudit({
         targetType: 'pubkey',
         targetId: pubkey,
         action: 'bulk_age_restrict',
@@ -124,7 +130,7 @@ export function UserActions({
   const bulkDeleteMutation = useMutation({
     mutationFn: async () => {
       const result = await api.bulkModerate(pubkey, 'delete-all', 'Bulk deleted by moderator');
-      await api.logDecision({
+      logAudit({
         targetType: 'pubkey',
         targetId: pubkey,
         action: 'bulk_delete',
