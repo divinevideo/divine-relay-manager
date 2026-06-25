@@ -108,6 +108,16 @@ describe('adminApi', () => {
       expect(result).toEqual(mockData);
     });
 
+    it('throws an actionable ApiError when an HTTP request times out', async () => {
+      // Regression: apiRequest had no timeout, so a hung relay could leave the
+      // "Deleting…" / "Restricting…" bulk modals spinning forever.
+      mockFetch.mockRejectedValueOnce(new DOMException('timed out', 'TimeoutError'));
+
+      await expect(getWorkerInfo(API_URL)).rejects.toThrow(
+        /Request to \/api\/info timed out after 30s\. The action may still have applied\. Re-check before retrying\./,
+      );
+    });
+
     it('surfaces a JSON error body (409 version_conflict) as structured ApiError fields', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: false,
@@ -376,6 +386,23 @@ describe('adminApi', () => {
       const result = await callRelayRpc<string[]>(API_URL, 'listbannedpubkeys');
 
       expect(result).toEqual(['pubkey1', 'pubkey2']);
+    });
+
+    it('throws an actionable ApiError naming the method when the RPC times out', async () => {
+      // Regression: callRelayRpc had no timeout, so a hung banpubkey purge left
+      // the "Banning…" modal spinning forever.
+      mockFetch.mockRejectedValueOnce(new DOMException('timed out', 'TimeoutError'));
+
+      await expect(callRelayRpc(API_URL, 'banpubkey', ['npub'])).rejects.toThrow(
+        /Relay RPC 'banpubkey' timed out after 30s\. The action may still have applied\. Re-check before retrying\./,
+      );
+    });
+
+    it('re-throws non-timeout fetch errors unchanged', async () => {
+      const networkError = new TypeError('Failed to fetch');
+      mockFetch.mockRejectedValueOnce(networkError);
+
+      await expect(callRelayRpc(API_URL, 'banpubkey')).rejects.toBe(networkError);
     });
   });
 

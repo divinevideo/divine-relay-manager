@@ -84,6 +84,29 @@ export class ApiError extends Error {
   }
 }
 
+// Bound every relay-bound HTTP call so a slow or hung relay can't leave the UI
+// spinning forever (the "Banning…" / "Deleting…" confirm modals). Generous
+// because some actions purge across 16+ tables; if legitimate operations exceed
+// this, fix the relay-side latency rather than raise the bound. Covers every
+// caller of apiRequest and callRelayRpc, not just bans.
+const API_TIMEOUT_MS = 30_000;
+
+// fetch wrapper that aborts after API_TIMEOUT_MS. On timeout it throws an
+// actionable ApiError: the relay may have applied the action even though we
+// stopped waiting, so the moderator should re-check rather than blindly retry.
+async function fetchWithTimeout(url: string, init: RequestInit, label: string): Promise<Response> {
+  try {
+    return await fetch(url, { ...init, signal: AbortSignal.timeout(API_TIMEOUT_MS) });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'TimeoutError') {
+      throw new ApiError(
+        `${label} timed out after ${API_TIMEOUT_MS / 1000}s. The action may still have applied. Re-check before retrying.`,
+      );
+    }
+    throw err;
+  }
+}
+
 async function apiRequest<T>(
   apiUrl: string,
   endpoint: string,
@@ -93,11 +116,11 @@ async function apiRequest<T>(
   if (!apiUrl) {
     throw new ApiError('No relay selected. Go to Settings to choose an environment.');
   }
-  const response = await fetch(`${apiUrl}${endpoint}`, {
+  const response = await fetchWithTimeout(`${apiUrl}${endpoint}`, {
     method,
     headers: getApiHeaders(),
     body: body ? JSON.stringify(body) : undefined,
-  });
+  }, `Request to ${endpoint}`);
 
   if (!response.ok) {
     // Read the JSON error body if there is one so callers can act on structured
@@ -172,11 +195,6 @@ export async function allowPubkey(apiUrl: string, pubkey: string): Promise<ApiRe
   return moderateAction(apiUrl, { action: 'allow_pubkey', pubkey });
 }
 
-// Bound relay RPC calls so a slow/hung relay can't leave the UI spinning forever
-// (e.g. the "Banning…" modal). Generous because banpubkey purges across 16+ tables;
-// if legitimate purges exceed this, fix the relay-side latency rather than raise this.
-const RELAY_RPC_TIMEOUT_MS = 30_000;
-
 // NIP-86 Relay RPC endpoint - for direct relay management
 export async function callRelayRpc<T = unknown>(
   apiUrl: string,
@@ -186,24 +204,11 @@ export async function callRelayRpc<T = unknown>(
   if (!apiUrl) {
     throw new ApiError('No relay selected. Go to Settings to choose an environment.');
   }
-  let response: Response;
-  try {
-    response = await fetch(`${apiUrl}/api/relay-rpc`, {
-      method: 'POST',
-      headers: getApiHeaders(),
-      body: JSON.stringify({ method, params }),
-      signal: AbortSignal.timeout(RELAY_RPC_TIMEOUT_MS),
-    });
-  } catch (err) {
-    if (err instanceof DOMException && err.name === 'TimeoutError') {
-      // The relay may still have applied the action even though we stopped waiting,
-      // so tell the moderator to re-check rather than blindly retry.
-      throw new ApiError(
-        `Relay RPC '${method}' timed out after ${RELAY_RPC_TIMEOUT_MS / 1000}s. The action may still have applied. Re-check before retrying.`,
-      );
-    }
-    throw err;
-  }
+  const response = await fetchWithTimeout(`${apiUrl}/api/relay-rpc`, {
+    method: 'POST',
+    headers: getApiHeaders(),
+    body: JSON.stringify({ method, params }),
+  }, `Relay RPC '${method}'`);
 
   if (!response.ok) {
     throw new ApiError(
