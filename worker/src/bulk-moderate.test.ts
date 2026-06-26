@@ -50,9 +50,13 @@ function mockRelay(events: Array<{ id: string; kind: number; content?: string; t
 // from the WebSocket REQ used for event IDs.
 function mockUserVideos(videos: Array<{ sha256: string }>) {
   vi.spyOn(globalThis, 'fetch').mockImplementation((async (input: RequestInfo | URL) => {
-    const url = String(input);
-    if (url.includes('/api/users/') && url.includes('/videos')) {
-      return new Response(JSON.stringify(videos), { status: 200 });
+    const url = new URL(String(input));
+    if (url.pathname.includes('/api/users/') && url.pathname.includes('/videos')) {
+      // Honor limit/offset so the mock paginates exactly like funnelcake (default
+      // 25, max 100) -- a non-paginating mock would hide the first-page-only bug.
+      const limit = Number(url.searchParams.get('limit') ?? '25');
+      const offset = Number(url.searchParams.get('offset') ?? '0');
+      return new Response(JSON.stringify(videos.slice(offset, offset + limit)), { status: 200 });
     }
     return new Response('not found', { status: 404 });
   }) as typeof fetch);
@@ -159,6 +163,21 @@ describe('handleBulkModerate', () => {
     expect(moderationActionFor(hashA)).toBe('QUARANTINE');
     expect(moderationActionFor(hashB)).toBe('QUARANTINE');
     expect(moderationActionFor(hashC)).toBe('QUARANTINE');
+  });
+
+  it('pages through ALL videos beyond the funnelcake per-page limit, not just the first page', async () => {
+    // 250 videos = 3 pages (100/100/50). funnelcake caps a page at 100 (default 25),
+    // so without offset paging only the first page would be withheld and the rest
+    // would stay live -- the exact under-enforcement this guards against.
+    const many = Array.from({ length: 250 }, (_, i) => ({ sha256: i.toString(16).padStart(64, '0') }));
+    mockUserVideos(many);
+    const request = new Request('https://test/api/bulk-moderate', {
+      method: 'POST',
+      body: JSON.stringify({ pubkey: 'a'.repeat(64), action: 'age-restrict-all' }),
+    });
+    const response = await handleBulkModerate(request, mockEnv, {});
+    const result = await response.json() as { mediaProcessed: number };
+    expect(result.mediaProcessed).toBe(250);
   });
 
   it('un-age-restrict-all sends SAFE (restore) for media', async () => {

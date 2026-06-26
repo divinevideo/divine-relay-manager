@@ -259,7 +259,13 @@ export async function queryRelayEvents(
 }
 
 const SHA256_HEX = /^[a-f0-9]{64}$/i;
-const VIDEO_QUERY_TIMEOUT_MS = 10000;
+const VIDEO_QUERY_TIMEOUT_MS = 10000; // per page
+// The funnelcake videos endpoint defaults to limit=25 and caps at 100, so we MUST
+// page explicitly: without ?limit + offset paging, bulk delete/age-restrict would
+// silently action only the first 25 videos and leave the rest live (a withhold
+// gap on a child-safety path). Page at the max size, with a safety bound.
+const VIDEO_PAGE_SIZE = 100;
+const VIDEO_MAX_PAGES = 100; // ~10k videos; throws if exceeded rather than under-enforcing
 
 // Enumerate a user's video media hashes via the Funnelcake REST API instead of a
 // WebSocket REQ. Funnelcake's `relay_events_by_kind_time` materialized view
@@ -276,20 +282,32 @@ export async function queryUserMediaHashes(
   env: Pick<BulkModerateEnv, 'RELAY_URL' | 'FUNNELCAKE_API_URL'>,
 ): Promise<string[]> {
   const baseUrl = deriveFunnelcakeApiUrl(env.RELAY_URL, env.FUNNELCAKE_API_URL);
-  const res = await fetch(`${baseUrl}/api/users/${pubkey}/videos`, {
-    signal: AbortSignal.timeout(VIDEO_QUERY_TIMEOUT_MS),
-  });
-  if (!res.ok) {
-    throw new Error(`Video query failed: ${res.status}`);
-  }
-  const videos = await res.json() as Array<{ sha256?: string }>;
   const hashes = new Set<string>();
-  for (const v of videos) {
-    if (v.sha256 && SHA256_HEX.test(v.sha256)) {
-      hashes.add(v.sha256.toLowerCase());
+
+  for (let page = 0; page < VIDEO_MAX_PAGES; page++) {
+    const offset = page * VIDEO_PAGE_SIZE;
+    const res = await fetch(
+      `${baseUrl}/api/users/${pubkey}/videos?limit=${VIDEO_PAGE_SIZE}&offset=${offset}`,
+      { signal: AbortSignal.timeout(VIDEO_QUERY_TIMEOUT_MS) },
+    );
+    if (!res.ok) {
+      throw new Error(`Video query failed: ${res.status}`);
+    }
+    const videos = await res.json() as Array<{ sha256?: string }>;
+    for (const v of videos) {
+      if (v.sha256 && SHA256_HEX.test(v.sha256)) {
+        hashes.add(v.sha256.toLowerCase());
+      }
+    }
+    // A short page (fewer than the page size) means we've reached the end.
+    if (videos.length < VIDEO_PAGE_SIZE) {
+      return Array.from(hashes);
     }
   }
-  return Array.from(hashes);
+
+  // Hit the page bound: fail closed rather than silently enforcing over a partial
+  // set on a withhold path.
+  throw new Error(`More than ${VIDEO_MAX_PAGES * VIDEO_PAGE_SIZE} videos for ${pubkey}; narrow the scope or add deeper pagination`);
 }
 
 async function runWithConcurrency<T>(
