@@ -6,6 +6,7 @@ import {
   handleBulkJobStatus,
   queryRelayEvents,
   queryUserVideosPage,
+  queryRelayEventsPage,
   type BulkModerateEnv,
 } from './bulk-moderate';
 import type { BulkJob, BulkJobMessage, BulkEnqueueResponse } from '../../shared/bulk-moderation';
@@ -141,6 +142,26 @@ describe('queryUserVideosPage', () => {
     const page = await queryUserVideosPage('a'.repeat(64), { RELAY_URL: 'wss://relay.test' });
     expect(page.hashes).toHaveLength(100);
     expect(page.nextCursor).toBe('100');
+  });
+});
+
+describe('queryRelayEventsPage', () => {
+  beforeEach(() => { vi.restoreAllMocks(); });
+  it('returns one chunk and the next until cursor', async () => {
+    const all = Array.from({ length: 250 }, (_, i) => ({ id: `e${i}`, kind: 1, content: '', tags: [] as string[][], created_at: 250 - i }));
+    mockPaginatedRelay(all);
+    const page = await queryRelayEventsPage('a'.repeat(64), { RELAY_URL: 'wss://relay.test' });
+    expect(page.events).toHaveLength(200);                  // EVENT_CHUNK_SIZE
+    expect(page.complete).toBe(false);                      // more remain
+    expect(page.nextUntil).toBe(all[199].created_at - 1);   // strictly past the boundary
+  });
+  it('signals completion on a short final page', async () => {
+    const all = Array.from({ length: 50 }, (_, i) => ({ id: `e${i}`, kind: 1, content: '', tags: [] as string[][], created_at: 50 - i }));
+    mockPaginatedRelay(all);
+    const page = await queryRelayEventsPage('a'.repeat(64), { RELAY_URL: 'wss://relay.test' });
+    expect(page.events).toHaveLength(50);
+    expect(page.complete).toBe(true);
+    expect(page.nextUntil).toBeNull();
   });
 });
 

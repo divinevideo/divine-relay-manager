@@ -17,6 +17,7 @@ const BULK_ACTION_CONCURRENCY = 5;
 const RELAY_QUERY_PAGE_SIZE = 500;
 const RELAY_QUERY_MAX_PAGES = 100; // safety bound (~50k events); logged if hit, never silent
 const RELAY_QUERY_TIMEOUT_MS = 10000; // per-page (reset each page)
+const EVENT_CHUNK_SIZE = 200; // chunked consumer: ~400 subrequests/chunk (ban + kind-5 per event)
 
 export interface BulkModerateEnv extends Nip86Env, ZendeskSyncEnv {
   DB?: D1Database;
@@ -420,6 +421,64 @@ export async function queryRelayEvents(
       ws.addEventListener('close', () => {
         finish(reject, new Error('Relay query closed before EOSE'));
       });
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+// One chunk of a user's events via a single relay REQ bounded by `until`. Returns
+// the next `until` (strictly past the oldest event so the inclusive boundary isn't
+// re-counted) and whether enumeration is complete. A full page that can't advance
+// the cursor signals the saturated-second caveat via complete=false.
+export async function queryRelayEventsPage(
+  pubkey: string,
+  env: Pick<BulkModerateEnv, 'RELAY_URL'>,
+  until?: number,
+): Promise<{ events: RelayEventSummary[]; nextUntil: number | null; complete: boolean }> {
+  type Page = { events: RelayEventSummary[]; nextUntil: number | null; complete: boolean };
+  return new Promise((resolve, reject) => {
+    try {
+      const ws = new WebSocket(env.RELAY_URL);
+      let resolved = false;
+      const events: RelayEventSummary[] = [];
+      let oldest = Infinity;
+      const subId = `bulk-page-${Date.now()}`;
+      const timeout = setTimeout(() => finish(reject, new Error('Relay query timed out before EOSE')), RELAY_QUERY_TIMEOUT_MS);
+      const finish = (fn: ((v: Page) => void) | ((e: Error) => void), value: Page | Error) => {
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(timeout);
+        ws.close();
+        (fn as (value: Page | Error) => void)(value);
+      };
+      ws.addEventListener('open', () => {
+        const filter: { authors: string[]; limit: number; until?: number } = { authors: [pubkey], limit: EVENT_CHUNK_SIZE };
+        if (until !== undefined) filter.until = until;
+        ws.send(JSON.stringify(['REQ', subId, filter]));
+      });
+      ws.addEventListener('message', (msg) => {
+        try {
+          const data = JSON.parse((msg as MessageEvent).data as string);
+          if (data[0] === 'EVENT' && data[1] === subId) {
+            const e = data[2] as { id: string; kind: number; content?: string; tags: string[][]; created_at?: number };
+            events.push({ id: e.id, kind: e.kind, content: e.content || '', tags: e.tags });
+            if (typeof e.created_at === 'number' && e.created_at < oldest) oldest = e.created_at;
+          } else if (data[0] === 'EOSE' && data[1] === subId) {
+            ws.send(JSON.stringify(['CLOSE', subId]));
+            if (events.length < EVENT_CHUNK_SIZE) {
+              finish(resolve, { events, nextUntil: null, complete: true });
+            } else if (oldest === Infinity) {
+              // Full page with no usable created_at: can't advance the cursor.
+              finish(resolve, { events, nextUntil: null, complete: false });
+            } else {
+              finish(resolve, { events, nextUntil: oldest - 1, complete: false });
+            }
+          }
+        } catch { /* ignore malformed frames */ }
+      });
+      ws.addEventListener('error', () => finish(reject, new Error('Relay query failed')));
+      ws.addEventListener('close', () => finish(reject, new Error('Relay query closed before EOSE')));
     } catch (error) {
       reject(error);
     }
