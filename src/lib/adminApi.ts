@@ -99,6 +99,23 @@ const API_TIMEOUT_MS = 30_000;
 // model (feat/bulk-moderate-async-job), after which bulk reverts to the default.
 const BULK_API_TIMEOUT_MS = 180_000;
 
+// NIP-86 read methods are a closed, known set, so derive read-vs-write from
+// membership rather than a name prefix: `getbannedevent` and `supportedmethods`
+// are reads that do NOT start with `list`, and inferring from the prefix would
+// label them as writes (wrongly telling a moderator a read "may have applied").
+const READ_RPC_METHODS = new Set<string>([
+  'listbannedpubkeys',
+  'listallowedpubkeys',
+  'listsuspendedpubkeys',
+  'listbannedevents',
+  'listbannedtags',
+  'listblockedips',
+  'listallowedkinds',
+  'listeventsneedingmoderation',
+  'getbannedevent',
+  'supportedmethods',
+]);
+
 // fetch wrapper that aborts after the chosen bound. The timeout message depends
 // on whether the call mutates relay state: a timed-out write may have landed
 // even though we stopped waiting (re-check before retrying), but a timed-out
@@ -226,8 +243,7 @@ export async function callRelayRpc<T = unknown>(
     method: 'POST',
     headers: getApiHeaders(),
     body: JSON.stringify({ method, params }),
-    // The only read RPCs are the list* methods; everything else mutates relay state.
-  }, `Relay RPC '${method}'`, { mutates: !method.startsWith('list') });
+  }, `Relay RPC '${method}'`, { mutates: !READ_RPC_METHODS.has(method) });
 
   if (!response.ok) {
     throw new ApiError(

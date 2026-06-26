@@ -443,6 +443,16 @@ describe('adminApi', () => {
         /Relay RPC 'listbannedpubkeys' timed out after 30s\. Could not reach the relay\. Try again\./,
       );
     });
+
+    it('a non-list read RPC (getbannedevent) timeout says could-not-reach, not may-have-applied', async () => {
+      // getbannedevent / supportedmethods are reads that do NOT start with 'list';
+      // they must still get the read copy, not the write "may have applied".
+      mockFetch.mockRejectedValueOnce(new DOMException('timed out', 'TimeoutError'));
+
+      await expect(callRelayRpc(API_URL, 'getbannedevent', ['eventid'])).rejects.toThrow(
+        /Relay RPC 'getbannedevent' timed out after 30s\. Could not reach the relay\. Try again\./,
+      );
+    });
   });
 
   describe('banPubkey', () => {
