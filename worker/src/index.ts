@@ -6,9 +6,6 @@ import {
   getSecretKey,
   getManagementUrl,
   callNip86Rpc,
-  banEvent,
-  banPubkey,
-  unbanPubkey,
   publishKind5Deletion,
   type SecretStoreSecret,
 } from './nip86';
@@ -30,7 +27,7 @@ import {
   updateAgeReviewConfig,
 } from './age-review';
 import { handleBulkModerate } from './bulk-moderate';
-import { ensureZendeskTable, addZendeskInternalNote, syncZendeskAfterAction, resolveZendeskCreds } from './zendesk-sync';
+import { ensureZendeskTable, addZendeskInternalNote, syncZendeskAfterAction } from './zendesk-sync';
 
 let schemaReady = false;
 async function ensureSchemaOnce(db: D1Database): Promise<void> {
