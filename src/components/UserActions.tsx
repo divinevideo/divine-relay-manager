@@ -27,9 +27,14 @@ export function UserActions({
 
   // Audit logging is a non-critical side effect. Fire-and-forget so a slow or
   // hung /api/decisions write can never stall the moderation action or leave the
-  // confirm dialog stuck on "Banning…". The relay action is the source of truth.
+  // confirm dialog stuck on "Banning…". The relay action is the source of truth;
+  // on failure we surface a non-blocking toast so the moderator knows the decision
+  // log lagged, without blocking the action or the dialog close.
   const logAudit = (params: Parameters<typeof api.logDecision>[0]) =>
-    void api.logDecision(params).catch((e) => console.warn('[UserActions] audit log failed', e));
+    void api.logDecision(params).catch((e) => {
+      console.warn('[UserActions] audit log failed', e);
+      toast({ title: 'Action applied; audit log not recorded' });
+    });
 
   const suspendUserMutation = useMutation({
     mutationFn: async () => {

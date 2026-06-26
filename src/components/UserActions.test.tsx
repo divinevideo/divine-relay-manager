@@ -101,4 +101,48 @@ describe('UserActions', () => {
     expect(api.banPubkey).toHaveBeenCalledWith('a'.repeat(64), 'Banned by moderator');
     expect(api.logDecision).toHaveBeenCalledTimes(1); // fired, but not awaited
   });
+
+  it('closes the ban dialog on success (the alertdialog is removed)', async () => {
+    // The real symptom of the hang bug is the dialog never closing; assert it's gone.
+    renderWithProvider(<UserActions pubkey={'a'.repeat(64)} />);
+    fireEvent.click(screen.getByRole('button', { name: /Ban User/i }));
+    const dialog = screen.getByRole('alertdialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Ban User' }));
+
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+  });
+
+  it('surfaces a ban timeout as an error toast and keeps the dialog open for retry', async () => {
+    api.banPubkey.mockRejectedValue(
+      new Error("Relay RPC 'banpubkey' timed out after 30s. The action may still have applied. Re-check before retrying."),
+    );
+    renderWithProvider(<UserActions pubkey={'a'.repeat(64)} />);
+    fireEvent.click(screen.getByRole('button', { name: /Ban User/i }));
+    const dialog = screen.getByRole('alertdialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Ban User' }));
+
+    await waitFor(() =>
+      expect(toast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Failed to ban user', variant: 'destructive' }),
+      ),
+    );
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument();
+  });
+
+  it('shows a non-blocking toast when the audit log fails but still completes the ban', async () => {
+    // Audit-log loss should be visible to the moderator, but must never block the
+    // action or the dialog close.
+    api.logDecision.mockRejectedValue(new Error('audit down'));
+    renderWithProvider(<UserActions pubkey={'a'.repeat(64)} />);
+    fireEvent.click(screen.getByRole('button', { name: /Ban User/i }));
+    const dialog = screen.getByRole('alertdialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Ban User' }));
+
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+    await waitFor(() =>
+      expect(toast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: expect.stringMatching(/audit log not recorded/i) }),
+      ),
+    );
+  });
 });
