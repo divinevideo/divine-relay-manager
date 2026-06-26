@@ -42,15 +42,77 @@ function json(data: unknown, status: number, corsHeaders: Record<string, string>
   });
 }
 
-// Runs the actual enumerate->action work. Invoked by the queue consumer
-// (processBulkJob), NOT directly by the HTTP handler -- the producer enqueues a
-// job and returns immediately so a large account can't hang the request.
+// Per-item chunk helpers, shared by the synchronous runBulkModeration (age-review)
+// and the chunked queue consumer (processBulkJob).
+
+async function moderateMediaHashes(
+  env: BulkModerateEnv, hashes: string[], mediaAction: string, reason: string,
+): Promise<{ processed: number; failures: string[] }> {
+  let processed = 0;
+  const failures: string[] = [];
+  await runWithConcurrency(hashes, BULK_ACTION_CONCURRENCY, async (sha256) => {
+    try {
+      await callModerateMedia(sha256, mediaAction, reason, env);
+      processed++;
+    } catch (error) {
+      failures.push(`media:${sha256}:${formatError(error)}`);
+    }
+  });
+  return { processed, failures };
+}
+
+async function writeDecisionBatch(
+  env: BulkModerateEnv, eventIds: string[], reason: string, moderatorPubkey: string,
+): Promise<void> {
+  if (!env.DB || eventIds.length === 0) return;
+  // Non-critical audit write (the relay deletes already happened): log and
+  // continue, never abort the run and mislabel a completed destructive run.
+  try {
+    await env.DB.batch(
+      eventIds.map((eventId) => env.DB!.prepare(
+        `INSERT INTO moderation_decisions (target_type, target_id, action, reason, moderator_pubkey, created_at) VALUES (?, ?, ?, ?, ?, datetime('now'))`
+      ).bind('event', eventId, 'delete_event', reason, moderatorPubkey))
+    );
+  } catch (error) {
+    console.error('[bulk-moderate] decision-log batch insert failed (non-critical):', formatError(error));
+  }
+}
+
+async function deleteEvents(
+  env: BulkModerateEnv, events: RelayEventSummary[], reason: string, moderatorPubkey: string,
+): Promise<{ processed: number; successfulEventIds: string[]; failures: string[] }> {
+  let processed = 0;
+  const successfulEventIds: string[] = [];
+  const failures: string[] = [];
+  await runWithConcurrency(events, BULK_ACTION_CONCURRENCY, async (event) => {
+    try {
+      const banResult = await banEvent(event.id, reason, env);
+      if (!banResult.success) throw new Error(banResult.error || 'banevent failed');
+      const deleteResult = await publishKind5Deletion(event.id, reason, env);
+      if (!deleteResult.success) throw new Error(deleteResult.error || 'kind 5 deletion failed');
+      processed++;
+      successfulEventIds.push(event.id);
+    } catch (error) {
+      failures.push(`event:${event.id}:${formatError(error)}`);
+    }
+  });
+  await writeDecisionBatch(env, successfulEventIds, reason, moderatorPubkey);
+  await runWithConcurrency(successfulEventIds, BULK_ACTION_CONCURRENCY, async (eventId) => {
+    await syncZendeskAfterAction(env, 'delete_event', 'event', eventId, moderatorPubkey);
+  });
+  return { processed, successfulEventIds, failures };
+}
+
+// Runs the WHOLE enumerate->action job synchronously, in one invocation. Used by
+// the age-review enforcement path, which needs the result inline for the case's
+// enforcement-leg status. The moderator-facing UI path uses the chunked queue
+// consumer (processBulkJob) instead, which drains any account size.
 //
-// Scope note: async removes the *client* hang, but the work still runs in one
-// queue-consumer invocation, so a very large account can still hit the Workers
-// per-invocation subrequest/CPU ceiling and land `failed` (BULK_ACTION_CONCURRENCY
-// changes parallelism, not the total subrequest count). Per-message chunking is
-// the future fix if real account sizes approach that ceiling.
+// Scope note: because this runs in one invocation, a very large account can still
+// hit the Workers per-invocation subrequest/CPU ceiling and land `failed` here
+// (BULK_ACTION_CONCURRENCY changes parallelism, not the total subrequest count).
+// That is acceptable for age-review (it fails visibly on the case; the moderator
+// re-runs from the chunked Users-page path).
 export async function runBulkModeration(
   env: BulkModerateEnv,
   pubkey: string,
@@ -61,99 +123,35 @@ export async function runBulkModeration(
   const result: BulkModerateResult = { success: true, eventsProcessed: 0, mediaProcessed: 0, failures: [] };
 
   if (action === 'delete-all') {
-    // Events come from the relay (WebSocket, paginated) because delete needs the
-    // event IDs for banevent + kind-5. Media hashes come from the Funnelcake REST
-    // API, which routes through the dedup-correct view and returns ALL of a user's
-    // videos -- the WebSocket REQ returns ~1 video/kind (funnelcake#471). Fetch
-    // both in parallel.
+    // Events come from the relay (WebSocket, paginated) for the event IDs;
+    // media hashes from the funnelcake REST API (dedup-correct, all videos).
     const [{ events, complete }, mediaHashes] = await Promise.all([
       queryRelayEvents(pubkey, env),
       queryUserMediaHashes(pubkey, env),
     ]);
-
-    // If the relay could not be fully paginated (e.g. more than one page of events
-    // share a single created_at second, which an until-cursor cannot subdivide),
-    // surface it rather than silently enforcing over a partial set. The events we
-    // did gather are still actioned below (best effort).
     if (!complete) {
       result.failures.push(`enumeration:${pubkey}:relay could not be fully paginated; actioned a partial set`);
     }
-
-    const successfulEventIds: string[] = [];
-
-    await runWithConcurrency(events, BULK_ACTION_CONCURRENCY, async (event) => {
-      try {
-        const banResult = await banEvent(event.id, reason, env);
-        if (!banResult.success) {
-          throw new Error(banResult.error || 'banevent failed');
-        }
-
-        const deleteResult = await publishKind5Deletion(event.id, reason, env);
-        if (!deleteResult.success) {
-          throw new Error(deleteResult.error || 'kind 5 deletion failed');
-        }
-
-        result.eventsProcessed++;
-        successfulEventIds.push(event.id);
-      } catch (error) {
-        result.failures.push(`event:${event.id}:${formatError(error)}`);
-      }
-    });
-
-    if (env.DB && successfulEventIds.length > 0) {
-      // Non-critical audit write (the relay deletes already happened). Per the
-      // graceful-degradation contract, a D1 failure here must NOT abort the job
-      // and mislabel a completed destructive run as failed — log and continue.
-      try {
-        await env.DB.batch(
-          successfulEventIds.map((eventId) => env.DB!.prepare(
-            `INSERT INTO moderation_decisions (target_type, target_id, action, reason, moderator_pubkey, created_at) VALUES (?, ?, ?, ?, ?, datetime('now'))`
-          ).bind('event', eventId, 'delete_event', reason, moderatorPubkey))
-        );
-      } catch (error) {
-        console.error('[bulk-moderate] decision-log batch insert failed (non-critical):', formatError(error));
-      }
-    }
-
-    await runWithConcurrency(successfulEventIds, BULK_ACTION_CONCURRENCY, async (eventId) => {
-      await syncZendeskAfterAction(env, 'delete_event', 'event', eventId, moderatorPubkey);
-    });
-
-    if (successfulEventIds.length > 0) {
+    const ev = await deleteEvents(env, events, reason, moderatorPubkey);
+    result.eventsProcessed = ev.processed;
+    result.failures.push(...ev.failures);
+    if (ev.successfulEventIds.length > 0) {
       await syncZendeskAfterAction(env, 'delete_event', 'pubkey', pubkey, moderatorPubkey);
     }
-
-    await runWithConcurrency(mediaHashes, BULK_ACTION_CONCURRENCY, async (sha256) => {
-      try {
-        await callModerateMedia(sha256, 'DELETE', reason, env);
-        result.mediaProcessed++;
-      } catch (error) {
-        result.failures.push(`media:${sha256}:${formatError(error)}`);
-      }
-    });
+    const media = await moderateMediaHashes(env, mediaHashes, 'DELETE', reason);
+    result.mediaProcessed = media.processed;
+    result.failures.push(...media.failures);
   } else {
-    // age-restrict-all / un-age-restrict-all are media-only: no event IDs needed,
-    // so we skip the WebSocket entirely and enumerate media from the REST API
-    // (dedup-correct, all videos -- funnelcake#471).
+    // age-restrict-all / un-age-restrict-all are media-only.
+    // QUARANTINE -> RESTRICT -> blossom Restricted (404s to everyone but the owner,
+    // reversible). 'AGE_RESTRICTED' would serve full bytes to any signed-in viewer,
+    // so it must NOT be used to hide a minor's content. Clear sends 'SAFE'.
     const mediaHashes = await queryUserMediaHashes(pubkey, env);
-    // REST returns one entry per video, so video count == event count for video
-    // kinds; report it so the UI's "across N events" stays meaningful.
-    result.eventsProcessed = mediaHashes.length;
-    // Age-review restriction must WITHHOLD the media, not adult-gate it.
-    // QUARANTINE -> (moderation-service) RESTRICT -> blossom BlobStatus::Restricted,
-    // which 404s to everyone except the owner and is reversible to Active. The
-    // old 'AGE_RESTRICTED' -> BlobStatus::AgeRestricted serves full bytes to ANY
-    // signed-in viewer (a throwaway key), so it does not hide a minor's content.
-    // Clear ('un-age-restrict-all') sends 'SAFE' -> Active to restore.
+    result.eventsProcessed = mediaHashes.length; // one video == one event for video kinds
     const mediaAction = action === 'age-restrict-all' ? 'QUARANTINE' : 'SAFE';
-    await runWithConcurrency(mediaHashes, BULK_ACTION_CONCURRENCY, async (sha256) => {
-      try {
-        await callModerateMedia(sha256, mediaAction, reason, env);
-        result.mediaProcessed++;
-      } catch (error) {
-        result.failures.push(`media:${sha256}:${formatError(error)}`);
-      }
-    });
+    const media = await moderateMediaHashes(env, mediaHashes, mediaAction, reason);
+    result.mediaProcessed = media.processed;
+    result.failures.push(...media.failures);
   }
 
   result.success = result.failures.length === 0;
