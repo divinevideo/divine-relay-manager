@@ -160,12 +160,7 @@ describe('runBulkModeration', () => {
     // would stay live -- the exact under-enforcement this guards against.
     const many = Array.from({ length: 250 }, (_, i) => ({ sha256: i.toString(16).padStart(64, '0') }));
     mockUserVideos(many);
-    const request = new Request('https://test/api/bulk-moderate', {
-      method: 'POST',
-      body: JSON.stringify({ pubkey: 'a'.repeat(64), action: 'age-restrict-all' }),
-    });
-    const response = await handleBulkModerate(request, mockEnv, {});
-    const result = await response.json() as { mediaProcessed: number };
+    const result = await runBulkModeration(mockEnv, 'a'.repeat(64), 'age-restrict-all', 'r');
     expect(result.mediaProcessed).toBe(250);
   });
 

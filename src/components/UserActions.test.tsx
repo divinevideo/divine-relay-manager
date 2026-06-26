@@ -155,6 +155,22 @@ describe('UserActions', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: /^Age Restrict All$/i })).toBeEnabled());
   });
 
+  it('gives up and surfaces an error when a job never confirms in time', async () => {
+    vi.useFakeTimers();
+    try {
+      api.getBulkJobStatus.mockResolvedValue(doneJob('age-restrict-all', { status: 'running', mediaProcessed: 0, eventsProcessed: 0 }));
+      renderWithProvider(<UserActions pubkey={PUBKEY} />);
+      fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
+      await vi.advanceTimersByTimeAsync(2000); // enqueue resolves, job set, give-up timer armed
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000 + 1000); // past MAX_POLL_MS
+      expect(toast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Bulk action failed', variant: 'destructive' }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('detaches from an in-flight job when the selected user changes (no stale running state)', async () => {
     // Job for user A keeps polling (never terminal).
     api.getBulkJobStatus.mockResolvedValue(doneJob('age-restrict-all', { status: 'running', mediaProcessed: 0, eventsProcessed: 0 }));
