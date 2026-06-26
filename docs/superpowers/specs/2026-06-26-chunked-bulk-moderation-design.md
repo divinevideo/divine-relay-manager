@@ -64,6 +64,17 @@ interface BulkJobMessage {
 - `cursor`: funnelcake v2 `next_cursor` for `media`; relay `until` timestamp
   (stringified) for `events`. Omitted = start of the phase.
 
+### Chunk sizes (subrequest budget)
+
+A worker invocation caps at ~1000 subrequests, so each chunk's per-item calls must
+stay well under that with headroom for the enumeration fetch + D1 writes:
+
+- `MEDIA_CHUNK_SIZE = 100` — one media page; 100 `callModerateMedia` subrequests
+  (also the funnelcake v2 max page size).
+- `EVENT_CHUNK_SIZE = 200` — 200 events × ~2 subrequests (`banEvent` + kind-5) ≈ 400,
+  plus the decision batch + any zendesk syncs. Distinct from `RELAY_QUERY_PAGE_SIZE`
+  (500), which stays for the synchronous `queryRelayEvents` used by age-review.
+
 ### Enumeration units (small, independently testable)
 
 - `queryUserVideosPage(pubkey, env, cursor?) → { hashes: string[]; nextCursor: string | null }`
@@ -71,7 +82,7 @@ interface BulkJobMessage {
   parses the `{ data: [{sha256}], next_cursor }` envelope. v2 cursor paging is
   unbounded and avoids v1 offset's skip/repeat caveat and O(offset) penalty.
 - `queryRelayEventsPage(pubkey, env, until?) → { events: RelayEventSummary[]; nextUntil: number | null; complete: boolean }`
-  — one WS REQ chunk (`{authors, until, limit: RELAY_QUERY_PAGE_SIZE}`); `nextUntil`
+  — one WS REQ chunk (`{authors, until, limit: EVENT_CHUNK_SIZE}`); `nextUntil`
   = oldest `created_at` − 1 (strictly past, so chunks don't double-count the
   inclusive boundary); `complete=false` surfaces the saturated-second caveat (a
   full page sharing one `created_at` that an `until` cursor can't subdivide).
@@ -89,7 +100,7 @@ loops `queryUserVideosPage` fully (unbounded, deduped) — no 10k cap. `queryRel
 2. Set `status='running'`, refresh `updated_at` (so an actively-progressing
    multi-chunk job is never stale-healed by the 30-min reaper).
 3. Phase = `msg.phase ?? (action === 'delete-all' ? 'events' : 'media')`.
-4. Run **one page** of that phase (concurrency `BULK_ACTION_CONCURRENCY = 5`):
+4. Run one chunk of that phase (concurrency `BULK_ACTION_CONCURRENCY = 5`; MEDIA_CHUNK_SIZE/EVENT_CHUNK_SIZE per above):
    - `events`: `queryRelayEventsPage(until=cursor)`; per event → `banEvent` +
      `publishKind5Deletion`; non-critical D1 decision batch + per-event zendesk
      sync; count `eventsProcessed`; collect per-item failures.
