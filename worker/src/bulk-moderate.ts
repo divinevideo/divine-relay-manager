@@ -45,6 +45,12 @@ function json(data: unknown, status: number, corsHeaders: Record<string, string>
 // Runs the actual enumerate->action work. Invoked by the queue consumer
 // (processBulkJob), NOT directly by the HTTP handler -- the producer enqueues a
 // job and returns immediately so a large account can't hang the request.
+//
+// Scope note: async removes the *client* hang, but the work still runs in one
+// queue-consumer invocation, so a very large account can still hit the Workers
+// per-invocation subrequest/CPU ceiling and land `failed` (BULK_ACTION_CONCURRENCY
+// changes parallelism, not the total subrequest count). Per-message chunking is
+// the future fix if real account sizes approach that ceiling.
 export async function runBulkModeration(
   env: BulkModerateEnv,
   pubkey: string,
@@ -95,11 +101,18 @@ export async function runBulkModeration(
     });
 
     if (env.DB && successfulEventIds.length > 0) {
-      await env.DB.batch(
-        successfulEventIds.map((eventId) => env.DB!.prepare(
-          `INSERT INTO moderation_decisions (target_type, target_id, action, reason, moderator_pubkey, created_at) VALUES (?, ?, ?, ?, ?, datetime('now'))`
-        ).bind('event', eventId, 'delete_event', reason, moderatorPubkey))
-      );
+      // Non-critical audit write (the relay deletes already happened). Per the
+      // graceful-degradation contract, a D1 failure here must NOT abort the job
+      // and mislabel a completed destructive run as failed — log and continue.
+      try {
+        await env.DB.batch(
+          successfulEventIds.map((eventId) => env.DB!.prepare(
+            `INSERT INTO moderation_decisions (target_type, target_id, action, reason, moderator_pubkey, created_at) VALUES (?, ?, ?, ?, ?, datetime('now'))`
+          ).bind('event', eventId, 'delete_event', reason, moderatorPubkey))
+        );
+      } catch (error) {
+        console.error('[bulk-moderate] decision-log batch insert failed (non-critical):', formatError(error));
+      }
     }
 
     await runWithConcurrency(successfulEventIds, BULK_ACTION_CONCURRENCY, async (eventId) => {
@@ -227,35 +240,58 @@ export async function handleBulkModerateEnqueue(
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).bind(jobId, body.pubkey, action, 'pending', 0, 0, '[]', now, now).run();
 
-  await env.BULK_QUEUE.send({ jobId, pubkey: body.pubkey, action, reason });
+  try {
+    await env.BULK_QUEUE.send({ jobId, pubkey: body.pubkey, action, reason });
+  } catch (error) {
+    // Roll back the orphaned pending row so it can't linger unprocessed.
+    await env.DB.prepare('DELETE FROM bulk_jobs WHERE job_id = ?').bind(jobId).run().catch(() => {});
+    console.error('[bulk-moderate] enqueue failed for', jobId, error);
+    return json({ error: 'Failed to enqueue bulk moderation job' }, 500, corsHeaders);
+  }
 
   return json({ success: true, jobId } satisfies BulkEnqueueResponse, 200, corsHeaders);
 }
 
-// Consumer: run one job to completion and write its terminal state. A throw from
-// runBulkModeration is recorded as `failed` (and swallowed) rather than rethrown,
-// so the queue does not retry a half-applied destructive job; re-running is a
-// manual operator action. TODO(#async-retry): revisit once jobs are idempotent.
+// A job whose row hasn't advanced past pending/running within this window is
+// treated as abandoned (e.g. the worker was evicted mid-consume, and with
+// max_retries=0 the message is gone). Generous because a large account can run
+// for minutes; the per-invocation subrequest/CPU ceiling caps real runtime well
+// under this. The frontend poller should also bound its own wait.
+const STALE_JOB_MS = 30 * 60 * 1000;
+
+// Consumer: run one job to completion and write its terminal state. Any error is
+// recorded as `failed` and swallowed (not rethrown) so the queue does not retry a
+// half-applied DESTRUCTIVE job — re-running is a manual operator action.
+// TODO(#async-retry): revisit once jobs are idempotent. The whole body is
+// wrapped so a failure in ensureBulkJobsTable or the `running` write also lands a
+// terminal state rather than stranding the row.
 export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv): Promise<void> {
   if (!env.DB) throw new Error('bulk_jobs storage (D1) is not bound');
-  await ensureBulkJobsTable(env.DB);
-
-  await env.DB.prepare('UPDATE bulk_jobs SET status = ?, updated_at = ? WHERE job_id = ?')
-    .bind('running', new Date().toISOString(), msg.jobId).run();
-
+  const db = env.DB;
   try {
+    await ensureBulkJobsTable(db);
+    await db.prepare('UPDATE bulk_jobs SET status = ?, updated_at = ? WHERE job_id = ?')
+      .bind('running', new Date().toISOString(), msg.jobId).run();
     const result = await runBulkModeration(env, msg.pubkey, msg.action, msg.reason || `Bulk ${msg.action} by moderator`);
-    await env.DB.prepare(
+    await db.prepare(
       'UPDATE bulk_jobs SET status = ?, events_processed = ?, media_processed = ?, failures = ?, updated_at = ? WHERE job_id = ?'
     ).bind('done', result.eventsProcessed, result.mediaProcessed, JSON.stringify(result.failures), new Date().toISOString(), msg.jobId).run();
   } catch (error) {
-    await env.DB.prepare(
-      'UPDATE bulk_jobs SET status = ?, failures = ?, updated_at = ? WHERE job_id = ?'
-    ).bind('failed', JSON.stringify([`job:${formatError(error)}`]), new Date().toISOString(), msg.jobId).run();
+    // runBulkModeration only throws pre-mutation (enumeration failure), so 0
+    // counts here is accurate; per-item action failures are captured in the
+    // result's failures[] and recorded as `done`.
+    try {
+      await db.prepare('UPDATE bulk_jobs SET status = ?, failures = ?, updated_at = ? WHERE job_id = ?')
+        .bind('failed', JSON.stringify([`job:${formatError(error)}`]), new Date().toISOString(), msg.jobId).run();
+    } catch (writeErr) {
+      console.error('[bulk-job] failed to record terminal state for', msg.jobId, writeErr);
+    }
   }
 }
 
-// Status endpoint: the UI polls this until status is terminal (done/failed).
+// Status endpoint: the UI polls this until status is terminal (done/failed). If a
+// row is stuck in pending/running past STALE_JOB_MS (a worker eviction that no
+// catch could recover from), self-heal it to `failed` so the poller never hangs.
 export async function handleBulkJobStatus(
   jobId: string,
   env: BulkModerateEnv,
@@ -269,7 +305,16 @@ export async function handleBulkJobStatus(
   if (!row) {
     return json({ error: 'job not found' }, 404, corsHeaders);
   }
-  return json(rowToBulkJob(row), 200, corsHeaders);
+
+  const job = rowToBulkJob(row);
+  if ((job.status === 'pending' || job.status === 'running') && Date.parse(job.updatedAt) < Date.now() - STALE_JOB_MS) {
+    job.status = 'failed';
+    job.failures = ['job:abandoned (no terminal update; worker likely evicted mid-run)'];
+    job.updatedAt = new Date().toISOString();
+    await env.DB.prepare('UPDATE bulk_jobs SET status = ?, failures = ?, updated_at = ? WHERE job_id = ?')
+      .bind(job.status, JSON.stringify(job.failures), job.updatedAt, jobId).run().catch(() => {});
+  }
+  return json(job, 200, corsHeaders);
 }
 
 export async function queryRelayEvents(

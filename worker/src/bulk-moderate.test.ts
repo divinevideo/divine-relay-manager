@@ -88,6 +88,8 @@ function makeJobDb() {
             const jobId = binds[binds.length - 1] as string;
             const row = rows.get(jobId);
             if (row) cols.forEach((c, i) => { row[c] = binds[i]; });
+          } else if (/^\s*DELETE FROM bulk_jobs/i.test(sql)) {
+            rows.delete(binds[0] as string);
           }
           return { success: true };
         },
@@ -196,6 +198,19 @@ describe('runBulkModeration', () => {
     expect(result.eventsProcessed).toBe(0);
     expect(result.failures[0]).toContain('relay refused');
   });
+
+  it('a failing decision-log batch (non-critical) does not abort an otherwise-successful delete-all', async () => {
+    // The relay deletes already happened; a D1 audit failure must log-and-continue,
+    // not throw and mislabel a completed destructive run as failed (AGENTS.md).
+    mockRelay([{ id: 'e'.repeat(64), kind: 1, content: '', tags: [] }]);
+    mockUserVideos([{ sha256: hashA }]);
+    (mockEnv.DB as unknown as { batch: ReturnType<typeof vi.fn> }).batch = vi.fn().mockRejectedValue(new Error('d1 down'));
+
+    const result = await runBulkModeration(mockEnv, 'a'.repeat(64), 'delete-all', 'r');
+    expect(result.eventsProcessed).toBe(1); // event still deleted
+    expect(result.mediaProcessed).toBe(1);
+    expect(result.failures).toEqual([]); // audit failure not surfaced as a moderation failure
+  });
 });
 
 describe('async bulk job model', () => {
@@ -277,6 +292,45 @@ describe('async bulk job model', () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('err', { status: 500 }));
     await expect(runBulkModeration(mockEnv, 'a'.repeat(64), 'delete-all', 'r')).rejects.toThrow(/Video query failed: 500/);
     expect(vi.mocked(banEvent)).not.toHaveBeenCalled();
+  });
+
+  it('processBulkJob records status=failed (not stranded) when the run throws', async () => {
+    const jobId = 'job-fail-1';
+    jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', created_at: 't', updated_at: 't' });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('err', { status: 500 })); // enumeration throws
+
+    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all' }, mockEnv);
+
+    const row = jobDb.rows.get(jobId)!;
+    expect(row.status).toBe('failed');
+    expect(JSON.parse(row.failures as string)[0]).toMatch(/Video query failed: 500/);
+  });
+
+  it('status self-heals a stale running job to failed so the poller never hangs', async () => {
+    const old = new Date(Date.now() - 31 * 60 * 1000).toISOString();
+    jobDb.rows.set('job-stale', { job_id: 'job-stale', pubkey: 'a'.repeat(64), action: 'delete-all', status: 'running', events_processed: 0, media_processed: 0, failures: '[]', created_at: old, updated_at: old });
+
+    const res = await handleBulkJobStatus('job-stale', mockEnv, {});
+    const job = await res.json() as BulkJob;
+    expect(job.status).toBe('failed');
+    expect(job.failures[0]).toMatch(/abandoned/);
+    expect(jobDb.rows.get('job-stale')!.status).toBe('failed'); // healed in the row, not just the response
+  });
+
+  it('status does NOT heal a recently-updated running job', async () => {
+    const now = new Date().toISOString();
+    jobDb.rows.set('job-live', { job_id: 'job-live', pubkey: 'a'.repeat(64), action: 'delete-all', status: 'running', events_processed: 0, media_processed: 0, failures: '[]', created_at: now, updated_at: now });
+
+    const res = await handleBulkJobStatus('job-live', mockEnv, {});
+    expect((await res.json() as BulkJob).status).toBe('running');
+  });
+
+  it('enqueue rolls back the pending row and 500s when the queue send fails', async () => {
+    (mockEnv.BULK_QUEUE as unknown as { send: ReturnType<typeof vi.fn> }).send = vi.fn().mockRejectedValue(new Error('queue down'));
+
+    const res = await handleBulkModerateEnqueue(enqueueReq({ pubkey: 'a'.repeat(64), action: 'age-restrict-all' }), mockEnv, {});
+    expect(res.status).toBe(500);
+    expect([...jobDb.rows.values()].some((r) => r.status === 'pending')).toBe(false); // no orphan row
   });
 });
 

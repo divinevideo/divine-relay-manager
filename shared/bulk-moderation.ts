@@ -12,6 +12,10 @@ export interface BulkModerateResult {
 // Async job model: /api/bulk-moderate enqueues a job and returns a jobId; a queue
 // consumer runs the work and writes progress to the bulk_jobs table; the UI polls
 // /api/bulk-moderate/status/:jobId.
+// `done` means the consumer ran to completion; it does NOT imply every item
+// succeeded -- partial per-item failures live in `failures[]`. Only a thrown /
+// catastrophic error (or an abandoned, self-healed job) is `failed`. Callers
+// derive overall success from `failures.length === 0`, mirroring BulkModerateResult.
 export type BulkJobStatus = 'pending' | 'running' | 'done' | 'failed';
 
 export interface BulkJobMessage {
