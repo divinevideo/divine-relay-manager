@@ -5,6 +5,7 @@ import {
   processBulkJob,
   handleBulkJobStatus,
   queryRelayEvents,
+  queryUserVideosPage,
   type BulkModerateEnv,
 } from './bulk-moderate';
 import type { BulkJob, BulkJobMessage, BulkEnqueueResponse } from '../../shared/bulk-moderation';
@@ -59,12 +60,14 @@ function mockRelay(events: Array<{ id: string; kind: number; content?: string; t
 function mockUserVideos(videos: Array<{ sha256: string }>) {
   vi.spyOn(globalThis, 'fetch').mockImplementation((async (input: RequestInfo | URL) => {
     const url = new URL(String(input));
-    if (url.pathname.includes('/api/users/') && url.pathname.includes('/videos')) {
-      // Honor limit/offset so the mock paginates exactly like funnelcake (default
-      // 25, max 100) -- a non-paginating mock would hide the first-page-only bug.
-      const limit = Number(url.searchParams.get('limit') ?? '25');
-      const offset = Number(url.searchParams.get('offset') ?? '0');
-      return new Response(JSON.stringify(videos.slice(offset, offset + limit)), { status: 200 });
+    if (url.pathname.includes('/api/v2/users/') && url.pathname.includes('/videos')) {
+      // funnelcake v2 envelope: { data: [...], next_cursor }. Cursor here is the
+      // numeric offset so the mock can page exactly like the cursor API.
+      const limit = Number(url.searchParams.get('limit') ?? '100');
+      const offset = url.searchParams.get('cursor') ? Number(url.searchParams.get('cursor')) : 0;
+      const page = videos.slice(offset, offset + limit);
+      const next = offset + limit < videos.length ? String(offset + limit) : null;
+      return new Response(JSON.stringify({ data: page, next_cursor: next }), { status: 200 });
     }
     return new Response('not found', { status: 404 });
   }) as typeof fetch);
@@ -124,6 +127,22 @@ function moderationActionFor(env: BulkModerateEnv, sha256: string): string | und
   }
   return undefined;
 }
+
+describe('queryUserVideosPage', () => {
+  beforeEach(() => { vi.restoreAllMocks(); });
+  it('parses the v2 envelope and returns the cursor', async () => {
+    mockUserVideos([{ sha256: 'a'.repeat(64) }, { sha256: 'b'.repeat(64) }]);
+    const page = await queryUserVideosPage('a'.repeat(64), { RELAY_URL: 'wss://relay.test' });
+    expect(page.hashes).toEqual(['a'.repeat(64), 'b'.repeat(64)]);
+    expect(page.nextCursor).toBeNull(); // 2 < limit 100 -> last page
+  });
+  it('returns a non-null cursor when more pages remain', async () => {
+    mockUserVideos(Array.from({ length: 150 }, (_, i) => ({ sha256: i.toString(16).padStart(64, '0') })));
+    const page = await queryUserVideosPage('a'.repeat(64), { RELAY_URL: 'wss://relay.test' });
+    expect(page.hashes).toHaveLength(100);
+    expect(page.nextCursor).toBe('100');
+  });
+});
 
 describe('runBulkModeration', () => {
   let mockEnv: BulkModerateEnv;

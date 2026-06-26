@@ -427,55 +427,51 @@ export async function queryRelayEvents(
 }
 
 const SHA256_HEX = /^[a-f0-9]{64}$/i;
+const MEDIA_CHUNK_SIZE = 100; // funnelcake v2 max page
 const VIDEO_QUERY_TIMEOUT_MS = 10000; // per page
-// The funnelcake videos endpoint defaults to limit=25 and caps at 100, so we MUST
-// page explicitly: without ?limit + offset paging, bulk delete/age-restrict would
-// silently action only the first 25 videos and leave the rest live (a withhold
-// gap on a child-safety path). Page at the max size, with a safety bound.
-const VIDEO_PAGE_SIZE = 100;
-const VIDEO_MAX_PAGES = 100; // ~10k videos; throws if exceeded rather than under-enforcing
+const VIDEO_MAX_PAGES = 100000; // anti-runaway guard for a non-terminating cursor (~10M videos)
 
-// Enumerate a user's video media hashes via the Funnelcake REST API instead of a
-// WebSocket REQ. Funnelcake's `relay_events_by_kind_time` materialized view
-// deduplicates addressable video events by (pubkey, kind) rather than
-// (pubkey, kind, d_tag), so a REQ returns only ~1 video/kind (funnelcake#471).
-// The REST endpoint routes through the correct `events_deduped` view and returns
-// `sha256` directly, so every video is actioned. The base URL goes through the
-// shared deriveFunnelcakeApiUrl so it honors FUNNELCAKE_API_URL when the REST and
-// relay hosts diverge. Bounded by a timeout so a hung endpoint can't stall bulk
-// moderation (for age-restrict this is the only upstream); throws on failure so
-// the caller fails closed rather than reporting a false "withheld everything".
+// One page of a user's video media hashes via the funnelcake v2 cursor API.
+// v2 returns { data: [{sha256}], next_cursor } and pages by an opaque cursor, so
+// we can walk an account of any size (v1 offset degrades + can skip/repeat).
+// funnelcake's deduped view returns every video (vs the WebSocket REQ's ~1/kind,
+// funnelcake#471). deriveFunnelcakeApiUrl honors FUNNELCAKE_API_URL when the REST
+// and relay hosts diverge; the timeout stops a hung endpoint stalling moderation.
+export async function queryUserVideosPage(
+  pubkey: string,
+  env: Pick<BulkModerateEnv, 'RELAY_URL' | 'FUNNELCAKE_API_URL'>,
+  cursor?: string,
+): Promise<{ hashes: string[]; nextCursor: string | null }> {
+  const baseUrl = deriveFunnelcakeApiUrl(env.RELAY_URL, env.FUNNELCAKE_API_URL);
+  const qs = new URLSearchParams({ limit: String(MEDIA_CHUNK_SIZE) });
+  if (cursor) qs.set('cursor', cursor);
+  const res = await fetch(`${baseUrl}/api/v2/users/${pubkey}/videos?${qs.toString()}`, {
+    signal: AbortSignal.timeout(VIDEO_QUERY_TIMEOUT_MS),
+  });
+  if (!res.ok) throw new Error(`Video query failed: ${res.status}`);
+  const body = await res.json() as { data?: Array<{ sha256?: string }>; next_cursor?: string | null };
+  const hashes: string[] = [];
+  for (const v of body.data ?? []) {
+    if (v.sha256 && SHA256_HEX.test(v.sha256)) hashes.push(v.sha256.toLowerCase());
+  }
+  return { hashes, nextCursor: body.next_cursor ?? null };
+}
+
+// Fully enumerate a user's video media hashes (loops the v2 cursor, deduped). Used
+// by the SYNCHRONOUS age-review path; the async UI path chunks per page instead.
 export async function queryUserMediaHashes(
   pubkey: string,
   env: Pick<BulkModerateEnv, 'RELAY_URL' | 'FUNNELCAKE_API_URL'>,
 ): Promise<string[]> {
-  const baseUrl = deriveFunnelcakeApiUrl(env.RELAY_URL, env.FUNNELCAKE_API_URL);
   const hashes = new Set<string>();
-
+  let cursor: string | undefined;
   for (let page = 0; page < VIDEO_MAX_PAGES; page++) {
-    const offset = page * VIDEO_PAGE_SIZE;
-    const res = await fetch(
-      `${baseUrl}/api/users/${pubkey}/videos?limit=${VIDEO_PAGE_SIZE}&offset=${offset}`,
-      { signal: AbortSignal.timeout(VIDEO_QUERY_TIMEOUT_MS) },
-    );
-    if (!res.ok) {
-      throw new Error(`Video query failed: ${res.status}`);
-    }
-    const videos = await res.json() as Array<{ sha256?: string }>;
-    for (const v of videos) {
-      if (v.sha256 && SHA256_HEX.test(v.sha256)) {
-        hashes.add(v.sha256.toLowerCase());
-      }
-    }
-    // A short page (fewer than the page size) means we've reached the end.
-    if (videos.length < VIDEO_PAGE_SIZE) {
-      return Array.from(hashes);
-    }
+    const { hashes: pageHashes, nextCursor } = await queryUserVideosPage(pubkey, env, cursor);
+    pageHashes.forEach((h) => hashes.add(h));
+    if (!nextCursor) return Array.from(hashes);
+    cursor = nextCursor;
   }
-
-  // Hit the page bound: fail closed rather than silently enforcing over a partial
-  // set on a withhold path.
-  throw new Error(`More than ${VIDEO_MAX_PAGES * VIDEO_PAGE_SIZE} videos for ${pubkey}; narrow the scope or add deeper pagination`);
+  throw new Error(`Video cursor did not terminate for ${pubkey} after ${VIDEO_MAX_PAGES} pages`);
 }
 
 async function runWithConcurrency<T>(
