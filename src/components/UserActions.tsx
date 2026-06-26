@@ -109,9 +109,13 @@ export function UserActions({
     onComplete: (job) => {
       const partial = job.status === 'failed' || job.failures.length > 0;
       if (partial) {
+        const counts = `${job.mediaProcessed} media across ${job.eventsProcessed} events`;
+        const detail = job.failures.length
+          ? `${counts}; ${job.failures.length} issue(s): ${job.failures.slice(0, 3).join('; ')}`
+          : `${counts}. The job did not complete cleanly.`;
         toast({
           title: `Bulk ${job.action === 'delete-all' ? 'delete' : 'age-restrict'} finished with issues`,
-          description: job.failures.slice(0, 3).join('; ') || 'The job did not complete cleanly.',
+          description: detail,
           variant: 'destructive',
         });
       } else {
@@ -128,7 +132,9 @@ export function UserActions({
       onActionComplete?.();
     },
     onError: (error) => {
-      toast({ title: 'Failed to start bulk action', description: error.message, variant: 'destructive' });
+      // Covers both enqueue failure and a persistent status-poll failure
+      // (the job may have started; error.message carries the specific reason).
+      toast({ title: 'Bulk action failed', description: error.message, variant: 'destructive' });
     },
   });
 

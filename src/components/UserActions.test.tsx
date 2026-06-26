@@ -118,8 +118,61 @@ describe('UserActions', () => {
 
     await waitFor(() =>
       expect(toast).toHaveBeenCalledWith(
-        expect.objectContaining({ title: 'Failed to start bulk action', variant: 'destructive' }),
+        expect.objectContaining({ title: 'Bulk action failed', variant: 'destructive' }),
       ),
     );
+  });
+
+  it('polls through running -> done and fires onComplete exactly once', async () => {
+    // First poll returns running (no toast yet), second returns done.
+    api.getBulkJobStatus
+      .mockResolvedValueOnce(doneJob('age-restrict-all', { status: 'running', mediaProcessed: 0, eventsProcessed: 0 }))
+      .mockResolvedValue(doneJob('age-restrict-all'));
+    const onActionComplete = vi.fn();
+    renderWithProvider(<UserActions pubkey={PUBKEY} onActionComplete={onActionComplete} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
+    // Button reflects the running job before the terminal poll.
+    await waitFor(() => expect(screen.getByRole('button', { name: /Restricting/i })).toBeInTheDocument());
+    // After the next poll the job is done: onComplete fires exactly once.
+    await waitFor(() => expect(onActionComplete).toHaveBeenCalledTimes(1), { timeout: 4000 });
+    expect(api.getBulkJobStatus.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(onActionComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it('surfaces a persistent status-poll failure (worker unreachable) and re-enables the buttons', async () => {
+    api.getBulkJobStatus.mockRejectedValue(new Error('Network connection lost'));
+    renderWithProvider(<UserActions pubkey={PUBKEY} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
+
+    await waitFor(() =>
+      expect(toast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Bulk action failed', variant: 'destructive' }),
+      ),
+    );
+    // Not stuck polling/disabled: the button returns to its idle label.
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Age Restrict All$/i })).toBeEnabled());
+  });
+
+  it('detaches from an in-flight job when the selected user changes (no stale running state)', async () => {
+    // Job for user A keeps polling (never terminal).
+    api.getBulkJobStatus.mockResolvedValue(doneJob('age-restrict-all', { status: 'running', mediaProcessed: 0, eventsProcessed: 0 }));
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const Wrapper = ({ pk }: { pk: string }) => (
+      <QueryClientProvider client={qc}>
+        <TooltipProvider><UserActions pubkey={pk} /></TooltipProvider>
+      </QueryClientProvider>
+    );
+    const { rerender } = render(<Wrapper pk={PUBKEY} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
+    await waitFor(() => expect(screen.getByRole('button', { name: /Restricting/i })).toBeInTheDocument());
+
+    // Switch to a different user — same component instance, not remounted.
+    rerender(<Wrapper pk={'b'.repeat(64)} />);
+
+    // The new user's button is idle/enabled, not stuck on the previous job.
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Age Restrict All$/i })).toBeEnabled());
   });
 });
