@@ -28,13 +28,9 @@ vi.mock('./keycast-client', () => ({
 // Keycast wiring, not bulk content moderation. By default the bulk leg succeeds;
 // individual tests can override to assert failure-surfacing.
 vi.mock('./bulk-moderate', () => ({
-  // mockImplementation (not mockResolvedValue) so each call gets a FRESH Response
-  // -- a Response body can only be read once, and triggerBulkModerate consumes it.
-  handleBulkModerate: vi.fn().mockImplementation(() =>
-    Promise.resolve(
-      new Response(JSON.stringify({ success: true, eventsProcessed: 0, mediaProcessed: 0, failures: [] }), { status: 200 }),
-    ),
-  ),
+  // age-review enforcement now calls runBulkModeration directly (synchronous,
+  // returns a BulkModerateResult), not the async HTTP enqueue path.
+  runBulkModeration: vi.fn().mockResolvedValue({ success: true, eventsProcessed: 0, mediaProcessed: 0, failures: [] }),
 }));
 
 // Relay-level NIP-86 enforcement. Stubbed to succeed by default; the

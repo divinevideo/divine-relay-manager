@@ -3,6 +3,7 @@ import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useToast } from '@/hooks/useToast';
 import { useAdminApi } from '@/hooks/useAdminApi';
+import { useBulkModerateJob } from '@/hooks/useBulkModerateJob';
 import { ConfirmDialog } from './ConfirmDialog';
 import { UserX, UserCheck, ShieldAlert, Trash2, Pause, Play } from 'lucide-react';
 
@@ -101,49 +102,44 @@ export function UserActions({
     },
   });
 
-  const bulkAgeRestrictMutation = useMutation({
-    mutationFn: async () => {
-      const result = await api.bulkModerate(pubkey, 'age-restrict-all', 'Bulk age-restricted by moderator');
-      await api.logDecision({
+  // Bulk actions are async jobs: enqueue returns a jobId immediately, then the
+  // hook polls until the queue consumer finishes and reports the outcome.
+  const bulkJob = useBulkModerateJob({
+    pubkey,
+    onComplete: (job) => {
+      const partial = job.status === 'failed' || job.failures.length > 0;
+      if (partial) {
+        const counts = `${job.mediaProcessed} media across ${job.eventsProcessed} events`;
+        const detail = job.failures.length
+          ? `${counts}; ${job.failures.length} issue(s): ${job.failures.slice(0, 3).join('; ')}`
+          : `${counts}. The job did not complete cleanly.`;
+        toast({
+          title: `Bulk ${job.action === 'delete-all' ? 'delete' : 'age-restrict'} finished with issues`,
+          description: detail,
+          variant: 'destructive',
+        });
+      } else {
+        const verb = job.action === 'delete-all' ? 'Deleted' : 'Age-restricted';
+        toast({ title: `${verb} ${job.mediaProcessed} media file(s) across ${job.eventsProcessed} events` });
+      }
+      // Non-critical audit log; never block the action.
+      void api.logDecision({
         targetType: 'pubkey',
         targetId: pubkey,
-        action: 'bulk_age_restrict',
-        reason: `Bulk age-restricted: ${result.mediaProcessed} media file(s)`,
-      });
-      return result;
-    },
-    onSuccess: (result) => {
-      toast({ title: `Age-restricted ${result.mediaProcessed} media file(s) across ${result.eventsProcessed} events` });
+        action: job.action === 'delete-all' ? 'bulk_delete' : 'bulk_age_restrict',
+        reason: `Bulk ${job.action}: ${job.mediaProcessed} media file(s)`,
+      }).catch((e) => console.warn('[UserActions] bulk audit log failed', e));
       onActionComplete?.();
     },
-    onError: (error: Error) => {
-      toast({ title: 'Failed to bulk age-restrict', description: error.message, variant: 'destructive' });
-    },
-  });
-
-  const bulkDeleteMutation = useMutation({
-    mutationFn: async () => {
-      const result = await api.bulkModerate(pubkey, 'delete-all', 'Bulk deleted by moderator');
-      await api.logDecision({
-        targetType: 'pubkey',
-        targetId: pubkey,
-        action: 'bulk_delete',
-        reason: `Bulk deleted: ${result.mediaProcessed} media file(s)`,
-      });
-      return result;
-    },
-    onSuccess: (result) => {
-      toast({ title: `Deleted ${result.mediaProcessed} media file(s) across ${result.eventsProcessed} events` });
-      onActionComplete?.();
-    },
-    onError: (error: Error) => {
-      toast({ title: 'Failed to bulk delete', description: error.message, variant: 'destructive' });
+    onError: (error) => {
+      // Covers both enqueue failure and a persistent status-poll failure
+      // (the job may have started; error.message carries the specific reason).
+      toast({ title: 'Bulk action failed', description: error.message, variant: 'destructive' });
     },
   });
 
   const anyPending = suspendUserMutation.isPending || unsuspendUserMutation.isPending ||
-    banUserMutation.isPending || unbanUserMutation.isPending ||
-    bulkAgeRestrictMutation.isPending || bulkDeleteMutation.isPending;
+    banUserMutation.isPending || unbanUserMutation.isPending || bulkJob.isRunning;
 
   return (
     <div className="flex flex-wrap gap-2">
@@ -205,9 +201,9 @@ export function UserActions({
           <Tooltip>
             <TooltipTrigger asChild>
               <Button variant="outline" className="border-orange-500 text-orange-600 hover:bg-orange-50"
-                onClick={() => bulkAgeRestrictMutation.mutate()} disabled={anyPending}>
+                onClick={() => bulkJob.start('age-restrict-all')} disabled={anyPending}>
                 <ShieldAlert className="h-4 w-4 mr-1" />
-                {bulkAgeRestrictMutation.isPending ? 'Restricting...' : 'Age Restrict All'}
+                {bulkJob.runningAction === 'age-restrict-all' ? 'Restricting...' : 'Age Restrict All'}
               </Button>
             </TooltipTrigger>
             <TooltipContent><p>Age-restrict all media from this user. Can be reversed.</p></TooltipContent>
@@ -217,15 +213,15 @@ export function UserActions({
             trigger={
               <Button variant="destructive" disabled={anyPending}>
                 <Trash2 className="h-4 w-4 mr-1" />
-                Delete All Content
+                {bulkJob.runningAction === 'delete-all' ? 'Deleting...' : 'Delete All Content'}
               </Button>
             }
             title="Delete All Content"
             summary="This will permanently delete all events and media from this user. This cannot be undone."
             confirmLabel="Confirm Delete"
-            pendingLabel="Deleting..."
-            onConfirm={async () => { await bulkDeleteMutation.mutateAsync(); }}
-            isPending={bulkDeleteMutation.isPending}
+            pendingLabel="Starting..."
+            onConfirm={async () => { await bulkJob.startAsync('delete-all'); }}
+            isPending={bulkJob.runningAction === 'delete-all'}
           />
         </>
       )}

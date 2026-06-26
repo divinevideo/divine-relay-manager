@@ -133,6 +133,7 @@ export function useAdminApi() {
     // Bulk moderation
     bulkModerate: (pubkey: string, action: adminApi.BulkAction, reason?: string) =>
       adminApi.bulkModerate(apiUrl, pubkey, action, reason),
+    getBulkJobStatus: (jobId: string) => adminApi.getBulkJobStatus(apiUrl, jobId),
 
     // Delete operations
     deleteMedia: (sha256: string, reason?: string) =>

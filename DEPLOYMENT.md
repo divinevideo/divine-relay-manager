@@ -181,3 +181,46 @@ curl -X POST https://relay.admin.divine.video/api/relay-rpc \
 ### Admin pubkey not authorized
 - Get pubkey from `/api/info` endpoint
 - Ensure DevOps has added this pubkey to relay's admin list
+
+## Bulk-moderate async job model (Cloudflare Queues) — deploy prerequisites
+
+The async bulk-moderate feature adds a Cloudflare Queue (`BULK_QUEUE`) with producer
+and consumer bindings in `worker/wrangler.{staging,prod}.toml`. **The queue must
+exist before you deploy the worker** — `wrangler deploy` validates queue bindings
+and fails (deploying nothing) if the queue is missing. There is no fallback to the
+old synchronous path: `POST /api/bulk-moderate` returns 500 if `BULK_QUEUE` is unbound.
+
+### One-time queue creation (per environment, before the first deploy)
+
+```bash
+cd worker
+npx wrangler queues create bulk-moderate-jobs-staging
+npx wrangler queues create bulk-moderate-jobs-prod
+npx wrangler queues list   # verify
+```
+
+### Deploy order (worker BEFORE frontend)
+
+The worker and the Pages frontend deploy separately, and there is no version
+negotiation, so order matters and the gap should be minimized:
+
+1. **Worker first.** `npx wrangler deploy --config wrangler.staging.toml` (verify), then prod.
+   - Old frontend + new worker: the old UI expects a synchronous `BulkModerateResult`
+     but gets `{jobId}` — bulk moderation misreports until the frontend catches up.
+2. **Frontend second**, back-to-back. `npx vite build && npx wrangler pages deploy dist ...`.
+   - New frontend + old worker: the UI polls `/api/bulk-moderate/status/:jobId` against
+     a worker with no status route (404) — bulk moderation breaks until the worker catches up.
+
+### Post-deploy verification
+
+- `npx wrangler queues list` shows the prod queue with a consumer attached.
+- Run one bulk action on a small test account; confirm `{jobId}` returns, a queue-consumer
+  log line fires (`npx wrangler tail`), the job row reaches `done` with non-zero counts,
+  and Blossom shows the media Restricted/Deleted.
+- `bulk_jobs` table is created on demand in the prod D1 (`divine-moderation-decisions-prod`).
+
+### Rollback
+
+Revert the worker deploy (`wrangler rollback` or redeploy the prior version). The
+`bulk_jobs` table and the queue persist but go inert (the old build has no
+producer/consumer). No data cleanup required.
