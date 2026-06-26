@@ -6,6 +6,7 @@ import {
   type BulkModerateResult,
   type BulkJob,
   type BulkJobMessage,
+  type BulkJobPhase,
   type BulkEnqueueResponse,
 } from '../../shared/bulk-moderation';
 import { deriveFunnelcakeApiUrl } from './funnelcake-proxy';
@@ -261,24 +262,85 @@ const STALE_JOB_MS = 30 * 60 * 1000;
 // Consumer: run one job to completion and write its terminal state. Any error is
 // recorded as `failed` and swallowed (not rethrown) so the queue does not retry a
 // half-applied DESTRUCTIVE job — re-running is a manual operator action.
-// TODO(#async-retry): revisit once jobs are idempotent. The whole body is
-// wrapped so a failure in ensureBulkJobsTable or the `running` write also lands a
-// terminal state rather than stranding the row.
+// TODO(#async-retry): revisit once jobs are idempotent.
+const MAX_STORED_FAILURES = 50;
+
+function appendFailures(existing: string[], added: string[]): string[] {
+  const merged = existing.filter((f) => !/^\+\d+ more$/.test(f)).concat(added);
+  if (merged.length <= MAX_STORED_FAILURES) return merged;
+  return merged.slice(0, MAX_STORED_FAILURES).concat(`+${merged.length - MAX_STORED_FAILURES} more`);
+}
+
+// Consumer: process ONE chunk of a job, persist incremental progress, then
+// re-enqueue the next chunk (carrying a continuation cursor) or finalize. One
+// chunk per invocation (max_batch_size=1) keeps any account size under the
+// per-invocation subrequest ceiling. The whole body is wrapped so any failure
+// lands a terminal `failed` state rather than stranding the row.
 export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv): Promise<void> {
   if (!env.DB) throw new Error('bulk_jobs storage (D1) is not bound');
   const db = env.DB;
   try {
     await ensureBulkJobsTable(db);
+    const row = await db.prepare('SELECT * FROM bulk_jobs WHERE job_id = ?').bind(msg.jobId).first<BulkJobRow>();
+    if (!row) return;                                          // unknown job: nothing to do
+    const job = rowToBulkJob(row);
+    if (job.status === 'done' || job.status === 'failed') return; // idempotent: already terminal
+
+    const reason = msg.reason || `Bulk ${msg.action} by moderator`;
+    const moderatorPubkey = await getAdminPubkey(env);
+    const phase: BulkJobPhase = msg.phase ?? (msg.action === 'delete-all' ? 'events' : 'media');
+
     await db.prepare('UPDATE bulk_jobs SET status = ?, updated_at = ? WHERE job_id = ?')
       .bind('running', new Date().toISOString(), msg.jobId).run();
-    const result = await runBulkModeration(env, msg.pubkey, msg.action, msg.reason || `Bulk ${msg.action} by moderator`);
+
+    let eventsDelta = 0;
+    let mediaDelta = 0;
+    const chunkFailures: string[] = [];
+    let next: BulkJobMessage | null = null;
+
+    if (phase === 'events') {
+      const until = msg.cursor ? Number(msg.cursor) : undefined;
+      const page = await queryRelayEventsPage(msg.pubkey, env, until);
+      const ev = await deleteEvents(env, page.events, reason, moderatorPubkey);
+      eventsDelta = ev.processed;
+      chunkFailures.push(...ev.failures);
+      if (!page.complete && page.nextUntil === null) {
+        chunkFailures.push(`enumeration:${msg.pubkey}:relay could not be fully paginated; some events may be unprocessed`);
+      }
+      if (page.complete || page.nextUntil === null) {
+        // Events done: one pubkey-level zendesk sync, then move to the media phase.
+        if (ev.successfulEventIds.length > 0) {
+          await syncZendeskAfterAction(env, 'delete_event', 'pubkey', msg.pubkey, moderatorPubkey);
+        }
+        next = { jobId: msg.jobId, pubkey: msg.pubkey, action: msg.action, reason, phase: 'media' };
+      } else {
+        next = { jobId: msg.jobId, pubkey: msg.pubkey, action: msg.action, reason, phase: 'events', cursor: String(page.nextUntil) };
+      }
+    } else {
+      const { hashes, nextCursor } = await queryUserVideosPage(msg.pubkey, env, msg.cursor);
+      const mediaAction = msg.action === 'delete-all' ? 'DELETE' : msg.action === 'age-restrict-all' ? 'QUARANTINE' : 'SAFE';
+      const media = await moderateMediaHashes(env, hashes, mediaAction, reason);
+      mediaDelta = media.processed;
+      chunkFailures.push(...media.failures);
+      next = nextCursor
+        ? { jobId: msg.jobId, pubkey: msg.pubkey, action: msg.action, reason, phase: 'media', cursor: nextCursor }
+        : null;
+    }
+
+    const status = next ? 'running' : 'done';
     await db.prepare(
       'UPDATE bulk_jobs SET status = ?, events_processed = ?, media_processed = ?, failures = ?, updated_at = ? WHERE job_id = ?'
-    ).bind('done', result.eventsProcessed, result.mediaProcessed, JSON.stringify(result.failures), new Date().toISOString(), msg.jobId).run();
+    ).bind(
+      status,
+      job.eventsProcessed + eventsDelta,
+      job.mediaProcessed + mediaDelta,
+      JSON.stringify(appendFailures(job.failures, chunkFailures)),
+      new Date().toISOString(),
+      msg.jobId,
+    ).run();
+
+    if (next) await env.BULK_QUEUE!.send(next);
   } catch (error) {
-    // runBulkModeration only throws pre-mutation (enumeration failure), so 0
-    // counts here is accurate; per-item action failures are captured in the
-    // result's failures[] and recorded as `done`.
     try {
       await db.prepare('UPDATE bulk_jobs SET status = ?, failures = ?, updated_at = ? WHERE job_id = ?')
         .bind('failed', JSON.stringify([`job:${formatError(error)}`]), new Date().toISOString(), msg.jobId).run();

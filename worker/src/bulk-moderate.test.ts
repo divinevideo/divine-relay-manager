@@ -288,6 +288,44 @@ describe('async bulk job model', () => {
     expect(sent).toHaveLength(0);
   });
 
+  it('media-only job chunks across multiple messages until done', async () => {
+    // 250 videos => pages of 100/100/50 across 3 messages. Proves chunking: the
+    // all-in-one consumer would finish in a single message.
+    const many = Array.from({ length: 250 }, (_, i) => ({ sha256: i.toString(16).padStart(64, '0') }));
+    mockUserVideos(many);
+    const jobId = 'job-chunk-1';
+    jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', created_at: 't', updated_at: 't' });
+
+    let msg: BulkJobMessage | undefined = { jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all' };
+    let iterations = 0;
+    while (msg && iterations++ < 10) { sent.length = 0; await processBulkJob(msg, mockEnv); msg = sent[0]; }
+
+    expect(iterations).toBe(3); // chunked across 3 messages
+    const row = jobDb.rows.get(jobId)!;
+    expect(row.status).toBe('done');
+    expect(row.media_processed).toBe(250);
+    expect(moderationActionFor(mockEnv, '0'.padStart(64, '0'))).toBe('QUARANTINE');
+  });
+
+  it('delete-all transitions events -> media across messages and finishes', async () => {
+    const { banEvent } = await import('./nip86');
+    vi.mocked(banEvent).mockResolvedValue({ success: true });
+    mockPaginatedRelay(Array.from({ length: 30 }, (_, i) => ({ id: `e${i}`, kind: 1, content: '', tags: [] as string[][], created_at: 30 - i })));
+    mockUserVideos([{ sha256: 'a'.repeat(64) }]);
+    const jobId = 'job-del-1';
+    jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'delete-all', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', created_at: 't', updated_at: 't' });
+
+    let msg: BulkJobMessage | undefined = { jobId, pubkey: 'a'.repeat(64), action: 'delete-all' };
+    let iterations = 0;
+    while (msg && iterations++ < 10) { sent.length = 0; await processBulkJob(msg, mockEnv); msg = sent[0]; }
+
+    expect(iterations).toBe(2); // events chunk -> media chunk
+    const row = jobDb.rows.get(jobId)!;
+    expect(row.status).toBe('done');
+    expect(row.events_processed).toBe(30);
+    expect(row.media_processed).toBe(1);
+  });
+
   it('processBulkJob runs the work and writes status=done with counts', async () => {
     const jobId = 'job-done-1';
     jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', created_at: 't', updated_at: 't' });
