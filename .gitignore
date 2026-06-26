@@ -28,3 +28,6 @@ dist-ssr
 
 # Local TLS certs (mkcert)
 .certs/
+
+# Playwright MCP run artifacts
+.playwright-mcp/

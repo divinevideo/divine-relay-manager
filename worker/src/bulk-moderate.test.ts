@@ -62,13 +62,16 @@ function mockUserVideos(videos: Array<{ sha256: string }>) {
   vi.spyOn(globalThis, 'fetch').mockImplementation((async (input: RequestInfo | URL) => {
     const url = new URL(String(input));
     if (url.pathname.includes('/api/v2/users/') && url.pathname.includes('/videos')) {
-      // funnelcake v2 envelope: { data: [...], next_cursor }. Cursor here is the
-      // numeric offset so the mock can page exactly like the cursor API.
+      // funnelcake v2 envelope is { data: [...], pagination: { next_cursor } }
+      // (PaginatedResponse<T> in funnelcake's handlers.rs). The cursor MUST live
+      // under `pagination` -- emitting it top-level would let a wrong-path parse
+      // pass the test while silently capping enumeration at one page in prod.
+      // Cursor here is the numeric offset so the mock pages like the cursor API.
       const limit = Number(url.searchParams.get('limit') ?? '100');
       const offset = url.searchParams.get('cursor') ? Number(url.searchParams.get('cursor')) : 0;
       const page = videos.slice(offset, offset + limit);
       const next = offset + limit < videos.length ? String(offset + limit) : null;
-      return new Response(JSON.stringify({ data: page, next_cursor: next }), { status: 200 });
+      return new Response(JSON.stringify({ data: page, pagination: { next_cursor: next, has_more: next !== null } }), { status: 200 });
     }
     return new Response('not found', { status: 404 });
   }) as typeof fetch);
@@ -147,13 +150,33 @@ describe('queryUserVideosPage', () => {
 
 describe('queryRelayEventsPage', () => {
   beforeEach(() => { vi.restoreAllMocks(); });
-  it('returns one chunk and the next until cursor', async () => {
+  it('defers the boundary second on a full multi-second page (no silent skip)', async () => {
+    // 250 events, distinct descending seconds. A full page cuts at the oldest
+    // second, which may have more events that did not fit -> defer it entirely:
+    // process the 199 strictly-newer events and re-fetch from `oldest` INCLUSIVE
+    // next chunk. Never processes or skips a partial second at the cut boundary.
     const all = Array.from({ length: 250 }, (_, i) => ({ id: `e${i}`, kind: 1, content: '', tags: [] as string[][], created_at: 250 - i }));
     mockPaginatedRelay(all);
     const page = await queryRelayEventsPage('a'.repeat(64), { RELAY_URL: 'wss://relay.test' });
-    expect(page.events).toHaveLength(200);                  // EVENT_CHUNK_SIZE
+    const boundary = all[199].created_at;                   // the cut (oldest) second
+    expect(page.events).toHaveLength(199);                  // boundary second deferred
+    expect(page.events.every((e) => Number(e.id.slice(1)) < 199)).toBe(true);
     expect(page.complete).toBe(false);                      // more remain
-    expect(page.nextUntil).toBe(all[199].created_at - 1);   // strictly past the boundary
+    expect(page.saturated).toBe(false);                     // multi-second, no single-second overflow
+    expect(page.nextUntil).toBe(boundary);                  // inclusive: boundary second re-fetched next chunk
+  });
+  it('surfaces saturation when a full page is all one second (cannot subdivide)', async () => {
+    // >EVENT_CHUNK_SIZE events at a single created_at: an `until` cursor cannot
+    // subdivide a second, so we process this page, step strictly past, and flag
+    // saturation so the consumer records the unavoidable gap instead of a silent
+    // success.
+    const all = Array.from({ length: 600 }, (_, i) => ({ id: `e${i}`, kind: 1, content: '', tags: [] as string[][], created_at: 1000 }));
+    mockPaginatedRelay(all);
+    const page = await queryRelayEventsPage('a'.repeat(64), { RELAY_URL: 'wss://relay.test' });
+    expect(page.events).toHaveLength(200);                  // EVENT_CHUNK_SIZE, all at second 1000
+    expect(page.saturated).toBe(true);                      // surfaced, not silent
+    expect(page.complete).toBe(false);
+    expect(page.nextUntil).toBe(999);                       // strictly past the saturated second
   });
   it('signals completion on a short final page', async () => {
     const all = Array.from({ length: 50 }, (_, i) => ({ id: `e${i}`, kind: 1, content: '', tags: [] as string[][], created_at: 50 - i }));
@@ -161,6 +184,7 @@ describe('queryRelayEventsPage', () => {
     const page = await queryRelayEventsPage('a'.repeat(64), { RELAY_URL: 'wss://relay.test' });
     expect(page.events).toHaveLength(50);
     expect(page.complete).toBe(true);
+    expect(page.saturated).toBe(false);
     expect(page.nextUntil).toBeNull();
   });
 });
@@ -335,7 +359,55 @@ describe('async bulk job model', () => {
     const row = jobDb.rows.get(jobId)!;
     expect(row.status).toBe('done');
     expect(row.media_processed).toBe(2); // hashA + hashB, both from REST
+    // Parity with the synchronous path: media-only actions count one event per
+    // video so the UI's "across N events" stays meaningful (not 0).
+    expect(row.events_processed).toBe(2);
     expect(moderationActionFor(mockEnv, hashA)).toBe('QUARANTINE');
+  });
+
+  it('delete-all surfaces saturation when one second holds more events than a chunk', async () => {
+    // 250 events all at one created_at: a chunk takes 200, the rest at that second
+    // cannot be reached by an `until` cursor. The job must complete but RECORD the
+    // gap, not silently report success on a partial destructive delete.
+    const { banEvent } = await import('./nip86');
+    vi.mocked(banEvent).mockResolvedValue({ success: true });
+    mockPaginatedRelay(Array.from({ length: 250 }, (_, i) => ({ id: `e${i}`, kind: 1, content: '', tags: [] as string[][], created_at: 1000 })));
+    mockUserVideos([{ sha256: hashA }]);
+    const jobId = 'job-sat-1';
+    jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'delete-all', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', created_at: 't', updated_at: 't' });
+
+    let msg: BulkJobMessage | undefined = { jobId, pubkey: 'a'.repeat(64), action: 'delete-all' };
+    let iterations = 0;
+    while (msg && iterations++ < 10) { sent.length = 0; await processBulkJob(msg, mockEnv); msg = sent[0]; }
+
+    const row = jobDb.rows.get(jobId)!;
+    expect(row.status).toBe('done');
+    expect(row.events_processed).toBe(200);                 // one chunk's worth; the rest unreachable
+    expect(JSON.parse(row.failures as string).some((f: string) => /share one timestamp/.test(f))).toBe(true);
+  });
+
+  it('media phase fails closed when the funnelcake cursor never advances (repeats)', async () => {
+    // A cursor that returns the same value forever would re-enqueue indefinitely
+    // and never be stale-healed (each chunk refreshes updated_at). It must fail
+    // closed, not churn the queue.
+    vi.spyOn(globalThis, 'fetch').mockImplementation((async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname.includes('/api/v2/users/') && url.pathname.includes('/videos')) {
+        return new Response(JSON.stringify({ data: [{ sha256: hashA }], pagination: { next_cursor: 'STUCK', has_more: true } }), { status: 200 });
+      }
+      return new Response('not found', { status: 404 });
+    }) as typeof fetch);
+    const jobId = 'job-stuck-1';
+    jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', created_at: 't', updated_at: 't' });
+
+    let msg: BulkJobMessage | undefined = { jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all' };
+    let iterations = 0;
+    while (msg && iterations++ < 10) { sent.length = 0; await processBulkJob(msg, mockEnv); msg = sent[0]; }
+
+    expect(iterations).toBeLessThan(10);                    // did not loop to the guard
+    const row = jobDb.rows.get(jobId)!;
+    expect(row.status).toBe('failed');
+    expect(JSON.parse(row.failures as string).some((f: string) => /did not advance/.test(f))).toBe(true);
   });
 
   it('status returns the job as a BulkJob, and 404 when the job is unknown', async () => {

@@ -262,7 +262,16 @@ const STALE_JOB_MS = 30 * 60 * 1000;
 // Consumer: run one job to completion and write its terminal state. Any error is
 // recorded as `failed` and swallowed (not rethrown) so the queue does not retry a
 // half-applied DESTRUCTIVE job — re-running is a manual operator action.
-// TODO(#async-retry): revisit once jobs are idempotent.
+//
+// Idempotency caveat: Cloudflare Queues is at-least-once. A duplicate delivery of
+// the SAME in-flight chunk message would re-process its page and re-enqueue a
+// second `next`, forking the chunk chain (both branches walk to `done`). The only
+// guard is the terminal short-circuit below, which covers a re-delivered message
+// for an already-finished job but not a mid-run duplicate. There is no data
+// corruption — every action (banevent/kind-5/moderate-media) is idempotent — only
+// count inflation and wasted compute on a rare duplicate. A true fix (an atomic
+// per-chunk claim) is a focused follow-up, not folded in here.
+// TODO(#async-retry): atomic chunk claim to collapse duplicate/forked deliveries.
 const MAX_STORED_FAILURES = 50;
 
 function appendFailures(existing: string[], added: string[]): string[] {
@@ -304,12 +313,19 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
       const ev = await deleteEvents(env, page.events, reason, moderatorPubkey);
       eventsDelta = ev.processed;
       chunkFailures.push(...ev.failures);
+      if (page.saturated) {
+        // More than EVENT_CHUNK_SIZE events share one timestamp; an `until` cursor
+        // can't subdivide a second, so some at it may be unprocessed. Surface it.
+        chunkFailures.push(`enumeration:${msg.pubkey}:more than ${EVENT_CHUNK_SIZE} events share one timestamp; some at that second may be unprocessed`);
+      }
       if (!page.complete && page.nextUntil === null) {
         chunkFailures.push(`enumeration:${msg.pubkey}:relay could not be fully paginated; some events may be unprocessed`);
       }
       if (page.complete || page.nextUntil === null) {
-        // Events done: one pubkey-level zendesk sync, then move to the media phase.
-        if (ev.successfulEventIds.length > 0) {
+        // Events done: one pubkey-level zendesk sync (gated on the job's CUMULATIVE
+        // successes, not just this final chunk's -- the last chunk is often an empty
+        // short page), then move to the media phase.
+        if (job.eventsProcessed + ev.processed > 0) {
           await syncZendeskAfterAction(env, 'delete_event', 'pubkey', msg.pubkey, moderatorPubkey);
         }
         next = { jobId: msg.jobId, pubkey: msg.pubkey, action: msg.action, reason, phase: 'media' };
@@ -322,6 +338,20 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
       const media = await moderateMediaHashes(env, hashes, mediaAction, reason);
       mediaDelta = media.processed;
       chunkFailures.push(...media.failures);
+      // Parity with the synchronous path: for media-only actions one video == one
+      // event, so the UI's "across N events" stays meaningful (delete-all counts
+      // events in its own phase, so leave eventsDelta 0 there).
+      if (msg.action !== 'delete-all') eventsDelta = hashes.length;
+      // Guard a non-terminating funnelcake cursor. The sync path is bounded by
+      // VIDEO_MAX_PAGES; the chunked path re-enqueues per page and refreshes
+      // updated_at each chunk, so a cursor that never goes null (or repeats) would
+      // churn the queue forever, immune to the stale-heal. Fail closed instead.
+      if (nextCursor && nextCursor === msg.cursor) {
+        throw new Error(`Video cursor did not advance for ${msg.pubkey} (stuck at ${nextCursor})`);
+      }
+      if (nextCursor && job.mediaProcessed + mediaDelta >= VIDEO_MAX_PAGES * MEDIA_CHUNK_SIZE) {
+        throw new Error(`Video cursor did not terminate for ${msg.pubkey} after ${VIDEO_MAX_PAGES} pages`);
+      }
       next = nextCursor
         ? { jobId: msg.jobId, pubkey: msg.pubkey, action: msg.action, reason, phase: 'media', cursor: nextCursor }
         : null;
@@ -342,8 +372,13 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
     if (next) await env.BULK_QUEUE!.send(next);
   } catch (error) {
     try {
+      // Preserve per-item failures earlier chunks recorded (forensic detail on a
+      // destructive path) and append the infra error, rather than clobbering them.
+      const cur = await db.prepare('SELECT failures FROM bulk_jobs WHERE job_id = ?').bind(msg.jobId).first<{ failures: string }>();
+      let prior: string[] = [];
+      if (cur) { try { prior = JSON.parse(cur.failures) as string[]; } catch { prior = []; } }
       await db.prepare('UPDATE bulk_jobs SET status = ?, failures = ?, updated_at = ? WHERE job_id = ?')
-        .bind('failed', JSON.stringify([`job:${formatError(error)}`]), new Date().toISOString(), msg.jobId).run();
+        .bind('failed', JSON.stringify(appendFailures(prior, [`job:${formatError(error)}`])), new Date().toISOString(), msg.jobId).run();
     } catch (writeErr) {
       console.error('[bulk-job] failed to record terminal state for', msg.jobId, writeErr);
     }
@@ -489,22 +524,34 @@ export async function queryRelayEvents(
   });
 }
 
-// One chunk of a user's events via a single relay REQ bounded by `until`. Returns
-// the next `until` (strictly past the oldest event so the inclusive boundary isn't
-// re-counted) and whether enumeration is complete. A full page that can't advance
-// the cursor signals the saturated-second caveat via complete=false.
+// One chunk of a user's events via a single relay REQ bounded by `until`.
+//
+// Pagination correctness on a destructive path: a relay returns the newest
+// EVENT_CHUNK_SIZE events with created_at <= until, in descending time. On a FULL
+// page the oldest second is at the cut boundary -- there may be more events at that
+// exact second that didn't fit. Stepping strictly past it (oldest - 1) would
+// silently drop them. So on a multi-second full page we DEFER the boundary
+// (oldest) second entirely: process only events strictly newer than `oldest` and
+// set nextUntil = oldest (inclusive) so the next chunk re-fetches that whole
+// second fresh. No event is processed twice (the boundary second is excluded here,
+// processed next chunk) and none is skipped.
+//
+// The one unavoidable case: a SINGLE second holding more than EVENT_CHUNK_SIZE
+// events (min === max on a full page). An `until` cursor cannot subdivide a
+// second, so we process this page, step past (oldest - 1), and set
+// `saturated: true` so the consumer SURFACES the gap (never silent). Matches the
+// synchronous queryRelayEvents progress-guard behavior.
 export async function queryRelayEventsPage(
   pubkey: string,
   env: Pick<BulkModerateEnv, 'RELAY_URL'>,
   until?: number,
-): Promise<{ events: RelayEventSummary[]; nextUntil: number | null; complete: boolean }> {
-  type Page = { events: RelayEventSummary[]; nextUntil: number | null; complete: boolean };
+): Promise<{ events: RelayEventSummary[]; nextUntil: number | null; complete: boolean; saturated: boolean }> {
+  type Page = { events: RelayEventSummary[]; nextUntil: number | null; complete: boolean; saturated: boolean };
   return new Promise((resolve, reject) => {
     try {
       const ws = new WebSocket(env.RELAY_URL);
       let resolved = false;
-      const events: RelayEventSummary[] = [];
-      let oldest = Infinity;
+      const collected: Array<{ summary: RelayEventSummary; createdAt: number | null }> = [];
       const subId = `bulk-page-${Date.now()}`;
       const timeout = setTimeout(() => finish(reject, new Error('Relay query timed out before EOSE')), RELAY_QUERY_TIMEOUT_MS);
       const finish = (fn: ((v: Page) => void) | ((e: Error) => void), value: Page | Error) => {
@@ -524,18 +571,39 @@ export async function queryRelayEventsPage(
           const data = JSON.parse((msg as MessageEvent).data as string);
           if (data[0] === 'EVENT' && data[1] === subId) {
             const e = data[2] as { id: string; kind: number; content?: string; tags: string[][]; created_at?: number };
-            events.push({ id: e.id, kind: e.kind, content: e.content || '', tags: e.tags });
-            if (typeof e.created_at === 'number' && e.created_at < oldest) oldest = e.created_at;
+            collected.push({
+              summary: { id: e.id, kind: e.kind, content: e.content || '', tags: e.tags },
+              createdAt: typeof e.created_at === 'number' ? e.created_at : null,
+            });
           } else if (data[0] === 'EOSE' && data[1] === subId) {
             ws.send(JSON.stringify(['CLOSE', subId]));
-            if (events.length < EVENT_CHUNK_SIZE) {
-              finish(resolve, { events, nextUntil: null, complete: true });
-            } else if (oldest === Infinity) {
-              // Full page with no usable created_at: can't advance the cursor.
-              finish(resolve, { events, nextUntil: null, complete: false });
-            } else {
-              finish(resolve, { events, nextUntil: oldest - 1, complete: false });
+            const all = collected.map((c) => c.summary);
+            if (collected.length < EVENT_CHUNK_SIZE) {
+              // Partial page: the relay has no more events at or before `until`.
+              finish(resolve, { events: all, nextUntil: null, complete: true, saturated: false });
+              return;
             }
+            const times = collected.map((c) => c.createdAt).filter((t): t is number => t !== null);
+            if (times.length === 0) {
+              // Full page with no usable created_at: cannot advance the cursor.
+              finish(resolve, { events: all, nextUntil: null, complete: false, saturated: false });
+              return;
+            }
+            const oldest = Math.min(...times);
+            const newest = Math.max(...times);
+            if (oldest === newest) {
+              // Entire full page is one second -> more events at it were cut off and
+              // an `until` cursor can't subdivide. Process this page, step strictly
+              // past, and surface the unavoidable gap.
+              finish(resolve, { events: all, nextUntil: oldest - 1, complete: false, saturated: true });
+              return;
+            }
+            // Multi-second full page: defer the boundary (oldest) second to the next
+            // chunk so we never process or skip a partial second at the cut.
+            const kept = collected
+              .filter((c) => c.createdAt === null || c.createdAt > oldest)
+              .map((c) => c.summary);
+            finish(resolve, { events: kept, nextUntil: oldest, complete: false, saturated: false });
           }
         } catch { /* ignore malformed frames */ }
       });
@@ -553,11 +621,16 @@ const VIDEO_QUERY_TIMEOUT_MS = 10000; // per page
 const VIDEO_MAX_PAGES = 100000; // anti-runaway guard for a non-terminating cursor (~10M videos)
 
 // One page of a user's video media hashes via the funnelcake v2 cursor API.
-// v2 returns { data: [{sha256}], next_cursor } and pages by an opaque cursor, so
-// we can walk an account of any size (v1 offset degrades + can skip/repeat).
-// funnelcake's deduped view returns every video (vs the WebSocket REQ's ~1/kind,
-// funnelcake#471). deriveFunnelcakeApiUrl honors FUNNELCAKE_API_URL when the REST
-// and relay hosts diverge; the timeout stops a hung endpoint stalling moderation.
+// v2 serializes the { data, pagination } envelope (PaginatedResponse<T> in
+// funnelcake's crates/api/src/handlers.rs) -- the cursor is at
+// `pagination.next_cursor`, NOT top-level. Reading it from the wrong place makes
+// next_cursor always null, silently capping enumeration at the first page (100
+// videos) and reporting success -- the exact under-enforcement this path fixes.
+// v2's opaque cursor walks an account of any size (v1 offset degrades + can
+// skip/repeat). funnelcake's deduped view returns every video (vs the WebSocket
+// REQ's ~1/kind, funnelcake#471). deriveFunnelcakeApiUrl honors FUNNELCAKE_API_URL
+// when the REST and relay hosts diverge; the timeout stops a hung endpoint
+// stalling moderation.
 export async function queryUserVideosPage(
   pubkey: string,
   env: Pick<BulkModerateEnv, 'RELAY_URL' | 'FUNNELCAKE_API_URL'>,
@@ -570,12 +643,15 @@ export async function queryUserVideosPage(
     signal: AbortSignal.timeout(VIDEO_QUERY_TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`Video query failed: ${res.status}`);
-  const body = await res.json() as { data?: Array<{ sha256?: string }>; next_cursor?: string | null };
+  const body = await res.json() as {
+    data?: Array<{ sha256?: string }>;
+    pagination?: { next_cursor?: string | null };
+  };
   const hashes: string[] = [];
   for (const v of body.data ?? []) {
     if (v.sha256 && SHA256_HEX.test(v.sha256)) hashes.push(v.sha256.toLowerCase());
   }
-  return { hashes, nextCursor: body.next_cursor ?? null };
+  return { hashes, nextCursor: body.pagination?.next_cursor ?? null };
 }
 
 // Fully enumerate a user's video media hashes (loops the v2 cursor, deduped). Used
