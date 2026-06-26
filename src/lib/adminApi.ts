@@ -91,17 +91,34 @@ export class ApiError extends Error {
 // caller of apiRequest and callRelayRpc, not just bans.
 const API_TIMEOUT_MS = 30_000;
 
-// fetch wrapper that aborts after API_TIMEOUT_MS. On timeout it throws an
-// actionable ApiError: the relay may have applied the action even though we
-// stopped waiting, so the moderator should re-check rather than blindly retry.
-async function fetchWithTimeout(url: string, init: RequestInit, label: string): Promise<Response> {
+// Bulk moderation is a server-side O(N/5) loop that can legitimately run for
+// minutes on a prolific account (especially once REST enumeration processes ALL
+// of an author's videos). Give it a far larger client bound than the default so
+// it doesn't false-timeout on the primary destructive path, while still
+// guaranteeing no fetch hangs forever. Tracked for replacement by the async job
+// model (feat/bulk-moderate-async-job), after which bulk reverts to the default.
+const BULK_API_TIMEOUT_MS = 180_000;
+
+// fetch wrapper that aborts after the chosen bound. The timeout message depends
+// on whether the call mutates relay state: a timed-out write may have landed
+// even though we stopped waiting (re-check before retrying), but a timed-out
+// read applied nothing (just retry). Emitting "may have applied" on a read would
+// mislead the moderator.
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  label: string,
+  opts: { mutates: boolean; timeoutMs?: number },
+): Promise<Response> {
+  const timeoutMs = opts.timeoutMs ?? API_TIMEOUT_MS;
   try {
-    return await fetch(url, { ...init, signal: AbortSignal.timeout(API_TIMEOUT_MS) });
+    return await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
   } catch (err) {
     if (err instanceof DOMException && err.name === 'TimeoutError') {
-      throw new ApiError(
-        `${label} timed out after ${API_TIMEOUT_MS / 1000}s. The action may still have applied. Re-check before retrying.`,
-      );
+      const tail = opts.mutates
+        ? 'The action may still have applied. Re-check before retrying.'
+        : 'Could not reach the relay. Try again.';
+      throw new ApiError(`${label} timed out after ${timeoutMs / 1000}s. ${tail}`);
     }
     throw err;
   }
@@ -111,7 +128,8 @@ async function apiRequest<T>(
   apiUrl: string,
   endpoint: string,
   method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
-  body?: object
+  body?: object,
+  opts?: { timeoutMs?: number }
 ): Promise<T> {
   if (!apiUrl) {
     throw new ApiError('No relay selected. Go to Settings to choose an environment.');
@@ -120,7 +138,7 @@ async function apiRequest<T>(
     method,
     headers: getApiHeaders(),
     body: body ? JSON.stringify(body) : undefined,
-  }, `Request to ${endpoint}`);
+  }, `Request to ${endpoint}`, { mutates: method !== 'GET', timeoutMs: opts?.timeoutMs });
 
   if (!response.ok) {
     // Read the JSON error body if there is one so callers can act on structured
@@ -208,7 +226,8 @@ export async function callRelayRpc<T = unknown>(
     method: 'POST',
     headers: getApiHeaders(),
     body: JSON.stringify({ method, params }),
-  }, `Relay RPC '${method}'`);
+    // The only read RPCs are the list* methods; everything else mutates relay state.
+  }, `Relay RPC '${method}'`, { mutates: !method.startsWith('list') });
 
   if (!response.ok) {
     throw new ApiError(
@@ -1019,7 +1038,10 @@ export async function bulkModerate(
   action: BulkAction,
   reason?: string,
 ): Promise<BulkModerateResult> {
-  const result = await apiRequest<BulkModerateResult>(apiUrl, '/api/bulk-moderate', 'POST', { pubkey, action, reason });
+  const result = await apiRequest<BulkModerateResult>(
+    apiUrl, '/api/bulk-moderate', 'POST', { pubkey, action, reason },
+    { timeoutMs: BULK_API_TIMEOUT_MS },
+  );
   if (!result.success) {
     const summary = result.failures.slice(0, 3).join('; ');
     throw new ApiError(summary ? `Bulk moderation failed: ${summary}` : 'Bulk moderation failed');
