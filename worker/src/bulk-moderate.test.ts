@@ -1,5 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { handleBulkModerate, queryRelayEvents, type BulkModerateEnv } from './bulk-moderate';
+import {
+  runBulkModeration,
+  handleBulkModerateEnqueue,
+  processBulkJob,
+  handleBulkJobStatus,
+  queryRelayEvents,
+  type BulkModerateEnv,
+} from './bulk-moderate';
+import type { BulkJob, BulkJobMessage, BulkEnqueueResponse } from '../../shared/bulk-moderation';
 
 vi.mock('./nip86', () => ({
   getAdminPubkey: vi.fn().mockResolvedValue('moderator-pubkey'),
@@ -62,90 +70,74 @@ function mockUserVideos(videos: Array<{ sha256: string }>) {
   }) as typeof fetch);
 }
 
-describe('handleBulkModerate', () => {
+// Functional in-memory D1 mock for the bulk_jobs table: supports the INSERT,
+// positional-SET UPDATE, and SELECT-by-job_id statements the async path uses.
+function makeJobDb() {
+  const rows = new Map<string, Record<string, unknown>>();
+  const db = {
+    prepare(sql: string) {
+      let binds: unknown[] = [];
+      const stmt = {
+        bind(...args: unknown[]) { binds = args; return stmt; },
+        async run() {
+          if (/^\s*INSERT INTO bulk_jobs/i.test(sql)) {
+            const [job_id, pubkey, action, status, events_processed, media_processed, failures, created_at, updated_at] = binds;
+            rows.set(job_id as string, { job_id, pubkey, action, status, events_processed, media_processed, failures, created_at, updated_at });
+          } else if (/^\s*UPDATE bulk_jobs/i.test(sql)) {
+            const cols = sql.match(/SET (.+) WHERE/i)![1].split(',').map((c) => c.trim().split('=')[0].trim());
+            const jobId = binds[binds.length - 1] as string;
+            const row = rows.get(jobId);
+            if (row) cols.forEach((c, i) => { row[c] = binds[i]; });
+          }
+          return { success: true };
+        },
+        async first() { return rows.get(binds[0] as string) ?? null; },
+      };
+      return stmt;
+    },
+    batch: async () => [],
+  };
+  return { db: db as unknown as D1Database, rows };
+}
+
+function baseEnv(): BulkModerateEnv {
+  return {
+    NOSTR_NSEC: 'nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5',
+    RELAY_URL: 'wss://relay.test',
+    MODERATION_API: {
+      fetch: vi.fn().mockResolvedValue(new Response(null, { status: 200 })),
+    } as unknown as Fetcher,
+    DB: {
+      prepare: vi.fn().mockReturnValue({ bind: vi.fn().mockReturnThis() }),
+      batch: vi.fn().mockResolvedValue([]),
+    } as unknown as D1Database,
+  };
+}
+
+function moderationActionFor(env: BulkModerateEnv, sha256: string): string | undefined {
+  const fetchMock = vi.mocked((env.MODERATION_API as unknown as { fetch: ReturnType<typeof vi.fn> }).fetch);
+  for (const call of fetchMock.mock.calls) {
+    const body = JSON.parse((call[1] as RequestInit).body as string);
+    if (body.sha256 === sha256) return body.action;
+  }
+  return undefined;
+}
+
+describe('runBulkModeration', () => {
   let mockEnv: BulkModerateEnv;
 
   beforeEach(() => {
     vi.restoreAllMocks();
     mockUserVideos([]); // default: no videos unless a test provides them
-    mockEnv = {
-      NOSTR_NSEC: 'nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5',
-      RELAY_URL: 'wss://relay.test',
-      MODERATION_API: {
-        fetch: vi.fn().mockResolvedValue(new Response(null, { status: 200 })),
-      } as unknown as Fetcher,
-      DB: {
-        prepare: vi.fn().mockReturnValue({
-          bind: vi.fn().mockReturnThis(),
-        }),
-        batch: vi.fn().mockResolvedValue([]),
-      } as unknown as D1Database,
-    };
+    mockEnv = baseEnv();
   });
-
-  it('rejects invalid action', async () => {
-    const request = new Request('https://test/api/bulk-moderate', {
-      method: 'POST',
-      body: JSON.stringify({ pubkey: 'a'.repeat(64), action: 'invalid' }),
-    });
-    const response = await handleBulkModerate(request, mockEnv, {});
-    expect(response.status).toBe(400);
-    const body = await response.json() as { error: string };
-    expect(body.error).toMatch(/Invalid action/);
-  });
-
-  it('requires 64-char hex pubkey', async () => {
-    const request = new Request('https://test/api/bulk-moderate', {
-      method: 'POST',
-      body: JSON.stringify({ pubkey: 'short', action: 'age-restrict-all' }),
-    });
-    const response = await handleBulkModerate(request, mockEnv, {});
-    expect(response.status).toBe(400);
-    const body = await response.json() as { error: string };
-    expect(body.error).toMatch(/pubkey/);
-  });
-
-  it('rejects missing pubkey', async () => {
-    const request = new Request('https://test/api/bulk-moderate', {
-      method: 'POST',
-      body: JSON.stringify({ action: 'delete-all' }),
-    });
-    const response = await handleBulkModerate(request, mockEnv, {});
-    expect(response.status).toBe(400);
-  });
-
-  it('accepts all three valid actions', async () => {
-    mockRelay([]);
-
-    for (const action of ['age-restrict-all', 'un-age-restrict-all', 'delete-all'] as const) {
-      const request = new Request('https://test/api/bulk-moderate', {
-        method: 'POST',
-        body: JSON.stringify({ pubkey: 'a'.repeat(64), action }),
-      });
-      const response = await handleBulkModerate(request, mockEnv, {});
-      expect(response.status).toBe(200);
-    }
-  });
-
-  function moderationActionFor(sha256: string): string | undefined {
-    const fetchMock = vi.mocked((mockEnv.MODERATION_API as unknown as { fetch: ReturnType<typeof vi.fn> }).fetch);
-    for (const call of fetchMock.mock.calls) {
-      const body = JSON.parse((call[1] as RequestInit).body as string);
-      if (body.sha256 === sha256) return body.action;
-    }
-    return undefined;
-  }
 
   it('age-restrict-all sends QUARANTINE (reversible withhold) for media', async () => {
     mockUserVideos([{ sha256: hashA }]); // media hashes come from the REST API now
-    const request = new Request('https://test/api/bulk-moderate', {
-      method: 'POST',
-      body: JSON.stringify({ pubkey: 'a'.repeat(64), action: 'age-restrict-all' }),
-    });
-    const response = await handleBulkModerate(request, mockEnv, {});
-    expect(response.status).toBe(200);
+    const result = await runBulkModeration(mockEnv, 'a'.repeat(64), 'age-restrict-all', 'r');
+    expect(result.success).toBe(true);
     // NOT 'AGE_RESTRICTED' (which would serve bytes to any signed-in viewer).
-    expect(moderationActionFor(hashA)).toBe('QUARANTINE');
+    expect(moderationActionFor(mockEnv, hashA)).toBe('QUARANTINE');
   });
 
   it('age-restrict-all QUARANTINEs EVERY video the REST API returns, not 1/kind (funnelcake#471)', async () => {
@@ -153,16 +145,11 @@ describe('handleBulkModerate', () => {
     // returns all of them. Three same-kind videos must ALL be withheld -- this
     // is the correctness fix and the guard against regressing to WS extraction.
     mockUserVideos([{ sha256: hashA }, { sha256: hashB }, { sha256: hashC }]);
-    const request = new Request('https://test/api/bulk-moderate', {
-      method: 'POST',
-      body: JSON.stringify({ pubkey: 'a'.repeat(64), action: 'age-restrict-all' }),
-    });
-    const response = await handleBulkModerate(request, mockEnv, {});
-    const result = await response.json() as { mediaProcessed: number };
+    const result = await runBulkModeration(mockEnv, 'a'.repeat(64), 'age-restrict-all', 'r');
     expect(result.mediaProcessed).toBe(3);
-    expect(moderationActionFor(hashA)).toBe('QUARANTINE');
-    expect(moderationActionFor(hashB)).toBe('QUARANTINE');
-    expect(moderationActionFor(hashC)).toBe('QUARANTINE');
+    expect(moderationActionFor(mockEnv, hashA)).toBe('QUARANTINE');
+    expect(moderationActionFor(mockEnv, hashB)).toBe('QUARANTINE');
+    expect(moderationActionFor(mockEnv, hashC)).toBe('QUARANTINE');
   });
 
   it('pages through ALL videos beyond the funnelcake per-page limit, not just the first page', async () => {
@@ -182,12 +169,8 @@ describe('handleBulkModerate', () => {
 
   it('un-age-restrict-all sends SAFE (restore) for media', async () => {
     mockUserVideos([{ sha256: hashA }]);
-    const request = new Request('https://test/api/bulk-moderate', {
-      method: 'POST',
-      body: JSON.stringify({ pubkey: 'a'.repeat(64), action: 'un-age-restrict-all' }),
-    });
-    await handleBulkModerate(request, mockEnv, {});
-    expect(moderationActionFor(hashA)).toBe('SAFE');
+    await runBulkModeration(mockEnv, 'a'.repeat(64), 'un-age-restrict-all', 'r');
+    expect(moderationActionFor(mockEnv, hashA)).toBe('SAFE');
   });
 
   it('delete-all bans events from the relay (WS) and DELETEs media hashes from the REST API', async () => {
@@ -196,16 +179,11 @@ describe('handleBulkModerate', () => {
     // source -- only the REST list (hashA) is.
     mockRelay([{ id: 'e'.repeat(64), kind: 34235, content: '', tags: [['x', hashB]] }]);
     mockUserVideos([{ sha256: hashA }]);
-    const request = new Request('https://test/api/bulk-moderate', {
-      method: 'POST',
-      body: JSON.stringify({ pubkey: 'a'.repeat(64), action: 'delete-all' }),
-    });
-    const response = await handleBulkModerate(request, mockEnv, {});
-    const result = await response.json() as { eventsProcessed: number; mediaProcessed: number };
+    const result = await runBulkModeration(mockEnv, 'a'.repeat(64), 'delete-all', 'r');
     expect(result.eventsProcessed).toBe(1);
     expect(result.mediaProcessed).toBe(1);
-    expect(moderationActionFor(hashA)).toBe('DELETE'); // from REST
-    expect(moderationActionFor(hashB)).toBeUndefined(); // NOT from the WS x-tag
+    expect(moderationActionFor(mockEnv, hashA)).toBe('DELETE'); // from REST
+    expect(moderationActionFor(mockEnv, hashB)).toBeUndefined(); // NOT from the WS x-tag
   });
 
   it('marks bulk delete as failed when relay deletion returns success false', async () => {
@@ -213,27 +191,82 @@ describe('handleBulkModerate', () => {
     vi.mocked(banEvent).mockResolvedValueOnce({ success: false, error: 'relay refused' });
     mockRelay([{ id: 'e'.repeat(64), kind: 1, content: '', tags: [] }]);
 
-    const request = new Request('https://test/api/bulk-moderate', {
-      method: 'POST',
-      body: JSON.stringify({ pubkey: 'a'.repeat(64), action: 'delete-all' }),
-    });
-    const response = await handleBulkModerate(request, mockEnv, {});
-    const body = await response.json() as { success: boolean; failures: string[]; eventsProcessed: number };
+    const result = await runBulkModeration(mockEnv, 'a'.repeat(64), 'delete-all', 'r');
+    expect(result.success).toBe(false);
+    expect(result.eventsProcessed).toBe(0);
+    expect(result.failures[0]).toContain('relay refused');
+  });
+});
 
-    expect(body.success).toBe(false);
-    expect(body.eventsProcessed).toBe(0);
-    expect(body.failures[0]).toContain('relay refused');
+describe('async bulk job model', () => {
+  let mockEnv: BulkModerateEnv;
+  let jobDb: ReturnType<typeof makeJobDb>;
+  let sent: BulkJobMessage[];
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    mockUserVideos([{ sha256: hashA }, { sha256: hashB }]);
+    jobDb = makeJobDb();
+    sent = [];
+    mockEnv = {
+      ...baseEnv(),
+      DB: jobDb.db,
+      BULK_QUEUE: { send: vi.fn(async (m: BulkJobMessage) => { sent.push(m); }) } as unknown as Queue<BulkJobMessage>,
+    };
+  });
+
+  function enqueueReq(body: object): Request {
+    return new Request('https://test/api/bulk-moderate', { method: 'POST', body: JSON.stringify(body) });
+  }
+
+  it('enqueue inserts a pending job, sends a queue message, and returns the jobId', async () => {
+    const res = await handleBulkModerateEnqueue(enqueueReq({ pubkey: 'a'.repeat(64), action: 'age-restrict-all' }), mockEnv, {});
+    expect(res.status).toBe(200);
+    const body = await res.json() as BulkEnqueueResponse;
+    expect(body.jobId).toMatch(/^[0-9a-f-]{36}$/);
+
+    expect(jobDb.rows.get(body.jobId)?.status).toBe('pending'); // row created, not yet run
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ jobId: body.jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all' });
+  });
+
+  it('enqueue validates the action/pubkey and does NOT enqueue on a bad request', async () => {
+    const bad = await handleBulkModerateEnqueue(enqueueReq({ pubkey: 'short', action: 'age-restrict-all' }), mockEnv, {});
+    expect(bad.status).toBe(400);
+    const badAction = await handleBulkModerateEnqueue(enqueueReq({ pubkey: 'a'.repeat(64), action: 'nope' }), mockEnv, {});
+    expect(badAction.status).toBe(400);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('processBulkJob runs the work and writes status=done with counts', async () => {
+    const jobId = 'job-done-1';
+    jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', created_at: 't', updated_at: 't' });
+
+    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all' }, mockEnv);
+
+    const row = jobDb.rows.get(jobId)!;
+    expect(row.status).toBe('done');
+    expect(row.media_processed).toBe(2); // hashA + hashB, both from REST
+    expect(moderationActionFor(mockEnv, hashA)).toBe('QUARANTINE');
+  });
+
+  it('status returns the job as a BulkJob, and 404 when the job is unknown', async () => {
+    jobDb.rows.set('job-2', { job_id: 'job-2', pubkey: 'a'.repeat(64), action: 'delete-all', status: 'done', events_processed: 3, media_processed: 5, failures: '["media:x:boom"]', created_at: 't1', updated_at: 't2' });
+
+    const ok = await handleBulkJobStatus('job-2', mockEnv, {});
+    expect(ok.status).toBe(200);
+    const job = await ok.json() as BulkJob;
+    expect(job).toMatchObject({ jobId: 'job-2', status: 'done', eventsProcessed: 3, mediaProcessed: 5, failures: ['media:x:boom'] });
+
+    const missing = await handleBulkJobStatus('nope', mockEnv, {});
+    expect(missing.status).toBe(404);
   });
 
   it('age-restrict-all fails closed when the videos REST call errors (no false success)', async () => {
     // A failed enumeration must NOT report a successful withhold; queryUserMediaHashes
-    // throws so the worker returns an error rather than a 200 success.
+    // throws so the job fails rather than reporting success.
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('err', { status: 500 }));
-    const request = new Request('https://test/api/bulk-moderate', {
-      method: 'POST',
-      body: JSON.stringify({ pubkey: 'a'.repeat(64), action: 'age-restrict-all' }),
-    });
-    await expect(handleBulkModerate(request, mockEnv, {})).rejects.toThrow(/Video query failed: 500/);
+    await expect(runBulkModeration(mockEnv, 'a'.repeat(64), 'age-restrict-all', 'r')).rejects.toThrow(/Video query failed: 500/);
     expect(vi.mocked((mockEnv.MODERATION_API as unknown as { fetch: ReturnType<typeof vi.fn> }).fetch)).not.toHaveBeenCalled();
   });
 
@@ -242,11 +275,7 @@ describe('handleBulkModerate', () => {
     vi.mocked(banEvent).mockClear(); // call history accumulates across tests
     mockRelay([{ id: 'e'.repeat(64), kind: 34235, content: '', tags: [] }]);
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('err', { status: 500 }));
-    const request = new Request('https://test/api/bulk-moderate', {
-      method: 'POST',
-      body: JSON.stringify({ pubkey: 'a'.repeat(64), action: 'delete-all' }),
-    });
-    await expect(handleBulkModerate(request, mockEnv, {})).rejects.toThrow(/Video query failed: 500/);
+    await expect(runBulkModeration(mockEnv, 'a'.repeat(64), 'delete-all', 'r')).rejects.toThrow(/Video query failed: 500/);
     expect(vi.mocked(banEvent)).not.toHaveBeenCalled();
   });
 });

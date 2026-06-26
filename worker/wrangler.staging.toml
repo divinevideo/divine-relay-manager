@@ -111,6 +111,16 @@ binding = "DB"
 database_name = "divine-moderation-decisions-staging"
 database_id = "5e694cde-20d4-491d-aed3-aaac47a5a9b5"
 
+# Bulk-moderate async job queue (staging)
+[[queues.producers]]
+binding = "BULK_QUEUE"
+queue = "bulk-moderate-jobs-staging"
+
+[[queues.consumers]]
+queue = "bulk-moderate-jobs-staging"
+max_batch_size = 1
+max_retries = 0
+
 # Service binding to divine-realness worker (bypasses CF Access 522 issue)
 [[services]]
 binding = "REALNESS"

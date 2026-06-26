@@ -1,6 +1,13 @@
 import { getAdminPubkey, banEvent, publishKind5Deletion, type Nip86Env } from './nip86';
 import { syncZendeskAfterAction, type ZendeskSyncEnv } from './zendesk-sync';
-import { VALID_BULK_ACTIONS, type BulkAction, type BulkModerateResult } from '../../shared/bulk-moderation';
+import {
+  VALID_BULK_ACTIONS,
+  type BulkAction,
+  type BulkModerateResult,
+  type BulkJob,
+  type BulkJobMessage,
+  type BulkEnqueueResponse,
+} from '../../shared/bulk-moderation';
 import { deriveFunnelcakeApiUrl } from './funnelcake-proxy';
 
 const BULK_ACTION_CONCURRENCY = 5;
@@ -18,6 +25,7 @@ export interface BulkModerateEnv extends Nip86Env, ZendeskSyncEnv {
   SERVICE_API_TOKEN?: string | { get(): Promise<string> };
   // Explicit Funnelcake REST API URL; derived from RELAY_URL when unset.
   FUNNELCAKE_API_URL?: string;
+  BULK_QUEUE?: Queue<BulkJobMessage>;
 }
 
 interface RelayEventSummary {
@@ -34,23 +42,15 @@ function json(data: unknown, status: number, corsHeaders: Record<string, string>
   });
 }
 
-export async function handleBulkModerate(
-  request: Request,
+// Runs the actual enumerate->action work. Invoked by the queue consumer
+// (processBulkJob), NOT directly by the HTTP handler -- the producer enqueues a
+// job and returns immediately so a large account can't hang the request.
+export async function runBulkModeration(
   env: BulkModerateEnv,
-  corsHeaders: Record<string, string>,
-): Promise<Response> {
-  const body = await request.json() as { pubkey?: string; action?: string; reason?: string };
-
-  if (!body.pubkey || !/^[0-9a-f]{64}$/.test(body.pubkey)) {
-    return json({ error: 'Valid 64-char hex pubkey required' }, 400, corsHeaders);
-  }
-  if (!body.action || !VALID_BULK_ACTIONS.includes(body.action as BulkAction)) {
-    return json({ error: `Invalid action. Must be one of: ${VALID_BULK_ACTIONS.join(', ')}` }, 400, corsHeaders);
-  }
-
-  const action = body.action as BulkAction;
-  const reason = body.reason || `Bulk ${action} by moderator`;
-
+  pubkey: string,
+  action: BulkAction,
+  reason: string,
+): Promise<BulkModerateResult> {
   const moderatorPubkey = await getAdminPubkey(env);
   const result: BulkModerateResult = { success: true, eventsProcessed: 0, mediaProcessed: 0, failures: [] };
 
@@ -61,8 +61,8 @@ export async function handleBulkModerate(
     // videos -- the WebSocket REQ returns ~1 video/kind (funnelcake#471). Fetch
     // both in parallel.
     const [{ events, complete }, mediaHashes] = await Promise.all([
-      queryRelayEvents(body.pubkey, env),
-      queryUserMediaHashes(body.pubkey, env),
+      queryRelayEvents(pubkey, env),
+      queryUserMediaHashes(pubkey, env),
     ]);
 
     // If the relay could not be fully paginated (e.g. more than one page of events
@@ -70,7 +70,7 @@ export async function handleBulkModerate(
     // surface it rather than silently enforcing over a partial set. The events we
     // did gather are still actioned below (best effort).
     if (!complete) {
-      result.failures.push(`enumeration:${body.pubkey}:relay could not be fully paginated; actioned a partial set`);
+      result.failures.push(`enumeration:${pubkey}:relay could not be fully paginated; actioned a partial set`);
     }
 
     const successfulEventIds: string[] = [];
@@ -107,7 +107,7 @@ export async function handleBulkModerate(
     });
 
     if (successfulEventIds.length > 0) {
-      await syncZendeskAfterAction(env, 'delete_event', 'pubkey', body.pubkey, moderatorPubkey);
+      await syncZendeskAfterAction(env, 'delete_event', 'pubkey', pubkey, moderatorPubkey);
     }
 
     await runWithConcurrency(mediaHashes, BULK_ACTION_CONCURRENCY, async (sha256) => {
@@ -122,7 +122,7 @@ export async function handleBulkModerate(
     // age-restrict-all / un-age-restrict-all are media-only: no event IDs needed,
     // so we skip the WebSocket entirely and enumerate media from the REST API
     // (dedup-correct, all videos -- funnelcake#471).
-    const mediaHashes = await queryUserMediaHashes(body.pubkey, env);
+    const mediaHashes = await queryUserMediaHashes(pubkey, env);
     // REST returns one entry per video, so video count == event count for video
     // kinds; report it so the UI's "across N events" stays meaningful.
     result.eventsProcessed = mediaHashes.length;
@@ -144,7 +144,132 @@ export async function handleBulkModerate(
   }
 
   result.success = result.failures.length === 0;
-  return json(result, 200, corsHeaders);
+  return result;
+}
+
+// On-demand schema, matching the repo's ensureDecisionsTable/ensureZendeskTable
+// pattern (no migration runner).
+export async function ensureBulkJobsTable(db: D1Database): Promise<void> {
+  await db.prepare(
+    `CREATE TABLE IF NOT EXISTS bulk_jobs (
+      job_id TEXT PRIMARY KEY,
+      pubkey TEXT NOT NULL,
+      action TEXT NOT NULL,
+      status TEXT NOT NULL,
+      events_processed INTEGER NOT NULL DEFAULT 0,
+      media_processed INTEGER NOT NULL DEFAULT 0,
+      failures TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )`
+  ).run();
+}
+
+interface BulkJobRow {
+  job_id: string;
+  pubkey: string;
+  action: string;
+  status: string;
+  events_processed: number;
+  media_processed: number;
+  failures: string;
+  created_at: string;
+  updated_at: string;
+}
+
+function rowToBulkJob(row: BulkJobRow): BulkJob {
+  let failures: string[] = [];
+  try { failures = JSON.parse(row.failures) as string[]; } catch { failures = []; }
+  return {
+    jobId: row.job_id,
+    pubkey: row.pubkey,
+    action: row.action as BulkJob['action'],
+    status: row.status as BulkJob['status'],
+    eventsProcessed: Number(row.events_processed) || 0,
+    mediaProcessed: Number(row.media_processed) || 0,
+    failures,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+// Producer: validate, persist a pending job, enqueue, and return the jobId
+// immediately. The actual O(N/5) work runs in the queue consumer (processBulkJob)
+// so a large account can never hang the request.
+export async function handleBulkModerateEnqueue(
+  request: Request,
+  env: BulkModerateEnv,
+  corsHeaders: Record<string, string>,
+): Promise<Response> {
+  const body = await request.json() as { pubkey?: string; action?: string; reason?: string };
+
+  if (!body.pubkey || !/^[0-9a-f]{64}$/.test(body.pubkey)) {
+    return json({ error: 'Valid 64-char hex pubkey required' }, 400, corsHeaders);
+  }
+  if (!body.action || !VALID_BULK_ACTIONS.includes(body.action as BulkAction)) {
+    return json({ error: `Invalid action. Must be one of: ${VALID_BULK_ACTIONS.join(', ')}` }, 400, corsHeaders);
+  }
+  if (!env.DB) {
+    return json({ error: 'bulk_jobs storage (D1) is not bound' }, 500, corsHeaders);
+  }
+  if (!env.BULK_QUEUE) {
+    return json({ error: 'bulk-moderate queue is not bound' }, 500, corsHeaders);
+  }
+
+  const action = body.action as BulkAction;
+  const reason = body.reason || `Bulk ${action} by moderator`;
+  const jobId = crypto.randomUUID();
+  const now = new Date().toISOString();
+
+  await ensureBulkJobsTable(env.DB);
+  await env.DB.prepare(
+    `INSERT INTO bulk_jobs (job_id, pubkey, action, status, events_processed, media_processed, failures, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(jobId, body.pubkey, action, 'pending', 0, 0, '[]', now, now).run();
+
+  await env.BULK_QUEUE.send({ jobId, pubkey: body.pubkey, action, reason });
+
+  return json({ success: true, jobId } satisfies BulkEnqueueResponse, 200, corsHeaders);
+}
+
+// Consumer: run one job to completion and write its terminal state. A throw from
+// runBulkModeration is recorded as `failed` (and swallowed) rather than rethrown,
+// so the queue does not retry a half-applied destructive job; re-running is a
+// manual operator action. TODO(#async-retry): revisit once jobs are idempotent.
+export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv): Promise<void> {
+  if (!env.DB) throw new Error('bulk_jobs storage (D1) is not bound');
+  await ensureBulkJobsTable(env.DB);
+
+  await env.DB.prepare('UPDATE bulk_jobs SET status = ?, updated_at = ? WHERE job_id = ?')
+    .bind('running', new Date().toISOString(), msg.jobId).run();
+
+  try {
+    const result = await runBulkModeration(env, msg.pubkey, msg.action, msg.reason || `Bulk ${msg.action} by moderator`);
+    await env.DB.prepare(
+      'UPDATE bulk_jobs SET status = ?, events_processed = ?, media_processed = ?, failures = ?, updated_at = ? WHERE job_id = ?'
+    ).bind('done', result.eventsProcessed, result.mediaProcessed, JSON.stringify(result.failures), new Date().toISOString(), msg.jobId).run();
+  } catch (error) {
+    await env.DB.prepare(
+      'UPDATE bulk_jobs SET status = ?, failures = ?, updated_at = ? WHERE job_id = ?'
+    ).bind('failed', JSON.stringify([`job:${formatError(error)}`]), new Date().toISOString(), msg.jobId).run();
+  }
+}
+
+// Status endpoint: the UI polls this until status is terminal (done/failed).
+export async function handleBulkJobStatus(
+  jobId: string,
+  env: BulkModerateEnv,
+  corsHeaders: Record<string, string>,
+): Promise<Response> {
+  if (!env.DB) {
+    return json({ error: 'bulk_jobs storage (D1) is not bound' }, 500, corsHeaders);
+  }
+  await ensureBulkJobsTable(env.DB);
+  const row = await env.DB.prepare('SELECT * FROM bulk_jobs WHERE job_id = ?').bind(jobId).first<BulkJobRow>();
+  if (!row) {
+    return json({ error: 'job not found' }, 404, corsHeaders);
+  }
+  return json(rowToBulkJob(row), 200, corsHeaders);
 }
 
 export async function queryRelayEvents(

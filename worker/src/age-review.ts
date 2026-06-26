@@ -14,9 +14,9 @@ import {
   type AgeReviewEnforcement,
   type AgeReviewCaseResponse,
 } from '../../shared/age-review';
-import { handleBulkModerate, type BulkModerateEnv } from './bulk-moderate';
+import { runBulkModeration, type BulkModerateEnv } from './bulk-moderate';
 import { resolveZendeskCreds } from './zendesk-sync';
-import type { BulkAction, BulkModerateResult } from '../../shared/bulk-moderation';
+import type { BulkAction } from '../../shared/bulk-moderation';
 import { suspendUser, unsuspendUser, banUser, createMinorAccount, type KeycastEnv } from './keycast-client';
 import { suspendPubkey, unsuspendPubkey, banPubkey, type SecretStoreSecret } from './nip86';
 
@@ -1125,8 +1125,12 @@ async function sendSlackAlert(
 
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
-// Bulk action trigger (internal call to handleBulkModerate)
+// Bulk action trigger (internal, SYNCHRONOUS)
 // ---------------------------------------------------------------------------
+// Age-review enforcement runs the bulk action inline and needs the result to set
+// the case's enforcement leg status, so it calls runBulkModeration directly
+// rather than the async HTTP enqueue path the moderator UI uses. This runs in a
+// webhook/cron context (no UI modal to hang), so synchronous is correct here.
 
 async function triggerBulkModerate(
   pubkey: string,
@@ -1134,15 +1138,10 @@ async function triggerBulkModerate(
   reason: string,
   env: AgeReviewEnv,
 ): Promise<void> {
-  const request = new Request('https://internal/api/bulk-moderate', {
-    method: 'POST',
-    body: JSON.stringify({ pubkey, action, reason }),
-  });
-  const response = await handleBulkModerate(request, env, {});
-  const body = await response.json() as BulkModerateResult & { error?: string };
-  if (!response.ok || !body.success) {
-    const summary = body.failures?.slice(0, 3).join('; ');
-    throw new Error(summary || body.error || `Bulk moderate returned ${response.status}`);
+  const result = await runBulkModeration(env, pubkey, action, reason);
+  if (!result.success) {
+    const summary = result.failures.slice(0, 3).join('; ');
+    throw new Error(summary || 'Bulk moderate failed');
   }
 }
 

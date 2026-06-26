@@ -29,7 +29,8 @@ import {
   getAgeReviewConfig,
   updateAgeReviewConfig,
 } from './age-review';
-import { handleBulkModerate } from './bulk-moderate';
+import { handleBulkModerateEnqueue, handleBulkJobStatus, processBulkJob } from './bulk-moderate';
+import type { BulkJobMessage } from '../../shared/bulk-moderation';
 import { ensureZendeskTable, addZendeskInternalNote, syncZendeskAfterAction, resolveZendeskCreds } from './zendesk-sync';
 
 let schemaReady = false;
@@ -72,6 +73,7 @@ interface Env extends KeycastEnv {
   ZENDESK_FIELD_AGE_REVIEW_DEADLINE?: string;
   KV?: KVNamespace;
   DB?: D1Database;
+  BULK_QUEUE?: Queue<BulkJobMessage>;
   // Relay management configuration
   MANAGEMENT_PATH?: string;  // Path for NIP-86 management API, defaults to "/management"
   MANAGEMENT_URL?: string;   // Full URL override for NIP-86 management API (for local dev with HTTP)
@@ -529,7 +531,13 @@ export default {
       // Bulk moderation (server-side iteration for batch operations)
       if (path === '/api/bulk-moderate' && request.method === 'POST') {
         if (env.DB) await ensureSchemaOnce(env.DB);
-        return handleBulkModerate(request, env, corsHeaders);
+        return handleBulkModerateEnqueue(request, env, corsHeaders);
+      }
+
+      // Bulk-moderate job status: the UI polls this until status is terminal.
+      const bulkStatusMatch = path.match(/^\/api\/bulk-moderate\/status\/([^/]+)$/);
+      if (bulkStatusMatch && request.method === 'GET') {
+        return handleBulkJobStatus(decodeURIComponent(bulkStatusMatch[1]), env, corsHeaders);
       }
 
       // Age review config
@@ -623,6 +631,20 @@ export default {
       } catch (error) {
         console.error('[scheduled] Age review deadline check failed:', error);
       }
+    }
+  },
+
+  // Queue consumer: drain bulk-moderate jobs. Each message's terminal state is
+  // recorded by processBulkJob, so we ack even on error rather than retrying a
+  // half-applied destructive job.
+  async queue(batch: MessageBatch<BulkJobMessage>, env: Env): Promise<void> {
+    for (const message of batch.messages) {
+      try {
+        await processBulkJob(message.body, env);
+      } catch (error) {
+        console.error('[queue] bulk job processing error:', error);
+      }
+      message.ack();
     }
   },
 };
