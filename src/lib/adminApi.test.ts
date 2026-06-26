@@ -28,6 +28,8 @@ import {
   extractMediaHashes,
   isBlockedMediaAction,
   updateAgeReviewCase,
+  bulkModerate,
+  getBulkJobStatus,
   ApiError,
   type UnsignedEvent,
   type ApiResponse,
@@ -1134,6 +1136,47 @@ describe('adminApi', () => {
 
       const result = await fetchResolutionLabels(API_URL);
       expect(result).toEqual([]);
+    });
+  });
+
+  describe('bulkModerate (async enqueue)', () => {
+    it('enqueues and returns the jobId', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, jobId: 'job-9' }) });
+
+      const res = await bulkModerate(API_URL, 'a'.repeat(64), 'age-restrict-all');
+
+      expect(res.jobId).toBe('job-9');
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/bulk-moderate'),
+        expect.objectContaining({ method: 'POST' }),
+      );
+    });
+
+    it('throws when the enqueue request fails', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false, status: 500, statusText: 'err', json: async () => ({ error: 'queue down' }),
+      });
+
+      await expect(bulkModerate(API_URL, 'a'.repeat(64), 'delete-all')).rejects.toThrow('queue down');
+    });
+  });
+
+  describe('getBulkJobStatus', () => {
+    it('GETs the job status by id', async () => {
+      const job = {
+        jobId: 'job-9', pubkey: 'a'.repeat(64), action: 'age-restrict-all', status: 'done',
+        eventsProcessed: 3, mediaProcessed: 3, failures: [], createdAt: 't', updatedAt: 't',
+      };
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => job });
+
+      const res = await getBulkJobStatus(API_URL, 'job-9');
+
+      expect(res.status).toBe('done');
+      expect(res.mediaProcessed).toBe(3);
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/bulk-moderate/status/job-9'),
+        expect.objectContaining({ method: 'GET' }),
+      );
     });
   });
 });
