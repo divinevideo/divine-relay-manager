@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { handleBulkModerate, extractMediaHashes, queryRelayEvents, type BulkModerateEnv } from './bulk-moderate';
+import { handleBulkModerate, queryRelayEvents, type BulkModerateEnv } from './bulk-moderate';
 
 vi.mock('./nip86', () => ({
   getAdminPubkey: vi.fn().mockResolvedValue('moderator-pubkey'),
@@ -205,6 +205,31 @@ describe('handleBulkModerate', () => {
     expect(body.eventsProcessed).toBe(0);
     expect(body.failures[0]).toContain('relay refused');
   });
+
+  it('age-restrict-all fails closed when the videos REST call errors (no false success)', async () => {
+    // A failed enumeration must NOT report a successful withhold; queryUserMediaHashes
+    // throws so the worker returns an error rather than a 200 success.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('err', { status: 500 }));
+    const request = new Request('https://test/api/bulk-moderate', {
+      method: 'POST',
+      body: JSON.stringify({ pubkey: 'a'.repeat(64), action: 'age-restrict-all' }),
+    });
+    await expect(handleBulkModerate(request, mockEnv, {})).rejects.toThrow(/Video query failed: 500/);
+    expect(vi.mocked((mockEnv.MODERATION_API as unknown as { fetch: ReturnType<typeof vi.fn> }).fetch)).not.toHaveBeenCalled();
+  });
+
+  it('delete-all fails closed when the videos REST call errors (no events banned)', async () => {
+    const { banEvent } = await import('./nip86');
+    vi.mocked(banEvent).mockClear(); // call history accumulates across tests
+    mockRelay([{ id: 'e'.repeat(64), kind: 34235, content: '', tags: [] }]);
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('err', { status: 500 }));
+    const request = new Request('https://test/api/bulk-moderate', {
+      method: 'POST',
+      body: JSON.stringify({ pubkey: 'a'.repeat(64), action: 'delete-all' }),
+    });
+    await expect(handleBulkModerate(request, mockEnv, {})).rejects.toThrow(/Video query failed: 500/);
+    expect(vi.mocked(banEvent)).not.toHaveBeenCalled();
+  });
 });
 
 // Paginating mock relay: responds to each REQ with up to `limit` events whose
@@ -261,74 +286,5 @@ describe('queryRelayEvents pagination', () => {
     expect(complete).toBe(false);            // surfaced, not a silent success
     expect(events.length).toBe(500);         // escaped the saturated second after one page
     expect(events.length).toBeLessThan(600); // the excess at that second was not silently claimed as done
-  });
-});
-
-describe('extractMediaHashes', () => {
-  it('extracts sha256 from imeta tags on video events', () => {
-    const events = [
-      {
-        id: 'e1',
-        kind: 34235,
-        content: '',
-        tags: [
-          ['imeta', `url https://example.com/${hashA}.mp4`, 'm video/mp4', `x ${hashA}`],
-          ['imeta', `url https://example.com/${hashB}.jpg`, 'm image/jpeg', `x ${hashB}`],
-        ],
-      },
-    ];
-    const hashes = extractMediaHashes(events);
-    expect(hashes).toContain(hashA);
-    expect(hashes).toContain(hashB);
-    expect(hashes).toHaveLength(2);
-  });
-
-  it('extracts from x tags', () => {
-    const events = [
-      { id: 'e1', kind: 34236, content: '', tags: [['x', hashA]] },
-    ];
-    expect(extractMediaHashes(events)).toEqual([hashA]);
-  });
-
-  it('extracts from content URLs and url tags', () => {
-    const events = [
-      { id: 'e1', kind: 1, content: `https://cdn.test/${hashA}.jpg`, tags: [] },
-      { id: 'e2', kind: 30023, content: '', tags: [['url', `https://cdn.test/${hashB}.png`]] },
-    ];
-    expect(extractMediaHashes(events)).toEqual([hashA, hashB]);
-  });
-
-  it('deduplicates hashes', () => {
-    const events = [
-      { id: 'e1', kind: 34235, content: '', tags: [['x', hashA]] },
-      { id: 'e2', kind: 34236, content: '', tags: [['x', hashA]] },
-    ];
-    expect(extractMediaHashes(events)).toEqual([hashA]);
-  });
-
-  it('ignores thumbnail image hashes embedded in video imeta tags', () => {
-    const events = [
-      {
-        id: 'e1',
-        kind: 34235,
-        content: '',
-        tags: [[
-          'imeta',
-          `url https://media.divine.video/${hashA}`,
-          'm video/mp4',
-          `image https://media.divine.video/${hashB}`,
-          `x ${hashA}`,
-        ]],
-      },
-    ];
-    expect(extractMediaHashes(events)).toEqual([hashA]);
-  });
-
-  it('returns empty array when there are no valid hashes', () => {
-    const events = [
-      { id: 'e1', kind: 1, content: '', tags: [] },
-      { id: 'e2', kind: 30023, content: '', tags: [['x', 'not-a-hash']] },
-    ];
-    expect(extractMediaHashes(events)).toEqual([]);
   });
 });

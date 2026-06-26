@@ -1,7 +1,7 @@
 import { getAdminPubkey, banEvent, publishKind5Deletion, type Nip86Env } from './nip86';
 import { syncZendeskAfterAction, type ZendeskSyncEnv } from './zendesk-sync';
 import { VALID_BULK_ACTIONS, type BulkAction, type BulkModerateResult } from '../../shared/bulk-moderation';
-import { extractMediaHashes as extractSharedMediaHashes } from '../../shared/media-hashes';
+import { deriveFunnelcakeApiUrl } from './funnelcake-proxy';
 
 const BULK_ACTION_CONCURRENCY = 5;
 // Page through ALL of an author's events via `until` cursoring instead of
@@ -16,6 +16,8 @@ export interface BulkModerateEnv extends Nip86Env, ZendeskSyncEnv {
   MODERATION_API?: Fetcher;
   MODERATION_ADMIN_URL?: string;
   SERVICE_API_TOKEN?: string | { get(): Promise<string> };
+  // Explicit Funnelcake REST API URL; derived from RELAY_URL when unset.
+  FUNNELCAKE_API_URL?: string;
 }
 
 interface RelayEventSummary {
@@ -256,30 +258,27 @@ export async function queryRelayEvents(
   });
 }
 
-export function extractMediaHashes(events: RelayEventSummary[]): string[] {
-  const hashes = new Set<string>();
-  for (const event of events) {
-    const eventHashes = extractSharedMediaHashes(event.content, event.tags);
-    eventHashes.forEach((hash) => hashes.add(hash));
-  }
-  return Array.from(hashes);
-}
-
 const SHA256_HEX = /^[a-f0-9]{64}$/i;
+const VIDEO_QUERY_TIMEOUT_MS = 10000;
 
 // Enumerate a user's video media hashes via the Funnelcake REST API instead of a
 // WebSocket REQ. Funnelcake's `relay_events_by_kind_time` materialized view
 // deduplicates addressable video events by (pubkey, kind) rather than
 // (pubkey, kind, d_tag), so a REQ returns only ~1 video/kind (funnelcake#471).
 // The REST endpoint routes through the correct `events_deduped` view and returns
-// `sha256` directly, so every video is actioned. The base URL is derived from
-// RELAY_URL (the relay host also serves the REST surface in every environment).
+// `sha256` directly, so every video is actioned. The base URL goes through the
+// shared deriveFunnelcakeApiUrl so it honors FUNNELCAKE_API_URL when the REST and
+// relay hosts diverge. Bounded by a timeout so a hung endpoint can't stall bulk
+// moderation (for age-restrict this is the only upstream); throws on failure so
+// the caller fails closed rather than reporting a false "withheld everything".
 export async function queryUserMediaHashes(
   pubkey: string,
-  env: Pick<BulkModerateEnv, 'RELAY_URL'>,
+  env: Pick<BulkModerateEnv, 'RELAY_URL' | 'FUNNELCAKE_API_URL'>,
 ): Promise<string[]> {
-  const baseUrl = env.RELAY_URL.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:');
-  const res = await fetch(`${baseUrl}/api/users/${pubkey}/videos`);
+  const baseUrl = deriveFunnelcakeApiUrl(env.RELAY_URL, env.FUNNELCAKE_API_URL);
+  const res = await fetch(`${baseUrl}/api/users/${pubkey}/videos`, {
+    signal: AbortSignal.timeout(VIDEO_QUERY_TIMEOUT_MS),
+  });
   if (!res.ok) {
     throw new Error(`Video query failed: ${res.status}`);
   }
