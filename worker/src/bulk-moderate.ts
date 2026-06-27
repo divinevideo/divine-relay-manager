@@ -162,7 +162,12 @@ export async function runBulkModeration(
 
 // On-demand schema, matching the repo's ensureDecisionsTable/ensureZendeskTable
 // pattern (no migration runner).
+// Memoized per worker isolate (mirrors index.ts ensureSchemaOnce) so the status
+// poll — which fires every ~1.5s — doesn't re-issue the CREATE plus the defensive
+// ALTER (which throws-and-is-caught once the column exists) on every call.
+let bulkSchemaReady = false;
 export async function ensureBulkJobsTable(db: D1Database): Promise<void> {
+  if (bulkSchemaReady) return;
   await db.prepare(
     `CREATE TABLE IF NOT EXISTS bulk_jobs (
       job_id TEXT PRIMARY KEY,
@@ -181,6 +186,7 @@ export async function ensureBulkJobsTable(db: D1Database): Promise<void> {
   // (on-demand schema, no migration runner). Ignored once the column is present.
   await db.prepare('ALTER TABLE bulk_jobs ADD COLUMN failures_dropped INTEGER NOT NULL DEFAULT 0')
     .run().catch(() => {});
+  bulkSchemaReady = true;
 }
 
 interface BulkJobRow {
@@ -460,15 +466,17 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
 // row is stuck in pending/running past STALE_JOB_MS, self-heal it to `failed` so
 // the poller never hangs.
 //
-// Why STALE_JOB_MS can't fire on a LIVE chunked job: each chunk completes in
+// Why STALE_JOB_MS rarely fires on a LIVE chunked job: each chunk completes in
 // seconds (bounded by the per-invocation subrequest/CPU ceiling) and re-enqueues
-// its successor immediately, which refreshes updated_at. So a healthy multi-chunk
-// job is never 30 minutes between updates -- a gap that long means the queue
-// message was lost or the worker was evicted mid-consume (max_retries=0, so the
-// message is gone), i.e. genuinely abandoned. The status guards make done/failed
-// sticky, so this heal can only act on a still-non-terminal row. Recovering the
-// dropped continuation of such an abandoned job (re-enqueuing the remaining pages)
-// is separate work: TODO(#async-retry).
+// its successor immediately, refreshing updated_at. A ~30-minute gap means the
+// continuation was lost, the worker was evicted mid-consume (max_retries=0, so the
+// message is gone), or the next message sat undelivered in a queue backlog that
+// long -- all treated as abandoned. The status guards make done/failed sticky, so
+// this heal only acts on a still-non-terminal row, and if a long-delayed message
+// IS later delivered its claim changes zero rows and no-ops -- so healing a
+// backlogged job is safe (worst case: the remaining pages are dropped and the
+// moderator re-runs; all actions are idempotent). Recovering the dropped
+// continuation automatically is separate work: TODO(#async-retry).
 export async function handleBulkJobStatus(
   jobId: string,
   env: BulkModerateEnv,
