@@ -102,6 +102,36 @@ describe('UserActions', () => {
     expect(api.logDecision).toHaveBeenCalledTimes(1); // fired, but not awaited
   });
 
+  it('invalidates the decision log after the detached audit write lands (report converges without manual refresh)', async () => {
+    // Suspend/age-restrict resolution comes only from the D1 decision row, and the
+    // onSuccess refetch races the fire-and-forget write. The invalidation must fire
+    // AFTER the write resolves (not before), so the report converges on its own.
+    let resolveWrite!: () => void;
+    api.logDecision.mockReturnValue(new Promise<void>((r) => { resolveWrite = () => r(undefined); }));
+
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const invalidateSpy = vi.spyOn(qc, 'invalidateQueries');
+    const decisionsInvalidations = () => invalidateSpy.mock.calls.filter(
+      ([arg]) => (arg as { queryKey?: unknown[] })?.queryKey?.[0] === 'decisions',
+    ).length;
+
+    render(
+      <QueryClientProvider client={qc}>
+        <TooltipProvider><UserActions pubkey={'a'.repeat(64)} /></TooltipProvider>
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /Suspend User/i }));
+
+    await waitFor(() => expect(api.logDecision).toHaveBeenCalledTimes(1));
+    expect(decisionsInvalidations()).toBe(0); // write hasn't landed yet — report stays unresolved
+
+    resolveWrite();
+
+    await waitFor(() => expect(decisionsInvalidations()).toBe(1));
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['decisions'] });
+  });
+
   it('closes the ban dialog on success (the alertdialog is removed)', async () => {
     // The real symptom of the hang bug is the dialog never closing; assert it's gone.
     renderWithProvider(<UserActions pubkey={'a'.repeat(64)} />);

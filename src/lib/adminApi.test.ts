@@ -131,6 +131,22 @@ describe('adminApi', () => {
       );
     });
 
+    it('a stalled response BODY (headers sent, body never finishes) still maps to the friendly timeout copy', async () => {
+      // A relay that sends headers then stalls the body aborts during
+      // response.json(), AFTER fetch() resolved. Without bounding the read this
+      // surfaced as a raw TimeoutError that skipped the "may have applied" copy.
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => { throw new DOMException('timed out', 'TimeoutError'); },
+      });
+
+      await expect(
+        moderateAction(API_URL, { action: 'ban_pubkey', pubkey: 'p'.repeat(64) }),
+      ).rejects.toThrow(
+        /Request to \/api\/moderate timed out after 30s\. The action may still have applied\. Re-check before retrying\./,
+      );
+    });
+
     it('bulkModerate is bounded by the longer BULK timeout; other calls by the 30s default', async () => {
       // bulk is a server-side O(N/5) loop that can legitimately exceed 30s; it
       // must not false-timeout on the primary path.

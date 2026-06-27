@@ -87,8 +87,10 @@ export class ApiError extends Error {
 // Bound every relay-bound HTTP call so a slow or hung relay can't leave the UI
 // spinning forever (the "Banning…" / "Deleting…" confirm modals). Generous
 // because some actions purge across 16+ tables; if legitimate operations exceed
-// this, fix the relay-side latency rather than raise the bound. Covers every
-// caller of apiRequest and callRelayRpc, not just bans.
+// this, fix the relay-side latency rather than raise the bound. Covers callers of
+// apiRequest and callRelayRpc (connection AND body read, via readJsonBounded) plus
+// the standalone check-result / check-classifier / realness fetches — every
+// relay-bound fetch routes through fetchWithTimeout.
 const API_TIMEOUT_MS = 30_000;
 
 // Bulk moderation is a server-side O(N/5) loop that can legitimately run for
@@ -121,6 +123,29 @@ const READ_RPC_METHODS = new Set<string>([
 // even though we stopped waiting (re-check before retrying), but a timed-out
 // read applied nothing (just retry). Emitting "may have applied" on a read would
 // mislead the moderator.
+// Map an AbortSignal.timeout abort to the friendly ApiError copy. Shared by
+// fetchWithTimeout (bounds the connection) and readJsonBounded (the body read): a
+// relay that sends headers then stalls the body aborts during response.json(),
+// AFTER fetch() resolves, so the same mapping has to wrap the read too — otherwise
+// a body stall surfaces as a raw TimeoutError and skips the "may have applied" copy.
+function asTimeoutApiError(err: unknown, label: string, mutates: boolean, timeoutMs: number): unknown {
+  if (err instanceof DOMException && err.name === 'TimeoutError') {
+    const tail = mutates
+      ? 'The action may still have applied. Re-check before retrying.'
+      : 'Could not reach the relay. Try again.';
+    return new ApiError(`${label} timed out after ${timeoutMs / 1000}s. ${tail}`);
+  }
+  return err;
+}
+
+async function readJsonBounded<T>(response: Response, label: string, mutates: boolean, timeoutMs: number): Promise<T> {
+  try {
+    return await response.json() as T;
+  } catch (err) {
+    throw asTimeoutApiError(err, label, mutates, timeoutMs);
+  }
+}
+
 async function fetchWithTimeout(
   url: string,
   init: RequestInit,
@@ -131,13 +156,7 @@ async function fetchWithTimeout(
   try {
     return await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
   } catch (err) {
-    if (err instanceof DOMException && err.name === 'TimeoutError') {
-      const tail = opts.mutates
-        ? 'The action may still have applied. Re-check before retrying.'
-        : 'Could not reach the relay. Try again.';
-      throw new ApiError(`${label} timed out after ${timeoutMs / 1000}s. ${tail}`);
-    }
-    throw err;
+    throw asTimeoutApiError(err, label, opts.mutates, timeoutMs);
   }
 }
 
@@ -151,11 +170,14 @@ async function apiRequest<T>(
   if (!apiUrl) {
     throw new ApiError('No relay selected. Go to Settings to choose an environment.');
   }
+  const label = `Request to ${endpoint}`;
+  const mutates = method !== 'GET';
+  const timeoutMs = opts?.timeoutMs ?? API_TIMEOUT_MS;
   const response = await fetchWithTimeout(`${apiUrl}${endpoint}`, {
     method,
     headers: getApiHeaders(),
     body: body ? JSON.stringify(body) : undefined,
-  }, `Request to ${endpoint}`, { mutates: method !== 'GET', timeoutMs: opts?.timeoutMs });
+  }, label, { mutates, timeoutMs });
 
   if (!response.ok) {
     // Read the JSON error body if there is one so callers can act on structured
@@ -176,7 +198,7 @@ async function apiRequest<T>(
     );
   }
 
-  const data = await response.json() as T;
+  const data = await readJsonBounded<T>(response, label, mutates, timeoutMs);
   return data;
 }
 
@@ -239,11 +261,13 @@ export async function callRelayRpc<T = unknown>(
   if (!apiUrl) {
     throw new ApiError('No relay selected. Go to Settings to choose an environment.');
   }
+  const label = `Relay RPC '${method}'`;
+  const mutates = !READ_RPC_METHODS.has(method);
   const response = await fetchWithTimeout(`${apiUrl}/api/relay-rpc`, {
     method: 'POST',
     headers: getApiHeaders(),
     body: JSON.stringify({ method, params }),
-  }, `Relay RPC '${method}'`, { mutates: !READ_RPC_METHODS.has(method) });
+  }, label, { mutates });
 
   if (!response.ok) {
     throw new ApiError(
@@ -253,7 +277,7 @@ export async function callRelayRpc<T = unknown>(
     );
   }
 
-  const data = await response.json() as ApiResponse<T>;
+  const data = await readJsonBounded<ApiResponse<T>>(response, label, mutates, API_TIMEOUT_MS);
 
   if (!data.success) {
     throw new ApiError(data.error || 'RPC call failed');
@@ -429,10 +453,10 @@ export async function moderateMedia(
 // Check media moderation status
 export async function checkMediaStatus(apiUrl: string, sha256: string): Promise<MediaStatus | null> {
   try {
-    const response = await fetch(`${apiUrl}/api/check-result/${sha256}`, {
+    const response = await fetchWithTimeout(`${apiUrl}/api/check-result/${sha256}`, {
       method: 'GET',
       headers: getApiHeaders(),
-    });
+    }, 'Media status check', { mutates: false });
 
     if (!response.ok) {
       if (response.status === 404) return null;
@@ -685,10 +709,10 @@ export interface ClassifierData {
 // Fetch classifier data (scene classification + topic profile)
 export async function getClassifierData(apiUrl: string, sha256: string): Promise<ClassifierData | null> {
   try {
-    const response = await fetch(`${apiUrl}/api/check-classifier/${sha256}`, {
+    const response = await fetchWithTimeout(`${apiUrl}/api/check-classifier/${sha256}`, {
       method: 'GET',
       headers: getApiHeaders(),
-    });
+    }, 'Classifier data', { mutates: false });
 
     if (!response.ok) {
       if (response.status === 404) return null;
@@ -772,10 +796,10 @@ export interface AIDetectionResult {
 // Fetch AI detection results by event ID (via worker proxy)
 export async function getAIDetectionResult(apiUrl: string, eventId: string): Promise<AIDetectionResult | null> {
   try {
-    const response = await fetch(`${apiUrl}/api/realness/jobs/${eventId}`, {
+    const response = await fetchWithTimeout(`${apiUrl}/api/realness/jobs/${eventId}`, {
       method: 'GET',
       headers: { ...getApiHeaders(''), 'Accept': 'application/json' },
-    });
+    }, 'AI detection result', { mutates: false });
 
     if (!response.ok) {
       if (response.status === 404) return null;
@@ -800,7 +824,7 @@ export async function submitAIDetection(
   eventId?: string
 ): Promise<{ jobId: string; status: string } | null> {
   try {
-    const response = await fetch(`${apiUrl}/api/realness/analyze`, {
+    const response = await fetchWithTimeout(`${apiUrl}/api/realness/analyze`, {
       method: 'POST',
       headers: getApiHeaders(),
       body: JSON.stringify({
@@ -808,7 +832,7 @@ export async function submitAIDetection(
         mediaHash: sha256,
         ...(eventId && { eventId }),
       }),
-    });
+    }, 'AI detection submit', { mutates: true });
 
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}: ${response.statusText}`);
