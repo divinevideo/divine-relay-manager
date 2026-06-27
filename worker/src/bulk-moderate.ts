@@ -172,10 +172,15 @@ export async function ensureBulkJobsTable(db: D1Database): Promise<void> {
       events_processed INTEGER NOT NULL DEFAULT 0,
       media_processed INTEGER NOT NULL DEFAULT 0,
       failures TEXT NOT NULL DEFAULT '[]',
+      failures_dropped INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )`
   ).run();
+  // Defensive add for a bulk_jobs table created before failures_dropped existed
+  // (on-demand schema, no migration runner). Ignored once the column is present.
+  await db.prepare('ALTER TABLE bulk_jobs ADD COLUMN failures_dropped INTEGER NOT NULL DEFAULT 0')
+    .run().catch(() => {});
 }
 
 interface BulkJobRow {
@@ -186,13 +191,30 @@ interface BulkJobRow {
   events_processed: number;
   media_processed: number;
   failures: string;
+  failures_dropped: number;
   created_at: string;
   updated_at: string;
 }
 
+// `failures[]` stores a capped raw list (<= MAX_STORED_FAILURES, no synthetic
+// marker); the overflow count lives in its own `failures_dropped` column so it
+// survives across chunks. Render the "+N more" marker only for display/the API.
+function failuresForDisplay(list: string[], dropped: number): string[] {
+  return dropped > 0 ? list.concat(`+${dropped} more`) : list;
+}
+
+function parseFailuresList(raw: string): string[] {
+  try {
+    const parsed = JSON.parse(raw) as string[];
+    // Defensive: never let a previously-stored synthetic marker re-enter the list.
+    return parsed.filter((f) => !/^\+\d+ more$/.test(f));
+  } catch {
+    return [];
+  }
+}
+
 function rowToBulkJob(row: BulkJobRow): BulkJob {
-  let failures: string[] = [];
-  try { failures = JSON.parse(row.failures) as string[]; } catch { failures = []; }
+  const dropped = Number(row.failures_dropped) || 0;
   return {
     jobId: row.job_id,
     pubkey: row.pubkey,
@@ -200,7 +222,7 @@ function rowToBulkJob(row: BulkJobRow): BulkJob {
     status: row.status as BulkJob['status'],
     eventsProcessed: Number(row.events_processed) || 0,
     mediaProcessed: Number(row.media_processed) || 0,
-    failures,
+    failures: failuresForDisplay(parseFailuresList(row.failures), dropped),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -214,7 +236,15 @@ export async function handleBulkModerateEnqueue(
   env: BulkModerateEnv,
   corsHeaders: Record<string, string>,
 ): Promise<Response> {
-  const body = await request.json() as { pubkey?: string; action?: string; reason?: string };
+  let body: { pubkey?: string; action?: string; reason?: string };
+  try {
+    body = await request.json() as { pubkey?: string; action?: string; reason?: string };
+  } catch {
+    return json({ error: 'Malformed JSON body' }, 400, corsHeaders);
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return json({ error: 'Request body must be a JSON object' }, 400, corsHeaders);
+  }
 
   if (!body.pubkey || !/^[0-9a-f]{64}$/.test(body.pubkey)) {
     return json({ error: 'Valid 64-char hex pubkey required' }, 400, corsHeaders);
@@ -236,9 +266,9 @@ export async function handleBulkModerateEnqueue(
 
   await ensureBulkJobsTable(env.DB);
   await env.DB.prepare(
-    `INSERT INTO bulk_jobs (job_id, pubkey, action, status, events_processed, media_processed, failures, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).bind(jobId, body.pubkey, action, 'pending', 0, 0, '[]', now, now).run();
+    `INSERT INTO bulk_jobs (job_id, pubkey, action, status, events_processed, media_processed, failures, failures_dropped, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(jobId, body.pubkey, action, 'pending', 0, 0, '[]', 0, now, now).run();
 
   try {
     await env.BULK_QUEUE.send({ jobId, pubkey: body.pubkey, action, reason });
@@ -263,21 +293,39 @@ const STALE_JOB_MS = 30 * 60 * 1000;
 // recorded as `failed` and swallowed (not rethrown) so the queue does not retry a
 // half-applied DESTRUCTIVE job — re-running is a manual operator action.
 //
-// Idempotency caveat: Cloudflare Queues is at-least-once. A duplicate delivery of
-// the SAME in-flight chunk message would re-process its page and re-enqueue a
-// second `next`, forking the chunk chain (both branches walk to `done`). The only
-// guard is the terminal short-circuit below, which covers a re-delivered message
-// for an already-finished job but not a mid-run duplicate. There is no data
-// corruption — every action (banevent/kind-5/moderate-media) is idempotent — only
-// count inflation and wasted compute on a rare duplicate. A true fix (an atomic
-// per-chunk claim) is a focused follow-up, not folded in here.
-// TODO(#async-retry): atomic chunk claim to collapse duplicate/forked deliveries.
+// Idempotency: Cloudflare Queues is at-least-once. Every write to bulk_jobs.status
+// is guarded so done/failed are sticky — the running-claim and terminal writes
+// only act while the row is still non-terminal, and `next` is enqueued only when
+// the terminal write actually changed a row. So a duplicate delivery for a job
+// another chunk already finished is a no-op: it can't flap done->running, re-fire
+// the UI's onComplete, or fork a second chunk chain. What these guards do NOT cover
+// is two duplicates of the same still-running message racing the same page; there
+// is no data corruption (banevent/kind-5/moderate-media are all idempotent), only
+// count inflation and wasted compute on that rare overlap. A full atomic per-chunk
+// claim (and recovering an abandoned job's dropped continuation) is a focused
+// follow-up.
+// TODO(#async-retry): atomic per-chunk claim + continuation recovery.
 const MAX_STORED_FAILURES = 50;
 
-function appendFailures(existing: string[], added: string[]): string[] {
-  const merged = existing.filter((f) => !/^\+\d+ more$/.test(f)).concat(added);
-  if (merged.length <= MAX_STORED_FAILURES) return merged;
-  return merged.slice(0, MAX_STORED_FAILURES).concat(`+${merged.length - MAX_STORED_FAILURES} more`);
+// Merge new failures into the stored list, tracking the cumulative dropped count
+// as its own number so it survives across chunks. Returns the capped raw list
+// (<= MAX_STORED_FAILURES, no marker) plus the running dropped total. Re-deriving
+// the marker from only the stored set each chunk loses earlier overflow and lets
+// a clean final chunk erase the count entirely; a dedicated counter can't be
+// erased. On a destructive path `failures[]` is the moderator's only signal of how
+// much went un-actioned, so the total must not silently understate.
+function mergeFailures(
+  existing: string[], existingDropped: number, added: string[],
+): { list: string[]; dropped: number } {
+  const base = existing.filter((f) => !/^\+\d+ more$/.test(f));
+  const merged = base.concat(added);
+  if (merged.length <= MAX_STORED_FAILURES) {
+    return { list: merged, dropped: existingDropped };
+  }
+  return {
+    list: merged.slice(0, MAX_STORED_FAILURES),
+    dropped: existingDropped + (merged.length - MAX_STORED_FAILURES),
+  };
 }
 
 // Consumer: process ONE chunk of a job, persist incremental progress, then
@@ -296,11 +344,19 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
     if (job.status === 'done' || job.status === 'failed') return; // idempotent: already terminal
 
     const reason = msg.reason || `Bulk ${msg.action} by moderator`;
-    const moderatorPubkey = await getAdminPubkey(env);
     const phase: BulkJobPhase = msg.phase ?? (msg.action === 'delete-all' ? 'events' : 'media');
 
-    await db.prepare('UPDATE bulk_jobs SET status = ?, updated_at = ? WHERE job_id = ?')
-      .bind('running', new Date().toISOString(), msg.jobId).run();
+    // Claim the chunk: flip to running only while still non-terminal. A duplicate
+    // delivery for a job another chunk already finished changes zero rows here, so
+    // we bail rather than flap `done`/`failed` back to `running` and re-fire the
+    // UI's onComplete. (Not a full atomic claim against a concurrent same-state
+    // duplicate -- that's TODO(#async-retry); this just stops the backward flips.)
+    const claim = await db.prepare(
+      `UPDATE bulk_jobs SET status = ?, updated_at = ? WHERE job_id = ? AND status IN ('pending','running')`
+    ).bind('running', new Date().toISOString(), msg.jobId).run();
+    if (!claim.meta?.changes) return;
+
+    const moderatorPubkey = await getAdminPubkey(env);
 
     let eventsDelta = 0;
     let mediaDelta = 0;
@@ -333,6 +389,7 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
         next = { jobId: msg.jobId, pubkey: msg.pubkey, action: msg.action, reason, phase: 'events', cursor: String(page.nextUntil) };
       }
     } else {
+      const mediaPage = msg.mediaPage ?? 0;
       const { hashes, nextCursor } = await queryUserVideosPage(msg.pubkey, env, msg.cursor);
       const mediaAction = msg.action === 'delete-all' ? 'DELETE' : msg.action === 'age-restrict-all' ? 'QUARANTINE' : 'SAFE';
       const media = await moderateMediaHashes(env, hashes, mediaAction, reason);
@@ -342,43 +399,57 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
       // event, so the UI's "across N events" stays meaningful (delete-all counts
       // events in its own phase, so leave eventsDelta 0 there).
       if (msg.action !== 'delete-all') eventsDelta = hashes.length;
-      // Guard a non-terminating funnelcake cursor. The sync path is bounded by
-      // VIDEO_MAX_PAGES; the chunked path re-enqueues per page and refreshes
-      // updated_at each chunk, so a cursor that never goes null (or repeats) would
-      // churn the queue forever, immune to the stale-heal. Fail closed instead.
-      if (nextCursor && nextCursor === msg.cursor) {
-        throw new Error(`Video cursor did not advance for ${msg.pubkey} (stuck at ${nextCursor})`);
+      if (nextCursor) {
+        // Bound the media phase on PAGES FETCHED, not items moderated. mediaProcessed
+        // only counts successes, so a cursor that advances forever while the
+        // moderation service fails would keep it near zero and never trip a
+        // success-based bound -- churning the queue forever (each chunk refreshes
+        // updated_at, so the stale-heal can't reclaim it either). Counting pages
+        // catches advance-forever and A->B->A cycles regardless of success.
+        if (nextCursor === msg.cursor) {
+          throw new Error(`Video cursor did not advance for ${msg.pubkey} (stuck at ${nextCursor})`);
+        }
+        if (mediaPage + 1 >= VIDEO_MAX_PAGES) {
+          throw new Error(`Video enumeration exceeded ${VIDEO_MAX_PAGES} pages for ${msg.pubkey}; cursor is not terminating`);
+        }
+        next = { jobId: msg.jobId, pubkey: msg.pubkey, action: msg.action, reason, phase: 'media', cursor: nextCursor, mediaPage: mediaPage + 1 };
+      } else {
+        next = null;
       }
-      if (nextCursor && job.mediaProcessed + mediaDelta >= VIDEO_MAX_PAGES * MEDIA_CHUNK_SIZE) {
-        throw new Error(`Video cursor did not terminate for ${msg.pubkey} after ${VIDEO_MAX_PAGES} pages`);
-      }
-      next = nextCursor
-        ? { jobId: msg.jobId, pubkey: msg.pubkey, action: msg.action, reason, phase: 'media', cursor: nextCursor }
-        : null;
     }
 
     const status = next ? 'running' : 'done';
-    await db.prepare(
-      'UPDATE bulk_jobs SET status = ?, events_processed = ?, media_processed = ?, failures = ?, updated_at = ? WHERE job_id = ?'
+    const merged = mergeFailures(parseFailuresList(row.failures), Number(row.failures_dropped) || 0, chunkFailures);
+    // Guard the terminal write on the status we claimed (`running`), and only
+    // enqueue the next chunk if this write actually landed. If a concurrent or
+    // duplicate chunk already moved the row to a terminal state, changes is 0 and
+    // we must NOT send `next` (that would fork the chunk chain).
+    const wrote = await db.prepare(
+      `UPDATE bulk_jobs SET status = ?, events_processed = ?, media_processed = ?, failures = ?, failures_dropped = ?, updated_at = ? WHERE job_id = ? AND status = 'running'`
     ).bind(
       status,
       job.eventsProcessed + eventsDelta,
       job.mediaProcessed + mediaDelta,
-      JSON.stringify(appendFailures(job.failures, chunkFailures)),
+      JSON.stringify(merged.list),
+      merged.dropped,
       new Date().toISOString(),
       msg.jobId,
     ).run();
 
-    if (next) await env.BULK_QUEUE!.send(next);
+    if (next && wrote.meta?.changes) await env.BULK_QUEUE!.send(next);
   } catch (error) {
     try {
       // Preserve per-item failures earlier chunks recorded (forensic detail on a
       // destructive path) and append the infra error, rather than clobbering them.
-      const cur = await db.prepare('SELECT failures FROM bulk_jobs WHERE job_id = ?').bind(msg.jobId).first<{ failures: string }>();
-      let prior: string[] = [];
-      if (cur) { try { prior = JSON.parse(cur.failures) as string[]; } catch { prior = []; } }
-      await db.prepare('UPDATE bulk_jobs SET status = ?, failures = ?, updated_at = ? WHERE job_id = ?')
-        .bind('failed', JSON.stringify(appendFailures(prior, [`job:${formatError(error)}`])), new Date().toISOString(), msg.jobId).run();
+      // Guard on a non-terminal status so this can't resurrect a `done` job.
+      const cur = await db.prepare('SELECT failures, failures_dropped FROM bulk_jobs WHERE job_id = ?').bind(msg.jobId).first<{ failures: string; failures_dropped: number }>();
+      const merged = mergeFailures(
+        cur ? parseFailuresList(cur.failures) : [],
+        cur ? Number(cur.failures_dropped) || 0 : 0,
+        [`job:${formatError(error)}`],
+      );
+      await db.prepare(`UPDATE bulk_jobs SET status = ?, failures = ?, failures_dropped = ?, updated_at = ? WHERE job_id = ? AND status IN ('pending','running')`)
+        .bind('failed', JSON.stringify(merged.list), merged.dropped, new Date().toISOString(), msg.jobId).run();
     } catch (writeErr) {
       console.error('[bulk-job] failed to record terminal state for', msg.jobId, writeErr);
     }
@@ -386,8 +457,18 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
 }
 
 // Status endpoint: the UI polls this until status is terminal (done/failed). If a
-// row is stuck in pending/running past STALE_JOB_MS (a worker eviction that no
-// catch could recover from), self-heal it to `failed` so the poller never hangs.
+// row is stuck in pending/running past STALE_JOB_MS, self-heal it to `failed` so
+// the poller never hangs.
+//
+// Why STALE_JOB_MS can't fire on a LIVE chunked job: each chunk completes in
+// seconds (bounded by the per-invocation subrequest/CPU ceiling) and re-enqueues
+// its successor immediately, which refreshes updated_at. So a healthy multi-chunk
+// job is never 30 minutes between updates -- a gap that long means the queue
+// message was lost or the worker was evicted mid-consume (max_retries=0, so the
+// message is gone), i.e. genuinely abandoned. The status guards make done/failed
+// sticky, so this heal can only act on a still-non-terminal row. Recovering the
+// dropped continuation of such an abandoned job (re-enqueuing the remaining pages)
+// is separate work: TODO(#async-retry).
 export async function handleBulkJobStatus(
   jobId: string,
   env: BulkModerateEnv,
@@ -404,11 +485,17 @@ export async function handleBulkJobStatus(
 
   const job = rowToBulkJob(row);
   if ((job.status === 'pending' || job.status === 'running') && Date.parse(job.updatedAt) < Date.now() - STALE_JOB_MS) {
+    // Append the abandonment note to the failures the consumer already recorded
+    // (don't overwrite them), and preserve the cumulative dropped count.
+    const merged = mergeFailures(
+      parseFailuresList(row.failures), Number(row.failures_dropped) || 0,
+      ['job:abandoned (no terminal update; worker likely evicted mid-run)'],
+    );
     job.status = 'failed';
-    job.failures = ['job:abandoned (no terminal update; worker likely evicted mid-run)'];
+    job.failures = failuresForDisplay(merged.list, merged.dropped);
     job.updatedAt = new Date().toISOString();
-    await env.DB.prepare('UPDATE bulk_jobs SET status = ?, failures = ?, updated_at = ? WHERE job_id = ?')
-      .bind(job.status, JSON.stringify(job.failures), job.updatedAt, jobId).run().catch(() => {});
+    await env.DB.prepare(`UPDATE bulk_jobs SET status = ?, failures = ?, failures_dropped = ?, updated_at = ? WHERE job_id = ? AND status IN ('pending','running')`)
+      .bind(job.status, JSON.stringify(merged.list), merged.dropped, job.updatedAt, jobId).run().catch(() => {});
   }
   return json(job, 200, corsHeaders);
 }
@@ -618,7 +705,7 @@ export async function queryRelayEventsPage(
 const SHA256_HEX = /^[a-f0-9]{64}$/i;
 const MEDIA_CHUNK_SIZE = 100; // funnelcake v2 max page
 const VIDEO_QUERY_TIMEOUT_MS = 10000; // per page
-const VIDEO_MAX_PAGES = 100000; // anti-runaway guard for a non-terminating cursor (~10M videos)
+export const VIDEO_MAX_PAGES = 100000; // anti-runaway guard for a non-terminating cursor (~10M videos)
 
 // One page of a user's video media hashes via the funnelcake v2 cursor API.
 // v2 serializes the { data, pagination } envelope (PaginatedResponse<T> in
@@ -647,9 +734,18 @@ export async function queryUserVideosPage(
     data?: Array<{ sha256?: string }>;
     pagination?: { next_cursor?: string | null };
   };
+  const data = body.data ?? [];
+  if (!Array.isArray(data)) {
+    throw new Error(`Video page returned a non-array data field for ${pubkey}; response shape may have changed`);
+  }
   const hashes: string[] = [];
-  for (const v of body.data ?? []) {
+  for (const v of data) {
     if (v.sha256 && SHA256_HEX.test(v.sha256)) hashes.push(v.sha256.toLowerCase());
+  }
+  if (data.length > 0 && hashes.length === 0) {
+    // Rows present but none carried a usable sha256: the response shape drifted.
+    // Treating zero hashes as a clean page would under-action on a withhold path.
+    throw new Error(`Video page returned ${data.length} rows with no valid sha256 for ${pubkey}; response shape may have changed`);
   }
   return { hashes, nextCursor: body.pagination?.next_cursor ?? null };
 }

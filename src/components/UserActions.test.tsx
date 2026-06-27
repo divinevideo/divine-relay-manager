@@ -155,15 +155,22 @@ describe('UserActions', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: /^Age Restrict All$/i })).toBeEnabled());
   });
 
-  it('gives up and surfaces an error when a job never confirms in time', async () => {
+  it('keeps the destructive button disabled while a job stays non-terminal (no fixed-timer re-enable)', async () => {
+    // A chunked job can legitimately run longer than any client timer. The button
+    // must NOT re-enable on a timer (which would let a moderator start a second,
+    // duplicate destructive job); it stays in the running state until the worker
+    // reports terminal. Verifies the removal of the 10-minute give-up.
     vi.useFakeTimers();
     try {
       api.getBulkJobStatus.mockResolvedValue(doneJob('age-restrict-all', { status: 'running', mediaProcessed: 0, eventsProcessed: 0 }));
       renderWithProvider(<UserActions pubkey={PUBKEY} />);
       fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
-      await vi.advanceTimersByTimeAsync(2000); // enqueue resolves, job set, give-up timer armed
-      await vi.advanceTimersByTimeAsync(10 * 60 * 1000 + 1000); // past MAX_POLL_MS
-      expect(toast).toHaveBeenCalledWith(
+      await vi.advanceTimersByTimeAsync(2000); // enqueue resolves, job running
+      await vi.advanceTimersByTimeAsync(11 * 60 * 1000); // well past the old 10-minute give-up
+      // Still running (not re-enabled to its idle label), so no duplicate job can start.
+      expect(screen.queryByRole('button', { name: /^Age Restrict All$/i })).toBeNull();
+      expect(screen.getByRole('button', { name: /Restricting/i })).toBeInTheDocument();
+      expect(toast).not.toHaveBeenCalledWith(
         expect.objectContaining({ title: 'Bulk action failed', variant: 'destructive' }),
       );
     } finally {

@@ -29,6 +29,9 @@ export type BulkJobPhase = 'events' | 'media';
 //   - cursor: opaque continuation for the current phase -- funnelcake v2
 //     next_cursor for media, or the relay `until` timestamp (stringified) for
 //     events. Absent = start of the phase.
+//   - mediaPage: 0-based page index for the media phase, incremented each chunk.
+//     Bounds the media phase on PAGES FETCHED (not items moderated), so a cursor
+//     that advances forever while moderation fails still terminates. Absent = 0.
 export interface BulkJobMessage {
   jobId: string;
   pubkey: string;
@@ -36,6 +39,7 @@ export interface BulkJobMessage {
   reason?: string;
   phase?: BulkJobPhase;
   cursor?: string;
+  mediaPage?: number;
 }
 
 export interface BulkJob {

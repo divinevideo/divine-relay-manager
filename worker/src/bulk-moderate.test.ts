@@ -7,6 +7,7 @@ import {
   queryRelayEvents,
   queryUserVideosPage,
   queryRelayEventsPage,
+  VIDEO_MAX_PAGES,
   type BulkModerateEnv,
 } from './bulk-moderate';
 import type { BulkJob, BulkJobMessage, BulkEnqueueResponse } from '../../shared/bulk-moderation';
@@ -79,6 +80,8 @@ function mockUserVideos(videos: Array<{ sha256: string }>) {
 
 // Functional in-memory D1 mock for the bulk_jobs table: supports the INSERT,
 // positional-SET UPDATE, and SELECT-by-job_id statements the async path uses.
+// Honors a `status IN (...)` / `status = '...'` guard in the UPDATE WHERE clause
+// and reports meta.changes, so the consumer's sticky-status guards are exercised.
 function makeJobDb() {
   const rows = new Map<string, Record<string, unknown>>();
   const db = {
@@ -88,17 +91,31 @@ function makeJobDb() {
         bind(...args: unknown[]) { binds = args; return stmt; },
         async run() {
           if (/^\s*INSERT INTO bulk_jobs/i.test(sql)) {
-            const [job_id, pubkey, action, status, events_processed, media_processed, failures, created_at, updated_at] = binds;
-            rows.set(job_id as string, { job_id, pubkey, action, status, events_processed, media_processed, failures, created_at, updated_at });
-          } else if (/^\s*UPDATE bulk_jobs/i.test(sql)) {
+            const [job_id, pubkey, action, status, events_processed, media_processed, failures, failures_dropped, created_at, updated_at] = binds;
+            rows.set(job_id as string, { job_id, pubkey, action, status, events_processed, media_processed, failures, failures_dropped, created_at, updated_at });
+            return { success: true, meta: { changes: 1 } };
+          }
+          if (/^\s*UPDATE bulk_jobs/i.test(sql)) {
             const cols = sql.match(/SET (.+) WHERE/i)![1].split(',').map((c) => c.trim().split('=')[0].trim());
             const jobId = binds[binds.length - 1] as string;
             const row = rows.get(jobId);
-            if (row) cols.forEach((c, i) => { row[c] = binds[i]; });
-          } else if (/^\s*DELETE FROM bulk_jobs/i.test(sql)) {
-            rows.delete(binds[0] as string);
+            let changes = 0;
+            if (row) {
+              const where = sql.slice(sql.search(/WHERE/i));
+              const inMatch = where.match(/status IN \(([^)]+)\)/i);
+              const eqMatch = where.match(/status\s*=\s*'(\w+)'/i);
+              let statusOk = true;
+              if (inMatch) statusOk = inMatch[1].split(',').map((s) => s.trim().replace(/'/g, '')).includes(row.status as string);
+              else if (eqMatch) statusOk = row.status === eqMatch[1];
+              if (statusOk) { cols.forEach((c, i) => { row[c] = binds[i]; }); changes = 1; }
+            }
+            return { success: true, meta: { changes } };
           }
-          return { success: true };
+          if (/^\s*DELETE FROM bulk_jobs/i.test(sql)) {
+            const existed = rows.delete(binds[0] as string);
+            return { success: true, meta: { changes: existed ? 1 : 0 } };
+          }
+          return { success: true, meta: { changes: 0 } }; // CREATE TABLE / ALTER TABLE
         },
         async first() { return rows.get(binds[0] as string) ?? null; },
       };
@@ -310,6 +327,71 @@ describe('async bulk job model', () => {
     const badAction = await handleBulkModerateEnqueue(enqueueReq({ pubkey: 'a'.repeat(64), action: 'nope' }), mockEnv, {});
     expect(badAction.status).toBe(400);
     expect(sent).toHaveLength(0);
+  });
+
+  it('enqueue returns 400 (not 500) on malformed or non-object JSON body', async () => {
+    const notJson = new Request('https://test/api/bulk-moderate', { method: 'POST', body: 'not json' });
+    expect((await handleBulkModerateEnqueue(notJson, mockEnv, {})).status).toBe(400);
+    const arrayBody = new Request('https://test/api/bulk-moderate', { method: 'POST', body: JSON.stringify([]) });
+    expect((await handleBulkModerateEnqueue(arrayBody, mockEnv, {})).status).toBe(400);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('a redelivered message for a terminal job is a no-op (status stays sticky, no re-enqueue)', async () => {
+    const jobId = 'job-dup-1';
+    jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', status: 'done', events_processed: 0, media_processed: 2, failures: '[]', failures_dropped: 0, created_at: 't', updated_at: 't' });
+
+    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', phase: 'media' }, mockEnv);
+
+    expect(jobDb.rows.get(jobId)!.status).toBe('done'); // not flipped back to running
+    expect(sent).toHaveLength(0);                       // no forked continuation
+  });
+
+  it('media phase fails closed past the page bound even when the cursor keeps advancing', async () => {
+    // A cursor that advances forever (A->B->C...) while moderation may be failing
+    // must terminate on PAGES fetched, not on successful moderations. Arriving at
+    // the last allowed page with more still to come throws.
+    vi.spyOn(globalThis, 'fetch').mockImplementation((async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname.includes('/api/v2/users/') && url.pathname.includes('/videos')) {
+        const cursor = url.searchParams.get('cursor') ?? '0';
+        const nextCursor = `c${Number(cursor.replace('c', '')) + 1}`; // always advances
+        return new Response(JSON.stringify({ data: [{ sha256: hashA }], pagination: { next_cursor: nextCursor, has_more: true } }), { status: 200 });
+      }
+      return new Response('not found', { status: 404 });
+    }) as typeof fetch);
+    const jobId = 'job-runaway-1';
+    jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', status: 'running', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, created_at: 't', updated_at: 't' });
+
+    // Start one page below the bound so a single chunk trips it.
+    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', phase: 'media', cursor: 'c0', mediaPage: VIDEO_MAX_PAGES - 1 }, mockEnv);
+
+    const row = jobDb.rows.get(jobId)!;
+    expect(row.status).toBe('failed');
+    expect(JSON.parse(row.failures as string).some((f: string) => /exceeded .* pages/.test(f))).toBe(true);
+    expect(sent).toHaveLength(0); // did not enqueue another runaway chunk
+  });
+
+  it('cumulative dropped-failure count survives across chunks and a clean final chunk', async () => {
+    // 250 videos that all fail to moderate => 250 failures across 3 chunks. The
+    // stored list caps at 50; the overflow must accumulate in its own count and a
+    // final clean (empty) page must not erase it.
+    const many = Array.from({ length: 250 }, (_, i) => ({ sha256: i.toString(16).padStart(64, '0') }));
+    mockUserVideos(many);
+    (mockEnv.MODERATION_API as unknown as { fetch: ReturnType<typeof vi.fn> }).fetch =
+      vi.fn().mockResolvedValue(new Response('nope', { status: 500 })); // every moderate call fails
+    const jobId = 'job-overflow-1';
+    jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, created_at: 't', updated_at: 't' });
+
+    let msg: BulkJobMessage | undefined = { jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all' };
+    let iterations = 0;
+    while (msg && iterations++ < 10) { sent.length = 0; await processBulkJob(msg, mockEnv); msg = sent[0]; }
+
+    const res = await handleBulkJobStatus(jobId, mockEnv, {});
+    const job = await res.json() as BulkJob;
+    expect(job.status).toBe('done');
+    expect(job.failures).toHaveLength(51);                       // 50 stored + 1 marker
+    expect(job.failures[50]).toBe('+200 more');                  // 250 total - 50 stored, not erased
   });
 
   it('media-only job chunks across multiple messages until done', async () => {
