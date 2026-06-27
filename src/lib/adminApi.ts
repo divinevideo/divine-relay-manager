@@ -87,10 +87,12 @@ export class ApiError extends Error {
 // Bound every relay-bound HTTP call so a slow or hung relay can't leave the UI
 // spinning forever (the "Banning…" / "Deleting…" confirm modals). Generous
 // because some actions purge across 16+ tables; if legitimate operations exceed
-// this, fix the relay-side latency rather than raise the bound. Covers callers of
-// apiRequest and callRelayRpc (connection AND body read, via readJsonBounded) plus
-// the standalone check-result / check-classifier / realness fetches — every
-// relay-bound fetch routes through fetchWithTimeout.
+// this, fix the relay-side latency rather than raise the bound. Every relay-bound
+// fetch routes through fetchWithTimeout (bounds the connection). apiRequest and
+// callRelayRpc additionally map a stalled body read to the friendly copy via
+// readJsonBounded (they surface the message to a moderator); the standalone
+// check-result / check-classifier / realness fetches rely on the same AbortSignal
+// aborting the body and degrade to null, so they need no copy mapping.
 const API_TIMEOUT_MS = 30_000;
 
 // Bulk moderation is a server-side O(N/5) loop that can legitimately run for
