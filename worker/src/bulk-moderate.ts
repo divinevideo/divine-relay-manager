@@ -265,7 +265,8 @@ const VIDEO_QUERY_TIMEOUT_MS = 10000; // per page
 // silently action only the first 25 videos and leave the rest live (a withhold
 // gap on a child-safety path). Page at the max size, with a safety bound.
 const VIDEO_PAGE_SIZE = 100;
-const VIDEO_MAX_PAGES = 100; // ~10k videos; throws if exceeded rather than under-enforcing
+const VIDEO_MAX_PAGES = 100;
+const VIDEO_MAX_TOTAL = VIDEO_MAX_PAGES * VIDEO_PAGE_SIZE; // ~10k videos; throws if exceeded rather than under-enforcing
 
 // Enumerate a user's video media hashes via the Funnelcake REST API instead of a
 // WebSocket REQ. Funnelcake's `relay_events_by_kind_time` materialized view
@@ -284,8 +285,15 @@ export async function queryUserMediaHashes(
   const baseUrl = deriveFunnelcakeApiUrl(env.RELAY_URL, env.FUNNELCAKE_API_URL);
   const hashes = new Set<string>();
 
-  for (let page = 0; page < VIDEO_MAX_PAGES; page++) {
-    const offset = page * VIDEO_PAGE_SIZE;
+  // Page until an EMPTY page (the true end of the list), not a short one. The
+  // server may cap a page below the requested limit; reading a short page as
+  // end-of-data would stop after page 0 and leave the rest of an account's media
+  // live on a withhold path. Advance the offset by the actual row count returned
+  // so a server-side cap below VIDEO_PAGE_SIZE can't skip rows. The <= bound gives
+  // one page of headroom so an account whose count exactly fills VIDEO_MAX_TOTAL
+  // terminates via the empty page instead of false-throwing.
+  let offset = 0;
+  while (offset <= VIDEO_MAX_TOTAL) {
     const res = await fetch(
       `${baseUrl}/api/users/${pubkey}/videos?limit=${VIDEO_PAGE_SIZE}&offset=${offset}`,
       { signal: AbortSignal.timeout(VIDEO_QUERY_TIMEOUT_MS) },
@@ -293,21 +301,35 @@ export async function queryUserMediaHashes(
     if (!res.ok) {
       throw new Error(`Video query failed: ${res.status}`);
     }
-    const videos = await res.json() as Array<{ sha256?: string }>;
+    const body = await res.json();
+    if (!Array.isArray(body)) {
+      // A pagination wrapper, null, or an error envelope: don't blindly iterate a
+      // non-array (which would throw an opaque "not iterable"). Fail closed loudly.
+      throw new Error(`Video query returned a non-array body for ${pubkey} (got ${body === null ? 'null' : typeof body})`);
+    }
+    const videos = body as Array<{ sha256?: string }>;
+    if (videos.length === 0) {
+      return Array.from(hashes); // true end of the list
+    }
+    let validInPage = 0;
     for (const v of videos) {
       if (v.sha256 && SHA256_HEX.test(v.sha256)) {
         hashes.add(v.sha256.toLowerCase());
+        validInPage++;
       }
     }
-    // A short page (fewer than the page size) means we've reached the end.
-    if (videos.length < VIDEO_PAGE_SIZE) {
-      return Array.from(hashes);
+    if (validInPage === 0) {
+      // Rows present but none carried a usable sha256: the response shape drifted
+      // (field renamed / non-string). Treating zero hashes as a clean success
+      // would report "withheld everything" having withheld nothing. Fail closed.
+      throw new Error(`Video query returned ${videos.length} rows with no valid sha256 for ${pubkey}; response shape may have changed`);
     }
+    offset += videos.length;
   }
 
-  // Hit the page bound: fail closed rather than silently enforcing over a partial
-  // set on a withhold path.
-  throw new Error(`More than ${VIDEO_MAX_PAGES * VIDEO_PAGE_SIZE} videos for ${pubkey}; narrow the scope or add deeper pagination`);
+  // Past the anti-runaway ceiling without ever seeing an empty page: fail closed
+  // rather than silently enforcing over a partial set on a withhold path.
+  throw new Error(`More than ${VIDEO_MAX_TOTAL} videos for ${pubkey}; narrow the scope or add deeper pagination`);
 }
 
 async function runWithConcurrency<T>(

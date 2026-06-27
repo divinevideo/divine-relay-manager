@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { handleBulkModerate, queryRelayEvents, type BulkModerateEnv } from './bulk-moderate';
+import { handleBulkModerate, queryRelayEvents, queryUserMediaHashes, type BulkModerateEnv } from './bulk-moderate';
 
 vi.mock('./nip86', () => ({
   getAdminPubkey: vi.fn().mockResolvedValue('moderator-pubkey'),
@@ -178,6 +178,67 @@ describe('handleBulkModerate', () => {
     const response = await handleBulkModerate(request, mockEnv, {});
     const result = await response.json() as { mediaProcessed: number };
     expect(result.mediaProcessed).toBe(250);
+  });
+
+  it('keeps paging when the server caps a page below the requested limit (no short-page early stop)', async () => {
+    // The server clamps every page to 50 even though we ask for 100. The old
+    // `videos.length < VIDEO_PAGE_SIZE` check read the first 50-row page as the
+    // end and enumerated only page 0. Advancing offset by the actual count and
+    // terminating on an EMPTY page collects all 120.
+    const many = Array.from({ length: 120 }, (_, i) => ({ sha256: i.toString(16).padStart(64, '0') }));
+    vi.spyOn(globalThis, 'fetch').mockImplementation((async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname.includes('/api/users/') && url.pathname.includes('/videos')) {
+        const offset = Number(url.searchParams.get('offset') ?? '0');
+        return new Response(JSON.stringify(many.slice(offset, offset + 50)), { status: 200 }); // hard cap at 50
+      }
+      return new Response('not found', { status: 404 });
+    }) as typeof fetch);
+    const hashes = await queryUserMediaHashes('a'.repeat(64), { RELAY_URL: 'wss://relay.test' });
+    expect(hashes).toHaveLength(120);
+  });
+
+  it('enumerates an account whose video count exactly fills the page bound (no false over-limit throw)', async () => {
+    // Exactly 10000 videos: every page is full, so the loop only knows it is done
+    // when the next fetch returns empty. The <= VIDEO_MAX_TOTAL headroom lets that
+    // terminating empty fetch happen instead of throwing on a completed account.
+    const many = Array.from({ length: 10000 }, (_, i) => ({ sha256: i.toString(16).padStart(64, '0') }));
+    mockUserVideos(many);
+    const hashes = await queryUserMediaHashes('a'.repeat(64), { RELAY_URL: 'wss://relay.test' });
+    expect(hashes).toHaveLength(10000);
+  });
+
+  it('throws past the anti-runaway ceiling (over-limit account still fails closed)', async () => {
+    const many = Array.from({ length: 10101 }, (_, i) => ({ sha256: i.toString(16).padStart(64, '0') }));
+    mockUserVideos(many);
+    await expect(queryUserMediaHashes('a'.repeat(64), { RELAY_URL: 'wss://relay.test' }))
+      .rejects.toThrow(/More than 10000 videos/);
+  });
+
+  it('fails closed when a page returns rows but no valid sha256 (shape drift)', async () => {
+    // 200 OK full of rows whose sha256 field is missing/renamed -> zero hashes.
+    // Reporting success here would withhold nothing while showing "done".
+    vi.spyOn(globalThis, 'fetch').mockImplementation((async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname.includes('/api/users/') && url.pathname.includes('/videos')) {
+        return new Response(JSON.stringify([{ id: 'v1' }, { id: 'v2' }]), { status: 200 });
+      }
+      return new Response('not found', { status: 404 });
+    }) as typeof fetch);
+    await expect(queryUserMediaHashes('a'.repeat(64), { RELAY_URL: 'wss://relay.test' }))
+      .rejects.toThrow(/no valid sha256/);
+  });
+
+  it('fails closed on a non-array body instead of throwing an opaque "not iterable"', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname.includes('/api/users/') && url.pathname.includes('/videos')) {
+        return new Response(JSON.stringify({ videos: [{ sha256: hashA }], total: 1 }), { status: 200 });
+      }
+      return new Response('not found', { status: 404 });
+    }) as typeof fetch);
+    await expect(queryUserMediaHashes('a'.repeat(64), { RELAY_URL: 'wss://relay.test' }))
+      .rejects.toThrow(/non-array body/);
   });
 
   it('un-age-restrict-all sends SAFE (restore) for media', async () => {
