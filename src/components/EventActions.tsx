@@ -284,7 +284,7 @@ export function EventActions({
             </Button>
           }
           title="Delete Event"
-          summary="This will permanently ban the event from the relay and publish a NIP-09 deletion request. This cannot be undone."
+          summary="This will permanently ban the event from the relay. This cannot be undone."
           onConfirm={() => deleteEventMutation.mutateAsync()}
           isPending={deleteEventMutation.isPending}
         />
@@ -368,7 +368,7 @@ export function EventActions({
                 </Button>
               }
               title="Delete Event & Media"
-              summary={`This will permanently delete the event (ban + NIP-09 deletion) and ${mediaHashes.length} media file(s). This cannot be undone.`}
+              summary={`This will permanently ban the event from the relay and delete ${mediaHashes.length} media file(s). This cannot be undone.`}
               onConfirm={() => deleteEventAndMediaMutation.mutateAsync()}
               isPending={deleteEventAndMediaMutation.isPending}
             />
