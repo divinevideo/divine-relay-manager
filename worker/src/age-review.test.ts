@@ -13,6 +13,7 @@ import {
   updateAgeReviewConfig,
   bucketModerationCounts,
   fetchZendeskTagCount,
+  handleGetAgeReviewFunnel,
   type AgeReviewEnv,
 } from './age-review';
 import type { AgeReviewCase } from '../../shared/age-review';
@@ -1798,5 +1799,49 @@ describe('fetchZendeskTagCount', () => {
   it('returns null when fetch throws', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network')));
     expect(await fetchZendeskTagCount(creds, 'q')).toBeNull();
+  });
+});
+
+describe('handleGetAgeReviewFunnel', () => {
+  const cors = { 'Access-Control-Allow-Origin': '*' };
+  const groupRows = [
+    { state: 'cleared', created_via: 'report', c: 3 },
+    { state: 'cleared', created_via: 'minor_onboarding', c: 2 },
+    { state: 'denied_closed', created_via: 'report', c: 1 },
+    { state: 'submitted_for_review', created_via: 'report', c: 4 },
+  ];
+  const mockDb = {
+    prepare: vi.fn().mockReturnValue({
+      bind: vi.fn().mockReturnValue({ all: vi.fn().mockResolvedValue({ results: groupRows }) }),
+    }),
+  };
+  const req = new Request('https://api.test/api/age-review/funnel?age_band=age_13_15');
+
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it('returns moderation counts and nulls helpdesk when Zendesk creds are absent', async () => {
+    const env = makeEnv(mockDb); // no ZENDESK_* set
+    const res = await handleGetAgeReviewFunnel(req, env, cors);
+    const body = await res.json() as import('../../shared/age-review').AgeReviewFunnelResponse;
+
+    expect(res.status).toBe(200);
+    expect(body.moderation.approved).toEqual({ total: 5, restored: 3, new_minor: 2 });
+    expect(body.moderation.in_progress).toBe(4);
+    expect(body.moderation.denied_expired).toBe(1);
+    expect(body.helpdesk).toMatchObject({ reports_in: null, requests_in: null, video_received: null });
+    expect(body.age_band).toBe('age_13_15');
+  });
+
+  it('populates helpdesk counts when Zendesk creds resolve', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ count: 9 }) }));
+    const env = makeEnv(mockDb, {
+      ZENDESK_SUBDOMAIN: 'rabblelabs', ZENDESK_EMAIL: 'a@b.co', ZENDESK_API_TOKEN: 'tok',
+    });
+    const res = await handleGetAgeReviewFunnel(req, env, cors);
+    const body = await res.json() as import('../../shared/age-review').AgeReviewFunnelResponse;
+
+    expect(body.helpdesk.requests_in).toBe(9);
+    expect(body.helpdesk.video_received).toBe(9);
+    expect(body.helpdesk.reports_in).toBe(9);
   });
 });

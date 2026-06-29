@@ -14,6 +14,7 @@ import {
   type AgeReviewEnforcement,
   type AgeReviewCaseResponse,
   type FunnelModerationCounts,
+  type AgeReviewFunnelResponse,
 } from '../../shared/age-review';
 import { runBulkModeration, type BulkModerateEnv } from './bulk-moderate';
 import { resolveZendeskCreds } from './zendesk-sync';
@@ -1238,6 +1239,50 @@ export async function fetchZendeskTagCount(
   } catch {
     return null;
   }
+}
+
+// GET /api/age-review/funnel: one D1 group-by for band-accurate moderation
+// outcomes, plus Zendesk tag counts for the helpdesk intake stages. The Zendesk
+// half is best-effort and nulls out on failure; the D1 half always returns.
+export async function handleGetAgeReviewFunnel(
+  request: Request,
+  env: AgeReviewEnv,
+  corsHeaders: Record<string, string>,
+): Promise<Response> {
+  if (!env.DB) return json({ success: false, error: 'Database not configured' }, 500, corsHeaders);
+
+  const url = new URL(request.url);
+  const bandParam = url.searchParams.get('age_band');
+  const ageBand: AgeBand = bandParam && AGE_BANDS.includes(bandParam as AgeBand)
+    ? (bandParam as AgeBand)
+    : 'age_13_15';
+
+  const rows = await env.DB.prepare(
+    'SELECT state, created_via, COUNT(*) AS c FROM age_review_cases WHERE suspected_age_band = ? GROUP BY state, created_via',
+  ).bind(ageBand).all<FunnelRow>();
+  const moderation = bucketModerationCounts(rows.results ?? []);
+
+  let reports_in: number | null = null;
+  let requests_in: number | null = null;
+  let video_received: number | null = null;
+
+  const creds = await resolveZendeskCreds(env);
+  if (creds) {
+    [requests_in, video_received, reports_in] = await Promise.all([
+      fetchZendeskTagCount(creds, 'type:ticket tags:age-review-response'),
+      fetchZendeskTagCount(creds, 'type:ticket tags:consent_video_received'),
+      fetchZendeskTagCount(creds, 'type:ticket tags:age-review -tags:age-review-response'),
+    ]);
+  }
+
+  const payload: AgeReviewFunnelResponse = {
+    success: true,
+    age_band: ageBand,
+    helpdesk: { source: 'zendesk', band_scope: 'all_bands', reports_in, requests_in, video_received },
+    moderation: { source: 'd1', band_scope: ageBand, ...moderation },
+    generated_at: new Date().toISOString(),
+  };
+  return json(payload, 200, corsHeaders);
 }
 
 // ---------------------------------------------------------------------------
