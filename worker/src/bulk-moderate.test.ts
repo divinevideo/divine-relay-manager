@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { handleBulkModerate, extractMediaHashes, queryRelayEvents, type BulkModerateEnv } from './bulk-moderate';
+import { handleBulkModerate, queryRelayEvents, queryUserMediaHashes, type BulkModerateEnv } from './bulk-moderate';
 
 vi.mock('./nip86', () => ({
   getAdminPubkey: vi.fn().mockResolvedValue('moderator-pubkey'),
@@ -13,6 +13,7 @@ vi.mock('./zendesk-sync', () => ({
 
 const hashA = 'a'.repeat(64);
 const hashB = 'b'.repeat(64);
+const hashC = 'c'.repeat(64);
 
 function mockRelay(events: Array<{ id: string; kind: number; content?: string; tags: string[][] }>) {
   vi.spyOn(globalThis, 'WebSocket').mockImplementation((function () {
@@ -44,11 +45,29 @@ function mockRelay(events: Array<{ id: string; kind: number; content?: string; t
   } as unknown as typeof WebSocket));
 }
 
+// Mock the funnelcake REST videos endpoint that queryUserMediaHashes fetches.
+// This is the dedup-correct source for media hashes (funnelcake#471), distinct
+// from the WebSocket REQ used for event IDs.
+function mockUserVideos(videos: Array<{ sha256: string }>) {
+  vi.spyOn(globalThis, 'fetch').mockImplementation((async (input: RequestInfo | URL) => {
+    const url = new URL(String(input));
+    if (url.pathname.includes('/api/users/') && url.pathname.includes('/videos')) {
+      // Honor limit/offset so the mock paginates exactly like funnelcake (default
+      // 25, max 100) -- a non-paginating mock would hide the first-page-only bug.
+      const limit = Number(url.searchParams.get('limit') ?? '25');
+      const offset = Number(url.searchParams.get('offset') ?? '0');
+      return new Response(JSON.stringify(videos.slice(offset, offset + limit)), { status: 200 });
+    }
+    return new Response('not found', { status: 404 });
+  }) as typeof fetch);
+}
+
 describe('handleBulkModerate', () => {
   let mockEnv: BulkModerateEnv;
 
   beforeEach(() => {
     vi.restoreAllMocks();
+    mockUserVideos([]); // default: no videos unless a test provides them
     mockEnv = {
       NOSTR_NSEC: 'nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5',
       RELAY_URL: 'wss://relay.test',
@@ -118,7 +137,7 @@ describe('handleBulkModerate', () => {
   }
 
   it('age-restrict-all sends QUARANTINE (reversible withhold) for media', async () => {
-    mockRelay([{ id: 'e'.repeat(64), kind: 34235, content: '', tags: [['x', hashA]] }]);
+    mockUserVideos([{ sha256: hashA }]); // media hashes come from the REST API now
     const request = new Request('https://test/api/bulk-moderate', {
       method: 'POST',
       body: JSON.stringify({ pubkey: 'a'.repeat(64), action: 'age-restrict-all' }),
@@ -129,14 +148,125 @@ describe('handleBulkModerate', () => {
     expect(moderationActionFor(hashA)).toBe('QUARANTINE');
   });
 
+  it('age-restrict-all QUARANTINEs EVERY video the REST API returns, not 1/kind (funnelcake#471)', async () => {
+    // The WebSocket REQ dedup bug surfaced ~1 video/kind; the REST endpoint
+    // returns all of them. Three same-kind videos must ALL be withheld -- this
+    // is the correctness fix and the guard against regressing to WS extraction.
+    mockUserVideos([{ sha256: hashA }, { sha256: hashB }, { sha256: hashC }]);
+    const request = new Request('https://test/api/bulk-moderate', {
+      method: 'POST',
+      body: JSON.stringify({ pubkey: 'a'.repeat(64), action: 'age-restrict-all' }),
+    });
+    const response = await handleBulkModerate(request, mockEnv, {});
+    const result = await response.json() as { mediaProcessed: number };
+    expect(result.mediaProcessed).toBe(3);
+    expect(moderationActionFor(hashA)).toBe('QUARANTINE');
+    expect(moderationActionFor(hashB)).toBe('QUARANTINE');
+    expect(moderationActionFor(hashC)).toBe('QUARANTINE');
+  });
+
+  it('pages through ALL videos beyond the funnelcake per-page limit, not just the first page', async () => {
+    // 250 videos = 3 pages (100/100/50). funnelcake caps a page at 100 (default 25),
+    // so without offset paging only the first page would be withheld and the rest
+    // would stay live -- the exact under-enforcement this guards against.
+    const many = Array.from({ length: 250 }, (_, i) => ({ sha256: i.toString(16).padStart(64, '0') }));
+    mockUserVideos(many);
+    const request = new Request('https://test/api/bulk-moderate', {
+      method: 'POST',
+      body: JSON.stringify({ pubkey: 'a'.repeat(64), action: 'age-restrict-all' }),
+    });
+    const response = await handleBulkModerate(request, mockEnv, {});
+    const result = await response.json() as { mediaProcessed: number };
+    expect(result.mediaProcessed).toBe(250);
+  });
+
+  it('keeps paging when the server caps a page below the requested limit (no short-page early stop)', async () => {
+    // The server clamps every page to 50 even though we ask for 100. The old
+    // `videos.length < VIDEO_PAGE_SIZE` check read the first 50-row page as the
+    // end and enumerated only page 0. Advancing offset by the actual count and
+    // terminating on an EMPTY page collects all 120.
+    const many = Array.from({ length: 120 }, (_, i) => ({ sha256: i.toString(16).padStart(64, '0') }));
+    vi.spyOn(globalThis, 'fetch').mockImplementation((async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname.includes('/api/users/') && url.pathname.includes('/videos')) {
+        const offset = Number(url.searchParams.get('offset') ?? '0');
+        return new Response(JSON.stringify(many.slice(offset, offset + 50)), { status: 200 }); // hard cap at 50
+      }
+      return new Response('not found', { status: 404 });
+    }) as typeof fetch);
+    const hashes = await queryUserMediaHashes('a'.repeat(64), { RELAY_URL: 'wss://relay.test' });
+    expect(hashes).toHaveLength(120);
+  });
+
+  it('enumerates an account whose video count exactly fills the page bound (no false over-limit throw)', async () => {
+    // Exactly 10000 videos: every page is full, so the loop only knows it is done
+    // when the next fetch returns empty. The <= VIDEO_MAX_TOTAL headroom lets that
+    // terminating empty fetch happen instead of throwing on a completed account.
+    const many = Array.from({ length: 10000 }, (_, i) => ({ sha256: i.toString(16).padStart(64, '0') }));
+    mockUserVideos(many);
+    const hashes = await queryUserMediaHashes('a'.repeat(64), { RELAY_URL: 'wss://relay.test' });
+    expect(hashes).toHaveLength(10000);
+  });
+
+  it('throws past the anti-runaway ceiling (over-limit account still fails closed)', async () => {
+    const many = Array.from({ length: 10101 }, (_, i) => ({ sha256: i.toString(16).padStart(64, '0') }));
+    mockUserVideos(many);
+    await expect(queryUserMediaHashes('a'.repeat(64), { RELAY_URL: 'wss://relay.test' }))
+      .rejects.toThrow(/More than 10000 videos/);
+  });
+
+  it('fails closed when a page returns rows but no valid sha256 (shape drift)', async () => {
+    // 200 OK full of rows whose sha256 field is missing/renamed -> zero hashes.
+    // Reporting success here would withhold nothing while showing "done".
+    vi.spyOn(globalThis, 'fetch').mockImplementation((async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname.includes('/api/users/') && url.pathname.includes('/videos')) {
+        return new Response(JSON.stringify([{ id: 'v1' }, { id: 'v2' }]), { status: 200 });
+      }
+      return new Response('not found', { status: 404 });
+    }) as typeof fetch);
+    await expect(queryUserMediaHashes('a'.repeat(64), { RELAY_URL: 'wss://relay.test' }))
+      .rejects.toThrow(/no valid sha256/);
+  });
+
+  it('fails closed on a non-array body instead of throwing an opaque "not iterable"', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname.includes('/api/users/') && url.pathname.includes('/videos')) {
+        return new Response(JSON.stringify({ videos: [{ sha256: hashA }], total: 1 }), { status: 200 });
+      }
+      return new Response('not found', { status: 404 });
+    }) as typeof fetch);
+    await expect(queryUserMediaHashes('a'.repeat(64), { RELAY_URL: 'wss://relay.test' }))
+      .rejects.toThrow(/non-array body/);
+  });
+
   it('un-age-restrict-all sends SAFE (restore) for media', async () => {
-    mockRelay([{ id: 'e'.repeat(64), kind: 34235, content: '', tags: [['x', hashA]] }]);
+    mockUserVideos([{ sha256: hashA }]);
     const request = new Request('https://test/api/bulk-moderate', {
       method: 'POST',
       body: JSON.stringify({ pubkey: 'a'.repeat(64), action: 'un-age-restrict-all' }),
     });
     await handleBulkModerate(request, mockEnv, {});
     expect(moderationActionFor(hashA)).toBe('SAFE');
+  });
+
+  it('delete-all bans events from the relay (WS) and DELETEs media hashes from the REST API', async () => {
+    // Events still come from the WebSocket (delete needs event IDs); media
+    // hashes come from REST. The WS event's x-tag (hashB) must NOT be the media
+    // source -- only the REST list (hashA) is.
+    mockRelay([{ id: 'e'.repeat(64), kind: 34235, content: '', tags: [['x', hashB]] }]);
+    mockUserVideos([{ sha256: hashA }]);
+    const request = new Request('https://test/api/bulk-moderate', {
+      method: 'POST',
+      body: JSON.stringify({ pubkey: 'a'.repeat(64), action: 'delete-all' }),
+    });
+    const response = await handleBulkModerate(request, mockEnv, {});
+    const result = await response.json() as { eventsProcessed: number; mediaProcessed: number };
+    expect(result.eventsProcessed).toBe(1);
+    expect(result.mediaProcessed).toBe(1);
+    expect(moderationActionFor(hashA)).toBe('DELETE'); // from REST
+    expect(moderationActionFor(hashB)).toBeUndefined(); // NOT from the WS x-tag
   });
 
   it('marks bulk delete as failed when relay deletion returns success false', async () => {
@@ -154,6 +284,31 @@ describe('handleBulkModerate', () => {
     expect(body.success).toBe(false);
     expect(body.eventsProcessed).toBe(0);
     expect(body.failures[0]).toContain('relay refused');
+  });
+
+  it('age-restrict-all fails closed when the videos REST call errors (no false success)', async () => {
+    // A failed enumeration must NOT report a successful withhold; queryUserMediaHashes
+    // throws so the worker returns an error rather than a 200 success.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('err', { status: 500 }));
+    const request = new Request('https://test/api/bulk-moderate', {
+      method: 'POST',
+      body: JSON.stringify({ pubkey: 'a'.repeat(64), action: 'age-restrict-all' }),
+    });
+    await expect(handleBulkModerate(request, mockEnv, {})).rejects.toThrow(/Video query failed: 500/);
+    expect(vi.mocked((mockEnv.MODERATION_API as unknown as { fetch: ReturnType<typeof vi.fn> }).fetch)).not.toHaveBeenCalled();
+  });
+
+  it('delete-all fails closed when the videos REST call errors (no events banned)', async () => {
+    const { banEvent } = await import('./nip86');
+    vi.mocked(banEvent).mockClear(); // call history accumulates across tests
+    mockRelay([{ id: 'e'.repeat(64), kind: 34235, content: '', tags: [] }]);
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('err', { status: 500 }));
+    const request = new Request('https://test/api/bulk-moderate', {
+      method: 'POST',
+      body: JSON.stringify({ pubkey: 'a'.repeat(64), action: 'delete-all' }),
+    });
+    await expect(handleBulkModerate(request, mockEnv, {})).rejects.toThrow(/Video query failed: 500/);
+    expect(vi.mocked(banEvent)).not.toHaveBeenCalled();
   });
 });
 
@@ -211,74 +366,5 @@ describe('queryRelayEvents pagination', () => {
     expect(complete).toBe(false);            // surfaced, not a silent success
     expect(events.length).toBe(500);         // escaped the saturated second after one page
     expect(events.length).toBeLessThan(600); // the excess at that second was not silently claimed as done
-  });
-});
-
-describe('extractMediaHashes', () => {
-  it('extracts sha256 from imeta tags on video events', () => {
-    const events = [
-      {
-        id: 'e1',
-        kind: 34235,
-        content: '',
-        tags: [
-          ['imeta', `url https://example.com/${hashA}.mp4`, 'm video/mp4', `x ${hashA}`],
-          ['imeta', `url https://example.com/${hashB}.jpg`, 'm image/jpeg', `x ${hashB}`],
-        ],
-      },
-    ];
-    const hashes = extractMediaHashes(events);
-    expect(hashes).toContain(hashA);
-    expect(hashes).toContain(hashB);
-    expect(hashes).toHaveLength(2);
-  });
-
-  it('extracts from x tags', () => {
-    const events = [
-      { id: 'e1', kind: 34236, content: '', tags: [['x', hashA]] },
-    ];
-    expect(extractMediaHashes(events)).toEqual([hashA]);
-  });
-
-  it('extracts from content URLs and url tags', () => {
-    const events = [
-      { id: 'e1', kind: 1, content: `https://cdn.test/${hashA}.jpg`, tags: [] },
-      { id: 'e2', kind: 30023, content: '', tags: [['url', `https://cdn.test/${hashB}.png`]] },
-    ];
-    expect(extractMediaHashes(events)).toEqual([hashA, hashB]);
-  });
-
-  it('deduplicates hashes', () => {
-    const events = [
-      { id: 'e1', kind: 34235, content: '', tags: [['x', hashA]] },
-      { id: 'e2', kind: 34236, content: '', tags: [['x', hashA]] },
-    ];
-    expect(extractMediaHashes(events)).toEqual([hashA]);
-  });
-
-  it('ignores thumbnail image hashes embedded in video imeta tags', () => {
-    const events = [
-      {
-        id: 'e1',
-        kind: 34235,
-        content: '',
-        tags: [[
-          'imeta',
-          `url https://media.divine.video/${hashA}`,
-          'm video/mp4',
-          `image https://media.divine.video/${hashB}`,
-          `x ${hashA}`,
-        ]],
-      },
-    ];
-    expect(extractMediaHashes(events)).toEqual([hashA]);
-  });
-
-  it('returns empty array when there are no valid hashes', () => {
-    const events = [
-      { id: 'e1', kind: 1, content: '', tags: [] },
-      { id: 'e2', kind: 30023, content: '', tags: [['x', 'not-a-hash']] },
-    ];
-    expect(extractMediaHashes(events)).toEqual([]);
   });
 });
