@@ -1,4 +1,4 @@
-import { useMutation } from '@tanstack/react-query';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useToast } from '@/hooks/useToast';
@@ -24,12 +24,37 @@ export function UserActions({
 }: UserActionsProps) {
   const { toast } = useToast();
   const api = useAdminApi();
+  const queryClient = useQueryClient();
   const showBulkActions = context !== 'age-review';
+
+  // Audit logging is a non-critical side effect. Fire-and-forget so a slow or
+  // hung /api/decisions write can never stall the moderation action or leave the
+  // confirm dialog stuck on "Banning…". The relay action is the source of truth;
+  // on failure we surface a non-blocking toast so the moderator knows the decision
+  // log lagged, without blocking the action or the dialog close.
+  //
+  // When the write SUCCEEDS, re-invalidate the decision log. Suspend and bulk
+  // age-restrict derive resolved-state ONLY from the D1 decision row (unlike
+  // ban/delete, which read live relay state), and onActionComplete refetches
+  // decisions synchronously in onSuccess — racing this detached write. Without a
+  // post-write invalidation the report reads back before the row exists and stays
+  // "pending" until a manual refresh. The ['decisions'] prefix covers
+  // useDecisionLog's ['decisions', targetId]. A report legitimately stays
+  // unresolved when no row was written (the .catch path), which is correct.
+  const logAudit = (params: Parameters<typeof api.logDecision>[0]) =>
+    void api.logDecision(params)
+      .then(() => {
+        queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      })
+      .catch((e) => {
+        console.warn('[UserActions] audit log failed', e);
+        toast({ title: 'Action applied; audit log not recorded' });
+      });
 
   const suspendUserMutation = useMutation({
     mutationFn: async () => {
       await api.suspendPubkey(pubkey, 'Suspended by moderator');
-      await api.logDecision({
+      logAudit({
         targetType: 'pubkey',
         targetId: pubkey,
         action: 'suspend_user',
@@ -48,7 +73,7 @@ export function UserActions({
   const unsuspendUserMutation = useMutation({
     mutationFn: async () => {
       await api.unsuspendPubkey(pubkey);
-      await api.logDecision({
+      logAudit({
         targetType: 'pubkey',
         targetId: pubkey,
         action: 'unsuspend_user',
@@ -67,7 +92,7 @@ export function UserActions({
   const banUserMutation = useMutation({
     mutationFn: async () => {
       await api.banPubkey(pubkey, 'Banned by moderator');
-      await api.logDecision({
+      logAudit({
         targetType: 'pubkey',
         targetId: pubkey,
         action: 'ban_user',
@@ -86,7 +111,7 @@ export function UserActions({
   const unbanUserMutation = useMutation({
     mutationFn: async () => {
       await api.unbanPubkey(pubkey);
-      await api.logDecision({
+      logAudit({
         targetType: 'pubkey',
         targetId: pubkey,
         action: 'unban_user',

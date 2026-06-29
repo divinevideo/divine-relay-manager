@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -197,5 +197,99 @@ describe('UserActions', () => {
 
     // The new user's button is idle/enabled, not stuck on the previous job.
     await waitFor(() => expect(screen.getByRole('button', { name: /^Age Restrict All$/i })).toBeEnabled());
+  });
+
+  it('completes the ban (closing the modal) even when the audit log never resolves', async () => {
+    // Regression: logDecision used to be awaited in the mutation critical path, so a
+    // hung /api/decisions write left the confirm dialog stuck on "Banning…". The audit
+    // log is now fire-and-forget, so the ban must still settle when it never resolves.
+    api.logDecision.mockReturnValue(new Promise(() => {})); // never settles
+    const onActionComplete = vi.fn();
+
+    renderWithProvider(
+      <UserActions pubkey={'a'.repeat(64)} onActionComplete={onActionComplete} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /Ban User/i })); // open confirm dialog
+    const dialog = screen.getByRole('alertdialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Ban User' })); // confirm
+
+    await waitFor(() => expect(onActionComplete).toHaveBeenCalledTimes(1));
+    expect(api.banPubkey).toHaveBeenCalledWith('a'.repeat(64), 'Banned by moderator');
+    expect(api.logDecision).toHaveBeenCalledTimes(1); // fired, but not awaited
+  });
+
+  it('invalidates the decision log after the detached audit write lands (report converges without manual refresh)', async () => {
+    // Suspend/age-restrict resolution comes only from the D1 decision row, and the
+    // onSuccess refetch races the fire-and-forget write. The invalidation must fire
+    // AFTER the write resolves (not before), so the report converges on its own.
+    let resolveWrite!: () => void;
+    api.logDecision.mockReturnValue(new Promise<void>((r) => { resolveWrite = () => r(undefined); }));
+
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const invalidateSpy = vi.spyOn(qc, 'invalidateQueries');
+    const decisionsInvalidations = () => invalidateSpy.mock.calls.filter(
+      ([arg]) => (arg as { queryKey?: unknown[] })?.queryKey?.[0] === 'decisions',
+    ).length;
+
+    render(
+      <QueryClientProvider client={qc}>
+        <TooltipProvider><UserActions pubkey={'a'.repeat(64)} /></TooltipProvider>
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /Suspend User/i }));
+
+    await waitFor(() => expect(api.logDecision).toHaveBeenCalledTimes(1));
+    expect(decisionsInvalidations()).toBe(0); // write hasn't landed yet — report stays unresolved
+
+    resolveWrite();
+
+    await waitFor(() => expect(decisionsInvalidations()).toBe(1));
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['decisions'] });
+  });
+
+  it('closes the ban dialog on success (the alertdialog is removed)', async () => {
+    // The real symptom of the hang bug is the dialog never closing; assert it's gone.
+    renderWithProvider(<UserActions pubkey={'a'.repeat(64)} />);
+    fireEvent.click(screen.getByRole('button', { name: /Ban User/i }));
+    const dialog = screen.getByRole('alertdialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Ban User' }));
+
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+  });
+
+  it('surfaces a ban timeout as an error toast and keeps the dialog open for retry', async () => {
+    api.banPubkey.mockRejectedValue(
+      new Error("Relay RPC 'banpubkey' timed out after 30s. The action may still have applied. Re-check before retrying."),
+    );
+    renderWithProvider(<UserActions pubkey={'a'.repeat(64)} />);
+    fireEvent.click(screen.getByRole('button', { name: /Ban User/i }));
+    const dialog = screen.getByRole('alertdialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Ban User' }));
+
+    await waitFor(() =>
+      expect(toast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Failed to ban user', variant: 'destructive' }),
+      ),
+    );
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument();
+  });
+
+  it('shows a non-blocking toast when the audit log fails but still completes the ban', async () => {
+    // Audit-log loss should be visible to the moderator, but must never block the
+    // action or the dialog close.
+    api.logDecision.mockRejectedValue(new Error('audit down'));
+    renderWithProvider(<UserActions pubkey={'a'.repeat(64)} />);
+    fireEvent.click(screen.getByRole('button', { name: /Ban User/i }));
+    const dialog = screen.getByRole('alertdialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Ban User' }));
+
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+    await waitFor(() =>
+      expect(toast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: expect.stringMatching(/audit log not recorded/i) }),
+      ),
+    );
   });
 });

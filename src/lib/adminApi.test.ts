@@ -110,6 +110,62 @@ describe('adminApi', () => {
       expect(result).toEqual(mockData);
     });
 
+    it('a read (GET) timeout says could-not-reach, not may-have-applied', async () => {
+      // A timed-out read mutated nothing, so "may have applied" would be wrong;
+      // the moderator should just retry.
+      mockFetch.mockRejectedValueOnce(new DOMException('timed out', 'TimeoutError'));
+
+      await expect(getWorkerInfo(API_URL)).rejects.toThrow(
+        /Request to \/api\/info timed out after 30s\. Could not reach the relay\. Try again\./,
+      );
+    });
+
+    it('a write (POST) timeout says the action may still have applied', async () => {
+      // A timed-out write can still land on the relay even though we stopped
+      // waiting, so the moderator must re-check rather than blindly retry.
+      mockFetch.mockRejectedValueOnce(new DOMException('timed out', 'TimeoutError'));
+
+      await expect(
+        moderateAction(API_URL, { action: 'ban_pubkey', pubkey: 'p'.repeat(64) }),
+      ).rejects.toThrow(
+        /Request to \/api\/moderate timed out after 30s\. The action may still have applied\. Re-check before retrying\./,
+      );
+    });
+
+    it('a stalled response BODY (headers sent, body never finishes) still maps to the friendly timeout copy', async () => {
+      // A relay that sends headers then stalls the body aborts during
+      // response.json(), AFTER fetch() resolved. Without bounding the read this
+      // surfaced as a raw TimeoutError that skipped the "may have applied" copy.
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => { throw new DOMException('timed out', 'TimeoutError'); },
+      });
+
+      await expect(
+        moderateAction(API_URL, { action: 'ban_pubkey', pubkey: 'p'.repeat(64) }),
+      ).rejects.toThrow(
+        /Request to \/api\/moderate timed out after 30s\. The action may still have applied\. Re-check before retrying\./,
+      );
+    });
+
+    it('bulkModerate (async enqueue) uses the default 30s bound, like other calls', async () => {
+      // The async job model replaced the old 180s bulk bound: bulkModerate now just
+      // enqueues a job and returns a jobId immediately, so it carries no special
+      // timeout — the long-running work moved to the queue consumer.
+      const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => ({ success: true, jobId: 'job-1' }),
+      });
+      await bulkModerate(API_URL, 'a'.repeat(64), 'age-restrict-all');
+      expect(timeoutSpy).toHaveBeenLastCalledWith(30_000);
+
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true }) });
+      await getWorkerInfo(API_URL);
+      expect(timeoutSpy).toHaveBeenLastCalledWith(30_000);
+      timeoutSpy.mockRestore();
+    });
+
     it('surfaces a JSON error body (409 version_conflict) as structured ApiError fields', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: false,
@@ -378,6 +434,42 @@ describe('adminApi', () => {
       const result = await callRelayRpc<string[]>(API_URL, 'listbannedpubkeys');
 
       expect(result).toEqual(['pubkey1', 'pubkey2']);
+    });
+
+    it('throws an actionable ApiError naming the method when the RPC times out', async () => {
+      // Regression: callRelayRpc had no timeout, so a hung banpubkey purge left
+      // the "Banning…" modal spinning forever.
+      mockFetch.mockRejectedValueOnce(new DOMException('timed out', 'TimeoutError'));
+
+      await expect(callRelayRpc(API_URL, 'banpubkey', ['npub'])).rejects.toThrow(
+        /Relay RPC 'banpubkey' timed out after 30s\. The action may still have applied\. Re-check before retrying\./,
+      );
+    });
+
+    it('re-throws non-timeout fetch errors unchanged', async () => {
+      const networkError = new TypeError('Failed to fetch');
+      mockFetch.mockRejectedValueOnce(networkError);
+
+      await expect(callRelayRpc(API_URL, 'banpubkey')).rejects.toBe(networkError);
+    });
+
+    it('an RPC list read timeout says could-not-reach (no may-have-applied)', async () => {
+      // list* RPC methods are reads; a timeout there mutated nothing.
+      mockFetch.mockRejectedValueOnce(new DOMException('timed out', 'TimeoutError'));
+
+      await expect(listBannedPubkeys(API_URL)).rejects.toThrow(
+        /Relay RPC 'listbannedpubkeys' timed out after 30s\. Could not reach the relay\. Try again\./,
+      );
+    });
+
+    it('a non-list read RPC (getbannedevent) timeout says could-not-reach, not may-have-applied', async () => {
+      // getbannedevent / supportedmethods are reads that do NOT start with 'list';
+      // they must still get the read copy, not the write "may have applied".
+      mockFetch.mockRejectedValueOnce(new DOMException('timed out', 'TimeoutError'));
+
+      await expect(callRelayRpc(API_URL, 'getbannedevent', ['eventid'])).rejects.toThrow(
+        /Relay RPC 'getbannedevent' timed out after 30s\. Could not reach the relay\. Try again\./,
+      );
     });
   });
 
