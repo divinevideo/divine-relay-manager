@@ -18,7 +18,7 @@ const BULK_ACTION_CONCURRENCY = 5;
 const RELAY_QUERY_PAGE_SIZE = 500;
 const RELAY_QUERY_MAX_PAGES = 100; // safety bound (~50k events); logged if hit, never silent
 const RELAY_QUERY_TIMEOUT_MS = 10000; // per-page (reset each page)
-const EVENT_CHUNK_SIZE = 200; // chunked consumer: ~400 subrequests/chunk (ban + kind-5 per event)
+const EVENT_CHUNK_SIZE = 200; // chunked consumer: ~200 subrequests/chunk (banevent per event)
 
 export interface BulkModerateEnv extends Nip86Env, ZendeskSyncEnv {
   DB?: D1Database;
