@@ -26,5 +26,9 @@ dist-ssr
 # Git worktrees
 .worktrees/
 
-# Local TLS certs (mkcert)
+# Local TLS certs (mkcert) — dir or a symlink to a shared one
+.certs
 .certs/
+
+# Playwright MCP run artifacts
+.playwright-mcp/

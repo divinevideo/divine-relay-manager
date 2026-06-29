@@ -7,6 +7,9 @@ import {
   VALID_BULK_ACTIONS,
   type BulkAction,
   type BulkModerateResult,
+  type BulkJob,
+  type BulkJobStatus,
+  type BulkEnqueueResponse,
 } from "../../shared/bulk-moderation";
 import { extractMediaHashes as extractSharedMediaHashes } from "../../shared/media-hashes";
 import type { AgeReviewCaseResponse } from "../../shared/age-review";
@@ -94,14 +97,6 @@ export class ApiError extends Error {
 // check-result / check-classifier / realness fetches rely on the same AbortSignal
 // aborting the body and degrade to null, so they need no copy mapping.
 const API_TIMEOUT_MS = 30_000;
-
-// Bulk moderation is a server-side O(N/5) loop that can legitimately run for
-// minutes on a prolific account (especially once REST enumeration processes ALL
-// of an author's videos). Give it a far larger client bound than the default so
-// it doesn't false-timeout on the primary destructive path, while still
-// guaranteeing no fetch hangs forever. Tracked for replacement by the async job
-// model (feat/bulk-moderate-async-job), after which bulk reverts to the default.
-const BULK_API_TIMEOUT_MS = 180_000;
 
 // NIP-86 read methods are a closed, known set, so derive read-vs-write from
 // membership rather than a name prefix: `getbannedevent` and `supportedmethods`
@@ -1072,23 +1067,26 @@ export async function createMinorAccount(
 }
 
 // Bulk moderation
-export { VALID_BULK_ACTIONS, type BulkAction, type BulkModerateResult };
+export { VALID_BULK_ACTIONS, type BulkAction, type BulkModerateResult, type BulkJob, type BulkJobStatus };
 
+// Enqueue a bulk moderation job. Returns immediately with a jobId; the work runs
+// in a queue consumer. Poll getBulkJobStatus until the job is terminal.
 export async function bulkModerate(
   apiUrl: string,
   pubkey: string,
   action: BulkAction,
   reason?: string,
-): Promise<BulkModerateResult> {
-  const result = await apiRequest<BulkModerateResult>(
-    apiUrl, '/api/bulk-moderate', 'POST', { pubkey, action, reason },
-    { timeoutMs: BULK_API_TIMEOUT_MS },
-  );
-  if (!result.success) {
-    const summary = result.failures.slice(0, 3).join('; ');
-    throw new ApiError(summary ? `Bulk moderation failed: ${summary}` : 'Bulk moderation failed');
+): Promise<BulkEnqueueResponse> {
+  const result = await apiRequest<BulkEnqueueResponse>(apiUrl, '/api/bulk-moderate', 'POST', { pubkey, action, reason });
+  if (!result.success || !result.jobId) {
+    throw new ApiError('Failed to start bulk moderation');
   }
   return result;
+}
+
+// Fetch a bulk job's current state. `status` is terminal at 'done' | 'failed'.
+export async function getBulkJobStatus(apiUrl: string, jobId: string): Promise<BulkJob> {
+  return apiRequest<BulkJob>(apiUrl, `/api/bulk-moderate/status/${encodeURIComponent(jobId)}`, 'GET');
 }
 
 // Delete media (convenience wrapper)
