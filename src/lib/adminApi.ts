@@ -1036,6 +1036,17 @@ export async function getAgeReviewCase(
   return apiRequest<AgeReviewCaseResponse>(apiUrl, `/api/age-review/cases/${caseId}`, 'GET');
 }
 
+export async function getAgeReviewFunnel(
+  apiUrl: string,
+  ageBand: string = 'age_13_15',
+): Promise<import('../../shared/age-review').AgeReviewFunnelResponse> {
+  return apiRequest<import('../../shared/age-review').AgeReviewFunnelResponse>(
+    apiUrl,
+    `/api/age-review/funnel?age_band=${encodeURIComponent(ageBand)}`,
+    'GET',
+  );
+}
+
 export async function updateAgeReviewCase(
   apiUrl: string,
   caseId: string,
