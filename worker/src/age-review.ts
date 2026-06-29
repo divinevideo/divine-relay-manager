@@ -1221,6 +1221,25 @@ export function bucketModerationCounts(rows: FunnelRow[]): FunnelModerationCount
   };
 }
 
+// Count tickets matching a Zendesk Search query via /search/count.json. Returns
+// null on any failure so a Zendesk hiccup degrades gracefully rather than
+// blocking the moderation half of the funnel.
+export async function fetchZendeskTagCount(
+  creds: { subdomain: string; email: string; apiToken: string },
+  query: string,
+): Promise<number | null> {
+  try {
+    const auth = btoa(`${creds.email}/token:${creds.apiToken}`);
+    const url = `https://${creds.subdomain}.zendesk.com/api/v2/search/count.json?query=${encodeURIComponent(query)}`;
+    const response = await fetch(url, { headers: { Authorization: `Basic ${auth}` } });
+    if (!response.ok) return null;
+    const data = await response.json() as { count?: number };
+    return typeof data.count === 'number' ? data.count : null;
+  } catch {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

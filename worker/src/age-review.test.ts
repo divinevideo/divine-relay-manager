@@ -12,6 +12,7 @@ import {
   getAgeReviewConfig,
   updateAgeReviewConfig,
   bucketModerationCounts,
+  fetchZendeskTagCount,
   type AgeReviewEnv,
 } from './age-review';
 import type { AgeReviewCase } from '../../shared/age-review';
@@ -1769,5 +1770,33 @@ describe('bucketModerationCounts', () => {
       approved: { total: 0, restored: 0, new_minor: 0 },
       denied_expired: 0,
     });
+  });
+});
+
+describe('fetchZendeskTagCount', () => {
+  const creds = { subdomain: 'rabblelabs', email: 'a@b.co', apiToken: 'tok' };
+
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it('builds the search/count URL and returns the count', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ count: 7 }) });
+    vi.stubGlobal('fetch', mockFetch);
+
+    const result = await fetchZendeskTagCount(creds, 'type:ticket tags:age-review-response');
+
+    expect(result).toBe(7);
+    const calledUrl = mockFetch.mock.calls[0][0] as string;
+    expect(calledUrl).toContain('https://rabblelabs.zendesk.com/api/v2/search/count.json?query=');
+    expect(calledUrl).toContain(encodeURIComponent('type:ticket tags:age-review-response'));
+  });
+
+  it('returns null on a non-ok response', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, json: async () => ({}) }));
+    expect(await fetchZendeskTagCount(creds, 'q')).toBeNull();
+  });
+
+  it('returns null when fetch throws', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network')));
+    expect(await fetchZendeskTagCount(creds, 'q')).toBeNull();
   });
 });
