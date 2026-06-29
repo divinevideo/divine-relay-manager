@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   handleGetAgeReviewCases,
   handleGetAgeReviewCase,
@@ -11,6 +11,7 @@ import {
   syncAgeReviewTicketResolution,
   getAgeReviewConfig,
   updateAgeReviewConfig,
+  bucketModerationCounts,
   type AgeReviewEnv,
 } from './age-review';
 import type { AgeReviewCase } from '../../shared/age-review';
@@ -1745,5 +1746,28 @@ describe('handleCreateMinorAccount', () => {
     // Assert positionally: toContain(null) would also match the null zendesk_ticket_id.
     expect(bindArgs[2]).toBe('https://login.test/claim/abc');
     expect(bindArgs[3]).toBeNull();
+  });
+});
+
+describe('bucketModerationCounts', () => {
+  it('sums non-terminal states into in_progress and splits approved by created_via', () => {
+    const result = bucketModerationCounts([
+      { state: 'cleared', created_via: 'report', c: 3 },
+      { state: 'cleared', created_via: 'minor_onboarding', c: 2 },
+      { state: 'denied_closed', created_via: 'report', c: 1 },
+      { state: 'submitted_for_review', created_via: 'report', c: 4 },
+      { state: 'restricted_pending_parental_consent', created_via: 'report', c: 5 },
+    ]);
+    expect(result.in_progress).toBe(9);
+    expect(result.approved).toEqual({ total: 5, restored: 3, new_minor: 2 });
+    expect(result.denied_expired).toBe(1);
+  });
+
+  it('returns zeroes for an empty set', () => {
+    expect(bucketModerationCounts([])).toEqual({
+      in_progress: 0,
+      approved: { total: 0, restored: 0, new_minor: 0 },
+      denied_expired: 0,
+    });
   });
 });

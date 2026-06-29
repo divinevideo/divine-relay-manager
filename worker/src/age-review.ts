@@ -13,6 +13,7 @@ import {
   type EnforcementLegStatus,
   type AgeReviewEnforcement,
   type AgeReviewCaseResponse,
+  type FunnelModerationCounts,
 } from '../../shared/age-review';
 import { runBulkModeration, type BulkModerateEnv } from './bulk-moderate';
 import { resolveZendeskCreds } from './zendesk-sync';
@@ -1174,6 +1175,50 @@ export async function updateAgeReviewConfig(
     ).bind(String(config.auto_delete_on_deny)).run();
   }
   return getAgeReviewConfig(db);
+}
+
+// ---------------------------------------------------------------------------
+// Greenlight consent funnel
+// ---------------------------------------------------------------------------
+
+// One row of the funnel's D1 group-by (state x created_via, with a count).
+export interface FunnelRow {
+  state: string;
+  created_via: string | null;
+  c: number;
+}
+
+// Pure bucketing of the D1 group-by rows into funnel stages. Non-terminal states
+// roll up to in_progress; `cleared` is approved (split into new_minor vs restored
+// by created_via); `denied_closed` is denied/expired.
+export function bucketModerationCounts(rows: FunnelRow[]): FunnelModerationCounts {
+  const terminal = new Set<string>(TERMINAL_STATES);
+  let in_progress = 0;
+  let approvedTotal = 0;
+  let approvedNewMinor = 0;
+  let denied_expired = 0;
+
+  for (const row of rows) {
+    const count = row.c ?? 0;
+    if (row.state === 'cleared') {
+      approvedTotal += count;
+      if (row.created_via === 'minor_onboarding') approvedNewMinor += count;
+    } else if (row.state === 'denied_closed') {
+      denied_expired += count;
+    } else if (!terminal.has(row.state)) {
+      in_progress += count;
+    }
+  }
+
+  return {
+    in_progress,
+    approved: {
+      total: approvedTotal,
+      restored: approvedTotal - approvedNewMinor,
+      new_minor: approvedNewMinor,
+    },
+    denied_expired,
+  };
 }
 
 // ---------------------------------------------------------------------------

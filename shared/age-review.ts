@@ -125,3 +125,26 @@ export interface AgeReviewCaseResponse {
   enforcementComplete?: boolean;
   enforcement?: AgeReviewEnforcement;
 }
+
+// Greenlight consent funnel: moderation (D1) outcome counts for one age band.
+export interface FunnelModerationCounts {
+  in_progress: number;
+  approved: { total: number; restored: number; new_minor: number };
+  denied_expired: number;
+}
+
+// Full funnel payload returned by GET /api/age-review/funnel. Helpdesk counts
+// are nullable: a Zendesk failure nulls that half while moderation still returns.
+export interface AgeReviewFunnelResponse {
+  success: boolean;
+  age_band: AgeBand;
+  helpdesk: {
+    source: 'zendesk';
+    band_scope: 'all_bands';
+    reports_in: number | null;
+    requests_in: number | null;
+    video_received: number | null;
+  };
+  moderation: FunnelModerationCounts & { source: 'd1'; band_scope: AgeBand };
+  generated_at: string;
+}
