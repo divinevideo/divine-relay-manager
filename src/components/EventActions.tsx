@@ -1,4 +1,4 @@
-import { useMutation } from '@tanstack/react-query';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useToast } from '@/hooks/useToast';
@@ -35,12 +35,27 @@ export function EventActions({
 }: EventActionsProps) {
   const { toast } = useToast();
   const api = useAdminApi();
+  const queryClient = useQueryClient();
   const hasMedia = mediaHashes.length > 0;
+
+  // Audit logging is a non-critical side effect. Fire-and-forget so a slow, hung,
+  // or failing /api/decisions write can never make a relay/media action that already
+  // SUCCEEDED report failure (or leave a confirm dialog stuck open). The relay/media
+  // action is the source of truth. On a successful write, re-invalidate the decision
+  // log so the report converges without a manual refresh; on failure, surface a
+  // non-blocking toast. Mirrors UserActions.logAudit.
+  const logAudit = (params: Parameters<typeof api.logDecision>[0]) =>
+    void api.logDecision(params)
+      .then(() => { queryClient.invalidateQueries({ queryKey: ['decisions'] }); })
+      .catch((e) => {
+        console.warn('[EventActions] audit log failed', e);
+        toast({ title: 'Action applied; audit log not recorded' });
+      });
 
   const banEventMutation = useMutation({
     mutationFn: async () => {
       await api.banEvent(eventId, 'Banned by moderator');
-      await api.logDecision({
+      logAudit({
         targetType: 'event',
         targetId: eventId,
         action: 'ban_event',
@@ -59,7 +74,7 @@ export function EventActions({
   const restoreEventMutation = useMutation({
     mutationFn: async () => {
       await api.allowEvent(eventId);
-      await api.logDecision({
+      logAudit({
         targetType: 'event',
         targetId: eventId,
         action: 'restore_event',
@@ -78,7 +93,7 @@ export function EventActions({
   const deleteEventMutation = useMutation({
     mutationFn: async () => {
       await api.deleteEvent(eventId, 'Permanently deleted by moderator', pubkey);
-      await api.logDecision({
+      logAudit({
         targetType: 'event',
         targetId: eventId,
         action: 'delete_event_permanent',
@@ -99,7 +114,7 @@ export function EventActions({
       for (const hash of mediaHashes) {
         await api.moderateMedia(hash, 'PERMANENT_BAN', 'Blocked by moderator');
       }
-      await api.logDecision({
+      logAudit({
         targetType: 'event',
         targetId: eventId,
         action: 'block_media',
@@ -120,7 +135,7 @@ export function EventActions({
       for (const hash of mediaHashes) {
         await api.moderateMedia(hash, 'AGE_RESTRICTED', 'Age restricted by moderator');
       }
-      await api.logDecision({
+      logAudit({
         targetType: 'event',
         targetId: eventId,
         action: 'age_restrict_media',
@@ -143,7 +158,7 @@ export function EventActions({
       for (const hash of blockedHashes) {
         await api.moderateMedia(hash, 'SAFE', 'Unblocked by moderator');
       }
-      await api.logDecision({
+      logAudit({
         targetType: 'event',
         targetId: eventId,
         action: 'unblock_media',
@@ -166,7 +181,7 @@ export function EventActions({
       for (const hash of restrictedHashes) {
         await api.moderateMedia(hash, 'SAFE', 'Restriction removed by moderator');
       }
-      await api.logDecision({
+      logAudit({
         targetType: 'event',
         targetId: eventId,
         action: 'remove_restriction',
@@ -187,7 +202,7 @@ export function EventActions({
       for (const hash of mediaHashes) {
         await api.deleteMedia(hash, 'Permanently deleted by moderator');
       }
-      await api.logDecision({
+      logAudit({
         targetType: 'event',
         targetId: eventId,
         action: 'delete_media',
@@ -209,18 +224,19 @@ export function EventActions({
       try {
         await api.deleteEvent(eventId, 'Permanently deleted by moderator', pubkey);
         completed.push('event_deleted');
-        await api.logDecision({ targetType: 'event', targetId: eventId, action: 'delete_event', reason: 'Permanently deleted (combined)' });
+        logAudit({ targetType: 'event', targetId: eventId, action: 'delete_event', reason: 'Permanently deleted (combined)' });
 
         for (const hash of mediaHashes) {
           await api.deleteMedia(hash, 'Permanently deleted by moderator');
           completed.push(`media_${hash.slice(0, 8)}`);
         }
-        await api.logDecision({ targetType: 'event', targetId: eventId, action: 'delete_event_and_media', reason: `Permanently deleted event + ${mediaHashes.length} media file(s)` });
+        logAudit({ targetType: 'event', targetId: eventId, action: 'delete_event_and_media', reason: `Permanently deleted event + ${mediaHashes.length} media file(s)` });
       } catch (error) {
+        // Reached only when a real action (deleteEvent or a deleteMedia) failed —
+        // not the audit log, which is now fire-and-forget. So "media deletion failed"
+        // in onError is accurate.
         if (completed.length > 0) {
-          try {
-            await api.logDecision({ targetType: 'event', targetId: eventId, action: 'delete_event_and_media_partial', reason: `Partial delete (completed: ${completed.join(', ')}). Error: ${error instanceof Error ? error.message : 'unknown'}` });
-          } catch { /* audit log itself failed — nothing more we can do */ }
+          logAudit({ targetType: 'event', targetId: eventId, action: 'delete_event_and_media_partial', reason: `Partial delete (completed: ${completed.join(', ')}). Error: ${error instanceof Error ? error.message : 'unknown'}` });
         }
         throw Object.assign(error instanceof Error ? error : new Error('Unknown error'), { completed });
       }

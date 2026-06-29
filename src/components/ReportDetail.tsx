@@ -87,6 +87,21 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   const {
     deleteEvent, allowEvent, markAsReviewed, logDecision, deleteDecisions,
   } = useAdminApi();
+
+  // Audit logging is a non-critical side effect. Fire-and-forget so a failing
+  // /api/decisions write can't make an action whose authoritative step already
+  // SUCCEEDED (markAsReviewed label publish, allowEvent) report failure. On a
+  // successful write, re-invalidate the decision log; on failure, a non-blocking
+  // toast. Mirrors UserActions.logAudit. (confirmAutoHide keeps an awaited
+  // logDecision: there the decision write IS the action.)
+  const logAudit = (params: Parameters<typeof logDecision>[0]) =>
+    void logDecision(params)
+      .then(() => { queryClient.invalidateQueries({ queryKey: ['decisions'] }); })
+      .catch((e) => {
+        console.warn('[ReportDetail] audit log failed', e);
+        toast({ title: 'Action applied; audit log not recorded' });
+      });
+
   const { config } = useAppContext();
   const navigate = useNavigate();
   const [showThreadModal, setShowThreadModal] = useState(false);
@@ -179,8 +194,9 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     mutationFn: async ({ status, comment }: { status: ResolutionStatus; comment?: string }) => {
       if (!context.target) throw new Error('No target');
       await markAsReviewed(context.target.type, context.target.value, status, comment);
-      // Log the decision
-      await logDecision({
+      // Audit log is non-critical; markAsReviewed (the resolution label) is the
+      // authoritative action, so don't let a failed decision write report failure.
+      logAudit({
         targetType: context.target.type,
         targetId: context.target.value,
         action: status,
@@ -299,7 +315,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   const restoreAutoHideMutation = useMutation({
     mutationFn: async ({ eventId }: { eventId: string }) => {
       await allowEvent(eventId);
-      await logDecision({
+      logAudit({
         targetType: 'event',
         targetId: eventId,
         action: 'auto_hide_restored',
@@ -792,7 +808,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             onDeleteEvent={async (eventId) => {
               try {
                 await deleteEvent(eventId, 'Deleted from report review');
-                await logDecision({
+                logAudit({
                   targetType: 'event',
                   targetId: eventId,
                   action: 'delete_event',
