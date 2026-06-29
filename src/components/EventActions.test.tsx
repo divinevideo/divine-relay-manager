@@ -9,7 +9,6 @@ vi.mock('@/hooks/useAdminApi', () => ({
     deleteEvent: vi.fn().mockResolvedValue({ success: true }),
     moderateMedia: vi.fn().mockResolvedValue({ success: true }),
     deleteMedia: vi.fn().mockResolvedValue({ success: true }),
-    publishDeletionRequest: vi.fn().mockResolvedValue({ success: true }),
     callRelayRpc: vi.fn().mockResolvedValue({ success: true }),
     logDecision: vi.fn().mockResolvedValue(undefined),
   }),

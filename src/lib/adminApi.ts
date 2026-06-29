@@ -1094,11 +1094,6 @@ export async function deleteMedia(apiUrl: string, sha256: string, reason?: strin
   return moderateMedia(apiUrl, sha256, 'DELETE', reason || 'Deleted by moderator');
 }
 
-// Publish NIP-09 kind 5 deletion request via worker
-export async function publishDeletionRequest(apiUrl: string, eventId: string, reason?: string): Promise<ApiResponse> {
-  return apiRequest<ApiResponse>(apiUrl, '/api/publish-deletion', 'POST', { eventId, reason });
-}
-
 // Age review config
 export interface AgeReviewConfig {
   auto_delete_on_deny: boolean;

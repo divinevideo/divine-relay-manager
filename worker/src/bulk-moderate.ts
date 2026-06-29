@@ -1,4 +1,4 @@
-import { getAdminPubkey, banEvent, publishKind5Deletion, type Nip86Env } from './nip86';
+import { getAdminPubkey, banEvent, type Nip86Env } from './nip86';
 import { syncZendeskAfterAction, type ZendeskSyncEnv } from './zendesk-sync';
 import {
   VALID_BULK_ACTIONS,
@@ -88,10 +88,12 @@ async function deleteEvents(
   const failures: string[] = [];
   await runWithConcurrency(events, BULK_ACTION_CONCURRENCY, async (event) => {
     try {
+      // Admin deletion is NIP-86 banevent (authoritative). We do NOT publish a NIP-09
+      // kind-5 deletion: NIP-09 is author-only, so funnelcake (and any compliant relay)
+      // rejects a non-author's kind-5 — an admin kind-5 always fails and propagates
+      // nothing. banevent is the real removal.
       const banResult = await banEvent(event.id, reason, env);
       if (!banResult.success) throw new Error(banResult.error || 'banevent failed');
-      const deleteResult = await publishKind5Deletion(event.id, reason, env);
-      if (!deleteResult.success) throw new Error(deleteResult.error || 'kind 5 deletion failed');
       processed++;
       successfulEventIds.push(event.id);
     } catch (error) {

@@ -78,16 +78,15 @@ export function EventActions({
   const deleteEventMutation = useMutation({
     mutationFn: async () => {
       await api.deleteEvent(eventId, 'Permanently deleted by moderator', pubkey);
-      await api.publishDeletionRequest(eventId, 'Permanently deleted by moderator');
       await api.logDecision({
         targetType: 'event',
         targetId: eventId,
         action: 'delete_event_permanent',
-        reason: 'Permanently deleted (banevent + kind 5)',
+        reason: 'Permanently deleted (banevent)',
       });
     },
     onSuccess: () => {
-      toast({ title: 'Event permanently deleted', description: 'Banned from relay + NIP-09 deletion published' });
+      toast({ title: 'Event permanently deleted', description: 'Banned from relay' });
       onActionComplete?.();
     },
     onError: (error: Error) => {
@@ -211,9 +210,6 @@ export function EventActions({
         await api.deleteEvent(eventId, 'Permanently deleted by moderator', pubkey);
         completed.push('event_deleted');
         await api.logDecision({ targetType: 'event', targetId: eventId, action: 'delete_event', reason: 'Permanently deleted (combined)' });
-
-        await api.publishDeletionRequest(eventId, 'Permanently deleted by moderator');
-        completed.push('deletion_request');
 
         for (const hash of mediaHashes) {
           await api.deleteMedia(hash, 'Permanently deleted by moderator');
