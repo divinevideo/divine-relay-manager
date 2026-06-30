@@ -6,9 +6,6 @@ import {
   getSecretKey,
   getManagementUrl,
   callNip86Rpc,
-  banEvent,
-  banPubkey,
-  unbanPubkey,
   type SecretStoreSecret,
 } from './nip86';
 import { ensureSchema } from './db';
@@ -31,7 +28,7 @@ import {
 } from './age-review';
 import { handleBulkModerateEnqueue, handleBulkJobStatus, processBulkJob } from './bulk-moderate';
 import type { BulkJobMessage } from '../../shared/bulk-moderation';
-import { ensureZendeskTable, addZendeskInternalNote, syncZendeskAfterAction, resolveZendeskCreds } from './zendesk-sync';
+import { ensureZendeskTable, addZendeskInternalNote, syncZendeskAfterAction } from './zendesk-sync';
 
 let schemaReady = false;
 async function ensureSchemaOnce(db: D1Database): Promise<void> {
@@ -57,17 +54,14 @@ interface Env extends KeycastEnv {
   MODERATION_API?: Fetcher;
   // Zendesk integration
   ZENDESK_SUBDOMAIN?: string | SecretStoreSecret;
-  // These four are per-worker secrets (not Secrets Store). If migrated to SecretStoreSecret,
+  // These three are per-worker secrets (not Secrets Store). If migrated to SecretStoreSecret,
   // update the call sites — they pass these directly to crypto/TextEncoder without resolving.
   ZENDESK_JWT_SECRET?: string;
   ZENDESK_PREAUTH_SECRET?: string;
-  ZENDESK_WEBHOOK_SECRET?: string;
   ZENDESK_PARSE_REPORT_SECRET?: string;
   ZENDESK_AGE_REVIEW_WEBHOOK_SECRET?: string | SecretStoreSecret;  // For /api/zendesk/age-review-reply
   ZENDESK_API_TOKEN?: string | SecretStoreSecret;
   ZENDESK_EMAIL?: string | SecretStoreSecret;
-  ZENDESK_FIELD_ACTION_STATUS?: string;
-  ZENDESK_FIELD_ACTION_REQUESTED?: string;
   ZENDESK_FIELD_CATEGORY?: string;       // For auto-solve required fields
   ZENDESK_FIELD_ISSUE?: string;          // For auto-solve required fields
   ZENDESK_FIELD_AGE_REVIEW_DEADLINE?: string;
@@ -1776,65 +1770,6 @@ async function verifyNip98Auth(
   }
 }
 
-// Update Zendesk ticket with action result and internal note
-async function updateZendeskTicket(
-  ticketId: number,
-  success: boolean,
-  actionRequested: string,
-  note: string,
-  env: Env
-): Promise<void> {
-  const creds = await resolveZendeskCreds(env);
-  if (!creds) {
-    console.warn('[updateZendeskTicket] Missing Zendesk API credentials, skipping callback');
-    return;
-  }
-
-  if (!env.ZENDESK_FIELD_ACTION_STATUS || !env.ZENDESK_FIELD_ACTION_REQUESTED) {
-    console.warn('[updateZendeskTicket] Missing Zendesk field IDs, skipping callback');
-    return;
-  }
-
-  try {
-    const auth = btoa(`${creds.email}/token:${creds.apiToken}`);
-    const url = `https://${creds.subdomain}.zendesk.com/api/v2/tickets/${ticketId}`;
-
-    const customFields = [
-      { id: parseInt(env.ZENDESK_FIELD_ACTION_STATUS, 10), value: success ? 'success' : 'failed' },
-    ];
-
-    // Only reset action_requested to 'none' on success
-    if (success) {
-      customFields.push({ id: parseInt(env.ZENDESK_FIELD_ACTION_REQUESTED, 10), value: 'none' });
-    }
-
-    const response = await fetch(url, {
-      method: 'PUT',
-      headers: {
-        'Authorization': `Basic ${auth}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        ticket: {
-          custom_fields: customFields,
-          comment: {
-            body: note,
-            public: false,
-          },
-        },
-      }),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`[updateZendeskTicket] Failed to update ticket ${ticketId}: ${response.status} - ${errorText}`);
-    }
-  } catch (error) {
-    console.error('[updateZendeskTicket] Error:', error);
-  }
-}
-
-// Add internal note to Zendesk ticket (simpler than updateZendeskTicket - just adds comment, optionally solves)
 // Proxy handler for blocked media preview (Blossom admin bypass)
 // Moderators need to see media that Blossom blocks (Banned/Restricted status returns 404 on CDN).
 // This endpoint authenticates against Blossom's admin bypass and streams the content through.
@@ -2141,11 +2076,6 @@ async function handleZendeskRoutes(
 ): Promise<Response> {
   const subPath = path.replace('/api/zendesk', '');
 
-  // Webhook endpoint uses signature verification instead of JWT
-  if (subPath === '/webhook' && request.method === 'POST') {
-    return handleZendeskWebhook(request, env, corsHeaders);
-  }
-
   // Age review: parent replied to Zendesk ticket
   if (subPath === '/age-review-reply' && request.method === 'POST') {
     const bodyText = await request.text();
@@ -2195,12 +2125,6 @@ async function handleZendeskRoutes(
       }
       break;
 
-    case '/action':
-      if (request.method === 'POST') {
-        return handleZendeskAction(request, user, env, corsHeaders);
-      }
-      break;
-
     case '/verify':
       // Simple endpoint to verify JWT is valid
       if (request.method === 'GET') {
@@ -2216,152 +2140,6 @@ async function handleZendeskRoutes(
   }
 
   return jsonResponse({ success: false, error: 'Not found' }, 404, corsHeaders);
-}
-
-// Handle Zendesk webhook (triggered by ticket field changes)
-async function handleZendeskWebhook(
-  request: Request,
-  env: Env,
-  corsHeaders: Record<string, string>
-): Promise<Response> {
-  try {
-    const bodyText = await request.text();
-
-    // Verify webhook signature
-    const isValid = await verifyZendeskWebhook(request, bodyText, env.ZENDESK_WEBHOOK_SECRET);
-    if (!isValid) {
-      return jsonResponse({ success: false, error: 'Invalid webhook signature' }, 401, corsHeaders);
-    }
-
-    const body = JSON.parse(bodyText) as {
-      ticket_id: number;
-      action_requested?: string;
-      nostr_pubkey?: string;
-      nostr_event_id?: string;
-      agent_email?: string;
-    };
-
-    if (!body.action_requested || body.action_requested === 'none') {
-      return new Response(JSON.stringify({ success: true, message: 'No action requested' }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders },
-      });
-    }
-
-    // Execute the moderation action via NIP-86 RPC utilities.
-    // NOTE: Zendesk-originated moderation actions may be dead code —
-    // Aleysha and team use relay.admin.divine.video for moderation,
-    // not Zendesk. Keeping for correctness but monitor for removal.
-    let actionResult: { success: boolean; error?: string } = { success: false, error: 'Unknown action' };
-
-    switch (body.action_requested) {
-      case 'ban_user':
-        if (body.nostr_pubkey) {
-          actionResult = await banPubkey(body.nostr_pubkey, `Zendesk ticket #${body.ticket_id}`, env);
-        }
-        break;
-
-      case 'delete_event':
-        // banevent RPC instead of kind 5: NIP-09 kind 5 only allows authors
-        // to delete their own events; admin key can't delete via kind 5.
-        if (body.nostr_event_id) {
-          actionResult = await banEvent(body.nostr_event_id, `Zendesk ticket #${body.ticket_id}`, env);
-        }
-        break;
-
-      case 'allow_user':
-        if (body.nostr_pubkey) {
-          actionResult = await unbanPubkey(body.nostr_pubkey, env);
-        }
-        break;
-    }
-
-    // Log the decision
-    if (env.DB && actionResult.success) {
-      await ensureSchemaOnce(env.DB);
-      await env.DB.prepare(`
-        INSERT INTO moderation_decisions (target_type, target_id, action, reason, moderator_pubkey, report_id)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).bind(
-        body.nostr_event_id ? 'event' : 'pubkey',
-        body.nostr_event_id || body.nostr_pubkey || '',
-        body.action_requested,
-        `Zendesk ticket #${body.ticket_id}`,
-        body.agent_email || null,
-        `zendesk:${body.ticket_id}`
-      ).run();
-
-      const targetType = body.nostr_event_id ? 'event' : 'pubkey';
-      const targetId = body.nostr_event_id || body.nostr_pubkey || '';
-      await markHumanReviewed(env.DB, targetType, targetId);
-
-      // Sync any linked Zendesk tickets (via our mapping table)
-      try {
-        await syncZendeskAfterAction(
-          env,
-          body.action_requested,
-          body.nostr_event_id ? 'event' : 'pubkey',
-          body.nostr_event_id || body.nostr_pubkey || '',
-          body.agent_email || 'webhook'
-        );
-      } catch (err) {
-        console.error('[handleZendeskWebhook] Zendesk sync error:', err);
-      }
-    }
-
-    // Callback to Zendesk to update ticket status and add internal note
-    // TODO: allow_user case skipped until semantics of allow_user vs unban are clarified
-    if (body.action_requested !== 'allow_user') {
-      const agentInfo = body.agent_email ? ` by ${body.agent_email}` : '';
-      let zendeskNote: string;
-
-      if (actionResult.success) {
-        switch (body.action_requested) {
-          case 'ban_user':
-            zendeskNote = `✅ Ban executed successfully for pubkey ${body.nostr_pubkey}${agentInfo}`;
-            break;
-          case 'delete_event':
-            zendeskNote = `✅ Delete event executed successfully for event ${body.nostr_event_id}${agentInfo}`;
-            break;
-          default:
-            zendeskNote = `✅ Action "${body.action_requested}" executed successfully${agentInfo}`;
-        }
-      } else {
-        switch (body.action_requested) {
-          case 'ban_user':
-            zendeskNote = `❌ Ban failed for pubkey ${body.nostr_pubkey}: ${actionResult.error}`;
-            break;
-          case 'delete_event':
-            zendeskNote = `❌ Delete event failed for event ${body.nostr_event_id}: ${actionResult.error}`;
-            break;
-          default:
-            zendeskNote = `❌ Action "${body.action_requested}" failed: ${actionResult.error}`;
-        }
-      }
-
-      try {
-        await updateZendeskTicket(body.ticket_id, actionResult.success, body.action_requested, zendeskNote, env);
-      } catch (err) {
-        console.error('[handleZendeskWebhook] Zendesk callback error:', err);
-      }
-    }
-
-    return new Response(JSON.stringify({
-      success: actionResult.success,
-      action: body.action_requested,
-      error: actionResult.error,
-    }), {
-      status: actionResult.success ? 200 : 500,
-      headers: { 'Content-Type': 'application/json', ...corsHeaders },
-    });
-  } catch (error) {
-    console.error('Zendesk webhook error:', error);
-    return jsonResponse(
-      { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
-      500,
-      corsHeaders
-    );
-  }
 }
 
 // Parse content report ticket and store mapping, add helpful links as internal note
@@ -2780,181 +2558,6 @@ async function handleZendeskContext(
     });
   } catch (error) {
     console.error('Zendesk context error:', error);
-    return jsonResponse(
-      { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
-      500,
-      corsHeaders
-    );
-  }
-}
-
-// Execute moderation action from Zendesk sidebar
-async function handleZendeskAction(
-  request: Request,
-  user: ZendeskJWTPayload,
-  env: Env,
-  corsHeaders: Record<string, string>
-): Promise<Response> {
-  try {
-    const body = await request.json() as {
-      action: string;
-      pubkey?: string;
-      event_id?: string;
-      reason?: string;
-      ticket_id?: number;
-    };
-
-    if (!body.action) {
-      return jsonResponse({ success: false, error: 'Missing action' }, 400, corsHeaders);
-    }
-
-    const secretKey = await getSecretKey(env);
-    let actionResult: { success: boolean; error?: string } = { success: false, error: 'Unknown action' };
-
-    const reason = body.reason || `Via Zendesk by ${user.email}${body.ticket_id ? ` (ticket #${body.ticket_id})` : ''}`;
-
-    switch (body.action) {
-      case 'ban_user':
-        if (body.pubkey) {
-          const httpUrl = getManagementUrl(env);
-          const payload = JSON.stringify({ method: 'banpubkey', params: [body.pubkey, reason] });
-          const payloadHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
-          const payloadHashHex = Array.from(new Uint8Array(payloadHash)).map(b => b.toString(16).padStart(2, '0')).join('');
-
-          const authEvent = finalizeEvent({
-            kind: 27235,
-            content: '',
-            tags: [['u', httpUrl], ['method', 'POST'], ['payload', payloadHashHex]],
-            created_at: Math.floor(Date.now() / 1000),
-          }, secretKey);
-
-          const response = await fetch(httpUrl, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/nostr+json+rpc',
-              'Authorization': `Nostr ${btoa(JSON.stringify(authEvent))}`,
-            },
-            body: payload,
-          });
-
-          actionResult = response.ok ? { success: true } : { success: false, error: `Relay error: ${response.status}` };
-        } else {
-          actionResult = { success: false, error: 'Missing pubkey' };
-        }
-        break;
-
-      case 'allow_user':
-        if (body.pubkey) {
-          const httpUrl = getManagementUrl(env);
-          const payload = JSON.stringify({ method: 'unbanpubkey', params: [body.pubkey] });
-          const payloadHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
-          const payloadHashHex = Array.from(new Uint8Array(payloadHash)).map(b => b.toString(16).padStart(2, '0')).join('');
-
-          const authEvent = finalizeEvent({
-            kind: 27235,
-            content: '',
-            tags: [['u', httpUrl], ['method', 'POST'], ['payload', payloadHashHex]],
-            created_at: Math.floor(Date.now() / 1000),
-          }, secretKey);
-
-          const response = await fetch(httpUrl, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/nostr+json+rpc',
-              'Authorization': `Nostr ${btoa(JSON.stringify(authEvent))}`,
-            },
-            body: payload,
-          });
-
-          actionResult = response.ok ? { success: true } : { success: false, error: `Relay error: ${response.status}` };
-        } else {
-          actionResult = { success: false, error: 'Missing pubkey' };
-        }
-        break;
-
-      case 'delete_event':
-        // Use banevent RPC instead of kind 5. See handleZendeskWebhook
-        // delete_event comment for rationale.
-        // NOTE: Zendesk-originated moderation may be dead code — monitor
-        // for removal if relay admin tool fully replaces Zendesk actions.
-        if (body.event_id) {
-          const httpUrl = getManagementUrl(env);
-          const payload = JSON.stringify({ method: 'banevent', params: [body.event_id, reason] });
-          const payloadHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
-          const payloadHashHex = Array.from(new Uint8Array(payloadHash)).map(b => b.toString(16).padStart(2, '0')).join('');
-
-          const authEvent = finalizeEvent({
-            kind: 27235,
-            content: '',
-            tags: [['u', httpUrl], ['method', 'POST'], ['payload', payloadHashHex]],
-            created_at: Math.floor(Date.now() / 1000),
-          }, secretKey);
-
-          const response = await fetch(httpUrl, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/nostr+json+rpc',
-              'Authorization': `Nostr ${btoa(JSON.stringify(authEvent))}`,
-            },
-            body: payload,
-          });
-
-          actionResult = response.ok ? { success: true } : { success: false, error: `Relay error: ${response.status}` };
-        } else {
-          actionResult = { success: false, error: 'Missing event_id' };
-        }
-        break;
-
-      default:
-        actionResult = { success: false, error: `Unknown action: ${body.action}` };
-    }
-
-    // Log the decision
-    if (env.DB && actionResult.success) {
-      await ensureSchemaOnce(env.DB);
-      await env.DB.prepare(`
-        INSERT INTO moderation_decisions (target_type, target_id, action, reason, moderator_pubkey, report_id)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).bind(
-        body.event_id ? 'event' : 'pubkey',
-        body.event_id || body.pubkey || '',
-        body.action,
-        reason,
-        user.email,
-        body.ticket_id ? `zendesk:${body.ticket_id}` : null
-      ).run();
-
-      const ztargetType = body.event_id ? 'event' : 'pubkey';
-      const ztargetId = body.event_id || body.pubkey || '';
-      await markHumanReviewed(env.DB, ztargetType, ztargetId);
-    }
-
-    // Sync any linked Zendesk tickets
-    if (actionResult.success) {
-      try {
-        await syncZendeskAfterAction(
-          env,
-          body.action,
-          body.event_id ? 'event' : 'pubkey',
-          body.event_id || body.pubkey || '',
-          user.email
-        );
-      } catch (err) {
-        console.error('[handleZendeskAction] Zendesk sync error:', err);
-      }
-    }
-
-    return new Response(JSON.stringify({
-      success: actionResult.success,
-      action: body.action,
-      error: actionResult.error,
-      moderator: user.email,
-    }), {
-      status: actionResult.success ? 200 : 500,
-      headers: { 'Content-Type': 'application/json', ...corsHeaders },
-    });
-  } catch (error) {
-    console.error('Zendesk action error:', error);
     return jsonResponse(
       { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
       500,

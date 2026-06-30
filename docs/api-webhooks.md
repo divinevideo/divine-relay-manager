@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Divine Relay Manager exposes several API endpoints that allow external systems to trigger moderation actions. This enables integration with customer support tools like Zendesk, automated moderation pipelines, and other external services.
+The Divine Relay Manager exposes several API endpoints for integration with external systems like Zendesk (ticket report parsing, decision sync, age-review replies). Note: Zendesk does **not** execute moderation actions. Moderation is performed in Relay Manager; Zendesk only receives decision updates back. The former inbound moderation-execution path has been retired (see the note under `POST /api/zendesk/webhook`).
 
 **Base URL:** `https://api-relay.divine.video` (or `https://relay.admin.divine.video/api`)
 
@@ -146,6 +146,8 @@ Check the moderation status of a media file.
 
 ### POST /api/zendesk/webhook
 
+> **Retired (#103).** This inbound moderation-execution endpoint has been removed from the worker. Moderation happens in Relay Manager, not Zendesk. The Zendesk-side trigger, webhook, and `action_requested`/`action_status` fields have been deactivated. The detail below is kept for historical context only.
+
 Receives webhook events from Zendesk when ticket custom fields are updated.
 
 **Headers:**
@@ -227,6 +229,8 @@ Authorization: Bearer <zendesk-jwt-token>
 ---
 
 ### POST /api/zendesk/action
+
+> **Retired (#103).** This inbound moderation-execution endpoint (Zendesk sidebar) has been removed from the worker. The detail below is kept for historical context only.
 
 Execute moderation action from Zendesk sidebar (JWT authenticated).
 
@@ -318,6 +322,8 @@ Delete all decisions for a target (reopen a dismissed report).
 ---
 
 ## Setting Up Zendesk Webhooks
+
+> **Retired (#103).** The inbound moderation-execution wiring described below (the `action_requested`/`action_status` fields, the `relay moderation action` trigger, and the `relay-management` webhook) has been deactivated in Zendesk and removed from the worker. This section is kept for historical context only. The decision-reporting direction (Relay Manager → Zendesk auto-solve + internal notes) and the still-active `parse-report` / `age-review-reply` integrations are unaffected.
 
 ### 1. Create Custom Ticket Fields
 
