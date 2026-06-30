@@ -15,6 +15,7 @@ import {
   type AgeReviewCaseResponse,
   type FunnelModerationCounts,
   type AgeReviewFunnelResponse,
+  FUNNEL_ZENDESK_QUERIES,
 } from '../../shared/age-review';
 import { runBulkModeration, type BulkModerateEnv } from './bulk-moderate';
 import { resolveZendeskCreds } from './zendesk-sync';
@@ -1269,9 +1270,9 @@ export async function handleGetAgeReviewFunnel(
   const creds = await resolveZendeskCreds(env);
   if (creds) {
     [requests_in, video_received, reports_in] = await Promise.all([
-      fetchZendeskTagCount(creds, 'type:ticket tags:age-review-response'),
-      fetchZendeskTagCount(creds, 'type:ticket tags:consent_video_received'),
-      fetchZendeskTagCount(creds, 'type:ticket tags:age-review -tags:age-review-response'),
+      fetchZendeskTagCount(creds, FUNNEL_ZENDESK_QUERIES.requests_in),
+      fetchZendeskTagCount(creds, FUNNEL_ZENDESK_QUERIES.video_received),
+      fetchZendeskTagCount(creds, FUNNEL_ZENDESK_QUERIES.reports_in),
     ]);
   }
 

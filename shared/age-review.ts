@@ -133,6 +133,19 @@ export interface FunnelModerationCounts {
   denied_expired: number;
 }
 
+// Exact Zendesk Search queries behind each helpdesk funnel stage. Single source
+// of truth: the worker counts with these, and the UI surfaces them verbatim in
+// tooltips, so the displayed criteria can never drift from what is counted.
+// Reports vs requests are a clean partition of all `age-review` tickets: a
+// third-party in-app report carries `age-review` only, while a parent/teen who
+// reaches the helpdesk also carries `age-review-response`. Not band-filtered
+// (Zendesk does not tag age band), so these count all ages.
+export const FUNNEL_ZENDESK_QUERIES = {
+  reports_in: 'type:ticket tags:age-review -tags:age-review-response',
+  requests_in: 'type:ticket tags:age-review-response',
+  video_received: 'type:ticket tags:consent_video_received',
+} as const;
+
 // Full funnel payload returned by GET /api/age-review/funnel. Helpdesk counts
 // are nullable: a Zendesk failure nulls that half while moderation still returns.
 export interface AgeReviewFunnelResponse {

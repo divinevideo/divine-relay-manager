@@ -17,6 +17,7 @@ import {
   type AgeReviewEnv,
 } from './age-review';
 import type { AgeReviewCase } from '../../shared/age-review';
+import { FUNNEL_ZENDESK_QUERIES } from '../../shared/age-review';
 import { suspendUser, unsuspendUser, banUser, createMinorAccount } from './keycast-client';
 import { suspendPubkey, unsuspendPubkey, banPubkey } from './nip86';
 
@@ -1843,5 +1844,21 @@ describe('handleGetAgeReviewFunnel', () => {
     expect(body.helpdesk.requests_in).toBe(9);
     expect(body.helpdesk.video_received).toBe(9);
     expect(body.helpdesk.reports_in).toBe(9);
+  });
+
+  it('counts each helpdesk stage with the exact shared criteria query', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ count: 9 }) });
+    vi.stubGlobal('fetch', mockFetch);
+    const env = makeEnv(mockDb, {
+      ZENDESK_SUBDOMAIN: 'rabblelabs', ZENDESK_EMAIL: 'a@b.co', ZENDESK_API_TOKEN: 'tok',
+    });
+    await handleGetAgeReviewFunnel(req, env, cors);
+
+    // The displayed tooltip criteria are sourced from these same constants, so
+    // asserting the worker queries with them keeps explanation == measurement.
+    const calledUrls = mockFetch.mock.calls.map((c) => c[0] as string);
+    for (const query of Object.values(FUNNEL_ZENDESK_QUERIES)) {
+      expect(calledUrls.some((u) => u.includes(encodeURIComponent(query)))).toBe(true);
+    }
   });
 });
