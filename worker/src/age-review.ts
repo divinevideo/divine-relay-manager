@@ -1190,9 +1190,10 @@ export interface FunnelRow {
   c: number;
 }
 
-// Pure bucketing of the D1 group-by rows into funnel stages. Non-terminal states
-// roll up to in_progress; `cleared` is approved (split into new_minor vs restored
-// by created_via); `denied_closed` is denied/expired.
+// Pure bucketing of the D1 group-by rows into funnel stages. `cleared` is
+// approved (split into new_minor vs restored by created_via); `denied_closed` is
+// denied/expired; every other state (the seven non-terminal states, and by
+// design any unknown/future state) rolls up to in_progress as "still open".
 export function bucketModerationCounts(rows: FunnelRow[]): FunnelModerationCounts {
   const terminal = new Set<string>(TERMINAL_STATES);
   let in_progress = 0;
@@ -1223,17 +1224,17 @@ export function bucketModerationCounts(rows: FunnelRow[]): FunnelModerationCount
   };
 }
 
-// Count tickets matching a Zendesk Search query via /search/count.json. Returns
-// null on any failure so a Zendesk hiccup degrades gracefully rather than
-// blocking the moderation half of the funnel.
+// Count tickets matching a Zendesk Search query via /search/count.json. Takes a
+// resolved client config (auth + baseUrl from getZendeskClientConfig) so it does
+// not duplicate auth/URL construction. Returns null on any failure so a Zendesk
+// hiccup degrades gracefully rather than blocking the moderation half.
 export async function fetchZendeskTagCount(
-  creds: { subdomain: string; email: string; apiToken: string },
+  config: { auth: string; baseUrl: string },
   query: string,
 ): Promise<number | null> {
   try {
-    const auth = btoa(`${creds.email}/token:${creds.apiToken}`);
-    const url = `https://${creds.subdomain}.zendesk.com/api/v2/search/count.json?query=${encodeURIComponent(query)}`;
-    const response = await fetch(url, { headers: { Authorization: `Basic ${auth}` } });
+    const url = `${config.baseUrl}/search/count.json?query=${encodeURIComponent(query)}`;
+    const response = await fetch(url, { headers: { Authorization: `Basic ${config.auth}` } });
     if (!response.ok) return null;
     const data = await response.json() as { count?: number };
     return typeof data.count === 'number' ? data.count : null;
@@ -1267,12 +1268,12 @@ export async function handleGetAgeReviewFunnel(
   let requests_in: number | null = null;
   let video_received: number | null = null;
 
-  const creds = await resolveZendeskCreds(env);
-  if (creds) {
+  const zendesk = await getZendeskClientConfig(env);
+  if (zendesk) {
     [requests_in, video_received, reports_in] = await Promise.all([
-      fetchZendeskTagCount(creds, FUNNEL_ZENDESK_QUERIES.requests_in),
-      fetchZendeskTagCount(creds, FUNNEL_ZENDESK_QUERIES.video_received),
-      fetchZendeskTagCount(creds, FUNNEL_ZENDESK_QUERIES.reports_in),
+      fetchZendeskTagCount(zendesk, FUNNEL_ZENDESK_QUERIES.requests_in),
+      fetchZendeskTagCount(zendesk, FUNNEL_ZENDESK_QUERIES.video_received),
+      fetchZendeskTagCount(zendesk, FUNNEL_ZENDESK_QUERIES.reports_in),
     ]);
   }
 

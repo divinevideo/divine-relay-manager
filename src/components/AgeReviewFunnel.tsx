@@ -111,7 +111,10 @@ export function AgeReviewFunnel() {
           {stages.map((s) => (
             <Tooltip key={s.label}>
               <TooltipTrigger asChild>
-                <div className="rounded-md border p-2 cursor-help">
+                <div
+                  tabIndex={0}
+                  className="rounded-md border p-2 cursor-help focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
                   <div className="text-xl font-semibold tabular-nums">{fmt(s.value)}</div>
                   <div className="flex items-center gap-1 mt-0.5">
                     <span className="text-xs font-medium">{s.label}</span>
