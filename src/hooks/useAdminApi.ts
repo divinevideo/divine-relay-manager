@@ -140,8 +140,6 @@ export function useAdminApi() {
     // Delete operations
     deleteMedia: (sha256: string, reason?: string) =>
       adminApi.deleteMedia(apiUrl, sha256, reason),
-    publishDeletionRequest: (eventId: string, reason?: string) =>
-      adminApi.publishDeletionRequest(apiUrl, eventId, reason),
 
     // Age review config
     getAgeReviewConfig: () =>

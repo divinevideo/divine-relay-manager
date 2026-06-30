@@ -15,7 +15,6 @@ import type { BulkJob, BulkJobMessage, BulkEnqueueResponse } from '../../shared/
 vi.mock('./nip86', () => ({
   getAdminPubkey: vi.fn().mockResolvedValue('moderator-pubkey'),
   banEvent: vi.fn().mockResolvedValue({ success: true }),
-  publishKind5Deletion: vi.fn().mockResolvedValue({ success: true }),
 }));
 
 vi.mock('./zendesk-sync', () => ({
@@ -273,6 +272,18 @@ describe('runBulkModeration', () => {
     expect(result.success).toBe(false);
     expect(result.eventsProcessed).toBe(0);
     expect(result.failures[0]).toContain('relay refused');
+  });
+
+  it('delete-all counts an event as processed on banevent success alone (no kind-5)', async () => {
+    // Admin deletion is NIP-86 banevent only; there is no kind-5 publish, so a
+    // delete that bans successfully is processed with no failures.
+    mockRelay([{ id: 'e'.repeat(64), kind: 1, content: '', tags: [] }]);
+    mockUserVideos([]);
+
+    const result = await runBulkModeration(mockEnv, 'a'.repeat(64), 'delete-all', 'r');
+    expect(result.eventsProcessed).toBe(1);
+    expect(result.failures).toEqual([]);
+    expect(result.success).toBe(true);
   });
 
   it('a failing decision-log batch (non-critical) does not abort an otherwise-successful delete-all', async () => {

@@ -9,7 +9,6 @@ import {
   banEvent,
   banPubkey,
   unbanPubkey,
-  publishKind5Deletion,
   type SecretStoreSecret,
 } from './nip86';
 import { ensureSchema } from './db';
@@ -451,18 +450,6 @@ export default {
 
       if (path === '/api/moderate-media' && request.method === 'POST') {
         return handleModerateMedia(request, env, corsHeaders);
-      }
-
-      if (path === '/api/publish-deletion' && request.method === 'POST') {
-        const body = await request.json() as { eventId?: string; reason?: string };
-        if (!body.eventId) {
-          return jsonResponse({ success: false, error: 'Missing eventId' }, 400, corsHeaders);
-        }
-        const result = await publishKind5Deletion(body.eventId, body.reason || 'Deleted by moderator', env);
-        if (!result.success) {
-          return jsonResponse({ success: false, error: result.error || 'Failed to publish deletion' }, 500, corsHeaders);
-        }
-        return jsonResponse({ success: true }, 200, corsHeaders);
       }
 
       if (path === '/api/decisions' && request.method === 'POST') {

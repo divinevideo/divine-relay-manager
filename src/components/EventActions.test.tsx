@@ -1,23 +1,33 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { TooltipProvider } from '@/components/ui/tooltip';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventActions } from './EventActions';
 
-vi.mock('@/hooks/useAdminApi', () => ({
-  useAdminApi: () => ({
-    deleteEvent: vi.fn().mockResolvedValue({ success: true }),
-    moderateMedia: vi.fn().mockResolvedValue({ success: true }),
-    deleteMedia: vi.fn().mockResolvedValue({ success: true }),
-    publishDeletionRequest: vi.fn().mockResolvedValue({ success: true }),
-    callRelayRpc: vi.fn().mockResolvedValue({ success: true }),
-    logDecision: vi.fn().mockResolvedValue(undefined),
-  }),
+// Stable mocks so failure-path tests can control the audit log and assert on toasts.
+const api = vi.hoisted(() => ({
+  banEvent: vi.fn(),
+  allowEvent: vi.fn(),
+  deleteEvent: vi.fn(),
+  moderateMedia: vi.fn(),
+  deleteMedia: vi.fn(),
+  callRelayRpc: vi.fn(),
+  logDecision: vi.fn(),
 }));
+const toast = vi.hoisted(() => vi.fn());
 
-vi.mock('@/hooks/useToast', () => ({
-  useToast: () => ({ toast: vi.fn() }),
-}));
+vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => api }));
+vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast }) }));
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  api.banEvent.mockResolvedValue({ success: true });
+  api.allowEvent.mockResolvedValue({ success: true });
+  api.deleteEvent.mockResolvedValue({ success: true });
+  api.moderateMedia.mockResolvedValue({ success: true });
+  api.deleteMedia.mockResolvedValue({ success: true });
+  api.logDecision.mockResolvedValue(undefined);
+});
 
 function renderWithProvider(ui: React.ReactElement) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
@@ -72,5 +82,40 @@ describe('EventActions', () => {
     );
     expect(screen.getByRole('button', { name: /Remove Restriction/i })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Age Restrict/i })).not.toBeInTheDocument();
+  });
+
+  it('reports success on Ban Event even when the audit-log write fails', async () => {
+    // Regression: logDecision used to be awaited in the mutation, so a failed
+    // /api/decisions write made a SUCCEEDED banevent report "Failed to ban event".
+    // Audit is now fire-and-forget, so the ban reports success regardless.
+    api.logDecision.mockRejectedValue(new Error('audit down'));
+    renderWithProvider(<EventActions eventId="event-1" pubkey={'a'.repeat(64)} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Ban Event/i }));
+
+    await waitFor(() => expect(api.banEvent).toHaveBeenCalledWith('event-1', 'Banned by moderator'));
+    await waitFor(() =>
+      expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Event banned from relay' })),
+    );
+    expect(toast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Failed to ban event' }),
+    );
+    // and the audit failure surfaces as a non-blocking toast, not an action failure
+    await waitFor(() =>
+      expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: expect.stringMatching(/audit log not recorded/i) })),
+    );
+  });
+
+  it('does not fire-and-forget when the audit write never settles — ban still reports success', async () => {
+    // A hung /api/decisions write must not stall or fail the action.
+    api.logDecision.mockReturnValue(new Promise(() => {})); // never settles
+    renderWithProvider(<EventActions eventId="event-1" pubkey={'a'.repeat(64)} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Ban Event/i }));
+
+    await waitFor(() =>
+      expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Event banned from relay' })),
+    );
+    expect(api.banEvent).toHaveBeenCalledTimes(1);
   });
 });
