@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   handleGetAgeReviewCases,
   handleGetAgeReviewCase,
@@ -11,9 +11,13 @@ import {
   syncAgeReviewTicketResolution,
   getAgeReviewConfig,
   updateAgeReviewConfig,
+  bucketModerationCounts,
+  fetchZendeskTagCount,
+  handleGetAgeReviewFunnel,
   type AgeReviewEnv,
 } from './age-review';
 import type { AgeReviewCase } from '../../shared/age-review';
+import { FUNNEL_ZENDESK_QUERIES } from '../../shared/age-review';
 import { suspendUser, unsuspendUser, banUser, createMinorAccount } from './keycast-client';
 import { suspendPubkey, unsuspendPubkey, banPubkey } from './nip86';
 
@@ -1745,5 +1749,162 @@ describe('handleCreateMinorAccount', () => {
     // Assert positionally: toContain(null) would also match the null zendesk_ticket_id.
     expect(bindArgs[2]).toBe('https://login.test/claim/abc');
     expect(bindArgs[3]).toBeNull();
+  });
+});
+
+describe('bucketModerationCounts', () => {
+  it('sums non-terminal states into in_progress and splits approved by created_via', () => {
+    const result = bucketModerationCounts([
+      { state: 'cleared', created_via: 'report', c: 3 },
+      { state: 'cleared', created_via: 'minor_onboarding', c: 2 },
+      { state: 'denied_closed', created_via: 'report', c: 1 },
+      { state: 'submitted_for_review', created_via: 'report', c: 4 },
+      { state: 'restricted_pending_parental_consent', created_via: 'report', c: 5 },
+    ]);
+    expect(result.in_progress).toBe(9);
+    expect(result.approved).toEqual({ total: 5, restored: 3, new_minor: 2 });
+    expect(result.denied_expired).toBe(1);
+  });
+
+  it('returns zeroes for an empty set', () => {
+    expect(bucketModerationCounts([])).toEqual({
+      in_progress: 0,
+      approved: { total: 0, restored: 0, new_minor: 0 },
+      denied_expired: 0,
+    });
+  });
+
+  it('treats an unknown/future state as in_progress (open) by design', () => {
+    const result = bucketModerationCounts([
+      { state: 'some_future_state', created_via: 'report', c: 6 },
+    ]);
+    expect(result.in_progress).toBe(6);
+    expect(result.approved.total).toBe(0);
+    expect(result.denied_expired).toBe(0);
+  });
+
+  it('counts a cleared row with null created_via as restored', () => {
+    const result = bucketModerationCounts([
+      { state: 'cleared', created_via: null, c: 4 },
+    ]);
+    expect(result.approved).toEqual({ total: 4, restored: 4, new_minor: 0 });
+  });
+});
+
+describe('fetchZendeskTagCount', () => {
+  const config = { auth: btoa('a@b.co/token:tok'), baseUrl: 'https://rabblelabs.zendesk.com/api/v2' };
+
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it('builds the search/count URL from the config and returns the count', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ count: 7 }) });
+    vi.stubGlobal('fetch', mockFetch);
+
+    const result = await fetchZendeskTagCount(config, 'type:ticket tags:age-review-response');
+
+    expect(result).toBe(7);
+    const [calledUrl, init] = mockFetch.mock.calls[0];
+    expect(calledUrl).toContain('https://rabblelabs.zendesk.com/api/v2/search/count.json?query=');
+    expect(calledUrl).toContain(encodeURIComponent('type:ticket tags:age-review-response'));
+    expect((init as RequestInit).headers).toMatchObject({ Authorization: `Basic ${config.auth}` });
+  });
+
+  it('returns null on a non-ok response', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, json: async () => ({}) }));
+    expect(await fetchZendeskTagCount(config, 'q')).toBeNull();
+  });
+
+  it('returns null when fetch throws', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network')));
+    expect(await fetchZendeskTagCount(config, 'q')).toBeNull();
+  });
+});
+
+describe('handleGetAgeReviewFunnel', () => {
+  const cors = { 'Access-Control-Allow-Origin': '*' };
+  const groupRows = [
+    { state: 'cleared', created_via: 'report', c: 3 },
+    { state: 'cleared', created_via: 'minor_onboarding', c: 2 },
+    { state: 'denied_closed', created_via: 'report', c: 1 },
+    { state: 'submitted_for_review', created_via: 'report', c: 4 },
+  ];
+  const mockDb = {
+    prepare: vi.fn().mockReturnValue({
+      bind: vi.fn().mockReturnValue({ all: vi.fn().mockResolvedValue({ results: groupRows }) }),
+    }),
+  };
+  const req = new Request('https://api.test/api/age-review/funnel?age_band=age_13_15');
+
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it('returns moderation counts and nulls helpdesk when Zendesk creds are absent', async () => {
+    const env = makeEnv(mockDb); // no ZENDESK_* set
+    const res = await handleGetAgeReviewFunnel(req, env, cors);
+    const body = await res.json() as import('../../shared/age-review').AgeReviewFunnelResponse;
+
+    expect(res.status).toBe(200);
+    expect(body.moderation.approved).toEqual({ total: 5, restored: 3, new_minor: 2 });
+    expect(body.moderation.in_progress).toBe(4);
+    expect(body.moderation.denied_expired).toBe(1);
+    expect(body.helpdesk).toMatchObject({ reports_in: null, requests_in: null, video_received: null });
+    expect(body.age_band).toBe('age_13_15');
+  });
+
+  it('populates helpdesk counts when Zendesk creds resolve', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ count: 9 }) }));
+    const env = makeEnv(mockDb, {
+      ZENDESK_SUBDOMAIN: 'rabblelabs', ZENDESK_EMAIL: 'a@b.co', ZENDESK_API_TOKEN: 'tok',
+    });
+    const res = await handleGetAgeReviewFunnel(req, env, cors);
+    const body = await res.json() as import('../../shared/age-review').AgeReviewFunnelResponse;
+
+    expect(body.helpdesk.requests_in).toBe(9);
+    expect(body.helpdesk.video_received).toBe(9);
+    expect(body.helpdesk.reports_in).toBe(9);
+  });
+
+  it('keeps moderation counts and nulls helpdesk when Zendesk creds resolve but the call fails', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('zendesk down')));
+    const env = makeEnv(mockDb, {
+      ZENDESK_SUBDOMAIN: 'rabblelabs', ZENDESK_EMAIL: 'a@b.co', ZENDESK_API_TOKEN: 'tok',
+    });
+    const res = await handleGetAgeReviewFunnel(req, env, cors);
+    const body = await res.json() as import('../../shared/age-review').AgeReviewFunnelResponse;
+
+    expect(res.status).toBe(200);
+    expect(body.moderation.approved).toEqual({ total: 5, restored: 3, new_minor: 2 });
+    expect(body.moderation.in_progress).toBe(4);
+    expect(body.helpdesk).toMatchObject({ reports_in: null, requests_in: null, video_received: null });
+  });
+
+  it('keeps moderation counts and nulls helpdesk when Zendesk secret resolution fails', async () => {
+    const env = makeEnv(mockDb, {
+      ZENDESK_SUBDOMAIN: { get: vi.fn().mockRejectedValue(new Error('secret store down')) },
+      ZENDESK_EMAIL: 'a@b.co',
+      ZENDESK_API_TOKEN: 'tok',
+    });
+    const res = await handleGetAgeReviewFunnel(req, env, cors);
+    const body = await res.json() as import('../../shared/age-review').AgeReviewFunnelResponse;
+
+    expect(res.status).toBe(200);
+    expect(body.moderation.approved).toEqual({ total: 5, restored: 3, new_minor: 2 });
+    expect(body.moderation.in_progress).toBe(4);
+    expect(body.helpdesk).toMatchObject({ reports_in: null, requests_in: null, video_received: null });
+  });
+
+  it('counts each helpdesk stage with the exact shared criteria query', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ count: 9 }) });
+    vi.stubGlobal('fetch', mockFetch);
+    const env = makeEnv(mockDb, {
+      ZENDESK_SUBDOMAIN: 'rabblelabs', ZENDESK_EMAIL: 'a@b.co', ZENDESK_API_TOKEN: 'tok',
+    });
+    await handleGetAgeReviewFunnel(req, env, cors);
+
+    // The displayed tooltip criteria are sourced from these same constants, so
+    // asserting the worker queries with them keeps explanation == measurement.
+    const calledUrls = mockFetch.mock.calls.map((c) => c[0] as string);
+    for (const query of Object.values(FUNNEL_ZENDESK_QUERIES)) {
+      expect(calledUrls.some((u) => u.includes(encodeURIComponent(query)))).toBe(true);
+    }
   });
 });

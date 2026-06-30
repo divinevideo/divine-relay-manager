@@ -125,3 +125,39 @@ export interface AgeReviewCaseResponse {
   enforcementComplete?: boolean;
   enforcement?: AgeReviewEnforcement;
 }
+
+// Greenlight consent funnel: moderation (D1) outcome counts for one age band.
+export interface FunnelModerationCounts {
+  in_progress: number;
+  approved: { total: number; restored: number; new_minor: number };
+  denied_expired: number;
+}
+
+// Exact Zendesk Search queries behind each helpdesk funnel stage. Single source
+// of truth: the worker counts with these, and the UI surfaces them verbatim in
+// tooltips, so the displayed criteria can never drift from what is counted.
+// Reports vs requests are a clean partition of all `age-review` tickets: a
+// third-party in-app report carries `age-review` only, while a parent/teen who
+// reaches the helpdesk also carries `age-review-response`. Not band-filtered
+// (Zendesk does not tag age band), so these count all ages.
+export const FUNNEL_ZENDESK_QUERIES = {
+  reports_in: 'type:ticket tags:age-review -tags:age-review-response',
+  requests_in: 'type:ticket tags:age-review-response',
+  video_received: 'type:ticket tags:consent_video_received',
+} as const;
+
+// Full funnel payload returned by GET /api/age-review/funnel. Helpdesk counts
+// are nullable: a Zendesk failure nulls that half while moderation still returns.
+export interface AgeReviewFunnelResponse {
+  success: boolean;
+  age_band: AgeBand;
+  helpdesk: {
+    source: 'zendesk';
+    band_scope: 'all_bands';
+    reports_in: number | null;
+    requests_in: number | null;
+    video_received: number | null;
+  };
+  moderation: FunnelModerationCounts & { source: 'd1'; band_scope: AgeBand };
+  generated_at: string;
+}

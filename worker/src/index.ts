@@ -20,6 +20,7 @@ import { suspendUser, unsuspendUser, banUser } from './keycast-client';
 import {
   handleGetAgeReviewCases,
   handleGetAgeReviewCase,
+  handleGetAgeReviewFunnel,
   handleUpdateAgeReviewCase,
   handleCreateMinorAccount,
   handleGetModerationStatus,
@@ -562,6 +563,10 @@ export default {
       }
 
       // Age review case management
+      if (path === '/api/age-review/funnel' && request.method === 'GET') {
+        if (env.DB) await ensureSchemaOnce(env.DB);
+        return handleGetAgeReviewFunnel(request, env, corsHeaders);
+      }
       if (path === '/api/age-review/cases' && request.method === 'GET') {
         if (env.DB) await ensureSchemaOnce(env.DB);
         return handleGetAgeReviewCases(request, env, corsHeaders);

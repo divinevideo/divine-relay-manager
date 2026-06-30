@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/select";
 import { Clock, RefreshCw, Filter, AlertTriangle } from "lucide-react";
 import { AgeReviewDetail } from "@/components/AgeReviewDetail";
+import { AgeReviewFunnel } from "@/components/AgeReviewFunnel";
 import { CreateMinorAccountDialog } from "@/components/CreateMinorAccountDialog";
 import { UserIdentifier } from "@/components/UserIdentifier";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -238,13 +239,17 @@ export function AgeReview() {
   }
 
   return (
-    <div className="h-full flex gap-4">
-      <Card className="w-[360px] shrink-0 flex flex-col overflow-hidden">
-        {listContent}
-      </Card>
-      <Card className="flex-1 overflow-hidden">
-        {detailContent}
-      </Card>
+    <div className="h-full flex flex-col gap-4">
+      {/* Funnel is desktop-only in v1; the mobile branch above is unchanged. */}
+      <AgeReviewFunnel />
+      <div className="flex-1 min-h-0 flex gap-4">
+        <Card className="w-[360px] shrink-0 flex flex-col overflow-hidden">
+          {listContent}
+        </Card>
+        <Card className="flex-1 overflow-hidden">
+          {detailContent}
+        </Card>
+      </div>
     </div>
   );
 }

@@ -13,6 +13,9 @@ import {
   type EnforcementLegStatus,
   type AgeReviewEnforcement,
   type AgeReviewCaseResponse,
+  type FunnelModerationCounts,
+  type AgeReviewFunnelResponse,
+  FUNNEL_ZENDESK_QUERIES,
 } from '../../shared/age-review';
 import { runBulkModeration, type BulkModerateEnv } from './bulk-moderate';
 import { resolveZendeskCreds } from './zendesk-sync';
@@ -1174,6 +1177,118 @@ export async function updateAgeReviewConfig(
     ).bind(String(config.auto_delete_on_deny)).run();
   }
   return getAgeReviewConfig(db);
+}
+
+// ---------------------------------------------------------------------------
+// Greenlight consent funnel
+// ---------------------------------------------------------------------------
+
+// One row of the funnel's D1 group-by (state x created_via, with a count).
+export interface FunnelRow {
+  state: string;
+  created_via: string | null;
+  c: number;
+}
+
+// Pure bucketing of the D1 group-by rows into funnel stages. `cleared` is
+// approved (split into new_minor vs restored by created_via); `denied_closed` is
+// denied/expired; every other state (the seven non-terminal states, and by
+// design any unknown/future state) rolls up to in_progress as "still open".
+export function bucketModerationCounts(rows: FunnelRow[]): FunnelModerationCounts {
+  const terminal = new Set<string>(TERMINAL_STATES);
+  let in_progress = 0;
+  let approvedTotal = 0;
+  let approvedNewMinor = 0;
+  let denied_expired = 0;
+
+  for (const row of rows) {
+    const count = row.c ?? 0;
+    if (row.state === 'cleared') {
+      approvedTotal += count;
+      if (row.created_via === 'minor_onboarding') approvedNewMinor += count;
+    } else if (row.state === 'denied_closed') {
+      denied_expired += count;
+    } else if (!terminal.has(row.state)) {
+      in_progress += count;
+    }
+  }
+
+  return {
+    in_progress,
+    approved: {
+      total: approvedTotal,
+      restored: approvedTotal - approvedNewMinor,
+      new_minor: approvedNewMinor,
+    },
+    denied_expired,
+  };
+}
+
+// Count tickets matching a Zendesk Search query via /search/count.json. Takes a
+// resolved client config (auth + baseUrl from getZendeskClientConfig) so it does
+// not duplicate auth/URL construction. Returns null on any failure so a Zendesk
+// hiccup degrades gracefully rather than blocking the moderation half.
+export async function fetchZendeskTagCount(
+  config: { auth: string; baseUrl: string },
+  query: string,
+): Promise<number | null> {
+  try {
+    const url = `${config.baseUrl}/search/count.json?query=${encodeURIComponent(query)}`;
+    const response = await fetch(url, { headers: { Authorization: `Basic ${config.auth}` } });
+    if (!response.ok) return null;
+    const data = await response.json() as { count?: number };
+    return typeof data.count === 'number' ? data.count : null;
+  } catch {
+    return null;
+  }
+}
+
+// GET /api/age-review/funnel: one D1 group-by for band-accurate moderation
+// outcomes, plus Zendesk tag counts for the helpdesk intake stages. The Zendesk
+// half is best-effort and nulls out on failure; the D1 half always returns.
+export async function handleGetAgeReviewFunnel(
+  request: Request,
+  env: AgeReviewEnv,
+  corsHeaders: Record<string, string>,
+): Promise<Response> {
+  if (!env.DB) return json({ success: false, error: 'Database not configured' }, 500, corsHeaders);
+
+  const url = new URL(request.url);
+  const bandParam = url.searchParams.get('age_band');
+  const ageBand: AgeBand = bandParam && AGE_BANDS.includes(bandParam as AgeBand)
+    ? (bandParam as AgeBand)
+    : 'age_13_15';
+
+  const rows = await env.DB.prepare(
+    'SELECT state, created_via, COUNT(*) AS c FROM age_review_cases WHERE suspected_age_band = ? GROUP BY state, created_via',
+  ).bind(ageBand).all<FunnelRow>();
+  const moderation = bucketModerationCounts(rows.results ?? []);
+
+  let reports_in: number | null = null;
+  let requests_in: number | null = null;
+  let video_received: number | null = null;
+
+  try {
+    const zendesk = await getZendeskClientConfig(env);
+    if (zendesk) {
+      [requests_in, video_received, reports_in] = await Promise.all([
+        fetchZendeskTagCount(zendesk, FUNNEL_ZENDESK_QUERIES.requests_in),
+        fetchZendeskTagCount(zendesk, FUNNEL_ZENDESK_QUERIES.video_received),
+        fetchZendeskTagCount(zendesk, FUNNEL_ZENDESK_QUERIES.reports_in),
+      ]);
+    }
+  } catch (error) {
+    console.warn('[age-review] Zendesk funnel counts unavailable:', error);
+  }
+
+  const payload: AgeReviewFunnelResponse = {
+    success: true,
+    age_band: ageBand,
+    helpdesk: { source: 'zendesk', band_scope: 'all_bands', reports_in, requests_in, video_received },
+    moderation: { source: 'd1', band_scope: ageBand, ...moderation },
+    generated_at: new Date().toISOString(),
+  };
+  return json(payload, 200, corsHeaders);
 }
 
 // ---------------------------------------------------------------------------
