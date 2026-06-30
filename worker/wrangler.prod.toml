@@ -93,9 +93,6 @@ MODERATION_ADMIN_URL = "https://moderation-api.divine.video"
 ALLOWED_ORIGINS = "https://relay.admin.divine.video,https://app.divine.video,https://*.openvine-app.pages.dev,*.divine-relay-manager.pages.dev,*.divine-relay-admin.pages.dev"
 # CDN domain for media proxy (Blossom admin bypass for blocked content preview)
 CDN_DOMAIN = "media.divine.video"
-# Zendesk custom field IDs for webhook callback
-ZENDESK_FIELD_ACTION_STATUS = "14545793289743"
-ZENDESK_FIELD_ACTION_REQUESTED = "14545826900367"
 # Slack webhook for age review deadline alerts (add via: wrangler secret put SLACK_WEBHOOK_URL --config wrangler.prod.toml)
 # SLACK_WEBHOOK_URL — not in [vars] because it's a secret
 # Zendesk custom field IDs for auto-solve required fields
