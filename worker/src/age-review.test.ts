@@ -1877,6 +1877,21 @@ describe('handleGetAgeReviewFunnel', () => {
     expect(body.helpdesk).toMatchObject({ reports_in: null, requests_in: null, video_received: null });
   });
 
+  it('keeps moderation counts and nulls helpdesk when Zendesk secret resolution fails', async () => {
+    const env = makeEnv(mockDb, {
+      ZENDESK_SUBDOMAIN: { get: vi.fn().mockRejectedValue(new Error('secret store down')) },
+      ZENDESK_EMAIL: 'a@b.co',
+      ZENDESK_API_TOKEN: 'tok',
+    });
+    const res = await handleGetAgeReviewFunnel(req, env, cors);
+    const body = await res.json() as import('../../shared/age-review').AgeReviewFunnelResponse;
+
+    expect(res.status).toBe(200);
+    expect(body.moderation.approved).toEqual({ total: 5, restored: 3, new_minor: 2 });
+    expect(body.moderation.in_progress).toBe(4);
+    expect(body.helpdesk).toMatchObject({ reports_in: null, requests_in: null, video_received: null });
+  });
+
   it('counts each helpdesk stage with the exact shared criteria query', async () => {
     const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ count: 9 }) });
     vi.stubGlobal('fetch', mockFetch);

@@ -1268,13 +1268,17 @@ export async function handleGetAgeReviewFunnel(
   let requests_in: number | null = null;
   let video_received: number | null = null;
 
-  const zendesk = await getZendeskClientConfig(env);
-  if (zendesk) {
-    [requests_in, video_received, reports_in] = await Promise.all([
-      fetchZendeskTagCount(zendesk, FUNNEL_ZENDESK_QUERIES.requests_in),
-      fetchZendeskTagCount(zendesk, FUNNEL_ZENDESK_QUERIES.video_received),
-      fetchZendeskTagCount(zendesk, FUNNEL_ZENDESK_QUERIES.reports_in),
-    ]);
+  try {
+    const zendesk = await getZendeskClientConfig(env);
+    if (zendesk) {
+      [requests_in, video_received, reports_in] = await Promise.all([
+        fetchZendeskTagCount(zendesk, FUNNEL_ZENDESK_QUERIES.requests_in),
+        fetchZendeskTagCount(zendesk, FUNNEL_ZENDESK_QUERIES.video_received),
+        fetchZendeskTagCount(zendesk, FUNNEL_ZENDESK_QUERIES.reports_in),
+      ]);
+    }
+  } catch (error) {
+    console.warn('[age-review] Zendesk funnel counts unavailable:', error);
   }
 
   const payload: AgeReviewFunnelResponse = {
