@@ -165,7 +165,9 @@ export function AgeReviewDetail({ caseData: c }: Props) {
     : null;
   const verifiedMinorAtLabel =
     verifiedMinorAtDate && !Number.isNaN(verifiedMinorAtDate.getTime())
-      ? verifiedMinorAtDate.toLocaleDateString()
+      ? // UTC so every moderator sees the same approval date regardless of their
+        // local timezone (a near-midnight-UTC timestamp would otherwise shift a day).
+        verifiedMinorAtDate.toLocaleDateString(undefined, { timeZone: 'UTC' })
       : null;
 
   return (

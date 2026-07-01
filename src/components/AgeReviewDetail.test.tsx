@@ -290,6 +290,23 @@ describe('AgeReviewDetail', () => {
     expect(
       await screen.findByText(/approved protected minor/i)
     ).toBeInTheDocument();
+    // The approved date renders (UTC), distinct from the badge label.
+    expect(screen.getByText(/approved \d/i)).toHaveTextContent('2026');
+  });
+
+  it('renders the badge but omits the date when verified_minor_at is malformed', async () => {
+    getAccountStatus.mockResolvedValue({
+      success: true,
+      verified_minor: true,
+      verified_minor_at: 'not-a-date',
+    });
+
+    renderDetail(makeCase());
+
+    expect(
+      await screen.findByText(/approved protected minor/i)
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/approved \d/i)).not.toBeInTheDocument();
   });
 
   it('does not show the protected-minor badge when verified_minor is false', async () => {
