@@ -83,6 +83,8 @@ describe('AgeReviewDetail', () => {
     updateAgeReviewCase.mockResolvedValue({ success: true });
     getAgeReviewConfig.mockClear();
     getAgeReviewConfig.mockResolvedValue({ auto_delete_on_deny: false });
+    getAccountStatus.mockClear();
+    getAccountStatus.mockResolvedValue({ success: true, verified_minor: false });
     toast.mockClear();
     writeText.mockClear();
     Object.assign(navigator, {
@@ -315,5 +317,15 @@ describe('AgeReviewDetail', () => {
     expect(
       screen.queryByText(/approved protected minor/i)
     ).not.toBeInTheDocument();
+  });
+
+  it('shows status-unavailable when the account-status query rejects', async () => {
+    getAccountStatus.mockRejectedValue(new Error('network'));
+
+    renderDetail(makeCase());
+
+    expect(
+      await screen.findByText(/protected-minor status unavailable/i)
+    ).toBeInTheDocument();
   });
 });

@@ -160,6 +160,13 @@ export function AgeReviewDetail({ caseData: c }: Props) {
     enabled: !!c.pubkey,
     staleTime: 60_000, // verified_minor is durable; avoid refetching per case reopen
   });
+  const verifiedMinorAtDate = accountStatus?.verified_minor_at
+    ? new Date(accountStatus.verified_minor_at)
+    : null;
+  const verifiedMinorAtLabel =
+    verifiedMinorAtDate && !Number.isNaN(verifiedMinorAtDate.getTime())
+      ? verifiedMinorAtDate.toLocaleDateString()
+      : null;
 
   return (
     <ScrollArea className="h-full">
@@ -179,10 +186,9 @@ export function AgeReviewDetail({ caseData: c }: Props) {
                 <Badge className="bg-emerald-600 text-white hover:bg-emerald-600">
                   Approved protected minor (13-15)
                 </Badge>
-                {accountStatus.verified_minor_at ? (
+                {verifiedMinorAtLabel ? (
                   <span className="text-xs text-muted-foreground">
-                    approved{' '}
-                    {new Date(accountStatus.verified_minor_at).toLocaleDateString()}
+                    approved {verifiedMinorAtLabel}
                   </span>
                 ) : null}
               </>
