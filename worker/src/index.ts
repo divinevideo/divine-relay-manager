@@ -26,6 +26,7 @@ import {
   getAgeReviewConfig,
   updateAgeReviewConfig,
 } from './age-review';
+import { handleAccountStatus } from './account-status';
 import { handleBulkModerateEnqueue, handleBulkJobStatus, processBulkJob } from './bulk-moderate';
 import type { BulkJobMessage } from '../../shared/bulk-moderation';
 import { ensureZendeskTable, addZendeskInternalNote, syncZendeskAfterAction } from './zendesk-sync';
@@ -424,6 +425,12 @@ export default {
       });
       if (adminAuthError) {
         return jsonResponse({ success: false, error: adminAuthError }, 401, corsHeaders);
+      }
+
+      // Moderator-facing account status (surfaces keycast verified_minor for the age-review view).
+      if (path.startsWith('/api/account-status/') && request.method === 'GET') {
+        const targetPubkey = path.replace('/api/account-status/', '');
+        return handleAccountStatus(targetPubkey, env, corsHeaders);
       }
 
       if (path === '/api/publish' && request.method === 'POST') {
