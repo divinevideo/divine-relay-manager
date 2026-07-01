@@ -27,7 +27,10 @@ export default defineConfig(() => {
     globals: true,
     environment: 'jsdom',
     setupFiles: './src/test/setup.ts',
-    exclude: ['node_modules', 'worker/**'],
+    // `node_modules` alone only skips the top-level dir; a git worktree under
+    // `.worktrees/*/node_modules` would otherwise get globbed and run ~20k
+    // third-party package tests. Match nested node_modules and worktrees too.
+    exclude: ['**/node_modules/**', '**/dist/**', '**/.worktrees/**', 'worker/**'],
     onConsoleLog(log) {
       return !log.includes("React Router Future Flag Warning");
     },
