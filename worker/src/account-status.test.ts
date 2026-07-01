@@ -50,7 +50,7 @@ describe('handleAccountStatus', () => {
     const res = await handleAccountStatus('not-a-pubkey', makeEnv(), CORS);
 
     expect(res.status).toBe(400);
-    const body = await res.json();
+    const body = (await res.json()) as { success: boolean };
     expect(body.success).toBe(false);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
@@ -65,7 +65,24 @@ describe('handleAccountStatus', () => {
     // Not a hard failure: the moderator UI reads this as "status unavailable"
     // without blocking the case view.
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as { success: boolean };
+    expect(body.success).toBe(false);
+  });
+
+  it('degrades gracefully when keycast returns a server error', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 500,
+        text: () => Promise.resolve('boom'),
+      }),
+    );
+
+    const res = await handleAccountStatus(VALID_PUBKEY, makeEnv(), CORS);
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { success: boolean };
     expect(body.success).toBe(false);
   });
 });

@@ -154,10 +154,11 @@ export function AgeReviewDetail({ caseData: c }: Props) {
 
   // Keycast-backed protected-minor status (verified_minor). Best-effort: a
   // keycast blip resolves to success:false, so we simply don't show the badge.
-  const { data: accountStatus } = useQuery({
+  const { data: accountStatus, isError: accountStatusFailed } = useQuery({
     queryKey: ['account-status', c.pubkey],
     queryFn: () => api.getAccountStatus(c.pubkey),
     enabled: !!c.pubkey,
+    staleTime: 60_000, // verified_minor is durable; avoid refetching per case reopen
   });
 
   return (
@@ -185,6 +186,12 @@ export function AgeReviewDetail({ caseData: c }: Props) {
                   </span>
                 ) : null}
               </>
+            ) : accountStatusFailed || accountStatus?.success === false ? (
+              // Couldn't determine (keycast down/misconfig) — don't let a blip
+              // read the same as a confirmed non-minor; keep the safety signal.
+              <span className="text-xs text-muted-foreground">
+                protected-minor status unavailable
+              </span>
             ) : null}
           </div>
 

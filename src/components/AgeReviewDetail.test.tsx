@@ -8,7 +8,9 @@ import type { AgeReviewCase, AgeBand, AgeReviewState } from '../../shared/age-re
 
 const updateAgeReviewCase = vi.fn().mockResolvedValue({ success: true });
 const getAgeReviewConfig = vi.fn().mockResolvedValue({ auto_delete_on_deny: false });
-const getAccountStatus = vi.fn().mockResolvedValue({ success: false });
+const getAccountStatus = vi
+  .fn()
+  .mockResolvedValue({ success: true, verified_minor: false });
 const writeText = vi.fn().mockResolvedValue(undefined);
 const toast = vi.fn();
 
@@ -294,6 +296,22 @@ describe('AgeReviewDetail', () => {
     renderDetail(makeCase());
 
     await waitFor(() => expect(getAccountStatus).toHaveBeenCalled());
+    expect(
+      screen.queryByText(/approved protected minor/i)
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/status unavailable/i)
+    ).not.toBeInTheDocument();
+  });
+
+  it('shows status-unavailable when the account status could not be loaded', async () => {
+    getAccountStatus.mockResolvedValue({ success: false });
+
+    renderDetail(makeCase());
+
+    expect(
+      await screen.findByText(/protected-minor status unavailable/i)
+    ).toBeInTheDocument();
     expect(
       screen.queryByText(/approved protected minor/i)
     ).not.toBeInTheDocument();

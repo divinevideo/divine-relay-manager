@@ -13,7 +13,7 @@ export interface KeycastResult {
 
 export type KeycastReason = 'age_review' | 'age_review_denied' | 'age_review_expired' | 'moderation';
 
-const HEX_64 = /^[0-9a-f]{64}$/;
+export const HEX_64 = /^[0-9a-f]{64}$/;
 
 async function resolveToken(binding: string | SecretStoreSecret | undefined): Promise<string | null> {
   if (!binding) return null;

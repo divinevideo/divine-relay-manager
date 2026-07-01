@@ -1,9 +1,7 @@
 // ABOUTME: Moderator-facing account-status endpoint. Surfaces keycast's durable
 // ABOUTME: verified_minor flag (approved protected minor 13-15) for the age-review view.
 
-import { getUserStatus, type KeycastEnv } from './keycast-client';
-
-const HEX_64 = /^[0-9a-f]{64}$/;
+import { getUserStatus, HEX_64, type KeycastEnv } from './keycast-client';
 
 function json(
   data: unknown,
