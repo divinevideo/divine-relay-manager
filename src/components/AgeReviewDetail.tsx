@@ -152,6 +152,24 @@ export function AgeReviewDetail({ caseData: c }: Props) {
     queryFn: () => api.getAgeReviewConfig(),
   });
 
+  // Keycast-backed protected-minor status (verified_minor). Best-effort: a
+  // keycast blip resolves to success:false, so we simply don't show the badge.
+  const { data: accountStatus, isError: accountStatusFailed } = useQuery({
+    queryKey: ['account-status', c.pubkey],
+    queryFn: () => api.getAccountStatus(c.pubkey),
+    enabled: !!c.pubkey,
+    staleTime: 60_000, // verified_minor is durable; avoid refetching per case reopen
+  });
+  const verifiedMinorAtDate = accountStatus?.verified_minor_at
+    ? new Date(accountStatus.verified_minor_at)
+    : null;
+  const verifiedMinorAtLabel =
+    verifiedMinorAtDate && !Number.isNaN(verifiedMinorAtDate.getTime())
+      ? // UTC so every moderator sees the same approval date regardless of their
+        // local timezone (a near-midnight-UTC timestamp would otherwise shift a day).
+        verifiedMinorAtDate.toLocaleDateString(undefined, { timeZone: 'UTC' })
+      : null;
+
   return (
     <ScrollArea className="h-full">
       <div className="space-y-4 p-4">
@@ -164,6 +182,24 @@ export function AgeReviewDetail({ caseData: c }: Props) {
               <Badge variant="outline" className="gap-1">
                 <Pause className="h-3 w-3" /> Clock Paused
               </Badge>
+            ) : null}
+            {accountStatus?.verified_minor ? (
+              <>
+                <Badge className="bg-emerald-600 text-white hover:bg-emerald-600">
+                  Approved protected minor (13-15)
+                </Badge>
+                {verifiedMinorAtLabel ? (
+                  <span className="text-xs text-muted-foreground">
+                    approved {verifiedMinorAtLabel}
+                  </span>
+                ) : null}
+              </>
+            ) : accountStatusFailed || accountStatus?.success === false ? (
+              // Couldn't determine (keycast down/misconfig) — don't let a blip
+              // read the same as a confirmed non-minor; keep the safety signal.
+              <span className="text-xs text-muted-foreground">
+                protected-minor status unavailable
+              </span>
             ) : null}
           </div>
 
