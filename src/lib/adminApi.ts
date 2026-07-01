@@ -1036,6 +1036,31 @@ export async function getAgeReviewCase(
   return apiRequest<AgeReviewCaseResponse>(apiUrl, `/api/age-review/cases/${caseId}`, 'GET');
 }
 
+/** Keycast-backed account status for moderators: surfaces the durable
+ * `verified_minor` flag (approved protected minor 13-15). A keycast blip returns
+ * `{ success: false }` (HTTP 200), so callers degrade to "status unavailable". */
+export interface AccountStatusResponse {
+  success: boolean;
+  pubkey?: string;
+  status?: string;
+  suspended_reason?: string;
+  suspended_at?: string;
+  verified_minor?: boolean;
+  verified_minor_at?: string;
+  error?: string;
+}
+
+export async function getAccountStatus(
+  apiUrl: string,
+  pubkey: string,
+): Promise<AccountStatusResponse> {
+  return apiRequest<AccountStatusResponse>(
+    apiUrl,
+    `/api/account-status/${pubkey}`,
+    'GET',
+  );
+}
+
 export async function getAgeReviewFunnel(
   apiUrl: string,
   ageBand: string = 'age_13_15',

@@ -8,6 +8,7 @@ import type { AgeReviewCase, AgeBand, AgeReviewState } from '../../shared/age-re
 
 const updateAgeReviewCase = vi.fn().mockResolvedValue({ success: true });
 const getAgeReviewConfig = vi.fn().mockResolvedValue({ auto_delete_on_deny: false });
+const getAccountStatus = vi.fn().mockResolvedValue({ success: false });
 const writeText = vi.fn().mockResolvedValue(undefined);
 const toast = vi.fn();
 
@@ -15,6 +16,7 @@ vi.mock('@/hooks/useAdminApi', () => ({
   useAdminApi: () => ({
     updateAgeReviewCase,
     getAgeReviewConfig,
+    getAccountStatus,
   }),
 }));
 
@@ -270,5 +272,30 @@ describe('AgeReviewDetail', () => {
     }));
 
     expect(screen.queryByText('Claim Link')).not.toBeInTheDocument();
+  });
+
+  it('shows the approved-protected-minor badge when verified_minor is true', async () => {
+    getAccountStatus.mockResolvedValue({
+      success: true,
+      verified_minor: true,
+      verified_minor_at: '2026-06-30T12:00:00Z',
+    });
+
+    renderDetail(makeCase());
+
+    expect(
+      await screen.findByText(/approved protected minor/i)
+    ).toBeInTheDocument();
+  });
+
+  it('does not show the protected-minor badge when verified_minor is false', async () => {
+    getAccountStatus.mockResolvedValue({ success: true, verified_minor: false });
+
+    renderDetail(makeCase());
+
+    await waitFor(() => expect(getAccountStatus).toHaveBeenCalled());
+    expect(
+      screen.queryByText(/approved protected minor/i)
+    ).not.toBeInTheDocument();
   });
 });

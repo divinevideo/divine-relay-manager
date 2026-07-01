@@ -152,6 +152,14 @@ export function AgeReviewDetail({ caseData: c }: Props) {
     queryFn: () => api.getAgeReviewConfig(),
   });
 
+  // Keycast-backed protected-minor status (verified_minor). Best-effort: a
+  // keycast blip resolves to success:false, so we simply don't show the badge.
+  const { data: accountStatus } = useQuery({
+    queryKey: ['account-status', c.pubkey],
+    queryFn: () => api.getAccountStatus(c.pubkey),
+    enabled: !!c.pubkey,
+  });
+
   return (
     <ScrollArea className="h-full">
       <div className="space-y-4 p-4">
@@ -164,6 +172,19 @@ export function AgeReviewDetail({ caseData: c }: Props) {
               <Badge variant="outline" className="gap-1">
                 <Pause className="h-3 w-3" /> Clock Paused
               </Badge>
+            ) : null}
+            {accountStatus?.verified_minor ? (
+              <>
+                <Badge className="bg-emerald-600 text-white hover:bg-emerald-600">
+                  Approved protected minor (13-15)
+                </Badge>
+                {accountStatus.verified_minor_at ? (
+                  <span className="text-xs text-muted-foreground">
+                    approved{' '}
+                    {new Date(accountStatus.verified_minor_at).toLocaleDateString()}
+                  </span>
+                ) : null}
+              </>
             ) : null}
           </div>
 
