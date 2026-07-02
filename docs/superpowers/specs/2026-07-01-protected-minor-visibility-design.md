@@ -9,7 +9,7 @@
 Let a moderator see, from the age-review case view, whether the account is an **approved protected minor (13-15)** — keycast's durable `verified_minor` flag. This is a true, server-backed fact today (it confirms the minor-approval flow actually set the flag).
 
 ## What already exists (so this is mostly surfacing)
-- `worker/src/keycast-client.ts` `getUserStatus(pubkey, env)` already calls keycast `GET /api/admin/users/:pubkey/status` and returns `verified_minor` + `verified_minor_at` (already used by `ReportWatcher.ts`). **Note:** this is keycast's *admin* endpoint, which already exposed `verified_minor` before keycast#263 — so #141 is **independent** of the in-review detection PRs.
+- `worker/src/keycast-client.ts` `getUserStatus(pubkey, env)` already calls keycast `GET /api/admin/users/:pubkey/status` and returns `verified_minor` + `verified_minor_at` (already used by `ReportWatcher.ts`). **Note:** this is keycast's *admin* endpoint, so #141 is **independent** of the in-review detection PRs.
 - `AgeReviewDetail.tsx` is the moderator case view and has the case `pubkey`.
 - Frontend uses `adminApi.ts` + React Query.
 
@@ -26,7 +26,7 @@ Let a moderator see, from the age-review case view, whether the account is an **
 
 **Frontend**:
 - `adminApi.ts`: `getAccountStatus(pubkey)` client method.
-- `useAccountStatus(pubkey)` React Query hook (keyed on pubkey; enabled when a pubkey is present).
+- Account-status React Query hook (keyed on selected API URL + pubkey; enabled when both are present).
 - `AgeReviewDetail.tsx`: an **Account status** line that, when `verified_minor` is true, shows a badge **"Approved protected minor (13-15)"** + the `verified_minor_at` date. When false, it stays quiet (or a muted "not a protected minor"); on loading/error, an unobtrusive "status unavailable". The badge is clearly the *outcome* ("Approved"), distinct from the case's existing *suspected* age-band badge.
 
 **Placement:** age-review case detail only (not the cases list — avoids N keycast calls per list load). The hook is reusable elsewhere later (nuke button, user lookup).
@@ -40,5 +40,5 @@ Best-effort and independent of the case load: a keycast blip shows "status unava
 
 ## Out of scope (tracked)
 - **Active-protections display** (which protections apply/are active) — **follow-on #143**, after #175/#176.
-- Lifecycle reflection (age-up/revocation) — keycast#265.
+- Lifecycle reflection (age-up/revocation).
 - Cases-list badge.
