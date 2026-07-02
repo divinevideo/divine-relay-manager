@@ -531,3 +531,54 @@ describe('relay-rpc admin access via MOD_RELAY_ADMIN_KEY (Secrets Store shared k
     expect(response.status).toBe(401);
   });
 });
+
+describe('GET /api/account-status/:pubkey', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const accountEnv = {
+    ALLOWED_ORIGINS: 'https://app.divine.video',
+    RELAY_URL: 'wss://relay.divine.video',
+    ADMIN_API_KEY: 'test-admin-key',
+    KEYCAST_URL: 'https://login.test.divine.video',
+    KEYCAST_SERVICE_TOKEN: 'test-service-token',
+  } as never;
+  const PUBKEY = 'a'.repeat(64);
+
+  it('surfaces verified_minor for an admin-authed request', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        pubkey: PUBKEY,
+        status: 'active',
+        verified_minor: true,
+        verified_minor_at: '2026-06-30T12:00:00Z',
+      }),
+    }));
+
+    const response = await worker.fetch(
+      new Request(`https://api.divine.video/api/account-status/${PUBKEY}`, {
+        headers: { 'X-Admin-Key': 'test-admin-key', Origin: 'https://app.divine.video' },
+      }),
+      accountEnv,
+      ctx,
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.json() as { success: boolean; verified_minor?: boolean };
+    expect(body.success).toBe(true);
+    expect(body.verified_minor).toBe(true);
+  });
+
+  it('requires admin auth (401 without an admin key)', async () => {
+    const response = await worker.fetch(
+      new Request(`https://api.divine.video/api/account-status/${PUBKEY}`, {
+        headers: { Origin: 'https://app.divine.video' },
+      }),
+      accountEnv,
+      ctx,
+    );
+
+    expect(response.status).toBe(401);
+  });
+});

@@ -4,6 +4,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   getWorkerInfo,
+  getAccountStatus,
   publishEvent,
   moderateAction,
   deleteEvent,
@@ -48,6 +49,28 @@ const API_URL = 'https://test-api.example.com';
 describe('adminApi', () => {
   beforeEach(() => {
     mockFetch.mockReset();
+  });
+
+  describe('getAccountStatus', () => {
+    it('GETs /api/account-status/:pubkey and returns the parsed status', async () => {
+      const pubkey = 'a'.repeat(64);
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          success: true,
+          verified_minor: true,
+          verified_minor_at: '2026-06-30T12:00:00Z',
+        }),
+      });
+
+      const result = await getAccountStatus(API_URL, pubkey);
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        `${API_URL}/api/account-status/${pubkey}`,
+        expect.objectContaining({ method: 'GET' }),
+      );
+      expect(result).toMatchObject({ success: true, verified_minor: true });
+    });
   });
 
   describe('apiRequest (via getWorkerInfo)', () => {
