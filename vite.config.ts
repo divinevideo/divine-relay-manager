@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import react from "@vitejs/plugin-react-swc";
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
 
 // https://vitejs.dev/config/
 export default defineConfig(() => {
@@ -27,7 +27,12 @@ export default defineConfig(() => {
     globals: true,
     environment: 'jsdom',
     setupFiles: './src/test/setup.ts',
-    exclude: ['node_modules', 'worker/**'],
+    // Extend (don't replace) Vitest's defaults — a user `exclude` overrides
+    // them, and the defaults' `**/node_modules/**` is what keeps a stale git
+    // worktree under `.worktrees/*/node_modules` (a full repo checkout) from
+    // being globbed and running ~20k third-party package tests. We additionally
+    // exclude the worktrees' own source and the separately-tested `worker/`.
+    exclude: [...configDefaults.exclude, '**/.worktrees/**', 'worker/**'],
     onConsoleLog(log) {
       return !log.includes("React Router Future Flag Warning");
     },
