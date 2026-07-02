@@ -15,6 +15,7 @@ const writeText = vi.fn().mockResolvedValue(undefined);
 const toast = vi.fn();
 
 vi.mock('@/hooks/useAdminApi', () => ({
+  useApiUrl: () => 'https://api.test.divine.video',
   useAdminApi: () => ({
     updateAgeReviewCase,
     getAgeReviewConfig,

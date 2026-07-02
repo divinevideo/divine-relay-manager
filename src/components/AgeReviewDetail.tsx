@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useAdminApi } from "@/hooks/useAdminApi";
+import { useAdminApi, useApiUrl } from "@/hooks/useAdminApi";
 import { ApiError } from "@/lib/adminApi";
 import { useToast } from "@/hooks/useToast";
 import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
@@ -94,6 +94,7 @@ const ENFORCEMENT_STATES: AgeReviewState[] = [
 
 export function AgeReviewDetail({ caseData: c }: Props) {
   const api = useAdminApi();
+  const apiUrl = useApiUrl();
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [resolutionNote, setResolutionNote] = useState(c.resolution_note ?? "");
@@ -153,11 +154,11 @@ export function AgeReviewDetail({ caseData: c }: Props) {
   });
 
   // Keycast-backed protected-minor status (verified_minor). Best-effort: a
-  // keycast blip resolves to success:false, so we simply don't show the badge.
+  // keycast blip resolves to success:false, so we show status unavailable.
   const { data: accountStatus, isError: accountStatusFailed } = useQuery({
-    queryKey: ['account-status', c.pubkey],
+    queryKey: ['account-status', apiUrl, c.pubkey],
     queryFn: () => api.getAccountStatus(c.pubkey),
-    enabled: !!c.pubkey,
+    enabled: !!apiUrl && !!c.pubkey,
     staleTime: 60_000, // verified_minor is durable; avoid refetching per case reopen
   });
   const verifiedMinorAtDate = accountStatus?.verified_minor_at

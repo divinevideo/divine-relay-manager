@@ -1,9 +1,9 @@
 # Protected-minor visibility in the moderator UI — design
 
-**Issue:** divinevideo/divine-relay-manager#141 (T&S visibility of protected-minor status). Part of the protected-minor safeguards epic (support-trust-safety#173); equal sibling of keycast#265 (lifecycle).
+**Issue:** divinevideo/divine-relay-manager#141 (T&S visibility of protected-minor status).
 **Follow-on:** #143 (surface active protections once #175/#176 exist).
 **Date:** 2026-07-01
-**Status:** WIP (draft PR #142).
+**Status:** Ready for review in PR #142.
 
 ## Goal
 Let a moderator see, from the age-review case view, whether the account is an **approved protected minor (13-15)** — keycast's durable `verified_minor` flag. This is a true, server-backed fact today (it confirms the minor-approval flow actually set the flag).
