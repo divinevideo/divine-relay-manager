@@ -80,6 +80,71 @@ export async function banUser(pubkey: string, reason: KeycastReason, env: Keycas
   return callKeycast(pubkey, { status: 'banned', reason }, env);
 }
 
+/**
+ * Clear a Keycast account's verified_minor flag (protected-minor revocation,
+ * issue #147; endpoint from keycast#265). Composes with the status calls —
+ * the status outcome stays the caller's decision, this only lifts the flag.
+ * Keycast's clear is an idempotent success no-op on never-minor /
+ * already-cleared accounts and only writes a durable admin_audit_events row
+ * on a real transition, so callers invoke it unconditionally on revoke/deny
+ * without a pre-read. `actor` (moderator hex pubkey) and `reason` feed that
+ * audit row; a malformed actor is dropped (keycast 400s on it, which would
+ * fail the whole clear) so keycast falls back to log-only.
+ */
+export async function clearVerifiedMinor(
+  pubkey: string,
+  actor: string | undefined,
+  reason: string | undefined,
+  env: KeycastEnv,
+): Promise<KeycastResult> {
+  if (!env.KEYCAST_URL || !env.KEYCAST_SERVICE_TOKEN) {
+    return { success: false, error: 'not configured' };
+  }
+
+  if (!HEX_64.test(pubkey)) {
+    return { success: false, error: 'invalid pubkey: must be 64 hex chars' };
+  }
+
+  const token = await resolveToken(env.KEYCAST_SERVICE_TOKEN);
+  if (!token) {
+    return { success: false, error: 'not configured' };
+  }
+
+  const params = new URLSearchParams();
+  if (actor) {
+    if (HEX_64.test(actor)) {
+      params.set('actor', actor);
+    } else {
+      console.warn(`[keycast] dropping malformed actor for verified_minor clear on ${pubkey}; audit falls back to log-only`);
+    }
+  }
+  if (reason) {
+    params.set('reason', reason);
+  }
+  const qs = params.size > 0 ? `?${params.toString()}` : '';
+
+  try {
+    const res = await fetch(`${env.KEYCAST_URL}/api/admin/users/${pubkey}/verified-minor${qs}`, {
+      method: 'DELETE',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+      },
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      console.error(`[keycast] verified_minor clear failed for ${pubkey}: ${res.status} ${text}`);
+      return { success: false, status: res.status, error: `${res.status}: ${text}` };
+    }
+
+    return { success: true };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[keycast] verified_minor clear failed for ${pubkey}: ${msg}`);
+    return { success: false, error: msg };
+  }
+}
+
 export interface UserStatusResult {
   success: boolean;
   pubkey?: string;

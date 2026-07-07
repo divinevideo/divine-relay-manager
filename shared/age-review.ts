@@ -112,6 +112,10 @@ export interface AgeReviewEnforcement {
   bulkError?: string;
   keycast: EnforcementLegStatus;
   keycastError?: string;
+  /** Keycast verified_minor clear on revoke/deny (issue #147). Optional so
+   * payloads from an older worker still type-check. */
+  keycastMinorClear?: EnforcementLegStatus;
+  keycastMinorClearError?: string;
 }
 
 // Response body for a case GET/PATCH. On a partial-enforcement PATCH the worker

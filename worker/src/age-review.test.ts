@@ -18,13 +18,14 @@ import {
 } from './age-review';
 import type { AgeReviewCase } from '../../shared/age-review';
 import { FUNNEL_ZENDESK_QUERIES } from '../../shared/age-review';
-import { suspendUser, unsuspendUser, banUser, createMinorAccount } from './keycast-client';
+import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, createMinorAccount } from './keycast-client';
 import { suspendPubkey, unsuspendPubkey, banPubkey } from './nip86';
 
 vi.mock('./keycast-client', () => ({
   suspendUser: vi.fn().mockResolvedValue({ success: true }),
   unsuspendUser: vi.fn().mockResolvedValue({ success: true }),
   banUser: vi.fn().mockResolvedValue({ success: true }),
+  clearVerifiedMinor: vi.fn().mockResolvedValue({ success: true }),
   createMinorAccount: vi.fn().mockResolvedValue({ success: true, pubkey: 'a'.repeat(64), claim_url: 'https://login.test/claim/abc' }),
 }));
 
@@ -382,6 +383,7 @@ describe('Keycast suspension wiring', () => {
     vi.mocked(suspendUser).mockClear().mockResolvedValue({ success: true });
     vi.mocked(unsuspendUser).mockClear().mockResolvedValue({ success: true });
     vi.mocked(banUser).mockClear().mockResolvedValue({ success: true });
+    vi.mocked(clearVerifiedMinor).mockClear().mockResolvedValue({ success: true });
   });
 
   it('calls suspendUser when transitioning to restricted_pending_user_response', async () => {
@@ -621,6 +623,117 @@ describe('Keycast suspension wiring', () => {
     expect(body.keycastUpdated).toBe(true);
     expect(banUser).toHaveBeenCalledOnce();
     expect(banUser).toHaveBeenCalledWith(restrictedCase.pubkey, 'age_review_denied', expect.objectContaining({ DB: expect.anything() }));
+  });
+
+  // Issue #147: revoke/deny composes a verified_minor clear with the status leg.
+  const makeDbFor = (existing: ReturnType<typeof makeCase>, updated: ReturnType<typeof makeCase>) => {
+    let selectCount = 0;
+    const firstFor = (sql: string) => async () => {
+      if (sql.includes('WHERE id = ?')) {
+        selectCount += 1;
+        return selectCount === 1 ? existing : updated;
+      }
+      return null; // age_review_config -> default config
+    };
+    return {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        first: vi.fn().mockImplementation(firstFor(sql)),
+        bind: vi.fn().mockReturnValue({
+          first: vi.fn().mockImplementation(firstFor(sql)),
+          run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+        }),
+      })),
+    };
+  };
+
+  it('clears verified_minor (with actor + deny reason) when transitioning to denied_closed', async () => {
+    const moderator = 'b'.repeat(64);
+    const restrictedCase = makeCase({ state: 'restricted_pending_user_response', moderator_pubkey: moderator });
+    const updatedCase = { ...restrictedCase, state: 'denied_closed' as const };
+
+    const req = new Request('https://api.test/api/age-review/cases/case-1', {
+      method: 'PATCH',
+      body: JSON.stringify({ state: 'denied_closed' }),
+    });
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(makeDbFor(restrictedCase, updatedCase)), corsHeaders);
+    const body = await res.json() as { success: boolean; enforcement: { keycastMinorClear: string } };
+
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+    expect(body.enforcement.keycastMinorClear).toBe('ok');
+    expect(clearVerifiedMinor).toHaveBeenCalledOnce();
+    expect(clearVerifiedMinor).toHaveBeenCalledWith(
+      restrictedCase.pubkey,
+      moderator,
+      'age_review_denied',
+      expect.objectContaining({ DB: expect.anything() }),
+    );
+  });
+
+  it('clears verified_minor with the cleared reason on a cleared transition', async () => {
+    const restrictedCase = makeCase({ state: 'restricted_pending_user_response' });
+    const updatedCase = { ...restrictedCase, state: 'cleared' as const };
+
+    const req = new Request('https://api.test/api/age-review/cases/case-1', {
+      method: 'PATCH',
+      body: JSON.stringify({ state: 'cleared' }),
+    });
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(makeDbFor(restrictedCase, updatedCase)), corsHeaders);
+    const body = await res.json() as { success: boolean; enforcement: { keycastMinorClear: string } };
+
+    expect(res.status).toBe(200);
+    expect(body.enforcement.keycastMinorClear).toBe('ok');
+    // moderator_pubkey is null on this case: actor omitted -> keycast log-only fallback.
+    expect(clearVerifiedMinor).toHaveBeenCalledWith(
+      restrictedCase.pubkey,
+      undefined,
+      'age_review_cleared',
+      expect.objectContaining({ DB: expect.anything() }),
+    );
+  });
+
+  it('surfaces a verified_minor clear failure as incomplete enforcement (207)', async () => {
+    vi.mocked(clearVerifiedMinor).mockResolvedValueOnce({ success: false, error: 'Connection refused' });
+
+    const restrictedCase = makeCase({ state: 'restricted_pending_user_response' });
+    const updatedCase = { ...restrictedCase, state: 'denied_closed' as const };
+
+    const req = new Request('https://api.test/api/age-review/cases/case-1', {
+      method: 'PATCH',
+      body: JSON.stringify({ state: 'denied_closed' }),
+    });
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(makeDbFor(restrictedCase, updatedCase)), corsHeaders);
+    const body = await res.json() as {
+      success: boolean; enforcementComplete: boolean;
+      enforcement: { keycastMinorClear: string; keycastMinorClearError: string; keycast: string };
+      case: { state: string };
+    };
+
+    expect(res.status).toBe(207);
+    expect(body.success).toBe(false);
+    expect(body.enforcementComplete).toBe(false);
+    expect(body.enforcement.keycastMinorClear).toBe('failed');
+    expect(body.enforcement.keycastMinorClearError).toContain('Connection refused');
+    // Other legs unaffected; the flag failure must not mask or be masked.
+    expect(body.enforcement.keycast).toBe('ok');
+    // DB transition still persisted (enforcement remediation is out-of-band).
+    expect(body.case.state).toBe('denied_closed');
+  });
+
+  it('does not clear verified_minor on a restricting transition', async () => {
+    const reviewCase = makeCase({ state: 'under_moderator_review' });
+    const updatedCase = { ...reviewCase, state: 'restricted_pending_user_response' as const };
+
+    const req = new Request('https://api.test/api/age-review/cases/case-1', {
+      method: 'PATCH',
+      body: JSON.stringify({ state: 'restricted_pending_user_response' }),
+    });
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(makeDbFor(reviewCase, updatedCase)), corsHeaders);
+
+    expect(res.status).toBe(200);
+    expect(clearVerifiedMinor).not.toHaveBeenCalled();
+    const body = await res.json() as { enforcement: { keycastMinorClear: string } };
+    expect(body.enforcement.keycastMinorClear).toBe('not_attempted');
   });
 
   it('surfaces a Keycast failure (success:false / 207) but still applies the state transition', async () => {

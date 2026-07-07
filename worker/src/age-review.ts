@@ -20,7 +20,7 @@ import {
 import { runBulkModeration, type BulkModerateEnv } from './bulk-moderate';
 import { resolveZendeskCreds } from './zendesk-sync';
 import type { BulkAction } from '../../shared/bulk-moderation';
-import { suspendUser, unsuspendUser, banUser, createMinorAccount, type KeycastEnv } from './keycast-client';
+import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, createMinorAccount, type KeycastEnv } from './keycast-client';
 import { suspendPubkey, unsuspendPubkey, banPubkey, type SecretStoreSecret } from './nip86';
 
 export interface AgeReviewEnv extends BulkModerateEnv, KeycastEnv {
@@ -287,6 +287,8 @@ export async function handleUpdateAgeReviewCase(
   let relayError: string | undefined;
   let keycast: EnforcementLegStatus = 'not_attempted';
   let keycastError: string | undefined;
+  let keycastMinorClear: EnforcementLegStatus = 'not_attempted';
+  let keycastMinorClearError: string | undefined;
 
   // Shared wrapper for the relay and Keycast legs (both resolve to
   // { success, error }). Returns not_attempted when no call applies.
@@ -353,6 +355,27 @@ export async function handleUpdateAgeReviewCase(
       : undefined);
     keycast = keycastLeg.status;
     keycastError = keycastLeg.error;
+
+    // Clear verified_minor on revoke/deny (issue #147). Compose, don't couple:
+    // the status outcome above stays this side's decision; this leg only lifts
+    // the protected-minor flag so protections release across clients (#174).
+    // Unconditional on the deny/cleared transitions — keycast's clear is an
+    // idempotent no-op for never-minor accounts and only audits real
+    // transitions (keycast#265), so no pre-read of verified_minor is needed.
+    // actor = the case's moderator (already validated shape client-side);
+    // reason distinguishes deny from mistaken-approval clear in the audit row.
+    const minorClearActor = (updated?.moderator_pubkey ?? existing.moderator_pubkey) ?? undefined;
+    const minorClearLeg = await runStatusLeg('Keycast verified_minor clear', () =>
+      deniedCase || clearedCase
+        ? clearVerifiedMinor(
+            existing.pubkey,
+            minorClearActor,
+            deniedCase ? 'age_review_denied' : 'age_review_cleared',
+            env,
+          )
+        : undefined);
+    keycastMinorClear = minorClearLeg.status;
+    keycastMinorClearError = minorClearLeg.error;
   }
 
   // A failed critical leg is reported (success:false, HTTP 207) so the
@@ -365,8 +388,12 @@ export async function handleUpdateAgeReviewCase(
   if (!updated) {
     return json({ success: false, error: 'Case not found after update' }, 500, corsHeaders);
   }
-  const enforcement: AgeReviewEnforcement = { relay, relayError, bulk, bulkError, keycast, keycastError };
-  const enforcementComplete = relay !== 'failed' && bulk !== 'failed' && keycast !== 'failed';
+  const enforcement: AgeReviewEnforcement = {
+    relay, relayError, bulk, bulkError, keycast, keycastError,
+    keycastMinorClear, keycastMinorClearError,
+  };
+  const enforcementComplete = relay !== 'failed' && bulk !== 'failed' && keycast !== 'failed'
+    && keycastMinorClear !== 'failed';
   const response: AgeReviewCaseResponse = {
     success: enforcementComplete,
     case: updated,
