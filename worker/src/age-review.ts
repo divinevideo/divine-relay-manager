@@ -362,8 +362,9 @@ export async function handleUpdateAgeReviewCase(
     // Unconditional on the deny/cleared transitions — keycast's clear is an
     // idempotent no-op for never-minor accounts and only audits real
     // transitions (keycast#265), so no pre-read of verified_minor is needed.
-    // actor = the case's moderator (already validated shape client-side);
-    // reason distinguishes deny from mistaken-approval clear in the audit row.
+    // actor = the case's moderator; a malformed/absent actor is re-validated
+    // and dropped server-side in clearVerifiedMinor (keycast then falls back to
+    // log-only audit). reason distinguishes deny from cleared in the audit row.
     const minorClearActor = (updated?.moderator_pubkey ?? existing.moderator_pubkey) ?? undefined;
     const minorClearLeg = await runStatusLeg('Keycast verified_minor clear', () =>
       deniedCase || clearedCase
@@ -1070,6 +1071,23 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
       }
     } catch (error) {
       console.error(`[age-review] Keycast ban failed for expired case ${row.id}:`, error);
+    }
+
+    // Clear verified_minor on the auto-deny path too (#147): the interactive
+    // deny leg does this; the deadline-expiry auto-deny is the same terminal
+    // outcome with no moderator, so it must not leave a banned account with
+    // its protected-minor flag still set. System-initiated => no actor
+    // (keycast falls back to log-only audit). Idempotent no-op for a
+    // never-minor account. Best-effort, logged on failure.
+    try {
+      const clearResult = await clearVerifiedMinor(row.pubkey, undefined, 'age_review_expired', env);
+      if (clearResult.success) {
+        console.log(`[age-review] Keycast verified_minor clear sent for expired case ${row.id}`);
+      } else {
+        console.error(`[age-review] Keycast verified_minor clear failed for expired case ${row.id}: ${clearResult.error}`);
+      }
+    } catch (error) {
+      console.error(`[age-review] Keycast verified_minor clear failed for expired case ${row.id}:`, error);
     }
 
     // purge the user's events at the relay (one-way) -- the case is closed

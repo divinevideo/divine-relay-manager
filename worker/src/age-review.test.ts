@@ -1104,6 +1104,7 @@ describe('checkAgeReviewDeadlines', () => {
     vi.mocked(suspendUser).mockClear().mockResolvedValue({ success: true });
     vi.mocked(unsuspendUser).mockClear().mockResolvedValue({ success: true });
     vi.mocked(banUser).mockClear().mockResolvedValue({ success: true });
+    vi.mocked(clearVerifiedMinor).mockClear().mockResolvedValue({ success: true });
   });
 
   it('does nothing when DB unavailable', async () => {
@@ -1157,6 +1158,10 @@ describe('checkAgeReviewDeadlines', () => {
     // Verify Keycast ban was sent for the expired case
     expect(banUser).toHaveBeenCalledOnce();
     expect(banUser).toHaveBeenCalledWith(expiredCase.pubkey, 'age_review_expired', expect.objectContaining({ DB: expect.anything() }));
+
+    // Auto-deny must also clear verified_minor (#147) — system actor (undefined),
+    // so a deadline-expired account isn't left banned with the flag still set.
+    expect(clearVerifiedMinor).toHaveBeenCalledWith(expiredCase.pubkey, undefined, 'age_review_expired', expect.objectContaining({ DB: expect.anything() }));
 
     vi.unstubAllGlobals();
   });
