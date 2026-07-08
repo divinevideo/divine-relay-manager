@@ -71,11 +71,14 @@ function renderDetail(caseData: AgeReviewCase) {
     },
   });
 
-  return render(
+  const result = render(
     <QueryClientProvider client={queryClient}>
       <AgeReviewDetail caseData={caseData} />
     </QueryClientProvider>
   );
+  // Expose the client so absence tests can await query settlement instead of
+  // asserting against a possibly still-loading tree (vacuous pass).
+  return { ...result, queryClient };
 }
 
 describe('AgeReviewDetail', () => {
@@ -334,6 +337,75 @@ describe('AgeReviewDetail', () => {
     ).toBeInTheDocument();
     expect(
       screen.queryByText(/approved protected minor/i)
+    ).not.toBeInTheDocument();
+  });
+
+  it('lists the applicable protections when verified_minor is true', async () => {
+    getAccountStatus.mockResolvedValue({
+      success: true,
+      verified_minor: true,
+      verified_minor_at: '2026-06-30T12:00:00Z',
+    });
+
+    renderDetail(makeCase());
+
+    expect(
+      await screen.findByText(/protections that apply to this account/i)
+    ).toBeInTheDocument();
+    // Content lock (#175): forced-hidden adult content + disabled 18+ toggle.
+    expect(screen.getByText(/adult content is hidden/i)).toBeInTheDocument();
+    expect(screen.getByText(/18\+ visibility toggle is disabled/i)).toBeInTheDocument();
+    // DM restriction (#176): pinned official accounts only (named by their
+    // canonical NIP-05 handles, not just impersonable display names), both
+    // directions, and honestly labeled as still rolling out until the client
+    // releases ship it.
+    expect(screen.getByText(/Divine HQ/)).toBeInTheDocument();
+    expect(screen.getByText(/_@divinehq\.divine\.video/)).toBeInTheDocument();
+    expect(screen.getByText(/moderation@divine\.video/)).toBeInTheDocument();
+    expect(screen.getByText(/blocked on send and hidden on receive/i)).toBeInTheDocument();
+    expect(screen.getByText(/rolling out/i)).toBeInTheDocument();
+  });
+
+  it('frames the protections as policy-derived, not per-device confirmed', async () => {
+    getAccountStatus.mockResolvedValue({ success: true, verified_minor: true });
+
+    renderDetail(makeCase());
+
+    // The whole point of the honest framing: enforced by the apps per policy,
+    // never asserted as observed on the user's device.
+    expect(
+      await screen.findByText(/enforced client-side by the Divine apps/i)
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/not confirmed per device/i)
+    ).toBeInTheDocument();
+  });
+
+  it('does not show the protections block when verified_minor is false', async () => {
+    getAccountStatus.mockResolvedValue({ success: true, verified_minor: false });
+
+    const { queryClient } = renderDetail(makeCase());
+
+    // Wait for query settlement, not just the fetch call — asserting against a
+    // still-loading tree would pass even if the gating were broken.
+    await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+    expect(
+      screen.queryByText(/protections that apply to this account/i)
+    ).not.toBeInTheDocument();
+  });
+
+  it('does not show the protections block when the account status is unavailable', async () => {
+    // A keycast blip must not read as "protected": the badge branch already
+    // shows "status unavailable"; the protections list must stay absent too.
+    getAccountStatus.mockResolvedValue({ success: false });
+
+    renderDetail(makeCase());
+
+    expect(
+      await screen.findByText(/protected-minor status unavailable/i)
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/protections that apply to this account/i)
     ).not.toBeInTheDocument();
   });
 

@@ -26,6 +26,9 @@ import {
   AlertTriangle,
   Loader2,
   ExternalLink,
+  ShieldCheck,
+  EyeOff,
+  MessageSquareLock,
 } from "lucide-react";
 import { CopyableId } from "@/components/CopyableId";
 import { UserIdentifier } from "@/components/UserIdentifier";
@@ -203,6 +206,41 @@ export function AgeReviewDetail({ caseData: c }: Props) {
               </span>
             ) : null}
           </div>
+
+          {/* Protections that apply to an approved protected minor (#143).
+              POLICY-DERIVED from verified_minor: these are client-enforced
+              (the relay can't attribute NIP-17 DMs, and the content lock is
+              in-app), so there is no per-device signal to observe. We state
+              what policy applies and who enforces it — never "confirmed on
+              their device", which would be false assurance. */}
+          {accountStatus?.verified_minor ? (
+            <div className="rounded-md border p-2.5 space-y-1.5 text-xs">
+              <h4 className="flex items-center gap-1.5 font-medium">
+                <ShieldCheck className="h-3.5 w-3.5 text-emerald-600" />
+                Protections that apply to this account
+              </h4>
+              <div className="flex items-start gap-1.5 text-muted-foreground">
+                <EyeOff className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                <span>
+                  Adult content lock: adult content is hidden and the 18+ visibility toggle is disabled, so they cannot re-enable it.
+                </span>
+              </div>
+              {/* TODO(divinevideo/support-trust-safety#176): drop the
+                  "rolling out" caveat once the DM restriction ships in
+                  released mobile + web builds. Listing it without the caveat
+                  before then would assert a protection no released client
+                  enforces — the false assurance this block must never give. */}
+              <div className="flex items-start gap-1.5 text-muted-foreground">
+                <MessageSquareLock className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                <span>
+                  DM restriction (rolling out; not yet in released app versions): DMs limited to the pinned official accounts, Divine HQ (_@divinehq.divine.video) and Divine Moderation (moderation@divine.video); everything else is blocked on send and hidden on receive.
+                </span>
+              </div>
+              <div className="text-muted-foreground/80">
+                Derived from the approved protected-minor status above; enforced client-side by the Divine apps on supported versions. Not confirmed per device.
+              </div>
+            </div>
+          ) : null}
 
           {/* Deadline */}
           {!isTerminal && daysRemaining != null && (
