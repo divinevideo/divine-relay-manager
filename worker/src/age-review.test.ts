@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   handleGetAgeReviewCases,
   handleGetAgeReviewCase,
+  handleGetActiveAgeReviewCase,
   handleUpdateAgeReviewCase,
   handleGetModerationStatus,
   handleParentContact,
@@ -147,6 +148,32 @@ describe('handleGetAgeReviewCase', () => {
     const db = createMockDb([]);
     const res = await handleGetAgeReviewCase('nonexistent', makeEnv(db), corsHeaders);
     expect(res.status).toBe(404);
+  });
+});
+
+// -- handleGetActiveAgeReviewCase ---------------------------------------------
+
+describe('handleGetActiveAgeReviewCase', () => {
+  it('returns the active case for a pubkey', async () => {
+    const c = makeCase({ state: 'restricted_pending_user_response' });
+    const res = await handleGetActiveAgeReviewCase(c.pubkey, makeEnv(createMockDb([c])), corsHeaders);
+    expect(res.status).toBe(200);
+    const body = await res.json() as { success: boolean; case: AgeReviewCase | null };
+    expect(body.success).toBe(true);
+    expect(body.case?.id).toBe(c.id);
+  });
+
+  it('returns a null case when the pubkey has no active case', async () => {
+    const res = await handleGetActiveAgeReviewCase('a'.repeat(64), makeEnv(createMockDb([])), corsHeaders);
+    expect(res.status).toBe(200);
+    const body = await res.json() as { success: boolean; case: AgeReviewCase | null };
+    expect(body.success).toBe(true);
+    expect(body.case).toBeNull();
+  });
+
+  it('rejects an invalid pubkey', async () => {
+    const res = await handleGetActiveAgeReviewCase('not-a-pubkey', makeEnv(createMockDb([])), corsHeaders);
+    expect(res.status).toBe(400);
   });
 });
 

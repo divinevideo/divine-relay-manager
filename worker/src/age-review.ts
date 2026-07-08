@@ -97,6 +97,44 @@ export async function handleGetAgeReviewCase(
   return json({ success: true, case: row }, 200, corsHeaders);
 }
 
+/**
+ * Returns the single active (non-terminal) age-review case for a pubkey, or
+ * null. ReportWatcher guarantees at most one active case per pubkey, so this is
+ * unambiguous. Shared by the by-pubkey lookup endpoint and the relay-RPC guard.
+ */
+export async function getActiveAgeReviewCase(
+  pubkey: string,
+  env: AgeReviewEnv,
+): Promise<AgeReviewCase | null> {
+  if (!env.DB) return null;
+  const row = await env.DB.prepare(`
+    SELECT * FROM age_review_cases
+    WHERE pubkey = ? AND state NOT IN (${TERMINAL_STATES.map(() => '?').join(',')})
+    LIMIT 1
+  `).bind(pubkey, ...TERMINAL_STATES).first<AgeReviewCase>();
+  return row ?? null;
+}
+
+/**
+ * GET /api/age-review/active-case?pubkey=<hex>
+ *
+ * Returns the active (non-terminal) age-review case for a pubkey, or null.
+ * Read-only. Powers the report hand-off deep-link, the Ban warning, and the
+ * relay-RPC guard-response rendering.
+ */
+export async function handleGetActiveAgeReviewCase(
+  pubkey: string,
+  env: AgeReviewEnv,
+  corsHeaders: Record<string, string>,
+): Promise<Response> {
+  if (!env.DB) return json({ success: false, error: 'Database not configured' }, 500, corsHeaders);
+  if (!/^[0-9a-f]{64}$/i.test(pubkey)) {
+    return json({ success: false, error: 'Invalid pubkey' }, 400, corsHeaders);
+  }
+  const row = await getActiveAgeReviewCase(pubkey, env);
+  return json({ success: true, case: row }, 200, corsHeaders);
+}
+
 export async function handleUpdateAgeReviewCase(
   request: Request,
   caseId: string,

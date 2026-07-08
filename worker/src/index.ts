@@ -16,6 +16,7 @@ import { suspendUser, unsuspendUser, banUser } from './keycast-client';
 import {
   handleGetAgeReviewCases,
   handleGetAgeReviewCase,
+  handleGetActiveAgeReviewCase,
   handleGetAgeReviewFunnel,
   handleUpdateAgeReviewCase,
   handleCreateMinorAccount,
@@ -558,6 +559,11 @@ export default {
       if (path === '/api/age-review/cases' && request.method === 'GET') {
         if (env.DB) await ensureSchemaOnce(env.DB);
         return handleGetAgeReviewCases(request, env, corsHeaders);
+      }
+      if (path === '/api/age-review/active-case' && request.method === 'GET') {
+        if (env.DB) await ensureSchemaOnce(env.DB);
+        const pubkey = new URL(request.url).searchParams.get('pubkey') || '';
+        return handleGetActiveAgeReviewCase(pubkey, env, corsHeaders);
       }
       if (path.startsWith('/api/age-review/cases/') && request.method === 'GET') {
         if (env.DB) await ensureSchemaOnce(env.DB);
