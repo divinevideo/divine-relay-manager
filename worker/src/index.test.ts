@@ -227,6 +227,23 @@ describe('relay-rpc account-state side effects', () => {
     } as never;
   }
 
+  // Same env with a DB whose active-case lookup returns `caseRow` (or null).
+  function makeAccountStateEnvWithDb(caseRow: unknown) {
+    return {
+      ALLOWED_ORIGINS: 'https://app.divine.video',
+      RELAY_URL: 'wss://relay.divine.video',
+      ADMIN_API_KEY: 'test-admin-key',
+      MODERATION_ADMIN_URL: 'https://moderation-api.divine.video',
+      SERVICE_API_TOKEN: 'test-token',
+      NOSTR_NSEC: TEST_NSEC,
+      KEYCAST_URL: 'https://login.divine.video',
+      KEYCAST_SERVICE_TOKEN: 'keycast-token',
+      DB: {
+        prepare: () => ({ bind: () => ({ first: async () => caseRow }) }),
+      },
+    } as never;
+  }
+
   // Routes a mocked fetch by URL so each backend can be asserted independently.
   function makeFetchSpy() {
     return vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
@@ -365,6 +382,73 @@ describe('relay-rpc account-state side effects', () => {
     expect(kc[0].status).toBe('active');
     // unban lifts the Keycast ban but sends no DM (restore-on-unban DM tracked in #96)
     expect(await notifyBodies(fetchSpy)).toHaveLength(0);
+
+    fetchSpy.mockRestore();
+  });
+
+  it('suspendpubkey is refused when the target has an active age-review case', async () => {
+    const fetchSpy = makeFetchSpy();
+    const waitUntil = vi.fn();
+    const testCtx = { waitUntil } as unknown as ExecutionContext;
+    const env = makeAccountStateEnvWithDb({ id: 'case-1', state: 'restricted_pending_user_response' });
+
+    const response = await callRelayRpc('suspendpubkey', [VALID_PUBKEY, 'policy'], env, testCtx);
+    expect(response.status).toBe(409);
+    const body = await response.json() as { code: string; caseId: string; state: string };
+    expect(body.code).toBe('age_review_active');
+    expect(body.caseId).toBe('case-1');
+
+    // The guard short-circuits before any enforcement side effect.
+    await drain(waitUntil);
+    expect(keycastCalls(fetchSpy)).toHaveLength(0);
+    expect(await notifyBodies(fetchSpy)).toHaveLength(0);
+
+    fetchSpy.mockRestore();
+  });
+
+  it('unsuspendpubkey is refused when the target has an active age-review case', async () => {
+    const fetchSpy = makeFetchSpy();
+    const waitUntil = vi.fn();
+    const testCtx = { waitUntil } as unknown as ExecutionContext;
+    const env = makeAccountStateEnvWithDb({ id: 'case-2', state: 'restricted_pending_parental_consent' });
+
+    const response = await callRelayRpc('unsuspendpubkey', [VALID_PUBKEY], env, testCtx);
+    expect(response.status).toBe(409);
+    const body = await response.json() as { code: string };
+    expect(body.code).toBe('age_review_active');
+    expect(keycastCalls(fetchSpy)).toHaveLength(0);
+
+    fetchSpy.mockRestore();
+  });
+
+  it('suspendpubkey proceeds normally when the target has no active age-review case', async () => {
+    const fetchSpy = makeFetchSpy();
+    const waitUntil = vi.fn();
+    const testCtx = { waitUntil } as unknown as ExecutionContext;
+    const env = makeAccountStateEnvWithDb(null);
+
+    const response = await callRelayRpc('suspendpubkey', [VALID_PUBKEY, 'policy'], env, testCtx);
+    expect(response.status).toBe(200);
+    await drain(waitUntil);
+    const kc = keycastCalls(fetchSpy);
+    expect(kc).toHaveLength(1);
+    expect(kc[0].status).toBe('suspended');
+
+    fetchSpy.mockRestore();
+  });
+
+  it('banpubkey is not gated by an active age-review case (severe-action escape hatch)', async () => {
+    const fetchSpy = makeFetchSpy();
+    const waitUntil = vi.fn();
+    const testCtx = { waitUntil } as unknown as ExecutionContext;
+    const env = makeAccountStateEnvWithDb({ id: 'case-3', state: 'restricted_pending_user_response' });
+
+    const response = await callRelayRpc('banpubkey', [VALID_PUBKEY, 'csam'], env, testCtx);
+    expect(response.status).toBe(200);
+    await drain(waitUntil);
+    const kc = keycastCalls(fetchSpy);
+    expect(kc).toHaveLength(1);
+    expect(kc[0].status).toBe('banned');
 
     fetchSpy.mockRestore();
   });

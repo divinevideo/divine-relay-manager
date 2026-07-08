@@ -17,6 +17,7 @@ import {
   handleGetAgeReviewCases,
   handleGetAgeReviewCase,
   handleGetActiveAgeReviewCase,
+  getActiveAgeReviewCase,
   handleGetAgeReviewFunnel,
   handleUpdateAgeReviewCase,
   handleCreateMinorAccount,
@@ -941,6 +942,31 @@ async function handleRelayRpc(
 
   if (!body.method) {
     return jsonResponse({ success: false, error: 'Missing method' }, 400, corsHeaders);
+  }
+
+  // Age-review guard: a bare suspend/unsuspend on a pubkey with an open
+  // (non-terminal) age-review case must not half-enforce (Suspend orphans the
+  // case) or silently lift the hold (Unsuspend skips verification). Refuse and
+  // route the moderator to the case; Restrict/Clear live in the age-review flow.
+  // Age-review's own enforcement calls the nip86 helpers directly, and internal
+  // moderation/bulk callers use ban*/unban* only, so neither reaches this guard.
+  if (body.method === 'suspendpubkey' || body.method === 'unsuspendpubkey') {
+    const target = body.params?.[0] ? String(body.params[0]) : '';
+    if (target && env.DB) {
+      const activeCase = await getActiveAgeReviewCase(target, env);
+      if (activeCase) {
+        return new Response(JSON.stringify({
+          success: false,
+          error: 'This account is under age review. Restrict or clear it from the Age Review flow.',
+          code: 'age_review_active',
+          caseId: activeCase.id,
+          state: activeCase.state,
+        }), {
+          status: 409,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders },
+        });
+      }
+    }
   }
 
   // Use shared NIP-86 RPC utility
