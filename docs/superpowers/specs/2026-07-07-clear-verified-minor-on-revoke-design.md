@@ -23,20 +23,26 @@ mistaken approval / cleared → unsuspend); keycast's primitive is clear-only.
    with the service-token auth the other calls use. Returns `KeycastResult`.
 2. **New enforcement leg** in the age-review state-transition handler
    (`worker/src/age-review.ts`, alongside the Keycast status leg at ~:349):
-   run on `deniedCase` and `clearedCase` transitions, **unconditionally** —
-   keycast's clear is an idempotent success no-op on never-minor/already-cleared
-   accounts and only writes the durable audit row on a real transition, so no
-   pre-read of `verified_minor` is needed.
+   run on the **`deniedCase`** (revoke) transition only, plus the deadline-expiry
+   auto-deny in the cron. **Not on `cleared`** — `cleared` is the favorable
+   outcome and is overloaded: for a 13-15 consent-verified case it restores a
+   *confirmed protected minor* who must keep `verified_minor` (moderator guide,
+   13-15 band); the 16+ mistaken-flag case also uses `cleared` where the flag is
+   a no-op. Since the transition can't distinguish them, we leave the flag alone
+   on `cleared` (over-protecting a mistaken adult is the safe side) and only
+   deny/revoke removes it. keycast's clear is an idempotent no-op for
+   never-minor accounts, so no pre-read of `verified_minor` is needed.
 3. **Leg status surfaces like the others**: tracked via the shared
    `runStatusLeg` wrapper, folded into `enforcementComplete`, so a keycast
    failure is reported (HTTP 207, success:false) rather than silently leaving
    the flag set — issue requirement "must not silently leave the flag set."
-4. **actor + reason**: actor = the case row's `moderator_pubkey` (already an
-   accepted, persisted PATCH field), reason derived from the transition
-   (`age_review_denied` / `age_review_cleared`), so keycast writes the durable
-   `admin_audit_events` row. A malformed actor is dropped client-side (keycast
-   400s on it, which would fail the whole clear); absent actor → keycast's
-   log-only fallback per #265.
+4. **actor + reason**: actor = the case row's `moderator_pubkey` (best-effort:
+   relay-manager auths with a shared admin pubkey, so no per-actor signal, and
+   the field is unvalidated on write). reason is the revoke-direction
+   `age_review_denied` (interactive) / `age_review_expired` (cron), so keycast
+   writes the durable `admin_audit_events` row. A malformed/absent actor is
+   dropped server-side in `clearVerifiedMinor` → keycast's log-only fallback
+   per #265.
 
 ## Out of scope
 
@@ -47,7 +53,8 @@ mistaken approval / cleared → unsuspend); keycast's primitive is clear-only.
 
 - client: `clearVerifiedMinor` happy path, keycast error surfaced, URL/auth shape.
 - handler: deny transition runs the clear leg and reports it in `enforcement`;
-  cleared transition likewise; leg failure → `enforcementComplete=false` / 207;
+  **cleared transition does NOT clear** (favorable outcome keeps a confirmed
+  minor protected); leg failure → `enforcementComplete=false` / 207;
   non-terminal transitions do not call clear.
 - Follow existing `age-review.test.ts` / `keycast-client.test.ts` harnesses.
 

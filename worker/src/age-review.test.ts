@@ -670,7 +670,9 @@ describe('Keycast suspension wiring', () => {
     );
   });
 
-  it('clears verified_minor with the cleared reason on a cleared transition', async () => {
+  it('does NOT clear verified_minor on a cleared transition (favorable outcome keeps a confirmed minor protected)', async () => {
+    // `cleared` restores a 13-15 consent-verified account (a confirmed protected
+    // minor who must keep verified_minor). Only deny/revoke removes the flag.
     const restrictedCase = makeCase({ state: 'restricted_pending_user_response' });
     const updatedCase = { ...restrictedCase, state: 'cleared' as const };
 
@@ -679,17 +681,11 @@ describe('Keycast suspension wiring', () => {
       body: JSON.stringify({ state: 'cleared' }),
     });
     const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(makeDbFor(restrictedCase, updatedCase)), corsHeaders);
-    const body = await res.json() as { success: boolean; enforcement: { keycastMinorClear: string } };
 
     expect(res.status).toBe(200);
-    expect(body.enforcement.keycastMinorClear).toBe('ok');
-    // moderator_pubkey is null on this case: actor omitted -> keycast log-only fallback.
-    expect(clearVerifiedMinor).toHaveBeenCalledWith(
-      restrictedCase.pubkey,
-      undefined,
-      'age_review_cleared',
-      expect.objectContaining({ DB: expect.anything() }),
-    );
+    expect(clearVerifiedMinor).not.toHaveBeenCalled();
+    const body = await res.json() as { enforcement: { keycastMinorClear: string } };
+    expect(body.enforcement.keycastMinorClear).toBe('not_attempted');
   });
 
   it('surfaces a verified_minor clear failure as incomplete enforcement (207)', async () => {

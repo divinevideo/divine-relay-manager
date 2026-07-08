@@ -356,24 +356,31 @@ export async function handleUpdateAgeReviewCase(
     keycast = keycastLeg.status;
     keycastError = keycastLeg.error;
 
-    // Clear verified_minor on revoke/deny (issue #147). Compose, don't couple:
-    // the status outcome above stays this side's decision; this leg only lifts
-    // the protected-minor flag so protections release across clients (#174).
-    // Unconditional on the deny/cleared transitions — keycast's clear is an
-    // idempotent no-op for never-minor accounts and only audits real
-    // transitions (keycast#265), so no pre-read of verified_minor is needed.
-    // actor = the case's moderator; a malformed/absent actor is re-validated
-    // and dropped server-side in clearVerifiedMinor (keycast then falls back to
-    // log-only audit). reason distinguishes deny from cleared in the audit row.
+    // Clear verified_minor on the DENY/revoke transition ONLY (issue #147:
+    // "Revoking an approved minor... clears verified_minor"). Compose, don't
+    // couple: the status outcome above stays this side's decision; this leg
+    // only lifts the protected-minor flag so protections release across
+    // clients (#174).
+    //
+    // Deliberately NOT on `cleared`: `cleared` is the favorable outcome and
+    // is overloaded. For a 13-15 consent-verified case it "restores the
+    // account" (age-review-process.md, 13-15 band) — a *confirmed protected
+    // minor* who must KEEP verified_minor. Clearing there would strip
+    // protection from a minor, the worst failure direction on this path. The
+    // 16+ mistaken-flag case also uses `cleared`, where the flag is a no-op;
+    // we cannot distinguish the two from the transition alone, so we leave the
+    // flag untouched on `cleared` (an over-protected mistaken adult is the safe
+    // side). Only deny/revoke removes it. keycast's clear is an idempotent
+    // no-op for never-minor accounts, so no pre-read is needed.
+    //
+    // actor = the case's assigned moderator (best-effort: relay-manager auths
+    // with a shared admin pubkey, so there's no per-actor signal, and
+    // moderator_pubkey is unvalidated on write). A malformed/absent actor is
+    // dropped server-side in clearVerifiedMinor → keycast logs-only.
     const minorClearActor = (updated?.moderator_pubkey ?? existing.moderator_pubkey) ?? undefined;
     const minorClearLeg = await runStatusLeg('Keycast verified_minor clear', () =>
-      deniedCase || clearedCase
-        ? clearVerifiedMinor(
-            existing.pubkey,
-            minorClearActor,
-            deniedCase ? 'age_review_denied' : 'age_review_cleared',
-            env,
-          )
+      deniedCase
+        ? clearVerifiedMinor(existing.pubkey, minorClearActor, 'age_review_denied', env)
         : undefined);
     keycastMinorClear = minorClearLeg.status;
     keycastMinorClearError = minorClearLeg.error;

@@ -89,12 +89,14 @@ export async function banUser(pubkey: string, reason: KeycastReason, env: Keycas
  * on a real transition, so callers invoke it unconditionally on revoke/deny
  * without a pre-read. `actor` (moderator hex pubkey) and `reason` feed that
  * audit row; a malformed actor is dropped (keycast 400s on it, which would
- * fail the whole clear) so keycast falls back to log-only.
+ * fail the whole clear) so keycast falls back to log-only. Only the
+ * revoke-direction reasons are valid here (age_review_denied / _expired);
+ * `cleared` is deliberately not a clear trigger (see age-review.ts).
  */
 export async function clearVerifiedMinor(
   pubkey: string,
   actor: string | undefined,
-  reason: string | undefined,
+  reason: KeycastReason | undefined,
   env: KeycastEnv,
 ): Promise<KeycastResult> {
   if (!env.KEYCAST_URL || !env.KEYCAST_SERVICE_TOKEN) {
