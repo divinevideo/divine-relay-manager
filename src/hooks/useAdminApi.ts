@@ -129,6 +129,8 @@ export function useAdminApi() {
       adminApi.getAgeReviewFunnel(apiUrl, ageBand),
     getAgeReviewCase: (caseId: string) =>
       adminApi.getAgeReviewCase(apiUrl, caseId),
+    getActiveAgeReviewCase: (pubkey: string) =>
+      adminApi.getActiveAgeReviewCase(apiUrl, pubkey),
     getAccountStatus: (pubkey: string) =>
       adminApi.getAccountStatus(apiUrl, pubkey),
     updateAgeReviewCase: (caseId: string, updates: Record<string, unknown>) =>

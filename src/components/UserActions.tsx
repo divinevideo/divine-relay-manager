@@ -1,4 +1,4 @@
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useToast } from '@/hooks/useToast';
@@ -48,6 +48,18 @@ export function UserActions({
     }
     return false;
   };
+
+  // Whether this account has an open age-review case, which changes the Ban
+  // copy (a ban purges content the review may still need). For an underage
+  // report we already know one exists; otherwise look it up. Ban is only shown
+  // when the account is not banned, so skip the lookup once banned.
+  const { data: activeAgeCase } = useQuery({
+    queryKey: ['age-review-active-case', pubkey],
+    queryFn: () => api.getActiveAgeReviewCase(pubkey),
+    enabled: !isBanned && !isUnderageReport,
+    staleTime: 30_000,
+  });
+  const hasActiveAgeCase = isUnderageReport || !!activeAgeCase?.case;
 
   // Audit logging is a non-critical side effect. Fire-and-forget so a slow or
   // hung /api/decisions write can never stall the moderation action or leave the
@@ -247,7 +259,9 @@ export function UserActions({
               </Button>
             }
             title="Ban User"
-            summary="Permanently ban this user and purge all their content from the relay. This destroys events across 16+ tables and cannot be fully reversed — unbanning allows new posts but does not restore purged content."
+            summary={hasActiveAgeCase
+              ? "This account is under age review. Banning purges all their content across 16+ tables and cannot be fully reversed, which destroys evidence the review may need. Resolve through the Age Review flow unless this is a separate severe violation (e.g. CSAM) that requires an immediate ban."
+              : "Permanently ban this user and purge all their content from the relay. This destroys events across 16+ tables and cannot be fully reversed — unbanning allows new posts but does not restore purged content."}
             confirmLabel="Ban User"
             pendingLabel="Banning..."
             onConfirm={async () => { await banUserMutation.mutateAsync(); }}

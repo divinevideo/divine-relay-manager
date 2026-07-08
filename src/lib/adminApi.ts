@@ -1046,6 +1046,14 @@ export async function getAgeReviewCase(
   return apiRequest<AgeReviewCaseResponse>(apiUrl, `/api/age-review/cases/${caseId}`, 'GET');
 }
 
+/** Active (non-terminal) age-review case for a pubkey, or null. Read-only. */
+export async function getActiveAgeReviewCase(
+  apiUrl: string,
+  pubkey: string,
+): Promise<{ success: boolean; case: import('../../shared/age-review').AgeReviewCase | null }> {
+  return apiRequest(apiUrl, `/api/age-review/active-case?pubkey=${pubkey}`, 'GET');
+}
+
 /** Keycast-backed account status for moderators: surfaces the durable
  * `verified_minor` flag (approved protected minor 13-15). A keycast blip returns
  * `{ success: false }` (HTTP 200), so callers degrade to "status unavailable". */

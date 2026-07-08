@@ -14,6 +14,7 @@ const api = vi.hoisted(() => ({
   unbanPubkey: vi.fn(),
   suspendPubkey: vi.fn(),
   unsuspendPubkey: vi.fn(),
+  getActiveAgeReviewCase: vi.fn(),
   logDecision: vi.fn(),
 }));
 const toast = vi.hoisted(() => vi.fn());
@@ -44,6 +45,7 @@ beforeEach(() => {
   api.unbanPubkey.mockResolvedValue({ success: true });
   api.suspendPubkey.mockResolvedValue({ success: true });
   api.unsuspendPubkey.mockResolvedValue({ success: true });
+  api.getActiveAgeReviewCase.mockResolvedValue({ success: true, case: null });
   api.logDecision.mockResolvedValue(undefined);
 });
 
@@ -90,6 +92,13 @@ describe('UserActions', () => {
     renderWithProvider(<UserActions pubkey={PUBKEY} />);
     fireEvent.click(screen.getByRole('button', { name: /Suspend User/i }));
     await waitFor(() => expect(navigate).toHaveBeenCalledWith(`/age-review?pubkey=${PUBKEY}`));
+  });
+
+  it('warns about evidence when banning an account with an open age-review case', async () => {
+    api.getActiveAgeReviewCase.mockResolvedValue({ success: true, case: { id: 'case-1' } });
+    renderWithProvider(<UserActions pubkey={PUBKEY} />);
+    fireEvent.click(screen.getByRole('button', { name: /Ban User/i }));
+    expect(await screen.findByText(/under age review/i)).toBeInTheDocument();
   });
 
   it('renders unsuspend and ban when user is suspended', () => {
