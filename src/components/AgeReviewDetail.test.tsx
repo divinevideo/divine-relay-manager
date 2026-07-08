@@ -31,10 +31,6 @@ vi.mock('@/hooks/useAuthor', () => ({
   useAuthor: () => ({ data: undefined, isLoading: false }),
 }));
 
-vi.mock('@/hooks/useToast', () => ({
-  useToast: () => ({ toast }),
-}));
-
 function makeCase(overrides: Partial<AgeReviewCase> = {}): AgeReviewCase {
   return {
     id: 'case-1',
@@ -316,9 +312,11 @@ describe('AgeReviewDetail', () => {
   it('does not show the protected-minor badge when verified_minor is false', async () => {
     getAccountStatus.mockResolvedValue({ success: true, verified_minor: false });
 
-    renderDetail(makeCase());
+    const { queryClient } = renderDetail(makeCase());
 
-    await waitFor(() => expect(getAccountStatus).toHaveBeenCalled());
+    // Wait for query settlement, not just the fetch call — asserting against a
+    // still-loading tree would pass even if the gating were broken.
+    await waitFor(() => expect(queryClient.isFetching()).toBe(0));
     expect(
       screen.queryByText(/approved protected minor/i)
     ).not.toBeInTheDocument();
