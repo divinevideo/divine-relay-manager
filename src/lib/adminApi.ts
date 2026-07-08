@@ -267,10 +267,20 @@ export async function callRelayRpc<T = unknown>(
   }, label, { mutates });
 
   if (!response.ok) {
+    // Parse a structured error body so callers can branch on `code`
+    // (e.g. the age-review guard's 'age_review_active') instead of an opaque
+    // "HTTP 409:" message. Non-JSON bodies fall back to the status line.
+    let parsed: { error?: string; code?: string } | undefined;
+    try {
+      parsed = await response.json() as typeof parsed;
+    } catch {
+      // empty or non-JSON body; keep the status-line fallback
+    }
     throw new ApiError(
-      `HTTP ${response.status}: ${response.statusText}`,
+      parsed?.error || `HTTP ${response.status}: ${response.statusText}`,
       response.status,
-      response.statusText
+      response.statusText,
+      parsed?.code,
     );
   }
 

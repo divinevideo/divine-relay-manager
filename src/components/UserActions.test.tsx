@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { UserActions } from './UserActions';
+import { ApiError } from '@/lib/adminApi';
 
 // Stable mocks so async-flow tests can control enqueue + status polling and
 // assert on the same fn instances.
@@ -82,6 +83,13 @@ describe('UserActions', () => {
     renderWithProvider(<UserActions pubkey={PUBKEY} context="report" reportCategory="NS-spam" />);
     expect(screen.getByRole('button', { name: /Suspend User/i })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Handle in Age Review/i })).not.toBeInTheDocument();
+  });
+
+  it('routes to Age Review when a bare suspend is guard-blocked (age_review_active)', async () => {
+    api.suspendPubkey.mockRejectedValue(new ApiError('under age review', 409, 'Conflict', 'age_review_active'));
+    renderWithProvider(<UserActions pubkey={PUBKEY} />);
+    fireEvent.click(screen.getByRole('button', { name: /Suspend User/i }));
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith(`/age-review?pubkey=${PUBKEY}`));
   });
 
   it('renders unsuspend and ban when user is suspended', () => {

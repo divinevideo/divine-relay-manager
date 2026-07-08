@@ -3,6 +3,7 @@ import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useToast } from '@/hooks/useToast';
 import { useAdminApi } from '@/hooks/useAdminApi';
+import { ApiError } from '@/lib/adminApi';
 import { useBulkModerateJob } from '@/hooks/useBulkModerateJob';
 import { ConfirmDialog } from './ConfirmDialog';
 import { useNavigate } from 'react-router-dom';
@@ -35,6 +36,18 @@ export function UserActions({
   // generic Suspend/Unsuspend (which would enforce without advancing the case).
   // Exact category only: CSAM/child-safety are a separate, non-reversible path.
   const isUnderageReport = context === 'report' && reportCategory === 'NS-underageUser';
+
+  // The worker guard refuses a bare suspend/unsuspend on an account under age
+  // review (any context). Route the moderator to the case instead of surfacing
+  // a raw error, so enforcement can't drift from the case out of band.
+  const routeToAgeReviewIfGuarded = (error: Error): boolean => {
+    if (error instanceof ApiError && error.code === 'age_review_active') {
+      toast({ title: 'This account is under age review', description: 'Opening it in the Age Review flow.' });
+      navigate(`/age-review?pubkey=${pubkey}`);
+      return true;
+    }
+    return false;
+  };
 
   // Audit logging is a non-critical side effect. Fire-and-forget so a slow or
   // hung /api/decisions write can never stall the moderation action or leave the
@@ -75,6 +88,7 @@ export function UserActions({
       onActionComplete?.();
     },
     onError: (error: Error) => {
+      if (routeToAgeReviewIfGuarded(error)) return;
       toast({ title: 'Failed to suspend user', description: error.message, variant: 'destructive' });
     },
   });
@@ -94,6 +108,7 @@ export function UserActions({
       onActionComplete?.();
     },
     onError: (error: Error) => {
+      if (routeToAgeReviewIfGuarded(error)) return;
       toast({ title: 'Failed to unsuspend user', description: error.message, variant: 'destructive' });
     },
   });
