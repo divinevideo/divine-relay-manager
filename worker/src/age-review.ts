@@ -127,10 +127,14 @@ export async function handleGetActiveAgeReviewCase(
   env: AgeReviewEnv,
   corsHeaders: Record<string, string>,
 ): Promise<Response> {
-  if (!env.DB) return json({ success: false, error: 'Database not configured' }, 500, corsHeaders);
-  if (!/^[0-9a-f]{64}$/i.test(pubkey)) {
+  // Pubkeys are canonical lowercase hex and the stored column is case-sensitive,
+  // so validate case-sensitively (a mixed-case value would pass a case-
+  // insensitive check but miss the lowercased row). Validate before the DB
+  // check so a malformed pubkey is a 400, not a 500.
+  if (!/^[0-9a-f]{64}$/.test(pubkey)) {
     return json({ success: false, error: 'Invalid pubkey' }, 400, corsHeaders);
   }
+  if (!env.DB) return json({ success: false, error: 'Database not configured' }, 500, corsHeaders);
   const row = await getActiveAgeReviewCase(pubkey, env);
   return json({ success: true, case: row }, 200, corsHeaders);
 }

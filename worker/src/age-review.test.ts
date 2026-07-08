@@ -171,6 +171,14 @@ describe('handleGetActiveAgeReviewCase', () => {
     expect(body.case).toBeNull();
   });
 
+  it("returns null when the pubkey's only case is terminal (cleared)", async () => {
+    const c = makeCase({ state: 'cleared' });
+    const res = await handleGetActiveAgeReviewCase(c.pubkey, makeEnv(createMockDb([c])), corsHeaders);
+    expect(res.status).toBe(200);
+    const body = await res.json() as { success: boolean; case: AgeReviewCase | null };
+    expect(body.case).toBeNull();
+  });
+
   it('rejects an invalid pubkey', async () => {
     const res = await handleGetActiveAgeReviewCase('not-a-pubkey', makeEnv(createMockDb([])), corsHeaders);
     expect(res.status).toBe(400);

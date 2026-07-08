@@ -227,8 +227,11 @@ describe('relay-rpc account-state side effects', () => {
     } as never;
   }
 
-  // Same env with a DB whose active-case lookup returns `caseRow` (or null).
-  function makeAccountStateEnvWithDb(caseRow: unknown) {
+  // Same env with a DB whose active-case lookup returns `caseRow` only when it
+  // is non-terminal, mirroring the guard query's WHERE state NOT IN
+  // (cleared, denied_closed). A terminal or null row resolves to null.
+  function makeAccountStateEnvWithDb(caseRow: { id: string; state: string } | null) {
+    const active = caseRow && !['cleared', 'denied_closed'].includes(caseRow.state) ? caseRow : null;
     return {
       ALLOWED_ORIGINS: 'https://app.divine.video',
       RELAY_URL: 'wss://relay.divine.video',
@@ -239,7 +242,7 @@ describe('relay-rpc account-state side effects', () => {
       KEYCAST_URL: 'https://login.divine.video',
       KEYCAST_SERVICE_TOKEN: 'keycast-token',
       DB: {
-        prepare: () => ({ bind: () => ({ first: async () => caseRow }) }),
+        prepare: () => ({ bind: () => ({ first: async () => active }) }),
       },
     } as never;
   }
@@ -433,6 +436,20 @@ describe('relay-rpc account-state side effects', () => {
     const kc = keycastCalls(fetchSpy);
     expect(kc).toHaveLength(1);
     expect(kc[0].status).toBe('suspended');
+
+    fetchSpy.mockRestore();
+  });
+
+  it('suspendpubkey proceeds when the only age-review case is terminal (cleared)', async () => {
+    const fetchSpy = makeFetchSpy();
+    const waitUntil = vi.fn();
+    const testCtx = { waitUntil } as unknown as ExecutionContext;
+    const env = makeAccountStateEnvWithDb({ id: 'case-x', state: 'cleared' });
+
+    const response = await callRelayRpc('suspendpubkey', [VALID_PUBKEY, 'policy'], env, testCtx);
+    expect(response.status).toBe(200);
+    await drain(waitUntil);
+    expect(keycastCalls(fetchSpy)).toHaveLength(1);
 
     fetchSpy.mockRestore();
   });

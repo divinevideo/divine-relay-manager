@@ -953,7 +953,16 @@ async function handleRelayRpc(
   if (body.method === 'suspendpubkey' || body.method === 'unsuspendpubkey') {
     const target = body.params?.[0] ? String(body.params[0]) : '';
     if (target && env.DB) {
-      const activeCase = await getActiveAgeReviewCase(target, env);
+      // Fail open: this guard is a safety net (the report hand-off is the
+      // primary path), so a transient D1 error must not block core moderation.
+      // On lookup failure we log and proceed rather than 500 the suspend. This
+      // matches the !env.DB branch above, which also proceeds.
+      let activeCase = null;
+      try {
+        activeCase = await getActiveAgeReviewCase(target, env);
+      } catch (err) {
+        console.error('[handleRelayRpc] age-review guard lookup failed; proceeding:', err);
+      }
       if (activeCase) {
         return new Response(JSON.stringify({
           success: false,
