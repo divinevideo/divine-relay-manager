@@ -5,11 +5,13 @@ import { useToast } from '@/hooks/useToast';
 import { useAdminApi } from '@/hooks/useAdminApi';
 import { useBulkModerateJob } from '@/hooks/useBulkModerateJob';
 import { ConfirmDialog } from './ConfirmDialog';
-import { UserX, UserCheck, ShieldAlert, Trash2, Pause, Play } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { UserX, UserCheck, ShieldAlert, Trash2, Pause, Play, ArrowRight } from 'lucide-react';
 
 interface UserActionsProps {
   pubkey: string;
   context?: 'report' | 'age-review' | 'users';
+  reportCategory?: string;
   isBanned?: boolean;
   isSuspended?: boolean;
   onActionComplete?: () => void;
@@ -18,6 +20,7 @@ interface UserActionsProps {
 export function UserActions({
   pubkey,
   context = 'users',
+  reportCategory,
   isBanned = false,
   isSuspended = false,
   onActionComplete,
@@ -25,7 +28,13 @@ export function UserActions({
   const { toast } = useToast();
   const api = useAdminApi();
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const showBulkActions = context !== 'age-review';
+
+  // An under-16 report must be worked through the Age Review flow, not the
+  // generic Suspend/Unsuspend (which would enforce without advancing the case).
+  // Exact category only: CSAM/child-safety are a separate, non-reversible path.
+  const isUnderageReport = context === 'report' && reportCategory === 'NS-underageUser';
 
   // Audit logging is a non-critical side effect. Fire-and-forget so a slow or
   // hung /api/decisions write can never stall the moderation action or leave the
@@ -180,7 +189,18 @@ export function UserActions({
         </Tooltip>
       ) : (
         <>
-          {isSuspended ? (
+          {isUnderageReport ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="outline" className="border-blue-500 text-blue-600 hover:bg-blue-50"
+                  onClick={() => navigate(`/age-review?pubkey=${pubkey}`)} disabled={anyPending}>
+                  <ArrowRight className="h-4 w-4 mr-1" />
+                  Handle in Age Review
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent><p>This account was reported as under 16. Suspend and unsuspend run through the Age Review flow so the case, content age-restriction, and deadline stay in sync.</p></TooltipContent>
+            </Tooltip>
+          ) : isSuspended ? (
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button variant="outline" className="border-green-500 text-green-600 hover:bg-green-50"

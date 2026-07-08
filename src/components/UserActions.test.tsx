@@ -17,6 +17,12 @@ const api = vi.hoisted(() => ({
 }));
 const toast = vi.hoisted(() => vi.fn());
 
+const navigate = vi.hoisted(() => vi.fn());
+vi.mock('react-router-dom', async (orig) => ({
+  ...(await orig<typeof import('react-router-dom')>()),
+  useNavigate: () => navigate,
+}));
+
 vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => api }));
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast }) }));
 
@@ -56,6 +62,26 @@ describe('UserActions', () => {
     expect(screen.getByRole('button', { name: /Ban User/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Age Restrict All/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Delete All Content/i })).toBeInTheDocument();
+  });
+
+  it('shows the Age Review hand-off (not Suspend) for an NS-underageUser report', () => {
+    renderWithProvider(<UserActions pubkey={PUBKEY} context="report" reportCategory="NS-underageUser" />);
+    expect(screen.getByRole('button', { name: /Handle in Age Review/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Suspend User/i })).not.toBeInTheDocument();
+    // Ban stays available as the severe-action escape hatch.
+    expect(screen.getByRole('button', { name: /Ban User/i })).toBeInTheDocument();
+  });
+
+  it('navigates to the age-review flow when the hand-off is clicked', () => {
+    renderWithProvider(<UserActions pubkey={PUBKEY} context="report" reportCategory="NS-underageUser" />);
+    fireEvent.click(screen.getByRole('button', { name: /Handle in Age Review/i }));
+    expect(navigate).toHaveBeenCalledWith(`/age-review?pubkey=${PUBKEY}`);
+  });
+
+  it('keeps the generic Suspend for a non-underage report', () => {
+    renderWithProvider(<UserActions pubkey={PUBKEY} context="report" reportCategory="NS-spam" />);
+    expect(screen.getByRole('button', { name: /Suspend User/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Handle in Age Review/i })).not.toBeInTheDocument();
   });
 
   it('renders unsuspend and ban when user is suspended', () => {
