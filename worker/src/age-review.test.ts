@@ -670,6 +670,31 @@ describe('Keycast suspension wiring', () => {
     );
   });
 
+  it('clears verified_minor with an undefined actor when the case has no moderator_pubkey', async () => {
+    // relay-manager auths with a shared admin pubkey, so a case row may carry a
+    // null moderator_pubkey. The clear must still fire, with actor `undefined`
+    // (keycast then falls back to a log-only audit row). Locks the handler's
+    // `(updated ?? existing) ?? undefined` fallback on the interactive path.
+    const restrictedCase = makeCase({ state: 'restricted_pending_user_response', moderator_pubkey: null });
+    const updatedCase = { ...restrictedCase, state: 'denied_closed' as const };
+
+    const req = new Request('https://api.test/api/age-review/cases/case-1', {
+      method: 'PATCH',
+      body: JSON.stringify({ state: 'denied_closed' }),
+    });
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(makeDbFor(restrictedCase, updatedCase)), corsHeaders);
+    const body = await res.json() as { enforcement: { keycastMinorClear: string } };
+
+    expect(res.status).toBe(200);
+    expect(body.enforcement.keycastMinorClear).toBe('ok');
+    expect(clearVerifiedMinor).toHaveBeenCalledWith(
+      restrictedCase.pubkey,
+      undefined,
+      'age_review_denied',
+      expect.objectContaining({ DB: expect.anything() }),
+    );
+  });
+
   it('does NOT clear verified_minor on a cleared transition (favorable outcome keeps a confirmed minor protected)', async () => {
     // `cleared` restores a 13-15 consent-verified account (a confirmed protected
     // minor who must keep verified_minor). Only deny/revoke removes the flag.
