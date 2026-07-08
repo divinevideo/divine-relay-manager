@@ -1,4 +1,5 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useCallback } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { Card } from "@/components/ui/card";
@@ -52,7 +53,18 @@ type FilterMode = 'active' | 'closed' | 'all';
 export function AgeReview() {
   const api = useAdminApi();
   const isMobile = useIsMobile();
-  const [selectedCaseId, setSelectedCaseId] = useState<string | null>(null);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const selectedCaseId = searchParams.get('case');
+  const pubkeyParam = searchParams.get('pubkey');
+
+  // Case selection lives in the URL (?case=<id>) so a report hand-off can
+  // deep-link straight to a case; ?pubkey=<hex> is resolved to its active case.
+  const setSelectedCaseId = useCallback((id: string | null) => {
+    const next = new URLSearchParams(searchParams);
+    if (id) next.set('case', id); else next.delete('case');
+    next.delete('pubkey');
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
   const [filterMode, setFilterMode] = useState<FilterMode>('active');
   const [bandFilter, setBandFilter] = useState<string>('all');
 
@@ -72,7 +84,7 @@ export function AgeReview() {
 
   const filteredCases = data?.cases ?? [];
 
-  const selectedCase = filteredCases.find(c => c.id === selectedCaseId) ?? null;
+  const inFilteredList = filteredCases.find(c => c.id === selectedCaseId) ?? null;
 
   const { data: activeData } = useQuery({
     queryKey: ['age-review-cases', { state: 'active' }],
@@ -80,6 +92,23 @@ export function AgeReview() {
     staleTime: 30_000,
     refetchInterval: 30_000,
   });
+
+  // Fallback fetch so a deep-linked case outside the current filter still opens.
+  const { data: fetchedCaseData } = useQuery({
+    queryKey: ['age-review-case', selectedCaseId],
+    queryFn: () => api.getAgeReviewCase(selectedCaseId!),
+    enabled: !!selectedCaseId && !inFilteredList,
+    staleTime: 30_000,
+  });
+  const selectedCase = inFilteredList ?? fetchedCaseData?.case ?? null;
+
+  // Resolve a ?pubkey= hand-off to that pubkey's active case, then normalize the
+  // URL to ?case=. Active cases are already loaded, so no extra fetch is needed.
+  useEffect(() => {
+    if (!pubkeyParam) return;
+    const match = activeData?.cases?.find(c => c.pubkey === pubkeyParam);
+    if (match) setSelectedCaseId(match.id);
+  }, [pubkeyParam, activeData?.cases, setSelectedCaseId]);
 
   const activeCounts = useMemo(() => {
     if (!activeData?.cases) return { total: 0, urgent: 0 };
