@@ -31,6 +31,9 @@ export interface AgeReviewEnv extends BulkModerateEnv, KeycastEnv {
   ZENDESK_FIELD_CATEGORY?: string;
   ZENDESK_FIELD_ISSUE?: string;
   ZENDESK_FIELD_AGE_REVIEW_DEADLINE?: string;
+  // Group to route resolved tickets to (the Trust & Safety queue), instead of
+  // assigning the API credential's owner. Numeric Zendesk group id as a string.
+  ZENDESK_GROUP_ID?: string;
 }
 
 interface ZendeskClientConfig {
@@ -848,9 +851,13 @@ export async function syncAgeReviewTicketResolution(
     ticket: {
       comment: { body: noteLines.join('\n'), public: false },
       status: 'solved',
-      assignee_email: zendesk.email,
     },
   };
+
+  // Route to a group (Trust & Safety) rather than assigning the credential owner.
+  if (env.ZENDESK_GROUP_ID) {
+    (payload.ticket as Record<string, unknown>).group_id = Number(env.ZENDESK_GROUP_ID);
+  }
 
   // Required fields for solving (same pattern as addZendeskInternalNote in index.ts)
   if (env.ZENDESK_FIELD_CATEGORY && env.ZENDESK_FIELD_ISSUE) {

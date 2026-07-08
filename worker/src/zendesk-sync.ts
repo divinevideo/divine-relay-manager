@@ -7,6 +7,9 @@ export interface ZendeskSyncEnv {
   ZENDESK_EMAIL?: string | SecretStoreSecret;
   ZENDESK_FIELD_CATEGORY?: string;
   ZENDESK_FIELD_ISSUE?: string;
+  // Group to route resolved tickets to (the Trust & Safety queue), instead of
+  // assigning the API credential's owner. Numeric Zendesk group id as a string.
+  ZENDESK_GROUP_ID?: string;
   NOSTR_NSEC: string | SecretStoreSecret;
   RELAY_URL: string;
 }
@@ -98,7 +101,7 @@ export async function addZendeskInternalNote(
       ticket: {
         comment: { body: string; public: boolean };
         status?: string;
-        assignee_email?: string;
+        group_id?: number;
         custom_fields?: Array<{ id: number; value: string }>;
       };
     } = {
@@ -112,7 +115,10 @@ export async function addZendeskInternalNote(
 
     if (solve) {
       payload.ticket.status = 'solved';
-      payload.ticket.assignee_email = creds.email;
+      // Route resolved tickets to a group (Trust & Safety) instead of assigning
+      // the API credential's owner. This instance allows solving without an
+      // individual assignee, so the ticket lands unassigned in the queue.
+      if (env.ZENDESK_GROUP_ID) payload.ticket.group_id = Number(env.ZENDESK_GROUP_ID);
       payload.ticket.custom_fields = buildResolutionCustomFields(env);
     }
 
