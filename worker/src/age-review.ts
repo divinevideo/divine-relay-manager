@@ -116,6 +116,43 @@ export async function getActiveAgeReviewCase(
 }
 
 /**
+ * Refuse-and-route guard shared by the interactive enforcement endpoints
+ * (relay-rpc suspend/unsuspend, bulk-moderate enqueue): if the pubkey has an
+ * open (non-terminal) age-review case, returns a structured 409
+ * (`age_review_active` + caseId/state) that the frontend turns into a redirect
+ * to the case; returns null when nothing blocks the action.
+ *
+ * Fails open: the guard is a safety net (the report hand-off is the primary
+ * path), so a transient D1 error must not block core moderation — log and
+ * proceed. A malformed pubkey also skips the guard (no point querying; the
+ * caller's own validation produces the 400). Age-review's own enforcement
+ * calls the nip86 helpers / runBulkModeration directly, so it never hits the
+ * guarded endpoints.
+ */
+export async function ageReviewActiveGuard(
+  pubkey: string,
+  env: AgeReviewEnv,
+  corsHeaders: Record<string, string>,
+  error: string,
+): Promise<Response | null> {
+  if (!/^[0-9a-f]{64}$/.test(pubkey) || !env.DB) return null;
+  let activeCase: AgeReviewCase | null = null;
+  try {
+    activeCase = await getActiveAgeReviewCase(pubkey, env);
+  } catch (err) {
+    console.error('[ageReviewActiveGuard] lookup failed; proceeding:', err);
+  }
+  if (!activeCase) return null;
+  return json({
+    success: false,
+    error,
+    code: 'age_review_active',
+    caseId: activeCase.id,
+    state: activeCase.state,
+  }, 409, corsHeaders);
+}
+
+/**
  * GET /api/age-review/active-case?pubkey=<hex>
  *
  * Returns the active (non-terminal) age-review case for a pubkey, or null.

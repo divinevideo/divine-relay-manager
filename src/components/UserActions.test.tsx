@@ -75,6 +75,32 @@ describe('UserActions', () => {
     expect(screen.getByRole('button', { name: /Ban User/i })).toBeInTheDocument();
   });
 
+  it('hides the bulk content actions for an NS-underageUser report (enforcement runs through the case)', () => {
+    renderWithProvider(<UserActions pubkey={PUBKEY} context="report" reportCategory="NS-underageUser" />);
+    expect(screen.queryByRole('button', { name: /Age Restrict All/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Delete All Content/i })).not.toBeInTheDocument();
+    // The hand-off and the Ban escape hatch remain.
+    expect(screen.getByRole('button', { name: /Handle in Age Review/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Ban User/i })).toBeInTheDocument();
+  });
+
+  it('keeps the bulk content actions for a non-underage report', () => {
+    renderWithProvider(<UserActions pubkey={PUBKEY} context="report" reportCategory="NS-spam" />);
+    expect(screen.getByRole('button', { name: /Age Restrict All/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Delete All Content/i })).toBeInTheDocument();
+  });
+
+  it('routes to Age Review when a bulk action is guard-blocked (age_review_active)', async () => {
+    api.bulkModerate.mockRejectedValue(new ApiError('under age review', 409, 'Conflict', 'age_review_active'));
+    renderWithProvider(<UserActions pubkey={PUBKEY} />);
+    fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith(`/age-review?pubkey=${PUBKEY}`));
+    // Routed, not surfaced as a failure.
+    expect(toast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Bulk action failed' }),
+    );
+  });
+
   it('navigates to the age-review flow when the hand-off is clicked', () => {
     renderWithProvider(<UserActions pubkey={PUBKEY} context="report" reportCategory="NS-underageUser" />);
     fireEvent.click(screen.getByRole('button', { name: /Handle in Age Review/i }));

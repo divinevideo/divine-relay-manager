@@ -31,12 +31,17 @@ export function UserActions({
   const api = useAdminApi();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
-  const showBulkActions = context !== 'age-review';
 
   // An under-16 report must be worked through the Age Review flow, not the
   // generic Suspend/Unsuspend (which would enforce without advancing the case).
   // Exact category only: CSAM/child-safety are a separate, non-reversible path.
   const isUnderageReport = context === 'report' && reportCategory === UNDERAGE_REPORT_CATEGORY;
+
+  // Bulk content actions are hidden in the age-review context (the case screen
+  // has its own enforcement controls) and for an underage report (content
+  // enforcement runs through the case; the /api/bulk-moderate guard refuses it
+  // on an open case regardless). Ban stays as the severe-action escape hatch.
+  const showBulkActions = context !== 'age-review' && !isUnderageReport;
 
   // The worker guard refuses a bare suspend/unsuspend on an account under age
   // review (any context). Route the moderator to the case instead of surfacing
@@ -197,6 +202,10 @@ export function UserActions({
       onActionComplete?.();
     },
     onError: (error) => {
+      // A guard-refused enqueue (open age-review case) routes to the case, for
+      // the contexts where the buttons still render (Users tab, non-underage
+      // report on an account that also has an open case).
+      if (routeToAgeReviewIfGuarded(error)) return;
       // Covers both enqueue failure and a persistent status-poll failure
       // (the job may have started; error.message carries the specific reason).
       toast({ title: 'Bulk action failed', description: error.message, variant: 'destructive' });
@@ -229,7 +238,7 @@ export function UserActions({
                   Handle in Age Review
                 </Button>
               </TooltipTrigger>
-              <TooltipContent><p>This account was reported as under 16. Suspend and unsuspend run through the Age Review flow so the case, content age-restriction, and deadline stay in sync.</p></TooltipContent>
+              <TooltipContent><p>This account was reported as under 16. Account and content enforcement run through the Age Review flow so the case, content age-restriction, and deadline stay in sync.</p></TooltipContent>
             </Tooltip>
           ) : isSuspended ? (
             <Tooltip>

@@ -683,3 +683,109 @@ describe('GET /api/account-status/:pubkey', () => {
     expect(response.status).toBe(401);
   });
 });
+
+describe('bulk-moderate age-review guard', () => {
+  const VALID_PUBKEY = 'abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234';
+
+  // Generic mock DB: tolerates ensureSchemaOnce's DDL and the enqueue INSERT,
+  // records every executed statement's SQL, and answers the guard's
+  // age_review_cases lookup with `caseRow` only when it is non-terminal
+  // (mirroring the WHERE state NOT IN (cleared, denied_closed) filter).
+  // `lookupThrows` simulates a transient D1 failure on that lookup only.
+  function makeBulkEnv(
+    caseRow: { id: string; state: string } | null,
+    opts: { lookupThrows?: boolean } = {},
+  ) {
+    const active = caseRow && !['cleared', 'denied_closed'].includes(caseRow.state) ? caseRow : null;
+    const executed: string[] = [];
+    const send = vi.fn(async () => {});
+    const statement = (sql: string) => ({
+      bind: () => statement(sql),
+      run: async () => { executed.push(sql); return { success: true, meta: { changes: 1 } }; },
+      first: async () => {
+        if (sql.includes('age_review_cases')) {
+          if (opts.lookupThrows) throw new Error('D1 unavailable');
+          return active;
+        }
+        return null;
+      },
+      all: async () => ({ results: [] }),
+    });
+    const env = {
+      ALLOWED_ORIGINS: 'https://app.divine.video',
+      RELAY_URL: 'wss://relay.divine.video',
+      ADMIN_API_KEY: 'test-admin-key',
+      NOSTR_NSEC: TEST_NSEC,
+      DB: { prepare: statement },
+      BULK_QUEUE: { send },
+    } as never;
+    return { env, executed, send };
+  }
+
+  function enqueueRequest(body: object): Request {
+    return new Request('https://api-relay-prod.divine.video/api/bulk-moderate', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Admin-Key': 'test-admin-key',
+        Origin: 'https://app.divine.video',
+      },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it('refuses a bulk action when the target has an active age-review case', async () => {
+    const { env, executed, send } = makeBulkEnv({ id: 'case-b1', state: 'restricted_pending_user_response' });
+    const response = await worker.fetch(
+      enqueueRequest({ pubkey: VALID_PUBKEY, action: 'age-restrict-all' }), env, ctx,
+    );
+    expect(response.status).toBe(409);
+    const body = await response.json() as { code: string; caseId: string; state: string };
+    expect(body.code).toBe('age_review_active');
+    expect(body.caseId).toBe('case-b1');
+    // The guard short-circuits before any job is created or enqueued.
+    expect(executed.some((sql) => sql.includes('INSERT INTO bulk_jobs'))).toBe(false);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('refuses delete-all the same way (no destructive job on an open case)', async () => {
+    const { env, send } = makeBulkEnv({ id: 'case-b2', state: 'submitted_for_review' });
+    const response = await worker.fetch(
+      enqueueRequest({ pubkey: VALID_PUBKEY, action: 'delete-all' }), env, ctx,
+    );
+    expect(response.status).toBe(409);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('proceeds when the only age-review case is terminal (cleared)', async () => {
+    const { env, send } = makeBulkEnv({ id: 'case-b3', state: 'cleared' });
+    const response = await worker.fetch(
+      enqueueRequest({ pubkey: VALID_PUBKEY, action: 'age-restrict-all' }), env, ctx,
+    );
+    expect(response.status).toBe(200);
+    const body = await response.json() as { success: boolean; jobId: string };
+    expect(body.success).toBe(true);
+    expect(body.jobId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails open when the case lookup throws (transient D1 error must not block moderation)', async () => {
+    const { env, send } = makeBulkEnv({ id: 'case-b4', state: 'restricted_pending_user_response' }, { lookupThrows: true });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const response = await worker.fetch(
+      enqueueRequest({ pubkey: VALID_PUBKEY, action: 'age-restrict-all' }), env, ctx,
+    );
+    expect(response.status).toBe(200);
+    expect(send).toHaveBeenCalledTimes(1);
+    errorSpy.mockRestore();
+  });
+
+  it('leaves validation to the handler: malformed pubkey is a 400, not a guard error', async () => {
+    const { env, send } = makeBulkEnv({ id: 'case-b5', state: 'restricted_pending_user_response' });
+    const response = await worker.fetch(
+      enqueueRequest({ pubkey: 'not-a-pubkey', action: 'age-restrict-all' }), env, ctx,
+    );
+    expect(response.status).toBe(400);
+    expect(send).not.toHaveBeenCalled();
+  });
+});

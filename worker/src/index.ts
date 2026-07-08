@@ -17,7 +17,7 @@ import {
   handleGetAgeReviewCases,
   handleGetAgeReviewCase,
   handleGetActiveAgeReviewCase,
-  getActiveAgeReviewCase,
+  ageReviewActiveGuard,
   handleGetAgeReviewFunnel,
   handleUpdateAgeReviewCase,
   handleCreateMinorAccount,
@@ -522,6 +522,22 @@ export default {
       // Bulk moderation (server-side iteration for batch operations)
       if (path === '/api/bulk-moderate' && request.method === 'POST') {
         if (env.DB) await ensureSchemaOnce(env.DB);
+        // Age-review guard: bulk content actions on an account with an open
+        // case must not run out of band (age-restrict half-enforces without
+        // advancing the case, un-age-restrict lifts restrictions the case
+        // imposed, delete-all destroys evidence the review may need). Refuse
+        // and route to the case; Ban remains the severe-action escape hatch.
+        // Peeks at the body on a clone so malformed/invalid requests still get
+        // the handler's own 400s.
+        let peeked: { pubkey?: string } | undefined;
+        try {
+          peeked = await request.clone().json() as { pubkey?: string };
+        } catch { /* not JSON; the handler returns the 400 */ }
+        if (typeof peeked?.pubkey === 'string') {
+          const guarded = await ageReviewActiveGuard(peeked.pubkey, env, corsHeaders,
+            'This account is under age review. Content enforcement runs through the Age Review flow.');
+          if (guarded) return guarded;
+        }
         return handleBulkModerateEnqueue(request, env, corsHeaders);
       }
 
@@ -952,30 +968,9 @@ async function handleRelayRpc(
   // moderation/bulk callers use ban*/unban* only, so neither reaches this guard.
   if (body.method === 'suspendpubkey' || body.method === 'unsuspendpubkey') {
     const target = body.params?.[0] ? String(body.params[0]) : '';
-    if (target && env.DB) {
-      // Fail open: this guard is a safety net (the report hand-off is the
-      // primary path), so a transient D1 error must not block core moderation.
-      // On lookup failure we log and proceed rather than 500 the suspend. This
-      // matches the !env.DB branch above, which also proceeds.
-      let activeCase = null;
-      try {
-        activeCase = await getActiveAgeReviewCase(target, env);
-      } catch (err) {
-        console.error('[handleRelayRpc] age-review guard lookup failed; proceeding:', err);
-      }
-      if (activeCase) {
-        return new Response(JSON.stringify({
-          success: false,
-          error: 'This account is under age review. Restrict or clear it from the Age Review flow.',
-          code: 'age_review_active',
-          caseId: activeCase.id,
-          state: activeCase.state,
-        }), {
-          status: 409,
-          headers: { 'Content-Type': 'application/json', ...corsHeaders },
-        });
-      }
-    }
+    const guarded = await ageReviewActiveGuard(target, env, corsHeaders,
+      'This account is under age review. Restrict or clear it from the Age Review flow.');
+    if (guarded) return guarded;
   }
 
   // Use shared NIP-86 RPC utility
