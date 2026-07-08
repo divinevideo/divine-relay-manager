@@ -239,7 +239,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
     onError: (error: Error, variables: { pubkey: string }) => {
       if (error instanceof ApiError && error.code === 'age_review_active') {
         toast({ title: "This account is under age review", description: "Opening it in the Age Review flow." });
-        navigate(`/age-review?pubkey=${variables.pubkey}`);
+        navigate(`/age-review?pubkey=${encodeURIComponent(variables.pubkey)}`);
         return;
       }
       toast({

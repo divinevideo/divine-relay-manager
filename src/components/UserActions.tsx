@@ -4,6 +4,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { useToast } from '@/hooks/useToast';
 import { useAdminApi } from '@/hooks/useAdminApi';
 import { ApiError } from '@/lib/adminApi';
+import { UNDERAGE_REPORT_CATEGORY } from '@/lib/constants';
 import { useBulkModerateJob } from '@/hooks/useBulkModerateJob';
 import { ConfirmDialog } from './ConfirmDialog';
 import { useNavigate } from 'react-router-dom';
@@ -35,7 +36,7 @@ export function UserActions({
   // An under-16 report must be worked through the Age Review flow, not the
   // generic Suspend/Unsuspend (which would enforce without advancing the case).
   // Exact category only: CSAM/child-safety are a separate, non-reversible path.
-  const isUnderageReport = context === 'report' && reportCategory === 'NS-underageUser';
+  const isUnderageReport = context === 'report' && reportCategory === UNDERAGE_REPORT_CATEGORY;
 
   // The worker guard refuses a bare suspend/unsuspend on an account under age
   // review (any context). Route the moderator to the case instead of surfacing
@@ -43,7 +44,7 @@ export function UserActions({
   const routeToAgeReviewIfGuarded = (error: Error): boolean => {
     if (error instanceof ApiError && error.code === 'age_review_active') {
       toast({ title: 'This account is under age review', description: 'Opening it in the Age Review flow.' });
-      navigate(`/age-review?pubkey=${pubkey}`);
+      navigate(`/age-review?pubkey=${encodeURIComponent(pubkey)}`);
       return true;
     }
     return false;
@@ -51,12 +52,15 @@ export function UserActions({
 
   // Whether this account has an open age-review case, which changes the Ban
   // copy (a ban purges content the review may still need). For an underage
-  // report we already know one exists; otherwise look it up. Ban is only shown
-  // when the account is not banned, so skip the lookup once banned.
+  // report we already know one exists; otherwise look it up. Skipped once
+  // banned (no Ban button) and in the age-review context (already on the case).
+  // If the lookup errors we read only `data`, so hasActiveAgeCase stays false
+  // and the ban falls back to the generic copy — a non-critical enrichment that
+  // degrades quietly rather than blocking the action.
   const { data: activeAgeCase } = useQuery({
     queryKey: ['age-review-active-case', pubkey],
     queryFn: () => api.getActiveAgeReviewCase(pubkey),
-    enabled: !isBanned && !isUnderageReport,
+    enabled: !isBanned && !isUnderageReport && context !== 'age-review',
     staleTime: 30_000,
   });
   const hasActiveAgeCase = isUnderageReport || !!activeAgeCase?.case;
@@ -220,7 +224,7 @@ export function UserActions({
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button variant="outline" className="border-blue-500 text-blue-600 hover:bg-blue-50"
-                  onClick={() => navigate(`/age-review?pubkey=${pubkey}`)} disabled={anyPending}>
+                  onClick={() => navigate(`/age-review?pubkey=${encodeURIComponent(pubkey)}`)} disabled={anyPending}>
                   <ArrowRight className="h-4 w-4 mr-1" />
                   Handle in Age Review
                 </Button>

@@ -1046,12 +1046,17 @@ export async function getAgeReviewCase(
   return apiRequest<AgeReviewCaseResponse>(apiUrl, `/api/age-review/cases/${caseId}`, 'GET');
 }
 
+export interface ActiveAgeReviewCaseResponse {
+  success: boolean;
+  case: import('../../shared/age-review').AgeReviewCase | null;
+}
+
 /** Active (non-terminal) age-review case for a pubkey, or null. Read-only. */
 export async function getActiveAgeReviewCase(
   apiUrl: string,
   pubkey: string,
-): Promise<{ success: boolean; case: import('../../shared/age-review').AgeReviewCase | null }> {
-  return apiRequest(apiUrl, `/api/age-review/active-case?pubkey=${pubkey}`, 'GET');
+): Promise<ActiveAgeReviewCaseResponse> {
+  return apiRequest<ActiveAgeReviewCaseResponse>(apiUrl, `/api/age-review/active-case?pubkey=${encodeURIComponent(pubkey)}`, 'GET');
 }
 
 /** Keycast-backed account status for moderators: surfaces the durable

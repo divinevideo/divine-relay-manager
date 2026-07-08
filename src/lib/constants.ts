@@ -64,6 +64,11 @@ export const HIGH_PRIORITY_CATEGORIES = [
   'NS-underageUser', 'NS-childSafety',
 ];
 
+// The exact report category that opens an age-review case (ReportWatcher gates
+// on this same literal). Distinct from HIGH_PRIORITY_CATEGORIES: CSAM /
+// child-safety are a separate, non-reversible path, not age review.
+export const UNDERAGE_REPORT_CATEGORY = 'NS-underageUser';
+
 // Helper to get label with fallback
 export function getCategoryLabel(category: string): string {
   return CATEGORY_LABELS[category] || category;

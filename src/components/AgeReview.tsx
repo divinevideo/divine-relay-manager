@@ -103,12 +103,27 @@ export function AgeReview() {
   const selectedCase = inFilteredList ?? fetchedCaseData?.case ?? null;
 
   // Resolve a ?pubkey= hand-off to that pubkey's active case, then normalize the
-  // URL to ?case=. Active cases are already loaded, so no extra fetch is needed.
+  // URL to ?case=. Prefer the already-loaded active list; fall back to a direct
+  // lookup for a case created just before the 30s-cached list refetches.
+  const pubkeyMatch = pubkeyParam
+    ? activeData?.cases?.find(c => c.pubkey === pubkeyParam) ?? null
+    : null;
+  const { data: pubkeyLookup, isFetching: pubkeyFetching } = useQuery({
+    queryKey: ['age-review-active-case', pubkeyParam],
+    queryFn: () => api.getActiveAgeReviewCase(pubkeyParam!),
+    enabled: !!pubkeyParam && !pubkeyMatch,
+    staleTime: 30_000,
+  });
+  const pubkeyResolvedId = pubkeyMatch?.id ?? pubkeyLookup?.case?.id ?? null;
   useEffect(() => {
-    if (!pubkeyParam) return;
-    const match = activeData?.cases?.find(c => c.pubkey === pubkeyParam);
-    if (match) setSelectedCaseId(match.id);
-  }, [pubkeyParam, activeData?.cases, setSelectedCaseId]);
+    if (pubkeyParam && pubkeyResolvedId) setSelectedCaseId(pubkeyResolvedId);
+  }, [pubkeyParam, pubkeyResolvedId, setSelectedCaseId]);
+
+  // A ?pubkey= that resolves to no active case (already cleared/verified, or
+  // still being created) gets an explicit empty state, not a blank panel — but
+  // only once the active list has loaded and the fallback lookup has settled.
+  const pubkeyUnresolved = !!pubkeyParam && !pubkeyResolvedId
+    && activeData !== undefined && !pubkeyFetching;
 
   const activeCounts = useMemo(() => {
     if (!activeData?.cases) return { total: 0, urgent: 0 };
@@ -248,6 +263,10 @@ export function AgeReview() {
 
   const detailContent = selectedCase ? (
     <AgeReviewDetail caseData={selectedCase} />
+  ) : pubkeyUnresolved ? (
+    <div className="flex items-center justify-center h-full p-6 text-center text-sm text-muted-foreground">
+      No active age-review case for this account. It may already be resolved (for example a verified minor), or the case is still being created — refresh in a moment.
+    </div>
   ) : (
     <div className="flex items-center justify-center h-full text-sm text-muted-foreground">
       Select a case to view details
@@ -258,7 +277,7 @@ export function AgeReview() {
     return (
       <Card className="h-full flex flex-col overflow-hidden">
         {listContent}
-        <Sheet open={!!selectedCase} onOpenChange={() => setSelectedCaseId(null)}>
+        <Sheet open={!!selectedCase || pubkeyUnresolved} onOpenChange={() => setSelectedCaseId(null)}>
           <SheetContent side="bottom" className="h-[80vh] p-0">
             {detailContent}
           </SheetContent>
