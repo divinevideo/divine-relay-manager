@@ -802,7 +802,7 @@ describe('handleGetModerationStatus', () => {
     expect(body.restriction.status).toBe('active');
   });
 
-  it('returns restrictedMinorReview when active case exists', async () => {
+  it('returns restricted_minor_review when active case exists', async () => {
     const c = makeCase({ state: 'restricted_pending_user_response' });
     const db = createMockDb([c]);
     // Override first() to return the case for the pubkey query
@@ -817,12 +817,21 @@ describe('handleGetModerationStatus', () => {
     const res = await handleGetModerationStatus(c.pubkey, makeEnv(db), corsHeaders);
     const body = await res.json() as {
       restriction: { status: string };
-      minorReviewCase: { id: string; state: string };
+      minorReviewCase: {
+        id: string;
+        state: string;
+        suspectedAgeBand: string;
+        allowedResolution: string;
+      };
     };
 
-    expect(body.restriction.status).toBe('restrictedMinorReview');
+    // The mobile client keys off snake_case wire values; the whole contract
+    // (top-level status AND the nested enum values) must stay snake_case.
+    expect(body.restriction.status).toBe('restricted_minor_review');
     expect(body.minorReviewCase.id).toBe('case-1');
     expect(body.minorReviewCase.state).toBe('restricted_pending_user_response');
+    expect(body.minorReviewCase.suspectedAgeBand).toBe('age_13_15');
+    expect(body.minorReviewCase.allowedResolution).toBe('parent_video_or_email');
   });
 
   it('returns active for open_reported case (pre-moderator review)', async () => {

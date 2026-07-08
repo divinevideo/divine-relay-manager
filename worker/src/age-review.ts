@@ -488,7 +488,7 @@ export async function handleGetModerationStatus(
   }
 
   return json({
-    restriction: { status: 'restrictedMinorReview' },
+    restriction: { status: 'restricted_minor_review' },
     minorReviewCase: {
       id: activeCase.id,
       state: activeCase.state,
