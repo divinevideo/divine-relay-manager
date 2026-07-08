@@ -743,6 +743,7 @@ describe('bulk-moderate age-review guard', () => {
     const body = await response.json() as { code: string; caseId: string; state: string };
     expect(body.code).toBe('age_review_active');
     expect(body.caseId).toBe('case-b1');
+    expect(body.state).toBe('restricted_pending_user_response');
     // The guard short-circuits before any job is created or enqueued.
     expect(executed.some((sql) => sql.includes('INSERT INTO bulk_jobs'))).toBe(false);
     expect(send).not.toHaveBeenCalled();

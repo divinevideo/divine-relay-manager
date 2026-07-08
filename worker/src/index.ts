@@ -528,7 +528,13 @@ export default {
         // imposed, delete-all destroys evidence the review may need). Refuse
         // and route to the case; Ban remains the severe-action escape hatch.
         // Peeks at the body on a clone so malformed/invalid requests still get
-        // the handler's own 400s.
+        // the handler's own 400s. Two accepted edges: (1) the guard runs
+        // before action validation, so a well-formed pubkey with an open case
+        // gets this 409 even if the action name is invalid — accurate, since
+        // every bulk action on that account is refused; (2) the check is
+        // enqueue-time only — a case opened while a chunked job is already
+        // draining does not abort it (aborting mid-job would leave
+        // half-applied state; the job was legitimate when it started).
         let peeked: { pubkey?: string } | undefined;
         try {
           peeked = await request.clone().json() as { pubkey?: string };

@@ -101,6 +101,21 @@ describe('UserActions', () => {
     );
   });
 
+  it('routes a guard-blocked Delete All (confirm-dialog path) to Age Review too', async () => {
+    // Same enqueue.onError as the direct path, but through ConfirmDialog's
+    // startAsync: the rejection must not surface as a failure or crash the
+    // dialog — the moderator lands on the case.
+    api.bulkModerate.mockRejectedValue(new ApiError('under age review', 409, 'Conflict', 'age_review_active'));
+    renderWithProvider(<UserActions pubkey={PUBKEY} />);
+    fireEvent.click(screen.getByRole('button', { name: /Delete All Content/i }));
+    const dialog = screen.getByRole('alertdialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Confirm Delete' }));
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith(`/age-review?pubkey=${PUBKEY}`));
+    expect(toast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Bulk action failed' }),
+    );
+  });
+
   it('navigates to the age-review flow when the hand-off is clicked', () => {
     renderWithProvider(<UserActions pubkey={PUBKEY} context="report" reportCategory="NS-underageUser" />);
     fireEvent.click(screen.getByRole('button', { name: /Handle in Age Review/i }));
