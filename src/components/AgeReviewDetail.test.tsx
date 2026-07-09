@@ -366,7 +366,7 @@ describe('AgeReviewDetail', () => {
     // Rolling-out section (#176): its heading carries the not-yet-enforced
     // framing, and the row names the pinned accounts by canonical NIP-05
     // handle (display names are impersonable), both directions.
-    const rolloutHeading = await screen.findByText(/rolling out/i);
+    const rolloutHeading = await screen.findByText(/rolling out \(not yet enforced/i);
     expect(rolloutHeading).toHaveTextContent(/not yet enforced by released apps/i);
     const rolloutSection = rolloutHeading.closest('div') as HTMLElement;
     expect(within(rolloutSection).getByText(/DM restriction/i)).toBeInTheDocument();
@@ -401,7 +401,7 @@ describe('AgeReviewDetail', () => {
     expect(
       screen.queryByText(/protections that apply to this account/i)
     ).not.toBeInTheDocument();
-    expect(screen.queryByText(/rolling out/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/rolling out \(not yet enforced/i)).not.toBeInTheDocument();
   });
 
   it('does not show the protections block when the account status is unavailable', async () => {
@@ -417,7 +417,7 @@ describe('AgeReviewDetail', () => {
     expect(
       screen.queryByText(/protections that apply to this account/i)
     ).not.toBeInTheDocument();
-    expect(screen.queryByText(/rolling out/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/rolling out \(not yet enforced/i)).not.toBeInTheDocument();
   });
 
   it('shows status-unavailable when the account-status query rejects', async () => {
