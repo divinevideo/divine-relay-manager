@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest';
-import { suspendUser, unsuspendUser, banUser, getUserStatus, createMinorAccount, type KeycastEnv } from './keycast-client';
+import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, getUserStatus, createMinorAccount, type KeycastEnv } from './keycast-client';
 
 const VALID_PUBKEY = 'a'.repeat(64);
 
@@ -57,6 +57,60 @@ describe('keycast-client', () => {
       fetchMock.mockRejectedValue(new Error('Connection refused'));
       const result = await suspendUser(VALID_PUBKEY, 'age_review', makeEnv());
       expect(result).toEqual({ success: false, error: expect.stringContaining('Connection refused') });
+    });
+  });
+
+  describe('clearVerifiedMinor', () => {
+    it('sends DELETE to the verified-minor endpoint with actor and reason', async () => {
+      const actor = 'b'.repeat(64);
+      const result = await clearVerifiedMinor(VALID_PUBKEY, actor, 'age_review_denied', makeEnv());
+      expect(result).toEqual({ success: true });
+      expect(fetchMock).toHaveBeenCalledOnce();
+      const [url, opts] = fetchMock.mock.calls[0];
+      expect(url).toBe(
+        `https://login.test.divine.video/api/admin/users/${VALID_PUBKEY}/verified-minor?actor=${actor}&reason=age_review_denied`,
+      );
+      expect(opts.method).toBe('DELETE');
+      expect(opts.headers['Authorization']).toBe('Bearer test-service-token');
+    });
+
+    it('omits actor and reason when absent (keycast log-only fallback)', async () => {
+      const result = await clearVerifiedMinor(VALID_PUBKEY, undefined, undefined, makeEnv());
+      expect(result).toEqual({ success: true });
+      const [url] = fetchMock.mock.calls[0];
+      expect(url).toBe(`https://login.test.divine.video/api/admin/users/${VALID_PUBKEY}/verified-minor`);
+    });
+
+    it('drops a malformed actor instead of failing the clear (keycast 400s on it)', async () => {
+      const result = await clearVerifiedMinor(VALID_PUBKEY, 'not-a-pubkey', 'age_review_denied', makeEnv());
+      expect(result).toEqual({ success: true });
+      const [url] = fetchMock.mock.calls[0];
+      expect(url).not.toContain('actor=');
+      expect(url).toContain('reason=age_review_denied');
+    });
+
+    it('returns success false with status on 4xx', async () => {
+      fetchMock.mockResolvedValue({ ok: false, status: 401, text: () => Promise.resolve('bad token') });
+      const result = await clearVerifiedMinor(VALID_PUBKEY, undefined, undefined, makeEnv());
+      expect(result).toEqual({ success: false, status: 401, error: expect.stringContaining('401') });
+    });
+
+    it('returns success false on network error without throwing', async () => {
+      fetchMock.mockRejectedValue(new Error('Connection refused'));
+      const result = await clearVerifiedMinor(VALID_PUBKEY, undefined, undefined, makeEnv());
+      expect(result).toEqual({ success: false, error: expect.stringContaining('Connection refused') });
+    });
+
+    it('rejects an invalid target pubkey without calling keycast', async () => {
+      const result = await clearVerifiedMinor('nope', undefined, undefined, makeEnv());
+      expect(result.success).toBe(false);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('reports not configured when env is missing', async () => {
+      const result = await clearVerifiedMinor(VALID_PUBKEY, undefined, undefined, makeEnv({ KEYCAST_URL: undefined }));
+      expect(result).toEqual({ success: false, error: 'not configured' });
+      expect(fetchMock).not.toHaveBeenCalled();
     });
   });
 
