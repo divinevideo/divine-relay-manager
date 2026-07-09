@@ -33,6 +33,9 @@ export function useUserSummary(
           recentPosts: recentPosts.slice(0, 10).map(e => ({
             content: e.content,
             created_at: e.created_at,
+            // Kind lets the summarizer distinguish authored posts from
+            // comments (1111) and reposts of others' content (6/16) — see #156
+            kind: e.kind,
           })),
           existingLabels: existingLabels?.map(e => ({
             tags: e.tags,

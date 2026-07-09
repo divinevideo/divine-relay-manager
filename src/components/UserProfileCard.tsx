@@ -186,10 +186,10 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
         )}
 
         {/* Stats */}
-        <div className="flex gap-4 text-sm">
+        <div className="flex flex-wrap items-center gap-4 text-sm">
           <div className="flex items-center gap-1">
             <FileText className="h-4 w-4 text-muted-foreground" />
-            <span>{stats?.postCount || 0} posts</span>
+            <span>{stats?.postCount || 0} events</span>
           </div>
           <div className="flex items-center gap-1">
             <Flag className="h-4 w-4 text-muted-foreground" />
@@ -241,6 +241,20 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
 }
 
 // Separate component for recent posts with expand/collapse
+/** Extract the inner content from a NIP-18 repost (kind 6/16), whose content
+ *  field is the stringified JSON of the reposted event (or empty). */
+function repostedContent(content: string): string {
+  try {
+    const inner: unknown = JSON.parse(content);
+    if (inner && typeof inner === 'object' && typeof (inner as { content?: unknown }).content === 'string') {
+      return (inner as { content: string }).content;
+    }
+    return '';
+  } catch {
+    return '';
+  }
+}
+
 function RecentPostsSection({
   posts,
   onDeleteEvent,
@@ -275,17 +289,22 @@ function RecentPostsSection({
       {expanded && (
         <div className="space-y-3">
           {visiblePosts.map(post => {
+            // Kind 6/16 content is the stringified JSON of the reposted event
+            // (NIP-18) — surface the inner content, labeled, instead of raw JSON.
+            const isRepost = post.kind === 6 || post.kind === 16;
+            const displayContent = isRepost ? repostedContent(post.content) : post.content;
             return (
               <div key={post.id} className="p-3 bg-muted rounded-lg space-y-2 overflow-hidden">
                 {/* Post content */}
-                {post.content && (
+                {displayContent && (
                   <p className="text-sm whitespace-pre-wrap break-all line-clamp-4">
-                    {post.content}
+                    {isRepost && <span className="text-muted-foreground italic">reposted: </span>}
+                    {displayContent}
                   </p>
                 )}
 
                 {/* Media preview - uses InlineMediaPreview for admin proxy fallback */}
-                <InlineMediaPreview content={post.content} tags={post.tags} />
+                <InlineMediaPreview content={displayContent} tags={post.tags} />
 
                 {/* Timestamp, kind, link, and delete */}
                 <div className="flex items-center justify-between text-xs text-muted-foreground">
@@ -304,14 +323,16 @@ function RecentPostsSection({
                         );
                       } catch { return null; }
                     })()}
-                    {(post.kind === 34235 || post.kind === 34236) ? (
-                      <Badge variant="default" className="text-xs gap-1 bg-green-600" title="Short-form video — visible in Divine apps"><Video className="h-3 w-3" />Video</Badge>
+                    {(post.kind === 21 || post.kind === 22 || post.kind === 34235 || post.kind === 34236) ? (
+                      <Badge variant="default" className="text-xs gap-1 bg-green-600" title="Video (NIP-71) — visible in Divine apps"><Video className="h-3 w-3" />Video</Badge>
                     ) : post.kind === 1111 ? (
                       <Badge variant="outline" className="text-xs gap-1 text-green-600 border-green-300 bg-green-50" title="Comment (kind 1111) — visible in Divine apps when attached to a video"><MessageSquare className="h-3 w-3" />Comment</Badge>
                     ) : (post.kind === 16 || post.kind === 6) ? (
                       <Badge variant="outline" className="text-xs gap-1 text-blue-600 border-blue-300 bg-blue-50" title="Repost — boosts another user's content into feeds"><Repeat className="h-3 w-3" />Repost</Badge>
-                    ) : (
+                    ) : post.kind === 1 ? (
                       <Badge variant="outline" className="text-xs gap-1 text-amber-600 border-amber-300 bg-amber-50" title="Text note (kind 1) — not visible in Divine apps. Only visible via external Nostr clients."><Globe className="h-3 w-3" />Note</Badge>
+                    ) : (
+                      <Badge variant="outline" className="text-xs gap-1 text-amber-600 border-amber-300 bg-amber-50" title={`Kind ${post.kind} — not shown as content in Divine apps`}><Globe className="h-3 w-3" />Kind {post.kind}</Badge>
                     )}
                     {onDeleteEvent && (
                       <Button

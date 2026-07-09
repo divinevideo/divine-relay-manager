@@ -675,7 +675,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
                   <div className="flex gap-4 text-xs text-muted-foreground p-2 bg-muted/50 rounded">
                     <span className="flex items-center gap-1">
                       <FileText className="h-3 w-3" />
-                      {userStats.data.postCount} posts
+                      {userStats.data.postCount} events
                     </span>
                     <span className="flex items-center gap-1">
                       <Flag className="h-3 w-3" />
@@ -848,7 +848,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
               <div className="flex gap-4 text-xs text-muted-foreground pt-2 border-t">
                 <span className="flex items-center gap-1">
                   <FileText className="h-3 w-3" />
-                  {userStats.data.postCount} posts
+                  {userStats.data.postCount} events
                 </span>
                 <span className="flex items-center gap-1">
                   <Flag className="h-3 w-3" />

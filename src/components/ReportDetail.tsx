@@ -110,6 +110,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   const [dismissReason, setDismissReason] = useState("");
 
   const context = useReportContext(report);
+  const reportedPubkey = context.reportedUser.pubkey;
 
   // Banned event fallback: if thread found no event and target is an event ID, try management API
   const targetEventId = context.target?.type === 'event' ? context.target.value : undefined;
@@ -805,9 +806,9 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             stats={context.userStats}
             isLoading={false}
             isFunnelcakeUser={context.reportedUser.isFunnelcakeUser}
-            onViewActivity={context.reportedUser.pubkey ? () => {
+            onViewActivity={reportedPubkey ? () => {
               // Same drill-down the reporter rows get: Events tab filtered to this user (#156)
-              navigate(`/events?pubkey=${context.reportedUser.pubkey}`);
+              navigate(`/events?pubkey=${reportedPubkey}`);
             } : undefined}
             onDeleteEvent={async (eventId) => {
               try {
