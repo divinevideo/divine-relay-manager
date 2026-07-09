@@ -20,6 +20,7 @@ export const KIND_NAMES: Record<number, { name: string; description: string; nip
   14: { name: 'DM (NIP-17)', description: 'Direct message (NIP-17 style)', nip: 'NIP-17' },
   16: { name: 'Generic Repost', description: 'Repost of any event kind', nip: 'NIP-18' },
   17: { name: 'Reaction to Website', description: 'Reaction to external URL', nip: 'NIP-25' },
+  20: { name: 'Picture', description: 'Picture-first post (images via imeta tags)', nip: 'NIP-68' },
 
   // Channels
   40: { name: 'Channel Creation', description: 'Create a public channel', nip: 'NIP-28' },

@@ -1023,6 +1023,19 @@ async function handleRelayRpc(
   });
 }
 
+/**
+ * One prompt line per recent event for the user-summary context. Kind labels
+ * keep the model from attributing comments/reposted text as authored posts
+ * (#156); kind is optional for backward compatibility with older clients.
+ * Exported for tests.
+ */
+export function formatRecentPostLine(p: { content: string; kind?: number }): string {
+  const label = p.kind === 1111 ? '(comment) '
+    : (p.kind === 6 || p.kind === 16) ? "(repost of another user's event) "
+    : '';
+  return `- ${label}"${p.content.slice(0, 200)}"`;
+}
+
 async function handleSummarizeUser(
   request: Request,
   env: Env,
@@ -1031,7 +1044,7 @@ async function handleSummarizeUser(
   try {
     const body = await request.json() as {
       pubkey: string;
-      recentPosts: Array<{ content: string; created_at: number }>;
+      recentPosts: Array<{ content: string; created_at: number; kind?: number }>;
       existingLabels: Array<{ tags: string[][]; created_at: number }>;
       reportHistory: Array<{ content: string; tags: string[][]; created_at: number }>;
     };
@@ -1045,9 +1058,10 @@ async function handleSummarizeUser(
       });
     }
 
-    // Build context for Claude
+    // Build context for Claude. Label comments and reposts so the model
+    // doesn't attribute reposted text as the user's own authored posts (#156).
     const postSummary = body.recentPosts
-      .map(p => `- "${p.content.slice(0, 200)}"`)
+      .map(formatRecentPostLine)
       .join('\n');
 
     const labelSummary = body.existingLabels

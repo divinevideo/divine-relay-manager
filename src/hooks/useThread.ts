@@ -6,6 +6,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { NostrEvent } from "@nostrify/nostrify";
 import { NRelay1 } from "@nostrify/nostrify";
 import { fetchFunnelcakeEvent } from "@/lib/funnelcakeApi";
+import { isRepostKind } from "@/lib/nip18";
 
 export type FetchSource = 'rest' | 'local-relay' | 'external-relay' | 'banned-fallback';
 
@@ -20,9 +21,6 @@ export interface ThreadResult {
   /** If event wasn't found, the relay hint from the report (if any) */
   triedExternalRelay?: string;
 }
-
-// Kind 6 = repost of kind 1, Kind 16 = generic repost
-const REPOST_KINDS = [6, 16];
 
 /**
  * One-shot fetch from an external relay via WebSocket.
@@ -110,7 +108,7 @@ export function useThread(
 
       // Check if this is a repost and fetch the original
       let repostedEvent: NostrEvent | null = null;
-      const isRepost = REPOST_KINDS.includes(event.kind);
+      const isRepost = isRepostKind(event.kind);
 
       if (isRepost) {
         const originalEventTag = event.tags.find(t => t[0] === 'e');

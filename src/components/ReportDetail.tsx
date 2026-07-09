@@ -25,6 +25,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { useToast } from "@/hooks/useToast";
 import { ToastAction } from "@/components/ui/toast";
 import { useReportContext } from "@/hooks/useReportContext";
+import { isRepostKind } from "@/lib/nip18";
 import { useBannedEvent } from "@/hooks/useBannedEvent";
 import { useUserSummary } from "@/hooks/useUserSummary";
 import { useModerationStatus } from "@/hooks/useModerationStatus";
@@ -59,7 +60,7 @@ function getKindLabel(kind: number): string {
   if ([34235, 34236].includes(kind)) return 'Video';
   if (kind === 1111) return 'Comment';
   if (kind === 1) return 'Note';
-  if (kind === 6 || kind === 16) return 'Repost';
+  if (isRepostKind(kind)) return 'Repost';
   if (kind === 0) return 'Profile';
   return entry.name;
 }
@@ -110,6 +111,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   const [dismissReason, setDismissReason] = useState("");
 
   const context = useReportContext(report);
+  const reportedPubkey = context.reportedUser.pubkey;
 
   // Banned event fallback: if thread found no event and target is an event ID, try management API
   const targetEventId = context.target?.type === 'event' ? context.target.value : undefined;
@@ -805,6 +807,12 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             stats={context.userStats}
             isLoading={false}
             isFunnelcakeUser={context.reportedUser.isFunnelcakeUser}
+            onViewActivity={reportedPubkey ? () => {
+              // Same drill-down the reporter rows get: Events tab filtered to this
+              // user (#156). Encoded: the p tag comes from an attacker-authored
+              // 1984 event, so it isn't guaranteed to be clean hex.
+              navigate(`/events?pubkey=${encodeURIComponent(reportedPubkey)}`);
+            } : undefined}
             onDeleteEvent={async (eventId) => {
               try {
                 await deleteEvent(eventId, 'Deleted from report review');

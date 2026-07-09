@@ -755,9 +755,11 @@ export function EventsList({ relayUrl }: EventsListProps) {
     { value: '22', label: 'Short Video (22)' },
     // Standard kinds
     { value: '1', label: 'Text Notes (1)' },
+    { value: '1111', label: 'Comments (1111)' },
     { value: '0', label: 'Profiles (0)' },
     { value: '3', label: 'Contacts (3)' },
     { value: '6', label: 'Reposts (6)' },
+    { value: '16', label: 'Generic Reposts (16)' },
     { value: '7', label: 'Reactions (7)' },
     { value: '1984', label: 'Reports (1984)' },
     { value: '1985', label: 'Labels (1985)' },

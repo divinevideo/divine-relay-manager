@@ -9,11 +9,13 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useApiUrl } from "@/hooks/useAdminApi";
-import { User, FileText, Flag, Tag, CheckCircle, ChevronDown, ChevronUp, Copy, Check, ArrowUpRight, Trash2, Globe, ExternalLink, Video, MessageSquare } from "lucide-react";
+import { User, FileText, Flag, Tag, CheckCircle, ChevronDown, ChevronUp, Copy, Check, ArrowUpRight, Trash2, Globe, ExternalLink, Video, MessageSquare, Activity, Repeat } from "lucide-react";
 import { InlineMediaPreview } from "@/components/MediaPreview";
 import type { NostrEvent, NostrMetadata } from "@nostrify/nostrify";
 import type { UserStats } from "@/hooks/useUserStats";
 import { getProfileUrl, getPublicEventUrl } from "@/lib/constants";
+import { getKindName } from "@/lib/kindNames";
+import { getRepostTargetId, isRepostKind, parseRepostedEvent } from "@/lib/nip18";
 
 // Label category colors
 const LABEL_COLORS: Record<string, string> = {
@@ -42,10 +44,12 @@ interface UserProfileCardProps {
   stats?: UserStats;
   isLoading?: boolean;
   onDeleteEvent?: (eventId: string) => void;
+  /** Navigate to an in-app view of all events authored by this user (#156) */
+  onViewActivity?: () => void;
   isFunnelcakeUser?: boolean;
 }
 
-export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEvent, isFunnelcakeUser = false }: UserProfileCardProps) {
+export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEvent, onViewActivity, isFunnelcakeUser = false }: UserProfileCardProps) {
   const [copied, setCopied] = useState(false);
   const apiUrl = useApiUrl();
 
@@ -184,10 +188,10 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
         )}
 
         {/* Stats */}
-        <div className="flex gap-4 text-sm">
+        <div className="flex flex-wrap items-center gap-4 text-sm">
           <div className="flex items-center gap-1">
             <FileText className="h-4 w-4 text-muted-foreground" />
-            <span>{stats?.postCount || 0} posts</span>
+            <span>{stats?.postCount || 0} events</span>
           </div>
           <div className="flex items-center gap-1">
             <Flag className="h-4 w-4 text-muted-foreground" />
@@ -197,6 +201,18 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
             <Tag className="h-4 w-4 text-muted-foreground" />
             <span>{stats?.labelCount || 0} labels</span>
           </div>
+          {onViewActivity && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="ml-auto h-7 gap-1 text-xs"
+              onClick={onViewActivity}
+              title="View all events by this user in the Events tab"
+            >
+              <Activity className="h-3 w-3" />
+              View Activity
+            </Button>
+          )}
         </div>
 
         {/* Existing Labels */}
@@ -261,17 +277,43 @@ function RecentPostsSection({
       {expanded && (
         <div className="space-y-3">
           {visiblePosts.map(post => {
+            // Kind 6/16 content is the stringified JSON of the reposted event
+            // (NIP-18) — surface the inner content, labeled, instead of raw JSON.
+            const isRepost = isRepostKind(post.kind);
+            const inner = isRepost ? parseRepostedEvent(post.content) : null;
+            const displayContent = isRepost ? (inner?.content ?? '') : post.content;
             return (
               <div key={post.id} className="p-3 bg-muted rounded-lg space-y-2 overflow-hidden">
                 {/* Post content */}
-                {post.content && (
+                {displayContent && (
                   <p className="text-sm whitespace-pre-wrap break-all line-clamp-4">
-                    {post.content}
+                    {isRepost && (
+                      <span
+                        className="text-muted-foreground italic"
+                        title={inner?.pubkey ? `Reposted from pubkey ${inner.pubkey}` : undefined}
+                      >
+                        reposted:{' '}
+                      </span>
+                    )}
+                    {displayContent}
                   </p>
                 )}
+                {/* NIP-18 allows empty repost content — at least identify the target event */}
+                {isRepost && !displayContent && (() => {
+                  const targetId = getRepostTargetId(post.tags);
+                  return targetId ? (
+                    <p className="text-xs text-muted-foreground italic break-all">
+                      reposted event {targetId}
+                    </p>
+                  ) : null;
+                })()}
 
-                {/* Media preview - uses InlineMediaPreview for admin proxy fallback */}
-                <InlineMediaPreview content={post.content} tags={post.tags} />
+                {/* Media preview - uses InlineMediaPreview for admin proxy fallback.
+                    Reposts pass the inner event's content+tags so its media resolves. */}
+                <InlineMediaPreview
+                  content={displayContent}
+                  tags={isRepost ? (inner?.tags ?? []) : post.tags}
+                />
 
                 {/* Timestamp, kind, link, and delete */}
                 <div className="flex items-center justify-between text-xs text-muted-foreground">
@@ -290,12 +332,16 @@ function RecentPostsSection({
                         );
                       } catch { return null; }
                     })()}
-                    {(post.kind === 34235 || post.kind === 34236) ? (
-                      <Badge variant="default" className="text-xs gap-1 bg-green-600" title="Short-form video — visible in Divine apps"><Video className="h-3 w-3" />Video</Badge>
+                    {(post.kind === 21 || post.kind === 22 || post.kind === 34235 || post.kind === 34236) ? (
+                      <Badge variant="default" className="text-xs gap-1 bg-green-600" title="Video (NIP-71) — visible in Divine apps"><Video className="h-3 w-3" />Video</Badge>
                     ) : post.kind === 1111 ? (
                       <Badge variant="outline" className="text-xs gap-1 text-green-600 border-green-300 bg-green-50" title="Comment (kind 1111) — visible in Divine apps when attached to a video"><MessageSquare className="h-3 w-3" />Comment</Badge>
-                    ) : (
+                    ) : isRepost ? (
+                      <Badge variant="outline" className="text-xs gap-1 text-blue-600 border-blue-300 bg-blue-50" title="Repost — boosts another user's content into feeds"><Repeat className="h-3 w-3" />Repost</Badge>
+                    ) : post.kind === 1 ? (
                       <Badge variant="outline" className="text-xs gap-1 text-amber-600 border-amber-300 bg-amber-50" title="Text note (kind 1) — not visible in Divine apps. Only visible via external Nostr clients."><Globe className="h-3 w-3" />Note</Badge>
+                    ) : (
+                      <Badge variant="outline" className="text-xs gap-1 text-amber-600 border-amber-300 bg-amber-50" title={`${getKindName(post.kind)} — not shown as content in Divine apps`}><Globe className="h-3 w-3" />{getKindName(post.kind)}</Badge>
                     )}
                     {onDeleteEvent && (
                       <Button
@@ -321,7 +367,7 @@ function RecentPostsSection({
               className="w-full"
               onClick={() => setShowAll(!showAll)}
             >
-              {showAll ? 'Show less' : `Show ${posts.length - 5} more posts`}
+              {showAll ? 'Show less' : `Show ${posts.length - 5} more events`}
             </Button>
           )}
         </div>

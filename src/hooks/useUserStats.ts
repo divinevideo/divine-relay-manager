@@ -38,8 +38,10 @@ export function useUserStats(pubkey: string | undefined) {
       const [recentPosts, existingLabels, previousReports] = await Promise.all([
         // User's recent posts (text notes, video events, and other content)
         // Video kinds per NIP-71: 21 (Video), 22 (Short Video), 34235 (Addressable Video), 34236 (Addressable Short Video)
+        // 1111 (NIP-22 comments) and 6/16 (reposts) matter for moderation:
+        // comment-spam accounts often have no other content (#156)
         nostr.query(
-          [{ kinds: [1, 21, 22, 1063, 1064, 20, 30023, 34235, 34236], authors: [pubkey], limit: 20 }],
+          [{ kinds: [1, 6, 16, 21, 22, 1063, 1064, 20, 1111, 30023, 34235, 34236], authors: [pubkey], limit: 20 }],
           { signal: combinedSignal }
         ),
         // Labels against this user
@@ -55,7 +57,7 @@ export function useUserStats(pubkey: string | undefined) {
       ]);
 
       return {
-        postCount: recentPosts.length, // Note: This is just recent, not total
+        postCount: recentPosts.length, // Recent authored events of any queried kind (posts, comments, reposts) — not a total
         reportCount: previousReports.length,
         labelCount: existingLabels.length,
         recentPosts: recentPosts.sort((a, b) => b.created_at - a.created_at),
