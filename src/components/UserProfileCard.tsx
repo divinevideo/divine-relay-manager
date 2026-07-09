@@ -9,7 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useApiUrl } from "@/hooks/useAdminApi";
-import { User, FileText, Flag, Tag, CheckCircle, ChevronDown, ChevronUp, Copy, Check, ArrowUpRight, Trash2, Globe, ExternalLink, Video, MessageSquare } from "lucide-react";
+import { User, FileText, Flag, Tag, CheckCircle, ChevronDown, ChevronUp, Copy, Check, ArrowUpRight, Trash2, Globe, ExternalLink, Video, MessageSquare, Activity, Repeat } from "lucide-react";
 import { InlineMediaPreview } from "@/components/MediaPreview";
 import type { NostrEvent, NostrMetadata } from "@nostrify/nostrify";
 import type { UserStats } from "@/hooks/useUserStats";
@@ -42,10 +42,12 @@ interface UserProfileCardProps {
   stats?: UserStats;
   isLoading?: boolean;
   onDeleteEvent?: (eventId: string) => void;
+  /** Navigate to an in-app view of all events authored by this user (#156) */
+  onViewActivity?: () => void;
   isFunnelcakeUser?: boolean;
 }
 
-export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEvent, isFunnelcakeUser = false }: UserProfileCardProps) {
+export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEvent, onViewActivity, isFunnelcakeUser = false }: UserProfileCardProps) {
   const [copied, setCopied] = useState(false);
   const apiUrl = useApiUrl();
 
@@ -197,6 +199,18 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
             <Tag className="h-4 w-4 text-muted-foreground" />
             <span>{stats?.labelCount || 0} labels</span>
           </div>
+          {onViewActivity && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="ml-auto h-7 gap-1 text-xs"
+              onClick={onViewActivity}
+              title="View all events by this user in the Events tab"
+            >
+              <Activity className="h-3 w-3" />
+              View Activity
+            </Button>
+          )}
         </div>
 
         {/* Existing Labels */}
@@ -294,6 +308,8 @@ function RecentPostsSection({
                       <Badge variant="default" className="text-xs gap-1 bg-green-600" title="Short-form video — visible in Divine apps"><Video className="h-3 w-3" />Video</Badge>
                     ) : post.kind === 1111 ? (
                       <Badge variant="outline" className="text-xs gap-1 text-green-600 border-green-300 bg-green-50" title="Comment (kind 1111) — visible in Divine apps when attached to a video"><MessageSquare className="h-3 w-3" />Comment</Badge>
+                    ) : (post.kind === 16 || post.kind === 6) ? (
+                      <Badge variant="outline" className="text-xs gap-1 text-blue-600 border-blue-300 bg-blue-50" title="Repost — boosts another user's content into feeds"><Repeat className="h-3 w-3" />Repost</Badge>
                     ) : (
                       <Badge variant="outline" className="text-xs gap-1 text-amber-600 border-amber-300 bg-amber-50" title="Text note (kind 1) — not visible in Divine apps. Only visible via external Nostr clients."><Globe className="h-3 w-3" />Note</Badge>
                     )}

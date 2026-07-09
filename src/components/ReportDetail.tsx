@@ -805,6 +805,10 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             stats={context.userStats}
             isLoading={false}
             isFunnelcakeUser={context.reportedUser.isFunnelcakeUser}
+            onViewActivity={context.reportedUser.pubkey ? () => {
+              // Same drill-down the reporter rows get: Events tab filtered to this user (#156)
+              navigate(`/events?pubkey=${context.reportedUser.pubkey}`);
+            } : undefined}
             onDeleteEvent={async (eventId) => {
               try {
                 await deleteEvent(eventId, 'Deleted from report review');
