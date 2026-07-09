@@ -10,6 +10,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { NostrLoginProvider } from '@nostrify/react/login';
 import { AppProvider } from '@/components/AppProvider';
 import { AppConfig } from '@/contexts/AppContext';
+import { ErrorBoundary } from '@/components/ErrorBoundary';
 import AppRouter from './AppRouter';
 
 const queryClient = new QueryClient({
@@ -30,21 +31,25 @@ const defaultConfig: AppConfig = {
 
 export function App() {
   return (
-    <AppProvider storageKey="nostr:app-config-v2" defaultConfig={defaultConfig}>
-      <QueryClientProvider client={queryClient}>
-        <NostrLoginProvider storageKey='nostr:login'>
-          <NostrProvider>
-            <TooltipProvider>
-              <Toaster />
-              <Sonner />
-              <Suspense>
-                <AppRouter />
-              </Suspense>
-            </TooltipProvider>
-          </NostrProvider>
-        </NostrLoginProvider>
-      </QueryClientProvider>
-    </AppProvider>
+    // Outermost on purpose: the fallback must not depend on any provider below,
+    // so a crash anywhere in the tree still renders the error card (#158).
+    <ErrorBoundary>
+      <AppProvider storageKey="nostr:app-config-v2" defaultConfig={defaultConfig}>
+        <QueryClientProvider client={queryClient}>
+          <NostrLoginProvider storageKey='nostr:login'>
+            <NostrProvider>
+              <TooltipProvider>
+                <Toaster />
+                <Sonner />
+                <Suspense>
+                  <AppRouter />
+                </Suspense>
+              </TooltipProvider>
+            </NostrProvider>
+          </NostrLoginProvider>
+        </QueryClientProvider>
+      </AppProvider>
+    </ErrorBoundary>
   );
 }
 

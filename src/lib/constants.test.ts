@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { CATEGORY_LABELS, getReportCategory } from './constants';
+import { CATEGORY_LABELS, getReportCategory, getReportTargetIds, isHex64 } from './constants';
 
 describe('CATEGORY_LABELS', () => {
   it('maps the divine-mobile NIP-32 labels to existing display labels', () => {
@@ -40,5 +40,62 @@ describe('getReportCategory', () => {
         ['l', 'NS-spam', 'social.nos.ontology'],
       ],
     })).toBe('spam');
+  });
+});
+
+describe('isHex64', () => {
+  it('accepts lowercase, uppercase, and mixed-case 64-char hex', () => {
+    expect(isHex64('a'.repeat(64))).toBe(true);
+    expect(isHex64('F'.repeat(64))).toBe(true);
+    expect(isHex64('aB3'.repeat(21) + 'c')).toBe(true);
+  });
+
+  it('rejects wrong lengths, non-hex characters, and non-strings', () => {
+    expect(isHex64('a'.repeat(63))).toBe(false);
+    expect(isHex64('a'.repeat(65))).toBe(false);
+    expect(isHex64('g'.repeat(64))).toBe(false);
+    expect(isHex64('')).toBe(false);
+    expect(isHex64(undefined)).toBe(false);
+    expect(isHex64(42)).toBe(false);
+    expect(isHex64(null)).toBe(false);
+  });
+});
+
+describe('getReportTargetIds', () => {
+  it('extracts the first e and p tag values', () => {
+    expect(getReportTargetIds({
+      tags: [
+        ['e', 'c'.repeat(64), 'spam'],
+        ['e', 'f'.repeat(64)],
+        ['p', 'd'.repeat(64), 'spam'],
+      ],
+    })).toEqual({ eventId: 'c'.repeat(64), pubkey: 'd'.repeat(64) });
+  });
+
+  it('returns undefined fields for missing or valueless tags', () => {
+    expect(getReportTargetIds({ tags: [] })).toEqual({ eventId: undefined, pubkey: undefined });
+    expect(getReportTargetIds({ tags: [['e'], ['p']] })).toEqual({ eventId: undefined, pubkey: undefined });
+  });
+
+  it('skips valueless or junk-valued tags so they do not mask later valid ones', () => {
+    expect(getReportTargetIds({
+      tags: [['e'], ['e', 'c'.repeat(64)], ['p'], ['p', 'd'.repeat(64)]],
+    })).toEqual({ eventId: 'c'.repeat(64), pubkey: 'd'.repeat(64) });
+
+    expect(getReportTargetIds({
+      tags: [['e', ''], ['e', 'c'.repeat(64)], ['p', 'junk'], ['p', 'd'.repeat(64)]],
+    })).toEqual({ eventId: 'c'.repeat(64), pubkey: 'd'.repeat(64) });
+  });
+
+  it('returns undefined when no tag value is a well-formed 64-hex id', () => {
+    expect(getReportTargetIds({ tags: [['e', 'junk'], ['p', 'a'.repeat(63)]] }))
+      .toEqual({ eventId: undefined, pubkey: undefined });
+  });
+
+  it('tolerates non-array tags — the crash fallback must never crash itself', () => {
+    expect(getReportTargetIds({ tags: null as unknown as string[][] }))
+      .toEqual({ eventId: undefined, pubkey: undefined });
+    expect(getReportTargetIds({} as { tags: string[][] }))
+      .toEqual({ eventId: undefined, pubkey: undefined });
   });
 });

@@ -1221,9 +1221,49 @@ describe('adminApi', () => {
 
       await expect(fetchReports(API_URL)).rejects.toThrow('HTTP 502');
     });
+
+    it('normalizes malformed tags and drops non-object events (raw payload is untrusted)', async () => {
+      const events = [
+        { id: 'r1', kind: 1984, pubkey: 'pk1', created_at: 100, content: '', sig: '' }, // tags missing
+        { id: 'r2', kind: 1984, pubkey: 'pk2', created_at: 200, tags: null, content: '', sig: '' },
+        { id: 'r3', kind: 1984, pubkey: 'pk3', created_at: 300, tags: 'junk', content: '', sig: '' },
+        { id: 'r4', kind: 1984, pubkey: 'pk4', created_at: 400, tags: [['e', 'ok'], 'rogue', [42, 'x'], ['p', 'ok2']], content: '', sig: '' },
+        null,
+        'not an event',
+      ];
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, events }),
+      });
+
+      const result = await fetchReports(API_URL);
+
+      // Sorted newest-first; every survivor has fully validated string[][] tags
+      expect(result.map(e => e.id)).toEqual(['r4', 'r3', 'r2', 'r1']);
+      expect(result.map(e => e.tags)).toEqual([
+        [['e', 'ok'], ['p', 'ok2']],
+        [],
+        [],
+        [],
+      ]);
+    });
   });
 
   describe('fetchResolutionLabels', () => {
+    it('normalizes malformed tags in label events too', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          success: true,
+          events: [{ id: 'l1', kind: 1985, pubkey: 'pk', created_at: 1, tags: null, content: '', sig: '' }],
+        }),
+      });
+
+      const result = await fetchResolutionLabels(API_URL);
+      expect(result[0].tags).toEqual([]);
+    });
+
     it('should call /api/resolution-labels and return events', async () => {
       const events = [
         { id: 'label1', kind: 1985, pubkey: 'pk1', created_at: 100, tags: [['L', 'moderation/resolution']], content: '', sig: '' },
