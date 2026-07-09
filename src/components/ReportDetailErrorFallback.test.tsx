@@ -46,6 +46,19 @@ describe('ReportDetailErrorFallback', () => {
     expect(screen.getByText('HOSTILE-NonCanonical-Id')).toBeInTheDocument();
   });
 
+  it('survives non-array tags without crashing the fallback itself', () => {
+    render(
+      <ReportDetailErrorFallback
+        report={{ ...makeReport([]), tags: null as unknown as string[][] }}
+        onRetry={() => {}}
+        onDismiss={() => {}}
+      />
+    );
+
+    expect(screen.getByText(REPORT_ID)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /try again/i })).toBeInTheDocument();
+  });
+
   it('survives a non-string report id without crashing the fallback itself', () => {
     const onRetry = vi.fn();
     render(

@@ -91,4 +91,11 @@ describe('getReportTargetIds', () => {
     expect(getReportTargetIds({ tags: [['e', 'junk'], ['p', 'a'.repeat(63)]] }))
       .toEqual({ eventId: undefined, pubkey: undefined });
   });
+
+  it('tolerates non-array tags — the crash fallback must never crash itself', () => {
+    expect(getReportTargetIds({ tags: null as unknown as string[][] }))
+      .toEqual({ eventId: undefined, pubkey: undefined });
+    expect(getReportTargetIds({} as { tags: string[][] }))
+      .toEqual({ eventId: undefined, pubkey: undefined });
+  });
 });

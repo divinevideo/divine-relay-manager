@@ -356,16 +356,34 @@ export async function listSuspendedPubkeys(apiUrl: string): Promise<BannedPubkey
   });
 }
 
+// Shape guard at the ingestion boundary: the worker's JSON is cast, not
+// validated, and everything downstream (report consolidation, category
+// parsing, the crash fallback) assumes `tags` is string[][]. Without this,
+// one malformed or hostile report crashes the whole reports list — a single
+// bad event hiding the entire moderation queue (#161 review). Same
+// element-level validation as parseRepostedEvent in lib/nip18.
+function sanitizeRelayEvents(events: unknown): NostrEvent[] {
+  if (!Array.isArray(events)) return [];
+  return events
+    .filter((e): e is NostrEvent => !!e && typeof e === 'object')
+    .map(e => ({
+      ...e,
+      tags: Array.isArray(e.tags)
+        ? e.tags.filter((t): t is string[] => Array.isArray(t) && t.every(x => typeof x === 'string'))
+        : [],
+    }));
+}
+
 // Fetch reports via server-side relay query (replaces browser WebSocket)
 export async function fetchReports(apiUrl: string): Promise<NostrEvent[]> {
   const data = await apiRequest<{ success: boolean; events: NostrEvent[] }>(apiUrl, '/api/reports', 'GET');
-  return (data.events || []).sort((a: NostrEvent, b: NostrEvent) => b.created_at - a.created_at);
+  return sanitizeRelayEvents(data.events).sort((a, b) => b.created_at - a.created_at);
 }
 
 // Fetch resolution labels via server-side relay query (replaces browser WebSocket)
 export async function fetchResolutionLabels(apiUrl: string): Promise<NostrEvent[]> {
   const data = await apiRequest<{ success: boolean; events: NostrEvent[] }>(apiUrl, '/api/resolution-labels', 'GET');
-  return data.events || [];
+  return sanitizeRelayEvents(data.events);
 }
 
 // Publish a NIP-32 label (kind 1985)

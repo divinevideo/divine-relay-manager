@@ -126,8 +126,11 @@ export function isHex64(value: unknown): value is string {
 // mask a later valid tag of the same name. Returned ids are validated but
 // not case-normalized — lowercase at display sites.
 export function getReportTargetIds(event: { tags: string[][] }): { eventId?: string; pubkey?: string } {
+  // Runtime guard despite the type: this feeds the crash fallback, which must
+  // never crash itself, and raw payload shapes are normalized elsewhere.
+  const tags = Array.isArray(event.tags) ? event.tags : [];
   return {
-    eventId: event.tags.find(t => t[0] === 'e' && isHex64(t[1]))?.[1],
-    pubkey: event.tags.find(t => t[0] === 'p' && isHex64(t[1]))?.[1],
+    eventId: tags.find(t => t[0] === 'e' && isHex64(t[1]))?.[1],
+    pubkey: tags.find(t => t[0] === 'p' && isHex64(t[1]))?.[1],
   };
 }
