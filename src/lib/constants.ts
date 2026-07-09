@@ -77,7 +77,10 @@ export const UNDERAGE_REPORT_CATEGORY = 'NS-underageUser';
 // list so consuming surfaces can't drift. TODO(#162): UserProfilePreview
 // (Labels page) still carries its own inline list — aligning it also needs
 // the shared rendering pieces, tracked there.
-export const RECENT_CONTENT_KINDS = [1, 6, 16, ...VIDEO_KINDS, 20, 1063, 1064, 1111, 30023] as const;
+// Deliberately excludes kind 1064 (defunct NIP-95 draft, inline base64 file
+// bytes): not a current protocol kind, zero events on the Divine relay, and
+// Divine puts media on Blossom as URLs — querying it only pulled base64 noise.
+export const RECENT_CONTENT_KINDS = [1, 6, 16, ...VIDEO_KINDS, 20, 1063, 1111, 30023] as const;
 
 // Helper to get label with fallback
 export function getCategoryLabel(category: string): string {

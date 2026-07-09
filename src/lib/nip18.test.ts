@@ -1,7 +1,7 @@
 // ABOUTME: Tests NIP-18 repost parsing edge cases (empty/malformed/non-event JSON)
 
 import { describe, it, expect } from 'vitest';
-import { getRepostTargetId, isRepostKind, parseRepostedEvent, describeRepostTarget, getRepostKind, getRepostTargetCoordinate, parseRepostForDisplay } from './nip18';
+import { getRepostTargetId, isRepostKind, parseRepostedEvent, describeRepostTarget, getRepostTargetCoordinate, parseRepostForDisplay } from './nip18';
 
 describe('isRepostKind', () => {
   it('matches kinds 6 and 16 only', () => {
@@ -27,7 +27,6 @@ describe('parseRepostedEvent', () => {
       content: 'hello',
       tags: [['e', 'abc']],
       pubkey: 'f'.repeat(64),
-      kind: 34236,
     });
   });
 
@@ -65,26 +64,6 @@ describe('parseRepostedEvent', () => {
   });
 });
 
-describe('parseRepostedEvent inner kind', () => {
-  it('exposes a numeric inner kind and drops non-numeric ones', () => {
-    expect(parseRepostedEvent(JSON.stringify({ content: 'x', kind: 1064 }))?.kind).toBe(1064);
-    expect(parseRepostedEvent(JSON.stringify({ content: 'x', kind: '22' }))?.kind).toBeUndefined();
-  });
-});
-
-describe('getRepostKind', () => {
-  it('parses the NIP-18 k tag', () => {
-    expect(getRepostKind([['k', '34236']])).toBe(34236);
-  });
-
-  it('rejects missing or malformed k tags', () => {
-    expect(getRepostKind([])).toBeUndefined();
-    expect(getRepostKind([['k']])).toBeUndefined();
-    expect(getRepostKind([['k', 'abc']])).toBeUndefined();
-    expect(getRepostKind([['k', '12abc']])).toBeUndefined();
-  });
-});
-
 describe('getRepostTargetCoordinate', () => {
   const PK = 'b'.repeat(64);
 
@@ -115,31 +94,55 @@ describe('describeRepostTarget', () => {
 describe('parseRepostForDisplay', () => {
   const PK = 'b'.repeat(64);
 
-  it('passes through displayable non-repost content and suppresses kind 1064', () => {
+  it('passes non-repost content through unchanged (no kind-based suppression)', () => {
     expect(parseRepostForDisplay({ kind: 1, content: 'hello', tags: [] }).displayContent).toBe('hello');
-    expect(parseRepostForDisplay({ kind: 1064, content: 'QmFzZTY0', tags: [] }).displayContent).toBe('');
   });
 
-  it('suppresses inner content when the reposted event is kind 1064 (JSON or k tag)', () => {
-    const viaJson = parseRepostForDisplay({
+  it('shows the inner text of a parsed repost', () => {
+    const r = parseRepostForDisplay({
       kind: 16,
-      content: JSON.stringify({ content: 'QmFzZTY0RGF0YQ==', kind: 1064 }),
+      content: JSON.stringify({ content: 'inner note', pubkey: PK }),
       tags: [['e', 'c'.repeat(64)]],
     });
-    expect(viaJson.displayContent).toBe('');
-    expect(viaJson.targetDescription).toBe(`event ${'c'.repeat(64)}`);
-
-    const viaKTag = parseRepostForDisplay({
-      kind: 16,
-      content: 'not json at all',
-      tags: [['k', '1064'], ['e', 'c'.repeat(64)]],
-    });
-    expect(viaKTag.displayContent).toBe('');
+    expect(r.displayContent).toBe('inner note');
   });
 
-  it('shows raw content for out-of-spec reposts instead of discarding evidence', () => {
-    const outOfSpec = parseRepostForDisplay({ kind: 6, content: 'plain text spam', tags: [] });
-    expect(outOfSpec.displayContent).toBe('plain text spam');
+  it('never hides readable text a reposter tries to disguise with a kind claim', () => {
+    // Every kind signal on a repost (k tag, inner JSON kind) is authored by
+    // the account under review. None may blank its own readable text.
+    const viaKTag = parseRepostForDisplay({
+      kind: 16,
+      content: 'FREE GIVEAWAY click my profile',
+      tags: [['k', '1064'], ['e', 'c'.repeat(64)]],
+    });
+    expect(viaKTag.displayContent).toBe('FREE GIVEAWAY click my profile');
+
+    const viaInnerKind = parseRepostForDisplay({
+      kind: 16,
+      content: JSON.stringify({ content: 'FREE GIVEAWAY', kind: 1064 }),
+      tags: [['e', 'c'.repeat(64)]],
+    });
+    expect(viaInnerKind.displayContent).toBe('FREE GIVEAWAY');
+  });
+
+  it('shows plain-text and JSON-array out-of-spec content, but not a raw object envelope', () => {
+    // Plain text renders as evidence.
+    expect(parseRepostForDisplay({ kind: 6, content: 'plain text spam', tags: [] }).displayContent)
+      .toBe('plain text spam');
+
+    // A JSON array carrying readable text is not an event envelope — show it.
+    const arr = parseRepostForDisplay({ kind: 16, content: JSON.stringify(['visit scam.link']), tags: [] });
+    expect(arr.displayContent).toBe(JSON.stringify(['visit scam.link']));
+
+    // A serialized-event *object* (not a valid inner event) must not render as
+    // a raw JSON blob or reach the AI — show the target label instead.
+    const objEnvelope = parseRepostForDisplay({
+      kind: 16,
+      content: JSON.stringify({ content: 42, pubkey: 'x' }),
+      tags: [['e', 'c'.repeat(64)]],
+    });
+    expect(objEnvelope.displayContent).toBe('');
+    expect(objEnvelope.targetDescription).toBe(`event ${'c'.repeat(64)}`);
   });
 
   it('describes the a-tag coordinate for empty-content addressable reposts', () => {
@@ -165,18 +168,5 @@ describe('describeRepostTarget hostile-tag hardening', () => {
 describe('getRepostTargetCoordinate segment count', () => {
   it('rejects 2-segment kind:pubkey values (documented shape is kind:pubkey:d-tag)', () => {
     expect(getRepostTargetCoordinate([['a', `34236:${'b'.repeat(64)}`]])).toBeUndefined();
-  });
-});
-
-describe('parseRepostForDisplay contentSuppressed', () => {
-  it('distinguishes suppressed file-data content from genuinely empty content', () => {
-    expect(parseRepostForDisplay({ kind: 1064, content: 'QmFzZTY0', tags: [] }).contentSuppressed).toBe(true);
-    expect(parseRepostForDisplay({ kind: 20, content: '', tags: [] }).contentSuppressed).toBe(false);
-    expect(parseRepostForDisplay({
-      kind: 16,
-      content: JSON.stringify({ content: 'QmFzZTY0', kind: 1064 }),
-      tags: [],
-    }).contentSuppressed).toBe(true);
-    expect(parseRepostForDisplay({ kind: 16, content: '', tags: [] }).contentSuppressed).toBe(false);
   });
 });

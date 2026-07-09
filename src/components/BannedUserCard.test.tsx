@@ -135,28 +135,17 @@ describe('BannedUserCard', () => {
     expect(await screen.findByText(`reposted event ${target}`)).toBeInTheDocument();
   });
 
-  it('does not render raw base64 file contents for kind 1064 (unmerged NIP-95 draft)', async () => {
-    const base64Blob = 'QmFzZTY0RmlsZURhdGE='.repeat(20);
-    setAuthored([event(1064, base64Blob, '9')]);
-    renderCard();
-
-    fireEvent.click(await screen.findByRole('button', { name: /toggle details/i }));
-
-    expect(await screen.findByText('File Data')).toBeInTheDocument();
-    expect(screen.queryByText(new RegExp('QmFzZTY0'))).not.toBeInTheDocument();
-  });
-
-  it('does not render base64 smuggled through a repost of a kind-1064 event', async () => {
-    const target = 'c'.repeat(64);
+  it("shows a repost's readable inner text even when a kind claim tries to disguise it", async () => {
+    // A reposter could tag readable spam ['k','1064'] to try to hide it; the
+    // card must still surface the text (evidence), never blank it.
     setAuthored([
-      event(16, JSON.stringify({ content: 'QmFzZTY0RGF0YQ=='.repeat(10), kind: 1064 }), '9', [['e', target], ['k', '1064']]),
+      event(16, JSON.stringify({ content: 'FREE GIVEAWAY click my profile', pubkey: 'b'.repeat(64) }), '9', [['e', 'c'.repeat(64)], ['k', '1064']]),
     ]);
     renderCard();
 
     fireEvent.click(await screen.findByRole('button', { name: /toggle details/i }));
 
-    expect(await screen.findByText(`reposted event ${target}`)).toBeInTheDocument();
-    expect(screen.queryByText(new RegExp('QmFzZTY0'))).not.toBeInTheDocument();
+    expect(await screen.findByText(/FREE GIVEAWAY click my profile/)).toBeInTheDocument();
   });
 
   it('identifies a-tag-only addressable reposts (NIP-18 latest-version pattern)', async () => {

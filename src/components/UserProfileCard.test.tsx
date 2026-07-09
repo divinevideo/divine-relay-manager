@@ -83,17 +83,18 @@ describe('UserProfileCard', () => {
     expect(screen.getByText(`reposted event ${'c'.repeat(64)}`)).toBeInTheDocument();
   });
 
-  it('does not render base64 smuggled through a repost of a kind-1064 event', () => {
-    const repostOf1064 = post(
+  it("shows a repost's readable inner text even when a kind claim tries to disguise it", () => {
+    // A reposter could tag readable spam ['k','1064'] to try to hide it; the
+    // card must still surface the text (evidence), never blank it.
+    const disguised = post(
       16,
-      JSON.stringify({ content: 'QmFzZTY0RGF0YQ=='.repeat(10), kind: 1064 }),
+      JSON.stringify({ content: 'FREE GIVEAWAY click my profile', kind: 1064, pubkey: 'b'.repeat(64) }),
       '7',
       [['e', 'c'.repeat(64)], ['k', '1064']]
     );
-    render(<UserProfileCard pubkey={PUBKEY} stats={stats([repostOf1064])} />);
+    render(<UserProfileCard pubkey={PUBKEY} stats={stats([disguised])} />);
 
-    expect(screen.queryByText(/QmFzZTY0/)).not.toBeInTheDocument();
-    expect(screen.getByText(`reposted event ${'c'.repeat(64)}`)).toBeInTheDocument();
+    expect(screen.getByText(/FREE GIVEAWAY click my profile/)).toBeInTheDocument();
   });
 
   it('shows View Activity only when onViewActivity is provided, and fires it', () => {

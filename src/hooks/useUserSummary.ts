@@ -33,14 +33,13 @@ export function useUserSummary(
           pubkey,
           recentPosts: recentPosts.slice(0, 10).map(e => {
             // Shared display derivation (parseRepostForDisplay): reposts send
-            // the inner text, never raw NIP-18 JSON; kind-1064 base64 (direct
-            // or smuggled through a repost) is replaced with a marker so the
-            // AI prompt isn't fed file bytes as authored posts.
+            // the inner text, never raw NIP-18 JSON. An empty-content repost
+            // falls back to its target label.
             const display = parseRepostForDisplay(e);
             const content = display.isRepost
               ? (display.displayContent
                 || `[reposted ${display.targetDescription ?? 'unknown target'}]`)
-              : display.contentSuppressed ? '[file data]' : display.displayContent;
+              : display.displayContent;
             return {
               content,
               created_at: e.created_at,
