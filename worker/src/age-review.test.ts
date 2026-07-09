@@ -321,6 +321,7 @@ describe('handleUpdateAgeReviewCase', () => {
       ZENDESK_SUBDOMAIN: 'test',
       ZENDESK_API_TOKEN: 'tok',
       ZENDESK_EMAIL: 'agent@test.com',
+      ZENDESK_GROUP_ID: '15225535020687',
     }), corsHeaders);
     expect(res.status).toBe(200);
 
@@ -331,6 +332,9 @@ describe('handleUpdateAgeReviewCase', () => {
     const payload = JSON.parse(zendeskCall![1].body);
     expect(payload.ticket.status).toBe('solved');
     expect(payload.ticket.comment.body).toContain('cleared');
+    // Routes to the configured group (Trust & Safety), not a personal assignee.
+    expect(payload.ticket.group_id).toBe(15225535020687);
+    expect(payload.ticket.assignee_email).toBeUndefined();
 
     vi.unstubAllGlobals();
   });

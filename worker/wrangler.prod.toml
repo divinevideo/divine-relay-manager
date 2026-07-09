@@ -100,6 +100,9 @@ ZENDESK_FIELD_CATEGORY = "14559549220879"
 ZENDESK_FIELD_ISSUE = "14560383908879"
 # Age review deadline date field — create in Zendesk admin, then set the ID here
 ZENDESK_FIELD_AGE_REVIEW_DEADLINE = "16123853180303"
+# Group that relay-manager-resolved tickets route to (Trust & Safety), so they
+# land unassigned in that queue instead of being assigned to the API credential's owner.
+ZENDESK_GROUP_ID = "15225535020687"
 # Keycast account suspension API
 KEYCAST_URL = "https://login.divine.video"
 

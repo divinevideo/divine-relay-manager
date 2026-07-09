@@ -247,7 +247,7 @@ describe('addZendeskInternalNote solve payload', () => {
     vi.restoreAllMocks();
   });
 
-  it('sends solved status, assignee, and required custom fields for resolution actions', async () => {
+  it('sends solved status, group routing, and required custom fields for resolution actions', async () => {
     const { db, sqlLog } = createMockDB();
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
@@ -259,7 +259,7 @@ describe('addZendeskInternalNote solve payload', () => {
     const targetEventId = 'ab13eb2c66bea4cd8f538798054d23a02d5dca879401be5045b8482590e2482c';
     const response = await worker.fetch(
       makeResolutionPublishRequest(targetEventId),
-      makeEnv({ DB: db }),
+      makeEnv({ DB: db, ZENDESK_GROUP_ID: '15225535020687' }),
       ctx,
     );
 
@@ -272,7 +272,9 @@ describe('addZendeskInternalNote solve payload', () => {
 
     const payload = JSON.parse(options.body as string);
     expect(payload.ticket.status).toBe('solved');
-    expect(payload.ticket.assignee_email).toBe('test@divine.video');
+    // Routes to the configured group (Trust & Safety), never a personal assignee.
+    expect(payload.ticket.group_id).toBe(15225535020687);
+    expect(payload.ticket.assignee_email).toBeUndefined();
     expect(payload.ticket.custom_fields).toEqual([
       { id: 14559549220879, value: 'trust___safety' },
       { id: 14560383908879, value: 'other_content_report' },
