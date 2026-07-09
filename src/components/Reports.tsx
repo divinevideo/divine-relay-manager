@@ -1,7 +1,7 @@
 // ABOUTME: Displays kind 1984 reports with split-pane layout and consolidation
 // ABOUTME: Groups multiple reports on same target, shows count and all reporters
 
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
@@ -42,11 +42,33 @@ import {
 } from "lucide-react";
 import { nip19 } from "nostr-tools";
 import { ReportDetail } from "@/components/ReportDetail";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { ReportDetailErrorFallback } from "@/components/ReportDetailErrorFallback";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { AUTO_HIDE_ACTIONS, CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, getReportCategory } from "@/lib/constants";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
 import type { NostrEvent } from "@nostrify/nostrify";
+
+// Scoped fallback for the reports-list pane (#158): list rows render
+// reporter-authored content too, and without a boundary a row crash escalates
+// to the app-root card, whose Reload would deterministically re-crash.
+function ReportsListErrorFallback({ onRetry }: { onRetry: () => void }) {
+  return (
+    <Card className="lg:col-span-2 flex h-full flex-col items-center justify-center space-y-3 overflow-hidden p-8 text-center">
+      <AlertTriangle className="h-6 w-6 text-destructive" />
+      <p className="font-medium">The reports list failed to render</p>
+      <p className="text-sm text-muted-foreground">
+        A report in the queue may contain malformed data. Details are in the
+        browser console.
+      </p>
+      <Button variant="outline" size="sm" onClick={onRetry}>
+        <RefreshCw className="mr-1 h-3 w-3" />
+        Try again
+      </Button>
+    </Card>
+  );
+}
 
 // Sort options for moderation queue
 type SortOption = 'reports' | 'newest' | 'oldest' | 'category' | 'reporters';
@@ -87,6 +109,12 @@ interface ConsolidatedReport {
   oldestReport: NostrEvent;
 }
 
+// Deliberately presence-based (a valueless ["e"] still yields an event target)
+// rather than delegating to getReportTargetIds: returning null here would drop
+// malformed reports from the consolidated queue entirely, and useReportContext/
+// ReportDetail carry identical copies the detail pane relies on. TODO(#160):
+// consolidate all report-target extraction sites behind shared helpers with
+// agreed semantics.
 function getReportTarget(event: NostrEvent): ReportTarget | null {
   const eTag = event.tags.find(t => t[0] === 'e');
   if (eTag) return { type: 'event', value: eTag[1] };
@@ -333,6 +361,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const queryClient = useQueryClient();
   const isMobile = useIsMobile();
   const [selectedReport, setSelectedReport] = useState<NostrEvent | null>(null);
+  const detailBoundaryRef = useRef<ErrorBoundary | null>(null);
   const [viewMode, setViewMode] = useState<'consolidated' | 'individual'>('consolidated');
   const [hideResolved, setHideResolved] = useState(true);
   const [showPendingReview, setShowPendingReview] = useState(false);
@@ -739,6 +768,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
   // Update URL when report selection changes
   const handleSelectReport = (report: NostrEvent | null) => {
+    // Re-clicking the already-selected report's row is a natural retry
+    // gesture after a crash, but it doesn't change resetKeys — clear the
+    // boundary explicitly (no-op when the pane is healthy).
+    detailBoundaryRef.current?.reset();
     setSelectedReport(report);
     if (report) {
       navigate(`/reports/${report.id}`, { replace: true });
@@ -746,6 +779,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       navigate('/reports', { replace: true });
     }
   };
+  // One dismiss handler shared by the healthy detail pane and its crash
+  // fallback, so the two paths cannot drift.
+  const dismissDetail = () => handleSelectReport(null);
 
   // Wait for both reports AND decisions to load before rendering
   // This prevents auto-hidden CSAM from briefly appearing in default view
@@ -779,10 +815,42 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     );
   }
 
+  // Built once and rendered in both the desktop pane and the mobile sheet so
+  // the two views cannot drift. Reports render attacker-authored event data:
+  // a crashing report degrades to the inline fallback (with the target's
+  // identifiers and retry/dismiss) while the reports list stays usable (#158).
+  const reportDetailPane = (
+    <ErrorBoundary
+      ref={detailBoundaryRef}
+      resetKeys={[selectedReport?.id]}
+      fallback={reset => (
+        <ReportDetailErrorFallback
+          report={selectedReport}
+          onRetry={reset}
+          onDismiss={dismissDetail}
+        />
+      )}
+    >
+      <ReportDetail
+        report={selectedReport}
+        allReportsForTarget={
+          selectedReport
+            ? consolidated.find(c =>
+                c.reports.some(r => r.id === selectedReport.id)
+              )?.reports
+            : undefined
+        }
+        allReports={reports || []}
+        onDismiss={dismissDetail}
+      />
+    </ErrorBoundary>
+  );
+
   return (
     <>
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 h-full">
         {/* Left Pane - Report List */}
+        <ErrorBoundary fallback={reset => <ReportsListErrorFallback onRetry={reset} />}>
         <Card className="lg:col-span-2 h-full overflow-hidden flex flex-col">
         <CardHeader className="pb-3 shrink-0">
           <div className="flex items-center justify-between">
@@ -997,22 +1065,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           </ScrollArea>
         </CardContent>
       </Card>
+        </ErrorBoundary>
 
         {/* Right Pane - Report Detail (Desktop) */}
         {!isMobile && (
           <Card className="lg:col-span-3 overflow-hidden h-full">
-            <ReportDetail
-              report={selectedReport}
-              allReportsForTarget={
-                selectedReport
-                  ? consolidated.find(c =>
-                      c.reports.some(r => r.id === selectedReport.id)
-                    )?.reports
-                  : undefined
-              }
-              allReports={reports || []}
-              onDismiss={() => handleSelectReport(null)}
-            />
+            {reportDetailPane}
           </Card>
         )}
       </div>
@@ -1021,18 +1079,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       {isMobile && (
         <Sheet open={!!selectedReport} onOpenChange={(open) => !open && handleSelectReport(null)}>
           <SheetContent side="right" className="!w-full !max-w-[100vw] pt-10 px-0 pb-0 overflow-y-auto">
-            <ReportDetail
-              report={selectedReport}
-              allReportsForTarget={
-                selectedReport
-                  ? consolidated.find(c =>
-                      c.reports.some(r => r.id === selectedReport.id)
-                    )?.reports
-                  : undefined
-              }
-              allReports={reports || []}
-              onDismiss={() => handleSelectReport(null)}
-            />
+            {reportDetailPane}
           </SheetContent>
         </Sheet>
       )}

@@ -110,3 +110,24 @@ export function buildReasonString(categoryKey: string, note?: string): string {
   const label = getCategoryLabel(categoryKey);
   return note?.trim() ? `${label}: ${note.trim()}` : label;
 }
+
+// Nostr event ids, pubkeys, and sha256 hashes are 64 hex chars. NIP-01
+// canonical form is lowercase, but user-authored tag values may arrive
+// uppercase — accept either and let display sites lowercase for consistency.
+// Case-insensitive to match the existing inline checks in UserManagement/
+// EventsList; TODO(#160): migrate those inline regexes to this helper.
+export function isHex64(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{64}$/i.test(value);
+}
+
+// A kind-1984 report's target ids: the first e/p tag values that are
+// well-formed 64-hex ids (NIP-56). Tags are reporter-authored, so valueless
+// or junk-valued tags (["e"], ["e", ""]) are skipped rather than allowed to
+// mask a later valid tag of the same name. Returned ids are validated but
+// not case-normalized — lowercase at display sites.
+export function getReportTargetIds(event: { tags: string[][] }): { eventId?: string; pubkey?: string } {
+  return {
+    eventId: event.tags.find(t => t[0] === 'e' && isHex64(t[1]))?.[1],
+    pubkey: event.tags.find(t => t[0] === 'p' && isHex64(t[1]))?.[1],
+  };
+}

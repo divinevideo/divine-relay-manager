@@ -32,7 +32,16 @@ export default defineConfig(() => {
     // worktree under `.worktrees/*/node_modules` (a full repo checkout) from
     // being globbed and running ~20k third-party package tests. We additionally
     // exclude the worktrees' own source and the separately-tested `worker/`.
-    exclude: [...configDefaults.exclude, '**/.worktrees/**', 'worker/**'],
+    // `.claude/worktrees/` is where Claude Code sessions place their worktrees:
+    // without the exclude, a main-clone test run collects a worktree's test
+    // files but resolves their `@/` imports against the main clone's src/,
+    // failing on any symbol that exists only on the worktree's branch.
+    exclude: [
+      ...configDefaults.exclude,
+      '**/.worktrees/**',
+      '**/.claude/worktrees/**',
+      'worker/**',
+    ],
     onConsoleLog(log) {
       return !log.includes("React Router Future Flag Warning");
     },
