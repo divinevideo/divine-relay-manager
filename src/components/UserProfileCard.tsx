@@ -15,7 +15,7 @@ import type { NostrEvent, NostrMetadata } from "@nostrify/nostrify";
 import type { UserStats } from "@/hooks/useUserStats";
 import { getProfileUrl, getPublicEventUrl } from "@/lib/constants";
 import { getKindName } from "@/lib/kindNames";
-import { isRepostKind, parseRepostedEvent } from "@/lib/nip18";
+import { getRepostTargetId, isRepostKind, parseRepostedEvent } from "@/lib/nip18";
 
 // Label category colors
 const LABEL_COLORS: Record<string, string> = {
@@ -300,7 +300,7 @@ function RecentPostsSection({
                 )}
                 {/* NIP-18 allows empty repost content — at least identify the target event */}
                 {isRepost && !displayContent && (() => {
-                  const targetId = post.tags.find(t => t[0] === 'e')?.[1];
+                  const targetId = getRepostTargetId(post.tags);
                   return targetId ? (
                     <p className="text-xs text-muted-foreground italic break-all">
                       reposted event {targetId}

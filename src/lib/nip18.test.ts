@@ -1,7 +1,7 @@
 // ABOUTME: Tests NIP-18 repost parsing edge cases (empty/malformed/non-event JSON)
 
 import { describe, it, expect } from 'vitest';
-import { isRepostKind, parseRepostedEvent } from './nip18';
+import { getRepostTargetId, isRepostKind, parseRepostedEvent } from './nip18';
 
 describe('isRepostKind', () => {
   it('matches kinds 6 and 16 only', () => {
@@ -9,6 +9,14 @@ describe('isRepostKind', () => {
     expect(isRepostKind(16)).toBe(true);
     expect(isRepostKind(1)).toBe(false);
     expect(isRepostKind(1111)).toBe(false);
+  });
+});
+
+describe('getRepostTargetId', () => {
+  it('returns the first e-tag value, or undefined when absent', () => {
+    expect(getRepostTargetId([['p', 'x'], ['e', 'abc'], ['e', 'def']])).toBe('abc');
+    expect(getRepostTargetId([['p', 'x']])).toBeUndefined();
+    expect(getRepostTargetId([])).toBeUndefined();
   });
 });
 

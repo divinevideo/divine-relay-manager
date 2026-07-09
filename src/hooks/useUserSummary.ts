@@ -5,7 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { NostrEvent } from "@nostrify/nostrify";
 import { getApiHeaders } from "@/lib/adminApi";
 import { useApiUrl } from "@/hooks/useAdminApi";
-import { isRepostKind, parseRepostedEvent } from "@/lib/nip18";
+import { getRepostTargetId, isRepostKind, parseRepostedEvent } from "@/lib/nip18";
 
 interface SummaryResponse {
   summary: string;
@@ -37,7 +37,7 @@ export function useUserSummary(
             // noise. Empty/unparseable reposts fall back to the target event id.
             content: isRepostKind(e.kind)
               ? (parseRepostedEvent(e.content)?.content
-                || `[reposted event ${e.tags.find(t => t[0] === 'e')?.[1] ?? 'unknown'}]`)
+                || `[reposted event ${getRepostTargetId(e.tags) ?? 'unknown'}]`)
               : e.content,
             created_at: e.created_at,
             // Kind lets the summarizer distinguish authored posts from

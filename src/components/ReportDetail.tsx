@@ -25,6 +25,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { useToast } from "@/hooks/useToast";
 import { ToastAction } from "@/components/ui/toast";
 import { useReportContext } from "@/hooks/useReportContext";
+import { isRepostKind } from "@/lib/nip18";
 import { useBannedEvent } from "@/hooks/useBannedEvent";
 import { useUserSummary } from "@/hooks/useUserSummary";
 import { useModerationStatus } from "@/hooks/useModerationStatus";
@@ -59,7 +60,7 @@ function getKindLabel(kind: number): string {
   if ([34235, 34236].includes(kind)) return 'Video';
   if (kind === 1111) return 'Comment';
   if (kind === 1) return 'Note';
-  if (kind === 6 || kind === 16) return 'Repost';
+  if (isRepostKind(kind)) return 'Repost';
   if (kind === 0) return 'Profile';
   return entry.name;
 }

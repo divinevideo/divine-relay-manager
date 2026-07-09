@@ -11,6 +11,11 @@ export interface RepostedEvent {
   pubkey: string;
 }
 
+/** The reposted event's id from a repost's `e` tag (NIP-18 says it MUST exist). */
+export function getRepostTargetId(tags: string[][]): string | undefined {
+  return tags.find(t => t[0] === 'e')?.[1];
+}
+
 /**
  * Parse the inner (reposted) event out of a NIP-18 repost's content.
  * Returns null when content is empty, malformed JSON, or not event-shaped —
