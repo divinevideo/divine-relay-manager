@@ -807,8 +807,10 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             isLoading={false}
             isFunnelcakeUser={context.reportedUser.isFunnelcakeUser}
             onViewActivity={reportedPubkey ? () => {
-              // Same drill-down the reporter rows get: Events tab filtered to this user (#156)
-              navigate(`/events?pubkey=${reportedPubkey}`);
+              // Same drill-down the reporter rows get: Events tab filtered to this
+              // user (#156). Encoded: the p tag comes from an attacker-authored
+              // 1984 event, so it isn't guaranteed to be clean hex.
+              navigate(`/events?pubkey=${encodeURIComponent(reportedPubkey)}`);
             } : undefined}
             onDeleteEvent={async (eventId) => {
               try {

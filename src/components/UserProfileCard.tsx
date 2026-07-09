@@ -14,6 +14,7 @@ import { InlineMediaPreview } from "@/components/MediaPreview";
 import type { NostrEvent, NostrMetadata } from "@nostrify/nostrify";
 import type { UserStats } from "@/hooks/useUserStats";
 import { getProfileUrl, getPublicEventUrl } from "@/lib/constants";
+import { isRepostKind, parseRepostedEvent } from "@/lib/nip18";
 
 // Label category colors
 const LABEL_COLORS: Record<string, string> = {
@@ -241,20 +242,6 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
 }
 
 // Separate component for recent posts with expand/collapse
-/** Extract the inner content from a NIP-18 repost (kind 6/16), whose content
- *  field is the stringified JSON of the reposted event (or empty). */
-function repostedContent(content: string): string {
-  try {
-    const inner: unknown = JSON.parse(content);
-    if (inner && typeof inner === 'object' && typeof (inner as { content?: unknown }).content === 'string') {
-      return (inner as { content: string }).content;
-    }
-    return '';
-  } catch {
-    return '';
-  }
-}
-
 function RecentPostsSection({
   posts,
   onDeleteEvent,
@@ -291,20 +278,32 @@ function RecentPostsSection({
           {visiblePosts.map(post => {
             // Kind 6/16 content is the stringified JSON of the reposted event
             // (NIP-18) — surface the inner content, labeled, instead of raw JSON.
-            const isRepost = post.kind === 6 || post.kind === 16;
-            const displayContent = isRepost ? repostedContent(post.content) : post.content;
+            const isRepost = isRepostKind(post.kind);
+            const inner = isRepost ? parseRepostedEvent(post.content) : null;
+            const displayContent = isRepost ? (inner?.content ?? '') : post.content;
             return (
               <div key={post.id} className="p-3 bg-muted rounded-lg space-y-2 overflow-hidden">
                 {/* Post content */}
                 {displayContent && (
                   <p className="text-sm whitespace-pre-wrap break-all line-clamp-4">
-                    {isRepost && <span className="text-muted-foreground italic">reposted: </span>}
+                    {isRepost && (
+                      <span
+                        className="text-muted-foreground italic"
+                        title={inner?.pubkey ? `Reposted from pubkey ${inner.pubkey}` : undefined}
+                      >
+                        reposted:{' '}
+                      </span>
+                    )}
                     {displayContent}
                   </p>
                 )}
 
-                {/* Media preview - uses InlineMediaPreview for admin proxy fallback */}
-                <InlineMediaPreview content={displayContent} tags={post.tags} />
+                {/* Media preview - uses InlineMediaPreview for admin proxy fallback.
+                    Reposts pass the inner event's content+tags so its media resolves. */}
+                <InlineMediaPreview
+                  content={displayContent}
+                  tags={isRepost ? (inner?.tags ?? []) : post.tags}
+                />
 
                 {/* Timestamp, kind, link, and delete */}
                 <div className="flex items-center justify-between text-xs text-muted-foreground">
@@ -358,7 +357,7 @@ function RecentPostsSection({
               className="w-full"
               onClick={() => setShowAll(!showAll)}
             >
-              {showAll ? 'Show less' : `Show ${posts.length - 5} more posts`}
+              {showAll ? 'Show less' : `Show ${posts.length - 5} more events`}
             </Button>
           )}
         </div>

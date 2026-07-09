@@ -5,6 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { NostrEvent } from "@nostrify/nostrify";
 import { getApiHeaders } from "@/lib/adminApi";
 import { useApiUrl } from "@/hooks/useAdminApi";
+import { isRepostKind, parseRepostedEvent } from "@/lib/nip18";
 
 interface SummaryResponse {
   summary: string;
@@ -31,7 +32,9 @@ export function useUserSummary(
         body: JSON.stringify({
           pubkey,
           recentPosts: recentPosts.slice(0, 10).map(e => ({
-            content: e.content,
+            // Reposts send the inner (reposted) text, not the raw NIP-18 JSON —
+            // the worker slices to 200 chars, which would otherwise all be hex noise
+            content: isRepostKind(e.kind) ? (parseRepostedEvent(e.content)?.content ?? '') : e.content,
             created_at: e.created_at,
             // Kind lets the summarizer distinguish authored posts from
             // comments (1111) and reposts of others' content (6/16) — see #156

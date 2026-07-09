@@ -2,7 +2,6 @@
 // ABOUTME: View Activity drill-down added for report review (#156)
 
 import { describe, it, expect, vi } from 'vitest';
-import '@testing-library/jest-dom';
 import { fireEvent, render, screen } from '@testing-library/react';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { UserProfileCard } from './UserProfileCard';
@@ -35,7 +34,7 @@ function post(kind: number, content: string, idByte: string): NostrEvent {
 const RECENT: NostrEvent[] = [
   post(21, 'a video', '1'),
   post(1111, 'scam comment text', '2'),
-  post(16, JSON.stringify({ content: 'inner reposted text', kind: 34236 }), '3'),
+  post(16, JSON.stringify({ content: 'inner reposted text', kind: 34236, pubkey: 'b'.repeat(64) }), '3'),
   post(1, 'plain note', '4'),
   post(30023, 'long form', '5'),
 ];
@@ -68,8 +67,12 @@ describe('UserProfileCard', () => {
     render(<UserProfileCard pubkey={PUBKEY} stats={stats(RECENT)} />);
 
     expect(screen.getByText(/inner reposted text/)).toBeInTheDocument();
-    expect(screen.getByText(/reposted:/)).toBeInTheDocument();
     expect(screen.queryByText(/"kind":34236/)).not.toBeInTheDocument();
+    // Attribution: full inner pubkey surfaced via tooltip (never truncated)
+    expect(screen.getByText(/reposted:/)).toHaveAttribute(
+      'title',
+      `Reposted from pubkey ${'b'.repeat(64)}`
+    );
   });
 
   it('shows View Activity only when onViewActivity is provided, and fires it', () => {
