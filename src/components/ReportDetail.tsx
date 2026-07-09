@@ -691,6 +691,8 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                 triedExternalRelay={context.thread?.triedExternalRelay || context.relayHint}
                 reportTags={context.reportTags}
                 targetEventId={context.target?.type === 'event' ? context.target.value : undefined}
+                replies={context.thread?.replies}
+                reportedPubkey={context.reportedUser.pubkey}
                 isEventDeleted={moderationStatus.isEventGone === true}
                 isUserBanned={moderationStatus.isUserBanned === true}
                 checkedAt={moderationStatus.checkedAt}
