@@ -22,7 +22,6 @@ export interface ThreadResult {
   triedExternalRelay?: string;
 }
 
-
 /**
  * One-shot fetch from an external relay via WebSocket.
  * Opens a connection, sends one REQ, waits for EVENT or EOSE, then closes.

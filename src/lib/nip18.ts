@@ -24,8 +24,12 @@ export function parseRepostedEvent(content: string): RepostedEvent | null {
     if (typeof o.content !== 'string') return null;
     return {
       content: o.content,
-      // Element-level check too: a hostile inner event can put non-arrays in tags
-      tags: Array.isArray(o.tags) ? (o.tags.filter(Array.isArray) as string[][]) : [],
+      // Full element validation: hostile inner JSON can put non-arrays in tags,
+      // or non-strings inside a tag — either would crash consumers like
+      // MediaPreview that call string methods on tag members.
+      tags: Array.isArray(o.tags)
+        ? o.tags.filter((t): t is string[] => Array.isArray(t) && t.every(x => typeof x === 'string'))
+        : [],
       pubkey: typeof o.pubkey === 'string' ? o.pubkey : '',
     };
   } catch {

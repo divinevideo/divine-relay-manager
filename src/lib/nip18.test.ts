@@ -48,4 +48,10 @@ describe('parseRepostedEvent', () => {
       parseRepostedEvent(JSON.stringify({ content: 'x', tags: [['e', 'abc'], 'rogue', 42] }))
     ).toEqual({ content: 'x', tags: [['e', 'abc']], pubkey: '' });
   });
+
+  it('drops tags containing non-string members (would crash media preview)', () => {
+    expect(
+      parseRepostedEvent(JSON.stringify({ content: 'x', tags: [['imeta', 42], ['e', 'abc'], [null]] }))
+    ).toEqual({ content: 'x', tags: [['e', 'abc']], pubkey: '' });
+  });
 });
