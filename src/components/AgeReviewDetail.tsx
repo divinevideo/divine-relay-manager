@@ -214,30 +214,41 @@ export function AgeReviewDetail({ caseData: c }: Props) {
               what policy applies and who enforces it — never "confirmed on
               their device", which would be false assurance. */}
           {accountStatus?.verified_minor ? (
-            <div className="rounded-md border p-2.5 space-y-1.5 text-xs">
-              <h4 className="flex items-center gap-1.5 font-medium">
-                <ShieldCheck className="h-3.5 w-3.5 text-emerald-600" />
-                Protections that apply to this account
-              </h4>
-              <div className="flex items-start gap-1.5 text-muted-foreground">
-                <EyeOff className="h-3.5 w-3.5 mt-0.5 shrink-0" />
-                <span>
-                  Adult content lock: adult content is hidden and the 18+ visibility toggle is disabled, so they cannot re-enable it.
-                </span>
+            <div className="rounded-md border p-2.5 space-y-2 text-xs">
+              {/* Shipped protections only. A row under this heading is read as
+                  protecting the teen TODAY, so nothing rollout-only may live
+                  here regardless of caveats — the heading's claim wins. */}
+              <div className="space-y-1.5">
+                <h4 className="flex items-center gap-1.5 font-medium">
+                  <ShieldCheck className="h-3.5 w-3.5 text-emerald-600" />
+                  Protections that apply to this account
+                </h4>
+                <div className="flex items-start gap-1.5 text-muted-foreground">
+                  <EyeOff className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                  <span>
+                    Adult content lock: adult content is hidden and the 18+ visibility toggle is disabled, so they cannot re-enable it.
+                  </span>
+                </div>
+                <div className="text-muted-foreground/80">
+                  Derived from the approved protected-minor status above; enforced client-side by the Divine apps on supported versions. Not confirmed per device.
+                </div>
               </div>
-              {/* TODO(divinevideo/support-trust-safety#176): drop the
-                  "rolling out" caveat once the DM restriction ships in
-                  released mobile + web builds. Listing it without the caveat
-                  before then would assert a protection no released client
-                  enforces — the false assurance this block must never give. */}
-              <div className="flex items-start gap-1.5 text-muted-foreground">
-                <MessageSquareLock className="h-3.5 w-3.5 mt-0.5 shrink-0" />
-                <span>
-                  DM restriction (rolling out; not yet in released app versions): DMs limited to the pinned official accounts, Divine HQ (_@divinehq.divine.video) and Divine Moderation (moderation@divine.video); everything else is blocked on send and hidden on receive.
-                </span>
-              </div>
-              <div className="text-muted-foreground/80">
-                Derived from the approved protected-minor status above; enforced client-side by the Divine apps on supported versions. Not confirmed per device.
+              {/* TODO(divinevideo/support-trust-safety#176): move the DM
+                  restriction into the applied section above (and remove this
+                  one) once released mobile + web builds enforce it. Until
+                  then it lives under an explicit not-yet heading so a
+                  moderator can never mistake it for a live protection. */}
+              <div className="space-y-1.5 border-t pt-2">
+                <h4 className="flex items-center gap-1.5 font-medium text-muted-foreground">
+                  <Clock className="h-3.5 w-3.5" />
+                  Rolling out (not yet enforced by released apps)
+                </h4>
+                <div className="flex items-start gap-1.5 text-muted-foreground">
+                  <MessageSquareLock className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                  <span>
+                    DM restriction: DMs limited to the pinned official accounts, Divine HQ (_@divinehq.divine.video) and Divine Moderation (moderation@divine.video); everything else is blocked on send and hidden on receive.
+                  </span>
+                </div>
               </div>
             </div>
           ) : null}
