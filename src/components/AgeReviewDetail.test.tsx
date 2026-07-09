@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
@@ -29,10 +29,6 @@ vi.mock('@/hooks/useToast', () => ({
 
 vi.mock('@/hooks/useAuthor', () => ({
   useAuthor: () => ({ data: undefined, isLoading: false }),
-}));
-
-vi.mock('@/hooks/useToast', () => ({
-  useToast: () => ({ toast }),
 }));
 
 function makeCase(overrides: Partial<AgeReviewCase> = {}): AgeReviewCase {
@@ -71,11 +67,14 @@ function renderDetail(caseData: AgeReviewCase) {
     },
   });
 
-  return render(
+  const result = render(
     <QueryClientProvider client={queryClient}>
       <AgeReviewDetail caseData={caseData} />
     </QueryClientProvider>
   );
+  // Expose the client so absence tests can await query settlement instead of
+  // asserting against a possibly still-loading tree (vacuous pass).
+  return { ...result, queryClient };
 }
 
 describe('AgeReviewDetail', () => {
@@ -313,9 +312,11 @@ describe('AgeReviewDetail', () => {
   it('does not show the protected-minor badge when verified_minor is false', async () => {
     getAccountStatus.mockResolvedValue({ success: true, verified_minor: false });
 
-    renderDetail(makeCase());
+    const { queryClient } = renderDetail(makeCase());
 
-    await waitFor(() => expect(getAccountStatus).toHaveBeenCalled());
+    // Wait for query settlement, not just the fetch call — asserting against a
+    // still-loading tree would pass even if the gating were broken.
+    await waitFor(() => expect(queryClient.isFetching()).toBe(0));
     expect(
       screen.queryByText(/approved protected minor/i)
     ).not.toBeInTheDocument();
@@ -335,6 +336,88 @@ describe('AgeReviewDetail', () => {
     expect(
       screen.queryByText(/approved protected minor/i)
     ).not.toBeInTheDocument();
+  });
+
+  it('lists only shipped protections under "apply to this account" (adult lock, not the DM restriction)', async () => {
+    getAccountStatus.mockResolvedValue({
+      success: true,
+      verified_minor: true,
+      verified_minor_at: '2026-06-30T12:00:00Z',
+    });
+
+    renderDetail(makeCase());
+
+    // Content lock (#175, shipped): forced-hidden adult content + disabled
+    // 18+ toggle — inside the applied-protections section.
+    const appliedHeading = await screen.findByText(/protections that apply to this account/i);
+    const appliedSection = appliedHeading.closest('div') as HTMLElement;
+    expect(within(appliedSection).getByText(/adult content is hidden/i)).toBeInTheDocument();
+    expect(within(appliedSection).getByText(/18\+ visibility toggle is disabled/i)).toBeInTheDocument();
+    // The DM restriction (#176) is not enforced by any released client yet,
+    // so it must NOT sit under the applied-protections heading.
+    expect(within(appliedSection).queryByText(/DM restriction/i)).not.toBeInTheDocument();
+  });
+
+  it('shows the DM restriction in a separate rolling-out section, not as an applied protection', async () => {
+    getAccountStatus.mockResolvedValue({ success: true, verified_minor: true });
+
+    renderDetail(makeCase());
+
+    // Rolling-out section (#176): its heading carries the not-yet-enforced
+    // framing, and the row names the pinned accounts by canonical NIP-05
+    // handle (display names are impersonable), both directions.
+    const rolloutHeading = await screen.findByText(/rolling out \(not yet enforced/i);
+    expect(rolloutHeading).toHaveTextContent(/not yet enforced by released apps/i);
+    const rolloutSection = rolloutHeading.closest('div') as HTMLElement;
+    expect(within(rolloutSection).getByText(/DM restriction/i)).toBeInTheDocument();
+    expect(within(rolloutSection).getByText(/_@divinehq\.divine\.video/)).toBeInTheDocument();
+    expect(within(rolloutSection).getByText(/moderation@divine\.video/)).toBeInTheDocument();
+    expect(within(rolloutSection).getByText(/blocked on send and hidden on receive/i)).toBeInTheDocument();
+  });
+
+  it('frames the protections as policy-derived, not per-device confirmed', async () => {
+    getAccountStatus.mockResolvedValue({ success: true, verified_minor: true });
+
+    renderDetail(makeCase());
+
+    // The whole point of the honest framing: enforced by the apps per policy,
+    // never asserted as observed on the user's device.
+    expect(
+      await screen.findByText(/enforced client-side by the Divine apps/i)
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/not confirmed per device/i)
+    ).toBeInTheDocument();
+  });
+
+  it('does not show the protections block when verified_minor is false', async () => {
+    getAccountStatus.mockResolvedValue({ success: true, verified_minor: false });
+
+    const { queryClient } = renderDetail(makeCase());
+
+    // Wait for query settlement, not just the fetch call — asserting against a
+    // still-loading tree would pass even if the gating were broken.
+    await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+    expect(
+      screen.queryByText(/protections that apply to this account/i)
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/rolling out \(not yet enforced/i)).not.toBeInTheDocument();
+  });
+
+  it('does not show the protections block when the account status is unavailable', async () => {
+    // A keycast blip must not read as "protected": the badge branch already
+    // shows "status unavailable"; the protections list must stay absent too.
+    getAccountStatus.mockResolvedValue({ success: false });
+
+    renderDetail(makeCase());
+
+    expect(
+      await screen.findByText(/protected-minor status unavailable/i)
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/protections that apply to this account/i)
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/rolling out \(not yet enforced/i)).not.toBeInTheDocument();
   });
 
   it('shows status-unavailable when the account-status query rejects', async () => {
