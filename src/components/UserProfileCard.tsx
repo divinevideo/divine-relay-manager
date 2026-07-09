@@ -14,6 +14,7 @@ import { InlineMediaPreview } from "@/components/MediaPreview";
 import type { NostrEvent, NostrMetadata } from "@nostrify/nostrify";
 import type { UserStats } from "@/hooks/useUserStats";
 import { getProfileUrl, getPublicEventUrl } from "@/lib/constants";
+import { getKindName } from "@/lib/kindNames";
 import { isRepostKind, parseRepostedEvent } from "@/lib/nip18";
 
 // Label category colors
@@ -297,6 +298,15 @@ function RecentPostsSection({
                     {displayContent}
                   </p>
                 )}
+                {/* NIP-18 allows empty repost content — at least identify the target event */}
+                {isRepost && !displayContent && (() => {
+                  const targetId = post.tags.find(t => t[0] === 'e')?.[1];
+                  return targetId ? (
+                    <p className="text-xs text-muted-foreground italic break-all">
+                      reposted event {targetId}
+                    </p>
+                  ) : null;
+                })()}
 
                 {/* Media preview - uses InlineMediaPreview for admin proxy fallback.
                     Reposts pass the inner event's content+tags so its media resolves. */}
@@ -331,7 +341,7 @@ function RecentPostsSection({
                     ) : post.kind === 1 ? (
                       <Badge variant="outline" className="text-xs gap-1 text-amber-600 border-amber-300 bg-amber-50" title="Text note (kind 1) — not visible in Divine apps. Only visible via external Nostr clients."><Globe className="h-3 w-3" />Note</Badge>
                     ) : (
-                      <Badge variant="outline" className="text-xs gap-1 text-amber-600 border-amber-300 bg-amber-50" title={`Kind ${post.kind} — not shown as content in Divine apps`}><Globe className="h-3 w-3" />Kind {post.kind}</Badge>
+                      <Badge variant="outline" className="text-xs gap-1 text-amber-600 border-amber-300 bg-amber-50" title={`${getKindName(post.kind)} (kind ${post.kind}) — not shown as content in Divine apps`}><Globe className="h-3 w-3" />{getKindName(post.kind)}</Badge>
                     )}
                     {onDeleteEvent && (
                       <Button

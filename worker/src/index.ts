@@ -1061,7 +1061,7 @@ async function handleSummarizeUser(
     // Build context for Claude. Label comments and reposts so the model
     // doesn't attribute reposted text as the user's own authored posts (#156).
     const postSummary = body.recentPosts
-      .map(p => formatRecentPostLine(p))
+      .map(formatRecentPostLine)
       .join('\n');
 
     const labelSummary = body.existingLabels

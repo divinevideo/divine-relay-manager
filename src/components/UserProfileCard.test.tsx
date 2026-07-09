@@ -18,13 +18,13 @@ vi.mock('@/components/MediaPreview', () => ({
 
 const PUBKEY = 'a'.repeat(64);
 
-function post(kind: number, content: string, idByte: string): NostrEvent {
+function post(kind: number, content: string, idByte: string, tags: string[][] = []): NostrEvent {
   return {
     id: idByte.repeat(64),
     pubkey: PUBKEY,
     kind,
     content,
-    tags: [],
+    tags,
     created_at: 1_750_000_000,
     sig: 'f'.repeat(128),
   };
@@ -58,7 +58,7 @@ describe('UserProfileCard', () => {
     expect(screen.getByText('Comment')).toBeInTheDocument(); // kind 1111
     expect(screen.getByText('Repost')).toBeInTheDocument(); // kind 16
     expect(screen.getByText('Note')).toBeInTheDocument(); // kind 1 only
-    expect(screen.getByText('Kind 30023')).toBeInTheDocument(); // generic fallback
+    expect(screen.getByText('Long-form Article')).toBeInTheDocument(); // named via getKindName
     // Exactly one "Note" badge: non-1 kinds must not fall through to it
     expect(screen.getAllByText('Note')).toHaveLength(1);
   });
@@ -73,6 +73,14 @@ describe('UserProfileCard', () => {
       'title',
       `Reposted from pubkey ${'b'.repeat(64)}`
     );
+  });
+
+  it('identifies the target event for an empty-content repost', () => {
+    const emptyRepost = post(16, '', '6', [['e', 'c'.repeat(64)]]);
+    render(<UserProfileCard pubkey={PUBKEY} stats={stats([emptyRepost])} />);
+
+    expect(screen.getByText('Repost')).toBeInTheDocument();
+    expect(screen.getByText(`reposted event ${'c'.repeat(64)}`)).toBeInTheDocument();
   });
 
   it('shows View Activity only when onViewActivity is provided, and fires it', () => {

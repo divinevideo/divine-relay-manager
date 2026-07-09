@@ -42,4 +42,10 @@ describe('parseRepostedEvent', () => {
       pubkey: '',
     });
   });
+
+  it('drops non-array elements inside tags', () => {
+    expect(
+      parseRepostedEvent(JSON.stringify({ content: 'x', tags: [['e', 'abc'], 'rogue', 42] }))
+    ).toEqual({ content: 'x', tags: [['e', 'abc']], pubkey: '' });
+  });
 });

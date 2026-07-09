@@ -24,7 +24,8 @@ export function parseRepostedEvent(content: string): RepostedEvent | null {
     if (typeof o.content !== 'string') return null;
     return {
       content: o.content,
-      tags: Array.isArray(o.tags) ? (o.tags as string[][]) : [],
+      // Element-level check too: a hostile inner event can put non-arrays in tags
+      tags: Array.isArray(o.tags) ? (o.tags.filter(Array.isArray) as string[][]) : [],
       pubkey: typeof o.pubkey === 'string' ? o.pubkey : '',
     };
   } catch {
