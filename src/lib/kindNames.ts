@@ -35,6 +35,7 @@ export const KIND_NAMES: Record<number, { name: string; description: string; nip
   1040: { name: 'OpenTimestamps', description: 'OpenTimestamps attestation', nip: 'NIP-03' },
   1059: { name: 'Gift Wrap', description: 'Gift wrapped encrypted event', nip: 'NIP-59' },
   1063: { name: 'File Metadata', description: 'File/media metadata', nip: 'NIP-94' },
+  1064: { name: 'File Data', description: 'Inline base64 file contents (draft NIP-95, never merged)', nip: '' },
   1111: { name: 'Comment', description: 'Comment on any event', nip: 'NIP-22' },
 
   // Reports and Moderation
@@ -148,6 +149,19 @@ export const KIND_NAMES: Record<number, { name: string; description: string; nip
   // What's Hot (custom)
   11998: { name: "What's Hot", description: 'Trending/hot content aggregation', nip: '' },
 };
+
+// NIP-71 video kinds: 21 (Video), 22 (Short Video), 34235/34236 (addressable)
+export const VIDEO_KINDS = [21, 22, 34235, 34236] as const;
+
+export function isVideoKind(kind: number): boolean {
+  return (VIDEO_KINDS as readonly number[]).includes(kind);
+}
+
+// Kind 1064 (draft NIP-95) carries raw base64 file bytes in content —
+// never render it as text.
+export function hasDisplayableContent(kind: number): boolean {
+  return kind !== 1064;
+}
 
 // Get kind name with fallback
 export function getKindName(kind: number): string {

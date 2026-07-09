@@ -83,6 +83,19 @@ describe('UserProfileCard', () => {
     expect(screen.getByText(`reposted event ${'c'.repeat(64)}`)).toBeInTheDocument();
   });
 
+  it('does not render base64 smuggled through a repost of a kind-1064 event', () => {
+    const repostOf1064 = post(
+      16,
+      JSON.stringify({ content: 'QmFzZTY0RGF0YQ=='.repeat(10), kind: 1064 }),
+      '7',
+      [['e', 'c'.repeat(64)], ['k', '1064']]
+    );
+    render(<UserProfileCard pubkey={PUBKEY} stats={stats([repostOf1064])} />);
+
+    expect(screen.queryByText(/QmFzZTY0/)).not.toBeInTheDocument();
+    expect(screen.getByText(`reposted event ${'c'.repeat(64)}`)).toBeInTheDocument();
+  });
+
   it('shows View Activity only when onViewActivity is provided, and fires it', () => {
     const onViewActivity = vi.fn();
 
