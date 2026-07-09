@@ -16,6 +16,8 @@ import { suspendUser, unsuspendUser, banUser } from './keycast-client';
 import {
   handleGetAgeReviewCases,
   handleGetAgeReviewCase,
+  handleGetActiveAgeReviewCase,
+  ageReviewActiveGuard,
   handleGetAgeReviewFunnel,
   handleUpdateAgeReviewCase,
   handleCreateMinorAccount,
@@ -520,6 +522,28 @@ export default {
       // Bulk moderation (server-side iteration for batch operations)
       if (path === '/api/bulk-moderate' && request.method === 'POST') {
         if (env.DB) await ensureSchemaOnce(env.DB);
+        // Age-review guard: bulk content actions on an account with an open
+        // case must not run out of band (age-restrict half-enforces without
+        // advancing the case, un-age-restrict lifts restrictions the case
+        // imposed, delete-all destroys evidence the review may need). Refuse
+        // and route to the case; Ban remains the severe-action escape hatch.
+        // Peeks at the body on a clone so malformed/invalid requests still get
+        // the handler's own 400s. Two accepted edges: (1) the guard runs
+        // before action validation, so a well-formed pubkey with an open case
+        // gets this 409 even if the action name is invalid — accurate, since
+        // every bulk action on that account is refused; (2) the check is
+        // enqueue-time only — a case opened while a chunked job is already
+        // draining does not abort it (aborting mid-job would leave
+        // half-applied state; the job was legitimate when it started).
+        let peeked: { pubkey?: string } | undefined;
+        try {
+          peeked = await request.clone().json() as { pubkey?: string };
+        } catch { /* not JSON; the handler returns the 400 */ }
+        if (typeof peeked?.pubkey === 'string') {
+          const guarded = await ageReviewActiveGuard(peeked.pubkey, env, corsHeaders,
+            'This account is under age review. Content enforcement runs through the Age Review flow.');
+          if (guarded) return guarded;
+        }
         return handleBulkModerateEnqueue(request, env, corsHeaders);
       }
 
@@ -558,6 +582,11 @@ export default {
       if (path === '/api/age-review/cases' && request.method === 'GET') {
         if (env.DB) await ensureSchemaOnce(env.DB);
         return handleGetAgeReviewCases(request, env, corsHeaders);
+      }
+      if (path === '/api/age-review/active-case' && request.method === 'GET') {
+        if (env.DB) await ensureSchemaOnce(env.DB);
+        const pubkey = new URL(request.url).searchParams.get('pubkey') || '';
+        return handleGetActiveAgeReviewCase(pubkey, env, corsHeaders);
       }
       if (path.startsWith('/api/age-review/cases/') && request.method === 'GET') {
         if (env.DB) await ensureSchemaOnce(env.DB);
@@ -935,6 +964,19 @@ async function handleRelayRpc(
 
   if (!body.method) {
     return jsonResponse({ success: false, error: 'Missing method' }, 400, corsHeaders);
+  }
+
+  // Age-review guard: a bare suspend/unsuspend on a pubkey with an open
+  // (non-terminal) age-review case must not half-enforce (Suspend orphans the
+  // case) or silently lift the hold (Unsuspend skips verification). Refuse and
+  // route the moderator to the case; Restrict/Clear live in the age-review flow.
+  // Age-review's own enforcement calls the nip86 helpers directly, and internal
+  // moderation/bulk callers use ban*/unban* only, so neither reaches this guard.
+  if (body.method === 'suspendpubkey' || body.method === 'unsuspendpubkey') {
+    const target = body.params?.[0] ? String(body.params[0]) : '';
+    const guarded = await ageReviewActiveGuard(target, env, corsHeaders,
+      'This account is under age review. Restrict or clear it from the Age Review flow.');
+    if (guarded) return guarded;
   }
 
   // Use shared NIP-86 RPC utility

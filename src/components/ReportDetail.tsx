@@ -1092,6 +1092,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
               <UserActions
                 pubkey={context.reportedUser.pubkey}
                 context="report"
+                reportCategory={category}
                 isBanned={isUserBanned ?? undefined}
                 isSuspended={moderationStatus.isUserSuspended ?? undefined}
                 onActionComplete={handleActionComplete}

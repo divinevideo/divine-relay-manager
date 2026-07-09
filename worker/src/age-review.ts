@@ -97,6 +97,85 @@ export async function handleGetAgeReviewCase(
   return json({ success: true, case: row }, 200, corsHeaders);
 }
 
+/**
+ * Returns the single active (non-terminal) age-review case for a pubkey, or
+ * null. ReportWatcher guarantees at most one active case per pubkey, so this is
+ * unambiguous. Shared by the by-pubkey lookup endpoint and the relay-RPC guard.
+ */
+export async function getActiveAgeReviewCase(
+  pubkey: string,
+  env: AgeReviewEnv,
+): Promise<AgeReviewCase | null> {
+  if (!env.DB) return null;
+  const row = await env.DB.prepare(`
+    SELECT * FROM age_review_cases
+    WHERE pubkey = ? AND state NOT IN (${TERMINAL_STATES.map(() => '?').join(',')})
+    LIMIT 1
+  `).bind(pubkey, ...TERMINAL_STATES).first<AgeReviewCase>();
+  return row ?? null;
+}
+
+/**
+ * Refuse-and-route guard shared by the interactive enforcement endpoints
+ * (relay-rpc suspend/unsuspend, bulk-moderate enqueue): if the pubkey has an
+ * open (non-terminal) age-review case, returns a structured 409
+ * (`age_review_active` + caseId/state) that the frontend turns into a redirect
+ * to the case; returns null when nothing blocks the action.
+ *
+ * Fails open: the guard is a safety net (the report hand-off is the primary
+ * path), so a transient D1 error must not block core moderation — log and
+ * proceed. A malformed pubkey also skips the guard (no point querying; the
+ * caller's own validation produces the 400). Age-review's own enforcement
+ * calls the nip86 helpers / runBulkModeration directly, so it never hits the
+ * guarded endpoints.
+ */
+export async function ageReviewActiveGuard(
+  pubkey: string,
+  env: AgeReviewEnv,
+  corsHeaders: Record<string, string>,
+  error: string,
+): Promise<Response | null> {
+  if (!/^[0-9a-f]{64}$/.test(pubkey) || !env.DB) return null;
+  let activeCase: AgeReviewCase | null = null;
+  try {
+    activeCase = await getActiveAgeReviewCase(pubkey, env);
+  } catch (err) {
+    console.error('[ageReviewActiveGuard] lookup failed; proceeding:', err);
+  }
+  if (!activeCase) return null;
+  return json({
+    success: false,
+    error,
+    code: 'age_review_active',
+    caseId: activeCase.id,
+    state: activeCase.state,
+  }, 409, corsHeaders);
+}
+
+/**
+ * GET /api/age-review/active-case?pubkey=<hex>
+ *
+ * Returns the active (non-terminal) age-review case for a pubkey, or null.
+ * Read-only. Powers the report hand-off deep-link, the Ban warning, and the
+ * relay-RPC guard-response rendering.
+ */
+export async function handleGetActiveAgeReviewCase(
+  pubkey: string,
+  env: AgeReviewEnv,
+  corsHeaders: Record<string, string>,
+): Promise<Response> {
+  // Pubkeys are canonical lowercase hex and the stored column is case-sensitive,
+  // so validate case-sensitively (a mixed-case value would pass a case-
+  // insensitive check but miss the lowercased row). Validate before the DB
+  // check so a malformed pubkey is a 400, not a 500.
+  if (!/^[0-9a-f]{64}$/.test(pubkey)) {
+    return json({ success: false, error: 'Invalid pubkey' }, 400, corsHeaders);
+  }
+  if (!env.DB) return json({ success: false, error: 'Database not configured' }, 500, corsHeaders);
+  const row = await getActiveAgeReviewCase(pubkey, env);
+  return json({ success: true, case: row }, 200, corsHeaders);
+}
+
 export async function handleUpdateAgeReviewCase(
   request: Request,
   caseId: string,

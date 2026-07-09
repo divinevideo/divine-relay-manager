@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { UserActions } from './UserActions';
+import { ApiError } from '@/lib/adminApi';
 
 // Stable mocks so async-flow tests can control enqueue + status polling and
 // assert on the same fn instances.
@@ -13,9 +14,16 @@ const api = vi.hoisted(() => ({
   unbanPubkey: vi.fn(),
   suspendPubkey: vi.fn(),
   unsuspendPubkey: vi.fn(),
+  getActiveAgeReviewCase: vi.fn(),
   logDecision: vi.fn(),
 }));
 const toast = vi.hoisted(() => vi.fn());
+
+const navigate = vi.hoisted(() => vi.fn());
+vi.mock('react-router-dom', async (orig) => ({
+  ...(await orig<typeof import('react-router-dom')>()),
+  useNavigate: () => navigate,
+}));
 
 vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => api }));
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast }) }));
@@ -37,6 +45,7 @@ beforeEach(() => {
   api.unbanPubkey.mockResolvedValue({ success: true });
   api.suspendPubkey.mockResolvedValue({ success: true });
   api.unsuspendPubkey.mockResolvedValue({ success: true });
+  api.getActiveAgeReviewCase.mockResolvedValue({ success: true, case: null });
   api.logDecision.mockResolvedValue(undefined);
 });
 
@@ -56,6 +65,81 @@ describe('UserActions', () => {
     expect(screen.getByRole('button', { name: /Ban User/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Age Restrict All/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Delete All Content/i })).toBeInTheDocument();
+  });
+
+  it('shows the Age Review hand-off (not Suspend) for an NS-underageUser report', () => {
+    renderWithProvider(<UserActions pubkey={PUBKEY} context="report" reportCategory="NS-underageUser" />);
+    expect(screen.getByRole('button', { name: /Handle in Age Review/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Suspend User/i })).not.toBeInTheDocument();
+    // Ban stays available as the severe-action escape hatch.
+    expect(screen.getByRole('button', { name: /Ban User/i })).toBeInTheDocument();
+  });
+
+  it('hides the bulk content actions for an NS-underageUser report (enforcement runs through the case)', () => {
+    renderWithProvider(<UserActions pubkey={PUBKEY} context="report" reportCategory="NS-underageUser" />);
+    expect(screen.queryByRole('button', { name: /Age Restrict All/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Delete All Content/i })).not.toBeInTheDocument();
+    // The hand-off and the Ban escape hatch remain.
+    expect(screen.getByRole('button', { name: /Handle in Age Review/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Ban User/i })).toBeInTheDocument();
+  });
+
+  it('keeps the bulk content actions for a non-underage report', () => {
+    renderWithProvider(<UserActions pubkey={PUBKEY} context="report" reportCategory="NS-spam" />);
+    expect(screen.getByRole('button', { name: /Age Restrict All/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Delete All Content/i })).toBeInTheDocument();
+  });
+
+  it('routes to Age Review when a bulk action is guard-blocked (age_review_active)', async () => {
+    api.bulkModerate.mockRejectedValue(new ApiError('under age review', 409, 'Conflict', 'age_review_active'));
+    renderWithProvider(<UserActions pubkey={PUBKEY} />);
+    fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith(`/age-review?pubkey=${PUBKEY}`));
+    // Routed, not surfaced as a failure.
+    expect(toast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Bulk action failed' }),
+    );
+  });
+
+  it('routes a guard-blocked Delete All (confirm-dialog path) to Age Review too', async () => {
+    // Same enqueue.onError as the direct path, but through ConfirmDialog's
+    // startAsync: the rejection must not surface as a failure or crash the
+    // dialog — the moderator lands on the case.
+    api.bulkModerate.mockRejectedValue(new ApiError('under age review', 409, 'Conflict', 'age_review_active'));
+    renderWithProvider(<UserActions pubkey={PUBKEY} />);
+    fireEvent.click(screen.getByRole('button', { name: /Delete All Content/i }));
+    const dialog = screen.getByRole('alertdialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Confirm Delete' }));
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith(`/age-review?pubkey=${PUBKEY}`));
+    expect(toast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Bulk action failed' }),
+    );
+  });
+
+  it('navigates to the age-review flow when the hand-off is clicked', () => {
+    renderWithProvider(<UserActions pubkey={PUBKEY} context="report" reportCategory="NS-underageUser" />);
+    fireEvent.click(screen.getByRole('button', { name: /Handle in Age Review/i }));
+    expect(navigate).toHaveBeenCalledWith(`/age-review?pubkey=${PUBKEY}`);
+  });
+
+  it('keeps the generic Suspend for a non-underage report', () => {
+    renderWithProvider(<UserActions pubkey={PUBKEY} context="report" reportCategory="NS-spam" />);
+    expect(screen.getByRole('button', { name: /Suspend User/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Handle in Age Review/i })).not.toBeInTheDocument();
+  });
+
+  it('routes to Age Review when a bare suspend is guard-blocked (age_review_active)', async () => {
+    api.suspendPubkey.mockRejectedValue(new ApiError('under age review', 409, 'Conflict', 'age_review_active'));
+    renderWithProvider(<UserActions pubkey={PUBKEY} />);
+    fireEvent.click(screen.getByRole('button', { name: /Suspend User/i }));
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith(`/age-review?pubkey=${PUBKEY}`));
+  });
+
+  it('warns about evidence when banning an account with an open age-review case', async () => {
+    api.getActiveAgeReviewCase.mockResolvedValue({ success: true, case: { id: 'case-1' } });
+    renderWithProvider(<UserActions pubkey={PUBKEY} />);
+    fireEvent.click(screen.getByRole('button', { name: /Ban User/i }));
+    expect(await screen.findByText(/under age review/i)).toBeInTheDocument();
   });
 
   it('renders unsuspend and ban when user is suspended', () => {

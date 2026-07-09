@@ -1,15 +1,19 @@
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useToast } from '@/hooks/useToast';
 import { useAdminApi } from '@/hooks/useAdminApi';
+import { ApiError } from '@/lib/adminApi';
+import { UNDERAGE_REPORT_CATEGORY } from '@/lib/constants';
 import { useBulkModerateJob } from '@/hooks/useBulkModerateJob';
 import { ConfirmDialog } from './ConfirmDialog';
-import { UserX, UserCheck, ShieldAlert, Trash2, Pause, Play } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { UserX, UserCheck, ShieldAlert, Trash2, Pause, Play, ArrowRight } from 'lucide-react';
 
 interface UserActionsProps {
   pubkey: string;
   context?: 'report' | 'age-review' | 'users';
+  reportCategory?: string;
   isBanned?: boolean;
   isSuspended?: boolean;
   onActionComplete?: () => void;
@@ -18,6 +22,7 @@ interface UserActionsProps {
 export function UserActions({
   pubkey,
   context = 'users',
+  reportCategory,
   isBanned = false,
   isSuspended = false,
   onActionComplete,
@@ -25,7 +30,45 @@ export function UserActions({
   const { toast } = useToast();
   const api = useAdminApi();
   const queryClient = useQueryClient();
-  const showBulkActions = context !== 'age-review';
+  const navigate = useNavigate();
+
+  // An under-16 report must be worked through the Age Review flow, not the
+  // generic Suspend/Unsuspend (which would enforce without advancing the case).
+  // Exact category only: CSAM/child-safety are a separate, non-reversible path.
+  const isUnderageReport = context === 'report' && reportCategory === UNDERAGE_REPORT_CATEGORY;
+
+  // Bulk content actions are hidden in the age-review context (the case screen
+  // has its own enforcement controls) and for an underage report (content
+  // enforcement runs through the case; the /api/bulk-moderate guard refuses it
+  // on an open case regardless). Ban stays as the severe-action escape hatch.
+  const showBulkActions = context !== 'age-review' && !isUnderageReport;
+
+  // The worker guard refuses a bare suspend/unsuspend on an account under age
+  // review (any context). Route the moderator to the case instead of surfacing
+  // a raw error, so enforcement can't drift from the case out of band.
+  const routeToAgeReviewIfGuarded = (error: Error): boolean => {
+    if (error instanceof ApiError && error.code === 'age_review_active') {
+      toast({ title: 'This account is under age review', description: 'Opening it in the Age Review flow.' });
+      navigate(`/age-review?pubkey=${encodeURIComponent(pubkey)}`);
+      return true;
+    }
+    return false;
+  };
+
+  // Whether this account has an open age-review case, which changes the Ban
+  // copy (a ban purges content the review may still need). For an underage
+  // report we already know one exists; otherwise look it up. Skipped once
+  // banned (no Ban button) and in the age-review context (already on the case).
+  // If the lookup errors we read only `data`, so hasActiveAgeCase stays false
+  // and the ban falls back to the generic copy — a non-critical enrichment that
+  // degrades quietly rather than blocking the action.
+  const { data: activeAgeCase } = useQuery({
+    queryKey: ['age-review-active-case', pubkey],
+    queryFn: () => api.getActiveAgeReviewCase(pubkey),
+    enabled: !isBanned && !isUnderageReport && context !== 'age-review',
+    staleTime: 30_000,
+  });
+  const hasActiveAgeCase = isUnderageReport || !!activeAgeCase?.case;
 
   // Audit logging is a non-critical side effect. Fire-and-forget so a slow or
   // hung /api/decisions write can never stall the moderation action or leave the
@@ -66,6 +109,7 @@ export function UserActions({
       onActionComplete?.();
     },
     onError: (error: Error) => {
+      if (routeToAgeReviewIfGuarded(error)) return;
       toast({ title: 'Failed to suspend user', description: error.message, variant: 'destructive' });
     },
   });
@@ -85,6 +129,7 @@ export function UserActions({
       onActionComplete?.();
     },
     onError: (error: Error) => {
+      if (routeToAgeReviewIfGuarded(error)) return;
       toast({ title: 'Failed to unsuspend user', description: error.message, variant: 'destructive' });
     },
   });
@@ -157,6 +202,10 @@ export function UserActions({
       onActionComplete?.();
     },
     onError: (error) => {
+      // A guard-refused enqueue (open age-review case) routes to the case, for
+      // the contexts where the buttons still render (Users tab, non-underage
+      // report on an account that also has an open case).
+      if (routeToAgeReviewIfGuarded(error)) return;
       // Covers both enqueue failure and a persistent status-poll failure
       // (the job may have started; error.message carries the specific reason).
       toast({ title: 'Bulk action failed', description: error.message, variant: 'destructive' });
@@ -180,7 +229,18 @@ export function UserActions({
         </Tooltip>
       ) : (
         <>
-          {isSuspended ? (
+          {isUnderageReport ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="outline" className="border-blue-500 text-blue-600 hover:bg-blue-50"
+                  onClick={() => navigate(`/age-review?pubkey=${encodeURIComponent(pubkey)}`)} disabled={anyPending}>
+                  <ArrowRight className="h-4 w-4 mr-1" />
+                  Handle in Age Review
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent><p>This account was reported as under 16. Account and content enforcement run through the Age Review flow so the case, content age-restriction, and deadline stay in sync.</p></TooltipContent>
+            </Tooltip>
+          ) : isSuspended ? (
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button variant="outline" className="border-green-500 text-green-600 hover:bg-green-50"
@@ -212,7 +272,9 @@ export function UserActions({
               </Button>
             }
             title="Ban User"
-            summary="Permanently ban this user and purge all their content from the relay. This destroys events across 16+ tables and cannot be fully reversed — unbanning allows new posts but does not restore purged content."
+            summary={hasActiveAgeCase
+              ? "This account is under age review. Banning purges all their content across 16+ tables and cannot be fully reversed, which destroys evidence the review may need. Resolve through the Age Review flow unless this is a separate severe violation (e.g. CSAM) that requires an immediate ban."
+              : "Permanently ban this user and purge all their content from the relay. This destroys events across 16+ tables and cannot be fully reversed — unbanning allows new posts but does not restore purged content."}
             confirmLabel="Ban User"
             pendingLabel="Banning..."
             onConfirm={async () => { await banUserMutation.mutateAsync(); }}
