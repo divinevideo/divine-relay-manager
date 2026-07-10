@@ -8,7 +8,9 @@ import { isVideoKind } from "@/lib/kindNames";
  * The root scope a kind-1111 comment is attached to: its `E` (root event id)
  * or, for addressable content, its `A` (root address coordinate). This is
  * "what the comment is on". Returns undefined for non-comments or comments
- * with no root scope.
+ * with no root scope. External-identity roots (`I` tag: URLs, podcasts,
+ * geohashes) are intentionally not resolved — Divine's content is E/A video,
+ * and there is no in-tool event view to link them to.
  */
 export function getCommentTarget(event: Pick<NostrEvent, 'kind' | 'tags'>): string | undefined {
   if (event.kind !== 1111) return undefined;

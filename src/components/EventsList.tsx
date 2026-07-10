@@ -444,14 +444,19 @@ export function EventsList({ relayUrl }: EventsListProps) {
     }
   }, [searchParams, filterByPubkey]);
 
-  // #164 A: an internal parent link routes here as /events?event=<nevent|naddr>;
-  // seed the committed search from it so the direct-event lookup fires.
+  // #164 A: an internal parent link routes here as /events?event=<nevent|naddr>.
+  // Seed the search from it (both the box and the committed value, so the clear
+  // affordance shows), then consume the param — leaving it in the URL would make
+  // the effect re-fire and revert every later clear/re-search back to this event.
   useEffect(() => {
     const eventParam = searchParams.get('event');
-    if (eventParam && eventParam !== committedSearch) {
-      setCommittedSearch(eventParam);
-    }
-  }, [searchParams, committedSearch]);
+    if (!eventParam) return;
+    setSearchQuery(eventParam);
+    setCommittedSearch(eventParam);
+    const next = new URLSearchParams(searchParams);
+    next.delete('event');
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
 
   // Update URL when filterByPubkey changes
   const updatePubkeyFilter = (pubkey: string | null) => {
@@ -773,9 +778,10 @@ export function EventsList({ relayUrl }: EventsListProps) {
         return false;
       }
 
-      // Client-side content/pubkey substring search (instant, no Enter needed)
-      // Skip when in event_id mode (results come from dedicated query)
-      if (searchQuery.trim() && searchMode.type !== 'event_id') {
+      // Client-side content/pubkey substring search (instant, no Enter needed).
+      // Only in free-text mode: id/pubkey/address searches resolve via dedicated
+      // queries, so a synced nevent/naddr must not also run as a substring filter.
+      if (searchQuery.trim() && searchMode.type === 'text') {
         const query = searchQuery.toLowerCase();
         if (!event.content?.toLowerCase().includes(query) &&
             !event.pubkey.toLowerCase().includes(query)) {
@@ -1072,13 +1078,13 @@ export function EventsList({ relayUrl }: EventsListProps) {
           <CardContent className="p-0 flex-1 min-h-0">
             <ScrollArea className="h-full" viewportRef={scrollViewportRef}>
               <div className="p-3 pr-4">
-                {searchMode.type === 'event_id' ? (
-                  // Event ID lookup mode
+                {searchMode.type === 'event_id' || searchMode.type === 'address' ? (
+                  // Direct lookup mode (event id or addressable coordinate)
                   isLoadingDirectEvent ? (
                     <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
                       <Loader2 className="h-8 w-8 animate-spin mb-3" />
                       <p className="text-sm">Searching relay...</p>
-                      <p className="text-xs mt-1 font-mono">{searchMode.hex.slice(0, 16)}...</p>
+                      <p className="text-xs mt-1 font-mono">{committedSearch.slice(0, 24)}...</p>
                     </div>
                   ) : directEventError ? (
                     <Alert variant="destructive" className="mt-2">
@@ -1108,7 +1114,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
                     <div className="text-center py-8 text-muted-foreground">
                       <Search className="h-8 w-8 mx-auto mb-2 opacity-50" />
                       <p className="text-sm">No event found on relay</p>
-                      <p className="text-xs mt-1 font-mono">{searchMode.hex.slice(0, 16)}...</p>
+                      <p className="text-xs mt-1 font-mono">{committedSearch.slice(0, 24)}...</p>
                       <p className="text-xs mt-2">The event may have been deleted.</p>
                       {/^[0-9a-f]{64}$/i.test(committedSearch) && (
                         <Button
