@@ -23,6 +23,9 @@ import { Textarea } from "@/components/ui/textarea";
 import { EventDetail } from "@/components/EventDetail";
 import { BulkDeleteByKind } from "@/components/BulkDeleteByKind";
 import { getProfileUrl } from "@/lib/constants";
+import { getCommentTarget } from "@/lib/commentActivity";
+import { useEventTitles, type ResolvedTarget } from "@/hooks/useEventTitles";
+import { CommentParentLink } from "@/components/CommentParentLink";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   FileText,
@@ -129,11 +132,14 @@ function EventCard({
   isSelected,
   onSelect,
   onModerate,
+  parentLink,
 }: {
   event: EventWithModeration;
   isSelected: boolean;
   onSelect: () => void;
   onModerate: (eventId: string, action: 'allow' | 'ban', reason?: string) => void;
+  /** Resolved NIP-22 parent for a kind-1111 row's "on <parent>" link (#164 A). */
+  parentLink?: ResolvedTarget;
 }) {
   const author = useAuthor(event.pubkey);
   const [moderationDialogOpen, setModerationDialogOpen] = useState(false);
@@ -294,19 +300,24 @@ function EventCard({
           return null;
         })()}
 
-        <div className="flex items-center justify-between mt-2 text-xs text-muted-foreground">
-          <div className="flex items-center gap-3">
-            <span className="flex items-center gap-1">
+        <div className="flex items-center justify-between mt-2 text-xs text-muted-foreground gap-2">
+          <div className="flex items-center gap-3 min-w-0">
+            <span className="flex items-center gap-1 shrink-0">
               <Clock className="h-3 w-3" />
               {formatTimestamp(event.created_at)}
             </span>
-            <span className="flex items-center gap-1 font-mono">
+            <span className="flex items-center gap-1 font-mono shrink-0">
               <Hash className="h-3 w-3" />
               {event.id?.slice(0, 8)}...
             </span>
+            {event.kind === 1111 && (
+              <span onClick={(e) => e.stopPropagation()} className="min-w-0">
+                <CommentParentLink resolved={parentLink} />
+              </span>
+            )}
           </div>
           {event.tags.length > 0 && (
-            <span>{event.tags.length} tags</span>
+            <span className="shrink-0">{event.tags.length} tags</span>
           )}
         </div>
 
@@ -740,6 +751,14 @@ export function EventsList({ relayUrl }: EventsListProps) {
   // Enhanced direct lookup result (for event ID search)
   const enhancedDirectEvent = directEventLookup?.event ? enhanceEvent(directEventLookup.event) : null;
 
+  // #164 A: resolve NIP-22 parent titles/links for the visible kind-1111 rows,
+  // batched in one query (list rows + the direct-lookup card).
+  const commentTargets = [
+    ...events.map(getCommentTarget),
+    enhancedDirectEvent ? getCommentTarget(enhancedDirectEvent) : undefined,
+  ].filter((t): t is string => !!t);
+  const { titles: parentTitles } = useEventTitles(commentTargets, undefined);
+
   // Enhance events with moderation status and apply filters
   const enhancedEvents: EventWithModeration[] = (events || [])
     .map(enhanceEvent)
@@ -1082,6 +1101,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
                         isSelected={selectedEvent?.id === enhancedDirectEvent.id}
                         onSelect={() => setSelectedEvent(enhancedDirectEvent)}
                         onModerate={handleModerateEvent}
+                        parentLink={parentTitles.get(getCommentTarget(enhancedDirectEvent) ?? '')}
                       />
                     </div>
                   ) : (
@@ -1132,6 +1152,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
                         isSelected={selectedEvent?.id === event.id}
                         onSelect={() => setSelectedEvent(event)}
                         onModerate={handleModerateEvent}
+                        parentLink={parentTitles.get(getCommentTarget(event) ?? '')}
                       />
                     ))}
                     {/* Infinite scroll status */}
