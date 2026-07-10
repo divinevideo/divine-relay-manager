@@ -1,117 +1,143 @@
-# Nostr Relay Manager
+# Divine Relay Manager
 
-A clean, focused Nostr relay management application built with React and NIP-86 moderation tools.
+Divine Relay Manager is the internal content-moderation console for Divine's Nostr
+relay infrastructure. Moderators use it to review reports, drill into the surrounding
+conversation, run the minor-safety age-review workflow, and take relay-level moderation
+actions. It ships as two deployables: a React/Vite single-page app on Cloudflare Pages
+and a Cloudflare Worker API that signs and issues NIP-86 relay-management commands.
+The app deploys under the name `divine-relay-admin`.
 
-## 🚀 Quick Start
+## Features
 
-```bash
-npm run dev
+- **Reports queue** — the default view. Loads NIP-56 kind-1984 reports and, for each, pulls
+  the reported event, its thread ancestors and replies, the target's profile and recent
+  activity, and the reporter's filing history into a single review screen.
+- **Moderation actions** — ban/allow events and pubkeys through the Worker's NIP-86 RPC.
+  Actions record an append-only decision log and sync linked Zendesk tickets as a side effect.
+- **Bulk moderation** — an async job model (enqueue, queue-consumer, status polling) for
+  actioning an account's media at scale via Cloudflare Queues.
+- **Age review** — the minor-safety workflow, including the Greenlight consent-funnel
+  dashboard, protected-minor visibility, minor-account onboarding, and keycast integration.
+- **Auto-hide** — a `ReportWatcher` Durable Object holds a persistent relay subscription to
+  kind-1984 events and auto-hides high-priority reports from trusted apps unless a human has
+  already reviewed the target.
+- **Media preview** — extracts media URLs from events and, when direct load fails, falls back
+  to an authenticated Blossom admin proxy so moderators can view blocked content.
+- **AI context** — Hive AI and AI-detection reports, transcript analysis, scene
+  classification, and Claude-powered user summaries to speed up review.
+- **Events, Users, and Labels views** — browse relay events, inspect users, and publish
+  NIP-32 (kind-1985) moderation labels.
+
+## Architecture
+
+Two components deploy and version independently:
+
+```
+Frontend (React/Vite on CF Pages)        Worker (Cloudflare Workers)
+  |                                         |
+  |-- CF Access (edge auth) -------------->|-- CF Access (edge auth)
+  |-- direct relay WebSocket reads          |-- verifyAdminAccess() (defense-in-depth)
+  |   (useThread, useAuthor, useUserStats)  |-- handleModerate() --> relay NIP-86 RPC
+  |                                         |-- Zendesk ticket sync
+  v                                         |-- media proxy (Blossom)
+Nostr relay (Funnelcake)                    |-- ReportWatcher (Durable Object)
+                                            v
+                                          D1 (SQLite): decisions, targets, tickets, jobs
+                                          Cloudflare Queues (bulk moderation)
 ```
 
-Open your browser to `http://localhost:5173`
+The **frontend** reads directly from the relay over WebSocket for event, thread, and profile
+data, and calls the Worker only for privileged actions. It's built with React 18, TypeScript,
+Vite, TailwindCSS 3, shadcn/ui (Radix primitives), TanStack Query 5, and React Router. Nostr
+integration uses `@nostrify/nostrify`, `@nostrify/react`, and `nostr-tools`.
 
-## ✨ Features
+The **Worker** holds the admin signing key and issues NIP-86 relay-management commands
+(signing kind-27235 auth events). It persists moderation state in D1, runs the auto-hide
+`ReportWatcher` as a Durable Object, and processes bulk jobs off a Cloudflare Queue. Relevant
+NIPs: NIP-11 (relay info), NIP-19 (bech32 identifiers), NIP-32 (labels), NIP-56 (reports),
+NIP-86 (relay management), and NIP-98 (HTTP auth).
 
-### 🔐 **NIP-07 Authentication**
-- Secure login with browser extensions (Alby, nos2x, Flamingo)
-- No private key handling in the app
+Access is layered: Cloudflare Access enforces edge auth on both the frontend and API domains,
+and the Worker independently re-verifies admin access (`verifyAdminAccess()`) as defense in
+depth. Domains and bindings live in the `wrangler.*.toml` files and env files — treat those as
+the source of truth rather than hardcoding URLs.
 
-### 📋 **Event Management & Moderation**
-- **View real-time events** from any Nostr relay
-- **Filter by event kind** (text notes, profiles, reactions, etc.)
-- **Per-event moderation menu** with NIP-86 actions:
-  - Allow/Ban individual events
-  - Add moderation reasons
-  - Copy event details
-- **Visual moderation status** indicators
-- **Auto-refresh** every 30 seconds
+## Getting started
 
-### 🛠️ **NIP-86 Relay Management**
-- Ban/allow events by ID
-- View moderation queue
-- Authenticated API calls with NIP-98
+Requires Node.js 22.
 
-## 🎯 **Core Focus: Event Moderation**
+```bash
+npm run dev          # install deps and start the Vite dev server (http://localhost:5173)
+npm run test         # type-check, lint, run Vitest, and build
+npx tsc --noEmit     # type-check only
+```
 
-The app is designed around the **Events & Moderation** tab, which provides:
+Worker development lives under `worker/`:
 
-1. **Real-time event feed** from your relay
-2. **Dropdown moderation menu** on each event with options to:
-   - Moderate the event (allow/ban)
-   - Copy event ID, pubkey, or full JSON
-3. **Moderation dialog** with:
-   - Action selection (Allow/Ban)
-   - Reason field
-   - Event details preview
-4. **Status indicators** showing which events are banned/pending
-5. **Filtering options** by event kind and limit
+```bash
+cd worker
+npm run dev          # wrangler dev
+npm run test:run     # worker unit tests
+npm run typecheck    # tsc --noEmit
+```
 
-## 🔧 **Requirements**
+For the full local stack (Worker + Caddy HTTPS proxy + Vite), run `./scripts/dev-local.sh`.
+It requires `mkcert` and `caddy` (`brew install mkcert caddy`, then `sudo mkcert -install`)
+and reads local CF Access and admin-key values from `.env.local` and `worker/.dev.vars`. The
+HTTPS proxy exists because the frontend runs over TLS and browsers block an HTTPS page from
+fetching an HTTP endpoint.
 
-### For Basic Event Viewing:
-- Any public Nostr relay
-- NIP-07 browser extension
+## Configuration
 
-### For Full Moderation Features:
-- Relay that supports **NIP-86** management API
-- Your pubkey must be **authorized** as relay admin
-- Relay must have **CORS headers** configured
+There are two separate variable systems; they must stay in sync.
 
-## 📱 **How to Use**
+**Frontend (Vite).** Non-secret production and staging URLs are committed in `.env.production`
+(`VITE_PROD_RELAY_URL`, `VITE_PROD_API_URL`, `VITE_STAGING_RELAY_URL`, `VITE_STAGING_API_URL`).
+Copy `.env.example` to `.env.local` (gitignored) for secrets and local overrides:
 
-1. **Install a NIP-07 extension** (Alby recommended)
-2. **Start the app** with `npm run dev`
-3. **Log in** with your extension
-4. **Enter your relay URL** or use quick connect buttons
-5. **Go to "Events & Moderation" tab**
-6. **Click the ⋮ menu** on any event to moderate it
+| Variable | Purpose |
+|----------|---------|
+| `VITE_CF_ACCESS_CLIENT_ID` | CF Access service-token ID for reaching Access-protected APIs |
+| `VITE_CF_ACCESS_CLIENT_SECRET` | CF Access service-token secret |
+| `VITE_LOCAL_RELAY_URL` / `VITE_LOCAL_API_URL` | Optional local-dev endpoint overrides |
+| `VITE_ADMIN_API_KEY` | Optional; local admin auth for `./scripts/dev-local.sh` |
 
-## 🧪 **Testing Relays**
+`VITE_` values must be plaintext at build time, so they come from env files, not the encrypted
+Pages dashboard secrets.
 
-**For Event Viewing (works with any relay):**
-- `wss://relay.damus.io` - Popular, reliable
-- `wss://nos.lol` - Community relay
-- `wss://relay.nostr.band` - Feature-rich
+**Worker.** Vars (`RELAY_URL`, `CDN_DOMAIN`, `ALLOWED_ORIGINS`, `MANAGEMENT_PATH`,
+`MODERATION_SERVICE_URL`, and others) live in `worker/wrangler.*.toml`. Secrets are set via
+`wrangler secret put` or the Cloudflare dashboard and include `NOSTR_NSEC` (admin signing key),
+`ANTHROPIC_API_KEY`, the CF Access and Zendesk credentials, and `BLOSSOM_WEBHOOK_SECRET`.
+Secrets Store bindings resolve via `await binding.get()`, not as plain strings. Never commit
+secrets. The wrangler configs are the authoritative list of vars and bindings per environment.
 
-**For Full Management (requires NIP-86 support):**
-- Your own relay with NIP-86 implemented
-- Must be configured with your pubkey as admin
+## Deployment
 
-## 🛠️ **Technical Stack**
+The frontend deploys to Cloudflare Pages and the Worker to Cloudflare Workers. There is **no
+root worker `wrangler.toml`** — each Worker environment has its own config, and you must pass
+`--config` explicitly. The root `wrangler.toml` configures only the Pages build output.
 
-- **React 18** + TypeScript
-- **TailwindCSS** + shadcn/ui components
-- **TanStack Query** for data fetching
-- **Nostrify** for Nostr protocol integration
-- **NIP-07** browser extension integration
-- **NIP-86** relay management API
-- **NIP-98** HTTP authentication
+Deploy the Worker first, then the frontend back-to-back, because the two version independently
+and there is no version negotiation between them:
 
-## 🔍 **Troubleshooting**
+```bash
+# 1. Worker (staging, verify, then prod)
+cd worker
+npx wrangler deploy --config wrangler.staging.toml
+npx wrangler deploy --config wrangler.prod.toml
 
-**"Events not loading":**
-- Check relay URL is correct
-- Try a different relay from quick connect
+# 2. Frontend (Cloudflare Pages)
+npx vite build
+npx wrangler pages deploy dist --project-name divine-relay-admin --branch main
+```
 
-**"Moderation not working":**
-- Ensure your relay supports NIP-86
-- Verify your pubkey is authorized as admin
-- Check browser console for CORS errors
+Bulk moderation depends on a Cloudflare Queue that must exist before the first Worker deploy —
+see `DEPLOYMENT.md` for queue creation, deploy ordering, and rollback details.
 
-**"Login issues":**
-- Install a NIP-07 browser extension
-- Refresh page after installation
-
-## 🎨 **Clean Architecture**
-
-This is a **focused, minimal implementation** that prioritizes:
-- ✅ **Working event moderation** with NIP-86
-- ✅ **Clean, intuitive UI** for relay operators
-- ✅ **Real-time event viewing** and filtering
-- ✅ **Secure authentication** with NIP-07
-- ✅ **Responsive design** that works everywhere
-
-The app is built to **just work** for the core use case of moderating events on your Nostr relay.
+CI (`.github/workflows/test.yml`) runs the root test suite plus the Worker typecheck and tests
+on every push and pull request to `main`. A separate workflow enforces Conventional Commit PR
+titles.
 
 ---
 
