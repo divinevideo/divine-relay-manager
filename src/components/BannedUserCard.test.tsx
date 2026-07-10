@@ -3,6 +3,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { RECENT_CONTENT_KINDS } from '@/lib/constants';
@@ -17,6 +18,14 @@ vi.mock('@nostrify/react', () => ({
 // exercise the recent-content query and rendering.
 vi.mock('@/hooks/useAuthor', () => ({
   useAuthor: () => ({ data: undefined, isLoading: false }),
+}));
+
+// The batched parent-title hook is mocked so comment-row links are deterministic
+vi.mock('@/hooks/useEventTitles', () => ({
+  useEventTitles: (targets: string[]) => ({
+    titles: new Map(targets.map(t => [t, { target: t, title: 'Parent Video', encoded: 'nevent1parent' }])),
+    isLoading: false,
+  }),
 }));
 
 const PUBKEY = 'a'.repeat(64);
@@ -55,7 +64,9 @@ function renderCard() {
   });
   return render(
     <QueryClientProvider client={client}>
-      <BannedUserCard pubkey={PUBKEY} />
+      <MemoryRouter>
+        <BannedUserCard pubkey={PUBKEY} />
+      </MemoryRouter>
     </QueryClientProvider>
   );
 }
@@ -165,5 +176,28 @@ describe('BannedUserCard', () => {
     fireEvent.click(await screen.findByRole('button', { name: /toggle details/i }));
 
     expect(await screen.findByText(/plain text spam pushed as a repost/)).toBeInTheDocument();
+  });
+
+  it('shows the comment spray roll-up over all fetched comments (#164 A)', async () => {
+    setAuthored([
+      event(1111, 'x', '1', [['E', 'e'.repeat(64)], ['K', '34236']]),
+      event(1111, 'y', '2', [['E', 'd'.repeat(64)], ['K', '34236']]),
+      event(1111, 'z', '3', [['E', 'c'.repeat(64)], ['K', '34236']]),
+      event(1111, 'w', '4', [['E', 'b'.repeat(64)], ['K', '34236']]),
+    ]);
+    renderCard();
+
+    // Roll-up lives in the always-visible stats row (no expand needed)
+    expect(await screen.findByText(/4 comments across 4 videos/)).toBeInTheDocument();
+  });
+
+  it('renders an "on <parent>" link on a comment row (#164 A)', async () => {
+    setAuthored([event(1111, 'scam', '1', [['E', 'e'.repeat(64)], ['K', '34236']])]);
+    renderCard();
+
+    fireEvent.click(await screen.findByRole('button', { name: /toggle details/i }));
+
+    const link = await screen.findByRole('link', { name: /on Parent Video/ });
+    expect(link).toHaveAttribute('href', '/events?event=nevent1parent');
   });
 });

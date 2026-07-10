@@ -19,6 +19,9 @@ import { getProfileUrl, RECENT_CONTENT_KINDS } from "@/lib/constants";
 import { parseRepostForDisplay } from "@/lib/nip18";
 import { KindBadge } from "@/components/KindBadge";
 import { useAuthor } from "@/hooks/useAuthor";
+import { getCommentTarget, formatCommentActivity } from "@/lib/commentActivity";
+import { useEventTitles } from "@/hooks/useEventTitles";
+import { CommentParentLink } from "@/components/CommentParentLink";
 
 interface BannedUserCardProps {
   pubkey: string;
@@ -69,6 +72,8 @@ export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButto
         count: events.length,
         // Relay result order isn't guaranteed — sort (a copy) newest-first
         recentPosts: [...events].sort((a, b) => b.created_at - a.created_at).slice(0, 3),
+        // The full set drives the spray roll-up (summarize all comments, not the shown 3)
+        allEvents: events,
       };
     },
     // UserManagement renders one card per banned/suspended user and Radix
@@ -76,6 +81,12 @@ export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButto
     // N x 2 relay queries (aligned with useUserStats' 2min)
     staleTime: 2 * 60_000,
   });
+
+  // #164 A: spray roll-up over the full fetched set + parent-link resolution
+  const allEvents = postStats?.allEvents ?? [];
+  const commentTargets = allEvents.map(getCommentTarget).filter((t): t is string => !!t);
+  const { titles } = useEventTitles(commentTargets, undefined);
+  const activityLine = formatCommentActivity(allEvents);
 
   const displayName = profile?.name || profile?.display_name || shortNpub;
   const njumpUrl = `https://njump.me/${npub}`;
@@ -149,6 +160,9 @@ export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButto
                   <FileText className="h-3 w-3" />
                   {postStats?.count || 0} events on relay
                 </span>
+                {activityLine && (
+                  <span className="text-amber-700 dark:text-amber-400">{activityLine}</span>
+                )}
                 <a
                   href={njumpUrl}
                   target="_blank"
@@ -240,8 +254,13 @@ export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButto
                             reposted {targetDescription}
                           </p>
                         )}
-                        <div className="flex items-center justify-between text-xs text-muted-foreground">
-                          <span>{new Date(post.created_at * 1000).toLocaleString()}</span>
+                        <div className="flex items-center justify-between text-xs text-muted-foreground gap-2">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="shrink-0">{new Date(post.created_at * 1000).toLocaleString()}</span>
+                            {post.kind === 1111 && (
+                              <CommentParentLink resolved={titles.get(getCommentTarget(post) ?? '')} />
+                            )}
+                          </div>
                           <KindBadge kind={post.kind} />
                         </div>
                       </div>
