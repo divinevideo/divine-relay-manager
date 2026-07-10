@@ -790,3 +790,117 @@ describe('bulk-moderate age-review guard', () => {
     expect(send).not.toHaveBeenCalled();
   });
 });
+
+describe('summarize-user cache validation', () => {
+  const FALLBACK_SUMMARY = 'Unable to analyze user behavior at this time.';
+
+  function makeSummarizeEnv(
+    cached: string | null,
+    opts: { anthropicKey?: string; getThrows?: boolean; putThrows?: boolean } = {},
+  ) {
+    const kv = {
+      get: vi.fn(async () => {
+        if (opts.getThrows) throw new Error('KV read down');
+        return cached;
+      }),
+      put: vi.fn(async () => {
+        if (opts.putThrows) throw new Error('KV write down');
+      }),
+    };
+    const env = {
+      ALLOWED_ORIGINS: 'https://app.divine.video',
+      RELAY_URL: 'wss://relay.divine.video',
+      ADMIN_API_KEY: 'test-admin-key',
+      ANTHROPIC_API_KEY: opts.anthropicKey,
+      KV: kv,
+    } as never;
+    return { env, kv };
+  }
+
+  // Stub the Anthropic call so a regeneration returns a known summary. Lets a
+  // test tell "served from cache / fallback" apart from "actually regenerated".
+  function stubModel(summaryJson: string) {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ content: [{ type: 'text', text: summaryJson }] }), { status: 200 }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+  }
+
+  function summarizeRequest() {
+    return new Request('https://api-relay-prod.divine.video/api/summarize-user', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Admin-Key': 'test-admin-key',
+        Origin: 'https://app.divine.video',
+      },
+      body: JSON.stringify({ pubkey: 'abc', recentPosts: [], existingLabels: [], reportHistory: [] }),
+    });
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('serves a valid cached summary unchanged, without regenerating', async () => {
+    const { env, kv } = makeSummarizeEnv(JSON.stringify({ summary: 'cached ok', riskLevel: 'high' }));
+    const response = await worker.fetch(summarizeRequest(), env, ctx);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ summary: 'cached ok', riskLevel: 'high' });
+    expect(kv.get).toHaveBeenCalled();
+    expect(kv.put).not.toHaveBeenCalled();
+  });
+
+  it('re-validates a well-formed cached entry on read: clamps riskLevel, strips extras, serves it', async () => {
+    // Valid non-blank summary but out-of-enum riskLevel + an extra key (e.g. a
+    // pre-#169 entry). This is served (not regenerated) with the summary text
+    // intact and only the schema tightened. No Anthropic key proves no regen.
+    const stale = JSON.stringify({ summary: 'stale but real', riskLevel: 'severe', injected: 'ignore me' });
+    const { env, kv } = makeSummarizeEnv(stale);
+    const response = await worker.fetch(summarizeRequest(), env, ctx);
+    expect(await response.json()).toEqual({ summary: 'stale but real', riskLevel: 'unknown' });
+    expect(kv.put).not.toHaveBeenCalled();
+  });
+
+  it('regenerates instead of serving a cached entry that fails normalization', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    // Blank summary -> normalizes to null. Without an Anthropic key the
+    // regeneration fails into the fallback, whose summary text differs from the
+    // cached one, proving the stale entry was not served.
+    const { env } = makeSummarizeEnv(JSON.stringify({ summary: '', riskLevel: 'critical' }));
+    const response = await worker.fetch(summarizeRequest(), env, ctx);
+    const body = await response.json() as { summary: string; riskLevel: string };
+    expect(body.summary).toBe(FALLBACK_SUMMARY); // fell through, did not serve the blank cached entry
+    expect(body.riskLevel).toBe('unknown');
+  });
+
+  it('regenerates instead of serving an unparseable cached entry', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { env, kv } = makeSummarizeEnv('this is not json');
+    const response = await worker.fetch(summarizeRequest(), env, ctx);
+    const body = await response.json() as { summary: string; riskLevel: string };
+    expect(body.summary).toBe(FALLBACK_SUMMARY); // did not serve the raw cached string
+    expect(body.riskLevel).toBe('unknown');
+    expect(kv.put).not.toHaveBeenCalled();       // fallback path never caches
+  });
+
+  it('degrades to regeneration when the cache read throws, not the error card', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const fetchMock = stubModel('{"summary":"fresh","riskLevel":"low"}');
+    const { env } = makeSummarizeEnv(null, { anthropicKey: 'test-key', getThrows: true });
+    const response = await worker.fetch(summarizeRequest(), env, ctx);
+    expect(await response.json()).toEqual({ summary: 'fresh', riskLevel: 'low' }); // regenerated, not fallback
+    expect(fetchMock).toHaveBeenCalled();
+  });
+
+  it('returns the generated summary even when the cache write throws', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    stubModel('{"summary":"fresh","riskLevel":"low"}');
+    const { env, kv } = makeSummarizeEnv(null, { anthropicKey: 'test-key', putThrows: true });
+    const response = await worker.fetch(summarizeRequest(), env, ctx);
+    expect(await response.json()).toEqual({ summary: 'fresh', riskLevel: 'low' }); // write failure did not collapse it
+    expect(kv.put).toHaveBeenCalled();
+  });
+});
