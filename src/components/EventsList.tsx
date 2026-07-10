@@ -1127,7 +1127,9 @@ export function EventsList({ relayUrl }: EventsListProps) {
                           size="sm"
                           className="mt-1 text-xs"
                           onClick={() => {
-                            updatePubkeyFilter(searchMode.hex);
+                            // Only reachable in event_id mode (the button is gated on a
+                            // 64-hex committedSearch); guard so `address` mode type-checks.
+                            if (searchMode.type === 'event_id') updatePubkeyFilter(searchMode.hex);
                             clearSearch();
                           }}
                         >

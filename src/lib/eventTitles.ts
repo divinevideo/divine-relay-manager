@@ -15,7 +15,10 @@ export type ParsedTarget =
  * tags, so both shapes are validated (numeric kind, 64-hex pubkey) before use.
  */
 export function parseCommentTarget(target: string): ParsedTarget | null {
-  if (isHex64(target)) return { kind: 'id', id: target };
+  // isHex64 is a `value is string` guard; using it in a ternary (not `if`) keeps
+  // `target` typed as `string` for the address branch below rather than `never`.
+  const id = isHex64(target) ? target : null;
+  if (id !== null) return { kind: 'id', id };
   const parts = target.split(':');
   if (parts.length >= 3 && /^\d+$/.test(parts[0]) && isHex64(parts[1])) {
     return {
