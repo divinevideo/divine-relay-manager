@@ -429,6 +429,11 @@ export function EventsList({ relayUrl }: EventsListProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [committedSearch, setCommittedSearch] = useState('');
   const searchMode = useMemo(() => parseSearchInput(committedSearch), [committedSearch]);
+  // The live typed input's shape (committedSearch is only set on Enter/commit,
+  // so the instant substring filter must key off what's being typed, not the
+  // committed value). Only free text substring-filters; a typed id/pubkey/naddr
+  // resolves via its dedicated query instead.
+  const typedIsText = useMemo(() => parseSearchInput(searchQuery).type === 'text', [searchQuery]);
   const [filterHasReports, setFilterHasReports] = useState(false);
   const [filterNewUsers, setFilterNewUsers] = useState(false);
   const [filterHasMedia, setFilterHasMedia] = useState(false);
@@ -779,9 +784,9 @@ export function EventsList({ relayUrl }: EventsListProps) {
       }
 
       // Client-side content/pubkey substring search (instant, no Enter needed).
-      // Only in free-text mode: id/pubkey/address searches resolve via dedicated
-      // queries, so a synced nevent/naddr must not also run as a substring filter.
-      if (searchQuery.trim() && searchMode.type === 'text') {
+      // Gate on the live typed shape: free text filters as you type; a typed or
+      // synced id/pubkey/nevent/naddr resolves via its dedicated query instead.
+      if (searchQuery.trim() && typedIsText) {
         const query = searchQuery.toLowerCase();
         if (!event.content?.toLowerCase().includes(query) &&
             !event.pubkey.toLowerCase().includes(query)) {

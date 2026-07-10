@@ -44,6 +44,18 @@ describe('buildThreadTree NIP-22', () => {
     expect(tree?.replies.map(r => r.event.id)).toContain('c1');
   });
 
+  it('attaches a comment carrying both e and a to its parent exactly once', () => {
+    const root = ev({ id: 'root', kind: 34236, tags: [['d', 'vid1']] });
+    // Top-level comment on addressable content: NIP-22 lets it carry both a
+    // lowercase `e` (root id) and `a` (root address) pointing at the same parent.
+    const comment = ev({
+      id: 'c1', kind: 1111,
+      tags: [['E', 'root'], ['A', `34236:${PK}:vid1`], ['e', 'root'], ['a', `34236:${PK}:vid1`], ['k', '34236']],
+    });
+    const tree = buildThreadTree([root, comment], 'root');
+    expect(tree?.replies.filter(r => r.event.id === 'c1')).toHaveLength(1);
+  });
+
   it('still nests NIP-10 kind-1 replies (no regression)', () => {
     const root = ev({ id: 'root', kind: 1 });
     const reply = ev({ id: 'r1', kind: 1, tags: [['e', 'root', '', 'reply']] });
