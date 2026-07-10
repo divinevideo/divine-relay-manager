@@ -14,6 +14,9 @@ dist-ssr
 .env
 .dev.vars
 
+# TypeScript incremental build cache (emitted by tsc -p tsconfig.*.json)
+*.tsbuildinfo
+
 # Editor directories and files
 .idea
 .DS_Store
