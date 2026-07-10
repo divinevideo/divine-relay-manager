@@ -3,6 +3,7 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { UserProfileCard } from './UserProfileCard';
 import type { UserStats } from '@/hooks/useUserStats';
@@ -14,6 +15,14 @@ vi.mock('@/hooks/useAdminApi', () => ({
 // Media preview fetches/renders remote content; irrelevant to badge mapping
 vi.mock('@/components/MediaPreview', () => ({
   InlineMediaPreview: () => null,
+}));
+
+// The batched parent-title hook is mocked so comment-row links are deterministic
+vi.mock('@/hooks/useEventTitles', () => ({
+  useEventTitles: (targets: string[]) => ({
+    titles: new Map(targets.map(t => [t, { target: t, title: 'Parent Video', encoded: 'nevent1parent' }])),
+    isLoading: false,
+  }),
 }));
 
 const PUBKEY = 'a'.repeat(64);
@@ -108,5 +117,22 @@ describe('UserProfileCard', () => {
 
     rerender(<UserProfileCard pubkey={PUBKEY} stats={stats(RECENT)} />);
     expect(screen.queryByRole('button', { name: /view activity/i })).not.toBeInTheDocument();
+  });
+});
+
+describe('UserProfileCard comment context', () => {
+  it('shows the spray roll-up and a per-row "on <parent>" link for comments', () => {
+    const recent = [
+      post(1111, 'spam comment', '1', [['E', 'e'.repeat(64)], ['K', '34236']]),
+      post(1111, 'spam comment', '2', [['E', 'd'.repeat(64)], ['K', '34236']]),
+    ];
+    render(
+      <MemoryRouter>
+        <UserProfileCard pubkey={PUBKEY} stats={stats(recent)} />
+      </MemoryRouter>
+    );
+    expect(screen.getByText(/2 comments across 2 videos/)).toBeInTheDocument();
+    const link = screen.getAllByRole('link', { name: /on Parent Video/ })[0];
+    expect(link).toHaveAttribute('href', '/events?event=nevent1parent');
   });
 });

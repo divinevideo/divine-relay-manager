@@ -16,6 +16,9 @@ import type { UserStats } from "@/hooks/useUserStats";
 import { getProfileUrl, getPublicEventUrl } from "@/lib/constants";
 import { parseRepostForDisplay } from "@/lib/nip18";
 import { KindBadge } from "@/components/KindBadge";
+import { getCommentTarget, formatCommentActivity } from "@/lib/commentActivity";
+import { useEventTitles } from "@/hooks/useEventTitles";
+import { CommentParentLink } from "@/components/CommentParentLink";
 
 // Label category colors
 const LABEL_COLORS: Record<string, string> = {
@@ -257,6 +260,13 @@ function RecentPostsSection({
 
   const visiblePosts = showAll ? posts : posts.slice(0, 5);
 
+  // #164 A: batched parent-title resolution for the comment rows + spray roll-up
+  const commentTargets = posts
+    .map(getCommentTarget)
+    .filter((t): t is string => !!t);
+  const { titles } = useEventTitles(commentTargets, apiUrl);
+  const activityLine = formatCommentActivity(posts);
+
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
@@ -273,6 +283,9 @@ function RecentPostsSection({
           {expanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
         </Button>
       </div>
+      {activityLine && (
+        <p className="text-xs text-amber-700 dark:text-amber-400">{activityLine}</p>
+      )}
 
       {expanded && (
         <div className="space-y-3">
@@ -315,8 +328,13 @@ function RecentPostsSection({
                 />
 
                 {/* Timestamp, kind, link, and delete */}
-                <div className="flex items-center justify-between text-xs text-muted-foreground">
-                  <span>{new Date(post.created_at * 1000).toLocaleString()}</span>
+                <div className="flex items-center justify-between text-xs text-muted-foreground gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="shrink-0">{new Date(post.created_at * 1000).toLocaleString()}</span>
+                    {post.kind === 1111 && (
+                      <CommentParentLink resolved={titles.get(getCommentTarget(post) ?? '')} />
+                    )}
+                  </div>
                   <div className="flex items-center gap-1.5">
                     {(() => {
                       try {
