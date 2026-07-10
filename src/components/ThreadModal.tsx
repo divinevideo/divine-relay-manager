@@ -19,6 +19,7 @@ import { useAppContext } from "@/hooks/useAppContext";
 import { MessageSquare, Globe } from "lucide-react";
 import type { NostrEvent } from "@nostrify/nostrify";
 import { getProfileUrl } from "@/lib/constants";
+import { buildThreadReplyFilters, eventAddress } from "@/lib/threadFilters";
 
 interface ThreadModalProps {
   eventId: string;
@@ -33,19 +34,42 @@ interface ThreadNode {
   depth: number;
 }
 
-function buildThreadTree(events: NostrEvent[], rootId: string): ThreadNode | null {
+export function buildThreadTree(events: NostrEvent[], rootId: string): ThreadNode | null {
   const eventMap = new Map<string, NostrEvent>();
   events.forEach(e => eventMap.set(e.id, e));
 
   const root = eventMap.get(rootId);
   if (!root) return null;
 
+  const rootAddress = eventAddress(root);
+  const idSet = new Set(events.map(e => e.id));
+
+  // A NIP-22 comment's immediate parent: lowercase `e` (event id) or `a` (address).
+  function commentParent(e: NostrEvent): { id?: string; address?: string } {
+    return {
+      id: e.tags.find(t => t[0] === 'e')?.[1],
+      address: e.tags.find(t => t[0] === 'a')?.[1],
+    };
+  }
+
+  function isChildOf(e: NostrEvent, parent: NostrEvent, parentAddress: string | undefined): boolean {
+    if (e.kind === 1111) {
+      const { id, address } = commentParent(e);
+      if (id && id === parent.id) return true;
+      if (address && parentAddress && address === parentAddress) return true;
+      // Orphan (immediate parent not fetched): attach to root only, so it still shows.
+      const parentPresent = (!!id && idSet.has(id)) || (!!address && rootAddress === address);
+      return parent.id === rootId && !parentPresent;
+    }
+    // NIP-10 kind-1 reply markers (existing behavior)
+    const replyTag = e.tags.find(t => t[0] === 'e' && (t[3] === 'reply' || !t[3]));
+    return !!replyTag && replyTag[1] === parent.id;
+  }
+
   function buildNode(event: NostrEvent, depth: number): ThreadNode {
+    const parentAddress = eventAddress(event);
     const replies = events
-      .filter(e => {
-        const replyTag = e.tags.find(t => t[0] === 'e' && (t[3] === 'reply' || !t[3]));
-        return replyTag && replyTag[1] === event.id;
-      })
+      .filter(e => e.id !== event.id && isChildOf(e, event, parentAddress))
       .map(e => buildNode(e, depth + 1))
       .sort((a, b) => a.event.created_at - b.event.created_at);
 
@@ -148,22 +172,25 @@ export function ThreadModal({ eventId, open, onOpenChange, highlightEventId }: T
 
       if (!targetEvent) return null;
 
-      // Find root event ID
+      // Root: NIP-10 `e root` when present, else the event itself (addressable
+      // video reports have no NIP-10 root tag).
       const rootTag = targetEvent.tags.find(t => t[0] === 'e' && t[3] === 'root');
       const rootId = rootTag ? rootTag[1] : eventId;
 
-      // Fetch all events in thread
       const [rootEvent] = await nostr.query(
         [{ ids: [rootId], limit: 1 }],
         { signal: combinedSignal }
       );
+      const rootForFilters = rootEvent ?? targetEvent;
 
+      // NIP-10 kind-1 replies + NIP-22 kind-1111 comments (scoped by root E/A) —
+      // Divine comments are kind 1111, so kinds:[1] alone showed none (#164 B).
       const replies = await nostr.query(
-        [{ kinds: [1], '#e': [rootId], limit: 100 }],
+        buildThreadReplyFilters(rootForFilters, 100),
         { signal: combinedSignal }
       );
 
-      const allEvents = rootEvent ? [rootEvent, ...replies] : replies;
+      const allEvents = rootEvent ? [rootEvent, ...replies] : [targetEvent, ...replies];
       return buildThreadTree(allEvents, rootId);
     },
     enabled: open && !!eventId,
