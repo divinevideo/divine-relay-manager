@@ -63,9 +63,10 @@ type SearchMode =
   | { type: 'none' }
   | { type: 'event_id'; hex: string }
   | { type: 'pubkey'; hex: string }
+  | { type: 'address'; addressKind: number; pubkey: string; identifier: string }
   | { type: 'text'; query: string };
 
-function parseSearchInput(input: string): SearchMode {
+export function parseSearchInput(input: string): SearchMode {
   const trimmed = input.trim();
   if (!trimmed) return { type: 'none' };
 
@@ -90,6 +91,24 @@ function parseSearchInput(input: string): SearchMode {
         return { type: 'pubkey', hex: decoded.data };
       } else if (decoded.type === 'nprofile') {
         return { type: 'pubkey', hex: decoded.data.pubkey };
+      }
+    } catch {
+      // Invalid encoding, fall through to text search
+    }
+  }
+
+  // Addressable coordinate (naddr) — an internal parent link for an addressable
+  // video routes here, so resolve it to a kind+author+d lookup (#164 A)
+  if (trimmed.startsWith('naddr1')) {
+    try {
+      const decoded = nip19.decode(trimmed);
+      if (decoded.type === 'naddr') {
+        return {
+          type: 'address',
+          addressKind: decoded.data.kind,
+          pubkey: decoded.data.pubkey,
+          identifier: decoded.data.identifier,
+        };
       }
     } catch {
       // Invalid encoding, fall through to text search
@@ -414,6 +433,15 @@ export function EventsList({ relayUrl }: EventsListProps) {
     }
   }, [searchParams, filterByPubkey]);
 
+  // #164 A: an internal parent link routes here as /events?event=<nevent|naddr>;
+  // seed the committed search from it so the direct-event lookup fires.
+  useEffect(() => {
+    const eventParam = searchParams.get('event');
+    if (eventParam && eventParam !== committedSearch) {
+      setCommittedSearch(eventParam);
+    }
+  }, [searchParams, committedSearch]);
+
   // Update URL when filterByPubkey changes
   const updatePubkeyFilter = (pubkey: string | null) => {
     setFilterByPubkey(pubkey);
@@ -502,34 +530,43 @@ export function EventsList({ relayUrl }: EventsListProps) {
   // Direct event lookup by ID (separate from infinite scroll)
   // Tries normal relay query first, then falls back to getbannedevent RPC
   const { data: directEventLookup, isLoading: isLoadingDirectEvent, error: directEventError } = useQuery({
-    queryKey: ['event-search', searchMode.type === 'event_id' ? searchMode.hex : null],
+    queryKey: ['event-search', committedSearch, searchMode.type],
     queryFn: async ({ signal }) => {
-      if (searchMode.type !== 'event_id') return null;
+      const timeoutSignal = AbortSignal.any([signal, AbortSignal.timeout(5000)]);
 
-      // Try normal relay query first
-      const events = await nostr.query(
-        [{ ids: [searchMode.hex] }],
-        { signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]) }
-      );
-      if (events[0]) return { event: events[0], banned: false };
+      if (searchMode.type === 'event_id') {
+        // Try normal relay query first
+        const events = await nostr.query([{ ids: [searchMode.hex] }], { signal: timeoutSignal });
+        if (events[0]) return { event: events[0], banned: false };
 
-      // Fallback: check if it's a banned event via management API
-      try {
-        const bannedEvent = await callRelayRpc<NostrEvent>('getbannedevent', [searchMode.hex]);
-        if (bannedEvent) return { event: bannedEvent, banned: true };
-      } catch {
-        // Not banned or RPC failed
+        // Fallback: check if it's a banned event via management API
+        try {
+          const bannedEvent = await callRelayRpc<NostrEvent>('getbannedevent', [searchMode.hex]);
+          if (bannedEvent) return { event: bannedEvent, banned: true };
+        } catch {
+          // Not banned or RPC failed
+        }
+        return null;
+      }
+
+      if (searchMode.type === 'address') {
+        // Addressable video parents scope by kind+author+d, not by id (#164 A)
+        const events = await nostr.query(
+          [{ kinds: [searchMode.addressKind], authors: [searchMode.pubkey], '#d': [searchMode.identifier], limit: 1 }],
+          { signal: timeoutSignal },
+        );
+        return events[0] ? { event: events[0], banned: false } : null;
       }
 
       return null;
     },
-    enabled: searchMode.type === 'event_id' && !!nostr,
+    enabled: (searchMode.type === 'event_id' || searchMode.type === 'address') && !!nostr,
     staleTime: 60 * 1000,
   });
 
   // Auto-select found event in detail pane
   useEffect(() => {
-    if (directEventLookup?.event && searchMode.type === 'event_id') {
+    if (directEventLookup?.event && (searchMode.type === 'event_id' || searchMode.type === 'address')) {
       setSelectedEvent(directEventLookup.event);
     }
   }, [directEventLookup, searchMode]);
