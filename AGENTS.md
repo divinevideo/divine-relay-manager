@@ -75,7 +75,7 @@ worker/
 
 ## Build, Test, and Validation Commands
 - `npm run test`: primary repo test command.
-- `npx tsc --noEmit`: frontend and shared type-check.
+- `npx tsc -p tsconfig.app.json --noEmit`: frontend type-check. **Bare `npx tsc --noEmit` is a false green here** — the root `tsconfig.json` has `"files": []` with project references, so in non-build mode it type-checks nothing and exits 0. Always pass `-p tsconfig.app.json` (or run `npm run test`).
 - `npx vite build`: frontend production build.
 - `npx vite --port 8080`: frontend dev server.
 - `cd worker && npx vitest run`: worker tests when touching worker code.
@@ -85,7 +85,7 @@ worker/
 # Frontend
 npx vite --port 8080          # dev server
 npx vite build                # production build
-npx tsc --noEmit              # type-check
+npx tsc -p tsconfig.app.json --noEmit   # type-check (bare `tsc --noEmit` checks nothing here)
 
 # Worker
 cd worker
@@ -268,7 +268,7 @@ These must stay in sync. The frontend environment selector reads VITE_ vars to d
 ### Always do first
 - Read the file(s) you're modifying. Don't assume current state.
 - Check `wrangler.staging.toml` and `wrangler.prod.toml` for env vars and bindings.
-- Run `npx tsc --noEmit` after edits.
+- Run `npx tsc -p tsconfig.app.json --noEmit` after edits (bare `tsc --noEmit` is a false green — see Build/Test/Validation).
 - If touching `handleModerate()`: trace ALL side effects. Verify none are duplicated and none are fire-and-forget.
 - If touching media URLs or external service calls: verify domains against wrangler config env vars.
 
