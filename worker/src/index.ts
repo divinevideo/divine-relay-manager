@@ -1059,6 +1059,10 @@ export function normalizeUserSummary(
   const obj = raw as Record<string, unknown>;
 
   if (typeof obj.summary !== 'string' || obj.summary.trim() === '') return null;
+  // Store the trimmed value: we already trim to judge blankness, so surrounding
+  // whitespace is treated as insignificant. Trimming here keeps the function
+  // self-consistent and drops leading/trailing noise from the display card.
+  const summary = obj.summary.trim();
 
   const candidate = typeof obj.riskLevel === 'string' ? obj.riskLevel.trim().toLowerCase() : '';
   const riskLevel: SummaryRiskLevel =
@@ -1066,7 +1070,7 @@ export function normalizeUserSummary(
       ? (candidate as SummaryRiskLevel)
       : 'unknown';
 
-  return { summary: obj.summary, riskLevel };
+  return { summary, riskLevel };
 }
 
 async function handleSummarizeUser(

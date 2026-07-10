@@ -61,6 +61,11 @@ describe('normalizeUserSummary', () => {
       .toEqual({ summary: 'ok', riskLevel: 'low' });
   });
 
+  it('trims surrounding whitespace off a non-blank summary', () => {
+    expect(normalizeUserSummary({ summary: '  \n real summary \n  ', riskLevel: 'low' }))
+      .toEqual({ summary: 'real summary', riskLevel: 'low' });
+  });
+
   it('rejects a missing summary as malformed', () => {
     expect(normalizeUserSummary({ riskLevel: 'low' })).toBeNull();
   });
