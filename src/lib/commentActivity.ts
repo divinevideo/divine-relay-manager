@@ -2,6 +2,7 @@
 // ABOUTME: logic behind "what is this comment on" and "N comments across M videos"
 
 import type { NostrEvent } from "@nostrify/nostrify";
+import { isVideoKind } from "@/lib/kindNames";
 
 /**
  * The root scope a kind-1111 comment is attached to: its `E` (root event id)
@@ -54,4 +55,31 @@ export function summarizeCommentActivity(events: NostrEvent[]): CommentActivityS
   }
 
   return { commentCount: comments.length, distinctTargets: targets.size, repeatedAcrossTargets };
+}
+
+/**
+ * The at-a-glance spray line for a card: "8 comments across 7 videos" vs
+ * "8 comments on 1 video". Noun is "video" only when every comment's root-kind
+ * (K tag) is a video kind, else "post". Returns null when there are no comments.
+ */
+export function formatCommentActivity(events: NostrEvent[]): string | null {
+  const comments = events.filter(e => e.kind === 1111);
+  if (comments.length === 0) return null;
+
+  const { commentCount, distinctTargets, repeatedAcrossTargets } = summarizeCommentActivity(comments);
+
+  const rootKinds = comments
+    .map(c => c.tags.find(t => t[0] === 'K')?.[1])
+    .filter((k): k is string => !!k)
+    .map(Number)
+    .filter(k => !Number.isNaN(k));
+  const allVideo = rootKinds.length > 0 && rootKinds.every(isVideoKind);
+  const noun = allVideo ? 'video' : 'post';
+
+  const c = `${commentCount} comment${commentCount === 1 ? '' : 's'}`;
+  const where = distinctTargets === 1
+    ? `on 1 ${noun}`
+    : `across ${distinctTargets} ${noun}s`;
+  const spray = repeatedAcrossTargets >= 2 ? ` (same comment on ${repeatedAcrossTargets})` : '';
+  return `${c} ${where}${spray}`;
 }

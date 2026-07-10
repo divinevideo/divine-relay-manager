@@ -2,7 +2,7 @@
 
 import { describe, it, expect } from 'vitest';
 import type { NostrEvent } from '@nostrify/nostrify';
-import { getCommentTarget, summarizeCommentActivity } from './commentActivity';
+import { getCommentTarget, summarizeCommentActivity, formatCommentActivity } from './commentActivity';
 
 const PK = 'a'.repeat(64);
 const VID = (b: string) => b.repeat(64);
@@ -61,5 +61,36 @@ describe('summarizeCommentActivity', () => {
     const s = summarizeCommentActivity(events);
     expect(s.distinctTargets).toBe(1);
     expect(s.repeatedAcrossTargets).toBe(1);
+  });
+});
+
+describe('formatCommentActivity', () => {
+  it('returns null when there are no comments', () => {
+    expect(formatCommentActivity([])).toBeNull();
+  });
+
+  it('reads "on 1 video" for comments concentrated on one video target', () => {
+    const events = [
+      comment('a', [['E', VID('1')], ['K', '34236']], '1'),
+      comment('b', [['E', VID('1')], ['K', '34236']], '2'),
+    ];
+    expect(formatCommentActivity(events)).toBe('2 comments on 1 video');
+  });
+
+  it('reads "across M videos" for a spread, with a spray note for repeated text', () => {
+    const events = [
+      comment('same', [['E', VID('1')], ['K', '34236']], '1'),
+      comment('same', [['E', VID('2')], ['K', '34236']], '2'),
+      comment('same', [['E', VID('3')], ['K', '34236']], '3'),
+    ];
+    expect(formatCommentActivity(events)).toBe('3 comments across 3 videos (same comment on 3)');
+  });
+
+  it('uses "post" when the root kinds are not all video', () => {
+    const events = [
+      comment('a', [['E', VID('1')], ['K', '1']], '1'),
+      comment('b', [['E', VID('2')], ['K', '34236']], '2'),
+    ];
+    expect(formatCommentActivity(events)).toBe('2 comments across 2 posts');
   });
 });
