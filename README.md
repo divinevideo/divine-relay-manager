@@ -112,3 +112,7 @@ This is a **focused, minimal implementation** that prioritizes:
 - ✅ **Responsive design** that works everywhere
 
 The app is built to **just work** for the core use case of moderating events on your Nostr relay.
+
+---
+
+Part of [Divine](https://divine.video) — your playground for human creativity · [Brand guidelines](https://github.com/divinevideo/brand-guidelines)
