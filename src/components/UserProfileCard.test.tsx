@@ -83,6 +83,20 @@ describe('UserProfileCard', () => {
     expect(screen.getByText(`reposted event ${'c'.repeat(64)}`)).toBeInTheDocument();
   });
 
+  it("shows a repost's readable inner text even when a kind claim tries to disguise it", () => {
+    // A reposter could tag readable spam ['k','1064'] to try to hide it; the
+    // card must still surface the text (evidence), never blank it.
+    const disguised = post(
+      16,
+      JSON.stringify({ content: 'FREE GIVEAWAY click my profile', kind: 1064, pubkey: 'b'.repeat(64) }),
+      '7',
+      [['e', 'c'.repeat(64)], ['k', '1064']]
+    );
+    render(<UserProfileCard pubkey={PUBKEY} stats={stats([disguised])} />);
+
+    expect(screen.getByText(/FREE GIVEAWAY click my profile/)).toBeInTheDocument();
+  });
+
   it('shows View Activity only when onViewActivity is provided, and fires it', () => {
     const onViewActivity = vi.fn();
 

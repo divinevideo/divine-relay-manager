@@ -9,13 +9,13 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useApiUrl } from "@/hooks/useAdminApi";
-import { User, FileText, Flag, Tag, CheckCircle, ChevronDown, ChevronUp, Copy, Check, ArrowUpRight, Trash2, Globe, ExternalLink, Video, MessageSquare, Activity, Repeat } from "lucide-react";
+import { User, FileText, Flag, Tag, CheckCircle, ChevronDown, ChevronUp, Copy, Check, ArrowUpRight, Trash2, Globe, ExternalLink, Activity } from "lucide-react";
 import { InlineMediaPreview } from "@/components/MediaPreview";
 import type { NostrEvent, NostrMetadata } from "@nostrify/nostrify";
 import type { UserStats } from "@/hooks/useUserStats";
 import { getProfileUrl, getPublicEventUrl } from "@/lib/constants";
-import { getKindName } from "@/lib/kindNames";
-import { getRepostTargetId, isRepostKind, parseRepostedEvent } from "@/lib/nip18";
+import { parseRepostForDisplay } from "@/lib/nip18";
+import { KindBadge } from "@/components/KindBadge";
 
 // Label category colors
 const LABEL_COLORS: Record<string, string> = {
@@ -279,9 +279,10 @@ function RecentPostsSection({
           {visiblePosts.map(post => {
             // Kind 6/16 content is the stringified JSON of the reposted event
             // (NIP-18) — surface the inner content, labeled, instead of raw JSON.
-            const isRepost = isRepostKind(post.kind);
-            const inner = isRepost ? parseRepostedEvent(post.content) : null;
-            const displayContent = isRepost ? (inner?.content ?? '') : post.content;
+            // Shared NIP-18 display derivation — inner content for reposts
+            // (never raw JSON), file-data kinds suppressed (direct or
+            // smuggled through a repost), out-of-spec content preserved.
+            const { isRepost, inner, displayContent, targetDescription } = parseRepostForDisplay(post);
             return (
               <div key={post.id} className="p-3 bg-muted rounded-lg space-y-2 overflow-hidden">
                 {/* Post content */}
@@ -298,15 +299,13 @@ function RecentPostsSection({
                     {displayContent}
                   </p>
                 )}
-                {/* NIP-18 allows empty repost content — at least identify the target event */}
-                {isRepost && !displayContent && (() => {
-                  const targetId = getRepostTargetId(post.tags);
-                  return targetId ? (
-                    <p className="text-xs text-muted-foreground italic break-all">
-                      reposted event {targetId}
-                    </p>
-                  ) : null;
-                })()}
+                {/* Reposts with nothing displayable — identify the target
+                    (e-tag event id or a-tag coordinate per NIP-18) */}
+                {isRepost && !displayContent && targetDescription && (
+                  <p className="text-xs text-muted-foreground italic break-all line-clamp-2">
+                    reposted {targetDescription}
+                  </p>
+                )}
 
                 {/* Media preview - uses InlineMediaPreview for admin proxy fallback.
                     Reposts pass the inner event's content+tags so its media resolves. */}
@@ -332,17 +331,7 @@ function RecentPostsSection({
                         );
                       } catch { return null; }
                     })()}
-                    {(post.kind === 21 || post.kind === 22 || post.kind === 34235 || post.kind === 34236) ? (
-                      <Badge variant="default" className="text-xs gap-1 bg-green-600" title="Video (NIP-71) — visible in Divine apps"><Video className="h-3 w-3" />Video</Badge>
-                    ) : post.kind === 1111 ? (
-                      <Badge variant="outline" className="text-xs gap-1 text-green-600 border-green-300 bg-green-50" title="Comment (kind 1111) — visible in Divine apps when attached to a video"><MessageSquare className="h-3 w-3" />Comment</Badge>
-                    ) : isRepost ? (
-                      <Badge variant="outline" className="text-xs gap-1 text-blue-600 border-blue-300 bg-blue-50" title="Repost — boosts another user's content into feeds"><Repeat className="h-3 w-3" />Repost</Badge>
-                    ) : post.kind === 1 ? (
-                      <Badge variant="outline" className="text-xs gap-1 text-amber-600 border-amber-300 bg-amber-50" title="Text note (kind 1) — not visible in Divine apps. Only visible via external Nostr clients."><Globe className="h-3 w-3" />Note</Badge>
-                    ) : (
-                      <Badge variant="outline" className="text-xs gap-1 text-amber-600 border-amber-300 bg-amber-50" title={`${getKindName(post.kind)} — not shown as content in Divine apps`}><Globe className="h-3 w-3" />{getKindName(post.kind)}</Badge>
-                    )}
+                    <KindBadge kind={post.kind} />
                     {onDeleteEvent && (
                       <Button
                         variant="ghost"

@@ -3,6 +3,7 @@
 
 import { useNostr } from "@nostrify/react";
 import { useQuery } from "@tanstack/react-query";
+import { RECENT_CONTENT_KINDS } from "@/lib/constants";
 import type { NostrEvent } from "@nostrify/nostrify";
 
 export interface UserStats {
@@ -36,12 +37,10 @@ export function useUserStats(pubkey: string | undefined) {
 
       // Fetch in parallel
       const [recentPosts, existingLabels, previousReports] = await Promise.all([
-        // User's recent posts (text notes, video events, and other content)
-        // Video kinds per NIP-71: 21 (Video), 22 (Short Video), 34235 (Addressable Video), 34236 (Addressable Short Video)
-        // 1111 (NIP-22 comments) and 6/16 (reposts) matter for moderation:
-        // comment-spam accounts often have no other content (#156)
+        // User's recent authored content — RECENT_CONTENT_KINDS is shared with
+        // BannedUserCard so the two review surfaces stay aligned (#159).
         nostr.query(
-          [{ kinds: [1, 6, 16, 21, 22, 1063, 1064, 20, 1111, 30023, 34235, 34236], authors: [pubkey], limit: 20 }],
+          [{ kinds: [...RECENT_CONTENT_KINDS], authors: [pubkey], limit: 20 }],
           { signal: combinedSignal }
         ),
         // Labels against this user

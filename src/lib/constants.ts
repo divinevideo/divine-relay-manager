@@ -1,4 +1,5 @@
 import { getEnvironmentByApiUrl } from "@/lib/environments";
+import { VIDEO_KINDS } from "@/lib/kindNames";
 export { AUTO_HIDE_ACTION, AUTO_HIDE_ACTIONS, type AutoHideAction } from "../../shared/autohide";
 
 // ABOUTME: Shared constants for moderation categories and labels
@@ -68,6 +69,18 @@ export const HIGH_PRIORITY_CATEGORIES = [
 // on this same literal). Distinct from HIGH_PRIORITY_CATEGORIES: CSAM /
 // child-safety are a separate, non-reversible path, not age review.
 export const UNDERAGE_REPORT_CATEGORY = 'NS-underageUser';
+
+// Authored-content kinds surfaced on moderation review cards (report detail's
+// useUserStats and BannedUserCard). Video kinds per NIP-71: 21/22/34235/34236.
+// 1111 (NIP-22 comments) and 6/16 (reposts) matter for moderation because
+// comment-spam accounts often have no other content (#156, #159). One shared
+// list so consuming surfaces can't drift. TODO(#162): UserProfilePreview
+// (Labels page) still carries its own inline list — aligning it also needs
+// the shared rendering pieces, tracked there.
+// Deliberately excludes kind 1064 (defunct NIP-95 draft, inline base64 file
+// bytes): not a current protocol kind, zero events on the Divine relay, and
+// Divine puts media on Blossom as URLs — querying it only pulled base64 noise.
+export const RECENT_CONTENT_KINDS = [1, 6, 16, ...VIDEO_KINDS, 20, 1063, 1111, 30023] as const;
 
 // Helper to get label with fallback
 export function getCategoryLabel(category: string): string {

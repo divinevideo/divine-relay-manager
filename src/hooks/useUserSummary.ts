@@ -5,7 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { NostrEvent } from "@nostrify/nostrify";
 import { getApiHeaders } from "@/lib/adminApi";
 import { useApiUrl } from "@/hooks/useAdminApi";
-import { getRepostTargetId, isRepostKind, parseRepostedEvent } from "@/lib/nip18";
+import { parseRepostForDisplay } from "@/lib/nip18";
 
 interface SummaryResponse {
   summary: string;
@@ -31,19 +31,23 @@ export function useUserSummary(
         headers: getApiHeaders(),
         body: JSON.stringify({
           pubkey,
-          recentPosts: recentPosts.slice(0, 10).map(e => ({
-            // Reposts send the inner (reposted) text, not the raw NIP-18 JSON —
-            // the worker slices to 200 chars, which would otherwise all be hex
-            // noise. Empty/unparseable reposts fall back to the target event id.
-            content: isRepostKind(e.kind)
-              ? (parseRepostedEvent(e.content)?.content
-                || `[reposted event ${getRepostTargetId(e.tags) ?? 'unknown'}]`)
-              : e.content,
-            created_at: e.created_at,
-            // Kind lets the summarizer distinguish authored posts from
-            // comments (1111) and reposts of others' content (6/16) — see #156
-            kind: e.kind,
-          })),
+          recentPosts: recentPosts.slice(0, 10).map(e => {
+            // Shared display derivation (parseRepostForDisplay): reposts send
+            // the inner text, never raw NIP-18 JSON. An empty-content repost
+            // falls back to its target label.
+            const display = parseRepostForDisplay(e);
+            const content = display.isRepost
+              ? (display.displayContent
+                || `[reposted ${display.targetDescription ?? 'unknown target'}]`)
+              : display.displayContent;
+            return {
+              content,
+              created_at: e.created_at,
+              // Kind lets the summarizer distinguish authored posts from
+              // comments (1111) and reposts of others' content (6/16) — see #156
+              kind: e.kind,
+            };
+          }),
           existingLabels: existingLabels?.map(e => ({
             tags: e.tags,
             created_at: e.created_at,

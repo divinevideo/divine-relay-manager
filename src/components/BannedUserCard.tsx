@@ -15,8 +15,10 @@ import {
 } from "@/components/ui/collapsible";
 import { ExternalLink, FileText, ChevronDown, Copy, Check, Trash2 } from "lucide-react";
 import { useState } from "react";
-import type { NostrMetadata } from "@nostrify/nostrify";
-import { getProfileUrl } from "@/lib/constants";
+import { getProfileUrl, RECENT_CONTENT_KINDS } from "@/lib/constants";
+import { parseRepostForDisplay } from "@/lib/nip18";
+import { KindBadge } from "@/components/KindBadge";
+import { useAuthor } from "@/hooks/useAuthor";
 
 interface BannedUserCardProps {
   pubkey: string;
@@ -48,38 +50,31 @@ export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButto
   }
   const shortNpub = npub.slice(0, 12) + '...' + npub.slice(-8);
 
-  // Fetch user profile
-  const { data: profile, isLoading: profileLoading } = useQuery({
-    queryKey: ['profile', pubkey],
-    queryFn: async ({ signal }) => {
-      const events = await nostr.query(
-        [{ kinds: [0], authors: [pubkey], limit: 1 }],
-        { signal: AbortSignal.any([signal, AbortSignal.timeout(3000)]) }
-      );
-      if (events.length > 0) {
-        try {
-          return JSON.parse(events[0].content) as NostrMetadata;
-        } catch {
-          return null;
-        }
-      }
-      return null;
-    },
-  });
+  // Profile via the shared useAuthor hook (Funnelcake REST fast path,
+  // validated metadata, its own staleTime) instead of a hand-rolled query
+  const { data: author, isLoading: profileLoading } = useAuthor(pubkey);
+  const profile = author?.metadata;
 
-  // Fetch recent posts count
+  // Fetch recent authored content — kind 1 alone missed comment-spam accounts
+  // whose only activity is comments/reposts (#159); RECENT_CONTENT_KINDS is
+  // shared with useUserStats so this card and the report page stay aligned.
   const { data: postStats } = useQuery({
     queryKey: ['user-posts-stats', pubkey],
     queryFn: async ({ signal }) => {
       const events = await nostr.query(
-        [{ kinds: [1], authors: [pubkey], limit: 50 }],
+        [{ kinds: [...RECENT_CONTENT_KINDS], authors: [pubkey], limit: 50 }],
         { signal: AbortSignal.any([signal, AbortSignal.timeout(3000)]) }
       );
       return {
         count: events.length,
-        recentPosts: events.slice(0, 3),
+        // Relay result order isn't guaranteed — sort (a copy) newest-first
+        recentPosts: [...events].sort((a, b) => b.created_at - a.created_at).slice(0, 3),
       };
     },
+    // UserManagement renders one card per banned/suspended user and Radix
+    // Tabs remount on tab switch — without staleTime every switch refires
+    // N x 2 relay queries (aligned with useUserStats' 2min)
+    staleTime: 2 * 60_000,
   });
 
   const displayName = profile?.name || profile?.display_name || shortNpub;
@@ -138,6 +133,7 @@ export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButto
                   size="sm"
                   className="h-5 w-5 p-0"
                   onClick={copyNpub}
+                  aria-label="Copy npub"
                 >
                   {copied ? (
                     <Check className="h-3 w-3 text-green-500" />
@@ -151,7 +147,7 @@ export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButto
               <div className="flex items-center gap-3 mt-2 text-sm">
                 <span className="flex items-center gap-1 text-muted-foreground">
                   <FileText className="h-3 w-3" />
-                  {postStats?.count || 0} posts on relay
+                  {postStats?.count || 0} events on relay
                 </span>
                 <a
                   href={njumpUrl}
@@ -178,7 +174,7 @@ export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButto
             {/* Actions */}
             <div className="flex items-center gap-2">
               <CollapsibleTrigger asChild>
-                <Button variant="ghost" size="sm">
+                <Button variant="ghost" size="sm" aria-label={`Toggle details for ${displayName}`}>
                   <ChevronDown
                     className={`h-4 w-4 transition-transform ${
                       isOpen ? 'rotate-180' : ''
@@ -207,28 +203,54 @@ export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButto
               </div>
             )}
 
-            {/* Recent posts */}
+            {/* Recent authored content */}
             <div>
               <h4 className="text-xs font-medium text-muted-foreground uppercase mb-2">
-                Recent Posts on This Relay
+                Recent Content on This Relay
               </h4>
               {postStats?.recentPosts && postStats.recentPosts.length > 0 ? (
                 <div className="space-y-2">
-                  {postStats.recentPosts.map((post) => (
-                    <div
-                      key={post.id}
-                      className="text-sm p-2 bg-background rounded border"
-                    >
-                      <p className="line-clamp-2">{post.content}</p>
-                      <p className="text-xs text-muted-foreground mt-1">
-                        {new Date(post.created_at * 1000).toLocaleString()}
-                      </p>
-                    </div>
-                  ))}
+                  {postStats.recentPosts.map((post) => {
+                    // Shared NIP-18 display derivation — inner content for
+                    // reposts (never raw JSON), file-data kinds suppressed,
+                    // out-of-spec repost content preserved as evidence.
+                    const { isRepost, inner, displayContent, targetDescription } = parseRepostForDisplay(post);
+                    return (
+                      <div
+                        key={post.id}
+                        className="text-sm p-2 bg-background rounded border space-y-1"
+                      >
+                        {displayContent && (
+                          <p className="line-clamp-2 break-all">
+                            {isRepost && (
+                              <span
+                                className="text-muted-foreground italic"
+                                title={inner?.pubkey ? `Reposted from pubkey ${inner.pubkey}` : undefined}
+                              >
+                                reposted:{' '}
+                              </span>
+                            )}
+                            {displayContent}
+                          </p>
+                        )}
+                        {/* Reposts with nothing displayable — identify the target
+                            (e-tag event id or a-tag coordinate per NIP-18) */}
+                        {isRepost && !displayContent && targetDescription && (
+                          <p className="text-xs text-muted-foreground italic break-all line-clamp-2">
+                            reposted {targetDescription}
+                          </p>
+                        )}
+                        <div className="flex items-center justify-between text-xs text-muted-foreground">
+                          <span>{new Date(post.created_at * 1000).toLocaleString()}</span>
+                          <KindBadge kind={post.kind} />
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               ) : (
                 <p className="text-sm text-muted-foreground">
-                  No posts found on this relay
+                  No recent content found on this relay
                 </p>
               )}
             </div>

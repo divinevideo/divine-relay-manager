@@ -149,6 +149,13 @@ export const KIND_NAMES: Record<number, { name: string; description: string; nip
   11998: { name: "What's Hot", description: 'Trending/hot content aggregation', nip: '' },
 };
 
+// NIP-71 video kinds: 21 (Video), 22 (Short Video), 34235/34236 (addressable)
+export const VIDEO_KINDS = [21, 22, 34235, 34236] as const;
+
+export function isVideoKind(kind: number): boolean {
+  return (VIDEO_KINDS as readonly number[]).includes(kind);
+}
+
 // Get kind name with fallback
 export function getKindName(kind: number): string {
   return KIND_NAMES[kind]?.name || `Kind ${kind}`;
