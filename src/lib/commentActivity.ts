@@ -77,6 +77,9 @@ export function formatCommentActivity(events: NostrEvent[]): string | null {
   const noun = allVideo ? 'video' : 'post';
 
   const c = `${commentCount} comment${commentCount === 1 ? '' : 's'}`;
+  // A comment with no resolvable root scope contributes no target — fall back to
+  // the bare count rather than an "across 0 posts" nonsense line.
+  if (distinctTargets === 0) return c;
   const where = distinctTargets === 1
     ? `on 1 ${noun}`
     : `across ${distinctTargets} ${noun}s`;

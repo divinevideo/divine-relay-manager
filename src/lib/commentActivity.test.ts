@@ -93,4 +93,8 @@ describe('formatCommentActivity', () => {
     ];
     expect(formatCommentActivity(events)).toBe('2 comments across 2 posts');
   });
+
+  it('falls back to a bare count when comments have no resolvable target', () => {
+    expect(formatCommentActivity([comment('orphan', [], '1')])).toBe('1 comment');
+  });
 });
