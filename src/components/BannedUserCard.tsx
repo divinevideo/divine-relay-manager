@@ -19,6 +19,7 @@ import { getProfileUrl, RECENT_CONTENT_KINDS } from "@/lib/constants";
 import { parseRepostForDisplay } from "@/lib/nip18";
 import { KindBadge } from "@/components/KindBadge";
 import { useAuthor } from "@/hooks/useAuthor";
+import { useAppContext } from "@/hooks/useAppContext";
 import { getCommentTarget, formatCommentActivity } from "@/lib/commentActivity";
 import { useEventTitles } from "@/hooks/useEventTitles";
 import { CommentParentLink } from "@/components/CommentParentLink";
@@ -32,6 +33,7 @@ interface BannedUserCardProps {
 
 export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButton }: BannedUserCardProps) {
   const { nostr } = useNostr();
+  const { config } = useAppContext();
   const [isOpen, setIsOpen] = useState(false);
   const [copied, setCopied] = useState(false);
 
@@ -62,7 +64,9 @@ export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButto
   // whose only activity is comments/reposts (#159); RECENT_CONTENT_KINDS is
   // shared with useUserStats so this card and the report page stay aligned.
   const { data: postStats } = useQuery({
-    queryKey: ['user-posts-stats', pubkey],
+    // Env key (apiUrl): singleton QueryClient + per-env NPool — without it a
+    // card can serve the other environment's events for the staleTime window
+    queryKey: ['user-posts-stats', config.apiUrl, pubkey],
     queryFn: async ({ signal }) => {
       const events = await nostr.query(
         [{ kinds: [...RECENT_CONTENT_KINDS], authors: [pubkey], limit: 50 }],

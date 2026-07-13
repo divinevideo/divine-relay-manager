@@ -3,11 +3,12 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { nip19 } from 'nostr-tools';
 import type { NostrEvent, NostrFilter } from '@nostrify/nostrify';
-import { EventsList, parseSearchInput } from './EventsList';
+import { EventsList } from './EventsList';
+import { parseSearchInput } from '@/lib/searchInput';
 
 const PK = 'b'.repeat(64);
 
@@ -100,12 +101,20 @@ function setRelay({ byId = [], byAddress = [], list = [] }: {
   });
 }
 
+// Probe MemoryRouter's current query string so tests can pin param consumption
+const location = { search: '' };
+function LocationProbe() {
+  location.search = useLocation().search;
+  return null;
+}
+
 function renderEvents(initialEntry: string) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={[initialEntry]}>
         <EventsList relayUrl="wss://relay.test" />
+        <LocationProbe />
       </MemoryRouter>
     </QueryClientProvider>
   );
@@ -133,10 +142,15 @@ describe('EventsList internal navigation (#164 A)', () => {
       expect(addressFilter).toEqual({ kinds: [34236], authors: [PK], '#d': ['vid1'], limit: 1 });
     });
 
-    // The param seeds the search box (visible, clearable) and is consumed,
-    // and the resolved video renders in the detail pane
+    // The param seeds the search box (visible, clearable), the status strip
+    // reports the hit, and the resolved video renders in the detail pane
     expect(screen.getByDisplayValue(naddr)).toBeInTheDocument();
+    expect(await screen.findByText('Event found')).toBeInTheDocument();
     expect(await screen.findByText(/the video/)).toBeInTheDocument();
+
+    // The param is consumed from the URL — left in place, the effect would
+    // re-fire and revert every later clear/re-search back to this event
+    expect(location.search).not.toContain('event=');
   });
 
   it('shows a removed/banned parent for an event-id target via the getbannedevent fallback', async () => {

@@ -78,10 +78,12 @@ where."
 
 #### A2. Per-row "on \<parent\>" link: `CommentParentLink` (new shared component)
 
-- One shared component consumed by every surface that renders a 1111 row, so the
-  three cards do not drift. (Decision: shared component + shared hook over inline
-  per-card copies. Inline duplication is already tracked as a smell in issue
-  #162.)
+- One shared component consumed by the three moderation surfaces that render
+  1111 rows (UserProfileCard, BannedUserCard, EventsList), so they do not
+  drift. UserProfilePreview's hover rows are deliberately excluded — a hover
+  preview should not fire relay work. (Decision: shared component + shared
+  hook over inline per-card copies. Inline duplication is already tracked as
+  a smell in issue #162.)
 - Renders `on <resolved title>` linking to `/events?event=<nevent|naddr>`
   (internal), degrading to coordinate text but still linkable.
 

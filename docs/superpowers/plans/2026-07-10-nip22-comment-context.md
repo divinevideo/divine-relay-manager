@@ -14,7 +14,7 @@
 - Reposter/reporter/commenter-authored tag values are untrusted: validate an event id is 64-hex and an address coordinate is `kind:pubkey:d` (numeric kind, 64-hex pubkey) before using it in a filter or an encoded link.
 - Internal event links target `/events?event=<nevent|naddr>` (reuse the Events tab), never the public page.
 - Reuse `eventAddress()` (`src/lib/threadFilters.ts`), `isHex64()` (`src/lib/constants.ts`), `isVideoKind()`/`VIDEO_KINDS` (`src/lib/kindNames.ts`), `getCommentTarget()`/`summarizeCommentActivity()` (`src/lib/commentActivity.ts`) — do not re-implement.
-- Run `npx tsc --noEmit` and `npx vitest run <touched test files>` after each task. The worktree root is `/Users/mjb/code/divine-relay-manager/.claude/worktrees/feat+comment-context`; run frontend commands from there.
+- Run `npx tsc -p tsconfig.app.json --noEmit` and `npx vitest run <touched test files>` after each task. The worktree root is `/Users/mjb/code/divine-relay-manager/.claude/worktrees/feat+comment-context`; run frontend commands from there.
 - Commit after every task. No `Co-Authored-By` lines.
 
 ---
@@ -931,7 +931,7 @@ Expected: PASS.
 
 - [ ] **Step 5: Verify existing EventsList behavior didn't regress**
 
-Run: `npx vitest run src/components/EventsList.test.tsx` (if present) and `npx tsc --noEmit`
+Run: `npx vitest run src/components/EventsList.test.tsx` (if present) and `npx tsc -p tsconfig.app.json --noEmit`
 Expected: PASS / no type errors (the `SearchMode` union is exhaustively handled at ~811 and ~722 — confirm those still typecheck; add an `address` branch to any switch that the compiler flags).
 
 - [ ] **Step 6: Commit**
@@ -1187,7 +1187,7 @@ git commit -m "feat(reports): ThreadModal loads and nests NIP-22 comments (#164 
 
 Run from the worktree root:
 ```bash
-npx tsc --noEmit
+npx tsc -p tsconfig.app.json --noEmit
 npx vitest run
 npx vite build
 ```

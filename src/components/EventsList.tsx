@@ -24,6 +24,7 @@ import { EventDetail } from "@/components/EventDetail";
 import { BulkDeleteByKind } from "@/components/BulkDeleteByKind";
 import { getProfileUrl } from "@/lib/constants";
 import { getCommentTarget } from "@/lib/commentActivity";
+import { parseSearchInput } from "@/lib/searchInput";
 import { useEventTitles, type ResolvedTarget } from "@/hooks/useEventTitles";
 import { CommentParentLink } from "@/components/CommentParentLink";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -61,71 +62,6 @@ interface EventWithModeration extends NostrEvent {
   moderationStatus?: 'pending' | 'approved' | 'banned';
   moderationReason?: string;
 }
-
-type SearchMode =
-  | { type: 'none' }
-  | { type: 'event_id'; hex: string }
-  | { type: 'pubkey'; hex: string }
-  | { type: 'address'; addressKind: number; pubkey: string; identifier: string }
-  | { type: 'text'; query: string };
-
-export function parseSearchInput(input: string): SearchMode {
-  const trimmed = input.trim();
-  if (!trimmed) return { type: 'none' };
-
-  // NIP-19 encoded identifiers
-  if (trimmed.startsWith('note1') || trimmed.startsWith('nevent1')) {
-    try {
-      const decoded = nip19.decode(trimmed);
-      if (decoded.type === 'note') {
-        return { type: 'event_id', hex: decoded.data };
-      } else if (decoded.type === 'nevent') {
-        return { type: 'event_id', hex: decoded.data.id };
-      }
-    } catch {
-      // Invalid encoding, fall through to text search
-    }
-  }
-
-  if (trimmed.startsWith('npub1') || trimmed.startsWith('nprofile1')) {
-    try {
-      const decoded = nip19.decode(trimmed);
-      if (decoded.type === 'npub') {
-        return { type: 'pubkey', hex: decoded.data };
-      } else if (decoded.type === 'nprofile') {
-        return { type: 'pubkey', hex: decoded.data.pubkey };
-      }
-    } catch {
-      // Invalid encoding, fall through to text search
-    }
-  }
-
-  // Addressable coordinate (naddr) — an internal parent link for an addressable
-  // video routes here, so resolve it to a kind+author+d lookup (#164 A)
-  if (trimmed.startsWith('naddr1')) {
-    try {
-      const decoded = nip19.decode(trimmed);
-      if (decoded.type === 'naddr') {
-        return {
-          type: 'address',
-          addressKind: decoded.data.kind,
-          pubkey: decoded.data.pubkey,
-          identifier: decoded.data.identifier,
-        };
-      }
-    } catch {
-      // Invalid encoding, fall through to text search
-    }
-  }
-
-  // 64-char hex defaults to event ID lookup
-  if (/^[0-9a-f]{64}$/i.test(trimmed)) {
-    return { type: 'event_id', hex: trimmed.toLowerCase() };
-  }
-
-  return { type: 'text', query: trimmed };
-}
-
 
 function EventCard({
   event,
@@ -554,7 +490,10 @@ export function EventsList({ relayUrl }: EventsListProps) {
   // Direct event lookup by ID (separate from infinite scroll)
   // Tries normal relay query first, then falls back to getbannedevent RPC
   const { data: directEventLookup, isLoading: isLoadingDirectEvent, error: directEventError } = useQuery({
-    queryKey: ['event-search', committedSearch, searchMode.type],
+    // relayUrl in the key: the QueryClient is a singleton while the relay
+    // swaps per environment — without it a repeated lookup can serve the
+    // other environment's result for the staleTime window
+    queryKey: ['event-search', relayUrl, committedSearch, searchMode.type],
     queryFn: async ({ signal }) => {
       const timeoutSignal = AbortSignal.any([signal, AbortSignal.timeout(5000)]);
 
@@ -816,7 +755,9 @@ export function EventsList({ relayUrl }: EventsListProps) {
   // #164 A: resolve NIP-22 parent titles/links for the rows that actually
   // render — the filtered list rows, or only the direct-lookup card when a
   // lookup replaces the list (review: pre-filter events fed never-rendered
-  // targets to the batched query).
+  // targets to the batched query). Accepted tradeoff: a filter keystroke that
+  // changes the visible 1111 set refires the batched REQ for already-resolved
+  // targets — bounded to 1-2 REQs per interaction and cache-hit on clear.
   const commentTargets = (
     isDirectLookup
       ? [enhancedDirectEvent ? getCommentTarget(enhancedDirectEvent) : undefined]
@@ -885,13 +826,13 @@ export function EventsList({ relayUrl }: EventsListProps) {
               </button>
             )}
           </div>
-          {/* Search hints and status */}
-          {searchMode.type === 'event_id' ? (
+          {/* Search hints and status — both direct-lookup modes (id + naddr) */}
+          {isDirectLookup ? (
             <div className="flex items-center gap-2 text-xs px-1">
               {isLoadingDirectEvent ? (
                 <>
                   <Loader2 className="h-3 w-3 animate-spin text-primary" />
-                  <span className="text-muted-foreground">Searching relay for event <code className="font-mono">{searchMode.hex.slice(0, 12)}...</code></span>
+                  <span className="text-muted-foreground">Searching relay for event <code className="font-mono">{committedSearch.slice(0, 12)}...</code></span>
                 </>
               ) : directEventError ? (
                 <>
@@ -918,7 +859,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
             </div>
           ) : (() => {
             const preview = parseSearchInput(searchQuery);
-            if (preview.type === 'event_id') {
+            if (preview.type === 'event_id' || preview.type === 'address') {
               return (
                 <div className="flex items-center gap-2 text-xs text-muted-foreground px-1">
                   <Search className="h-3 w-3" />

@@ -53,13 +53,13 @@ export function buildResolvedMap(targets: string[], events: NostrEvent[]): Map<s
  * Distinct targets are fetched in one batched query; results degrade gracefully
  * so every parseable target is always linkable.
  */
-export function useEventTitles(targets: string[], apiUrlOverride?: string): { titles: Map<string, ResolvedTarget>; isLoading: boolean } {
+export function useEventTitles(targets: string[]): { titles: Map<string, ResolvedTarget>; isLoading: boolean } {
   const { nostr } = useNostr();
   const { config } = useAppContext();
   // Environment key (useAuthor pattern): the query hits the relay, but relay
   // and API switch together — keying on apiUrl stops cached titles from one
   // environment being served in another across the long-lived QueryClient.
-  const apiUrl = apiUrlOverride ?? config.apiUrl;
+  const apiUrl = config.apiUrl;
   const distinct = useMemo(() => Array.from(new Set(targets)).sort(), [targets]);
 
   const { data: events = [], isLoading } = useQuery<NostrEvent[]>({

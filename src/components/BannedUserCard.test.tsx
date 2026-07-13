@@ -7,6 +7,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { RECENT_CONTENT_KINDS } from '@/lib/constants';
+import { AppProvider } from '@/components/AppProvider';
 import { BannedUserCard } from './BannedUserCard';
 
 const relayQuery = vi.hoisted(() => ({ fn: vi.fn() }));
@@ -68,11 +69,13 @@ function renderCard() {
     defaultOptions: { queries: { retry: false } },
   });
   return render(
-    <QueryClientProvider client={client}>
-      <MemoryRouter>
-        <BannedUserCard pubkey={PUBKEY} />
-      </MemoryRouter>
-    </QueryClientProvider>
+    <AppProvider storageKey="test-app-config" defaultConfig={{ theme: 'light', relayUrl: 'wss://relay.test', apiUrl: 'https://api.test' }}>
+      <QueryClientProvider client={client}>
+        <MemoryRouter>
+          <BannedUserCard pubkey={PUBKEY} />
+        </MemoryRouter>
+      </QueryClientProvider>
+    </AppProvider>
   );
 }
 
