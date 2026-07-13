@@ -456,7 +456,7 @@ describe('Keycast suspension wiring', () => {
     expect(body.success).toBe(true);
     expect(body.keycastUpdated).toBe(true);
     expect(suspendUser).toHaveBeenCalledOnce();
-    expect(suspendUser).toHaveBeenCalledWith(reviewCase.pubkey, 'age_review', expect.objectContaining({ DB: expect.anything() }));
+    expect(suspendUser).toHaveBeenCalledWith(reviewCase.pubkey, 'age_review', expect.objectContaining({ DB: expect.anything() }), undefined);
   });
 
   it('calls unsuspendUser when transitioning to cleared', async () => {
@@ -490,7 +490,7 @@ describe('Keycast suspension wiring', () => {
     expect(body.success).toBe(true);
     expect(body.keycastUpdated).toBe(true);
     expect(unsuspendUser).toHaveBeenCalledOnce();
-    expect(unsuspendUser).toHaveBeenCalledWith(restrictedCase.pubkey, expect.objectContaining({ DB: expect.anything() }));
+    expect(unsuspendUser).toHaveBeenCalledWith(restrictedCase.pubkey, expect.objectContaining({ DB: expect.anything() }), undefined);
   });
 
   it('calls unsuspendUser when clearing a case that was never restricted', async () => {
@@ -590,7 +590,7 @@ describe('Keycast suspension wiring', () => {
     expect(res.status).toBe(200);
     expect(body.keycastUpdated).toBe(true);
     expect(unsuspendUser).toHaveBeenCalledOnce();
-    expect(unsuspendUser).toHaveBeenCalledWith(submittedCase.pubkey, expect.objectContaining({ DB: expect.anything() }));
+    expect(unsuspendUser).toHaveBeenCalledWith(submittedCase.pubkey, expect.objectContaining({ DB: expect.anything() }), undefined);
   });
 
   it('unsuspends when clearing after needs_follow_up (may have been restricted)', async () => {
@@ -623,7 +623,7 @@ describe('Keycast suspension wiring', () => {
     expect(res.status).toBe(200);
     expect(body.keycastUpdated).toBe(true);
     expect(unsuspendUser).toHaveBeenCalledOnce();
-    expect(unsuspendUser).toHaveBeenCalledWith(followUpCase.pubkey, expect.objectContaining({ DB: expect.anything() }));
+    expect(unsuspendUser).toHaveBeenCalledWith(followUpCase.pubkey, expect.objectContaining({ DB: expect.anything() }), undefined);
   });
 
   it('calls banUser when transitioning to denied_closed', async () => {
@@ -661,7 +661,7 @@ describe('Keycast suspension wiring', () => {
     expect(body.success).toBe(true);
     expect(body.keycastUpdated).toBe(true);
     expect(banUser).toHaveBeenCalledOnce();
-    expect(banUser).toHaveBeenCalledWith(restrictedCase.pubkey, 'age_review_denied', expect.objectContaining({ DB: expect.anything() }));
+    expect(banUser).toHaveBeenCalledWith(restrictedCase.pubkey, 'age_review_denied', expect.objectContaining({ DB: expect.anything() }), undefined);
   });
 
   // Issue #147: revoke/deny composes a verified_minor clear with the status leg.
@@ -707,6 +707,14 @@ describe('Keycast suspension wiring', () => {
       'age_review_denied',
       expect.objectContaining({ DB: expect.anything() }),
     );
+    // #175: the status (ban) leg is attributed to the same moderator, so keycast
+    // writes a durable admin_audit_events row for the status change (keycast#279).
+    expect(banUser).toHaveBeenCalledWith(
+      restrictedCase.pubkey,
+      'age_review_denied',
+      expect.objectContaining({ DB: expect.anything() }),
+      moderator,
+    );
   });
 
   it('clears verified_minor with an undefined actor when the case has no moderator_pubkey', async () => {
@@ -731,6 +739,51 @@ describe('Keycast suspension wiring', () => {
       undefined,
       'age_review_denied',
       expect.objectContaining({ DB: expect.anything() }),
+    );
+    // #175: with no moderator on the case, the status (ban) leg is also
+    // actor-less -> keycast falls back to a log-only audit row.
+    expect(banUser).toHaveBeenCalledWith(
+      restrictedCase.pubkey,
+      'age_review_denied',
+      expect.objectContaining({ DB: expect.anything() }),
+      undefined,
+    );
+  });
+
+  it('forwards the case moderator as actor on the suspend leg (keycast#279 / #175)', async () => {
+    const moderator = 'c'.repeat(64);
+    const reviewCase = makeCase({ state: 'under_moderator_review', moderator_pubkey: moderator });
+    const updatedCase = { ...reviewCase, state: 'restricted_pending_user_response' as const };
+
+    const req = new Request('https://api.test/api/age-review/cases/case-1', {
+      method: 'PATCH',
+      body: JSON.stringify({ state: 'restricted_pending_user_response' }),
+    });
+    await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(makeDbFor(reviewCase, updatedCase)), corsHeaders);
+
+    expect(suspendUser).toHaveBeenCalledWith(
+      reviewCase.pubkey,
+      'age_review',
+      expect.objectContaining({ DB: expect.anything() }),
+      moderator,
+    );
+  });
+
+  it('forwards the case moderator as actor on the unsuspend leg (keycast#279 / #175)', async () => {
+    const moderator = 'c'.repeat(64);
+    const restrictedCase = makeCase({ state: 'restricted_pending_user_response', moderator_pubkey: moderator });
+    const updatedCase = { ...restrictedCase, state: 'cleared' as const };
+
+    const req = new Request('https://api.test/api/age-review/cases/case-1', {
+      method: 'PATCH',
+      body: JSON.stringify({ state: 'cleared' }),
+    });
+    await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(makeDbFor(restrictedCase, updatedCase)), corsHeaders);
+
+    expect(unsuspendUser).toHaveBeenCalledWith(
+      restrictedCase.pubkey,
+      expect.objectContaining({ DB: expect.anything() }),
+      moderator,
     );
   });
 
