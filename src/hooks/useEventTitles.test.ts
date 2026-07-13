@@ -47,4 +47,14 @@ describe('buildResolvedMap', () => {
     const map = buildResolvedMap(['garbage'], []);
     expect(map.has('garbage')).toBe(false);
   });
+
+  it('resolves targets with uppercase hex via the case-normalized form', () => {
+    const upperId = ID.toUpperCase();
+    const idMap = buildResolvedMap([upperId], [ev({ id: ID, kind: 34236, tags: [['title', 'Puppies']] })]);
+    expect(idMap.get(upperId)?.title).toBe('Puppies');
+
+    const upperCoord = `34236:${PK.toUpperCase()}:vid1`;
+    const addrMap = buildResolvedMap([upperCoord], [ev({ kind: 34236, tags: [['d', 'vid1'], ['title', 'My Video']] })]);
+    expect(addrMap.get(upperCoord)?.title).toBe('My Video');
+  });
 });

@@ -1,7 +1,7 @@
 // ABOUTME: Displays user profile with stats, labels, and recent posts
 // ABOUTME: Used in report detail view to show reported user context
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { nip19 } from "nostr-tools";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -258,15 +258,16 @@ function RecentPostsSection({
   const [expanded, setExpanded] = useState(true);
   const [showAll, setShowAll] = useState(false);
 
-  const visiblePosts = showAll ? posts : posts.slice(0, 5);
+  const visiblePosts = useMemo(() => (showAll ? posts : posts.slice(0, 5)), [showAll, posts]);
 
   // #164 A: the spray roll-up is offline tag math over all posts, but
   // parent-title resolution is relay work — scope it to the rows actually
   // rendered (EventsList pattern); it widens when "Show all" reveals more
-  const commentTargets = expanded
-    ? visiblePosts.map(getCommentTarget).filter((t): t is string => !!t)
-    : [];
-  const { titles } = useEventTitles(commentTargets, apiUrl);
+  const commentTargets = useMemo(
+    () => (expanded ? visiblePosts.map(getCommentTarget).filter((t): t is string => !!t) : []),
+    [expanded, visiblePosts],
+  );
+  const { titles } = useEventTitles(commentTargets);
   const activityLine = formatCommentActivity(posts);
 
   return (

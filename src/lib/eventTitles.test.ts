@@ -36,6 +36,17 @@ describe('parseCommentTarget', () => {
     expect(parseCommentTarget('34236:shortpubkey:d')).toBeNull();
     expect(parseCommentTarget(`34236:${PK}`)).toBeNull(); // 2-segment, no d
   });
+
+  it('normalizes uppercase hex in commenter-authored targets to canonical lowercase', () => {
+    // Relay ids/pubkeys are lowercase hex; an uppercase tag value must still
+    // match in filters instead of silently degrading the title
+    expect(parseCommentTarget(ID.toUpperCase())).toEqual({ kind: 'id', id: ID });
+    expect(parseCommentTarget(`34236:${PK.toUpperCase()}:vid1`)).toEqual({
+      kind: 'address', addressKind: 34236, pubkey: PK, identifier: 'vid1',
+    });
+    // d-tags are case-sensitive — never normalized
+    expect(parseCommentTarget(`34236:${PK}:VId1`)).toMatchObject({ identifier: 'VId1' });
+  });
 });
 
 describe('encodeTarget', () => {

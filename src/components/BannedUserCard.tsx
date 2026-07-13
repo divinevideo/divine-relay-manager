@@ -14,7 +14,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { ExternalLink, FileText, ChevronDown, Copy, Check, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { getProfileUrl, RECENT_CONTENT_KINDS } from "@/lib/constants";
 import { parseRepostForDisplay } from "@/lib/nip18";
 import { KindBadge } from "@/components/KindBadge";
@@ -86,10 +86,11 @@ export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButto
   // but parent-title resolution is relay work — scope it to the ≤3 rows that
   // actually render, and only once the card is open (EventsList pattern)
   const allEvents = postStats?.allEvents ?? [];
-  const commentTargets = isOpen
-    ? (postStats?.recentPosts ?? []).map(getCommentTarget).filter((t): t is string => !!t)
-    : [];
-  const { titles } = useEventTitles(commentTargets, undefined);
+  const commentTargets = useMemo(
+    () => (isOpen ? (postStats?.recentPosts ?? []).map(getCommentTarget).filter((t): t is string => !!t) : []),
+    [isOpen, postStats],
+  );
+  const { titles } = useEventTitles(commentTargets);
   const activityLine = formatCommentActivity(allEvents);
 
   const displayName = profile?.name || profile?.display_name || shortNpub;

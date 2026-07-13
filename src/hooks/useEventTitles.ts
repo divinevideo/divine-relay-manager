@@ -7,6 +7,7 @@ import { useMemo } from 'react';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { parseCommentTarget, encodeTarget, extractEventTitle, buildTitleFilters, type ParsedTarget } from '@/lib/eventTitles';
 import { eventAddress } from '@/lib/threadFilters';
+import { useAppContext } from '@/hooks/useAppContext';
 
 export interface ResolvedTarget {
   target: string;
@@ -33,7 +34,10 @@ export function buildResolvedMap(targets: string[], events: NostrEvent[]): Map<s
     const parsed = parseCommentTarget(target);
     if (!parsed) continue;
     const encoded = encodeTarget(parsed);
-    const found = parsed.kind === 'id' ? byId.get(parsed.id) : byAddress.get(target);
+    // Look up by the parsed (case-normalized) form, not the raw tag value
+    const found = parsed.kind === 'id'
+      ? byId.get(parsed.id)
+      : byAddress.get(`${parsed.addressKind}:${parsed.pubkey}:${parsed.identifier}`);
     if (found) {
       const title = extractEventTitle(found);
       map.set(target, { target, encoded, kind: found.kind, title: title || fallbackTitle(parsed, target) });
@@ -49,8 +53,13 @@ export function buildResolvedMap(targets: string[], events: NostrEvent[]): Map<s
  * Distinct targets are fetched in one batched query; results degrade gracefully
  * so every parseable target is always linkable.
  */
-export function useEventTitles(targets: string[], apiUrl?: string): { titles: Map<string, ResolvedTarget>; isLoading: boolean } {
+export function useEventTitles(targets: string[], apiUrlOverride?: string): { titles: Map<string, ResolvedTarget>; isLoading: boolean } {
   const { nostr } = useNostr();
+  const { config } = useAppContext();
+  // Environment key (useAuthor pattern): the query hits the relay, but relay
+  // and API switch together — keying on apiUrl stops cached titles from one
+  // environment being served in another across the long-lived QueryClient.
+  const apiUrl = apiUrlOverride ?? config.apiUrl;
   const distinct = useMemo(() => Array.from(new Set(targets)).sort(), [targets]);
 
   const { data: events = [], isLoading } = useQuery<NostrEvent[]>({

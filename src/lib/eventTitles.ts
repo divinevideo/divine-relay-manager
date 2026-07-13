@@ -17,15 +17,17 @@ export type ParsedTarget =
 export function parseCommentTarget(target: string): ParsedTarget | null {
   // isHex64 is a `value is string` guard; using it in a ternary (not `if`) keeps
   // `target` typed as `string` for the address branch below rather than `never`.
-  const id = isHex64(target) ? target : null;
+  // Hex is lowercased to canonical form: isHex64 is case-insensitive, but relay
+  // ids/pubkeys are lowercase, so an uppercase tag value would miss in filters.
+  const id = isHex64(target) ? target.toLowerCase() : null;
   if (id !== null) return { kind: 'id', id };
   const parts = target.split(':');
   if (parts.length >= 3 && /^\d+$/.test(parts[0]) && isHex64(parts[1])) {
     return {
       kind: 'address',
       addressKind: Number(parts[0]),
-      pubkey: parts[1],
-      // d-tags may contain ':' — rejoin the remainder
+      pubkey: parts[1].toLowerCase(),
+      // d-tags may contain ':' — rejoin the remainder (case-sensitive, untouched)
       identifier: parts.slice(2).join(':'),
     };
   }
