@@ -260,10 +260,12 @@ function RecentPostsSection({
 
   const visiblePosts = showAll ? posts : posts.slice(0, 5);
 
-  // #164 A: batched parent-title resolution for the comment rows + spray roll-up
-  const commentTargets = posts
-    .map(getCommentTarget)
-    .filter((t): t is string => !!t);
+  // #164 A: the spray roll-up is offline tag math over all posts, but
+  // parent-title resolution is relay work — scope it to the rows actually
+  // rendered (EventsList pattern); it widens when "Show all" reveals more
+  const commentTargets = expanded
+    ? visiblePosts.map(getCommentTarget).filter((t): t is string => !!t)
+    : [];
   const { titles } = useEventTitles(commentTargets, apiUrl);
   const activityLine = formatCommentActivity(posts);
 
@@ -279,6 +281,7 @@ function RecentPostsSection({
           size="sm"
           className="h-6 px-2"
           onClick={() => setExpanded(!expanded)}
+          aria-label="Toggle recent content"
         >
           {expanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
         </Button>

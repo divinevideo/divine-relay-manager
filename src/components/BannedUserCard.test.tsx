@@ -20,12 +20,17 @@ vi.mock('@/hooks/useAuthor', () => ({
   useAuthor: () => ({ data: undefined, isLoading: false }),
 }));
 
-// The batched parent-title hook is mocked so comment-row links are deterministic
+// The batched parent-title hook is mocked so comment-row links are deterministic;
+// calls are recorded so tests can assert what resolution was requested and when
+const titleCalls = vi.hoisted(() => ({ targets: [] as string[][] }));
 vi.mock('@/hooks/useEventTitles', () => ({
-  useEventTitles: (targets: string[]) => ({
-    titles: new Map(targets.map(t => [t, { target: t, title: 'Parent Video', encoded: 'nevent1parent' }])),
-    isLoading: false,
-  }),
+  useEventTitles: (targets: string[]) => {
+    titleCalls.targets.push(targets);
+    return {
+      titles: new Map(targets.map(t => [t, { target: t, title: 'Parent Video', encoded: 'nevent1parent' }])),
+      isLoading: false,
+    };
+  },
 }));
 
 const PUBKEY = 'a'.repeat(64);
@@ -73,6 +78,7 @@ function renderCard() {
 
 beforeEach(() => {
   relayQuery.fn.mockReset();
+  titleCalls.targets.length = 0;
   setAuthored(AUTHORED);
 });
 
@@ -199,5 +205,36 @@ describe('BannedUserCard', () => {
 
     const link = await screen.findByRole('link', { name: /on Parent Video/ });
     expect(link).toHaveAttribute('href', '/events?event=nevent1parent');
+  });
+
+  it('requests no parent-title resolution while the card is collapsed (#165 review)', async () => {
+    setAuthored([
+      event(1111, 'x', '1', [['E', 'e'.repeat(64)], ['K', '34236']]),
+      event(1111, 'y', '2', [['E', 'd'.repeat(64)], ['K', '34236']]),
+    ]);
+    renderCard();
+
+    // Content query settled (roll-up rendered) with the card still collapsed
+    expect(await screen.findByText(/2 comments across 2 videos/)).toBeInTheDocument();
+
+    expect(titleCalls.targets.flat()).toEqual([]);
+  });
+
+  it('resolves parent titles only for the 3 rendered rows once open (#165 review)', async () => {
+    // 5 comments fetched; only the newest 3 render as rows
+    setAuthored([
+      event(1111, 'v', '1', [['E', 'b'.repeat(64)], ['K', '34236']], T + 1),
+      event(1111, 'w', '2', [['E', 'c'.repeat(64)], ['K', '34236']], T + 2),
+      event(1111, 'x', '3', [['E', 'd'.repeat(64)], ['K', '34236']], T + 3),
+      event(1111, 'y', '4', [['E', 'e'.repeat(64)], ['K', '34236']], T + 4),
+      event(1111, 'z', '5', [['E', 'f'.repeat(64)], ['K', '34236']], T + 5),
+    ]);
+    renderCard();
+
+    fireEvent.click(await screen.findByRole('button', { name: /toggle details/i }));
+    await screen.findAllByRole('link', { name: /on Parent Video/ });
+
+    // Newest 3 targets only — the 2 never-rendered comments are not resolved
+    expect(titleCalls.targets.at(-1)).toEqual(['f'.repeat(64), 'e'.repeat(64), 'd'.repeat(64)]);
   });
 });

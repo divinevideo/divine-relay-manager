@@ -1,7 +1,7 @@
 // ABOUTME: Tests UserProfileCard's recent-content badge mapping and the
 // ABOUTME: View Activity drill-down added for report review (#156)
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import type { NostrEvent } from '@nostrify/nostrify';
@@ -17,12 +17,17 @@ vi.mock('@/components/MediaPreview', () => ({
   InlineMediaPreview: () => null,
 }));
 
-// The batched parent-title hook is mocked so comment-row links are deterministic
+// The batched parent-title hook is mocked so comment-row links are deterministic;
+// calls are recorded so tests can assert what resolution was requested and when
+const titleCalls = vi.hoisted(() => ({ targets: [] as string[][] }));
 vi.mock('@/hooks/useEventTitles', () => ({
-  useEventTitles: (targets: string[]) => ({
-    titles: new Map(targets.map(t => [t, { target: t, title: 'Parent Video', encoded: 'nevent1parent' }])),
-    isLoading: false,
-  }),
+  useEventTitles: (targets: string[]) => {
+    titleCalls.targets.push(targets);
+    return {
+      titles: new Map(targets.map(t => [t, { target: t, title: 'Parent Video', encoded: 'nevent1parent' }])),
+      isLoading: false,
+    };
+  },
 }));
 
 const PUBKEY = 'a'.repeat(64);
@@ -121,6 +126,10 @@ describe('UserProfileCard', () => {
 });
 
 describe('UserProfileCard comment context', () => {
+  beforeEach(() => {
+    titleCalls.targets.length = 0;
+  });
+
   it('shows the spray roll-up and a per-row "on <parent>" link for comments', () => {
     const recent = [
       post(1111, 'spam comment', '1', [['E', 'e'.repeat(64)], ['K', '34236']]),
@@ -134,5 +143,41 @@ describe('UserProfileCard comment context', () => {
     expect(screen.getByText(/2 comments across 2 videos/)).toBeInTheDocument();
     const link = screen.getAllByRole('link', { name: /on Parent Video/ })[0];
     expect(link).toHaveAttribute('href', '/events?event=nevent1parent');
+  });
+
+  it('resolves parent titles only for visible rows, widening on Show all (#165 review)', () => {
+    // 7 comments; only 5 rows are visible before "Show all"
+    const recent = ['1', '2', '3', '4', '5', '6', '7'].map((b, i) =>
+      post(1111, `comment ${b}`, b, [['E', String.fromCharCode(98 + i).repeat(64)], ['K', '34236']])
+    );
+    render(
+      <MemoryRouter>
+        <UserProfileCard pubkey={PUBKEY} stats={stats(recent)} />
+      </MemoryRouter>
+    );
+
+    // Visible slice only — the 2 hidden rows are not resolved
+    expect(titleCalls.targets.at(-1)).toEqual(
+      ['b', 'c', 'd', 'e', 'f'].map(ch => ch.repeat(64))
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /show 2 more events/i }));
+    expect(titleCalls.targets.at(-1)).toEqual(
+      ['b', 'c', 'd', 'e', 'f', 'g', 'h'].map(ch => ch.repeat(64))
+    );
+  });
+
+  it('requests no parent-title resolution while the section is collapsed (#165 review)', () => {
+    const recent = [
+      post(1111, 'spam comment', '1', [['E', 'e'.repeat(64)], ['K', '34236']]),
+    ];
+    render(
+      <MemoryRouter>
+        <UserProfileCard pubkey={PUBKEY} stats={stats(recent)} />
+      </MemoryRouter>
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /toggle recent content/i }));
+    expect(titleCalls.targets.at(-1)).toEqual([]);
   });
 });

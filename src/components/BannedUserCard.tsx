@@ -82,9 +82,13 @@ export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButto
     staleTime: 2 * 60_000,
   });
 
-  // #164 A: spray roll-up over the full fetched set + parent-link resolution
+  // #164 A: the spray roll-up is offline tag math over the full fetched set,
+  // but parent-title resolution is relay work — scope it to the ≤3 rows that
+  // actually render, and only once the card is open (EventsList pattern)
   const allEvents = postStats?.allEvents ?? [];
-  const commentTargets = allEvents.map(getCommentTarget).filter((t): t is string => !!t);
+  const commentTargets = isOpen
+    ? (postStats?.recentPosts ?? []).map(getCommentTarget).filter((t): t is string => !!t)
+    : [];
   const { titles } = useEventTitles(commentTargets, undefined);
   const activityLine = formatCommentActivity(allEvents);
 
