@@ -17,6 +17,9 @@
 # worker AND the auth layer is alive. Anything else means trouble:
 #   404 -- routing broke (the #108 failure mode)
 #   302 -- CF Access got applied to /v1 paths (devices would be locked out)
+#   200 -- auth layer removed/bypassed (worst case: unauthenticated reads)
+#   403 -- the NIP-98 handler's status contract changed (mobile clients
+#          share this contract; investigate the worker auth path)
 #   5xx/transport -- worker or edge outage
 #
 # Runbook on failure:
@@ -35,10 +38,26 @@
 # https://api.divine.video as a second BASE_URL probe target so coverage
 # for pre-fix app installs is monitored too.
 #
-# Alerting: a failed run notifies via GitHub (scheduled-workflow failure
-# email + the red run). If the SLACK_WEBHOOK_ALERTS secret is configured
-# (shared with the ReportWatcher health check design), it also posts to
-# the alerts channel; absent secret just skips that step.
+# Alerting -- know the limits:
+#   - A failed run turns red, and GitHub emails ONLY the user who last
+#     modified the cron line below (subject to their personal notification
+#     settings). Until Slack is wired, that one person is the whole
+#     alerting story.
+#   - If the SLACK_WEBHOOK_ALERTS secret is configured, failures also post
+#     to the alerts channel; absent secret, that step skips with a warning.
+#   - This repo is public: GitHub auto-disables scheduled workflows after
+#     60 days without repository activity -- the monitor can die silently
+#     during a quiet period. Re-enable from the Actions tab; consider a
+#     keepalive if the repo goes dormant.
+#   - Schedules only run from the default branch: this check goes live at
+#     merge, not on the PR.
+#
+# Setup:
+#   1. (Recommended) Repo secret SLACK_WEBHOOK_ALERTS -- incoming webhook
+#      for the alerts channel (same value as vmalertmanager-slack-webhook-prod
+#      in GCP Secret Manager; shared with the ReportWatcher health design).
+#   2. To test manually: Actions tab > "Minor-Review Endpoint Health" >
+#      Run workflow.
 
 name: Minor-Review Endpoint Health
 
@@ -47,9 +66,13 @@ on:
     - cron: '7,22,37,52 * * * *' # every 15 min, offset to avoid top-of-hour runner contention
   workflow_dispatch:
 
+# The job runs shell + outbound curl only: no checkout, no token use
+permissions: {}
+
 jobs:
   probe:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Probe minor-review endpoints (expect 401)
@@ -58,17 +81,27 @@ jobs:
           BASE_URL="https://api-relay-prod.divine.video"
           FAILURES=""
 
+          # Human-readable transport diagnosis for the common curl exits
+          diagnose() {
+            case "$1" in
+              6) echo "DNS resolution failed" ;;
+              7) echo "connection refused" ;;
+              28) echo "timeout after 15s" ;;
+              *) echo "curl exit $1" ;;
+            esac
+          }
+
           probe() {
             local method="$1" path="$2" attempt code
             for attempt in 1 2; do
               if [ "$method" = "GET" ]; then
                 code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
-                  "$BASE_URL$path" 2>/dev/null) || code="transport_error($?)"
+                  "$BASE_URL$path" 2>/dev/null) || code="transport_error: $(diagnose $?)"
               else
                 code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
                   -X POST -H 'Content-Type: application/json' \
                   -d '{"email":"synthetic@check.invalid"}' \
-                  "$BASE_URL$path" 2>/dev/null) || code="transport_error($?)"
+                  "$BASE_URL$path" 2>/dev/null) || code="transport_error: $(diagnose $?)"
               fi
               if [ "$code" = "401" ]; then
                 echo "OK: $method $path -> 401 (routed, auth layer alive)"
@@ -78,7 +111,7 @@ jobs:
               # One retry damps transient edge blips without hiding real outages
               [ "$attempt" = "1" ] && sleep 30
             done
-            FAILURES="$FAILURES\n$method $path -> $code"
+            FAILURES="$FAILURES$method $path -> $code"$'\n'
             return 0
           }
 
@@ -86,8 +119,10 @@ jobs:
           probe POST "/v1/minor-review-cases/synthetic-check/parent-contact"
 
           if [ -n "$FAILURES" ]; then
-            printf 'failures<<EOF\n%b\nEOF\n' "$FAILURES" >> "$GITHUB_OUTPUT"
-            printf '::error::Minor-review endpoints unhealthy -- clients are silently failing open:%b\n' "$FAILURES"
+            printf 'failures<<EOF\n%s\nEOF\n' "${FAILURES%$'\n'}" >> "$GITHUB_OUTPUT"
+            # Workflow-command annotations are single-line: encode newlines
+            printf '::error::Minor-review endpoints unhealthy -- clients are silently failing open: %s\n' \
+              "$(printf '%s' "${FAILURES%$'\n'}" | tr '\n' '|')"
             echo "unhealthy=true" >> "$GITHUB_OUTPUT"
           else
             echo "unhealthy=false" >> "$GITHUB_OUTPUT"
