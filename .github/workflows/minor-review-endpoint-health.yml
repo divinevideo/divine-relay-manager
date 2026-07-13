@@ -12,11 +12,20 @@
 #   GET  /v1/account/moderation-status                      -> expect 401
 #   POST /v1/minor-review-cases/<id>/parent-contact         -> expect 401
 #
-# Why 401 is the healthy signal: the endpoints require NIP-98 user auth,
-# so an unauthenticated probe answering 401 proves the path is routed and
-# an auth layer answers -- the strongest signal an unauthenticated probe
-# can give. Anything else means trouble:
-#   404 -- routing broke (the #108 failure mode)
+# Why "401 + NIP-98 marker" is the healthy signal: the endpoints require
+# NIP-98 user auth and reject an unauthenticated probe with the worker's
+# distinctive body ("... expected: Nostr <base64>", single-sourced in
+# verifyNip98Auth, worker/src/index.ts). The status code alone is NOT
+# enough: any unmatched path on these hosts also answers 401 via the
+# generic admin fallback (verified live), so a status-only probe would
+# stay green through a route regression -- the exact #108 failure class.
+# If the worker's error copy ever changes, this probe goes red (fail-safe);
+# update the marker and the copy together. What each outcome means:
+#   401 + marker -- healthy: endpoint routed, NIP-98 auth answering
+#   401 without marker -- generic admin fallback: the route did NOT match
+#          (removed/renamed/method drift). The #108-class failure.
+#   404 -- cannot happen unauth on these hosts today (everything falls to
+#          the 401 fallback); will matter for the api.divine.video target (#173)
 #   302 -- CF Access got applied to /v1 paths (devices would be locked out)
 #   200 -- auth layer removed/bypassed (worst case: unauthenticated reads)
 #   403 -- the NIP-98 handler's status contract changed (mobile clients
@@ -25,7 +34,9 @@
 #
 # Runbook on failure:
 #   1. Check the run log for which probe failed and the code it saw.
-#   2. curl the URL yourself; if 404, check worker routes/deploy state
+#   2. curl the URL yourself and read the body. A 401 with the admin
+#      fallback text means the route no longer matches: check the /v1
+#      route conditions in worker/src/index.ts and the deployed version
 #      (wrangler deployments list --config wrangler.<env>.toml).
 #   3. If 302, someone extended the CF Access app on that env over /v1.
 #   4. Remember: clients are silently failing open the whole time this
@@ -82,6 +93,7 @@ jobs:
         id: probe
         run: |
           FAILURES=""
+          BODY_FILE=$(mktemp)
 
           # Human-readable transport diagnosis for the common curl exits
           diagnose() {
@@ -93,23 +105,34 @@ jobs:
             esac
           }
 
+          # The endpoint-specific NIP-98 rejection marker (single-sourced in
+          # verifyNip98Auth, worker/src/index.ts). A 401 WITHOUT it is the
+          # generic admin fallback: the route did not match.
+          MARKER='expected: Nostr'
+
           probe() {
-            local method="$1" path="$2" attempt code
+            local method="$1" path="$2" attempt code snippet
             for attempt in 1 2; do
+              : > "$BODY_FILE"
               if [ "$method" = "GET" ]; then
-                code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
+                code=$(curl -s -o "$BODY_FILE" -w '%{http_code}' --max-time 15 \
                   "$BASE_URL$path" 2>/dev/null) || code="transport_error: $(diagnose $?)"
               else
-                code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
+                code=$(curl -s -o "$BODY_FILE" -w '%{http_code}' --max-time 15 \
                   -X POST -H 'Content-Type: application/json' \
                   -d '{"email":"synthetic@check.invalid"}' \
                   "$BASE_URL$path" 2>/dev/null) || code="transport_error: $(diagnose $?)"
               fi
-              if [ "$code" = "401" ]; then
-                echo "OK: $method $BASE_URL$path -> 401 (routed, auth answering)"
+              if [ "$code" = "401" ] && grep -q "$MARKER" "$BODY_FILE"; then
+                echo "OK: $method $BASE_URL$path -> 401 + NIP-98 marker (endpoint routed, auth answering)"
                 return 0
               fi
-              echo "attempt $attempt: $method $BASE_URL$path -> $code (expected 401)"
+              if [ "$code" = "401" ]; then
+                # Sanitize the response-derived snippet: single line, bounded
+                snippet=$(tr -d '\r' < "$BODY_FILE" | tr '\n' ' ' | head -c 100)
+                code="401 without NIP-98 marker (generic fallback; route regression?): $snippet"
+              fi
+              echo "attempt $attempt: $method $BASE_URL$path -> $code (expected 401 + NIP-98 marker)"
               # One retry damps transient edge blips without hiding real outages
               [ "$attempt" = "1" ] && sleep 30
             done
