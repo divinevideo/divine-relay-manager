@@ -48,13 +48,13 @@ export function buildResolvedMap(targets: string[], events: NostrEvent[]): Map<s
   return map;
 }
 
+const NO_EVENTS: NostrEvent[] = [];
+
 /**
  * Resolve a set of comment targets to display titles + internal-link encodings.
  * Distinct targets are fetched in one batched query; results degrade gracefully
  * so every parseable target is always linkable.
  */
-const NO_EVENTS: NostrEvent[] = [];
-
 export function useEventTitles(targets: string[]): { titles: Map<string, ResolvedTarget>; isLoading: boolean } {
   const { nostr } = useNostr();
   const { config } = useAppContext();

@@ -3,8 +3,21 @@
 
 import type { NostrEvent } from "@nostrify/nostrify";
 import { isVideoKind } from "@/lib/kindNames";
-import { isHex64 } from "@/lib/constants";
 import { parseCommentTarget } from "@/lib/eventTitles";
+
+/**
+ * Canonical form for a commenter-authored root value: parseable ids and
+ * coordinates get their hex lowercased (either shape, whichever tag it was
+ * smuggled through); unparseable values pass through raw and are rejected
+ * downstream by every parseCommentTarget consumer.
+ */
+function canonicalizeTarget(raw: string): string {
+  const parsed = parseCommentTarget(raw);
+  if (!parsed) return raw;
+  return parsed.kind === 'id'
+    ? parsed.id
+    : `${parsed.addressKind}:${parsed.pubkey}:${parsed.identifier}`;
+}
 
 /**
  * The root scope a kind-1111 comment is attached to: its `E` (root event id)
@@ -14,24 +27,15 @@ import { parseCommentTarget } from "@/lib/eventTitles";
  * geohashes) are intentionally not resolved — Divine's content is E/A video,
  * and there is no in-tool event view to link them to.
  *
- * Hex is case-normalized at this single source, so the spray count, the
- * batched title map, and row-link lookups all compare targets canonically;
- * values parseCommentTarget can't parse pass through raw and are rejected
- * downstream.
+ * Values are canonicalized at this single source, so the spray count, the
+ * batched title map, and row-link lookups all compare targets consistently.
  */
 export function getCommentTarget(event: Pick<NostrEvent, 'kind' | 'tags'>): string | undefined {
   if (event.kind !== 1111) return undefined;
   const rootE = event.tags.find(t => t[0] === 'E')?.[1];
-  if (rootE) return isHex64(rootE) ? rootE.toLowerCase() : rootE;
+  if (rootE) return canonicalizeTarget(rootE);
   const rootA = event.tags.find(t => t[0] === 'A')?.[1];
-  if (!rootA) return undefined;
-  // An A tag should carry a coordinate, but a bare event id smuggled through
-  // one still normalizes to the same canonical form an E tag would produce
-  const parsed = parseCommentTarget(rootA);
-  if (!parsed) return rootA;
-  return parsed.kind === 'id'
-    ? parsed.id
-    : `${parsed.addressKind}:${parsed.pubkey}:${parsed.identifier}`;
+  return rootA ? canonicalizeTarget(rootA) : undefined;
 }
 
 export interface CommentActivitySummary {
