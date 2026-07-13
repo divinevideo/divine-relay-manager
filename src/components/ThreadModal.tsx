@@ -17,68 +17,15 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useAuthor } from "@/hooks/useAuthor";
 import { useAppContext } from "@/hooks/useAppContext";
 import { MessageSquare, Globe } from "lucide-react";
-import type { NostrEvent } from "@nostrify/nostrify";
 import { getProfileUrl } from "@/lib/constants";
-import { buildThreadReplyFilters, eventAddress } from "@/lib/threadFilters";
+import { buildThreadReplyFilters } from "@/lib/threadFilters";
+import { buildThreadTree, type ThreadNode } from "@/lib/threadTree";
 
 interface ThreadModalProps {
   eventId: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   highlightEventId?: string;
-}
-
-interface ThreadNode {
-  event: NostrEvent;
-  replies: ThreadNode[];
-  depth: number;
-}
-
-export function buildThreadTree(events: NostrEvent[], rootId: string): ThreadNode | null {
-  const eventMap = new Map<string, NostrEvent>();
-  events.forEach(e => eventMap.set(e.id, e));
-
-  const root = eventMap.get(rootId);
-  if (!root) return null;
-
-  const rootAddress = eventAddress(root);
-  const idSet = new Set(events.map(e => e.id));
-
-  // A NIP-22 comment's immediate parent: lowercase `e` (event id) or `a` (address).
-  function commentParent(e: NostrEvent): { id?: string; address?: string } {
-    return {
-      id: e.tags.find(t => t[0] === 'e')?.[1],
-      address: e.tags.find(t => t[0] === 'a')?.[1],
-    };
-  }
-
-  function isChildOf(e: NostrEvent, parent: NostrEvent, parentAddress: string | undefined): boolean {
-    if (e.kind === 1111) {
-      const { id, address } = commentParent(e);
-      // A fetched id-parent is authoritative — tags are commenter-authored, so
-      // an `e` and `a` that disagree (e→X, a→root) must not attach twice.
-      if (id && idSet.has(id)) return id === parent.id;
-      if (address && parentAddress && address === parentAddress) return true;
-      // Orphan (immediate parent not fetched): attach to root only, so it still shows.
-      const parentPresent = !!address && rootAddress === address;
-      return parent.id === rootId && !parentPresent;
-    }
-    // NIP-10 kind-1 reply markers (existing behavior)
-    const replyTag = e.tags.find(t => t[0] === 'e' && (t[3] === 'reply' || !t[3]));
-    return !!replyTag && replyTag[1] === parent.id;
-  }
-
-  function buildNode(event: NostrEvent, depth: number): ThreadNode {
-    const parentAddress = eventAddress(event);
-    const replies = events
-      .filter(e => e.id !== event.id && isChildOf(e, event, parentAddress))
-      .map(e => buildNode(e, depth + 1))
-      .sort((a, b) => a.event.created_at - b.event.created_at);
-
-    return { event, replies, depth };
-  }
-
-  return buildNode(root, 0);
 }
 
 function ThreadPost({

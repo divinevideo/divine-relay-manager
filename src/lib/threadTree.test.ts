@@ -1,8 +1,8 @@
-// ABOUTME: Tests ThreadModal's thread-tree builder incl. NIP-22 comment nesting (#164 B)
+// ABOUTME: Tests the pure thread-tree builder incl. NIP-22 comment nesting (#164 B)
 
 import { describe, it, expect } from 'vitest';
 import type { NostrEvent } from '@nostrify/nostrify';
-import { buildThreadTree } from './ThreadModal';
+import { buildThreadTree } from './threadTree';
 
 const PK = 'b'.repeat(64);
 function ev(over: Partial<NostrEvent>): NostrEvent {
@@ -76,5 +76,20 @@ describe('buildThreadTree NIP-22', () => {
     const reply = ev({ id: 'r1', kind: 1, tags: [['e', 'root', '', 'reply']] });
     const tree = buildThreadTree([root, reply], 'root');
     expect(tree?.replies.map(r => r.event.id)).toContain('r1');
+  });
+
+  it('nests a reply whose uppercase-hex e tag names a fetched parent (case-normalized)', () => {
+    const rootId = 'c'.repeat(64);
+    const c1Id = 'd'.repeat(64);
+    const replyId = 'e'.repeat(64);
+    const root = ev({ id: rootId, kind: 34236, tags: [['d', 'vid1']] });
+    const c1 = ev({ id: c1Id, kind: 1111, tags: [['A', `34236:${PK}:vid1`], ['a', `34236:${PK}:vid1`], ['k', '34236']] });
+    // Without normalization the uppercase id misses the fetched-id set and
+    // the reply flattens to an orphan under root instead of nesting under c1
+    const reply = ev({ id: replyId, kind: 1111, tags: [['A', `34236:${PK}:vid1`], ['e', c1Id.toUpperCase()], ['k', '1111']] });
+    const tree = buildThreadTree([root, c1, reply], rootId);
+    expect(tree?.replies.map(r => r.event.id)).not.toContain(replyId);
+    const c1node = tree?.replies.find(r => r.event.id === c1Id);
+    expect(c1node?.replies.map(r => r.event.id)).toEqual([replyId]);
   });
 });
