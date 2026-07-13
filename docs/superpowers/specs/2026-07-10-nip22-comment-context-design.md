@@ -92,8 +92,10 @@ where."
 - Renders instantly from tags, no network: "8 comments across 7 videos" (spray)
   vs "8 comments on 1 video" (conversation). When the same comment text hit
   multiple targets (`repeatedAcrossTargets >= 2`), it flags that explicitly.
-- Noun is driven off the root-kind `K` tag (offline): "videos" for video kinds,
-  "posts" / "notes" otherwise, "pieces of content" when mixed.
+- Noun is driven off the root-kind `K` tag (offline): "videos" when every
+  comment's root kind is a video kind, else the generic "posts" (simplified in
+  implementation from the three-way videos/posts/mixed split sketched here —
+  "posts" reads fine for mixed sets and avoids a third branch).
 
 #### A4. Events-list rows and internal-navigation plumbing
 
@@ -129,8 +131,9 @@ by-coordinate banned lookup, so no in-repo fallback exists for A-only targets.
 This is the operative path in practice — `getCommentTarget` prefers the `E`
 root tag, both Divine clients always write one (mobile unconditionally, web for
 addressable roots too), and a production sample found 257/257 comments carry
-`E`, zero A-only. A relay-side by-coordinate banned lookup is filed as a
-funnelcake follow-up to close the residual gap for strict-NIP-22 clients.
+`E`, zero A-only. A relay-side by-coordinate banned lookup goes to a
+funnelcake follow-up issue to close the residual gap for strict-NIP-22
+clients (filed alongside this PR's review round).
 
 ## Testing
 
