@@ -54,8 +54,8 @@
 #
 # Setup:
 #   1. (Recommended) Repo secret SLACK_WEBHOOK_ALERTS -- incoming webhook
-#      for the alerts channel (same value as vmalertmanager-slack-webhook-prod
-#      in GCP Secret Manager; shared with the ReportWatcher health design).
+#      for the alerts channel (same webhook the prod alertmanager uses;
+#      see the iac repo / GCP Secret Manager for the value).
 #   2. To test manually: Actions tab > "Minor-Review Endpoint Health" >
 #      Run workflow.
 
