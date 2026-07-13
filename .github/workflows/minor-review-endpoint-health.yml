@@ -38,7 +38,7 @@
 # staging devices are locked out.
 #
 # TODO(#173): when the api.divine.video ingress route lands, add
-# https://api.divine.video as a second BASE_URL probe target so coverage
+# https://api.divine.video as a third BASE_URL probe target so coverage
 # for pre-fix app installs is monitored too.
 #
 # Alerting -- know the limits:
