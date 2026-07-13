@@ -53,6 +53,8 @@ export function buildResolvedMap(targets: string[], events: NostrEvent[]): Map<s
  * Distinct targets are fetched in one batched query; results degrade gracefully
  * so every parseable target is always linkable.
  */
+const NO_EVENTS: NostrEvent[] = [];
+
 export function useEventTitles(targets: string[]): { titles: Map<string, ResolvedTarget>; isLoading: boolean } {
   const { nostr } = useNostr();
   const { config } = useAppContext();
@@ -66,7 +68,7 @@ export function useEventTitles(targets: string[]): { titles: Map<string, Resolve
   const distinctKey = JSON.stringify(Array.from(new Set(targets)).sort());
   const distinct = useMemo(() => JSON.parse(distinctKey) as string[], [distinctKey]);
 
-  const { data: events = [], isLoading } = useQuery<NostrEvent[]>({
+  const { data, isLoading } = useQuery<NostrEvent[]>({
     queryKey: ['event-titles', apiUrl ?? '', distinct],
     queryFn: async ({ signal }) => {
       const filters = buildTitleFilters(distinct);
@@ -77,6 +79,9 @@ export function useEventTitles(targets: string[]): { titles: Map<string, Resolve
     staleTime: 5 * 60_000,
   });
 
+  // Stable empty fallback — an inline `= []` default would re-defeat the
+  // identity stabilization above for the whole pending/disabled window
+  const events = data ?? NO_EVENTS;
   const titles = useMemo(() => buildResolvedMap(distinct, events), [distinct, events]);
   return { titles, isLoading };
 }

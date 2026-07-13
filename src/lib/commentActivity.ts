@@ -16,7 +16,8 @@ import { parseCommentTarget } from "@/lib/eventTitles";
  *
  * Hex is case-normalized at this single source, so the spray count, the
  * batched title map, and row-link lookups all compare targets canonically;
- * unparseable values pass through raw and are rejected downstream.
+ * values parseCommentTarget can't parse pass through raw and are rejected
+ * downstream.
  */
 export function getCommentTarget(event: Pick<NostrEvent, 'kind' | 'tags'>): string | undefined {
   if (event.kind !== 1111) return undefined;
@@ -24,10 +25,13 @@ export function getCommentTarget(event: Pick<NostrEvent, 'kind' | 'tags'>): stri
   if (rootE) return isHex64(rootE) ? rootE.toLowerCase() : rootE;
   const rootA = event.tags.find(t => t[0] === 'A')?.[1];
   if (!rootA) return undefined;
+  // An A tag should carry a coordinate, but a bare event id smuggled through
+  // one still normalizes to the same canonical form an E tag would produce
   const parsed = parseCommentTarget(rootA);
-  return parsed?.kind === 'address'
-    ? `${parsed.addressKind}:${parsed.pubkey}:${parsed.identifier}`
-    : rootA;
+  if (!parsed) return rootA;
+  return parsed.kind === 'id'
+    ? parsed.id
+    : `${parsed.addressKind}:${parsed.pubkey}:${parsed.identifier}`;
 }
 
 export interface CommentActivitySummary {

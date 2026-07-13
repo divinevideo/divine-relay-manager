@@ -105,8 +105,8 @@ where."
 - Internal navigation: `EventsList` reads a new `?event=<encoded>` param
   (mirroring its existing `?pubkey=` param) and drives its direct-event lookup.
 - Extend the direct-event lookup to resolve address coordinates: an naddr /
-  address ref queries `{ kinds, authors, '#d' }` instead of `{ ids }`, keeping the
-  existing `getbannedevent` RPC fallback.
+  address ref queries `{ kinds, authors, '#d' }` instead of `{ ids }`; the
+  `getbannedevent` fallback remains id-only (see Contract note below).
 
 ## Key decision: internal event view for the parent link
 

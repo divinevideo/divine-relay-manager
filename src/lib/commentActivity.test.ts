@@ -33,6 +33,9 @@ describe('getCommentTarget', () => {
   it('case-normalizes commenter-authored hex so equal targets compare equal', () => {
     expect(getCommentTarget(comment('x', [['E', VID('c').toUpperCase()]]))).toBe(VID('c'));
     expect(getCommentTarget(comment('x', [['A', `34236:${PK.toUpperCase()}:vid1`]]))).toBe(ADDR);
+    // A bare event id smuggled through an A tag (out-of-spec) normalizes to
+    // the same canonical form an E tag would produce
+    expect(getCommentTarget(comment('x', [['A', VID('c').toUpperCase()]]))).toBe(VID('c'));
     // ...so a video tagged with mixed-case hex counts as one target, not two
     const s = summarizeCommentActivity([
       comment('a', [['E', VID('c')]], '1'),
