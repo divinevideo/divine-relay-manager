@@ -429,6 +429,9 @@ export function EventsList({ relayUrl }: EventsListProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [committedSearch, setCommittedSearch] = useState('');
   const searchMode = useMemo(() => parseSearchInput(committedSearch), [committedSearch]);
+  // Direct-lookup mode: a committed id/nevent/naddr replaces the list with the
+  // single-event pane, driven by the dedicated lookup query below.
+  const isDirectLookup = searchMode.type === 'event_id' || searchMode.type === 'address';
   // The live typed input's shape (committedSearch is only set on Enter/commit,
   // so the instant substring filter must key off what's being typed, not the
   // committed value). Only free text substring-filters; a typed id/pubkey/naddr
@@ -586,16 +589,16 @@ export function EventsList({ relayUrl }: EventsListProps) {
 
       return null;
     },
-    enabled: (searchMode.type === 'event_id' || searchMode.type === 'address') && !!nostr,
+    enabled: isDirectLookup && !!nostr,
     staleTime: 60 * 1000,
   });
 
   // Auto-select found event in detail pane
   useEffect(() => {
-    if (directEventLookup?.event && (searchMode.type === 'event_id' || searchMode.type === 'address')) {
+    if (directEventLookup?.event && isDirectLookup) {
       setSelectedEvent(directEventLookup.event);
     }
-  }, [directEventLookup, searchMode]);
+  }, [directEventLookup, isDirectLookup]);
 
   // Flatten all pages into a single events array
   const events = useMemo(() => eventsData?.pages.flat() ?? [], [eventsData?.pages]);
@@ -766,14 +769,6 @@ export function EventsList({ relayUrl }: EventsListProps) {
   // Enhanced direct lookup result (for event ID search)
   const enhancedDirectEvent = directEventLookup?.event ? enhanceEvent(directEventLookup.event) : null;
 
-  // #164 A: resolve NIP-22 parent titles/links for the visible kind-1111 rows,
-  // batched in one query (list rows + the direct-lookup card).
-  const commentTargets = [
-    ...events.map(getCommentTarget),
-    enhancedDirectEvent ? getCommentTarget(enhancedDirectEvent) : undefined,
-  ].filter((t): t is string => !!t);
-  const { titles: parentTitles } = useEventTitles(commentTargets, undefined);
-
   // Enhance events with moderation status and apply filters
   const enhancedEvents: EventWithModeration[] = (events || [])
     .map(enhanceEvent)
@@ -817,6 +812,17 @@ export function EventsList({ relayUrl }: EventsListProps) {
 
       return true;
     });
+
+  // #164 A: resolve NIP-22 parent titles/links for the rows that actually
+  // render — the filtered list rows, or only the direct-lookup card when a
+  // lookup replaces the list (review: pre-filter events fed never-rendered
+  // targets to the batched query).
+  const commentTargets = (
+    isDirectLookup
+      ? [enhancedDirectEvent ? getCommentTarget(enhancedDirectEvent) : undefined]
+      : enhancedEvents.map(getCommentTarget)
+  ).filter((t): t is string => !!t);
+  const { titles: parentTitles } = useEventTitles(commentTargets);
 
   const kindOptions = [
     { value: 'all', label: 'All Events' },
@@ -1088,7 +1094,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
           <CardContent className="p-0 flex-1 min-h-0">
             <ScrollArea className="h-full" viewportRef={scrollViewportRef}>
               <div className="p-3 pr-4">
-                {searchMode.type === 'event_id' || searchMode.type === 'address' ? (
+                {isDirectLookup ? (
                   // Direct lookup mode (event id or addressable coordinate)
                   isLoadingDirectEvent ? (
                     <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
