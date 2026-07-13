@@ -17,42 +17,15 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useAuthor } from "@/hooks/useAuthor";
 import { useAppContext } from "@/hooks/useAppContext";
 import { MessageSquare, Globe } from "lucide-react";
-import type { NostrEvent } from "@nostrify/nostrify";
 import { getProfileUrl } from "@/lib/constants";
+import { buildThreadReplyFilters } from "@/lib/threadFilters";
+import { buildThreadTree, type ThreadNode } from "@/lib/threadTree";
 
 interface ThreadModalProps {
   eventId: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   highlightEventId?: string;
-}
-
-interface ThreadNode {
-  event: NostrEvent;
-  replies: ThreadNode[];
-  depth: number;
-}
-
-function buildThreadTree(events: NostrEvent[], rootId: string): ThreadNode | null {
-  const eventMap = new Map<string, NostrEvent>();
-  events.forEach(e => eventMap.set(e.id, e));
-
-  const root = eventMap.get(rootId);
-  if (!root) return null;
-
-  function buildNode(event: NostrEvent, depth: number): ThreadNode {
-    const replies = events
-      .filter(e => {
-        const replyTag = e.tags.find(t => t[0] === 'e' && (t[3] === 'reply' || !t[3]));
-        return replyTag && replyTag[1] === event.id;
-      })
-      .map(e => buildNode(e, depth + 1))
-      .sort((a, b) => a.event.created_at - b.event.created_at);
-
-    return { event, replies, depth };
-  }
-
-  return buildNode(root, 0);
 }
 
 function ThreadPost({
@@ -135,7 +108,9 @@ export function ThreadModal({ eventId, open, onOpenChange, highlightEventId }: T
 
   // Fetch full thread
   const { data: thread, isLoading } = useQuery({
-    queryKey: ['full-thread', eventId],
+    // Env key (apiUrl): singleton QueryClient + per-env NPool — without it a
+    // reopen serves the other environment's thread until the refetch lands
+    queryKey: ['full-thread', config.apiUrl, eventId],
     queryFn: async ({ signal }) => {
       const timeout = AbortSignal.timeout(10000);
       const combinedSignal = AbortSignal.any([signal, timeout]);
@@ -148,25 +123,32 @@ export function ThreadModal({ eventId, open, onOpenChange, highlightEventId }: T
 
       if (!targetEvent) return null;
 
-      // Find root event ID
+      // Root: NIP-10 `e root` when present, else the event itself (addressable
+      // video reports have no NIP-10 root tag).
       const rootTag = targetEvent.tags.find(t => t[0] === 'e' && t[3] === 'root');
       const rootId = rootTag ? rootTag[1] : eventId;
 
-      // Fetch all events in thread
       const [rootEvent] = await nostr.query(
         [{ ids: [rootId], limit: 1 }],
         { signal: combinedSignal }
       );
+      const rootForFilters = rootEvent ?? targetEvent;
 
+      // NIP-10 kind-1 replies + NIP-22 kind-1111 comments (scoped by root E/A) —
+      // Divine comments are kind 1111, so kinds:[1] alone showed none (#164 B).
       const replies = await nostr.query(
-        [{ kinds: [1], '#e': [rootId], limit: 100 }],
+        buildThreadReplyFilters(rootForFilters, 100),
         { signal: combinedSignal }
       );
 
-      const allEvents = rootEvent ? [rootEvent, ...replies] : replies;
+      const allEvents = rootEvent ? [rootEvent, ...replies] : [targetEvent, ...replies];
       return buildThreadTree(allEvents, rootId);
     },
     enabled: open && !!eventId,
+    // Reopening the modal is common while working a report; 30s keeps that
+    // instant without refiring 3 relay round-trips, yet stays fresh enough
+    // to pick up new comments on the next report visit
+    staleTime: 30_000,
   });
 
   return (

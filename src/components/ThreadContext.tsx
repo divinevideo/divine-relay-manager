@@ -32,6 +32,10 @@ interface ThreadContextProps {
   reportTags?: string[][];
   /** Target event ID from the report */
   targetEventId?: string;
+  /** Replies + NIP-22 comments on the reported event (#164 B) */
+  replies?: NostrEvent[];
+  /** The reported user's pubkey — their comment rows are flagged */
+  reportedPubkey?: string | null;
   /** True when the event is known to be deleted from the relay */
   isEventDeleted?: boolean;
   /** True when the user is known to be banned from the relay */
@@ -47,11 +51,14 @@ interface ThreadContextProps {
 function PostCard({
   event,
   isReported = false,
+  flagAuthor = false,
   depth = 0,
   apiUrl,
 }: {
   event: NostrEvent;
   isReported?: boolean;
+  /** Highlight because this row was authored by the reported user (comment lists). */
+  flagAuthor?: boolean;
   depth?: number;
   apiUrl?: string;
 }) {
@@ -81,7 +88,7 @@ function PostCard({
     <div
       className={`relative ${depth > 0 ? 'ml-6 border-l-2 border-muted pl-4' : ''}`}
     >
-      <Card className={`overflow-hidden ${isReported ? 'border-destructive bg-destructive/5' : ''}`}>
+      <Card className={`overflow-hidden ${isReported ? 'border-destructive bg-destructive/5' : flagAuthor ? 'border-amber-400 bg-amber-50/60 dark:bg-amber-950/20' : ''}`}>
         <CardContent className="p-3 overflow-hidden">
           <div className="flex items-start gap-3">
             <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80 shrink-0">
@@ -101,6 +108,12 @@ function PostCard({
                 </span>
                 {isReported && (
                   <Badge variant="destructive" className="text-xs">Reported</Badge>
+                )}
+                {flagAuthor && !isReported && (
+                  <Badge variant="outline" className="text-xs gap-1 text-amber-700 border-amber-400 bg-amber-50 dark:text-amber-300 dark:bg-amber-950/40">
+                    <AlertTriangle className="h-3 w-3" />
+                    By reported user
+                  </Badge>
                 )}
               </div>
               <div className="text-sm mt-1 whitespace-pre-wrap break-words overflow-hidden">
@@ -200,6 +213,42 @@ function ReportTagsFallback({ reportTags, targetEventId }: { reportTags?: string
   );
 }
 
+/** Flat list of replies + NIP-22 comments on the reported event, newest first,
+ * with the reported user's own rows flagged so spray patterns stand out (#164 B). */
+function CommentsSection({
+  replies,
+  reportedPubkey,
+  apiUrl,
+}: {
+  replies: NostrEvent[];
+  reportedPubkey?: string | null;
+  apiUrl?: string;
+}) {
+  if (replies.length === 0) return null;
+  const sorted = [...replies].sort((a, b) => b.created_at - a.created_at);
+  const flaggedCount = reportedPubkey
+    ? sorted.filter(e => e.pubkey === reportedPubkey).length
+    : 0;
+
+  return (
+    <div className="mt-4 space-y-2">
+      <h4 className="text-sm font-medium text-muted-foreground">
+        Comments on this content ({sorted.length}
+        {flaggedCount > 0 ? `, ${flaggedCount} by the reported user` : ''})
+      </h4>
+      {sorted.map(event => (
+        <PostCard
+          key={event.id}
+          event={event}
+          depth={1}
+          apiUrl={apiUrl}
+          flagAuthor={!!reportedPubkey && event.pubkey === reportedPubkey}
+        />
+      ))}
+    </div>
+  );
+}
+
 export function ThreadContext({
   ancestors,
   reportedEvent,
@@ -211,6 +260,8 @@ export function ThreadContext({
   triedExternalRelay,
   reportTags,
   targetEventId,
+  replies = [],
+  reportedPubkey,
   isEventDeleted,
   isUserBanned,
   checkedAt,
@@ -354,6 +405,8 @@ export function ThreadContext({
         depth={ancestors.length}
         apiUrl={apiUrl}
       />
+
+      <CommentsSection replies={replies} reportedPubkey={reportedPubkey} apiUrl={apiUrl} />
     </div>
   );
 }

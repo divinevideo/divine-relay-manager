@@ -14,11 +14,15 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { ExternalLink, FileText, ChevronDown, Copy, Check, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { getProfileUrl, RECENT_CONTENT_KINDS } from "@/lib/constants";
 import { parseRepostForDisplay } from "@/lib/nip18";
 import { KindBadge } from "@/components/KindBadge";
 import { useAuthor } from "@/hooks/useAuthor";
+import { useAppContext } from "@/hooks/useAppContext";
+import { getCommentTarget, formatCommentActivity } from "@/lib/commentActivity";
+import { useEventTitles } from "@/hooks/useEventTitles";
+import { CommentParentLink } from "@/components/CommentParentLink";
 
 interface BannedUserCardProps {
   pubkey: string;
@@ -29,6 +33,7 @@ interface BannedUserCardProps {
 
 export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButton }: BannedUserCardProps) {
   const { nostr } = useNostr();
+  const { config } = useAppContext();
   const [isOpen, setIsOpen] = useState(false);
   const [copied, setCopied] = useState(false);
 
@@ -59,7 +64,9 @@ export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButto
   // whose only activity is comments/reposts (#159); RECENT_CONTENT_KINDS is
   // shared with useUserStats so this card and the report page stay aligned.
   const { data: postStats } = useQuery({
-    queryKey: ['user-posts-stats', pubkey],
+    // Env key (apiUrl): singleton QueryClient + per-env NPool — without it a
+    // card can serve the other environment's events for the staleTime window
+    queryKey: ['user-posts-stats', config.apiUrl, pubkey],
     queryFn: async ({ signal }) => {
       const events = await nostr.query(
         [{ kinds: [...RECENT_CONTENT_KINDS], authors: [pubkey], limit: 50 }],
@@ -69,6 +76,8 @@ export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButto
         count: events.length,
         // Relay result order isn't guaranteed — sort (a copy) newest-first
         recentPosts: [...events].sort((a, b) => b.created_at - a.created_at).slice(0, 3),
+        // The full set drives the spray roll-up (summarize all comments, not the shown 3)
+        allEvents: events,
       };
     },
     // UserManagement renders one card per banned/suspended user and Radix
@@ -76,6 +85,17 @@ export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButto
     // N x 2 relay queries (aligned with useUserStats' 2min)
     staleTime: 2 * 60_000,
   });
+
+  // #164 A: the spray roll-up is offline tag math over the full fetched set,
+  // but parent-title resolution is relay work — scope it to the ≤3 rows that
+  // actually render, and only once the card is open (EventsList pattern)
+  const allEvents = postStats?.allEvents ?? [];
+  const commentTargets = useMemo(
+    () => (isOpen ? (postStats?.recentPosts ?? []).map(getCommentTarget).filter((t): t is string => !!t) : []),
+    [isOpen, postStats],
+  );
+  const { titles } = useEventTitles(commentTargets);
+  const activityLine = formatCommentActivity(allEvents);
 
   const displayName = profile?.name || profile?.display_name || shortNpub;
   const njumpUrl = `https://njump.me/${npub}`;
@@ -149,6 +169,9 @@ export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButto
                   <FileText className="h-3 w-3" />
                   {postStats?.count || 0} events on relay
                 </span>
+                {activityLine && (
+                  <span className="text-amber-700 dark:text-amber-400">{activityLine}</span>
+                )}
                 <a
                   href={njumpUrl}
                   target="_blank"
@@ -240,8 +263,13 @@ export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButto
                             reposted {targetDescription}
                           </p>
                         )}
-                        <div className="flex items-center justify-between text-xs text-muted-foreground">
-                          <span>{new Date(post.created_at * 1000).toLocaleString()}</span>
+                        <div className="flex items-center justify-between text-xs text-muted-foreground gap-2">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="shrink-0">{new Date(post.created_at * 1000).toLocaleString()}</span>
+                            {post.kind === 1111 && (
+                              <CommentParentLink resolved={titles.get(getCommentTarget(post) ?? '')} />
+                            )}
+                          </div>
                           <KindBadge kind={post.kind} />
                         </div>
                       </div>

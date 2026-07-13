@@ -23,6 +23,10 @@ import { Textarea } from "@/components/ui/textarea";
 import { EventDetail } from "@/components/EventDetail";
 import { BulkDeleteByKind } from "@/components/BulkDeleteByKind";
 import { getProfileUrl } from "@/lib/constants";
+import { getCommentTarget } from "@/lib/commentActivity";
+import { parseSearchInput } from "@/lib/searchInput";
+import { useEventTitles, type ResolvedTarget } from "@/hooks/useEventTitles";
+import { CommentParentLink } from "@/components/CommentParentLink";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   FileText,
@@ -59,62 +63,19 @@ interface EventWithModeration extends NostrEvent {
   moderationReason?: string;
 }
 
-type SearchMode =
-  | { type: 'none' }
-  | { type: 'event_id'; hex: string }
-  | { type: 'pubkey'; hex: string }
-  | { type: 'text'; query: string };
-
-function parseSearchInput(input: string): SearchMode {
-  const trimmed = input.trim();
-  if (!trimmed) return { type: 'none' };
-
-  // NIP-19 encoded identifiers
-  if (trimmed.startsWith('note1') || trimmed.startsWith('nevent1')) {
-    try {
-      const decoded = nip19.decode(trimmed);
-      if (decoded.type === 'note') {
-        return { type: 'event_id', hex: decoded.data };
-      } else if (decoded.type === 'nevent') {
-        return { type: 'event_id', hex: decoded.data.id };
-      }
-    } catch {
-      // Invalid encoding, fall through to text search
-    }
-  }
-
-  if (trimmed.startsWith('npub1') || trimmed.startsWith('nprofile1')) {
-    try {
-      const decoded = nip19.decode(trimmed);
-      if (decoded.type === 'npub') {
-        return { type: 'pubkey', hex: decoded.data };
-      } else if (decoded.type === 'nprofile') {
-        return { type: 'pubkey', hex: decoded.data.pubkey };
-      }
-    } catch {
-      // Invalid encoding, fall through to text search
-    }
-  }
-
-  // 64-char hex defaults to event ID lookup
-  if (/^[0-9a-f]{64}$/i.test(trimmed)) {
-    return { type: 'event_id', hex: trimmed.toLowerCase() };
-  }
-
-  return { type: 'text', query: trimmed };
-}
-
-
 function EventCard({
   event,
   isSelected,
   onSelect,
   onModerate,
+  parentLink,
 }: {
   event: EventWithModeration;
   isSelected: boolean;
   onSelect: () => void;
   onModerate: (eventId: string, action: 'allow' | 'ban', reason?: string) => void;
+  /** Resolved NIP-22 parent for a kind-1111 row's "on <parent>" link (#164 A). */
+  parentLink?: ResolvedTarget;
 }) {
   const author = useAuthor(event.pubkey);
   const [moderationDialogOpen, setModerationDialogOpen] = useState(false);
@@ -275,19 +236,24 @@ function EventCard({
           return null;
         })()}
 
-        <div className="flex items-center justify-between mt-2 text-xs text-muted-foreground">
-          <div className="flex items-center gap-3">
-            <span className="flex items-center gap-1">
+        <div className="flex items-center justify-between mt-2 text-xs text-muted-foreground gap-2">
+          <div className="flex items-center gap-3 min-w-0">
+            <span className="flex items-center gap-1 shrink-0">
               <Clock className="h-3 w-3" />
               {formatTimestamp(event.created_at)}
             </span>
-            <span className="flex items-center gap-1 font-mono">
+            <span className="flex items-center gap-1 font-mono shrink-0">
               <Hash className="h-3 w-3" />
               {event.id?.slice(0, 8)}...
             </span>
+            {event.kind === 1111 && (
+              <span onClick={(e) => e.stopPropagation()} className="min-w-0">
+                <CommentParentLink resolved={parentLink} />
+              </span>
+            )}
           </div>
           {event.tags.length > 0 && (
-            <span>{event.tags.length} tags</span>
+            <span className="shrink-0">{event.tags.length} tags</span>
           )}
         </div>
 
@@ -399,6 +365,14 @@ export function EventsList({ relayUrl }: EventsListProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [committedSearch, setCommittedSearch] = useState('');
   const searchMode = useMemo(() => parseSearchInput(committedSearch), [committedSearch]);
+  // Direct-lookup mode: a committed id/nevent/naddr replaces the list with the
+  // single-event pane, driven by the dedicated lookup query below.
+  const isDirectLookup = searchMode.type === 'event_id' || searchMode.type === 'address';
+  // The live typed input's shape (committedSearch is only set on Enter/commit,
+  // so the instant substring filter must key off what's being typed, not the
+  // committed value). Only free text substring-filters; a typed id/pubkey/naddr
+  // resolves via its dedicated query instead.
+  const typedIsText = useMemo(() => parseSearchInput(searchQuery).type === 'text', [searchQuery]);
   const [filterHasReports, setFilterHasReports] = useState(false);
   const [filterNewUsers, setFilterNewUsers] = useState(false);
   const [filterHasMedia, setFilterHasMedia] = useState(false);
@@ -413,6 +387,20 @@ export function EventsList({ relayUrl }: EventsListProps) {
       setFilterByPubkey(pubkeyParam);
     }
   }, [searchParams, filterByPubkey]);
+
+  // #164 A: an internal parent link routes here as /events?event=<nevent|naddr>.
+  // Seed the search from it (both the box and the committed value, so the clear
+  // affordance shows), then consume the param — leaving it in the URL would make
+  // the effect re-fire and revert every later clear/re-search back to this event.
+  useEffect(() => {
+    const eventParam = searchParams.get('event');
+    if (!eventParam) return;
+    setSearchQuery(eventParam);
+    setCommittedSearch(eventParam);
+    const next = new URLSearchParams(searchParams);
+    next.delete('event');
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
 
   // Update URL when filterByPubkey changes
   const updatePubkeyFilter = (pubkey: string | null) => {
@@ -502,37 +490,55 @@ export function EventsList({ relayUrl }: EventsListProps) {
   // Direct event lookup by ID (separate from infinite scroll)
   // Tries normal relay query first, then falls back to getbannedevent RPC
   const { data: directEventLookup, isLoading: isLoadingDirectEvent, error: directEventError } = useQuery({
-    queryKey: ['event-search', searchMode.type === 'event_id' ? searchMode.hex : null],
+    // relayUrl in the key: the QueryClient is a singleton while the relay
+    // swaps per environment — without it a repeated lookup can serve the
+    // other environment's result for the staleTime window
+    queryKey: ['event-search', relayUrl, committedSearch, searchMode.type],
     queryFn: async ({ signal }) => {
-      if (searchMode.type !== 'event_id') return null;
+      const timeoutSignal = AbortSignal.any([signal, AbortSignal.timeout(5000)]);
 
-      // Try normal relay query first
-      const events = await nostr.query(
-        [{ ids: [searchMode.hex] }],
-        { signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]) }
-      );
-      if (events[0]) return { event: events[0], banned: false };
+      if (searchMode.type === 'event_id') {
+        // Try normal relay query first
+        const events = await nostr.query([{ ids: [searchMode.hex] }], { signal: timeoutSignal });
+        if (events[0]) return { event: events[0], banned: false };
 
-      // Fallback: check if it's a banned event via management API
-      try {
-        const bannedEvent = await callRelayRpc<NostrEvent>('getbannedevent', [searchMode.hex]);
-        if (bannedEvent) return { event: bannedEvent, banned: true };
-      } catch {
-        // Not banned or RPC failed
+        // Fallback: check if it's a banned event via management API
+        try {
+          const bannedEvent = await callRelayRpc<NostrEvent>('getbannedevent', [searchMode.hex]);
+          if (bannedEvent) return { event: bannedEvent, banned: true };
+        } catch {
+          // Not banned or RPC failed
+        }
+        return null;
+      }
+
+      if (searchMode.type === 'address') {
+        // Addressable video parents scope by kind+author+d, not by id (#164 A).
+        // Live relay only — no banned fallback is possible here: getbannedevent
+        // takes an event id and the relay has no by-coordinate banned lookup
+        // (divine-funnelcake#649 tracks adding one). In practice comments carry
+        // an E root tag (both Divine clients always write one; getCommentTarget
+        // prefers it), so parent links route through the id branch above and
+        // this A-only path is a rare degraded case.
+        const events = await nostr.query(
+          [{ kinds: [searchMode.addressKind], authors: [searchMode.pubkey], '#d': [searchMode.identifier], limit: 1 }],
+          { signal: timeoutSignal },
+        );
+        return events[0] ? { event: events[0], banned: false } : null;
       }
 
       return null;
     },
-    enabled: searchMode.type === 'event_id' && !!nostr,
+    enabled: isDirectLookup && !!nostr,
     staleTime: 60 * 1000,
   });
 
   // Auto-select found event in detail pane
   useEffect(() => {
-    if (directEventLookup?.event && searchMode.type === 'event_id') {
+    if (directEventLookup?.event && isDirectLookup) {
       setSelectedEvent(directEventLookup.event);
     }
-  }, [directEventLookup, searchMode]);
+  }, [directEventLookup, isDirectLookup]);
 
   // Flatten all pages into a single events array
   const events = useMemo(() => eventsData?.pages.flat() ?? [], [eventsData?.pages]);
@@ -717,9 +723,10 @@ export function EventsList({ relayUrl }: EventsListProps) {
         return false;
       }
 
-      // Client-side content/pubkey substring search (instant, no Enter needed)
-      // Skip when in event_id mode (results come from dedicated query)
-      if (searchQuery.trim() && searchMode.type !== 'event_id') {
+      // Client-side content/pubkey substring search (instant, no Enter needed).
+      // Gate on the live typed shape: free text filters as you type; a typed or
+      // synced id/pubkey/nevent/naddr resolves via its dedicated query instead.
+      if (searchQuery.trim() && typedIsText) {
         const query = searchQuery.toLowerCase();
         if (!event.content?.toLowerCase().includes(query) &&
             !event.pubkey.toLowerCase().includes(query)) {
@@ -745,6 +752,19 @@ export function EventsList({ relayUrl }: EventsListProps) {
 
       return true;
     });
+
+  // #164 A: resolve NIP-22 parent titles/links for the rows that actually
+  // render — the filtered list rows, or only the direct-lookup card when a
+  // lookup replaces the list (review: pre-filter events fed never-rendered
+  // targets to the batched query). Accepted tradeoff: a filter keystroke that
+  // changes the visible 1111 set refires the batched REQ for already-resolved
+  // targets — bounded to 1-2 REQs per interaction and cache-hit on clear.
+  const commentTargets = (
+    isDirectLookup
+      ? [enhancedDirectEvent ? getCommentTarget(enhancedDirectEvent) : undefined]
+      : enhancedEvents.map(getCommentTarget)
+  ).filter((t): t is string => !!t);
+  const { titles: parentTitles } = useEventTitles(commentTargets);
 
   const kindOptions = [
     { value: 'all', label: 'All Events' },
@@ -807,13 +827,13 @@ export function EventsList({ relayUrl }: EventsListProps) {
               </button>
             )}
           </div>
-          {/* Search hints and status */}
-          {searchMode.type === 'event_id' ? (
+          {/* Search hints and status — both direct-lookup modes (id + naddr) */}
+          {isDirectLookup ? (
             <div className="flex items-center gap-2 text-xs px-1">
               {isLoadingDirectEvent ? (
                 <>
                   <Loader2 className="h-3 w-3 animate-spin text-primary" />
-                  <span className="text-muted-foreground">Searching relay for event <code className="font-mono">{searchMode.hex.slice(0, 12)}...</code></span>
+                  <span className="text-muted-foreground">Searching relay for event <code className="font-mono">{committedSearch.slice(0, 12)}...</code></span>
                 </>
               ) : directEventError ? (
                 <>
@@ -840,7 +860,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
             </div>
           ) : (() => {
             const preview = parseSearchInput(searchQuery);
-            if (preview.type === 'event_id') {
+            if (preview.type === 'event_id' || preview.type === 'address') {
               return (
                 <div className="flex items-center gap-2 text-xs text-muted-foreground px-1">
                   <Search className="h-3 w-3" />
@@ -1016,13 +1036,13 @@ export function EventsList({ relayUrl }: EventsListProps) {
           <CardContent className="p-0 flex-1 min-h-0">
             <ScrollArea className="h-full" viewportRef={scrollViewportRef}>
               <div className="p-3 pr-4">
-                {searchMode.type === 'event_id' ? (
-                  // Event ID lookup mode
+                {isDirectLookup ? (
+                  // Direct lookup mode (event id or addressable coordinate)
                   isLoadingDirectEvent ? (
                     <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
                       <Loader2 className="h-8 w-8 animate-spin mb-3" />
                       <p className="text-sm">Searching relay...</p>
-                      <p className="text-xs mt-1 font-mono">{searchMode.hex.slice(0, 16)}...</p>
+                      <p className="text-xs mt-1 font-mono">{committedSearch.slice(0, 24)}...</p>
                     </div>
                   ) : directEventError ? (
                     <Alert variant="destructive" className="mt-2">
@@ -1045,21 +1065,28 @@ export function EventsList({ relayUrl }: EventsListProps) {
                         isSelected={selectedEvent?.id === enhancedDirectEvent.id}
                         onSelect={() => setSelectedEvent(enhancedDirectEvent)}
                         onModerate={handleModerateEvent}
+                        parentLink={parentTitles.get(getCommentTarget(enhancedDirectEvent) ?? '')}
                       />
                     </div>
                   ) : (
                     <div className="text-center py-8 text-muted-foreground">
                       <Search className="h-8 w-8 mx-auto mb-2 opacity-50" />
                       <p className="text-sm">No event found on relay</p>
-                      <p className="text-xs mt-1 font-mono">{searchMode.hex.slice(0, 16)}...</p>
-                      <p className="text-xs mt-2">The event may have been deleted.</p>
+                      <p className="text-xs mt-1 font-mono">{committedSearch.slice(0, 24)}...</p>
+                      <p className="text-xs mt-2">
+                        {searchMode.type === 'address'
+                          ? 'The event may have been deleted or banned. Banned events can only be retrieved by event id — an address lookup queries the live relay only.'
+                          : 'The event may have been deleted.'}
+                      </p>
                       {/^[0-9a-f]{64}$/i.test(committedSearch) && (
                         <Button
                           variant="link"
                           size="sm"
                           className="mt-1 text-xs"
                           onClick={() => {
-                            updatePubkeyFilter(searchMode.hex);
+                            // Only reachable in event_id mode (the button is gated on a
+                            // 64-hex committedSearch); guard so `address` mode type-checks.
+                            if (searchMode.type === 'event_id') updatePubkeyFilter(searchMode.hex);
                             clearSearch();
                           }}
                         >
@@ -1095,6 +1122,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
                         isSelected={selectedEvent?.id === event.id}
                         onSelect={() => setSelectedEvent(event)}
                         onModerate={handleModerateEvent}
+                        parentLink={parentTitles.get(getCommentTarget(event) ?? '')}
                       />
                     ))}
                     {/* Infinite scroll status */}

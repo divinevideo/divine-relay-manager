@@ -1,7 +1,7 @@
 // ABOUTME: Displays user profile with stats, labels, and recent posts
 // ABOUTME: Used in report detail view to show reported user context
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { nip19 } from "nostr-tools";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -16,6 +16,9 @@ import type { UserStats } from "@/hooks/useUserStats";
 import { getProfileUrl, getPublicEventUrl } from "@/lib/constants";
 import { parseRepostForDisplay } from "@/lib/nip18";
 import { KindBadge } from "@/components/KindBadge";
+import { getCommentTarget, formatCommentActivity } from "@/lib/commentActivity";
+import { useEventTitles } from "@/hooks/useEventTitles";
+import { CommentParentLink } from "@/components/CommentParentLink";
 
 // Label category colors
 const LABEL_COLORS: Record<string, string> = {
@@ -255,7 +258,17 @@ function RecentPostsSection({
   const [expanded, setExpanded] = useState(true);
   const [showAll, setShowAll] = useState(false);
 
-  const visiblePosts = showAll ? posts : posts.slice(0, 5);
+  const visiblePosts = useMemo(() => (showAll ? posts : posts.slice(0, 5)), [showAll, posts]);
+
+  // #164 A: the spray roll-up is offline tag math over all posts, but
+  // parent-title resolution is relay work — scope it to the rows actually
+  // rendered (EventsList pattern); it widens when "Show all" reveals more
+  const commentTargets = useMemo(
+    () => (expanded ? visiblePosts.map(getCommentTarget).filter((t): t is string => !!t) : []),
+    [expanded, visiblePosts],
+  );
+  const { titles } = useEventTitles(commentTargets);
+  const activityLine = formatCommentActivity(posts);
 
   return (
     <div className="space-y-2">
@@ -269,10 +282,14 @@ function RecentPostsSection({
           size="sm"
           className="h-6 px-2"
           onClick={() => setExpanded(!expanded)}
+          aria-label="Toggle recent content"
         >
           {expanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
         </Button>
       </div>
+      {activityLine && (
+        <p className="text-xs text-amber-700 dark:text-amber-400">{activityLine}</p>
+      )}
 
       {expanded && (
         <div className="space-y-3">
@@ -315,8 +332,13 @@ function RecentPostsSection({
                 />
 
                 {/* Timestamp, kind, link, and delete */}
-                <div className="flex items-center justify-between text-xs text-muted-foreground">
-                  <span>{new Date(post.created_at * 1000).toLocaleString()}</span>
+                <div className="flex items-center justify-between text-xs text-muted-foreground gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="shrink-0">{new Date(post.created_at * 1000).toLocaleString()}</span>
+                    {post.kind === 1111 && (
+                      <CommentParentLink resolved={titles.get(getCommentTarget(post) ?? '')} />
+                    )}
+                  </div>
                   <div className="flex items-center gap-1.5">
                     {(() => {
                       try {

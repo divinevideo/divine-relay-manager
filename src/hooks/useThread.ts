@@ -7,6 +7,7 @@ import type { NostrEvent } from "@nostrify/nostrify";
 import { NRelay1 } from "@nostrify/nostrify";
 import { fetchFunnelcakeEvent } from "@/lib/funnelcakeApi";
 import { isRepostKind } from "@/lib/nip18";
+import { buildThreadReplyFilters } from "@/lib/threadFilters";
 
 export type FetchSource = 'rest' | 'local-relay' | 'external-relay' | 'banned-fallback';
 
@@ -198,9 +199,12 @@ export function useThread(
         ancestorEvents = [...ancestorEvents, ...externalResults.filter((e): e is NostrEvent => e !== null)];
       }
 
-      // Replies stay on WebSocket for now (Phase 2)
+      // Replies stay on WebSocket for now (Phase 2). Includes NIP-10 kind-1
+      // replies AND NIP-22 kind-1111 comments (scoped by root E/A tag) — Divine
+      // comments are kind 1111, so kinds:[1] alone showed none (#164 B). A
+      // single multi-filter REQ lets the relay union + dedupe.
       const replies = await nostr.query(
-        [{ kinds: [1], '#e': [eventId], limit: 20 }],
+        buildThreadReplyFilters(event, 20),
         { signal: combinedSignal }
       );
 
