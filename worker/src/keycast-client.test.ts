@@ -133,6 +133,47 @@ describe('keycast-client', () => {
     });
   });
 
+  // keycast#279 / divine-relay-manager#175: attribute an age-review status change
+  // to the moderator so keycast writes a durable admin_audit_events row. Mirrors
+  // clearVerifiedMinor's client-side actor guard, but actor rides the JSON body.
+  describe('actor attribution on status changes', () => {
+    const ACTOR = 'b'.repeat(64);
+
+    it('suspendUser includes a valid actor in the body', async () => {
+      const result = await suspendUser(VALID_PUBKEY, 'age_review', makeEnv(), ACTOR);
+      expect(result).toEqual({ success: true });
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(body).toEqual({ status: 'suspended', reason: 'age_review', actor: ACTOR });
+    });
+
+    it('banUser includes a valid actor in the body', async () => {
+      await banUser(VALID_PUBKEY, 'age_review_denied', makeEnv(), ACTOR);
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(body).toEqual({ status: 'banned', reason: 'age_review_denied', actor: ACTOR });
+    });
+
+    it('unsuspendUser includes a valid actor in the body', async () => {
+      await unsuspendUser(VALID_PUBKEY, makeEnv(), ACTOR);
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(body).toEqual({ status: 'active', actor: ACTOR });
+    });
+
+    it('drops a malformed actor instead of failing the status change (keycast 400s on it)', async () => {
+      const result = await suspendUser(VALID_PUBKEY, 'age_review', makeEnv(), 'not-a-pubkey');
+      expect(result).toEqual({ success: true });
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(body).toEqual({ status: 'suspended', reason: 'age_review' });
+      expect(body.actor).toBeUndefined();
+    });
+
+    it('omits actor when none is supplied (keycast log-only fallback)', async () => {
+      await banUser(VALID_PUBKEY, 'moderation', makeEnv());
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(body).toEqual({ status: 'banned', reason: 'moderation' });
+      expect(body.actor).toBeUndefined();
+    });
+  });
+
   describe('config validation', () => {
     it('returns not configured when KEYCAST_URL is missing', async () => {
       const result = await suspendUser(VALID_PUBKEY, 'age_review', makeEnv({ KEYCAST_URL: undefined }));
