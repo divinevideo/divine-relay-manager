@@ -120,6 +120,18 @@ The per-row parent link routes to the internal Events tab rather than the public
   resolve address coordinates (naddr) is treated as first-class work, not a
   footnote.
 
+### Contract note (narrowed in review)
+
+Banned/removed parent retrieval is guaranteed for **event-id targets only**. The
+address (naddr) lookup queries the live relay and degrades to a labeled
+not-found state: `getbannedevent` takes an event id and the relay has no
+by-coordinate banned lookup, so no in-repo fallback exists for A-only targets.
+This is the operative path in practice — `getCommentTarget` prefers the `E`
+root tag, both Divine clients always write one (mobile unconditionally, web for
+addressable roots too), and a production sample found 257/257 comments carry
+`E`, zero A-only. A relay-side by-coordinate banned lookup is filed as a
+funnelcake follow-up to close the residual gap for strict-NIP-22 clients.
+
 ## Testing
 
 - `buildThreadTree` NIP-22 nesting (critical, pure): NIP-22 nesting, mixed

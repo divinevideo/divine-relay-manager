@@ -571,7 +571,12 @@ export function EventsList({ relayUrl }: EventsListProps) {
       }
 
       if (searchMode.type === 'address') {
-        // Addressable video parents scope by kind+author+d, not by id (#164 A)
+        // Addressable video parents scope by kind+author+d, not by id (#164 A).
+        // Live relay only — no banned fallback is possible here: getbannedevent
+        // takes an event id and the relay has no by-coordinate banned lookup.
+        // In practice comments carry an E root tag (both Divine clients always
+        // write one; getCommentTarget prefers it), so parent links route through
+        // the id branch above and this A-only path is a rare degraded case.
         const events = await nostr.query(
           [{ kinds: [searchMode.addressKind], authors: [searchMode.pubkey], '#d': [searchMode.identifier], limit: 1 }],
           { signal: timeoutSignal },
@@ -1120,7 +1125,11 @@ export function EventsList({ relayUrl }: EventsListProps) {
                       <Search className="h-8 w-8 mx-auto mb-2 opacity-50" />
                       <p className="text-sm">No event found on relay</p>
                       <p className="text-xs mt-1 font-mono">{committedSearch.slice(0, 24)}...</p>
-                      <p className="text-xs mt-2">The event may have been deleted.</p>
+                      <p className="text-xs mt-2">
+                        {searchMode.type === 'address'
+                          ? 'The event may have been deleted or banned. Banned events can only be retrieved by event id — an address lookup queries the live relay only.'
+                          : 'The event may have been deleted.'}
+                      </p>
                       {/^[0-9a-f]{64}$/i.test(committedSearch) && (
                         <Button
                           variant="link"
