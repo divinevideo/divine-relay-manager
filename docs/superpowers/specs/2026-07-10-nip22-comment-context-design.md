@@ -133,9 +133,8 @@ by-coordinate banned lookup, so no in-repo fallback exists for A-only targets.
 This is the operative path in practice — `getCommentTarget` prefers the `E`
 root tag, both Divine clients always write one (mobile unconditionally, web for
 addressable roots too), and a production sample found 257/257 comments carry
-`E`, zero A-only. A relay-side by-coordinate banned lookup goes to a
-funnelcake follow-up issue to close the residual gap for strict-NIP-22
-clients (filed alongside this PR's review round).
+`E`, zero A-only. A relay-side by-coordinate banned lookup is filed as
+divine-funnelcake#649 to close the residual gap for strict-NIP-22 clients.
 
 ## Testing
 

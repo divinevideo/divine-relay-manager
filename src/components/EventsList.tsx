@@ -515,10 +515,11 @@ export function EventsList({ relayUrl }: EventsListProps) {
       if (searchMode.type === 'address') {
         // Addressable video parents scope by kind+author+d, not by id (#164 A).
         // Live relay only — no banned fallback is possible here: getbannedevent
-        // takes an event id and the relay has no by-coordinate banned lookup.
-        // In practice comments carry an E root tag (both Divine clients always
-        // write one; getCommentTarget prefers it), so parent links route through
-        // the id branch above and this A-only path is a rare degraded case.
+        // takes an event id and the relay has no by-coordinate banned lookup
+        // (divine-funnelcake#649 tracks adding one). In practice comments carry
+        // an E root tag (both Divine clients always write one; getCommentTarget
+        // prefers it), so parent links route through the id branch above and
+        // this A-only path is a rare degraded case.
         const events = await nostr.query(
           [{ kinds: [searchMode.addressKind], authors: [searchMode.pubkey], '#d': [searchMode.identifier], limit: 1 }],
           { signal: timeoutSignal },
