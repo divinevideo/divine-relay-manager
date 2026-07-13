@@ -7,14 +7,15 @@
 # found only by manually root-causing a mobile report). This check makes
 # that failure mode alert instead of hide.
 #
-# What it probes (production relay-manager worker, where these endpoints
-# live -- NOT api.divine.video, see #108):
+# What it probes (the relay-manager workers, where these endpoints live --
+# NOT api.divine.video, see #108), on both production and staging:
 #   GET  /v1/account/moderation-status                      -> expect 401
 #   POST /v1/minor-review-cases/<id>/parent-contact         -> expect 401
 #
 # Why 401 is the healthy signal: the endpoints require NIP-98 user auth,
-# so an unauthenticated probe answering 401 proves the path routes to the
-# worker AND the auth layer is alive. Anything else means trouble:
+# so an unauthenticated probe answering 401 proves the path is routed and
+# an auth layer answers -- the strongest signal an unauthenticated probe
+# can give. Anything else means trouble:
 #   404 -- routing broke (the #108 failure mode)
 #   302 -- CF Access got applied to /v1 paths (devices would be locked out)
 #   200 -- auth layer removed/bypassed (worst case: unauthenticated reads)
@@ -25,14 +26,16 @@
 # Runbook on failure:
 #   1. Check the run log for which probe failed and the code it saw.
 #   2. curl the URL yourself; if 404, check worker routes/deploy state
-#      (wrangler deployments list --config wrangler.prod.toml).
-#   3. If 302, someone changed the CF Access app covering api-relay-prod.
+#      (wrangler deployments list --config wrangler.<env>.toml).
+#   3. If 302, someone extended the CF Access app on that env over /v1.
 #   4. Remember: clients are silently failing open the whole time this
 #      is red -- treat as a minor-safety enforcement outage, not routine CI.
 #
-# Staging is deliberately not probed: api-relay-staging sits behind CF
-# Access for all callers, so an unauthenticated probe sees the edge 302,
-# not worker health -- there is no signal in it.
+# Staging note: the staging worker's /v1 paths bypass CF Access (verified
+# 2026-07-13: /v1 answers the worker's own 401 while /api/* 302s to Access)
+# -- mobile devices must reach /v1, so this is by design. If the staging
+# probe starts seeing 302, someone extended the Access app over /v1 and
+# staging devices are locked out.
 #
 # TODO(#173): when the api.divine.video ingress route lands, add
 # https://api.divine.video as a second BASE_URL probe target so coverage
@@ -44,7 +47,7 @@
 #     settings). Until Slack is wired, that one person is the whole
 #     alerting story.
 #   - If the SLACK_WEBHOOK_ALERTS secret is configured, failures also post
-#     to the alerts channel; absent secret, that step skips with a warning.
+#     to the alerts channel; absent secret, that step no-ops with a warning.
 #   - This repo is public: GitHub auto-disables scheduled workflows after
 #     60 days without repository activity -- the monitor can die silently
 #     during a quiet period. Re-enable from the Actions tab; consider a
@@ -78,7 +81,6 @@ jobs:
       - name: Probe minor-review endpoints (expect 401)
         id: probe
         run: |
-          BASE_URL="https://api-relay-prod.divine.video"
           FAILURES=""
 
           # Human-readable transport diagnosis for the common curl exits
@@ -104,19 +106,23 @@ jobs:
                   "$BASE_URL$path" 2>/dev/null) || code="transport_error: $(diagnose $?)"
               fi
               if [ "$code" = "401" ]; then
-                echo "OK: $method $path -> 401 (routed, auth layer alive)"
+                echo "OK: $method $BASE_URL$path -> 401 (routed, auth answering)"
                 return 0
               fi
-              echo "attempt $attempt: $method $path -> $code (expected 401)"
+              echo "attempt $attempt: $method $BASE_URL$path -> $code (expected 401)"
               # One retry damps transient edge blips without hiding real outages
               [ "$attempt" = "1" ] && sleep 30
             done
-            FAILURES="$FAILURES$method $path -> $code"$'\n'
+            FAILURES="$FAILURES$method $BASE_URL$path -> $code"$'\n'
             return 0
           }
 
-          probe GET  "/v1/account/moderation-status"
-          probe POST "/v1/minor-review-cases/synthetic-check/parent-contact"
+          for BASE_URL in \
+            "https://api-relay-prod.divine.video" \
+            "https://api-relay-staging.divine.video"; do
+            probe GET  "/v1/account/moderation-status"
+            probe POST "/v1/minor-review-cases/synthetic-check/parent-contact"
+          done
 
           if [ -n "$FAILURES" ]; then
             printf 'failures<<EOF\n%s\nEOF\n' "${FAILURES%$'\n'}" >> "$GITHUB_OUTPUT"
