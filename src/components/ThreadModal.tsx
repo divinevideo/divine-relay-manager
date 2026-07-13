@@ -108,7 +108,9 @@ export function ThreadModal({ eventId, open, onOpenChange, highlightEventId }: T
 
   // Fetch full thread
   const { data: thread, isLoading } = useQuery({
-    queryKey: ['full-thread', eventId],
+    // Env key (apiUrl): singleton QueryClient + per-env NPool — without it a
+    // reopen serves the other environment's thread until the refetch lands
+    queryKey: ['full-thread', config.apiUrl, eventId],
     queryFn: async ({ signal }) => {
       const timeout = AbortSignal.timeout(10000);
       const combinedSignal = AbortSignal.any([signal, timeout]);
@@ -143,6 +145,10 @@ export function ThreadModal({ eventId, open, onOpenChange, highlightEventId }: T
       return buildThreadTree(allEvents, rootId);
     },
     enabled: open && !!eventId,
+    // Reopening the modal is common while working a report; 30s keeps that
+    // instant without refiring 3 relay round-trips, yet stays fresh enough
+    // to pick up new comments on the next report visit
+    staleTime: 30_000,
   });
 
   return (

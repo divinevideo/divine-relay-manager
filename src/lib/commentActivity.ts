@@ -3,6 +3,8 @@
 
 import type { NostrEvent } from "@nostrify/nostrify";
 import { isVideoKind } from "@/lib/kindNames";
+import { isHex64 } from "@/lib/constants";
+import { parseCommentTarget } from "@/lib/eventTitles";
 
 /**
  * The root scope a kind-1111 comment is attached to: its `E` (root event id)
@@ -11,12 +13,21 @@ import { isVideoKind } from "@/lib/kindNames";
  * with no root scope. External-identity roots (`I` tag: URLs, podcasts,
  * geohashes) are intentionally not resolved — Divine's content is E/A video,
  * and there is no in-tool event view to link them to.
+ *
+ * Hex is case-normalized at this single source, so the spray count, the
+ * batched title map, and row-link lookups all compare targets canonically;
+ * unparseable values pass through raw and are rejected downstream.
  */
 export function getCommentTarget(event: Pick<NostrEvent, 'kind' | 'tags'>): string | undefined {
   if (event.kind !== 1111) return undefined;
   const rootE = event.tags.find(t => t[0] === 'E')?.[1];
-  if (rootE) return rootE;
-  return event.tags.find(t => t[0] === 'A')?.[1];
+  if (rootE) return isHex64(rootE) ? rootE.toLowerCase() : rootE;
+  const rootA = event.tags.find(t => t[0] === 'A')?.[1];
+  if (!rootA) return undefined;
+  const parsed = parseCommentTarget(rootA);
+  return parsed?.kind === 'address'
+    ? `${parsed.addressKind}:${parsed.pubkey}:${parsed.identifier}`
+    : rootA;
 }
 
 export interface CommentActivitySummary {

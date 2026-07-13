@@ -2,6 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Superseded in review rounds (PR #165):** code sketches below are the
+> as-planned versions; the merged implementation diverges where review rounds
+> amended it (env-keyed query caches, no `apiUrl` param on `useEventTitles`,
+> resolution scoped to rendered rows and gated on open, `parseSearchInput` /
+> `buildThreadTree` extracted to `src/lib/`, hex case-normalization). The
+> design spec's review amendments and the code are authoritative.
+
 **Goal:** Give moderators full NIP-22 comment context on the report surfaces — what a comment is attached to, whether an account sprayed across many targets, and the comments left on a reported video — closing issue #164.
 
 **Architecture:** Two independent improvements. (A) recent-content context adds a per-card spray roll-up and a per-row "on \<parent\>" link into the internal Events tab, backed by a batched title-resolution hook. (B) reported-content context extends `ThreadModal` to load and nest NIP-22 kind-1111 comments. New pure logic lives in `src/lib/`, the hook in `src/hooks/`, and one shared link component in `src/components/`.

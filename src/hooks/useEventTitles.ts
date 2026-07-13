@@ -60,7 +60,11 @@ export function useEventTitles(targets: string[]): { titles: Map<string, Resolve
   // and API switch together — keying on apiUrl stops cached titles from one
   // environment being served in another across the long-lived QueryClient.
   const apiUrl = config.apiUrl;
-  const distinct = useMemo(() => Array.from(new Set(targets)).sort(), [targets]);
+  // Stabilize identity at the hook boundary: some callers derive targets from
+  // filtered rows (new array every render), so memoize off the content, not
+  // the reference — no per-render map rebuilds, no caller memo requirement
+  const distinctKey = JSON.stringify(Array.from(new Set(targets)).sort());
+  const distinct = useMemo(() => JSON.parse(distinctKey) as string[], [distinctKey]);
 
   const { data: events = [], isLoading } = useQuery<NostrEvent[]>({
     queryKey: ['event-titles', apiUrl ?? '', distinct],

@@ -29,6 +29,17 @@ describe('getCommentTarget', () => {
     expect(getCommentTarget({ ...comment('x', []), kind: 1 })).toBeUndefined();
     expect(getCommentTarget(comment('x', []))).toBeUndefined();
   });
+
+  it('case-normalizes commenter-authored hex so equal targets compare equal', () => {
+    expect(getCommentTarget(comment('x', [['E', VID('c').toUpperCase()]]))).toBe(VID('c'));
+    expect(getCommentTarget(comment('x', [['A', `34236:${PK.toUpperCase()}:vid1`]]))).toBe(ADDR);
+    // ...so a video tagged with mixed-case hex counts as one target, not two
+    const s = summarizeCommentActivity([
+      comment('a', [['E', VID('c')]], '1'),
+      comment('b', [['E', VID('c').toUpperCase()]], '2'),
+    ]);
+    expect(s.distinctTargets).toBe(1);
+  });
 });
 
 describe('summarizeCommentActivity', () => {
