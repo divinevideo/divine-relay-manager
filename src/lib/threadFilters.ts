@@ -21,15 +21,20 @@ export function eventAddress(
 }
 
 /**
- * Relay filters for everything threaded under `event`:
+ * Relay filters for the replies/comments under `event`:
  * - NIP-10 kind-1 replies referencing it by lowercase `e`
  * - NIP-22 kind-1111 comments scoped to it as root by uppercase `E` (event id),
  *   and for addressable events also by uppercase `A` (address coordinate)
+ * - NIP-22 kind-1111 comments naming it as immediate parent by lowercase `e` —
+ *   when `event` is itself a comment, its replies carry E=<thread root>, so
+ *   the root-scope filters alone would miss them (a reported comment's replies)
  *
  * Divine comments are kind 1111, so a `kinds:[1]` query alone misses them —
  * this is the query foundation for #164 B (show a video's comments on its
- * report). Uppercase `E`/`A` catch the whole comment tree (top-level + nested,
- * which all carry the root scope), not just direct children.
+ * report). For a root event, uppercase `E`/`A` catch the whole comment tree
+ * (top-level + nested all carry the root scope). For a non-root comment, the
+ * lowercase-`e` filter catches direct replies only — deeper descendants would
+ * need per-level round-trips, which one batched REQ can't express.
  */
 export function buildThreadReplyFilters(
   event: Pick<NostrEvent, 'id' | 'kind' | 'pubkey' | 'tags'>,
@@ -38,6 +43,7 @@ export function buildThreadReplyFilters(
   const filters: NostrFilter[] = [
     { kinds: [1], '#e': [event.id], limit },
     { kinds: [1111], '#E': [event.id], limit },
+    { kinds: [1111], '#e': [event.id], limit },
   ];
   const address = eventAddress(event);
   if (address) {

@@ -55,10 +55,12 @@ export function buildThreadTree(events: NostrEvent[], rootId: string): ThreadNod
   function isChildOf(e: NostrEvent, parent: NostrEvent, parentAddress: string | undefined): boolean {
     if (e.kind === 1111) {
       const { id, address } = commentParent(e);
-      if (id && id === parent.id) return true;
+      // A fetched id-parent is authoritative — tags are commenter-authored, so
+      // an `e` and `a` that disagree (e→X, a→root) must not attach twice.
+      if (id && idSet.has(id)) return id === parent.id;
       if (address && parentAddress && address === parentAddress) return true;
       // Orphan (immediate parent not fetched): attach to root only, so it still shows.
-      const parentPresent = (!!id && idSet.has(id)) || (!!address && rootAddress === address);
+      const parentPresent = !!address && rootAddress === address;
       return parent.id === rootId && !parentPresent;
     }
     // NIP-10 kind-1 reply markers (existing behavior)

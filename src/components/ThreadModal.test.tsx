@@ -56,6 +56,21 @@ describe('buildThreadTree NIP-22', () => {
     expect(tree?.replies.filter(r => r.event.id === 'c1')).toHaveLength(1);
   });
 
+  it('attaches a comment whose e and a tags disagree only under its fetched e-parent', () => {
+    const root = ev({ id: 'root', kind: 34236, tags: [['d', 'vid1']] });
+    const c1 = ev({ id: 'c1', kind: 1111, tags: [['A', `34236:${PK}:vid1`], ['a', `34236:${PK}:vid1`], ['k', '34236']] });
+    // Commenter-authored tags can disagree: `e` names c1 while `a` names the
+    // root — a fetched id-parent is authoritative, so no double render
+    const sneaky = ev({
+      id: 'c2', kind: 1111,
+      tags: [['A', `34236:${PK}:vid1`], ['e', 'c1'], ['a', `34236:${PK}:vid1`], ['k', '1111']],
+    });
+    const tree = buildThreadTree([root, c1, sneaky], 'root');
+    expect(tree?.replies.map(r => r.event.id)).not.toContain('c2');
+    const c1node = tree?.replies.find(r => r.event.id === 'c1');
+    expect(c1node?.replies.map(r => r.event.id)).toEqual(['c2']);
+  });
+
   it('still nests NIP-10 kind-1 replies (no regression)', () => {
     const root = ev({ id: 'root', kind: 1 });
     const reply = ev({ id: 'r1', kind: 1, tags: [['e', 'root', '', 'reply']] });

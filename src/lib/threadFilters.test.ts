@@ -34,13 +34,20 @@ describe('buildThreadReplyFilters', () => {
   it('does not add an address filter for regular-kind events', () => {
     const filters = buildThreadReplyFilters({ ...base, kind: 22 });
     expect(filters.some(f => '#A' in f)).toBe(false);
-    expect(filters).toHaveLength(2);
+    expect(filters).toHaveLength(3);
+  });
+
+  it('fetches direct 1111 replies to a reported comment (parent e, not root E)', () => {
+    // A reported event can itself be a kind-1111 comment: its replies carry
+    // E=<thread root video>, e=<this comment> — the root-E filter misses them
+    const filters = buildThreadReplyFilters({ ...base, kind: 1111 });
+    expect(filters).toContainEqual({ kinds: [1111], '#e': [ID], limit: 100 });
   });
 
   it('adds an #A address filter for addressable videos — their comments scope by address', () => {
     const filters = buildThreadReplyFilters({ ...base, kind: 34236, tags: [['d', 'vid1']] });
     expect(filters).toContainEqual({ kinds: [1111], '#A': [`34236:${PK}:vid1`], limit: 100 });
-    expect(filters).toHaveLength(3);
+    expect(filters).toHaveLength(4);
   });
 
   it('honors a custom limit across every filter', () => {
