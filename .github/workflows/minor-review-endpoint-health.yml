@@ -16,16 +16,18 @@
 # NIP-98 user auth and reject an unauthenticated probe with the worker's
 # distinctive body ("... expected: Nostr <base64>", single-sourced in
 # verifyNip98Auth, worker/src/index.ts). The status code alone is NOT
-# enough: any unmatched path on these hosts also answers 401 via the
-# generic admin fallback (verified live), so a status-only probe would
-# stay green through a route regression -- the exact #108 failure class.
+# enough: any unmatched path under /v1 on these hosts also answers 401
+# via the worker's generic admin fallback (verified live; non-/v1 paths
+# hit CF Access at the edge instead), so a status-only probe would stay
+# green through a route regression -- the exact #108 failure class.
 # If the worker's error copy ever changes, this probe goes red (fail-safe);
 # update the marker and the copy together. What each outcome means:
 #   401 + marker -- healthy: endpoint routed, NIP-98 auth answering
 #   401 without marker -- generic admin fallback: the route did NOT match
 #          (removed/renamed/method drift). The #108-class failure.
-#   404 -- cannot happen unauth on these hosts today (everything falls to
-#          the 401 fallback); will matter for the api.divine.video target (#173)
+#   404 -- cannot happen unauth under /v1 on these hosts today (unmatched
+#          /v1 paths fall to the 401 fallback); will matter for the
+#          api.divine.video target (#173)
 #   302 -- CF Access got applied to /v1 paths (devices would be locked out)
 #   200 -- auth layer removed/bypassed (worst case: unauthenticated reads)
 #   403 -- the NIP-98 handler's status contract changed (mobile clients
@@ -128,8 +130,11 @@ jobs:
                 return 0
               fi
               if [ "$code" = "401" ]; then
-                # Sanitize the response-derived snippet: single line, bounded
-                snippet=$(tr -d '\r' < "$BODY_FILE" | tr '\n' ' ' | head -c 100)
+                # Sanitize the response-derived snippet: bound the read FIRST
+                # (head before the pipe: a multi-MB body must not SIGPIPE the
+                # pipeline if pipefail is ever enabled), then single-line and
+                # strip control chars (ANSI etc.) for logs/annotation/Slack
+                snippet=$(head -c 100 "$BODY_FILE" | tr -d '\r' | tr '\n' ' ' | tr -cd '[:print:]')
                 code="401 without NIP-98 marker (generic fallback; route regression?): $snippet"
               fi
               echo "attempt $attempt: $method $BASE_URL$path -> $code (expected 401 + NIP-98 marker)"

@@ -1867,6 +1867,8 @@ async function verifyNip98Auth(
 ): Promise<Nip98Result> {
   const authHeader = request.headers.get('Authorization');
   if (!authHeader || !authHeader.startsWith('Nostr ')) {
+    // 'expected: Nostr' is probed by .github/workflows/minor-review-endpoint-health.yml
+    // as the endpoint-liveness marker -- rewording this string reds the monitor; update together
     return { valid: false, error: 'Missing or invalid Authorization header (expected: Nostr <base64>)' };
   }
 
