@@ -172,6 +172,22 @@ describe('keycast-client', () => {
       expect(body).toEqual({ status: 'banned', reason: 'moderation' });
       expect(body.actor).toBeUndefined();
     });
+
+    it('drops an uppercase-hex actor (Nostr pubkeys are canonical lowercase; keycast log-only fallback)', async () => {
+      const result = await suspendUser(VALID_PUBKEY, 'age_review', makeEnv(), 'A'.repeat(64));
+      expect(result).toEqual({ success: true });
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(body).toEqual({ status: 'suspended', reason: 'age_review' });
+      expect(body.actor).toBeUndefined();
+    });
+
+    it('drops a wrong-length actor on the ban leg (63 hex chars)', async () => {
+      const result = await banUser(VALID_PUBKEY, 'age_review_denied', makeEnv(), 'a'.repeat(63));
+      expect(result).toEqual({ success: true });
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(body).toEqual({ status: 'banned', reason: 'age_review_denied' });
+      expect(body.actor).toBeUndefined();
+    });
   });
 
   describe('config validation', () => {
