@@ -3,6 +3,7 @@ import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useToast } from '@/hooks/useToast';
 import { useAdminApi } from '@/hooks/useAdminApi';
+import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { ApiError } from '@/lib/adminApi';
 import { UNDERAGE_REPORT_CATEGORY } from '@/lib/constants';
 import { useBulkModerateJob } from '@/hooks/useBulkModerateJob';
@@ -29,6 +30,7 @@ export function UserActions({
 }: UserActionsProps) {
   const { toast } = useToast();
   const api = useAdminApi();
+  const { user } = useCurrentUser();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
 
@@ -85,7 +87,7 @@ export function UserActions({
   // useDecisionLog's ['decisions', targetId]. A report legitimately stays
   // unresolved when no row was written (the .catch path), which is correct.
   const logAudit = (params: Parameters<typeof api.logDecision>[0]) =>
-    void api.logDecision(params)
+    void api.logDecision({ moderatorPubkey: user?.pubkey, ...params })
       .then(() => {
         queryClient.invalidateQueries({ queryKey: ['decisions'] });
       })
@@ -198,6 +200,7 @@ export function UserActions({
         targetId: pubkey,
         action: job.action === 'delete-all' ? 'bulk_delete' : 'bulk_age_restrict',
         reason: `Bulk ${job.action}: ${job.mediaProcessed} media file(s)`,
+        moderatorPubkey: user?.pubkey,
       }).catch((e) => console.warn('[UserActions] bulk audit log failed', e));
       onActionComplete?.();
     },

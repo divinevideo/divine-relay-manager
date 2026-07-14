@@ -3,6 +3,7 @@ import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useToast } from '@/hooks/useToast';
 import { useAdminApi } from '@/hooks/useAdminApi';
+import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { DeleteConfirmDialog } from './DeleteConfirmDialog';
 import { ShieldX, Undo2, Video, ShieldAlert, Unlock, Trash2 } from 'lucide-react';
 
@@ -35,6 +36,7 @@ export function EventActions({
 }: EventActionsProps) {
   const { toast } = useToast();
   const api = useAdminApi();
+  const { user } = useCurrentUser();
   const queryClient = useQueryClient();
   const hasMedia = mediaHashes.length > 0;
 
@@ -45,7 +47,7 @@ export function EventActions({
   // log so the report converges without a manual refresh; on failure, surface a
   // non-blocking toast. Mirrors UserActions.logAudit.
   const logAudit = (params: Parameters<typeof api.logDecision>[0]) =>
-    void api.logDecision(params)
+    void api.logDecision({ moderatorPubkey: user?.pubkey, ...params })
       .then(() => { queryClient.invalidateQueries({ queryKey: ['decisions'] }); })
       .catch((e) => {
         console.warn('[EventActions] audit log failed', e);

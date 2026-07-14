@@ -10,6 +10,7 @@ import { useModerationStatus } from "@/hooks/useModerationStatus";
 import { useToast } from "@/hooks/useToast";
 import { getKindInfo, getKindCategory } from "@/lib/kindNames";
 import { useAdminApi } from "@/hooks/useAdminApi";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { UserIdentifier } from "@/components/UserIdentifier";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -359,6 +360,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
   const { nostr } = useNostr();
   const { toast } = useToast();
   const { banPubkey, deleteEvent, unbanPubkey, allowEvent, verifyPubkeyBanned, verifyPubkeyUnbanned, verifyEventDeleted, logDecision } = useAdminApi();
+  const { user } = useCurrentUser();
   const queryClient = useQueryClient();
 
   const [_showRawJson, _setShowRawJson] = useState(false);
@@ -525,6 +527,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
         targetId: pubkey,
         action: 'unban_user',
         reason: 'Unbanned from event viewer',
+        moderatorPubkey: user?.pubkey,
       });
       return pubkey;
     },
@@ -572,6 +575,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
         targetId: eventId,
         action: 'restore_event',
         reason: 'Restored from event viewer',
+        moderatorPubkey: user?.pubkey,
       });
       return eventId;
     },

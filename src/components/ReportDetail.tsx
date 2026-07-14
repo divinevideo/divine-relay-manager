@@ -37,6 +37,7 @@ import { AISummary } from "@/components/AISummary";
 
 import { ThreadModal } from "@/components/ThreadModal";
 import { useAdminApi } from "@/hooks/useAdminApi";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { useAppContext } from "@/hooks/useAppContext";
 import { extractMediaHashes, type ResolutionStatus } from "@/lib/adminApi";
 import { useMediaStatus } from "@/hooks/useMediaStatus";
@@ -88,6 +89,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   const {
     deleteEvent, allowEvent, markAsReviewed, logDecision, deleteDecisions,
   } = useAdminApi();
+  const { user } = useCurrentUser();
 
   // Audit logging is a non-critical side effect. Fire-and-forget so a failing
   // /api/decisions write can't make an action whose authoritative step already
@@ -96,7 +98,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   // toast. Mirrors UserActions.logAudit. (confirmAutoHide keeps an awaited
   // logDecision: there the decision write IS the action.)
   const logAudit = (params: Parameters<typeof logDecision>[0]) =>
-    void logDecision(params)
+    void logDecision({ moderatorPubkey: user?.pubkey, ...params })
       .then(() => { queryClient.invalidateQueries({ queryKey: ['decisions'] }); })
       .catch((e) => {
         console.warn('[ReportDetail] audit log failed', e);
@@ -295,6 +297,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
         action: 'auto_hide_confirmed',
         reason: 'Auto-hide confirmed by moderator',
         reportId: report?.id,
+        moderatorPubkey: user?.pubkey,
       });
       return targetId;
     },
