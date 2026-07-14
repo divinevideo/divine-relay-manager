@@ -75,10 +75,38 @@ describe('DivineSessionProvider / useDivineSession', () => {
 
   it('ignores a non-canonical pubkey from getPublicKey', async () => {
     getSession.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 'tok' });
-    getPublicKey.mockResolvedValue('NOT-HEX');
+    getPublicKey.mockResolvedValue('not a pubkey at all');
     renderProbe();
     await waitFor(() => expect(screen.getByTestId('resolving')).toHaveTextContent('false'));
     expect(screen.getByTestId('pubkey')).toHaveTextContent('none');
+  });
+
+  it('normalizes an uppercase/whitespace pubkey to canonical lowercase', async () => {
+    getSession.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 'tok' });
+    getPublicKey.mockResolvedValue(`  ${'A'.repeat(64)}  `);
+    renderProbe();
+    await waitFor(() => expect(screen.getByTestId('pubkey')).toHaveTextContent('a'.repeat(64)));
+  });
+
+  it('stays resolving (no "Sign in" flash) while the pubkey resolves for a valid session', async () => {
+    // credentials resolve first; the pubkey RPC is still pending. isResolving must
+    // stay true across that window so the button shows a skeleton, not "Sign in".
+    let releasePubkey!: (pk: string) => void;
+    getSession.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 'tok' });
+    getPublicKey.mockReturnValue(
+      new Promise((resolve) => {
+        releasePubkey = resolve;
+      }),
+    );
+    renderProbe();
+    await waitFor(() => expect(screen.getByTestId('token')).toHaveTextContent('tok'));
+    expect(screen.getByTestId('resolving')).toHaveTextContent('true');
+    expect(screen.getByTestId('pubkey')).toHaveTextContent('none');
+    await act(async () => {
+      releasePubkey(PUBKEY);
+    });
+    await waitFor(() => expect(screen.getByTestId('resolving')).toHaveTextContent('false'));
+    expect(screen.getByTestId('pubkey')).toHaveTextContent(PUBKEY);
   });
 
   it('degrades to signed-out when getSession throws (storage disabled)', async () => {

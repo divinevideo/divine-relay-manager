@@ -60,12 +60,15 @@ interface BulkDeleteByKindProps {
     action: string;
     reason?: string;
     reportId?: string;
+    moderatorPubkey?: string;
   }) => Promise<void>;
   /** Report ID for decision logging */
   reportId?: string;
+  /** Logged-in moderator, attributed on each audit write (#178). */
+  moderatorPubkey?: string;
 }
 
-export function BulkDeleteByKind({ pubkey, onComplete, variant = "button", logDecision, reportId }: BulkDeleteByKindProps) {
+export function BulkDeleteByKind({ pubkey, onComplete, variant = "button", logDecision, reportId, moderatorPubkey }: BulkDeleteByKindProps) {
   const { nostr } = useNostr();
   const { deleteEvent } = useAdminApi();
   const { toast } = useToast();
@@ -147,6 +150,7 @@ export function BulkDeleteByKind({ pubkey, onComplete, variant = "button", logDe
                 action: 'delete_event',
                 reason: deleteReason,
                 reportId,
+                moderatorPubkey,
               });
             } catch (e) {
               console.warn(`Failed to log decision for ${event.id}:`, e);

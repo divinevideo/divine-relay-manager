@@ -14,9 +14,11 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
   const [credentials, setCredentials] = useState<StoredCredentials | null>(null);
   const [credentialsResolved, setCredentialsResolved] = useState(false);
   const [pubkey, setPubkey] = useState<string | undefined>();
-  // Whether the pubkey-resolution attempt has settled (success OR failure), so a
-  // failed/absent getPublicKey settles isResolving instead of hanging the skeleton.
-  const [identityResolved, setIdentityResolved] = useState(true);
+  // The access token the pubkey-resolution attempt has settled for (success OR
+  // failure). Compared against the live token during render so isResolving is
+  // derived, not lagged by a post-commit effect (avoids a one-frame "Sign in"
+  // flash for an already-signed-in moderator on load).
+  const [resolvedForToken, setResolvedForToken] = useState<string | undefined>(undefined);
 
   // Bumped on logout so an in-flight refresh that started earlier can detect it
   // lost the race and undo any session the SDK re-persisted mid-refresh.
@@ -29,6 +31,11 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  // Known phase-1 limitation: getSessionWithRefresh() returns null both for "no
+  // session" and "refresh transiently failed", so a network blip during a
+  // focus-triggered refresh collapses to signed-out until the next resolve.
+  // Attribution-only and self-recovering (next focus/action re-resolves), so not
+  // worth the getSession-fallback complexity here; revisit with phase-2 verify.
   const refresh = useCallback(async () => {
     const gen = generationRef.current;
     let creds: StoredCredentials | null = null;
@@ -71,27 +78,33 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
     let cancelled = false;
     if (!signer) {
       setPubkey(undefined);
-      setIdentityResolved(true);
       return;
     }
-    setIdentityResolved(false);
     signer
       .getPublicKey()
-      // Keep the prior pubkey on a re-resolve (token refresh) to avoid flapping.
-      // The worker rejects non-canonical pubkeys, so only accept lowercase 64-hex.
       .then((pk) => {
-        if (!cancelled) setPubkey((prev) => (HEX_64.test(pk) ? pk : prev));
+        if (cancelled) return;
+        // The worker requires canonical lowercase 64-hex. Normalize the common
+        // non-canonical shapes (uppercase / whitespace); keep the prior pubkey
+        // and warn on anything still invalid rather than degrading silently.
+        const normalized = pk.trim().toLowerCase();
+        if (HEX_64.test(normalized)) {
+          setPubkey(normalized);
+        } else {
+          console.warn('[divine-login] getPublicKey returned a non-canonical pubkey; attribution unavailable', pk);
+        }
       })
       .catch(() => {
         /* attribution degrades to null; never block on identity */
       })
       .finally(() => {
-        if (!cancelled) setIdentityResolved(true);
+        // Mark this token resolved (success or failure) so isResolving settles.
+        if (!cancelled) setResolvedForToken(accessToken);
       });
     return () => {
       cancelled = true;
     };
-  }, [signer]);
+  }, [signer, accessToken]);
 
   const logout = useCallback(() => {
     generationRef.current += 1;
@@ -101,7 +114,10 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
     setCredentialsResolved(true); // logout is a definitive "signed out" resolution
   }, []);
 
-  const isResolving = !credentialsResolved || (!!accessToken && !identityResolved);
+  // Identity is pending when there's a token we have not finished resolving for.
+  // Derived during render so it never lags the token by a frame.
+  const identityResolved = !accessToken || resolvedForToken === accessToken;
+  const isResolving = !credentialsResolved || !identityResolved;
 
   const value = useMemo<DivineSessionValue>(
     () => ({ credentials, pubkey, signer, isResolving, startLogin: sdkStartLogin, logout, refresh }),

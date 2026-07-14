@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/collapsible";
 import { useToast } from "@/hooks/useToast";
 import { useAdminApi } from "@/hooks/useAdminApi";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 import type { BannedPubkeyEntry } from "@/lib/adminApi";
 import {
   Bug,
@@ -75,6 +76,7 @@ export function DebugPanel() {
     verifyPubkeyBanned,
     verifyPubkeyUnbanned,
   } = useAdminApi();
+  const { user } = useCurrentUser();
   const [testPubkey, setTestPubkey] = useState("");
   const [rpcMethod, setRpcMethod] = useState("listbannedpubkeys");
   const [rpcParams, setRpcParams] = useState("");
@@ -203,6 +205,7 @@ export function DebugPanel() {
           targetId: pubkey,
           action: 'ban_user',
           reason: 'Debug test ban',
+          moderatorPubkey: user?.pubkey,
         });
         results.logResult = logResult;
       } catch (error) {
@@ -302,6 +305,7 @@ export function DebugPanel() {
           targetId: pubkey,
           action: 'unban_user',
           reason: 'Debug test unban',
+          moderatorPubkey: user?.pubkey,
         });
         results.logResult = logResult;
       } catch (error) {

@@ -1122,6 +1122,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                         pubkey={context.reportedUser.pubkey}
                         logDecision={logDecision}
                         reportId={report?.id}
+                        moderatorPubkey={user?.pubkey}
                         onComplete={handleActionComplete}
                       />
                     </div>
