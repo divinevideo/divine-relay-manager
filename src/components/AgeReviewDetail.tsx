@@ -126,8 +126,17 @@ export function AgeReviewDetail({ caseData: c }: Props) {
       // it through, or invalidate if a response ever omits it.
       if (data.case) {
         queryClient.setQueryData(['age-review-case', c.id], { success: true, case: data.case });
+        // ...and the hand-off's lookup key: left stale, re-entering the
+        // ?pubkey= hand-off within its cache lifetime re-seeds the per-case
+        // entry with the pre-action ACTIVE row, resurrecting the exact hole
+        // above. Terminal states have no active case; write that truth.
+        queryClient.setQueryData(
+          ['age-review-active-case', c.pubkey],
+          { success: true, case: TERMINAL_STATES.includes(data.case.state) ? null : data.case },
+        );
       } else {
         queryClient.invalidateQueries({ queryKey: ['age-review-case', c.id] });
+        queryClient.removeQueries({ queryKey: ['age-review-active-case', c.pubkey] });
       }
       const requestedState = pendingStateRef.current as AgeReviewState | undefined;
       if (requestedState && ENFORCEMENT_STATES.includes(requestedState) && data.enforcementComplete === false) {
@@ -154,6 +163,9 @@ export function AgeReviewDetail({ caseData: c }: Props) {
         queryClient.invalidateQueries({ queryKey: ['age-review-cases'] });
         // The reload must also reach the per-case fallback the hand-off seeds
         queryClient.invalidateQueries({ queryKey: ['age-review-case', c.id] });
+        // Remove (not invalidate) the lookup entry: the hand-off effect seeds
+        // synchronously from cached data before any refetch could land
+        queryClient.removeQueries({ queryKey: ['age-review-active-case', c.pubkey] });
         toast({
           title: 'Case changed since you opened it',
           description: 'Another moderator or an automated deadline action modified this case. Reloaded the latest state; review it and re-apply if still needed.',
