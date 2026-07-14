@@ -122,11 +122,12 @@ export function AgeReview() {
     // the ?case= normalization renders immediately instead of paying a second
     // round-trip (during which the pane regressed to the generic prompt and
     // the mobile sheet bounced closed) — the hand-off's second half.
-    if (pubkeyLookup?.case) {
-      queryClient.setQueryData(['age-review-case', pubkeyResolvedId], { success: true, case: pubkeyLookup.case });
+    const resolvedCase = pubkeyMatch ?? pubkeyLookup?.case;
+    if (resolvedCase) {
+      queryClient.setQueryData(['age-review-case', pubkeyResolvedId], { success: true, case: resolvedCase });
     }
     setSelectedCaseId(pubkeyResolvedId);
-  }, [pubkeyParam, pubkeyResolvedId, pubkeyLookup, queryClient, setSelectedCaseId]);
+  }, [pubkeyParam, pubkeyResolvedId, pubkeyMatch, pubkeyLookup, queryClient, setSelectedCaseId]);
 
   // A ?pubkey= that resolves to no active case (already cleared/verified, or
   // still being created) gets an explicit empty state, not a blank panel — but
