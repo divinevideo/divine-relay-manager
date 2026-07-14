@@ -124,6 +124,11 @@ export function AgeReview() {
   // only once the active list has loaded and the fallback lookup has settled.
   const pubkeyUnresolved = !!pubkeyParam && !pubkeyResolvedId
     && activeData !== undefined && !pubkeyFetching;
+  // While the hand-off lookup is still in flight, say so — the generic
+  // "Select a case" prompt here read as "nothing happened" to moderators
+  // (a fresh case isn't in the 30s-cached list, so the direct lookup's
+  // round-trip is a visible pause on the report -> age-review hand-off).
+  const pubkeyResolving = !!pubkeyParam && !pubkeyResolvedId && !pubkeyUnresolved;
 
   const activeCounts = useMemo(() => {
     if (!activeData?.cases) return { total: 0, urgent: 0 };
@@ -263,6 +268,11 @@ export function AgeReview() {
 
   const detailContent = selectedCase ? (
     <AgeReviewDetail caseData={selectedCase} />
+  ) : pubkeyResolving ? (
+    <div className="flex items-center justify-center h-full gap-2 text-sm text-muted-foreground">
+      <RefreshCw className="h-4 w-4 animate-spin" />
+      Opening this account&apos;s age-review case…
+    </div>
   ) : pubkeyUnresolved ? (
     <div className="flex items-center justify-center h-full p-6 text-center text-sm text-muted-foreground">
       No active age-review case for this account. It may already be resolved (for example a verified minor), or the case is still being created — refresh in a moment.
@@ -277,7 +287,7 @@ export function AgeReview() {
     return (
       <Card className="h-full flex flex-col overflow-hidden">
         {listContent}
-        <Sheet open={!!selectedCase || pubkeyUnresolved} onOpenChange={() => setSelectedCaseId(null)}>
+        <Sheet open={!!selectedCase || pubkeyUnresolved || pubkeyResolving} onOpenChange={() => setSelectedCaseId(null)}>
           <SheetContent side="bottom" className="h-[80vh] p-0">
             {detailContent}
           </SheetContent>
