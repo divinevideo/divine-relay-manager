@@ -167,3 +167,68 @@ describe('DivineSessionProvider / useDivineSession', () => {
     expect(screen.getByTestId('resolving')).toHaveTextContent('false');
   });
 });
+
+describe('getModeratorPubkey (audit-write identity snapshot)', () => {
+  function ModProbe({ onCapture }: { onCapture: (v: string | undefined) => void }) {
+    const { getModeratorPubkey, credentials } = useDivineSession();
+    return (
+      <div>
+        <span data-testid="token">{credentials?.accessToken ?? 'none'}</span>
+        <button onClick={async () => onCapture(await getModeratorPubkey())}>capture</button>
+      </div>
+    );
+  }
+
+  it('snapshots the resolved moderator pubkey for an audit write', async () => {
+    getSession.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 'tok' });
+    let captured: string | undefined = 'sentinel';
+    render(
+      <DivineSessionProvider>
+        <ModProbe onCapture={(v) => { captured = v; }} />
+      </DivineSessionProvider>,
+    );
+    await waitFor(() => expect(screen.getByTestId('token')).toHaveTextContent('tok'));
+    await act(async () => {
+      fireEvent.click(screen.getByText('capture'));
+    });
+    expect(captured).toBe(PUBKEY);
+  });
+
+  it('waits for an in-flight pubkey then returns it (boot-window race)', async () => {
+    let releasePubkey!: (pk: string) => void;
+    getSession.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 'tok' });
+    getPublicKey.mockReturnValue(
+      new Promise((resolve) => {
+        releasePubkey = resolve;
+      }),
+    );
+    let captured: string | undefined = 'sentinel';
+    render(
+      <DivineSessionProvider>
+        <ModProbe onCapture={(v) => { captured = v; }} />
+      </DivineSessionProvider>,
+    );
+    await waitFor(() => expect(screen.getByTestId('token')).toHaveTextContent('tok'));
+    // Capture while the pubkey is still resolving; the audit path must wait for it.
+    await act(async () => {
+      fireEvent.click(screen.getByText('capture'));
+      releasePubkey(PUBKEY);
+    });
+    expect(captured).toBe(PUBKEY);
+  });
+
+  it('returns undefined for an audit write when signed out', async () => {
+    getSession.mockResolvedValue(null);
+    let captured: string | undefined = 'sentinel';
+    render(
+      <DivineSessionProvider>
+        <ModProbe onCapture={(v) => { captured = v; }} />
+      </DivineSessionProvider>,
+    );
+    await waitFor(() => expect(screen.getByTestId('token')).toHaveTextContent('none'));
+    await act(async () => {
+      fireEvent.click(screen.getByText('capture'));
+    });
+    expect(captured).toBeUndefined();
+  });
+});

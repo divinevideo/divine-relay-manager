@@ -9,6 +9,10 @@ import { DivineRpcSigner } from '@/lib/divineSigner';
 import { DivineSessionContext, type DivineSessionValue } from '@/contexts/DivineSessionContext';
 
 const HEX_64 = /^[0-9a-f]{64}$/;
+// How long an audit write waits for an in-flight pubkey before falling back to
+// null. getPublicKey is cached once resolved, so this only bites in the brief
+// boot window. Never blocks the moderation action itself.
+const MOD_PUBKEY_WAIT_MS = 3000;
 
 export function DivineSessionProvider({ children }: { children: ReactNode }) {
   const [credentials, setCredentials] = useState<StoredCredentials | null>(null);
@@ -24,6 +28,9 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
   // lost the race and undo any session the SDK re-persisted mid-refresh.
   const generationRef = useRef(0);
   const mountedRef = useRef(true);
+  // Latest signer, read by getModeratorPubkey so it can snapshot the identity at
+  // action-start time (see below).
+  const signerRef = useRef<NostrSigner | null>(null);
   useEffect(() => {
     mountedRef.current = true;
     return () => {
@@ -73,6 +80,30 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
     () => (accessToken ? new DivineRpcSigner(() => accessToken) : null),
     [accessToken],
   );
+  useEffect(() => {
+    signerRef.current = signer;
+  }, [signer]);
+
+  // Snapshot the moderator pubkey for an audit write. Reads the signer at call
+  // time (so callers can capture the identity at ACTION START and a later
+  // logout/switch can't retarget a long job) and waits briefly for an in-flight
+  // pubkey before falling back to undefined. getPublicKey is cached once
+  // resolved, so this returns instantly in the common case and never gates the
+  // moderation action.
+  const getModeratorPubkey = useCallback(async (): Promise<string | undefined> => {
+    const sig = signerRef.current;
+    if (!sig) return undefined;
+    try {
+      const pk = await Promise.race([
+        sig.getPublicKey(),
+        new Promise<string>((resolve) => setTimeout(() => resolve(''), MOD_PUBKEY_WAIT_MS)),
+      ]);
+      const normalized = pk.trim().toLowerCase();
+      return HEX_64.test(normalized) ? normalized : undefined;
+    } catch {
+      return undefined;
+    }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -120,8 +151,17 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
   const isResolving = !credentialsResolved || !identityResolved;
 
   const value = useMemo<DivineSessionValue>(
-    () => ({ credentials, pubkey, signer, isResolving, startLogin: sdkStartLogin, logout, refresh }),
-    [credentials, pubkey, signer, isResolving, logout, refresh],
+    () => ({
+      credentials,
+      pubkey,
+      signer,
+      isResolving,
+      getModeratorPubkey,
+      startLogin: sdkStartLogin,
+      logout,
+      refresh,
+    }),
+    [credentials, pubkey, signer, isResolving, getModeratorPubkey, logout, refresh],
   );
 
   return <DivineSessionContext.Provider value={value}>{children}</DivineSessionContext.Provider>;

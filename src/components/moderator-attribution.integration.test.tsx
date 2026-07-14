@@ -3,7 +3,7 @@
 // + REAL useCurrentUser + REAL EventActions, mocking only the SDK boundary and the
 // admin API. Guards against "green units over an inert path" (#178).
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { TooltipProvider } from '@/components/ui/tooltip';
 
@@ -76,6 +76,30 @@ describe('moderator attribution (composed: provider -> useCurrentUser -> moderat
     fireEvent.click(screen.getByRole('button', { name: /Ban Event/i }));
 
     await waitFor(() => expect(api.banEvent).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(api.logDecision).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'ban_event', moderatorPubkey: MOD_PUBKEY }),
+      ),
+    );
+  });
+
+  it('captures the pubkey for an action fired during the boot-resolve window (no null attribution)', async () => {
+    // getPublicKey is deferred: the moderator acts before their identity resolves.
+    let releasePubkey!: (pk: string) => void;
+    getPublicKey.mockReturnValue(
+      new Promise((resolve) => {
+        releasePubkey = resolve;
+      }),
+    );
+    renderComposed();
+    // Ban immediately, while the pubkey is still resolving (probe reads 'none').
+    expect(screen.getByTestId('resolved-mod')).toHaveTextContent('none');
+    fireEvent.click(await screen.findByRole('button', { name: /Ban Event/i }));
+    await waitFor(() => expect(api.banEvent).toHaveBeenCalled());
+    // The detached audit path waits for the in-flight identity; now it resolves.
+    await act(async () => {
+      releasePubkey(MOD_PUBKEY);
+    });
     await waitFor(() =>
       expect(api.logDecision).toHaveBeenCalledWith(
         expect.objectContaining({ action: 'ban_event', moderatorPubkey: MOD_PUBKEY }),

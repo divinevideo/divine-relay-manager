@@ -36,7 +36,7 @@ export function EventActions({
 }: EventActionsProps) {
   const { toast } = useToast();
   const api = useAdminApi();
-  const { user } = useCurrentUser();
+  const { getModeratorPubkey } = useCurrentUser();
   const queryClient = useQueryClient();
   const hasMedia = mediaHashes.length > 0;
 
@@ -46,13 +46,16 @@ export function EventActions({
   // action is the source of truth. On a successful write, re-invalidate the decision
   // log so the report converges without a manual refresh; on failure, surface a
   // non-blocking toast. Mirrors UserActions.logAudit.
+  // Detached audit write: waits briefly for the moderator identity (captured at
+  // call time), then attributes or falls back to null. Never blocks the action.
   const logAudit = (params: Parameters<typeof api.logDecision>[0]) =>
-    void api.logDecision({ moderatorPubkey: user?.pubkey, ...params })
-      .then(() => { queryClient.invalidateQueries({ queryKey: ['decisions'] }); })
-      .catch((e) => {
-        console.warn('[EventActions] audit log failed', e);
-        toast({ title: 'Action applied; audit log not recorded' });
-      });
+    void getModeratorPubkey().then((moderatorPubkey) =>
+      api.logDecision({ ...params, moderatorPubkey })
+        .then(() => { queryClient.invalidateQueries({ queryKey: ['decisions'] }); })
+        .catch((e) => {
+          console.warn('[EventActions] audit log failed', e);
+          toast({ title: 'Action applied; audit log not recorded' });
+        }));
 
   const banEventMutation = useMutation({
     mutationFn: async () => {

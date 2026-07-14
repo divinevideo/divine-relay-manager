@@ -360,7 +360,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
   const { nostr } = useNostr();
   const { toast } = useToast();
   const { banPubkey, deleteEvent, unbanPubkey, allowEvent, verifyPubkeyBanned, verifyPubkeyUnbanned, verifyEventDeleted, logDecision } = useAdminApi();
-  const { user } = useCurrentUser();
+  const { getModeratorPubkey } = useCurrentUser();
   const queryClient = useQueryClient();
 
   const [_showRawJson, _setShowRawJson] = useState(false);
@@ -521,13 +521,14 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
 
   const unbanMutation = useMutation({
     mutationFn: async ({ pubkey }: { pubkey: string }) => {
+      const moderator = getModeratorPubkey(); // snapshot identity at action start
       await unbanPubkey(pubkey);
       await logDecision({
         targetType: 'pubkey',
         targetId: pubkey,
         action: 'unban_user',
         reason: 'Unbanned from event viewer',
-        moderatorPubkey: user?.pubkey,
+        moderatorPubkey: await moderator,
       });
       return pubkey;
     },
@@ -569,13 +570,14 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
 
   const restoreMutation = useMutation({
     mutationFn: async ({ eventId }: { eventId: string }) => {
+      const moderator = getModeratorPubkey(); // snapshot identity at action start
       await allowEvent(eventId);
       await logDecision({
         targetType: 'event',
         targetId: eventId,
         action: 'restore_event',
         reason: 'Restored from event viewer',
-        moderatorPubkey: user?.pubkey,
+        moderatorPubkey: await moderator,
       });
       return eventId;
     },

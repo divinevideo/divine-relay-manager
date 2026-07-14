@@ -29,7 +29,9 @@ vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => api }));
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast }) }));
 // Logged-in moderator, so audit writes carry attribution (#178).
 const MOD_PUBKEY = 'e'.repeat(64);
-vi.mock('@/hooks/useCurrentUser', () => ({ useCurrentUser: () => ({ user: { pubkey: MOD_PUBKEY } }) }));
+vi.mock('@/hooks/useCurrentUser', () => ({
+  useCurrentUser: () => ({ user: { pubkey: MOD_PUBKEY }, getModeratorPubkey: async () => MOD_PUBKEY }),
+}));
 
 const PUBKEY = 'a'.repeat(64);
 

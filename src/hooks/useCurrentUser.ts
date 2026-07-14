@@ -13,7 +13,7 @@ export interface CurrentUser {
 }
 
 export function useCurrentUser() {
-  const { pubkey, signer } = useDivineSession();
+  const { pubkey, signer, getModeratorPubkey } = useDivineSession();
 
   const user = useMemo<CurrentUser | undefined>(
     () => (pubkey && signer ? { pubkey, signer } : undefined),
@@ -28,5 +28,8 @@ export function useCurrentUser() {
     user,
     users,
     ...author.data,
+    // Prefer this over user?.pubkey for AUDIT WRITES: it snapshots identity at
+    // action start and survives the boot-resolve window and account switches.
+    getModeratorPubkey,
   };
 }

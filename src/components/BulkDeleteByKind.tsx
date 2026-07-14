@@ -64,11 +64,12 @@ interface BulkDeleteByKindProps {
   }) => Promise<void>;
   /** Report ID for decision logging */
   reportId?: string;
-  /** Logged-in moderator, attributed on each audit write (#178). */
-  moderatorPubkey?: string;
+  /** Snapshot the acting moderator's pubkey, resolved once at job start so a
+   *  logout/switch mid-delete can't retarget the attribution (#178). */
+  getModeratorPubkey?: () => Promise<string | undefined>;
 }
 
-export function BulkDeleteByKind({ pubkey, onComplete, variant = "button", logDecision, reportId, moderatorPubkey }: BulkDeleteByKindProps) {
+export function BulkDeleteByKind({ pubkey, onComplete, variant = "button", logDecision, reportId, getModeratorPubkey }: BulkDeleteByKindProps) {
   const { nostr } = useNostr();
   const { deleteEvent } = useAdminApi();
   const { toast } = useToast();
@@ -137,6 +138,9 @@ export function BulkDeleteByKind({ pubkey, onComplete, variant = "button", logDe
       let deleted = 0;
       const errors: string[] = [];
       const deleteReason = reason.trim() || `Bulk delete: kind ${selectedKind}`;
+      // Snapshot the moderator once at job start; a logout/switch mid-delete
+      // must not retarget the per-event attribution.
+      const moderatorPubkey = getModeratorPubkey ? await getModeratorPubkey() : undefined;
 
       for (const event of eventsToDelete) {
         try {

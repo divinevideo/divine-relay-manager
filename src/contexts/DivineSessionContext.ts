@@ -14,6 +14,13 @@ export interface DivineSessionValue {
   signer: NostrSigner | null;
   /** True until the session (and, with a token, the pubkey) has resolved. */
   isResolving: boolean;
+  /**
+   * Snapshot the moderator pubkey for an audit write. Captures the signer at
+   * call time (call at action START so a later logout/switch can't retarget a
+   * long job's attribution) and waits briefly for an in-flight pubkey before
+   * falling back to undefined. Never gate a moderation action on this.
+   */
+  getModeratorPubkey: () => Promise<string | undefined>;
   startLogin: (returnPath?: string) => Promise<void>;
   logout: () => void;
   refresh: () => Promise<void>;
@@ -26,6 +33,7 @@ export const DivineSessionContext = createContext<DivineSessionValue>({
   pubkey: undefined,
   signer: null,
   isResolving: false,
+  getModeratorPubkey: async () => undefined,
   startLogin: sdkStartLogin,
   logout: () => {},
   refresh: async () => {},

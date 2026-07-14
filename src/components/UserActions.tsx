@@ -1,3 +1,4 @@
+import { useRef } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
@@ -30,8 +31,11 @@ export function UserActions({
 }: UserActionsProps) {
   const { toast } = useToast();
   const api = useAdminApi();
-  const { user } = useCurrentUser();
+  const { getModeratorPubkey } = useCurrentUser();
   const queryClient = useQueryClient();
+  // Snapshot of the moderator at bulk-job start; a logout/switch during the long
+  // job must not retarget its completion audit write (#178).
+  const bulkModeratorRef = useRef<Promise<string | undefined>>();
   const navigate = useNavigate();
 
   // An under-16 report must be worked through the Age Review flow, not the
@@ -87,14 +91,15 @@ export function UserActions({
   // useDecisionLog's ['decisions', targetId]. A report legitimately stays
   // unresolved when no row was written (the .catch path), which is correct.
   const logAudit = (params: Parameters<typeof api.logDecision>[0]) =>
-    void api.logDecision({ moderatorPubkey: user?.pubkey, ...params })
+    void getModeratorPubkey().then((moderatorPubkey) =>
+      api.logDecision({ ...params, moderatorPubkey })
       .then(() => {
         queryClient.invalidateQueries({ queryKey: ['decisions'] });
       })
       .catch((e) => {
         console.warn('[UserActions] audit log failed', e);
         toast({ title: 'Action applied; audit log not recorded' });
-      });
+      }));
 
   const suspendUserMutation = useMutation({
     mutationFn: async () => {
@@ -194,14 +199,19 @@ export function UserActions({
         const verb = job.action === 'delete-all' ? 'Deleted' : 'Age-restricted';
         toast({ title: `${verb} ${job.mediaProcessed} media file(s) across ${job.eventsProcessed} events` });
       }
-      // Non-critical audit log; never block the action.
-      void api.logDecision({
-        targetType: 'pubkey',
-        targetId: pubkey,
-        action: job.action === 'delete-all' ? 'bulk_delete' : 'bulk_age_restrict',
-        reason: `Bulk ${job.action}: ${job.mediaProcessed} media file(s)`,
-        moderatorPubkey: user?.pubkey,
-      }).catch((e) => console.warn('[UserActions] bulk audit log failed', e));
+      // Non-critical audit log; never block the action. Attribute to the
+      // moderator snapshotted at job START (not now), so a mid-job logout/switch
+      // can't retarget it.
+      void (bulkModeratorRef.current ?? Promise.resolve(undefined))
+        .then((moderatorPubkey) =>
+          api.logDecision({
+            targetType: 'pubkey',
+            targetId: pubkey,
+            action: job.action === 'delete-all' ? 'bulk_delete' : 'bulk_age_restrict',
+            reason: `Bulk ${job.action}: ${job.mediaProcessed} media file(s)`,
+            moderatorPubkey,
+          }))
+        .catch((e) => console.warn('[UserActions] bulk audit log failed', e));
       onActionComplete?.();
     },
     onError: (error) => {
@@ -291,7 +301,7 @@ export function UserActions({
           <Tooltip>
             <TooltipTrigger asChild>
               <Button variant="outline" className="border-orange-500 text-orange-600 hover:bg-orange-50"
-                onClick={() => bulkJob.start('age-restrict-all')} disabled={anyPending}>
+                onClick={() => { bulkModeratorRef.current = getModeratorPubkey(); bulkJob.start('age-restrict-all'); }} disabled={anyPending}>
                 <ShieldAlert className="h-4 w-4 mr-1" />
                 {bulkJob.runningAction === 'age-restrict-all' ? 'Restricting...' : 'Age Restrict All'}
               </Button>
@@ -310,7 +320,7 @@ export function UserActions({
             summary="This will permanently delete all events and media from this user. This cannot be undone."
             confirmLabel="Confirm Delete"
             pendingLabel="Starting..."
-            onConfirm={async () => { await bulkJob.startAsync('delete-all'); }}
+            onConfirm={async () => { bulkModeratorRef.current = getModeratorPubkey(); await bulkJob.startAsync('delete-all'); }}
             isPending={bulkJob.runningAction === 'delete-all'}
           />
         </>

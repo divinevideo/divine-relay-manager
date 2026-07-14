@@ -89,7 +89,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   const {
     deleteEvent, allowEvent, markAsReviewed, logDecision, deleteDecisions,
   } = useAdminApi();
-  const { user } = useCurrentUser();
+  const { getModeratorPubkey } = useCurrentUser();
 
   // Audit logging is a non-critical side effect. Fire-and-forget so a failing
   // /api/decisions write can't make an action whose authoritative step already
@@ -97,13 +97,16 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   // successful write, re-invalidate the decision log; on failure, a non-blocking
   // toast. Mirrors UserActions.logAudit. (confirmAutoHide keeps an awaited
   // logDecision: there the decision write IS the action.)
+  // Detached audit write: waits briefly for the moderator identity (captured at
+  // call time), then attributes or falls back to null. Never blocks the action.
   const logAudit = (params: Parameters<typeof logDecision>[0]) =>
-    void logDecision({ moderatorPubkey: user?.pubkey, ...params })
-      .then(() => { queryClient.invalidateQueries({ queryKey: ['decisions'] }); })
-      .catch((e) => {
-        console.warn('[ReportDetail] audit log failed', e);
-        toast({ title: 'Action applied; audit log not recorded' });
-      });
+    void getModeratorPubkey().then((moderatorPubkey) =>
+      logDecision({ ...params, moderatorPubkey })
+        .then(() => { queryClient.invalidateQueries({ queryKey: ['decisions'] }); })
+        .catch((e) => {
+          console.warn('[ReportDetail] audit log failed', e);
+          toast({ title: 'Action applied; audit log not recorded' });
+        }));
 
   const { config } = useAppContext();
   const navigate = useNavigate();
@@ -291,13 +294,14 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   // Confirm auto-hidden content (approve the auto-hide decision)
   const confirmAutoHideMutation = useMutation({
     mutationFn: async ({ targetId, targetType }: { targetId: string; targetType: 'event' | 'pubkey' }) => {
+      const moderator = getModeratorPubkey(); // snapshot identity at action start
       await logDecision({
         targetType,
         targetId,
         action: 'auto_hide_confirmed',
         reason: 'Auto-hide confirmed by moderator',
         reportId: report?.id,
-        moderatorPubkey: user?.pubkey,
+        moderatorPubkey: await moderator,
       });
       return targetId;
     },
@@ -1122,7 +1126,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                         pubkey={context.reportedUser.pubkey}
                         logDecision={logDecision}
                         reportId={report?.id}
-                        moderatorPubkey={user?.pubkey}
+                        getModeratorPubkey={getModeratorPubkey}
                         onComplete={handleActionComplete}
                       />
                     </div>

@@ -76,7 +76,7 @@ export function DebugPanel() {
     verifyPubkeyBanned,
     verifyPubkeyUnbanned,
   } = useAdminApi();
-  const { user } = useCurrentUser();
+  const { getModeratorPubkey } = useCurrentUser();
   const [testPubkey, setTestPubkey] = useState("");
   const [rpcMethod, setRpcMethod] = useState("listbannedpubkeys");
   const [rpcParams, setRpcParams] = useState("");
@@ -205,7 +205,7 @@ export function DebugPanel() {
           targetId: pubkey,
           action: 'ban_user',
           reason: 'Debug test ban',
-          moderatorPubkey: user?.pubkey,
+          moderatorPubkey: await getModeratorPubkey(),
         });
         results.logResult = logResult;
       } catch (error) {
@@ -305,7 +305,7 @@ export function DebugPanel() {
           targetId: pubkey,
           action: 'unban_user',
           reason: 'Debug test unban',
-          moderatorPubkey: user?.pubkey,
+          moderatorPubkey: await getModeratorPubkey(),
         });
         results.logResult = logResult;
       } catch (error) {
