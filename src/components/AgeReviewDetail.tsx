@@ -118,6 +118,17 @@ export function AgeReviewDetail({ caseData: c }: Props) {
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['age-review-cases'] });
+      // Keep the per-case entry in step: the hand-off seeds
+      // ['age-review-case', id] (30s staleTime), and a terminal action drops
+      // the case from the active list, so the detail falls back to that
+      // entry — left stale, it shows actionable controls with the old
+      // expected_version (review). The PATCH returns the updated row; write
+      // it through, or invalidate if a response ever omits it.
+      if (data.case) {
+        queryClient.setQueryData(['age-review-case', c.id], { success: true, case: data.case });
+      } else {
+        queryClient.invalidateQueries({ queryKey: ['age-review-case', c.id] });
+      }
       const requestedState = pendingStateRef.current as AgeReviewState | undefined;
       if (requestedState && ENFORCEMENT_STATES.includes(requestedState) && data.enforcementComplete === false) {
         // Surface only actual failed enforcement legs. `not_attempted` is valid
@@ -141,6 +152,8 @@ export function AgeReviewDetail({ caseData: c }: Props) {
       // blindly replay a possibly-stale transition.
       if (error instanceof ApiError && error.code === 'version_conflict') {
         queryClient.invalidateQueries({ queryKey: ['age-review-cases'] });
+        // The reload must also reach the per-case fallback the hand-off seeds
+        queryClient.invalidateQueries({ queryKey: ['age-review-case', c.id] });
         toast({
           title: 'Case changed since you opened it',
           description: 'Another moderator or an automated deadline action modified this case. Reloaded the latest state; review it and re-apply if still needed.',
