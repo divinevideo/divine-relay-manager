@@ -124,7 +124,19 @@ export function AgeReview() {
     // the mobile sheet bounced closed) — the hand-off's second half.
     const resolvedCase = pubkeyMatch ?? pubkeyLookup?.case;
     if (resolvedCase) {
-      queryClient.setQueryData(['age-review-case', pubkeyResolvedId], { success: true, case: resolvedCase });
+      // Stamp the seed with the SOURCE's timestamp, not "now": a cron or
+      // another moderator can close the case while our lookup entry ages,
+      // and a now-stamped seed would re-mark that stale row fresh and block
+      // the corrective refetch. Source-stamped, a stale seed still renders
+      // instantly and self-corrects in one round-trip (review).
+      const sourceUpdatedAt = pubkeyMatch
+        ? queryClient.getQueryState(['age-review-cases', { state: 'active' }])?.dataUpdatedAt
+        : queryClient.getQueryState(['age-review-active-case', pubkeyParam])?.dataUpdatedAt;
+      queryClient.setQueryData(
+        ['age-review-case', pubkeyResolvedId],
+        { success: true, case: resolvedCase },
+        sourceUpdatedAt ? { updatedAt: sourceUpdatedAt } : undefined,
+      );
     }
     setSelectedCaseId(pubkeyResolvedId);
   }, [pubkeyParam, pubkeyResolvedId, pubkeyMatch, pubkeyLookup, queryClient, setSelectedCaseId]);
