@@ -133,6 +133,69 @@ describe('keycast-client', () => {
     });
   });
 
+  // Contract for the durable status-change audit (keycast#295 / keycast#279):
+  // keycast-client can attach a moderator actor so keycast writes an
+  // admin_audit_events row. Mirrors clearVerifiedMinor's actor guard, but the
+  // actor rides the JSON body. Wired to the interactive age-review path by #178.
+  describe('actor attribution on status changes', () => {
+    const ACTOR = 'b'.repeat(64);
+
+    it('suspendUser includes a valid actor in the body', async () => {
+      const result = await suspendUser(VALID_PUBKEY, 'age_review', makeEnv(), ACTOR);
+      expect(result).toEqual({ success: true });
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(body).toEqual({ status: 'suspended', reason: 'age_review', actor: ACTOR });
+    });
+
+    it('banUser includes a valid actor in the body', async () => {
+      await banUser(VALID_PUBKEY, 'age_review_denied', makeEnv(), ACTOR);
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(body).toEqual({ status: 'banned', reason: 'age_review_denied', actor: ACTOR });
+    });
+
+    it('unsuspendUser includes a valid actor in the body', async () => {
+      await unsuspendUser(VALID_PUBKEY, makeEnv(), ACTOR);
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(body).toEqual({ status: 'active', actor: ACTOR });
+    });
+
+    it('drops a malformed actor instead of failing the status change (keycast 400s on it)', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const result = await suspendUser(VALID_PUBKEY, 'age_review', makeEnv(), 'not-a-pubkey');
+      expect(result).toEqual({ success: true });
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(body).toEqual({ status: 'suspended', reason: 'age_review' });
+      expect(body.actor).toBeUndefined();
+      // The drop must leave an observability trail (the audit silently
+      // degrading to log-only should be findable in the worker logs)
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('dropping malformed actor'));
+      warnSpy.mockRestore();
+    });
+
+    it('omits actor when none is supplied (keycast log-only fallback)', async () => {
+      await banUser(VALID_PUBKEY, 'moderation', makeEnv());
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(body).toEqual({ status: 'banned', reason: 'moderation' });
+      expect(body.actor).toBeUndefined();
+    });
+
+    it('drops an uppercase-hex actor (Nostr pubkeys are canonical lowercase; keycast log-only fallback)', async () => {
+      const result = await suspendUser(VALID_PUBKEY, 'age_review', makeEnv(), 'A'.repeat(64));
+      expect(result).toEqual({ success: true });
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(body).toEqual({ status: 'suspended', reason: 'age_review' });
+      expect(body.actor).toBeUndefined();
+    });
+
+    it('drops a wrong-length actor on the ban leg (63 hex chars)', async () => {
+      const result = await banUser(VALID_PUBKEY, 'age_review_denied', makeEnv(), 'a'.repeat(63));
+      expect(result).toEqual({ success: true });
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(body).toEqual({ status: 'banned', reason: 'age_review_denied' });
+      expect(body.actor).toBeUndefined();
+    });
+  });
+
   describe('config validation', () => {
     it('returns not configured when KEYCAST_URL is missing', async () => {
       const result = await suspendUser(VALID_PUBKEY, 'age_review', makeEnv({ KEYCAST_URL: undefined }));

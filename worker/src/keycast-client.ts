@@ -25,6 +25,7 @@ async function callKeycast(
   pubkey: string,
   body: { status: string; reason?: KeycastReason },
   env: KeycastEnv,
+  actor?: string,
 ): Promise<KeycastResult> {
   if (!env.KEYCAST_URL || !env.KEYCAST_SERVICE_TOKEN) {
     return { success: false, error: 'not configured' };
@@ -39,6 +40,24 @@ async function callKeycast(
     return { success: false, error: 'not configured' };
   }
 
+  // Optional moderator attribution: a valid actor makes keycast write a durable
+  // admin_audit_events row for the status change (keycast#295 contract /
+  // keycast#279). A malformed actor is dropped (keycast 400s on it, which would
+  // fail the whole status change) so keycast falls back to log-only. Mirrors
+  // clearVerifiedMinor.
+  // TODO(#178): no caller passes an actor on the status legs yet. Attributing a
+  // status change needs a verified moderator identity (#178); until it lands the
+  // status legs call through actor-less. This lands the relay-manager side of the
+  // keycast#295 contract so it and keycast can deploy independently.
+  const payload: { status: string; reason?: KeycastReason; actor?: string } = { ...body };
+  if (actor) {
+    if (HEX_64.test(actor)) {
+      payload.actor = actor;
+    } else {
+      console.warn(`[keycast] dropping malformed actor for ${body.status} on ${pubkey}; audit falls back to log-only`);
+    }
+  }
+
   try {
     const res = await fetch(`${env.KEYCAST_URL}/api/admin/users/${pubkey}/status`, {
       method: 'PUT',
@@ -46,7 +65,7 @@ async function callKeycast(
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${token}`,
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify(payload),
     });
 
     if (!res.ok) {
@@ -63,8 +82,8 @@ async function callKeycast(
   }
 }
 
-export async function suspendUser(pubkey: string, reason: KeycastReason, env: KeycastEnv): Promise<KeycastResult> {
-  return callKeycast(pubkey, { status: 'suspended', reason }, env);
+export async function suspendUser(pubkey: string, reason: KeycastReason, env: KeycastEnv, actor?: string): Promise<KeycastResult> {
+  return callKeycast(pubkey, { status: 'suspended', reason }, env, actor);
 }
 
 /**
@@ -72,12 +91,12 @@ export async function suspendUser(pubkey: string, reason: KeycastReason, env: Ke
  * (Keycast uses a single status transition), so this is the restore path for
  * unsuspend AND unban.
  */
-export async function unsuspendUser(pubkey: string, env: KeycastEnv): Promise<KeycastResult> {
-  return callKeycast(pubkey, { status: 'active' }, env);
+export async function unsuspendUser(pubkey: string, env: KeycastEnv, actor?: string): Promise<KeycastResult> {
+  return callKeycast(pubkey, { status: 'active' }, env, actor);
 }
 
-export async function banUser(pubkey: string, reason: KeycastReason, env: KeycastEnv): Promise<KeycastResult> {
-  return callKeycast(pubkey, { status: 'banned', reason }, env);
+export async function banUser(pubkey: string, reason: KeycastReason, env: KeycastEnv, actor?: string): Promise<KeycastResult> {
+  return callKeycast(pubkey, { status: 'banned', reason }, env, actor);
 }
 
 /**
