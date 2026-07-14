@@ -11,6 +11,7 @@ import { NostrLoginProvider } from '@nostrify/react/login';
 import { AppProvider } from '@/components/AppProvider';
 import { AppConfig } from '@/contexts/AppContext';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
+import { DivineSessionProvider } from '@/contexts/DivineSessionContext';
 import AppRouter from './AppRouter';
 
 const queryClient = new QueryClient({
@@ -38,13 +39,15 @@ export function App() {
         <QueryClientProvider client={queryClient}>
           <NostrLoginProvider storageKey='nostr:login'>
             <NostrProvider>
-              <TooltipProvider>
-                <Toaster />
-                <Sonner />
-                <Suspense>
-                  <AppRouter />
-                </Suspense>
-              </TooltipProvider>
+              <DivineSessionProvider>
+                <TooltipProvider>
+                  <Toaster />
+                  <Sonner />
+                  <Suspense>
+                    <AppRouter />
+                  </Suspense>
+                </TooltipProvider>
+              </DivineSessionProvider>
             </NostrProvider>
           </NostrLoginProvider>
         </QueryClientProvider>
