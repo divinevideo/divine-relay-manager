@@ -1,49 +1,14 @@
-// ABOUTME: Single source of truth for the divine-login session AND the resolved
-// moderator identity (pubkey + signer). The SDK owns storage/refresh; this
-// context resolves the pubkey ONCE so every useCurrentUser consumer shares it
+// ABOUTME: Provider that resolves the divine-login session AND the moderator
+// identity (pubkey + signer) once, so every useCurrentUser consumer shares it
 // (no per-mount RPC, no act-before-resolve null-attribution race).
-import {
-  createContext,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ReactNode,
-} from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { StoredCredentials } from '@divinevideo/login';
 import type { NostrSigner } from '@nostrify/nostrify';
 import { getSession, logout as sdkLogout, startLogin as sdkStartLogin } from '@/lib/divineLogin';
 import { DivineRpcSigner } from '@/lib/divineSigner';
+import { DivineSessionContext, type DivineSessionValue } from '@/contexts/DivineSessionContext';
 
 const HEX_64 = /^[0-9a-f]{64}$/;
-
-export interface DivineSessionValue {
-  credentials: StoredCredentials | null;
-  /** The moderator's canonical 64-hex pubkey, once resolved. */
-  pubkey: string | undefined;
-  /** Signer bound to the current session token, or null when signed out. */
-  signer: NostrSigner | null;
-  /** True until the session (and, with a token, the pubkey) has resolved. */
-  isResolving: boolean;
-  startLogin: (returnPath?: string) => Promise<void>;
-  logout: () => void;
-  refresh: () => Promise<void>;
-}
-
-const defaultValue: DivineSessionValue = {
-  credentials: null,
-  pubkey: undefined,
-  signer: null,
-  isResolving: false,
-  startLogin: sdkStartLogin,
-  logout: () => {},
-  refresh: async () => {},
-};
-
-// Default value is signed-out so components render logged-out without a
-// provider (test ergonomics); the real provider overrides with live state.
-export const DivineSessionContext = createContext<DivineSessionValue>(defaultValue);
 
 export function DivineSessionProvider({ children }: { children: ReactNode }) {
   const [credentials, setCredentials] = useState<StoredCredentials | null>(null);

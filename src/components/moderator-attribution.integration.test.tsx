@@ -33,7 +33,7 @@ const api = vi.hoisted(() => ({
 vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => api }));
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast: vi.fn() }) }));
 
-import { DivineSessionProvider } from '@/contexts/DivineSessionContext';
+import { DivineSessionProvider } from '@/components/DivineSessionProvider';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { EventActions } from './EventActions';
 

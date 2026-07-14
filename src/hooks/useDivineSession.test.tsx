@@ -14,7 +14,7 @@ const { getSession, logout, startLogin, getPublicKey, DivineRpcSigner } = vi.hoi
 vi.mock('@/lib/divineLogin', () => ({ getSession, logout, startLogin }));
 vi.mock('@/lib/divineSigner', () => ({ DivineRpcSigner }));
 
-import { DivineSessionProvider } from '@/contexts/DivineSessionContext';
+import { DivineSessionProvider } from '@/components/DivineSessionProvider';
 import { useDivineSession } from '@/hooks/useDivineSession';
 
 const PUBKEY = 'a'.repeat(64);

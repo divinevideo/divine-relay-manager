@@ -7,11 +7,10 @@ import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { NostrLoginProvider } from '@nostrify/react/login';
 import { AppProvider } from '@/components/AppProvider';
 import { AppConfig } from '@/contexts/AppContext';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
-import { DivineSessionProvider } from '@/contexts/DivineSessionContext';
+import { DivineSessionProvider } from '@/components/DivineSessionProvider';
 import AppRouter from './AppRouter';
 
 const queryClient = new QueryClient({
@@ -37,19 +36,17 @@ export function App() {
     <ErrorBoundary>
       <AppProvider storageKey="nostr:app-config-v2" defaultConfig={defaultConfig}>
         <QueryClientProvider client={queryClient}>
-          <NostrLoginProvider storageKey='nostr:login'>
-            <NostrProvider>
-              <DivineSessionProvider>
-                <TooltipProvider>
-                  <Toaster />
-                  <Sonner />
-                  <Suspense>
-                    <AppRouter />
-                  </Suspense>
-                </TooltipProvider>
-              </DivineSessionProvider>
-            </NostrProvider>
-          </NostrLoginProvider>
+          <NostrProvider>
+            <DivineSessionProvider>
+              <TooltipProvider>
+                <Toaster />
+                <Sonner />
+                <Suspense>
+                  <AppRouter />
+                </Suspense>
+              </TooltipProvider>
+            </DivineSessionProvider>
+          </NostrProvider>
         </QueryClientProvider>
       </AppProvider>
     </ErrorBoundary>
