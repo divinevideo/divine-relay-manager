@@ -13,26 +13,18 @@ export class DivineRpcSigner implements NostrSigner {
   constructor(
     private readonly getAccessToken: () => string | undefined,
     private readonly serverUrl: string = DIVINE_LOGIN_SERVER_URL,
-    private readonly timeoutMs = 10_000,
   ) {}
-
-  private readonly fetchWithTimeout: typeof fetch = async (input, init) => {
-    const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), this.timeoutMs);
-    try {
-      return await fetch(input, { ...init, signal: controller.signal });
-    } finally {
-      clearTimeout(id);
-    }
-  };
 
   private rpc(): DivineRpc {
     const token = this.getAccessToken();
     if (!token) throw new Error('divine-login: no access token');
+    // No custom fetch: DivineRpc.call already wraps each request in
+    // AbortSignal.timeout, which covers headers AND body. An earlier hand-rolled
+    // AbortController here cleared its timer once headers arrived, leaving a
+    // stalled body read to hang forever -- rely on the SDK's timeout instead.
     return new DivineRpc({
       nostrApi: `${this.serverUrl}/api/nostr`,
       accessToken: token,
-      fetch: this.fetchWithTimeout,
     });
   }
 

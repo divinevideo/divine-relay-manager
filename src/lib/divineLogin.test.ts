@@ -52,6 +52,7 @@ describe('divineLogin', () => {
         clientId: DIVINE_LOGIN_CLIENT_ID,
         redirectUri: `${window.location.origin}/auth/callback`,
         storage: localStorage,
+        fetch: expect.any(Function), // timeout-wrapped fetch (OAuth methods have no built-in timeout)
       }),
     );
   });
@@ -83,12 +84,25 @@ describe('divineLogin', () => {
   it('completeLogin defaults the return path to /reports', async () => {
     oauth.parseCallback.mockReturnValue({ code: 'abc' });
     oauth.exchangeCode.mockResolvedValue({
+      access_token: 't',
       bunker_url: 'bunker://x',
       token_type: 'Bearer',
       expires_in: 3600,
     });
     const result = await completeLogin('https://relay.admin.divine.video/auth/callback?code=abc');
     expect(result).toEqual({ returnPath: '/reports' });
+  });
+
+  it('completeLogin throws when the token response has no access token (attribution would be dead)', async () => {
+    oauth.parseCallback.mockReturnValue({ code: 'abc' });
+    oauth.exchangeCode.mockResolvedValue({
+      bunker_url: 'bunker://x', // no access_token
+      token_type: 'Bearer',
+      expires_in: 3600,
+    });
+    await expect(
+      completeLogin('https://relay.admin.divine.video/auth/callback?code=abc'),
+    ).rejects.toThrow(/access token/i);
   });
 
   it('completeLogin throws on an OAuth error callback', async () => {
