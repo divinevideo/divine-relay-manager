@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAdminApi, useApiUrl } from "@/hooks/useAdminApi";
 import { ApiError } from "@/lib/adminApi";
+import { reconcileCaseIntoList, type AgeReviewListParams } from "@/lib/ageReviewCache";
 import { useToast } from "@/hooks/useToast";
 import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
 import { UserActions } from "@/components/UserActions";
@@ -116,7 +117,55 @@ export function AgeReviewDetail({ caseData: c }: Props) {
       pendingStateRef.current = updates.state as string | undefined;
       return api.updateAgeReviewCase(c.id, { ...updates, expected_version: c.version });
     },
-    onSuccess: (data) => {
+    // Capture the mutated case's identity at mutate time: onSuccess/onError
+    // fire with the LATEST render's closure, so after a mid-flight case
+    // switch a closure-read c would misroute every cache write below
+    // (review: wrong case's keys written, the acted-on case left stale)
+    onMutate: () => ({ caseId: c.id, casePubkey: c.pubkey }),
+    onSuccess: (data, _updates, ctx) => {
+      // Keep the per-case entry in step: the hand-off seeds
+      // ['age-review-case', id] (30s staleTime), and a terminal action drops
+      // the case from the active list, so the detail falls back to that
+      // entry — left stale, it shows actionable controls with the old
+      // expected_version (review). The PATCH returns the updated row; write
+      // it through (keyed from the RESPONSE), or invalidate the mutate-time
+      // keys if a response ever omits it.
+      if (data.case) {
+        const updated = data.case;
+        queryClient.setQueryData(['age-review-case', updated.id], { success: true, case: updated });
+        // ...and every cached LIST: selectedCase prefers the list row, so a
+        // retained pre-action row out-votes both repaired entries while the
+        // invalidation refetch is pending — or forever if it fails (review).
+        // Reconcile the response row into each list per its filter params;
+        // the refetch still supersedes with full server truth when it lands.
+        queryClient.getQueriesData<{ success: boolean; cases: AgeReviewCase[] }>({ queryKey: ['age-review-cases'] })
+          .forEach(([key, old]) => {
+            if (!old?.cases) return;
+            const params = (key[1] ?? {}) as AgeReviewListParams;
+            const reconciled = reconcileCaseIntoList(params, old.cases, updated);
+            // Same-reference result = no change; skip the write so untouched
+            // entries keep their invalidation state and timestamps
+            if (reconciled !== old.cases) {
+              queryClient.setQueryData(key, { ...old, cases: reconciled });
+            }
+          });
+        // ...and the hand-off's lookup key: left stale, re-entering the
+        // ?pubkey= hand-off within its cache lifetime re-seeds the per-case
+        // entry with the pre-action ACTIVE row, resurrecting the exact hole
+        // above. Terminal states have no active case; write that truth.
+        queryClient.setQueryData(
+          ['age-review-active-case', updated.pubkey],
+          { success: true, case: TERMINAL_STATES.includes(updated.state) ? null : updated },
+        );
+      } else {
+        queryClient.invalidateQueries({ queryKey: ['age-review-case', ctx.caseId] });
+        queryClient.removeQueries({ queryKey: ['age-review-active-case', ctx.casePubkey] });
+      }
+      // Invalidate AFTER the cache writes: setQueryData clears isInvalidated
+      // and fresh-stamps the entry, so writing after invalidating would
+      // suppress refetch-on-mount for every unobserved list cache (review) —
+      // this order keeps reconciled data rendering now AND every list due a
+      // real refetch.
       queryClient.invalidateQueries({ queryKey: ['age-review-cases'] });
       const requestedState = pendingStateRef.current as AgeReviewState | undefined;
       if (requestedState && ENFORCEMENT_STATES.includes(requestedState) && data.enforcementComplete === false) {
@@ -134,13 +183,19 @@ export function AgeReviewDetail({ caseData: c }: Props) {
         });
       }
     },
-    onError: (error) => {
+    onError: (error, _updates, ctx) => {
       // A concurrent writer (another moderator, or the deadline cron) changed
       // the case between our read and this write. Reload the current state so
       // the moderator can review it before re-applying; we deliberately do not
       // blindly replay a possibly-stale transition.
       if (error instanceof ApiError && error.code === 'version_conflict') {
         queryClient.invalidateQueries({ queryKey: ['age-review-cases'] });
+        // Mutate-time identity (ctx), not the render closure: a mid-flight
+        // case switch must reload the case that conflicted
+        queryClient.invalidateQueries({ queryKey: ['age-review-case', ctx?.caseId] });
+        // Remove (not invalidate) the lookup entry: the hand-off effect seeds
+        // synchronously from cached data before any refetch could land
+        queryClient.removeQueries({ queryKey: ['age-review-active-case', ctx?.casePubkey] });
         toast({
           title: 'Case changed since you opened it',
           description: 'Another moderator or an automated deadline action modified this case. Reloaded the latest state; review it and re-apply if still needed.',
