@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -54,6 +54,7 @@ export function AgeReview() {
   const api = useAdminApi();
   const isMobile = useIsMobile();
   const [searchParams, setSearchParams] = useSearchParams();
+  const queryClient = useQueryClient();
   const selectedCaseId = searchParams.get('case');
   const pubkeyParam = searchParams.get('pubkey');
 
@@ -108,7 +109,7 @@ export function AgeReview() {
   const pubkeyMatch = pubkeyParam
     ? activeData?.cases?.find(c => c.pubkey === pubkeyParam) ?? null
     : null;
-  const { data: pubkeyLookup, isFetching: pubkeyFetching } = useQuery({
+  const { data: pubkeyLookup, isFetching: pubkeyFetching, isError: pubkeyLookupFailed } = useQuery({
     queryKey: ['age-review-active-case', pubkeyParam],
     queryFn: () => api.getActiveAgeReviewCase(pubkeyParam!),
     enabled: !!pubkeyParam && !pubkeyMatch,
@@ -116,19 +117,28 @@ export function AgeReview() {
   });
   const pubkeyResolvedId = pubkeyMatch?.id ?? pubkeyLookup?.case?.id ?? null;
   useEffect(() => {
-    if (pubkeyParam && pubkeyResolvedId) setSelectedCaseId(pubkeyResolvedId);
-  }, [pubkeyParam, pubkeyResolvedId, setSelectedCaseId]);
+    if (!pubkeyParam || !pubkeyResolvedId) return;
+    // The lookup already returned the full case: seed the per-case cache so
+    // the ?case= normalization renders immediately instead of paying a second
+    // round-trip (during which the pane regressed to the generic prompt and
+    // the mobile sheet bounced closed) — the hand-off's second half.
+    if (pubkeyLookup?.case) {
+      queryClient.setQueryData(['age-review-case', pubkeyResolvedId], { success: true, case: pubkeyLookup.case });
+    }
+    setSelectedCaseId(pubkeyResolvedId);
+  }, [pubkeyParam, pubkeyResolvedId, pubkeyLookup, queryClient, setSelectedCaseId]);
 
   // A ?pubkey= that resolves to no active case (already cleared/verified, or
   // still being created) gets an explicit empty state, not a blank panel — but
-  // only once the active list has loaded and the fallback lookup has settled.
+  // only once the active list has loaded and the fallback lookup has settled
+  // WITHOUT error (a failed lookup gets its own honest message below).
   const pubkeyUnresolved = !!pubkeyParam && !pubkeyResolvedId
-    && activeData !== undefined && !pubkeyFetching;
-  // While the hand-off lookup is still in flight, say so — the generic
-  // "Select a case" prompt here read as "nothing happened" to moderators
-  // (a fresh case isn't in the 30s-cached list, so the direct lookup's
-  // round-trip is a visible pause on the report -> age-review hand-off).
-  const pubkeyResolving = !!pubkeyParam && !pubkeyResolvedId && !pubkeyUnresolved;
+    && activeData !== undefined && !pubkeyFetching && !pubkeyLookupFailed;
+  // While the hand-off is still becoming renderable, say so — the generic
+  // "Select a case" prompt here read as "nothing happened" to moderators.
+  // Keyed on render-readiness (!selectedCase), not just lookup settlement,
+  // so the frame between resolution and the ?case= URL rewrite stays covered.
+  const pubkeyResolving = !!pubkeyParam && !pubkeyUnresolved && !pubkeyLookupFailed && !selectedCase;
 
   const activeCounts = useMemo(() => {
     if (!activeData?.cases) return { total: 0, urgent: 0 };
@@ -273,6 +283,10 @@ export function AgeReview() {
       <RefreshCw className="h-4 w-4 animate-spin" />
       Opening this account&apos;s age-review case…
     </div>
+  ) : pubkeyParam && pubkeyLookupFailed ? (
+    <div className="flex items-center justify-center h-full p-6 text-center text-sm text-muted-foreground">
+      Couldn&apos;t look up this account&apos;s case — the lookup failed. Retry from the report, or check the case list.
+    </div>
   ) : pubkeyUnresolved ? (
     <div className="flex items-center justify-center h-full p-6 text-center text-sm text-muted-foreground">
       No active age-review case for this account. It may already be resolved (for example a verified minor), or the case is still being created — refresh in a moment.
@@ -287,7 +301,7 @@ export function AgeReview() {
     return (
       <Card className="h-full flex flex-col overflow-hidden">
         {listContent}
-        <Sheet open={!!selectedCase || pubkeyUnresolved || pubkeyResolving} onOpenChange={() => setSelectedCaseId(null)}>
+        <Sheet open={!!selectedCase || pubkeyUnresolved || pubkeyResolving || (!!pubkeyParam && pubkeyLookupFailed)} onOpenChange={() => setSelectedCaseId(null)}>
           <SheetContent side="bottom" className="h-[80vh] p-0">
             {detailContent}
           </SheetContent>
