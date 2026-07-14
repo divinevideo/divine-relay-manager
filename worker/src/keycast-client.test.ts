@@ -133,9 +133,10 @@ describe('keycast-client', () => {
     });
   });
 
-  // keycast#279 / divine-relay-manager#175: attribute an age-review status change
-  // to the moderator so keycast writes a durable admin_audit_events row. Mirrors
-  // clearVerifiedMinor's client-side actor guard, but actor rides the JSON body.
+  // Contract for the durable status-change audit (keycast#295 / keycast#279):
+  // keycast-client can attach a moderator actor so keycast writes an
+  // admin_audit_events row. Mirrors clearVerifiedMinor's actor guard, but the
+  // actor rides the JSON body. Wired to the interactive age-review path by #178.
   describe('actor attribution on status changes', () => {
     const ACTOR = 'b'.repeat(64);
 

@@ -40,10 +40,15 @@ async function callKeycast(
     return { success: false, error: 'not configured' };
   }
 
-  // Attribute the change to the moderator when a valid actor is supplied so
-  // keycast writes a durable admin_audit_events row (keycast#279). A malformed
-  // actor is dropped (keycast 400s on it, which would fail the whole status
-  // change) so keycast falls back to log-only. Mirrors clearVerifiedMinor.
+  // Optional moderator attribution: a valid actor makes keycast write a durable
+  // admin_audit_events row for the status change (keycast#295 contract /
+  // keycast#279). A malformed actor is dropped (keycast 400s on it, which would
+  // fail the whole status change) so keycast falls back to log-only. Mirrors
+  // clearVerifiedMinor.
+  // TODO(#178): no caller passes an actor on the status legs yet. Attributing a
+  // status change needs a verified moderator identity (#178); until it lands the
+  // status legs call through actor-less. This lands the relay-manager side of the
+  // keycast#295 contract so it and keycast can deploy independently.
   const payload: { status: string; reason?: KeycastReason; actor?: string } = { ...body };
   if (actor) {
     if (HEX_64.test(actor)) {

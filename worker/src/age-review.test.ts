@@ -22,11 +22,7 @@ import { FUNNEL_ZENDESK_QUERIES } from '../../shared/age-review';
 import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, createMinorAccount } from './keycast-client';
 import { suspendPubkey, unsuspendPubkey, banPubkey } from './nip86';
 
-// Stub the network functions but pass real constants (HEX_64) through --
-// age-review's moderator_pubkey validation must use the same regex the
-// client-side actor guard uses.
-vi.mock('./keycast-client', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('./keycast-client')>()),
+vi.mock('./keycast-client', () => ({
   suspendUser: vi.fn().mockResolvedValue({ success: true }),
   unsuspendUser: vi.fn().mockResolvedValue({ success: true }),
   banUser: vi.fn().mockResolvedValue({ success: true }),
@@ -238,44 +234,6 @@ describe('handleUpdateAgeReviewCase', () => {
     expect(res.status).toBe(400);
     const body = await res.json() as { error: string };
     expect(body.error).toContain('Cannot transition');
-  });
-
-  it('rejects a non-hex moderator_pubkey (audit attribution must be canonical) (#175 review)', async () => {
-    const req = new Request('https://api.test/api/age-review/cases/case-1', {
-      method: 'PATCH',
-      body: JSON.stringify({ moderator_pubkey: 'not-a-pubkey' }),
-    });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
-    expect(res.status).toBe(400);
-    const body = await res.json() as { error: string };
-    expect(body.error).toContain('canonical 64-hex');
-  });
-
-  it('rejects an uppercase moderator_pubkey (canonical lowercase only) (#175 review)', async () => {
-    const req = new Request('https://api.test/api/age-review/cases/case-1', {
-      method: 'PATCH',
-      body: JSON.stringify({ moderator_pubkey: 'A'.repeat(64) }),
-    });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
-    expect(res.status).toBe(400);
-  });
-
-  it('rejects a wrong-length moderator_pubkey (#175 review)', async () => {
-    const req = new Request('https://api.test/api/age-review/cases/case-1', {
-      method: 'PATCH',
-      body: JSON.stringify({ moderator_pubkey: 'a'.repeat(63) }),
-    });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
-    expect(res.status).toBe(400);
-  });
-
-  it('still accepts a null moderator_pubkey (unassign) (#175 review)', async () => {
-    const req = new Request('https://api.test/api/age-review/cases/case-1', {
-      method: 'PATCH',
-      body: JSON.stringify({ moderator_pubkey: null }),
-    });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
-    expect(res.status).toBe(200);
   });
 
   it('rejects update on terminal case', async () => {
@@ -498,7 +456,7 @@ describe('Keycast suspension wiring', () => {
     expect(body.success).toBe(true);
     expect(body.keycastUpdated).toBe(true);
     expect(suspendUser).toHaveBeenCalledOnce();
-    expect(suspendUser).toHaveBeenCalledWith(reviewCase.pubkey, 'age_review', expect.objectContaining({ DB: expect.anything() }), undefined);
+    expect(suspendUser).toHaveBeenCalledWith(reviewCase.pubkey, 'age_review', expect.objectContaining({ DB: expect.anything() }));
   });
 
   it('calls unsuspendUser when transitioning to cleared', async () => {
@@ -532,7 +490,7 @@ describe('Keycast suspension wiring', () => {
     expect(body.success).toBe(true);
     expect(body.keycastUpdated).toBe(true);
     expect(unsuspendUser).toHaveBeenCalledOnce();
-    expect(unsuspendUser).toHaveBeenCalledWith(restrictedCase.pubkey, expect.objectContaining({ DB: expect.anything() }), undefined);
+    expect(unsuspendUser).toHaveBeenCalledWith(restrictedCase.pubkey, expect.objectContaining({ DB: expect.anything() }));
   });
 
   it('calls unsuspendUser when clearing a case that was never restricted', async () => {
@@ -632,7 +590,7 @@ describe('Keycast suspension wiring', () => {
     expect(res.status).toBe(200);
     expect(body.keycastUpdated).toBe(true);
     expect(unsuspendUser).toHaveBeenCalledOnce();
-    expect(unsuspendUser).toHaveBeenCalledWith(submittedCase.pubkey, expect.objectContaining({ DB: expect.anything() }), undefined);
+    expect(unsuspendUser).toHaveBeenCalledWith(submittedCase.pubkey, expect.objectContaining({ DB: expect.anything() }));
   });
 
   it('unsuspends when clearing after needs_follow_up (may have been restricted)', async () => {
@@ -665,7 +623,7 @@ describe('Keycast suspension wiring', () => {
     expect(res.status).toBe(200);
     expect(body.keycastUpdated).toBe(true);
     expect(unsuspendUser).toHaveBeenCalledOnce();
-    expect(unsuspendUser).toHaveBeenCalledWith(followUpCase.pubkey, expect.objectContaining({ DB: expect.anything() }), undefined);
+    expect(unsuspendUser).toHaveBeenCalledWith(followUpCase.pubkey, expect.objectContaining({ DB: expect.anything() }));
   });
 
   it('calls banUser when transitioning to denied_closed', async () => {
@@ -703,7 +661,7 @@ describe('Keycast suspension wiring', () => {
     expect(body.success).toBe(true);
     expect(body.keycastUpdated).toBe(true);
     expect(banUser).toHaveBeenCalledOnce();
-    expect(banUser).toHaveBeenCalledWith(restrictedCase.pubkey, 'age_review_denied', expect.objectContaining({ DB: expect.anything() }), undefined);
+    expect(banUser).toHaveBeenCalledWith(restrictedCase.pubkey, 'age_review_denied', expect.objectContaining({ DB: expect.anything() }));
   });
 
   // Issue #147: revoke/deny composes a verified_minor clear with the status leg.
@@ -749,14 +707,6 @@ describe('Keycast suspension wiring', () => {
       'age_review_denied',
       expect.objectContaining({ DB: expect.anything() }),
     );
-    // #175: the status (ban) leg is attributed to the same moderator, so keycast
-    // writes a durable admin_audit_events row for the status change (keycast#279).
-    expect(banUser).toHaveBeenCalledWith(
-      restrictedCase.pubkey,
-      'age_review_denied',
-      expect.objectContaining({ DB: expect.anything() }),
-      moderator,
-    );
   });
 
   it('clears verified_minor with an undefined actor when the case has no moderator_pubkey', async () => {
@@ -781,147 +731,6 @@ describe('Keycast suspension wiring', () => {
       undefined,
       'age_review_denied',
       expect.objectContaining({ DB: expect.anything() }),
-    );
-    // #175: with no moderator on the case, the status (ban) leg is also
-    // actor-less -> keycast falls back to a log-only audit row.
-    expect(banUser).toHaveBeenCalledWith(
-      restrictedCase.pubkey,
-      'age_review_denied',
-      expect.objectContaining({ DB: expect.anything() }),
-      undefined,
-    );
-  });
-
-  it('forwards the case moderator as actor on the suspend leg (keycast#279 / #175)', async () => {
-    const moderator = 'c'.repeat(64);
-    const reviewCase = makeCase({ state: 'under_moderator_review', moderator_pubkey: moderator });
-    const updatedCase = { ...reviewCase, state: 'restricted_pending_user_response' as const };
-
-    const req = new Request('https://api.test/api/age-review/cases/case-1', {
-      method: 'PATCH',
-      body: JSON.stringify({ state: 'restricted_pending_user_response' }),
-    });
-    await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(makeDbFor(reviewCase, updatedCase)), corsHeaders);
-
-    expect(suspendUser).toHaveBeenCalledWith(
-      reviewCase.pubkey,
-      'age_review',
-      expect.objectContaining({ DB: expect.anything() }),
-      moderator,
-    );
-  });
-
-  it('persists the acting moderator in the same CAS update and attributes keycast, from a report-created case (#175 review, real UI shape)', async () => {
-    // End-to-end shape of the real path: a report-created case starts with no
-    // moderator; the UI sends the logged-in pubkey alongside the state change.
-    // One PATCH must (a) persist the moderator in the SAME compare-and-swap
-    // UPDATE as the transition and (b) attribute the keycast status leg.
-    const moderator = 'e'.repeat(64);
-    const reviewCase = makeCase({ state: 'under_moderator_review', moderator_pubkey: null, created_via: 'report' });
-    const updatedCase = {
-      ...reviewCase,
-      state: 'restricted_pending_user_response' as const,
-      moderator_pubkey: moderator,
-    };
-    const db = makeDbFor(reviewCase, updatedCase);
-
-    const req = new Request('https://api.test/api/age-review/cases/case-1', {
-      method: 'PATCH',
-      body: JSON.stringify({
-        state: 'restricted_pending_user_response',
-        moderator_pubkey: moderator,
-        expected_version: reviewCase.version,
-      }),
-    });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
-    expect(res.status).toBe(200);
-
-    // (a) persistence rides the CAS UPDATE itself, not a separate write
-    const updateIdx = db.prepare.mock.calls.findIndex(
-      (c: string[]) => c[0]?.includes('UPDATE age_review_cases SET'),
-    );
-    expect(updateIdx).toBeGreaterThanOrEqual(0);
-    expect(db.prepare.mock.calls[updateIdx][0]).toContain('moderator_pubkey = ?');
-    const bindArgs = db.prepare.mock.results[updateIdx].value.bind.mock.calls[0];
-    expect(bindArgs).toContain(moderator);
-    expect(bindArgs).toContain(reviewCase.version); // same CAS guard
-
-    // (b) the keycast status leg is attributed to the same moderator
-    expect(suspendUser).toHaveBeenCalledWith(
-      reviewCase.pubkey,
-      'age_review',
-      expect.objectContaining({ DB: expect.anything() }),
-      moderator,
-    );
-  });
-
-  it('does not attribute a stale moderator when unassigning in the same PATCH (#175 review)', async () => {
-    // moderator_pubkey: null + state in one PATCH: the actor must reflect the
-    // post-write row (unassigned -> log-only), not fall back to the previous
-    // moderator through a stale ?? chain.
-    const previousModerator = 'b'.repeat(64);
-    const reviewCase = makeCase({ state: 'under_moderator_review', moderator_pubkey: previousModerator });
-    const updatedCase = {
-      ...reviewCase,
-      state: 'restricted_pending_user_response' as const,
-      moderator_pubkey: null,
-    };
-
-    const req = new Request('https://api.test/api/age-review/cases/case-1', {
-      method: 'PATCH',
-      body: JSON.stringify({ state: 'restricted_pending_user_response', moderator_pubkey: null }),
-    });
-    await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(makeDbFor(reviewCase, updatedCase)), corsHeaders);
-
-    expect(suspendUser).toHaveBeenCalledWith(
-      reviewCase.pubkey,
-      'age_review',
-      expect.objectContaining({ DB: expect.anything() }),
-      undefined,
-    );
-  });
-
-  it('prefers the updated row moderator when assigned in the same PATCH (#175 review)', async () => {
-    // Assign-moderator-and-transition in one PATCH: the pre-update read has
-    // no moderator, the post-update re-read does. Attribution must come from
-    // the updated row or the audit silently degrades to log-only.
-    const moderator = 'd'.repeat(64);
-    const reviewCase = makeCase({ state: 'under_moderator_review', moderator_pubkey: null });
-    const updatedCase = {
-      ...reviewCase,
-      state: 'restricted_pending_user_response' as const,
-      moderator_pubkey: moderator,
-    };
-
-    const req = new Request('https://api.test/api/age-review/cases/case-1', {
-      method: 'PATCH',
-      body: JSON.stringify({ state: 'restricted_pending_user_response', moderator_pubkey: moderator }),
-    });
-    await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(makeDbFor(reviewCase, updatedCase)), corsHeaders);
-
-    expect(suspendUser).toHaveBeenCalledWith(
-      reviewCase.pubkey,
-      'age_review',
-      expect.objectContaining({ DB: expect.anything() }),
-      moderator,
-    );
-  });
-
-  it('forwards the case moderator as actor on the unsuspend leg (keycast#279 / #175)', async () => {
-    const moderator = 'c'.repeat(64);
-    const restrictedCase = makeCase({ state: 'restricted_pending_user_response', moderator_pubkey: moderator });
-    const updatedCase = { ...restrictedCase, state: 'cleared' as const };
-
-    const req = new Request('https://api.test/api/age-review/cases/case-1', {
-      method: 'PATCH',
-      body: JSON.stringify({ state: 'cleared' }),
-    });
-    await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(makeDbFor(restrictedCase, updatedCase)), corsHeaders);
-
-    expect(unsuspendUser).toHaveBeenCalledWith(
-      restrictedCase.pubkey,
-      expect.objectContaining({ DB: expect.anything() }),
-      moderator,
     );
   });
 

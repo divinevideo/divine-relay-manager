@@ -20,7 +20,7 @@ import {
 import { runBulkModeration, type BulkModerateEnv } from './bulk-moderate';
 import { resolveZendeskCreds } from './zendesk-sync';
 import type { BulkAction } from '../../shared/bulk-moderation';
-import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, createMinorAccount, type KeycastEnv, HEX_64 } from './keycast-client';
+import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, createMinorAccount, type KeycastEnv } from './keycast-client';
 import { suspendPubkey, unsuspendPubkey, banPubkey, type SecretStoreSecret } from './nip86';
 
 export interface AgeReviewEnv extends BulkModerateEnv, KeycastEnv {
@@ -240,17 +240,10 @@ export async function handleUpdateAgeReviewCase(
     binds.push(newDeadline);
   }
 
-  // Moderator assignment/attribution. The value is UI-declared within the
-  // CF Access perimeter (house pattern, same trust model as
-  // moderation_decisions.moderator_pubkey) and feeds the keycast audit actor
-  // (#175) -- reject malformed input loudly at the boundary rather than
-  // letting the audit silently degrade to log-only downstream.
+  // Moderator assignment
   if (body.moderator_pubkey !== undefined) {
-    if (
-      body.moderator_pubkey !== null
-      && (typeof body.moderator_pubkey !== 'string' || !HEX_64.test(body.moderator_pubkey))
-    ) {
-      return json({ success: false, error: 'moderator_pubkey must be a canonical 64-hex pubkey or null' }, 400, corsHeaders);
+    if (body.moderator_pubkey !== null && typeof body.moderator_pubkey !== 'string') {
+      return json({ success: false, error: 'moderator_pubkey must be a string or null' }, 400, corsHeaders);
     }
     updates.push('moderator_pubkey = ?');
     binds.push(body.moderator_pubkey as string | null);
@@ -436,22 +429,11 @@ export async function handleUpdateAgeReviewCase(
       console.error(`[age-review] Bulk action failed for case ${caseId}:`, error);
     }
 
-    // actor = the case's moderator as of THIS write, attributing BOTH keycast
-    // legs below to the human who acted: the status change (durable
-    // admin_audit_events row, keycast#279 / #175) and the verified_minor clear
-    // (#147). The UI sends the logged-in moderator with state changes and the
-    // PATCH boundary validates canonical 64-hex, so post-#175 rows are clean;
-    // the client-side drop guard remains for rows written before validation.
-    // Reading the updated row (not a stale ?? chain) means an unassign in the
-    // same PATCH is honored rather than attributing the previous moderator.
-    // An absent actor degrades to keycast's log-only audit fallback.
-    const moderatorActor = (updated ?? existing).moderator_pubkey ?? undefined;
-
     // Keycast account status.
     const keycastLeg = await runStatusLeg('Keycast', () =>
-      enteredRestrictedState ? suspendUser(existing.pubkey, 'age_review', env, moderatorActor)
-      : clearedCase ? unsuspendUser(existing.pubkey, env, moderatorActor)
-      : deniedCase ? banUser(existing.pubkey, 'age_review_denied', env, moderatorActor)
+      enteredRestrictedState ? suspendUser(existing.pubkey, 'age_review', env)
+      : clearedCase ? unsuspendUser(existing.pubkey, env)
+      : deniedCase ? banUser(existing.pubkey, 'age_review_denied', env)
       : undefined);
     keycast = keycastLeg.status;
     keycastError = keycastLeg.error;
@@ -472,9 +454,15 @@ export async function handleUpdateAgeReviewCase(
     // flag untouched on `cleared` (an over-protected mistaken adult is the safe
     // side). Only deny/revoke removes it. keycast's clear is an idempotent
     // no-op for never-minor accounts, so no pre-read is needed.
+    //
+    // actor = the case's assigned moderator (best-effort: relay-manager auths
+    // with a shared admin pubkey, so there's no per-actor signal, and
+    // moderator_pubkey is unvalidated on write). A malformed/absent actor is
+    // dropped server-side in clearVerifiedMinor → keycast logs-only.
+    const minorClearActor = (updated?.moderator_pubkey ?? existing.moderator_pubkey) ?? undefined;
     const minorClearLeg = await runStatusLeg('Keycast verified_minor clear', () =>
       deniedCase
-        ? clearVerifiedMinor(existing.pubkey, moderatorActor, 'age_review_denied', env)
+        ? clearVerifiedMinor(existing.pubkey, minorClearActor, 'age_review_denied', env)
         : undefined);
     keycastMinorClear = minorClearLeg.status;
     keycastMinorClearError = minorClearLeg.error;

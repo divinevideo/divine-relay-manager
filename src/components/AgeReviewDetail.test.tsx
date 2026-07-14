@@ -31,16 +31,6 @@ vi.mock('@/hooks/useAuthor', () => ({
   useAuthor: () => ({ data: undefined, isLoading: false }),
 }));
 
-// Logged-in moderator identity (house attribution pattern, #175). Mutable so
-// tests can exercise the not-logged-in path.
-const MOD_PUBKEY = 'f'.repeat(64);
-const currentUser = vi.hoisted(() => ({ pubkey: undefined as string | undefined }));
-vi.mock('@/hooks/useCurrentUser', () => ({
-  useCurrentUser: () => ({
-    user: currentUser.pubkey ? { pubkey: currentUser.pubkey } : undefined,
-  }),
-}));
-
 function makeCase(overrides: Partial<AgeReviewCase> = {}): AgeReviewCase {
   return {
     id: 'case-1',
@@ -97,7 +87,6 @@ describe('AgeReviewDetail', () => {
     getAccountStatus.mockResolvedValue({ success: true, verified_minor: false });
     toast.mockClear();
     writeText.mockClear();
-    currentUser.pubkey = MOD_PUBKEY;
     Object.assign(navigator, {
       clipboard: {
         writeText,
@@ -115,38 +104,7 @@ describe('AgeReviewDetail', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Restrict Account' }));
 
     await waitFor(() => {
-      expect(updateAgeReviewCase).toHaveBeenCalledWith('case-1', {
-        state: expectedState,
-        moderator_pubkey: MOD_PUBKEY,
-        expected_version: 0,
-      });
-    });
-  });
-
-  it('omits moderator_pubkey when no Nostr login is present (keycast falls back to log-only)', async () => {
-    currentUser.pubkey = undefined;
-    renderDetail(makeCase());
-
-    fireEvent.click(screen.getByRole('button', { name: 'Restrict Account' }));
-
-    await waitFor(() => {
-      expect(updateAgeReviewCase).toHaveBeenCalledWith('case-1', {
-        state: 'restricted_pending_user_response',
-        expected_version: 0,
-      });
-    });
-  });
-
-  it('does not attach moderator_pubkey to non-state updates (attribution rides actions only)', async () => {
-    renderDetail(makeCase());
-
-    fireEvent.click(screen.getByRole('button', { name: /pause clock/i }));
-
-    await waitFor(() => {
-      expect(updateAgeReviewCase).toHaveBeenCalledWith('case-1', {
-        clock_paused: true,
-        expected_version: 0,
-      });
+      expect(updateAgeReviewCase).toHaveBeenCalledWith('case-1', { state: expectedState, expected_version: 0 });
     });
   });
 
@@ -168,7 +126,6 @@ describe('AgeReviewDetail', () => {
     await waitFor(() => {
       expect(updateAgeReviewCase).toHaveBeenCalledWith('case-1', {
         state: 'restricted_pending_user_response',
-        moderator_pubkey: MOD_PUBKEY,
         expected_version: 3,
       });
       expect(toast).toHaveBeenCalledWith(expect.objectContaining({
