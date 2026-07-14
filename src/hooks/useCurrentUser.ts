@@ -1,43 +1,63 @@
-import { type NLoginType, NUser, useNostrLogin } from '@nostrify/react/login';
-import { useNostr } from '@nostrify/react';
-import { useCallback, useMemo } from 'react';
+// ABOUTME: Current moderator identity, sourced from the divine-login session.
+// Builds a DivineRpcSigner from the session token and resolves the pubkey via
+// the login RPC. CF Access is the access gate; this is attribution only.
+import { useEffect, useMemo, useState } from 'react';
+import type { NostrSigner } from '@nostrify/nostrify';
 
+import { useDivineSession } from './useDivineSession';
+import { DivineRpcSigner } from '@/lib/divineSigner';
 import { useAuthor } from './useAuthor.ts';
 
+const HEX_64 = /^[0-9a-f]{64}$/;
+
+export interface CurrentUser {
+  pubkey: string;
+  signer: NostrSigner;
+}
+
 export function useCurrentUser() {
-  const { nostr } = useNostr();
-  const { logins } = useNostrLogin();
+  const { credentials } = useDivineSession();
+  const accessToken = credentials?.accessToken;
 
-  const loginToUser = useCallback((login: NLoginType): NUser  => {
-    switch (login.type) {
-      case 'nsec': // Nostr login with secret key
-        return NUser.fromNsecLogin(login);
-      case 'bunker': // Nostr login with NIP-46 "bunker://" URI
-        return NUser.fromBunkerLogin(login, nostr);
-      case 'extension': // Nostr login with NIP-07 browser extension
-        return NUser.fromExtensionLogin(login);
-      // Other login types can be defined here
-      default:
-        throw new Error(`Unsupported login type: ${login.type}`);
+  // A new signer per token is correct: token rotation on refresh resets the
+  // pubkey cache. Refreshes are infrequent (near expiry) so the re-resolve cost
+  // is negligible.
+  const signer = useMemo(
+    () => (accessToken ? new DivineRpcSigner(() => accessToken) : null),
+    [accessToken],
+  );
+
+  const [pubkey, setPubkey] = useState<string | undefined>();
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!signer) {
+      setPubkey(undefined);
+      return;
     }
-  }, [nostr]);
+    signer
+      .getPublicKey()
+      // Keep the prior pubkey on a re-resolve (token refresh) to avoid flapping
+      // logged-in -> out -> in. The worker rejects non-canonical pubkeys, so we
+      // only accept lowercase 64-hex.
+      .then((pk) => {
+        if (!cancelled) setPubkey((prev) => (HEX_64.test(pk) ? pk : prev));
+      })
+      .catch(() => {
+        /* attribution degrades to null; never block on identity */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [signer]);
 
-  const users = useMemo(() => {
-    const users: NUser[] = [];
+  const user = useMemo<CurrentUser | undefined>(
+    () => (signer && pubkey ? { pubkey, signer } : undefined),
+    [signer, pubkey],
+  );
 
-    for (const login of logins) {
-      try {
-        const user = loginToUser(login);
-        users.push(user);
-      } catch (error) {
-        console.warn('Skipped invalid login', login.id, error);
-      }
-    }
+  const users = useMemo(() => (user ? [user] : []), [user]);
 
-    return users;
-  }, [logins, loginToUser]);
-
-  const user = users[0] as NUser | undefined;
   const author = useAuthor(user?.pubkey);
 
   return {

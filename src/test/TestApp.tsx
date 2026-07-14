@@ -4,6 +4,7 @@ import { NostrLoginProvider } from '@nostrify/react/login';
 import NostrProvider from '@/components/NostrProvider';
 import { AppProvider } from '@/components/AppProvider';
 import { AppConfig } from '@/contexts/AppContext';
+import { DivineSessionProvider } from '@/contexts/DivineSessionContext';
 
 interface TestAppProps {
   children: React.ReactNode;
@@ -29,7 +30,9 @@ export function TestApp({ children }: TestAppProps) {
         <QueryClientProvider client={queryClient}>
           <NostrLoginProvider storageKey='test-login'>
             <NostrProvider>
-              {children}
+              <DivineSessionProvider>
+                {children}
+              </DivineSessionProvider>
             </NostrProvider>
           </NostrLoginProvider>
         </QueryClientProvider>
