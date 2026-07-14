@@ -436,13 +436,16 @@ export async function handleUpdateAgeReviewCase(
       console.error(`[age-review] Bulk action failed for case ${caseId}:`, error);
     }
 
-    // actor = the case's assigned moderator, attributing BOTH keycast legs below
-    // to the human who acted: the status change (durable admin_audit_events row,
-    // keycast#279 / #175) and the verified_minor clear (#147). Best-effort:
-    // relay-manager auths with a shared admin pubkey, so there's no per-actor
-    // signal, and moderator_pubkey is unvalidated on write. A malformed/absent
-    // actor is dropped client-side (keycast 400s on it) → keycast logs-only.
-    const moderatorActor = (updated?.moderator_pubkey ?? existing.moderator_pubkey) ?? undefined;
+    // actor = the case's moderator as of THIS write, attributing BOTH keycast
+    // legs below to the human who acted: the status change (durable
+    // admin_audit_events row, keycast#279 / #175) and the verified_minor clear
+    // (#147). The UI sends the logged-in moderator with state changes and the
+    // PATCH boundary validates canonical 64-hex, so post-#175 rows are clean;
+    // the client-side drop guard remains for rows written before validation.
+    // Reading the updated row (not a stale ?? chain) means an unassign in the
+    // same PATCH is honored rather than attributing the previous moderator.
+    // An absent actor degrades to keycast's log-only audit fallback.
+    const moderatorActor = (updated ?? existing).moderator_pubkey ?? undefined;
 
     // Keycast account status.
     const keycastLeg = await runStatusLeg('Keycast', () =>
