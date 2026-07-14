@@ -106,4 +106,14 @@ Register `divine-relay-admin` (client_id + `allowed_redirect_uris`) in keycast t
 
 ## Out of scope
 
-Phase 2 (worker verifies the token server-side, superseding the `Cf-Access-Jwt-Assertion` presence check), phase 3 (per-moderator NIP-98 signing), retiring the dormant manual login beyond dupe deletion, cross-subdomain SSO, multi-account.
+Phase 2 (worker verifies the token server-side, superseding the `Cf-Access-Jwt-Assertion` presence check), phase 3 (per-moderator NIP-98 signing), cross-subdomain SSO, multi-account.
+
+## Amendments after adversarial review (2026-07-14)
+
+Three fresh-eyes reviewers (correctness, end-to-end inertness, test quality) ran against the implemented branch. Their findings changed the design in three ways, all ratified with Matt:
+
+- **Attribution scope widened (was the load-bearing gap).** The original claim that attribution "lights up with no further changes" held only for `UserManagement`. `AgeReviewDetail`'s attribution lives in unmerged PR #176 (not this branch), and the primary surfaces (`ReportDetail` dismissals, `EventDetail`/`EventActions` deletes/bans, `UserActions`) sent no moderator pubkey at all — prod's largest null-attribution buckets (dismissed: 1199, delete_event: 447). This PR now wires `user?.pubkey` into those surfaces. Age-review attribution still ships with #176. **Acceptance path for this PR:** a report dismissal / user ban attributing end-to-end (not age-review, which needs #176).
+- **Dormant nostrify auth stack removed (was: leave it).** Because `useCurrentUser` no longer reads the nostrify login store, `LoginArea`/`LoginDialog`/`SignupDialog`/`AccountSwitcher`/`useLoginActions`/`useLoggedInAccounts` and `NostrLoginProvider` became fully bypassed dead code. Removed them.
+- **Identity resolution moved into the provider.** To close a per-mount pubkey-resolution race (act-before-resolve → null attribution), the pubkey + signer now resolve once in `DivineSessionProvider` and are shared via context; `useCurrentUser` just reads them.
+
+Correctness fixes from the review: OAuth requests get a timeout (they had none); the signer's hand-rolled fetch timeout was dropped in favor of the SDK's whole-request timeout (the old one left a stalled body hanging); a logout that races an in-flight refresh no longer resurrects the session (generation guard); a token-absent login surfaces an error instead of a silent dead state; `getSession` throwing (disabled storage) degrades to signed-out instead of hanging; and the sign-in button surfaces start failures. One documented limitation kept for phase 1: no `onUnauthorized` refresh on the signer (mid-session token expiry hard-fails a profile-edit signature; session-level refresh on focus/mount covers the common case). A composed integration test now drives the real provider → `useCurrentUser` → a real moderation action and asserts the resolved pubkey lands on the audit write.
