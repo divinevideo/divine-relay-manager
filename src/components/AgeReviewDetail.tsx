@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAdminApi, useApiUrl } from "@/hooks/useAdminApi";
 import { ApiError } from "@/lib/adminApi";
+import { reconcileCaseIntoList, type AgeReviewListParams } from "@/lib/ageReviewCache";
 import { useToast } from "@/hooks/useToast";
 import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
 import { UserActions } from "@/components/UserActions";
@@ -131,14 +132,26 @@ export function AgeReviewDetail({ caseData: c }: Props) {
       // it through (keyed from the RESPONSE), or invalidate the mutate-time
       // keys if a response ever omits it.
       if (data.case) {
-        queryClient.setQueryData(['age-review-case', data.case.id], { success: true, case: data.case });
+        const updated = data.case;
+        queryClient.setQueryData(['age-review-case', updated.id], { success: true, case: updated });
+        // ...and every cached LIST: selectedCase prefers the list row, so a
+        // retained pre-action row out-votes both repaired entries while the
+        // invalidation refetch is pending — or forever if it fails (review).
+        // Reconcile the response row into each list per its filter params;
+        // the refetch still supersedes with full server truth when it lands.
+        queryClient.getQueriesData<{ success: boolean; cases: AgeReviewCase[] }>({ queryKey: ['age-review-cases'] })
+          .forEach(([key, old]) => {
+            if (!old?.cases) return;
+            const params = (key[1] ?? {}) as AgeReviewListParams;
+            queryClient.setQueryData(key, { ...old, cases: reconcileCaseIntoList(params, old.cases, updated) });
+          });
         // ...and the hand-off's lookup key: left stale, re-entering the
         // ?pubkey= hand-off within its cache lifetime re-seeds the per-case
         // entry with the pre-action ACTIVE row, resurrecting the exact hole
         // above. Terminal states have no active case; write that truth.
         queryClient.setQueryData(
-          ['age-review-active-case', data.case.pubkey],
-          { success: true, case: TERMINAL_STATES.includes(data.case.state) ? null : data.case },
+          ['age-review-active-case', updated.pubkey],
+          { success: true, case: TERMINAL_STATES.includes(updated.state) ? null : updated },
         );
       } else {
         queryClient.invalidateQueries({ queryKey: ['age-review-case', ctx.caseId] });
