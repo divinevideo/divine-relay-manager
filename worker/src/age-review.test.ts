@@ -22,7 +22,11 @@ import { FUNNEL_ZENDESK_QUERIES } from '../../shared/age-review';
 import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, createMinorAccount } from './keycast-client';
 import { suspendPubkey, unsuspendPubkey, banPubkey } from './nip86';
 
-vi.mock('./keycast-client', () => ({
+// Stub the network functions but pass real constants (HEX_64) through --
+// age-review's moderator_pubkey validation must use the same regex the
+// client-side actor guard uses.
+vi.mock('./keycast-client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./keycast-client')>()),
   suspendUser: vi.fn().mockResolvedValue({ success: true }),
   unsuspendUser: vi.fn().mockResolvedValue({ success: true }),
   banUser: vi.fn().mockResolvedValue({ success: true }),
@@ -234,6 +238,44 @@ describe('handleUpdateAgeReviewCase', () => {
     expect(res.status).toBe(400);
     const body = await res.json() as { error: string };
     expect(body.error).toContain('Cannot transition');
+  });
+
+  it('rejects a non-hex moderator_pubkey (audit attribution must be canonical) (#175 review)', async () => {
+    const req = new Request('https://api.test/api/age-review/cases/case-1', {
+      method: 'PATCH',
+      body: JSON.stringify({ moderator_pubkey: 'not-a-pubkey' }),
+    });
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
+    expect(res.status).toBe(400);
+    const body = await res.json() as { error: string };
+    expect(body.error).toContain('canonical 64-hex');
+  });
+
+  it('rejects an uppercase moderator_pubkey (canonical lowercase only) (#175 review)', async () => {
+    const req = new Request('https://api.test/api/age-review/cases/case-1', {
+      method: 'PATCH',
+      body: JSON.stringify({ moderator_pubkey: 'A'.repeat(64) }),
+    });
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects a wrong-length moderator_pubkey (#175 review)', async () => {
+    const req = new Request('https://api.test/api/age-review/cases/case-1', {
+      method: 'PATCH',
+      body: JSON.stringify({ moderator_pubkey: 'a'.repeat(63) }),
+    });
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
+    expect(res.status).toBe(400);
+  });
+
+  it('still accepts a null moderator_pubkey (unassign) (#175 review)', async () => {
+    const req = new Request('https://api.test/api/age-review/cases/case-1', {
+      method: 'PATCH',
+      body: JSON.stringify({ moderator_pubkey: null }),
+    });
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
+    expect(res.status).toBe(200);
   });
 
   it('rejects update on terminal case', async () => {
@@ -761,6 +803,50 @@ describe('Keycast suspension wiring', () => {
     });
     await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(makeDbFor(reviewCase, updatedCase)), corsHeaders);
 
+    expect(suspendUser).toHaveBeenCalledWith(
+      reviewCase.pubkey,
+      'age_review',
+      expect.objectContaining({ DB: expect.anything() }),
+      moderator,
+    );
+  });
+
+  it('persists the acting moderator in the same CAS update and attributes keycast, from a report-created case (#175 review, real UI shape)', async () => {
+    // End-to-end shape of the real path: a report-created case starts with no
+    // moderator; the UI sends the logged-in pubkey alongside the state change.
+    // One PATCH must (a) persist the moderator in the SAME compare-and-swap
+    // UPDATE as the transition and (b) attribute the keycast status leg.
+    const moderator = 'e'.repeat(64);
+    const reviewCase = makeCase({ state: 'under_moderator_review', moderator_pubkey: null, created_via: 'report' });
+    const updatedCase = {
+      ...reviewCase,
+      state: 'restricted_pending_user_response' as const,
+      moderator_pubkey: moderator,
+    };
+    const db = makeDbFor(reviewCase, updatedCase);
+
+    const req = new Request('https://api.test/api/age-review/cases/case-1', {
+      method: 'PATCH',
+      body: JSON.stringify({
+        state: 'restricted_pending_user_response',
+        moderator_pubkey: moderator,
+        expected_version: reviewCase.version,
+      }),
+    });
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
+    expect(res.status).toBe(200);
+
+    // (a) persistence rides the CAS UPDATE itself, not a separate write
+    const updateIdx = db.prepare.mock.calls.findIndex(
+      (c: string[]) => c[0]?.includes('UPDATE age_review_cases SET'),
+    );
+    expect(updateIdx).toBeGreaterThanOrEqual(0);
+    expect(db.prepare.mock.calls[updateIdx][0]).toContain('moderator_pubkey = ?');
+    const bindArgs = db.prepare.mock.results[updateIdx].value.bind.mock.calls[0];
+    expect(bindArgs).toContain(moderator);
+    expect(bindArgs).toContain(reviewCase.version); // same CAS guard
+
+    // (b) the keycast status leg is attributed to the same moderator
     expect(suspendUser).toHaveBeenCalledWith(
       reviewCase.pubkey,
       'age_review',

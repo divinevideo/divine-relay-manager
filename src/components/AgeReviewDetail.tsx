@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAdminApi, useApiUrl } from "@/hooks/useAdminApi";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { ApiError } from "@/lib/adminApi";
 import { useToast } from "@/hooks/useToast";
 import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
@@ -99,6 +100,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
   const api = useAdminApi();
   const apiUrl = useApiUrl();
   const { toast } = useToast();
+  const { user } = useCurrentUser();
   const queryClient = useQueryClient();
   const [resolutionNote, setResolutionNote] = useState(c.resolution_note ?? "");
   const pendingStateRef = useRef<string | undefined>();
@@ -114,7 +116,15 @@ export function AgeReviewDetail({ caseData: c }: Props) {
   const updateCase = useMutation({
     mutationFn: (updates: Record<string, unknown>) => {
       pendingStateRef.current = updates.state as string | undefined;
-      return api.updateAgeReviewCase(c.id, { ...updates, expected_version: c.version });
+      // State-changing actions carry the logged-in moderator so the case row
+      // and the keycast audit attribute the acting human (#175). House
+      // pattern (see UserManagement -> moderation_decisions): UI-declared
+      // within the CF Access perimeter. Without a Nostr login the field is
+      // omitted and keycast falls back to a log-only audit row.
+      const attribution = updates.state !== undefined && user?.pubkey
+        ? { moderator_pubkey: user.pubkey }
+        : {};
+      return api.updateAgeReviewCase(c.id, { ...attribution, ...updates, expected_version: c.version });
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['age-review-cases'] });

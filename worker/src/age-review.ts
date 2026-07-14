@@ -20,7 +20,7 @@ import {
 import { runBulkModeration, type BulkModerateEnv } from './bulk-moderate';
 import { resolveZendeskCreds } from './zendesk-sync';
 import type { BulkAction } from '../../shared/bulk-moderation';
-import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, createMinorAccount, type KeycastEnv } from './keycast-client';
+import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, createMinorAccount, type KeycastEnv, HEX_64 } from './keycast-client';
 import { suspendPubkey, unsuspendPubkey, banPubkey, type SecretStoreSecret } from './nip86';
 
 export interface AgeReviewEnv extends BulkModerateEnv, KeycastEnv {
@@ -240,10 +240,17 @@ export async function handleUpdateAgeReviewCase(
     binds.push(newDeadline);
   }
 
-  // Moderator assignment
+  // Moderator assignment/attribution. The value is UI-declared within the
+  // CF Access perimeter (house pattern, same trust model as
+  // moderation_decisions.moderator_pubkey) and feeds the keycast audit actor
+  // (#175) -- reject malformed input loudly at the boundary rather than
+  // letting the audit silently degrade to log-only downstream.
   if (body.moderator_pubkey !== undefined) {
-    if (body.moderator_pubkey !== null && typeof body.moderator_pubkey !== 'string') {
-      return json({ success: false, error: 'moderator_pubkey must be a string or null' }, 400, corsHeaders);
+    if (
+      body.moderator_pubkey !== null
+      && (typeof body.moderator_pubkey !== 'string' || !HEX_64.test(body.moderator_pubkey))
+    ) {
+      return json({ success: false, error: 'moderator_pubkey must be a canonical 64-hex pubkey or null' }, 400, corsHeaders);
     }
     updates.push('moderator_pubkey = ?');
     binds.push(body.moderator_pubkey as string | null);
