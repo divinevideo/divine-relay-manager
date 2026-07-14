@@ -1,0 +1,192 @@
+# Minor-Review Endpoint Health (#174)
+#
+# The mobile minor-account-review gate fails open by design: if
+# /v1/account/moderation-status is unreachable, every client treats the
+# account as active and the parental-consent gate silently never fires.
+# That is exactly what happened in #108 (wrong host, 404, dead for months,
+# found only by manually root-causing a mobile report). This check makes
+# that failure mode alert instead of hide.
+#
+# What it probes (the relay-manager workers, where these endpoints live --
+# NOT api.divine.video, see #108), on both production and staging:
+#   GET  /v1/account/moderation-status                      -> expect 401
+#   POST /v1/minor-review-cases/<id>/parent-contact         -> expect 401
+#
+# Why "401 + NIP-98 marker" is the healthy signal: the endpoints require
+# NIP-98 user auth and reject an unauthenticated probe with the worker's
+# distinctive body ("... expected: Nostr <base64>", single-sourced in
+# verifyNip98Auth, worker/src/index.ts). The status code alone is NOT
+# enough: any unmatched path under /v1 on these hosts also answers 401
+# via the worker's generic admin fallback (verified live; non-/v1 paths
+# hit CF Access at the edge instead), so a status-only probe would stay
+# green through a route regression -- the exact #108 failure class.
+# If the worker's error copy ever changes, this probe goes red (fail-safe);
+# update the marker and the copy together. What each outcome means:
+#   401 + marker -- healthy: endpoint routed, NIP-98 auth answering
+#   401 without marker -- generic admin fallback: the route did NOT match
+#          (removed/renamed/method drift). The #108-class failure.
+#   404 -- cannot happen unauth under /v1 on these hosts today (unmatched
+#          /v1 paths fall to the 401 fallback); will matter for the
+#          api.divine.video target (#173)
+#   302 -- CF Access got applied to /v1 paths (devices would be locked out)
+#   200 -- auth layer removed/bypassed (worst case: unauthenticated reads)
+#   403 -- the NIP-98 handler's status contract changed (mobile clients
+#          share this contract; investigate the worker auth path)
+#   5xx/transport -- worker or edge outage
+#
+# Runbook on failure:
+#   1. Check the run log for which probe failed and the code it saw.
+#   2. curl the URL yourself and read the body. A 401 with the admin
+#      fallback text means the route no longer matches: check the /v1
+#      route conditions in worker/src/index.ts and the deployed version
+#      (wrangler deployments list --config wrangler.<env>.toml).
+#   3. If 302, someone extended the CF Access app on that env over /v1.
+#   4. Remember: clients are silently failing open the whole time this
+#      is red -- treat as a minor-safety enforcement outage, not routine CI.
+#
+# Staging note: the staging worker's /v1 paths bypass CF Access (verified
+# 2026-07-13: /v1 answers the worker's own 401 while /api/* 302s to Access)
+# -- mobile devices must reach /v1, so this is by design. If the staging
+# probe starts seeing 302, someone extended the Access app over /v1 and
+# staging devices are locked out.
+#
+# TODO(#173): when the api.divine.video ingress route lands, add
+# https://api.divine.video as a third BASE_URL probe target so coverage
+# for pre-fix app installs is monitored too.
+#
+# Alerting -- know the limits:
+#   - A failed run turns red, and GitHub emails ONLY the user who last
+#     modified the cron line below (subject to their personal notification
+#     settings). Until Slack is wired, that one person is the whole
+#     alerting story.
+#   - If the SLACK_WEBHOOK_ALERTS secret is configured, failures also post
+#     to the alerts channel; absent secret, that step no-ops with a warning.
+#   - This repo is public: GitHub auto-disables scheduled workflows after
+#     60 days without repository activity -- the monitor can die silently
+#     during a quiet period. Re-enable from the Actions tab; consider a
+#     keepalive if the repo goes dormant.
+#   - Schedules only run from the default branch: this check goes live at
+#     merge, not on the PR.
+#
+# Setup:
+#   1. (Recommended) Repo secret SLACK_WEBHOOK_ALERTS -- incoming webhook
+#      for the alerts channel (same webhook the prod alertmanager uses;
+#      see the iac repo / GCP Secret Manager for the value).
+#   2. To test manually: Actions tab > "Minor-Review Endpoint Health" >
+#      Run workflow.
+
+name: Minor-Review Endpoint Health
+
+on:
+  schedule:
+    - cron: '7,22,37,52 * * * *' # every 15 min, offset to avoid top-of-hour runner contention
+  workflow_dispatch:
+
+# The job runs shell + outbound curl only: no checkout, no token use
+permissions: {}
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Probe minor-review endpoints (expect 401)
+        id: probe
+        run: |
+          FAILURES=""
+          BODY_FILE=$(mktemp)
+
+          # Human-readable transport diagnosis for the common curl exits
+          diagnose() {
+            case "$1" in
+              6) echo "DNS resolution failed" ;;
+              7) echo "connection refused" ;;
+              28) echo "timeout after 15s" ;;
+              *) echo "curl exit $1" ;;
+            esac
+          }
+
+          # The endpoint-specific NIP-98 rejection marker (single-sourced in
+          # verifyNip98Auth, worker/src/index.ts). A 401 WITHOUT it is the
+          # generic admin fallback: the route did not match.
+          MARKER='expected: Nostr'
+
+          probe() {
+            local method="$1" path="$2" attempt code snippet
+            for attempt in 1 2; do
+              : > "$BODY_FILE"
+              if [ "$method" = "GET" ]; then
+                code=$(curl -s -o "$BODY_FILE" -w '%{http_code}' --max-time 15 \
+                  "$BASE_URL$path" 2>/dev/null) || code="transport_error: $(diagnose $?)"
+              else
+                code=$(curl -s -o "$BODY_FILE" -w '%{http_code}' --max-time 15 \
+                  -X POST -H 'Content-Type: application/json' \
+                  -d '{"email":"synthetic@check.invalid"}' \
+                  "$BASE_URL$path" 2>/dev/null) || code="transport_error: $(diagnose $?)"
+              fi
+              if [ "$code" = "401" ] && grep -q "$MARKER" "$BODY_FILE"; then
+                echo "OK: $method $BASE_URL$path -> 401 + NIP-98 marker (endpoint routed, auth answering)"
+                return 0
+              fi
+              if [ "$code" = "401" ]; then
+                # Sanitize the response-derived snippet: bound the read FIRST
+                # (head before the pipe: a multi-MB body must not SIGPIPE the
+                # pipeline if pipefail is ever enabled), then single-line and
+                # strip control chars (ANSI etc.) for logs/annotation/Slack
+                snippet=$(head -c 100 "$BODY_FILE" | tr -d '\r' | tr '\n' ' ' | tr -cd '[:print:]')
+                code="401 without NIP-98 marker (generic fallback; route regression?): $snippet"
+              fi
+              echo "attempt $attempt: $method $BASE_URL$path -> $code (expected 401 + NIP-98 marker)"
+              # One retry damps transient edge blips without hiding real outages
+              [ "$attempt" = "1" ] && sleep 30
+            done
+            FAILURES="$FAILURES$method $BASE_URL$path -> $code"$'\n'
+            return 0
+          }
+
+          for BASE_URL in \
+            "https://api-relay-prod.divine.video" \
+            "https://api-relay-staging.divine.video"; do
+            probe GET  "/v1/account/moderation-status"
+            probe POST "/v1/minor-review-cases/synthetic-check/parent-contact"
+          done
+
+          if [ -n "$FAILURES" ]; then
+            printf 'failures<<EOF\n%s\nEOF\n' "${FAILURES%$'\n'}" >> "$GITHUB_OUTPUT"
+            # Workflow-command annotations are single-line: encode newlines
+            printf '::error::Minor-review endpoints unhealthy -- clients are silently failing open: %s\n' \
+              "$(printf '%s' "${FAILURES%$'\n'}" | tr '\n' '|')"
+            echo "unhealthy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "unhealthy=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Alert to Slack (if configured)
+        if: steps.probe.outputs.unhealthy == 'true'
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_ALERTS }}
+          FAILURES: ${{ steps.probe.outputs.failures }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK" ]; then
+            echo "::warning::SLACK_WEBHOOK_ALERTS not configured; relying on the red run for notification"
+            exit 0
+          fi
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          PAYLOAD=$(jq -n \
+            --arg failures "$FAILURES" \
+            --arg run_url "$RUN_URL" \
+            '{
+              text: ":rotating_light: Minor-review endpoints unhealthy -- the mobile gate is silently failing open",
+              blocks: [
+                {type: "section", text: {type: "mrkdwn", text: ":rotating_light: *Minor-review endpoint health failing* (#174)\nClients fail open while this is red -- minor-safety enforcement outage.\n```\($failures)```"}},
+                {type: "context", elements: [{type: "mrkdwn", text: "<\($run_url)|View workflow run>"}]}
+              ]
+            }')
+          curl -sf --max-time 10 -X POST "$SLACK_WEBHOOK" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD"
+
+      - name: Fail the run so GitHub notifies
+        if: steps.probe.outputs.unhealthy == 'true'
+        run: exit 1
