@@ -159,11 +159,16 @@ describe('keycast-client', () => {
     });
 
     it('drops a malformed actor instead of failing the status change (keycast 400s on it)', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const result = await suspendUser(VALID_PUBKEY, 'age_review', makeEnv(), 'not-a-pubkey');
       expect(result).toEqual({ success: true });
       const body = JSON.parse(fetchMock.mock.calls[0][1].body);
       expect(body).toEqual({ status: 'suspended', reason: 'age_review' });
       expect(body.actor).toBeUndefined();
+      // The drop must leave an observability trail (the audit silently
+      // degrading to log-only should be findable in the worker logs)
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('dropping malformed actor'));
+      warnSpy.mockRestore();
     });
 
     it('omits actor when none is supplied (keycast log-only fallback)', async () => {

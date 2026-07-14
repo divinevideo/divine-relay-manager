@@ -769,6 +769,32 @@ describe('Keycast suspension wiring', () => {
     );
   });
 
+  it('prefers the updated row moderator when assigned in the same PATCH (#175 review)', async () => {
+    // Assign-moderator-and-transition in one PATCH: the pre-update read has
+    // no moderator, the post-update re-read does. Attribution must come from
+    // the updated row or the audit silently degrades to log-only.
+    const moderator = 'd'.repeat(64);
+    const reviewCase = makeCase({ state: 'under_moderator_review', moderator_pubkey: null });
+    const updatedCase = {
+      ...reviewCase,
+      state: 'restricted_pending_user_response' as const,
+      moderator_pubkey: moderator,
+    };
+
+    const req = new Request('https://api.test/api/age-review/cases/case-1', {
+      method: 'PATCH',
+      body: JSON.stringify({ state: 'restricted_pending_user_response', moderator_pubkey: moderator }),
+    });
+    await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(makeDbFor(reviewCase, updatedCase)), corsHeaders);
+
+    expect(suspendUser).toHaveBeenCalledWith(
+      reviewCase.pubkey,
+      'age_review',
+      expect.objectContaining({ DB: expect.anything() }),
+      moderator,
+    );
+  });
+
   it('forwards the case moderator as actor on the unsuspend leg (keycast#279 / #175)', async () => {
     const moderator = 'c'.repeat(64);
     const restrictedCase = makeCase({ state: 'restricted_pending_user_response', moderator_pubkey: moderator });
