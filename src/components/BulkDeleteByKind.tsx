@@ -138,9 +138,10 @@ export function BulkDeleteByKind({ pubkey, onComplete, variant = "button", logDe
       let deleted = 0;
       const errors: string[] = [];
       const deleteReason = reason.trim() || `Bulk delete: kind ${selectedKind}`;
-      // Snapshot the moderator once at job start; a logout/switch mid-delete
-      // must not retarget the per-event attribution.
-      const moderatorPubkey = getModeratorPubkey ? await getModeratorPubkey() : undefined;
+      // Snapshot the moderator once at job start; a logout/switch mid-delete must
+      // not retarget the per-event attribution. Kept as a promise (awaited inside
+      // the loop, resolving once) so the first delete isn't blocked on identity.
+      const moderatorPromise = getModeratorPubkey ? getModeratorPubkey() : Promise.resolve(undefined);
 
       for (const event of eventsToDelete) {
         try {
@@ -154,7 +155,7 @@ export function BulkDeleteByKind({ pubkey, onComplete, variant = "button", logDe
                 action: 'delete_event',
                 reason: deleteReason,
                 reportId,
-                moderatorPubkey,
+                moderatorPubkey: await moderatorPromise,
               });
             } catch (e) {
               console.warn(`Failed to log decision for ${event.id}:`, e);

@@ -93,15 +93,20 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
   const getModeratorPubkey = useCallback(async (): Promise<string | undefined> => {
     const sig = signerRef.current;
     if (!sig) return undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const pk = await Promise.race([
         sig.getPublicKey(),
-        new Promise<string>((resolve) => setTimeout(() => resolve(''), MOD_PUBKEY_WAIT_MS)),
+        new Promise<string>((resolve) => {
+          timer = setTimeout(() => resolve(''), MOD_PUBKEY_WAIT_MS);
+        }),
       ]);
       const normalized = pk.trim().toLowerCase();
       return HEX_64.test(normalized) ? normalized : undefined;
     } catch {
       return undefined;
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }, []);
 
