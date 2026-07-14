@@ -12,7 +12,9 @@ export interface AgeReviewListParams {
 
 /** Whether `c` belongs in a list fetched with `params` (client-side mirror
  * of the worker's WHERE clause: active = not terminal, closed = terminal,
- * a specific state matches exactly, absent = all; band matches exactly). */
+ * a specific state matches exactly, absent = all; band matches exactly).
+ * Divergence for INVALID filter values only (worker ignores them and returns
+ * all; this excludes) — unreachable from the UI's FilterMode/AGE_BANDS. */
 export function caseBelongsInList(params: AgeReviewListParams, c: AgeReviewCase): boolean {
   if (params.state === 'active' && TERMINAL_STATES.includes(c.state)) return false;
   if (params.state === 'closed' && !TERMINAL_STATES.includes(c.state)) return false;
@@ -34,8 +36,11 @@ export function reconcileCaseIntoList(
   cases: AgeReviewCase[],
   updated: AgeReviewCase,
 ): AgeReviewCase[] {
+  const present = cases.some(c => c.id === updated.id);
   if (!caseBelongsInList(params, updated)) {
-    return cases.filter(c => c.id !== updated.id);
+    // Return the SAME array when nothing changes so callers can skip the
+    // cache write entirely (a no-op setQueryData still churns subscribers)
+    return present ? cases.filter(c => c.id !== updated.id) : cases;
   }
-  return cases.map(c => (c.id === updated.id ? updated : c));
+  return present ? cases.map(c => (c.id === updated.id ? updated : c)) : cases;
 }

@@ -123,7 +123,6 @@ export function AgeReviewDetail({ caseData: c }: Props) {
     // (review: wrong case's keys written, the acted-on case left stale)
     onMutate: () => ({ caseId: c.id, casePubkey: c.pubkey }),
     onSuccess: (data, _updates, ctx) => {
-      queryClient.invalidateQueries({ queryKey: ['age-review-cases'] });
       // Keep the per-case entry in step: the hand-off seeds
       // ['age-review-case', id] (30s staleTime), and a terminal action drops
       // the case from the active list, so the detail falls back to that
@@ -143,7 +142,12 @@ export function AgeReviewDetail({ caseData: c }: Props) {
           .forEach(([key, old]) => {
             if (!old?.cases) return;
             const params = (key[1] ?? {}) as AgeReviewListParams;
-            queryClient.setQueryData(key, { ...old, cases: reconcileCaseIntoList(params, old.cases, updated) });
+            const reconciled = reconcileCaseIntoList(params, old.cases, updated);
+            // Same-reference result = no change; skip the write so untouched
+            // entries keep their invalidation state and timestamps
+            if (reconciled !== old.cases) {
+              queryClient.setQueryData(key, { ...old, cases: reconciled });
+            }
           });
         // ...and the hand-off's lookup key: left stale, re-entering the
         // ?pubkey= hand-off within its cache lifetime re-seeds the per-case
@@ -157,6 +161,12 @@ export function AgeReviewDetail({ caseData: c }: Props) {
         queryClient.invalidateQueries({ queryKey: ['age-review-case', ctx.caseId] });
         queryClient.removeQueries({ queryKey: ['age-review-active-case', ctx.casePubkey] });
       }
+      // Invalidate AFTER the cache writes: setQueryData clears isInvalidated
+      // and fresh-stamps the entry, so writing after invalidating would
+      // suppress refetch-on-mount for every unobserved list cache (review) —
+      // this order keeps reconciled data rendering now AND every list due a
+      // real refetch.
+      queryClient.invalidateQueries({ queryKey: ['age-review-cases'] });
       const requestedState = pendingStateRef.current as AgeReviewState | undefined;
       if (requestedState && ENFORCEMENT_STATES.includes(requestedState) && data.enforcementComplete === false) {
         // Surface only actual failed enforcement legs. `not_attempted` is valid
