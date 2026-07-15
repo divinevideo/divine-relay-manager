@@ -16,6 +16,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Server, FileText, Users, Settings, Flag, Tag, Bug, GripVertical, Clock } from "lucide-react";
 import { useAppContext } from "@/hooks/useAppContext";
 import AdminBar from "@/components/AdminBar";
+import { DivineLoginButton } from "@/components/auth/DivineLoginButton";
 
 // Tab definitions in default order (Reports first for moderation workflow)
 const TAB_DEFINITIONS = [
@@ -163,7 +164,10 @@ export function RelayManager() {
                 <p className="text-sm text-muted-foreground">NIP-86 Moderation Tools</p>
               </div>
             </div>
-            <EnvironmentSelector />
+            <div className="flex items-center gap-3">
+              <DivineLoginButton />
+              <EnvironmentSelector />
+            </div>
           </div>
         </div>
       </header>

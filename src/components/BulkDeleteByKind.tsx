@@ -60,12 +60,16 @@ interface BulkDeleteByKindProps {
     action: string;
     reason?: string;
     reportId?: string;
+    moderatorPubkey?: string;
   }) => Promise<void>;
   /** Report ID for decision logging */
   reportId?: string;
+  /** Snapshot the acting moderator's pubkey, resolved once at job start so a
+   *  logout/switch mid-delete can't retarget the attribution (#178). */
+  getModeratorPubkey?: () => Promise<string | undefined>;
 }
 
-export function BulkDeleteByKind({ pubkey, onComplete, variant = "button", logDecision, reportId }: BulkDeleteByKindProps) {
+export function BulkDeleteByKind({ pubkey, onComplete, variant = "button", logDecision, reportId, getModeratorPubkey }: BulkDeleteByKindProps) {
   const { nostr } = useNostr();
   const { deleteEvent } = useAdminApi();
   const { toast } = useToast();
@@ -134,6 +138,10 @@ export function BulkDeleteByKind({ pubkey, onComplete, variant = "button", logDe
       let deleted = 0;
       const errors: string[] = [];
       const deleteReason = reason.trim() || `Bulk delete: kind ${selectedKind}`;
+      // Snapshot the moderator once at job start; a logout/switch mid-delete must
+      // not retarget the per-event attribution. Kept as a promise (awaited inside
+      // the loop, resolving once) so the first delete isn't blocked on identity.
+      const moderatorPromise = getModeratorPubkey ? getModeratorPubkey() : Promise.resolve(undefined);
 
       for (const event of eventsToDelete) {
         try {
@@ -147,6 +155,7 @@ export function BulkDeleteByKind({ pubkey, onComplete, variant = "button", logDe
                 action: 'delete_event',
                 reason: deleteReason,
                 reportId,
+                moderatorPubkey: await moderatorPromise,
               });
             } catch (e) {
               console.warn(`Failed to log decision for ${event.id}:`, e);

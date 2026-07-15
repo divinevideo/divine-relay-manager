@@ -27,6 +27,11 @@ vi.mock('react-router-dom', async (orig) => ({
 
 vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => api }));
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast }) }));
+// Logged-in moderator, so audit writes carry attribution (#178).
+const MOD_PUBKEY = 'e'.repeat(64);
+vi.mock('@/hooks/useCurrentUser', () => ({
+  useCurrentUser: () => ({ user: { pubkey: MOD_PUBKEY }, getModeratorPubkey: async () => MOD_PUBKEY }),
+}));
 
 const PUBKEY = 'a'.repeat(64);
 
@@ -133,6 +138,17 @@ describe('UserActions', () => {
     renderWithProvider(<UserActions pubkey={PUBKEY} />);
     fireEvent.click(screen.getByRole('button', { name: /Suspend User/i }));
     await waitFor(() => expect(navigate).toHaveBeenCalledWith(`/age-review?pubkey=${PUBKEY}`));
+  });
+
+  it('attributes the audit write to the logged-in moderator (#178)', async () => {
+    renderWithProvider(<UserActions pubkey={PUBKEY} />);
+    fireEvent.click(screen.getByRole('button', { name: /Suspend User/i }));
+    await waitFor(() => expect(api.suspendPubkey).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(api.logDecision).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'suspend_user', moderatorPubkey: MOD_PUBKEY }),
+      ),
+    );
   });
 
   it('warns about evidence when banning an account with an open age-review case', async () => {

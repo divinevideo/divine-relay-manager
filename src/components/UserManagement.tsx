@@ -44,7 +44,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { callRelayRpc, verifyPubkeyBanned, verifyPubkeyUnbanned, unbanPubkey, unsuspendPubkey, logDecision } = useAdminApi();
-  const { user } = useCurrentUser();
+  const { getModeratorPubkey } = useCurrentUser();
   const [newPubkey, setNewPubkey] = useState("");
   const [newReason, setNewReason] = useState("");
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
@@ -85,6 +85,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
   // Mutation for banning users
   const banUserMutation = useMutation({
     mutationFn: async ({ pubkey, reason }: { pubkey: string; reason?: string }) => {
+      const moderator = getModeratorPubkey(); // snapshot identity at action start
       await callRelayRpc('banpubkey', [pubkey, reason]);
       // Log to D1 for audit trail
       await logDecision({
@@ -92,7 +93,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
         targetId: pubkey,
         action: 'ban_user',
         reason: reason || 'Banned via User Management',
-        moderatorPubkey: user?.pubkey,
+        moderatorPubkey: await moderator,
       });
       return pubkey;
     },
@@ -123,6 +124,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
   // Mutation for allowing users
   const allowUserMutation = useMutation({
     mutationFn: async ({ pubkey, reason }: { pubkey: string; reason?: string }) => {
+      const moderator = getModeratorPubkey(); // snapshot identity at action start
       await callRelayRpc('unbanpubkey', [pubkey, reason]);
       // Log to D1 for audit trail
       await logDecision({
@@ -130,7 +132,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
         targetId: pubkey,
         action: 'allow_user',
         reason: reason || 'Allowed via User Management',
-        moderatorPubkey: user?.pubkey,
+        moderatorPubkey: await moderator,
       });
       return pubkey;
     },
@@ -190,13 +192,14 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
   // Mutation for unbanning users
   const unbanUserMutation = useMutation({
     mutationFn: async ({ pubkey }: { pubkey: string }) => {
+      const moderator = getModeratorPubkey(); // snapshot identity at action start
       await unbanPubkey(pubkey);
       await logDecision({
         targetType: 'pubkey',
         targetId: pubkey,
         action: 'unban_user',
         reason: 'Unbanned via User Management',
-        moderatorPubkey: user?.pubkey,
+        moderatorPubkey: await moderator,
       });
       return pubkey;
     },
@@ -222,13 +225,14 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
 
   const unsuspendUserMutation = useMutation({
     mutationFn: async ({ pubkey }: { pubkey: string }) => {
+      const moderator = getModeratorPubkey(); // snapshot identity at action start
       await unsuspendPubkey(pubkey);
       await logDecision({
         targetType: 'pubkey',
         targetId: pubkey,
         action: 'unsuspend_user',
         reason: 'Unsuspended via User Management',
-        moderatorPubkey: user?.pubkey,
+        moderatorPubkey: await moderator,
       });
       return pubkey;
     },

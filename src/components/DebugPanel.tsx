@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/collapsible";
 import { useToast } from "@/hooks/useToast";
 import { useAdminApi } from "@/hooks/useAdminApi";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 import type { BannedPubkeyEntry } from "@/lib/adminApi";
 import {
   Bug,
@@ -75,6 +76,7 @@ export function DebugPanel() {
     verifyPubkeyBanned,
     verifyPubkeyUnbanned,
   } = useAdminApi();
+  const { getModeratorPubkey } = useCurrentUser();
   const [testPubkey, setTestPubkey] = useState("");
   const [rpcMethod, setRpcMethod] = useState("listbannedpubkeys");
   const [rpcParams, setRpcParams] = useState("");
@@ -187,6 +189,7 @@ export function DebugPanel() {
     mutationFn: async (pubkey: string) => {
       const start = Date.now();
       const results: { banResult?: unknown; banError?: string; logResult?: unknown; logError?: string } = {};
+      const moderator = getModeratorPubkey(); // capture before the authoritative request
 
       // Try to ban via NIP-86 RPC
       try {
@@ -203,6 +206,7 @@ export function DebugPanel() {
           targetId: pubkey,
           action: 'ban_user',
           reason: 'Debug test ban',
+          moderatorPubkey: await moderator,
         });
         results.logResult = logResult;
       } catch (error) {
@@ -288,6 +292,7 @@ export function DebugPanel() {
     mutationFn: async (pubkey: string) => {
       const start = Date.now();
       const results: { unbanResult?: unknown; unbanError?: string; logResult?: unknown; logError?: string } = {};
+      const moderator = getModeratorPubkey(); // capture before the authoritative request
 
       try {
         const unbanResult = await unbanPubkey(pubkey);
@@ -302,6 +307,7 @@ export function DebugPanel() {
           targetId: pubkey,
           action: 'unban_user',
           reason: 'Debug test unban',
+          moderatorPubkey: await moderator,
         });
         results.logResult = logResult;
       } catch (error) {

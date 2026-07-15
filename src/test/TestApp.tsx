@@ -1,9 +1,9 @@
 import { BrowserRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { NostrLoginProvider } from '@nostrify/react/login';
 import NostrProvider from '@/components/NostrProvider';
 import { AppProvider } from '@/components/AppProvider';
 import { AppConfig } from '@/contexts/AppContext';
+import { DivineSessionProvider } from '@/components/DivineSessionProvider';
 
 interface TestAppProps {
   children: React.ReactNode;
@@ -27,11 +27,11 @@ export function TestApp({ children }: TestAppProps) {
     <BrowserRouter>
       <AppProvider storageKey='test-app-config' defaultConfig={defaultConfig}>
         <QueryClientProvider client={queryClient}>
-          <NostrLoginProvider storageKey='test-login'>
-            <NostrProvider>
+          <NostrProvider>
+            <DivineSessionProvider>
               {children}
-            </NostrProvider>
-          </NostrLoginProvider>
+            </DivineSessionProvider>
+          </NostrProvider>
         </QueryClientProvider>
       </AppProvider>
     </BrowserRouter>

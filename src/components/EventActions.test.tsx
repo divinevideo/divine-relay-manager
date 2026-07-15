@@ -15,9 +15,14 @@ const api = vi.hoisted(() => ({
   logDecision: vi.fn(),
 }));
 const toast = vi.hoisted(() => vi.fn());
+const MOD_PUBKEY = 'e'.repeat(64);
 
 vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => api }));
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast }) }));
+// Logged-in moderator, so audit writes carry attribution (#178).
+vi.mock('@/hooks/useCurrentUser', () => ({
+  useCurrentUser: () => ({ user: { pubkey: MOD_PUBKEY }, getModeratorPubkey: async () => MOD_PUBKEY }),
+}));
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -94,6 +99,10 @@ describe('EventActions', () => {
     fireEvent.click(screen.getByRole('button', { name: /Ban Event/i }));
 
     await waitFor(() => expect(api.banEvent).toHaveBeenCalledWith('event-1', 'Banned by moderator'));
+    // #178: the audit write is attributed to the logged-in moderator.
+    await waitFor(() =>
+      expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({ moderatorPubkey: MOD_PUBKEY })),
+    );
     await waitFor(() =>
       expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Event banned from relay' })),
     );
