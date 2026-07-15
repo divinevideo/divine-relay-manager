@@ -45,7 +45,7 @@ import { ReportDetail } from "@/components/ReportDetail";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { ReportDetailErrorFallback } from "@/components/ReportDetailErrorFallback";
 import { DeepLinkFallback } from "@/components/DeepLinkFallback";
-import { classifyTargetedFetch, decisionsForTarget, type DeepLinkStatus } from "@/lib/deepLinkResolution";
+import { classifyTargetedFetch, decisionsForTarget, reportsMatchingTarget, type DeepLinkStatus } from "@/lib/deepLinkResolution";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { AUTO_HIDE_ACTIONS, CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, getReportCategory } from "@/lib/constants";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -781,17 +781,20 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         const events = await fetchReportsByTarget(
           target.type === 'event' ? { event: target.value } : { pubkey: target.value }
         );
-        const verdict = classifyTargetedFetch({ ok: true, events });
+        // Match by resolved target (same rule as the bulk list) so a report that only
+        // p-tags the pubkey but resolves to an event target isn't a false 'found'.
+        const matching = reportsMatchingTarget(events, target, getReportTarget);
+        const verdict = classifyTargetedFetch({ ok: true, events: matching });
         if (verdict === 'found') {
           // Merge into the reports cache so the detail pane has full context,
           queryClient.setQueryData<NostrEvent[]>(['reports', relayUrl], (old) => {
             const merged = [...(old ?? [])];
-            for (const e of events) if (!merged.some(m => m.id === e.id)) merged.push(e);
+            for (const e of matching) if (!merged.some(m => m.id === e.id)) merged.push(e);
             return merged;
           });
           // and select the newest fetched report directly — not via a re-run, so a
           // consolidation mismatch can neither loop nor hang the pane on 'resolving'.
-          const latest = events.reduce((a, b) => (b.created_at > a.created_at ? b : a));
+          const latest = matching.reduce((a, b) => (b.created_at > a.created_at ? b : a));
           setSelectedReport(latest);
           setDeepLinkStatus('found');
           navigate(`/reports/${latest.id}`, { replace: true });

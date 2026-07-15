@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { classifyTargetedFetch, decisionsForTarget } from './deepLinkResolution';
+import { classifyTargetedFetch, decisionsForTarget, reportsMatchingTarget } from './deepLinkResolution';
 
 describe('classifyTargetedFetch', () => {
   it('unavailable when the fetch failed', () => {
@@ -27,5 +27,25 @@ describe('decisionsForTarget', () => {
   });
   it('returns [] for undefined input', () => {
     expect(decisionsForTarget(undefined, 'PK')).toEqual([]);
+  });
+});
+
+describe('reportsMatchingTarget', () => {
+  type E = { id: string; t: { type: string; value: string } | null };
+  const getTarget = (e: E) => e.t;
+  const events: E[] = [
+    { id: 'a', t: { type: 'event', value: 'E1' } },
+    { id: 'b', t: { type: 'pubkey', value: 'P1' } },
+    { id: 'c', t: null },
+    { id: 'd', t: { type: 'pubkey', value: 'P1' } },
+  ];
+  it('keeps only events whose resolved target matches type and value', () => {
+    expect(reportsMatchingTarget(events, { type: 'pubkey', value: 'P1' }, getTarget).map((e) => e.id)).toEqual([
+      'b',
+      'd',
+    ]);
+  });
+  it('drops events whose resolved target is null or differs (event-typed report does not satisfy a pubkey target)', () => {
+    expect(reportsMatchingTarget(events, { type: 'event', value: 'E1' }, getTarget).map((e) => e.id)).toEqual(['a']);
   });
 });

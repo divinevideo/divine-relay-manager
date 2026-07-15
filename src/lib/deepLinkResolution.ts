@@ -13,6 +13,21 @@ export function classifyTargetedFetch(
   return (outcome.events?.length ?? 0) > 0 ? 'found' : 'gone';
 }
 
+// Keep only the reports whose resolved target (via the caller's getReportTarget)
+// matches the deep-link target. This mirrors the bulk list's consolidation rule so
+// a targeted lookup and the bulk search agree: a report that merely p-tags a pubkey
+// but resolves to an event target does NOT satisfy a ?pubkey= deep-link.
+export function reportsMatchingTarget<E>(
+  events: E[],
+  target: { type: string; value: string },
+  getTarget: (event: E) => { type: string; value: string } | null
+): E[] {
+  return events.filter((e) => {
+    const t = getTarget(e);
+    return t !== null && t.type === target.type && t.value === target.value;
+  });
+}
+
 // The moderation decisions recorded for a target, matching both the raw id and
 // the mobile "user_<pubkey>" form the report/decision pipeline sometimes uses.
 // Generic so it preserves the caller's element type (e.g. ModerationDecision).
