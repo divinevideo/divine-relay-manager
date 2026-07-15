@@ -357,7 +357,7 @@ function IndividualReportItem({
 
 export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
+  const [searchParams] = useSearchParams();
   const { listBannedPubkeys, listBannedEvents, getAllDecisions, fetchReports, fetchReportsByTarget, fetchResolutionLabels } = useAdminApi();
   const { config, updateConfig } = useAppContext();
   const queryClient = useQueryClient();
@@ -377,6 +377,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const [deepLinkStatus, setDeepLinkStatus] = useState<DeepLinkStatus>('idle');
   const attemptedTargetRef = useRef<string | null>(null); // one targeted fetch per target
   const [retryNonce, setRetryNonce] = useState(0); // forces the deep-link effect to re-run on retry
+  // Tracks mount state so an in-flight targeted lookup that resolves after the component
+  // unmounts (e.g. the moderator switched tabs) can't fire a late navigate() and yank them back.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    // Set on mount (not only cleared on unmount) so a StrictMode remount restores it.
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   // Reports and resolution labels fetched via server-side relay query through
   // the worker. Replaces browser-side WebSocket (nostrify NPool) which served
@@ -767,8 +775,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       }
       setSelectedReport(inBulk.latestReport);
       setDeepLinkStatus('found');
+      // Navigating to the path (no query string) already clears the deep-link params;
+      // a separate setSearchParams({}) here would run against the stale pre-navigate path
+      // and clobber this back to /reports.
       navigate(`/reports/${inBulk.latestReport.id}`, { replace: true });
-      setSearchParams({}, { replace: true });
       attemptedTargetRef.current = null;
       return;
     }
@@ -784,6 +794,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         const events = await fetchReportsByTarget(
           target.type === 'event' ? { event: target.value } : { pubkey: target.value }
         );
+        // Drop the result if this run was superseded (target changed) or the component
+        // unmounted while the fetch was in flight — otherwise a late navigate() would yank
+        // the moderator back to this report. (A benign same-target re-run keeps
+        // attemptedTargetRef === target.value, so this correctly still applies.)
+        if (!mountedRef.current || attemptedTargetRef.current !== target.value) return;
         // Match by resolved target (same rule as the bulk list) so a report that only
         // p-tags the pubkey but resolves to an event target isn't a false 'found'.
         const matching = reportsMatchingTarget(events, target, getReportTarget);
@@ -801,15 +816,15 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           setSelectedReport(latest);
           setDeepLinkStatus('found');
           navigate(`/reports/${latest.id}`, { replace: true });
-          setSearchParams({}, { replace: true });
         } else {
           setDeepLinkStatus(verdict); // 'gone'
         }
       } catch {
+        if (!mountedRef.current || attemptedTargetRef.current !== target.value) return;
         setDeepLinkStatus('unavailable');
       }
     })();
-  }, [allConsolidated, searchParams, hideResolved, resolvedTargets, navigate, setSearchParams, isLoading, config.relayUrl, config.apiUrl, updateConfig, queryClient, fetchReportsByTarget, relayUrl, retryNonce]);
+  }, [allConsolidated, searchParams, hideResolved, resolvedTargets, navigate, isLoading, config.relayUrl, config.apiUrl, updateConfig, queryClient, fetchReportsByTarget, relayUrl, retryNonce]);
 
   // Update URL when report selection changes
   const handleSelectReport = (report: NostrEvent | null) => {

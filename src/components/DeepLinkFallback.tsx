@@ -46,7 +46,7 @@ export function DeepLinkFallback({ status, target, decisions, onRetry }: DeepLin
               {decisions.map((d) => (
                 <li key={d.id}>
                   <code>{d.action}</code>
-                  {d.created_at ? ` — ${d.created_at}` : ''}
+                  {d.created_at ? ` · ${d.created_at}` : ''}
                   {d.moderator_pubkey ? (
                     <>
                       {' '}by <code className="break-all">{d.moderator_pubkey}</code>
