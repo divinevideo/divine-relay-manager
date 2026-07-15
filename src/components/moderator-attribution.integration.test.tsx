@@ -15,8 +15,12 @@ const { getSession, getPublicKey } = vi.hoisted(() => ({
   getPublicKey: vi.fn(),
 }));
 vi.mock('@/lib/divineLogin', () => ({ getSession, logout: vi.fn(), startLogin: vi.fn() }));
+// Token-aware: getPublicKey receives the signer's token, so a test can give two
+// accounts distinct pubkeys. Existing tests ignore the arg (return one pubkey).
 vi.mock('@/lib/divineSigner', () => ({
-  DivineRpcSigner: vi.fn().mockImplementation(() => ({ getPublicKey })),
+  DivineRpcSigner: vi.fn().mockImplementation((getToken?: () => string | undefined) => ({
+    getPublicKey: () => getPublicKey(getToken?.()),
+  })),
 }));
 // Profile metadata is not part of the attribution path; keep the relay out.
 vi.mock('@/hooks/useAuthor', () => ({ useAuthor: () => ({ data: {} }) }));
@@ -105,6 +109,44 @@ describe('moderator attribution (composed: provider -> useCurrentUser -> moderat
         expect.objectContaining({ action: 'ban_event', moderatorPubkey: MOD_PUBKEY }),
       ),
     );
+  });
+
+  it('attributes the moderator captured at action start, not one switched in mid-request (dcadenas #181)', async () => {
+    // The exact race: identity must be captured BEFORE the authoritative request,
+    // so a logout/account-switch WHILE the request is in flight can't retarget it.
+    // This fails on the old code (which read identity after the request).
+    const PK_A = 'a'.repeat(64);
+    const PK_B = 'b'.repeat(64);
+    getPublicKey.mockImplementation(async (token: string) => (token === 'tokB' ? PK_B : PK_A));
+    getSession.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 'tokA' });
+    let releaseBan!: () => void;
+    api.banEvent.mockReturnValue(
+      new Promise<{ success: true }>((resolve) => {
+        releaseBan = () => resolve({ success: true });
+      }),
+    );
+
+    renderComposed();
+    await waitFor(() => expect(screen.getByTestId('resolved-mod')).toHaveTextContent(PK_A));
+
+    // Start the ban: the mutation captures moderator A, then awaits banEvent.
+    fireEvent.click(screen.getByRole('button', { name: /Ban Event/i }));
+    await waitFor(() => expect(api.banEvent).toHaveBeenCalled());
+
+    // Switch accounts WHILE banEvent is still in flight.
+    getSession.mockResolvedValue({ bunkerUrl: 'bunker://y', accessToken: 'tokB' });
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+    });
+    await waitFor(() => expect(screen.getByTestId('resolved-mod')).toHaveTextContent(PK_B));
+
+    // The request completes; the audit must attribute A (captured at start), not B.
+    await act(async () => {
+      releaseBan();
+    });
+    await waitFor(() => expect(api.logDecision).toHaveBeenCalled());
+    const banCall = api.logDecision.mock.calls.find((c) => c[0]?.action === 'ban_event');
+    expect(banCall?.[0].moderatorPubkey).toBe(PK_A);
   });
 
   it('writes null attribution (not a stale/other pubkey) when signed out', async () => {
