@@ -399,7 +399,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
   // Query banned pubkeys from relay (NIP-86 RPC)
   // Force fresh fetch (staleTime: 0) when deep linking to ensure accurate ban status
-  const { data: bannedPubkeys, isFetching: isFetchingBanned } = useQuery({
+  const { data: bannedPubkeys } = useQuery({
     queryKey: ['banned-pubkeys'],
     queryFn: async () => {
       try {
@@ -739,8 +739,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       }
     }
 
-    // Still loading the bulk list (or fresh ban data) — resolving, don't conclude yet.
-    if (isLoading || isFetchingBanned) {
+    // Still loading the bulk list — resolving, don't conclude yet. We intentionally
+    // do NOT gate on isFetchingBanned: ban data affects how a report is displayed,
+    // not whether it exists, and gating on it flips a resolved pane back to
+    // 'resolving' (and re-fires the lookup) on every background ban refetch.
+    if (isLoading) {
       setDeepLinkStatus('resolving');
       return;
     }
@@ -806,7 +809,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         setDeepLinkStatus('unavailable');
       }
     })();
-  }, [allConsolidated, searchParams, hideResolved, resolvedTargets, navigate, setSearchParams, isLoading, isFetchingBanned, config.relayUrl, config.apiUrl, updateConfig, queryClient, fetchReportsByTarget, relayUrl, retryNonce]);
+  }, [allConsolidated, searchParams, hideResolved, resolvedTargets, navigate, setSearchParams, isLoading, config.relayUrl, config.apiUrl, updateConfig, queryClient, fetchReportsByTarget, relayUrl, retryNonce]);
 
   // Update URL when report selection changes
   const handleSelectReport = (report: NostrEvent | null) => {
