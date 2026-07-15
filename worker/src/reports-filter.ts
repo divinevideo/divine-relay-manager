@@ -20,3 +20,15 @@ export function buildReportsFilter(params: URLSearchParams): {
   }
   return { kinds: [REPORT_KIND], limit: BULK_LIMIT };
 }
+
+// A targeted deep-link lookup (?event=/?pubkey=) that came back empty without the relay
+// confirming end-of-stored-events (no EOSE — a timeout or early close) is ambiguous, not
+// proof of absence. The caller should surface it as "unavailable" (retry), never as a
+// deletion. Bulk requests (no target param) are exempt: they self-correct on the next poll.
+export function isUnconfirmedTargetedMiss(
+  params: URLSearchParams,
+  result: { events?: unknown[]; complete?: boolean }
+): boolean {
+  const isTargeted = params.has('event') || params.has('pubkey');
+  return isTargeted && !result.complete && (result.events?.length ?? 0) === 0;
+}
