@@ -95,8 +95,12 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
     if (!sig) return undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
+      const pkPromise = sig.getPublicKey();
+      // If the timeout wins the race, getPublicKey stays pending; swallow a late
+      // rejection so it doesn't surface as an unhandled promise rejection.
+      pkPromise.catch(() => {});
       const pk = await Promise.race([
-        sig.getPublicKey(),
+        pkPromise,
         new Promise<string>((resolve) => {
           timer = setTimeout(() => resolve(''), MOD_PUBKEY_WAIT_MS);
         }),

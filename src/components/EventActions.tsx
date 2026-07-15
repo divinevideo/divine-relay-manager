@@ -168,9 +168,9 @@ export function EventActions({
 
   const unblockMediaMutation = useMutation({
     mutationFn: async () => {
-      const moderator = getModeratorPubkey(); // capture before the authoritative request
       const blockedHashes = mediaHashStatuses.filter(s => s.isBlocked).map(s => s.hash);
       if (blockedHashes.length === 0) return;
+      const moderator = getModeratorPubkey(); // capture before the authoritative request
       for (const hash of blockedHashes) {
         await api.moderateMedia(hash, 'SAFE', 'Unblocked by moderator');
       }
@@ -192,9 +192,9 @@ export function EventActions({
 
   const removeRestrictionMutation = useMutation({
     mutationFn: async () => {
-      const moderator = getModeratorPubkey(); // capture before the authoritative request
       const restrictedHashes = mediaHashStatuses.filter(s => s.isRestricted).map(s => s.hash);
       if (restrictedHashes.length === 0) return;
+      const moderator = getModeratorPubkey(); // capture before the authoritative request
       for (const hash of restrictedHashes) {
         await api.moderateMedia(hash, 'SAFE', 'Restriction removed by moderator');
       }
