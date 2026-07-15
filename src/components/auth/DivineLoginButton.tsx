@@ -12,10 +12,7 @@ function shortPubkey(pubkey: string): string {
 }
 
 export function DivineLoginButton() {
-  const { user, metadata } = useCurrentUser() as {
-    user?: { pubkey: string };
-    metadata?: { name?: string };
-  };
+  const { user, metadata } = useCurrentUser();
   const { startLogin, logout, isResolving } = useDivineSession();
   const { toast } = useToast();
 
