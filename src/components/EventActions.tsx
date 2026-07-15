@@ -46,10 +46,15 @@ export function EventActions({
   // action is the source of truth. On a successful write, re-invalidate the decision
   // log so the report converges without a manual refresh; on failure, surface a
   // non-blocking toast. Mirrors UserActions.logAudit.
-  // Detached audit write: waits briefly for the moderator identity (captured at
-  // call time), then attributes or falls back to null. Never blocks the action.
-  const logAudit = (params: Parameters<typeof api.logDecision>[0]) =>
-    void getModeratorPubkey().then((moderatorPubkey) =>
+  // Detached audit write. `moderator` is captured by the caller BEFORE the
+  // authoritative request (so a logout/switch mid-request can't retarget it) and
+  // reused across every write in the action. Waits for the in-flight identity,
+  // attributes or falls back to null, and never blocks the action.
+  const logAudit = (
+    moderator: Promise<string | undefined>,
+    params: Parameters<typeof api.logDecision>[0],
+  ) =>
+    void moderator.then((moderatorPubkey) =>
       api.logDecision({ ...params, moderatorPubkey })
         .then(() => { queryClient.invalidateQueries({ queryKey: ['decisions'] }); })
         .catch((e) => {
@@ -59,8 +64,9 @@ export function EventActions({
 
   const banEventMutation = useMutation({
     mutationFn: async () => {
+      const moderator = getModeratorPubkey(); // capture before the authoritative request
       await api.banEvent(eventId, 'Banned by moderator');
-      logAudit({
+      logAudit(moderator, {
         targetType: 'event',
         targetId: eventId,
         action: 'ban_event',
@@ -78,8 +84,9 @@ export function EventActions({
 
   const restoreEventMutation = useMutation({
     mutationFn: async () => {
+      const moderator = getModeratorPubkey(); // capture before the authoritative request
       await api.allowEvent(eventId);
-      logAudit({
+      logAudit(moderator, {
         targetType: 'event',
         targetId: eventId,
         action: 'restore_event',
@@ -97,8 +104,9 @@ export function EventActions({
 
   const deleteEventMutation = useMutation({
     mutationFn: async () => {
+      const moderator = getModeratorPubkey(); // capture before the authoritative request
       await api.deleteEvent(eventId, 'Permanently deleted by moderator', pubkey);
-      logAudit({
+      logAudit(moderator, {
         targetType: 'event',
         targetId: eventId,
         action: 'delete_event_permanent',
@@ -116,10 +124,11 @@ export function EventActions({
 
   const blockMediaMutation = useMutation({
     mutationFn: async () => {
+      const moderator = getModeratorPubkey(); // capture before the authoritative request
       for (const hash of mediaHashes) {
         await api.moderateMedia(hash, 'PERMANENT_BAN', 'Blocked by moderator');
       }
-      logAudit({
+      logAudit(moderator, {
         targetType: 'event',
         targetId: eventId,
         action: 'block_media',
@@ -137,10 +146,11 @@ export function EventActions({
 
   const ageRestrictMutation = useMutation({
     mutationFn: async () => {
+      const moderator = getModeratorPubkey(); // capture before the authoritative request
       for (const hash of mediaHashes) {
         await api.moderateMedia(hash, 'AGE_RESTRICTED', 'Age restricted by moderator');
       }
-      logAudit({
+      logAudit(moderator, {
         targetType: 'event',
         targetId: eventId,
         action: 'age_restrict_media',
@@ -158,12 +168,13 @@ export function EventActions({
 
   const unblockMediaMutation = useMutation({
     mutationFn: async () => {
+      const moderator = getModeratorPubkey(); // capture before the authoritative request
       const blockedHashes = mediaHashStatuses.filter(s => s.isBlocked).map(s => s.hash);
       if (blockedHashes.length === 0) return;
       for (const hash of blockedHashes) {
         await api.moderateMedia(hash, 'SAFE', 'Unblocked by moderator');
       }
-      logAudit({
+      logAudit(moderator, {
         targetType: 'event',
         targetId: eventId,
         action: 'unblock_media',
@@ -181,12 +192,13 @@ export function EventActions({
 
   const removeRestrictionMutation = useMutation({
     mutationFn: async () => {
+      const moderator = getModeratorPubkey(); // capture before the authoritative request
       const restrictedHashes = mediaHashStatuses.filter(s => s.isRestricted).map(s => s.hash);
       if (restrictedHashes.length === 0) return;
       for (const hash of restrictedHashes) {
         await api.moderateMedia(hash, 'SAFE', 'Restriction removed by moderator');
       }
-      logAudit({
+      logAudit(moderator, {
         targetType: 'event',
         targetId: eventId,
         action: 'remove_restriction',
@@ -204,10 +216,11 @@ export function EventActions({
 
   const deleteMediaMutation = useMutation({
     mutationFn: async () => {
+      const moderator = getModeratorPubkey(); // capture before the authoritative request
       for (const hash of mediaHashes) {
         await api.deleteMedia(hash, 'Permanently deleted by moderator');
       }
-      logAudit({
+      logAudit(moderator, {
         targetType: 'event',
         targetId: eventId,
         action: 'delete_media',
@@ -225,23 +238,24 @@ export function EventActions({
 
   const deleteEventAndMediaMutation = useMutation({
     mutationFn: async () => {
+      const moderator = getModeratorPubkey(); // capture before the authoritative request
       const completed: string[] = [];
       try {
         await api.deleteEvent(eventId, 'Permanently deleted by moderator', pubkey);
         completed.push('event_deleted');
-        logAudit({ targetType: 'event', targetId: eventId, action: 'delete_event', reason: 'Permanently deleted (combined)' });
+        logAudit(moderator, { targetType: 'event', targetId: eventId, action: 'delete_event', reason: 'Permanently deleted (combined)' });
 
         for (const hash of mediaHashes) {
           await api.deleteMedia(hash, 'Permanently deleted by moderator');
           completed.push(`media_${hash.slice(0, 8)}`);
         }
-        logAudit({ targetType: 'event', targetId: eventId, action: 'delete_event_and_media', reason: `Permanently deleted event + ${mediaHashes.length} media file(s)` });
+        logAudit(moderator, { targetType: 'event', targetId: eventId, action: 'delete_event_and_media', reason: `Permanently deleted event + ${mediaHashes.length} media file(s)` });
       } catch (error) {
         // Reached only when a real action (deleteEvent or a deleteMedia) failed —
         // not the audit log, which is now fire-and-forget. So "media deletion failed"
         // in onError is accurate.
         if (completed.length > 0) {
-          logAudit({ targetType: 'event', targetId: eventId, action: 'delete_event_and_media_partial', reason: `Partial delete (completed: ${completed.join(', ')}). Error: ${error instanceof Error ? error.message : 'unknown'}` });
+          logAudit(moderator, { targetType: 'event', targetId: eventId, action: 'delete_event_and_media_partial', reason: `Partial delete (completed: ${completed.join(', ')}). Error: ${error instanceof Error ? error.message : 'unknown'}` });
         }
         throw Object.assign(error instanceof Error ? error : new Error('Unknown error'), { completed });
       }

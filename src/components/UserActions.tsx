@@ -90,8 +90,15 @@ export function UserActions({
   // "pending" until a manual refresh. The ['decisions'] prefix covers
   // useDecisionLog's ['decisions', targetId]. A report legitimately stays
   // unresolved when no row was written (the .catch path), which is correct.
-  const logAudit = (params: Parameters<typeof api.logDecision>[0]) =>
-    void getModeratorPubkey().then((moderatorPubkey) =>
+  // Detached audit write. `moderator` is captured by the caller BEFORE the
+  // authoritative request (so a logout/switch mid-request can't retarget it) and
+  // reused across the action. Waits for the in-flight identity, attributes or
+  // falls back to null, and never blocks the action.
+  const logAudit = (
+    moderator: Promise<string | undefined>,
+    params: Parameters<typeof api.logDecision>[0],
+  ) =>
+    void moderator.then((moderatorPubkey) =>
       api.logDecision({ ...params, moderatorPubkey })
       .then(() => {
         queryClient.invalidateQueries({ queryKey: ['decisions'] });
@@ -103,8 +110,9 @@ export function UserActions({
 
   const suspendUserMutation = useMutation({
     mutationFn: async () => {
+      const moderator = getModeratorPubkey(); // capture before the authoritative request
       await api.suspendPubkey(pubkey, 'Suspended by moderator');
-      logAudit({
+      logAudit(moderator, {
         targetType: 'pubkey',
         targetId: pubkey,
         action: 'suspend_user',
@@ -123,8 +131,9 @@ export function UserActions({
 
   const unsuspendUserMutation = useMutation({
     mutationFn: async () => {
+      const moderator = getModeratorPubkey(); // capture before the authoritative request
       await api.unsuspendPubkey(pubkey);
-      logAudit({
+      logAudit(moderator, {
         targetType: 'pubkey',
         targetId: pubkey,
         action: 'unsuspend_user',
@@ -143,8 +152,9 @@ export function UserActions({
 
   const banUserMutation = useMutation({
     mutationFn: async () => {
+      const moderator = getModeratorPubkey(); // capture before the authoritative request
       await api.banPubkey(pubkey, 'Banned by moderator');
-      logAudit({
+      logAudit(moderator, {
         targetType: 'pubkey',
         targetId: pubkey,
         action: 'ban_user',
@@ -162,8 +172,9 @@ export function UserActions({
 
   const unbanUserMutation = useMutation({
     mutationFn: async () => {
+      const moderator = getModeratorPubkey(); // capture before the authoritative request
       await api.unbanPubkey(pubkey);
-      logAudit({
+      logAudit(moderator, {
         targetType: 'pubkey',
         targetId: pubkey,
         action: 'unban_user',
