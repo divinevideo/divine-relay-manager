@@ -18,6 +18,7 @@ import {
   listBannedPubkeys,
   listBannedEvents,
   fetchReports,
+  fetchReportsByTarget,
   fetchResolutionLabels,
   publishLabel,
   publishLabelAndBan,
@@ -1175,6 +1176,32 @@ describe('adminApi', () => {
       const hashes = extractMediaHashes(content, tags);
 
       expect(hashes).toEqual([]);
+    });
+  });
+
+  describe('fetchReportsByTarget', () => {
+    it('requests /api/reports?event= and returns sanitized events', async () => {
+      const events = [{ id: 'r1', kind: 1984, pubkey: 'pk', created_at: 1, tags: [], content: '', sig: '' }];
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, events }) });
+
+      const result = await fetchReportsByTarget(API_URL, { event: 'abc' });
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/reports?event=abc'),
+        expect.objectContaining({ method: 'GET' })
+      );
+      expect(result.map((e) => e.id)).toEqual(['r1']);
+    });
+
+    it('requests /api/reports?pubkey= when given a pubkey target', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, events: [] }) });
+
+      await fetchReportsByTarget(API_URL, { pubkey: 'def' });
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/reports?pubkey=def'),
+        expect.objectContaining({ method: 'GET' })
+      );
     });
   });
 
