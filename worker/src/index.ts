@@ -9,6 +9,7 @@ import {
   type SecretStoreSecret,
 } from './nip86';
 import { ensureSchema } from './db';
+import { buildReportsFilter } from './reports-filter';
 import { generatePreAuthToken, verifyPreAuthToken, base64UrlEncode } from './zendesk-preauth';
 import { deriveFunnelcakeApiUrl, proxyFunnelcakeRequest } from './funnelcake-proxy';
 import type { KeycastEnv } from './keycast-client';
@@ -520,7 +521,8 @@ export default {
       // nostrify NPool connection caching. The worker opens a fresh WebSocket
       // per request via queryRelay(), so every poll gets current data.
       if (path === '/api/reports' && request.method === 'GET') {
-        const result = await queryRelay({ kinds: [1984], limit: 200 }, env.RELAY_URL);
+        const filter = buildReportsFilter(url.searchParams);
+        const result = await queryRelay(filter, env.RELAY_URL);
         if (!result.success) {
           return jsonResponse({ success: false, error: result.error }, 502, corsHeaders);
         }
