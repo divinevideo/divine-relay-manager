@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import worker from './index';
 
 const env = {
@@ -902,5 +902,101 @@ describe('summarize-user cache validation', () => {
     const response = await worker.fetch(summarizeRequest(), env, ctx);
     expect(await response.json()).toEqual({ summary: 'fresh', riskLevel: 'low' }); // write failure did not collapse it
     expect(kv.put).toHaveBeenCalled();
+  });
+});
+
+// A relay whose backing store is slow or dying must not make the moderation
+// queue render as legitimately empty. queryRelay() may only report success on
+// an EOSE-complete result; timeout and close-before-EOSE are errors so the
+// API returns 502 and the frontend keeps its last good data (surfaced by the
+// staging ClickHouse OOM, iac-coreconfig#1230 — but applies to prod too).
+describe('/api/reports relay-query integrity', () => {
+  class FakeRelaySocket {
+    static instances: FakeRelaySocket[] = [];
+    url: string;
+    sent: string[] = [];
+    private listeners: Record<string, ((ev: unknown) => void)[]> = {};
+    constructor(url: string) {
+      this.url = url;
+      FakeRelaySocket.instances.push(this);
+      queueMicrotask(() => this.emit('open', {}));
+    }
+    addEventListener(type: string, cb: (ev: unknown) => void) {
+      (this.listeners[type] ??= []).push(cb);
+    }
+    send(data: string) { this.sent.push(data); }
+    close() { queueMicrotask(() => this.emit('close', {})); }
+    emit(type: string, ev: unknown) {
+      for (const cb of this.listeners[type] ?? []) cb(ev);
+    }
+    subId(): string { return JSON.parse(this.sent[0])[1] as string; }
+    message(payload: unknown) { this.emit('message', { data: JSON.stringify(payload) }); }
+  }
+
+  const reportsEnv = {
+    ALLOWED_ORIGINS: 'https://app.divine.video',
+    RELAY_URL: 'wss://relay.example',
+    ADMIN_API_KEY: 'test-admin-key',
+  } as never;
+
+  const reportsRequest = () => new Request('https://api.example/api/reports', {
+    headers: { 'X-Admin-Key': 'test-admin-key' },
+  });
+
+  const EVENT_A = { id: 'a'.repeat(64), kind: 1984, pubkey: 'b'.repeat(64), tags: [], content: '', sig: 'c'.repeat(128), created_at: 1 };
+  const EVENT_B = { id: 'd'.repeat(64), kind: 1984, pubkey: 'b'.repeat(64), tags: [], content: '', sig: 'c'.repeat(128), created_at: 2 };
+
+  beforeEach(() => {
+    FakeRelaySocket.instances = [];
+    vi.stubGlobal('WebSocket', FakeRelaySocket);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it('returns events on an EOSE-complete result', async () => {
+    const resPromise = worker.fetch(reportsRequest(), reportsEnv, ctx);
+    await new Promise((r) => setTimeout(r, 0));
+    const sock = FakeRelaySocket.instances[0];
+    expect(sock).toBeDefined();
+    sock.message(['EVENT', sock.subId(), EVENT_A]);
+    sock.message(['EVENT', sock.subId(), EVENT_B]);
+    sock.message(['EOSE', sock.subId()]);
+    const res = await resPromise;
+    expect(res.status).toBe(200);
+    const body = await res.json() as { success: boolean; events: unknown[] };
+    expect(body.success).toBe(true);
+    expect(body.events).toHaveLength(2);
+  });
+
+  it('returns 502 when the relay query times out before EOSE (partial data must not read as an empty queue)', async () => {
+    vi.useFakeTimers();
+    const resPromise = worker.fetch(reportsRequest(), reportsEnv, ctx);
+    await vi.advanceTimersByTimeAsync(0);
+    const sock = FakeRelaySocket.instances[0];
+    expect(sock).toBeDefined();
+    sock.message(['EVENT', sock.subId(), EVENT_A]); // partial data arrived, then the relay stalls
+    await vi.advanceTimersByTimeAsync(5000);
+    const res = await resPromise;
+    expect(res.status).toBe(502);
+    const body = await res.json() as { success: boolean; error?: string };
+    expect(body.success).toBe(false);
+    expect(body.error).toMatch(/timed out/i);
+  });
+
+  it('returns 502 when the relay closes before EOSE', async () => {
+    const resPromise = worker.fetch(reportsRequest(), reportsEnv, ctx);
+    await new Promise((r) => setTimeout(r, 0));
+    const sock = FakeRelaySocket.instances[0];
+    expect(sock).toBeDefined();
+    sock.message(['EVENT', sock.subId(), EVENT_A]);
+    sock.emit('close', {});
+    const res = await resPromise;
+    expect(res.status).toBe(502);
+    const body = await res.json() as { success: boolean; error?: string };
+    expect(body.success).toBe(false);
+    expect(body.error).toMatch(/closed before/i);
   });
 });

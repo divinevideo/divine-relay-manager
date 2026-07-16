@@ -101,3 +101,65 @@ describe('Reports crash degradation (#158)', () => {
     expect(screen.getByText(/this report failed to render/i)).toBeInTheDocument();
   });
 });
+
+// A failed poll must not blank a loaded queue. The worker now 502s when the
+// relay times out / closes before EOSE (instead of returning an empty success);
+// the list keeps rendering its last good data with a stale-data warning rather
+// than replacing the whole pane with the error alert. Surfaced by the staging
+// ClickHouse pressure (iac-coreconfig#1230); applies to any slow relay in prod.
+describe('Reports stale-data resilience', () => {
+  it('keeps the last loaded queue visible with a warning when a refresh fails', async () => {
+    let reportsCalls = 0;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/reports')) {
+        reportsCalls++;
+        if (reportsCalls === 1) return jsonResponse({ success: true, events: [REPORT] });
+        return new Response(JSON.stringify({ success: false, error: 'Relay query timed out before EOSE' }), {
+          status: 502,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url.includes('/api/resolution-labels')) return jsonResponse({ success: true, events: [] });
+      if (url.includes('/api/decisions')) return jsonResponse({ success: true, decisions: [] });
+      if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
+      return jsonResponse({ success: true });
+    }));
+
+    render(
+      <TestApp>
+        <Reports relayUrl="wss://relay.example" />
+      </TestApp>
+    );
+
+    expect(await screen.findByText(/1 report$/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTitle(/last updated|refresh/i));
+
+    // Warning appears; the queue row is still there (not blanked, no full-pane error).
+    expect(await screen.findByText(/refresh is failing/i)).toBeInTheDocument();
+    expect(screen.getByText(/1 report$/)).toBeInTheDocument();
+    expect(screen.queryByText(/failed to load reports/i)).not.toBeInTheDocument();
+  });
+
+  it('still shows the full error pane when the first load fails (no stale data to fall back on)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/reports')) {
+        return new Response(JSON.stringify({ success: false, error: 'Relay query timed out before EOSE' }), {
+          status: 502,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return jsonResponse({ success: true, events: [], decisions: [], result: [] });
+    }));
+
+    render(
+      <TestApp>
+        <Reports relayUrl="wss://relay.example" />
+      </TestApp>
+    );
+
+    expect(await screen.findByText(/failed to load reports/i)).toBeInTheDocument();
+  });
+});

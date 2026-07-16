@@ -805,7 +805,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     );
   }
 
-  if (error) {
+  // Full-pane error only when there is nothing to show. When a REFRESH fails
+  // (e.g. the worker 502s on a relay timeout), the last good list stays
+  // rendered with a stale-data warning below — replacing a populated queue
+  // with an error pane (or, before the worker fix, with silent emptiness)
+  // made one slow poll look like "no reports pending".
+  if (error && !reports) {
     return (
       <Alert variant="destructive">
         <AlertDescription>
@@ -883,6 +888,16 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
               </Button>
             </div>
           </div>
+
+          {/* Refresh failed but we still hold a previous list: warn instead of
+              blanking the queue. The poll keeps retrying every 15s. */}
+          {error && (
+            <Alert variant="destructive" className="mt-2 py-2">
+              <AlertDescription className="text-xs">
+                Live refresh is failing. Showing reports loaded {lastUpdatedText ?? 'earlier'}; retrying automatically.
+              </AlertDescription>
+            </Alert>
+          )}
 
           {/* View mode toggle */}
           <Tabs value={viewMode} onValueChange={(v) => setViewMode(v as 'consolidated' | 'individual')} className="mt-2">
