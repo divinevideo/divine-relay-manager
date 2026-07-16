@@ -32,6 +32,7 @@ import { handleAccountStatus } from './account-status';
 import { handleBulkModerateEnqueue, handleBulkJobStatus, processBulkJob } from './bulk-moderate';
 import type { BulkJobMessage } from '../../shared/bulk-moderation';
 import { ensureZendeskTable, addZendeskInternalNote, syncZendeskAfterAction } from './zendesk-sync';
+import { buildReportNote, parseKind0Profile, type ReportedProfile } from './report-note';
 
 let schemaReady = false;
 async function ensureSchemaOnce(db: D1Database): Promise<void> {
@@ -2351,25 +2352,39 @@ async function handleParseReport(
       `).bind(ticket_id, event_id, author_pubkey, violation_type).run();
     }
 
-    // Generate internal note with links
-    const envParam = env.ENVIRONMENT ? `&env=${env.ENVIRONMENT}` : '';
-    const lines = ['📋 **Content Report Links**', ''];
-    if (violation_type) {
-      lines.push(`**Violation Type:** ${violation_type}`, '');
-    }
-    if (event_id) {
-      lines.push('**Reported Event:**');
-      lines.push(`• [View in Relay Admin](https://relay.admin.divine.video/reports?event=${event_id}${envParam})`);
-      lines.push(`• Event ID: \`${event_id}\``);
-      lines.push('');
-    }
-    if (author_pubkey) {
-      lines.push('**Reported Author:**');
-      lines.push(`• [View in Relay Admin](https://relay.admin.divine.video/reports?pubkey=${author_pubkey}${envParam})`);
-      lines.push(`• Pubkey: \`${author_pubkey}\``);
+    // Enrich the note with profile + event context (best-effort; never block the note).
+    // The reported subject's kind-0 gives a human-legible name/nip05 and flags restored OG
+    // Vine accounts; the reported event's kind labels the content type (video/note/etc).
+    let profile: ReportedProfile | null = null;
+    let reportedEventKind: number | null = null;
+    try {
+      const [profRes, evtRes] = await Promise.all([
+        author_pubkey
+          ? queryRelay({ authors: [author_pubkey], kinds: [0], limit: 1 }, env.RELAY_URL)
+          : Promise.resolve(null),
+        event_id
+          ? queryRelay({ ids: [event_id], limit: 1 }, env.RELAY_URL)
+          : Promise.resolve(null),
+      ]);
+      if (profRes?.success && profRes.events?.length) {
+        profile = parseKind0Profile(profRes.events[0] as { content?: string; tags?: string[][] });
+      }
+      if (evtRes?.success && evtRes.events?.length) {
+        const kind = (evtRes.events[0] as { kind?: number }).kind;
+        reportedEventKind = typeof kind === 'number' ? kind : null;
+      }
+    } catch (err) {
+      console.warn('[handleParseReport] enrichment fetch failed (continuing without it):', err);
     }
 
-    const note = lines.join('\n');
+    const note = buildReportNote({
+      eventId: event_id,
+      authorPubkey: author_pubkey,
+      violationType: violation_type,
+      environment: env.ENVIRONMENT,
+      profile,
+      reportedEventKind,
+    });
 
     // Add internal note to Zendesk
     await addZendeskInternalNote(ticket_id, note, env);
