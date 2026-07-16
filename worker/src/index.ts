@@ -2285,6 +2285,19 @@ async function handleZendeskRoutes(
   return jsonResponse({ success: false, error: 'Not found' }, 404, corsHeaders);
 }
 
+// Cap best-effort report-note enrichment so a slow relay can't push the Zendesk webhook
+// handler toward Zendesk's delivery timeout. On timeout we post the note without enrichment.
+const ENRICHMENT_TIMEOUT_MS = 3000;
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
+}
+
 // Parse content report ticket and store mapping, add helpful links as internal note
 async function handleParseReport(
   request: Request,
@@ -2360,10 +2373,16 @@ async function handleParseReport(
     try {
       const [profRes, evtRes] = await Promise.all([
         author_pubkey
-          ? queryRelay({ authors: [author_pubkey], kinds: [0], limit: 1 }, env.RELAY_URL)
+          ? withTimeout(
+              queryRelay({ authors: [author_pubkey], kinds: [0], limit: 1 }, env.RELAY_URL),
+              ENRICHMENT_TIMEOUT_MS,
+            )
           : Promise.resolve(null),
         event_id
-          ? queryRelay({ ids: [event_id], limit: 1 }, env.RELAY_URL)
+          ? withTimeout(
+              queryRelay({ ids: [event_id], limit: 1 }, env.RELAY_URL),
+              ENRICHMENT_TIMEOUT_MS,
+            )
           : Promise.resolve(null),
       ]);
       if (profRes?.success && profRes.events?.length) {

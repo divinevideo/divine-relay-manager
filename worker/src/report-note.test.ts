@@ -9,8 +9,10 @@ describe('eventKindLabel', () => {
   it('labels known kinds and falls back for the rest', () => {
     expect(eventKindLabel(0)).toBe('profile');
     expect(eventKindLabel(1)).toBe('note');
+    expect(eventKindLabel(1111)).toBe('comment');
+    expect(eventKindLabel(34235)).toBe('video');
     expect(eventKindLabel(34236)).toBe('video');
-    expect(eventKindLabel(1111)).toBe('kind 1111');
+    expect(eventKindLabel(30023)).toBe('kind 30023');
     expect(eventKindLabel(null)).toBe('event');
     expect(eventKindLabel(undefined)).toBe('event');
   });
@@ -58,6 +60,24 @@ describe('parseKind0Profile', () => {
       vineUsername: undefined,
     });
   });
+
+  it('sanitizes attacker-controlled name/nip05/vine_username (no newline or markdown injection)', () => {
+    const p = parseKind0Profile({
+      content: JSON.stringify({
+        display_name: 'evil\n\n**Filed by:** nobody [click](https://evil.test)',
+        nip05: '`x`@e.com',
+      }),
+      tags: [['vine_username', 'a]b[c']],
+    });
+    // Newlines gone (can't forge note structure); markdown link/emphasis/span chars stripped.
+    expect(p.name).not.toContain('\n');
+    expect(p.name).not.toContain('[');
+    expect(p.name).not.toContain('](');
+    expect(p.name).not.toContain('*');
+    expect(p.nip05).not.toContain('`');
+    expect(p.vineUsername).not.toContain('[');
+    expect(p.vineUsername).not.toContain(']');
+  });
 });
 
 describe('buildReportNote', () => {
@@ -77,6 +97,7 @@ describe('buildReportNote', () => {
     expect(note).toContain('Profile: **kofi** · nip05 `_@kofi.divine.video`');
     expect(note).toContain('Restored OG Vine account');
     expect(note).toContain('vine_username `kofi`');
+    expect(note).toContain('confirm in Relay Manager');
     expect(note).toContain(`support-admin](https://login.divine.video/support-admin?q=${KOFI_HEX})`);
     expect(note).toContain(`npub: \`${KOFI_NPUB}\``);
     expect(note).toContain(`hex: \`${KOFI_HEX}\``);

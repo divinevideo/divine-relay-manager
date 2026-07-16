@@ -6,7 +6,7 @@ import { nip19 } from 'nostr-tools';
 
 /** Profile facts pulled from the reported account's kind-0 event (best-effort enrichment). */
 export interface ReportedProfile {
-  /** display_name || name from kind-0 content, if any. */
+  /** display_name || name from kind-0 content, if any (sanitized for note interpolation). */
   name?: string;
   /** nip05 from kind-0 content, if any (as claimed by the account; not verified here). */
   nip05?: string;
@@ -40,11 +40,35 @@ export function eventKindLabel(kind: number | null | undefined): string {
       return 'profile';
     case 1:
       return 'note';
+    case 1111:
+      return 'comment';
+    case 34235:
     case 34236:
       return 'video';
     default:
       return kind == null ? 'event' : `kind ${kind}`;
   }
+}
+
+/**
+ * Neutralize attacker-controlled kind-0 text (name / nip05 / vine_username) before it is
+ * interpolated into the Markdown note. The reported account fully controls its own kind-0,
+ * so strip anything that could forge note structure (newlines / control chars) or inject
+ * Markdown links, images, code spans, emphasis, or raw HTML. Underscores, dots, and @ are
+ * kept so legitimate nip05 values (e.g. `_@name.divine.video`) survive intact.
+ */
+function sanitizeInline(value: string | undefined, maxLen = 80): string | undefined {
+  if (!value) return undefined;
+  const cleaned = Array.from(value, (ch) => {
+    const code = ch.charCodeAt(0);
+    return code < 0x20 || code === 0x7f ? ' ' : ch; // control chars / newlines -> space
+  })
+    .join('')
+    .replace(/[`[\]*<>|]/g, '') // markdown link/image/span/emphasis + html/table
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned) return undefined;
+  return cleaned.length > maxLen ? `${cleaned.slice(0, maxLen)}…` : cleaned;
 }
 
 /** Parse a raw kind-0 event into the profile facts the note needs. Never throws. */
@@ -74,7 +98,13 @@ export function parseKind0Profile(
     // Malformed kind-0 content: fall back to tag-derived facts (e.g. the OG-import flag).
   }
 
-  return { name, nip05, isVineImport, vineUsername: tagValue('vine_username') };
+  // Sanitize every attacker-controlled field before it reaches the note.
+  return {
+    name: sanitizeInline(name),
+    nip05: sanitizeInline(nip05),
+    isVineImport,
+    vineUsername: sanitizeInline(tagValue('vine_username')),
+  };
 }
 
 function toNpub(hex: string): string {
@@ -95,15 +125,16 @@ function keycastBase(environment?: string): string {
  * Build the internal note for a content-report ticket. Self-contained and unambiguous:
  * names the report source, distinguishes the reported subject from the reporter, and
  * surfaces human-legible identity + the restored-OG signal so an agent needs no prior context.
+ *
+ * The caller guarantees at least one of `eventId` / `authorPubkey` is set.
  */
 export function buildReportNote(input: ReportNoteInput): string {
   const { eventId, authorPubkey, violationType, environment, profile, reportedEventKind } = input;
   const envParam = environment ? `&env=${environment}` : '';
   const scope = eventId ? 'content (specific event)' : 'account-level (whole profile)';
-  const primaryLink =
-    eventId
-      ? `${RELAY_ADMIN}/reports?event=${eventId}${envParam}`
-      : `${RELAY_ADMIN}/reports?pubkey=${authorPubkey}${envParam}`;
+  const primaryLink = eventId
+    ? `${RELAY_ADMIN}/reports?event=${eventId}${envParam}`
+    : `${RELAY_ADMIN}/reports?pubkey=${authorPubkey}${envParam}`;
 
   const lines: string[] = [];
   lines.push('**🛡️ RELAY REPORT — INTERNAL LOOKUP**', '');
@@ -121,9 +152,7 @@ export function buildReportNote(input: ReportNoteInput): string {
   }
 
   if (authorPubkey) {
-    lines.push(
-      '**Reported account** — the subject of this report, *not* the person who filed it:',
-    );
+    lines.push('**Reported account** — the subject of this report, *not* the person who filed it:');
     if (profile?.name || profile?.nip05) {
       const bits: string[] = [];
       if (profile.name) bits.push(`**${profile.name}**`);
@@ -133,7 +162,7 @@ export function buildReportNote(input: ReportNoteInput): string {
     if (profile?.isVineImport) {
       const uname = profile.vineUsername ? ` (vine_username \`${profile.vineUsername}\`)` : '';
       lines.push(
-        `• ⚠️ **Restored OG Vine account**${uname} — likely a name mix-up, not impersonation; consider the "Recovered OG account" macro`,
+        `• ⚠️ **Restored OG Vine account**${uname} — self-reported import markers; likely a name mix-up, not impersonation, but confirm in Relay Manager before applying the "Recovered OG account" macro`,
       );
     }
     lines.push(
