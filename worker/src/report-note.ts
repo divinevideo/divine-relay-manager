@@ -23,8 +23,10 @@ export interface ReportNoteInput {
   authorPubkey: string | null;
   /** Report category, verbatim from the ticket (e.g. "other", "sexualContent"). */
   violationType: string | null;
-  /** Worker environment, drives link env params + keycast host. */
+  /** Worker environment, drives the relay-admin `env` link param. */
   environment?: string;
+  /** Configured Keycast base URL (env.KEYCAST_URL); the note's lookup host + link derive from it. */
+  keycastUrl?: string;
   /** Reported account's profile (enrichment); null/undefined if the fetch failed. */
   profile?: ReportedProfile | null;
   /** Kind of the reported event (enrichment); null/undefined if unknown. */
@@ -115,10 +117,17 @@ function toNpub(hex: string): string {
   }
 }
 
-function keycastBase(environment?: string): string {
-  return environment === 'staging'
-    ? 'https://login.staging.dvines.org'
-    : 'https://login.divine.video';
+/** Normalize the configured Keycast URL and derive its visible host, so the note's
+ *  label and link always agree with the deployed environment. */
+function keycastTarget(keycastUrl?: string): { url: string; host: string } {
+  const url = (keycastUrl || 'https://login.divine.video').replace(/\/+$/, '');
+  let host = url;
+  try {
+    host = new URL(url).host;
+  } catch {
+    // Not a parseable URL: fall back to showing the raw value.
+  }
+  return { url, host };
 }
 
 /**
@@ -131,6 +140,7 @@ function keycastBase(environment?: string): string {
 export function buildReportNote(input: ReportNoteInput): string {
   const { eventId, authorPubkey, violationType, environment, profile, reportedEventKind } = input;
   const envParam = environment ? `&env=${environment}` : '';
+  const keycast = keycastTarget(input.keycastUrl);
   const scope = eventId ? 'content (specific event)' : 'account-level (whole profile)';
   const primaryLink = eventId
     ? `${RELAY_ADMIN}/reports?event=${eventId}${envParam}`
@@ -155,18 +165,19 @@ export function buildReportNote(input: ReportNoteInput): string {
     lines.push('**Reported account** — the subject of this report, *not* the person who filed it:');
     if (profile?.name || profile?.nip05) {
       const bits: string[] = [];
-      if (profile.name) bits.push(`**${profile.name}**`);
-      if (profile.nip05) bits.push(`nip05 \`${profile.nip05}\``);
+      // Code span (not bold) so a name containing a bare URL can't auto-link in Zendesk.
+      if (profile.name) bits.push(`\`${profile.name}\``);
+      if (profile.nip05) bits.push(`nip05 \`${profile.nip05}\` (claimed, unverified)`);
       lines.push(`• Profile: ${bits.join(' · ')}`);
     }
     if (profile?.isVineImport) {
       const uname = profile.vineUsername ? ` (vine_username \`${profile.vineUsername}\`)` : '';
       lines.push(
-        `• ⚠️ **Restored OG Vine account**${uname} — self-reported import markers; likely a name mix-up, not impersonation, but confirm in Relay Manager before applying the "Recovered OG account" macro`,
+        `• 🏷️ **Vine-archive import markers**${uname} — self-reported on the account's own kind-0, so a signal, not proof. Verify the reporter's ownership before resolving; if confirmed, the "Recovered OG account" macro applies.`,
       );
     }
     lines.push(
-      `• Look up in login.divine.video → [support-admin](${keycastBase(environment)}/support-admin?q=${authorPubkey})`,
+      `• Look up in ${keycast.host} → [support-admin](${keycast.url}/support-admin?q=${authorPubkey})`,
     );
     lines.push(`• Public profile → https://divine.video/profile/${authorPubkey}`);
     lines.push(`• npub: \`${toNpub(authorPubkey)}\``);

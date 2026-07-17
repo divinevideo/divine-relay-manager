@@ -2401,6 +2401,7 @@ async function handleParseReport(
       authorPubkey: author_pubkey,
       violationType: violation_type,
       environment: env.ENVIRONMENT,
+      keycastUrl: env.KEYCAST_URL,
       profile,
       reportedEventKind,
     });

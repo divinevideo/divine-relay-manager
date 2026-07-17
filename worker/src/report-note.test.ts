@@ -87,6 +87,7 @@ describe('buildReportNote', () => {
       authorPubkey: KOFI_HEX,
       violationType: 'other',
       environment: 'production',
+      keycastUrl: 'https://login.divine.video',
       profile: { name: 'kofi', nip05: '_@kofi.divine.video', isVineImport: true, vineUsername: 'kofi' },
       reportedEventKind: null,
     });
@@ -94,11 +95,15 @@ describe('buildReportNote', () => {
     expect(note).toContain('RELAY REPORT');
     expect(note).toContain('Scope: **account-level (whole profile)**');
     expect(note).toContain('the subject of this report, *not* the person who filed it');
-    expect(note).toContain('Profile: **kofi** · nip05 `_@kofi.divine.video`');
-    expect(note).toContain('Restored OG Vine account');
+    // Name is a code span (not bold); nip05 is flagged claimed/unverified.
+    expect(note).toContain('Profile: `kofi` · nip05 `_@kofi.divine.video` (claimed, unverified)');
+    // Import markers are presented as evidence, not a verdict.
+    expect(note).toContain('Vine-archive import markers');
     expect(note).toContain('vine_username `kofi`');
-    expect(note).toContain('confirm in Relay Manager');
-    expect(note).toContain(`support-admin](https://login.divine.video/support-admin?q=${KOFI_HEX})`);
+    expect(note).toContain("Verify the reporter's ownership");
+    expect(note).not.toContain('name mix-up, not impersonation');
+    // Visible host and href agree, both derived from the configured Keycast URL.
+    expect(note).toContain(`Look up in login.divine.video → [support-admin](https://login.divine.video/support-admin?q=${KOFI_HEX})`);
     expect(note).toContain(`npub: \`${KOFI_NPUB}\``);
     expect(note).toContain(`hex: \`${KOFI_HEX}\``);
     // No content block for an account-level report.
@@ -124,8 +129,8 @@ describe('buildReportNote', () => {
     expect(note).toContain(`**→ [Open this report in Relay Manager](https://relay.admin.divine.video/reports?event=${eventId}&env=production)**`);
     // Author block still present.
     expect(note).toContain('**Reported account**');
-    expect(note).toContain('Profile: **poster**');
-    expect(note).not.toContain('Restored OG Vine account');
+    expect(note).toContain('Profile: `poster`');
+    expect(note).not.toContain('Vine-archive import markers');
   });
 
   it('degrades gracefully with no enrichment (still shows npub/hex, no Profile/OG lines)', () => {
@@ -141,19 +146,39 @@ describe('buildReportNote', () => {
     expect(note).toContain('Reason: **unspecified**');
     expect(note).toContain(`npub: \`${KOFI_NPUB}\``);
     expect(note).not.toContain('• Profile:');
-    expect(note).not.toContain('Restored OG Vine account');
+    expect(note).not.toContain('Vine-archive import markers');
   });
 
-  it('uses the staging keycast host and env param on staging', () => {
+  it('derives keycast host + link from the configured URL (staging); label and href agree', () => {
     const note = buildReportNote({
       eventId: null,
       authorPubkey: KOFI_HEX,
       violationType: 'spam',
       environment: 'staging',
+      keycastUrl: 'https://login.staging.dvines.org',
       profile: null,
       reportedEventKind: null,
     });
-    expect(note).toContain(`https://login.staging.dvines.org/support-admin?q=${KOFI_HEX}`);
+    expect(note).toContain(
+      `Look up in login.staging.dvines.org → [support-admin](https://login.staging.dvines.org/support-admin?q=${KOFI_HEX})`,
+    );
+    // The old bug rendered "login.divine.video" as the label while linking to staging.
+    expect(note).not.toContain('login.divine.video');
     expect(note).toContain('&env=staging');
+  });
+
+  it('renders a bare URL in the name inertly (code span, not auto-linkable)', () => {
+    const note = buildReportNote({
+      eventId: null,
+      authorPubkey: KOFI_HEX,
+      violationType: 'other',
+      environment: 'production',
+      keycastUrl: 'https://login.divine.video',
+      profile: { name: 'click https://evil.test now', nip05: undefined, isVineImport: false },
+      reportedEventKind: null,
+    });
+    // Name (incl. its URL) is wrapped in a code span, which does not auto-link in Zendesk.
+    expect(note).toContain('• Profile: `click https://evil.test now`');
+    expect(note).not.toContain('**click https://evil.test now**');
   });
 });
