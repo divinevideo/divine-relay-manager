@@ -101,4 +101,16 @@ describe('verifyNip98Auth host allowlist', () => {
     const pubRes = await verifyNip98Auth(reqAtOwnHost(toHeader(pubEvt)), OWN, []);
     expect(pubRes.valid).toBe(false);
   });
+
+  it('rejects a userinfo/credential-prefixed host that resolves to a foreign hostname (no .host bypass)', async () => {
+    // `URL.hostname` of this is `evil.com` — the `api-relay-prod.divine.video@` part
+    // is userinfo, not host. A refactor to `.host` or a naive string split/includes
+    // check could be fooled into treating this as the allowlisted own host.
+    const evt = signEvent({
+      u: 'https://api-relay-prod.divine.video@evil.com/v1/account/moderation-status',
+      method: 'GET',
+    });
+    const res = await verifyNip98Auth(reqAtOwnHost(toHeader(evt)), OWN, [PUBLIC_HOST]);
+    expect(res.valid).toBe(false);
+  });
 });

@@ -1862,10 +1862,12 @@ interface Nip98Result {
   error?: string;
 }
 
-// Returns true iff `signedUrl` differs from `expectedUrl` only in host, that host
-// is in `allowedHosts` (bare hostnames), and scheme + path + query still match
-// exactly. Used only by the two mobile endpoints (#173); strict callers pass an
-// empty allowlist, so this can never return true for them. Malformed URLs → false.
+// Returns true iff `signedUrl` matches `expectedUrl` in scheme + path + query,
+// and its hostname is in `allowedHosts` (bare hostnames). Port and fragment are
+// intentionally not compared — this is a bare-hostname allowlist by design;
+// tightening to port would mean comparing `.host` instead of `.hostname`. Used
+// only by the two mobile endpoints (#173); strict callers pass an empty
+// allowlist, so this can never return true for them. Malformed URLs → false.
 function hostAllowlistedUrlMatch(signedUrl: string, expectedUrl: string, allowedHosts: string[]): boolean {
   if (allowedHosts.length === 0) return false;
   try {
