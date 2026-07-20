@@ -1862,9 +1862,30 @@ interface Nip98Result {
   error?: string;
 }
 
-async function verifyNip98Auth(
+// Returns true iff `signedUrl` differs from `expectedUrl` only in host, that host
+// is in `allowedHosts` (bare hostnames), and scheme + path + query still match
+// exactly. Used only by the two mobile endpoints (#173); strict callers pass an
+// empty allowlist, so this can never return true for them. Malformed URLs → false.
+function hostAllowlistedUrlMatch(signedUrl: string, expectedUrl: string, allowedHosts: string[]): boolean {
+  if (allowedHosts.length === 0) return false;
+  try {
+    const signed = new URL(signedUrl);
+    const expected = new URL(expectedUrl);
+    return (
+      signed.protocol === expected.protocol && // scheme not dropped (Constraint 2)
+      signed.pathname === expected.pathname &&  // path stays exactly bound
+      signed.search === expected.search &&      // query stays exactly bound
+      allowedHosts.includes(signed.hostname)    // host is the only relaxation
+    );
+  } catch {
+    return false;
+  }
+}
+
+export async function verifyNip98Auth(
   request: Request,
-  expectedUrl: string
+  expectedUrl: string,
+  allowedHosts: string[] = []
 ): Promise<Nip98Result> {
   const authHeader = request.headers.get('Authorization');
   if (!authHeader || !authHeader.startsWith('Nostr ')) {
@@ -1894,9 +1915,19 @@ async function verifyNip98Auth(
       return { valid: false, error: 'Event timestamp too old or in future' };
     }
 
-    // Verify URL tag
+    // Verify URL tag. Exact string match is the unchanged fast path (covers all
+    // same-host callers, including strict callers that pass no allowedHosts).
+    // Only when the strings differ do we relax the HOST — and only the host:
+    // scheme, path, and query must still match the worker's own request exactly,
+    // and the signed host must be a member of the caller-supplied allowlist.
+    // This closes divine-relay-manager#173, where the mobile client signs for the
+    // public host (api.divine.video) but the request is forwarded to the worker's
+    // real host, so request.url (== expectedUrl) never string-matches the signed u.
     const urlTag = event.tags.find((t: string[]) => t[0] === 'u');
-    if (!urlTag || urlTag[1] !== expectedUrl) {
+    if (!urlTag) {
+      return { valid: false, error: `URL mismatch (expected ${expectedUrl})` };
+    }
+    if (urlTag[1] !== expectedUrl && !hostAllowlistedUrlMatch(urlTag[1], expectedUrl, allowedHosts)) {
       return { valid: false, error: `URL mismatch (expected ${expectedUrl})` };
     }
 
