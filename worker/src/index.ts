@@ -48,6 +48,10 @@ interface Env extends KeycastEnv {
   NOSTR_NSEC: string | SecretStoreSecret;
   RELAY_URL: string;
   ALLOWED_ORIGINS: string;
+  // Comma-separated public hostnames whose NIP-98 `u`-tag host is accepted in
+  // addition to the worker's own request host, for the two mobile endpoints only
+  // (divine-relay-manager#173). Non-secret. Empty/unset ⇒ strict same-host.
+  NIP98_PUBLIC_HOST_ALLOWLIST?: string;
   ANTHROPIC_API_KEY?: string;
   // Cloudflare Access Service Token for moderation.admin.divine.video
   CF_ACCESS_CLIENT_ID?: string | SecretStoreSecret;
@@ -270,6 +274,15 @@ function getAllowedOrigin(requestOrigin: string | null, allowedOriginsEnv: strin
   return null;
 }
 
+// Parse the NIP-98 public-host allowlist (#173). Same split/trim/filter shape as
+// getAllowedOrigin. Bare hostnames, no wildcards. Empty/unset ⇒ [] ⇒ strict.
+function getNip98AllowedHosts(env: Env): string[] {
+  return (env.NIP98_PUBLIC_HOST_ALLOWLIST ?? '')
+    .split(',')
+    .map((host) => host.trim())
+    .filter(Boolean);
+}
+
 function originMatchesRule(requestOrigin: string, allowedRule: string): boolean {
   if (requestOrigin === allowedRule) {
     return true;
@@ -407,14 +420,14 @@ export default {
 
       // Mobile-facing endpoints: NIP-98 user auth, not admin auth
       if (path === '/v1/account/moderation-status' && request.method === 'GET') {
-        const authResult = await verifyNip98Auth(request, request.url);
+        const authResult = await verifyNip98Auth(request, request.url, getNip98AllowedHosts(env));
         if (!authResult.valid || !authResult.pubkey) return jsonResponse({ success: false, error: authResult.error ?? 'Unauthorized' }, 401, corsHeaders);
         if (env.DB) await ensureSchemaOnce(env.DB);
         return handleGetModerationStatus(authResult.pubkey, env, corsHeaders);
       }
 
       if (path.startsWith('/v1/minor-review-cases/') && path.endsWith('/parent-contact') && request.method === 'POST') {
-        const authResult = await verifyNip98Auth(request, request.url);
+        const authResult = await verifyNip98Auth(request, request.url, getNip98AllowedHosts(env));
         if (!authResult.valid || !authResult.pubkey) return jsonResponse({ success: false, error: authResult.error ?? 'Unauthorized' }, 401, corsHeaders);
         if (env.DB) await ensureSchemaOnce(env.DB);
         const caseId = path.replace('/v1/minor-review-cases/', '').replace('/parent-contact', '');
@@ -2471,7 +2484,8 @@ async function handleZendeskPreAuth(
     // Ensure nonce table exists
     await ensureSchemaOnce(env.DB);
 
-    // Verify NIP-98 auth
+    // Verify NIP-98 auth. Intentionally strict: no allowedHosts passed, so this
+    // Zendesk pre-auth path stays same-host only (#173 scope — do not relax).
     const authResult = await verifyNip98Auth(request, request.url);
     if (!authResult.valid) {
       return jsonResponse(

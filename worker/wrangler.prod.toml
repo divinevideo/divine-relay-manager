@@ -91,6 +91,10 @@ MODERATION_SERVICE_URL = "https://moderation-api.divine.video"
 MODERATION_ADMIN_URL = "https://moderation-api.divine.video"
 # Allow admin UI plus the managed web app and its preview deployments
 ALLOWED_ORIGINS = "https://relay.admin.divine.video,https://app.divine.video,https://*.openvine-app.pages.dev,*.divine-relay-manager.pages.dev,*.divine-relay-admin.pages.dev"
+# Public hostname(s) whose NIP-98 u-tag host is accepted in addition to this
+# worker's own host, for the two mobile endpoints only (divine-relay-manager#173).
+# Comma-separated bare hostnames, no wildcards. Empty/unset = strict same-host.
+NIP98_PUBLIC_HOST_ALLOWLIST = "api.divine.video"
 # CDN domain for media proxy (Blossom admin bypass for blocked content preview)
 CDN_DOMAIN = "media.divine.video"
 # Slack webhook for age review deadline alerts (add via: wrangler secret put SLACK_WEBHOOK_URL --config wrangler.prod.toml)
