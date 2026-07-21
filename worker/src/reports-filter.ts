@@ -10,13 +10,15 @@ export function buildReportsFilter(params: URLSearchParams): {
   '#e'?: string[];
   '#p'?: string[];
 } {
+  // Nostr event ids and pubkeys are lowercase hex; relay filters match exactly.
+  // Normalize so an uppercase-hex deep link still resolves instead of false-'gone'.
   const event = params.get('event');
   if (event) {
-    return { kinds: [REPORT_KIND], '#e': [event] };
+    return { kinds: [REPORT_KIND], '#e': [event.toLowerCase()] };
   }
   const pubkey = params.get('pubkey');
   if (pubkey) {
-    return { kinds: [REPORT_KIND], '#p': [pubkey] };
+    return { kinds: [REPORT_KIND], '#p': [pubkey.toLowerCase()] };
   }
   return { kinds: [REPORT_KIND], limit: BULK_LIMIT };
 }

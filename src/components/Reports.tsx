@@ -799,25 +799,32 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         // the moderator back to this report. (A benign same-target re-run keeps
         // attemptedTargetRef === target.value, so this correctly still applies.)
         if (!mountedRef.current || attemptedTargetRef.current !== target.value) return;
-        // Match by resolved target (same rule as the bulk list) so a report that only
-        // p-tags the pubkey but resolves to an event target isn't a false 'found'.
+        // The relay's own #e/#p filter is authoritative for existence: every returned
+        // report tags the deep-link target. Gate found/gone on the raw result, not on
+        // reportsMatchingTarget — re-filtering by resolved target made a note-report that
+        // p-tags a ?pubkey= target (but resolves to an event) a false 'gone'. An empty
+        // result here is a relay-confirmed absence; an empty *timeout* never reaches this
+        // branch (the worker 502s it → the catch below → 'unavailable').
         const matching = reportsMatchingTarget(events, target, getReportTarget);
-        const verdict = classifyTargetedFetch({ ok: true, events: matching });
+        const verdict = classifyTargetedFetch({ ok: true, events });
         if (verdict === 'found') {
+          // Prefer a report whose resolved target IS the deep-link target for display;
+          // fall back to any returned report (all of them tag the target).
+          const pool = matching.length > 0 ? matching : events;
           // Merge into the reports cache so the detail pane has full context,
           queryClient.setQueryData<NostrEvent[]>(['reports', relayUrl], (old) => {
             const merged = [...(old ?? [])];
-            for (const e of matching) if (!merged.some(m => m.id === e.id)) merged.push(e);
+            for (const e of pool) if (!merged.some(m => m.id === e.id)) merged.push(e);
             return merged;
           });
-          // and select the newest fetched report directly — not via a re-run, so a
+          // and select the newest report directly — not via a re-run, so a
           // consolidation mismatch can neither loop nor hang the pane on 'resolving'.
-          const latest = matching.reduce((a, b) => (b.created_at > a.created_at ? b : a));
+          const latest = pool.reduce((a, b) => (b.created_at > a.created_at ? b : a));
           setSelectedReport(latest);
           setDeepLinkStatus('found');
           navigate(`/reports/${latest.id}`, { replace: true });
         } else {
-          setDeepLinkStatus(verdict); // 'gone'
+          setDeepLinkStatus(verdict); // 'gone' — relay-confirmed empty (timeout is a 502 → catch)
         }
       } catch {
         if (!mountedRef.current || attemptedTargetRef.current !== target.value) return;
@@ -884,7 +891,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     ? { type: 'event' as const, value: searchParams.get('event')! }
     : { type: 'pubkey' as const, value: searchParams.get('pubkey') ?? '' };
   const showDeepLinkFallback =
-    !selectedReport && (deepLinkStatus === 'gone' || deepLinkStatus === 'unavailable');
+    !selectedReport && hasDeepLinkParams && (deepLinkStatus === 'gone' || deepLinkStatus === 'unavailable');
   const showDeepLinkResolving =
     !selectedReport && deepLinkStatus === 'resolving' && hasDeepLinkParams;
 

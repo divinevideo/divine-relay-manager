@@ -26,6 +26,19 @@ function ev(id: string, tags: string[][]) {
 const OTHER_REPORT = ev('5'.repeat(64), [['e', OTHER_EVENT]]); // in the bulk list, unrelated target
 const MATCHING_REPORT = ev(MATCHING_ID, [['e', EFOUND]]); // resolves to event:EFOUND
 
+const PWITHNOTE = '7'.repeat(64); // pubkey deep-link whose only reports are note-reports
+const NOTE_REPORT_ID = '8'.repeat(64);
+// A note-report: p-tags the reported author (PWITHNOTE) but also e-tags the note, so
+// getReportTarget resolves it to the *event* target — reportsMatchingTarget would drop it
+// for a ?pubkey= lookup. The relay's #p filter still returns it, so it must resolve 'found'.
+const NOTE_REPORT = ev(NOTE_REPORT_ID, [['e', OTHER_EVENT], ['p', PWITHNOTE]]);
+
+const MULTI_ETAG_ID = '9'.repeat(64);
+// A report whose FIRST e-tag is a different note, so getReportTarget resolves it to
+// event:OTHER_EVENT — reportsMatchingTarget drops it under ?event=EFOUND even though the
+// relay's #e filter matched EFOUND (the second e-tag). Must still resolve 'found'.
+const MULTI_ETAG_REPORT = ev(MULTI_ETAG_ID, [['e', OTHER_EVENT], ['e', EFOUND]]);
+
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 }
@@ -84,6 +97,34 @@ describe('Reports deep-link resolution', () => {
     // The fix: navigate to /reports/:id, and the redundant setSearchParams({}) that used to
     // clobber it back to /reports is gone — so the resolved URL is bookmarkable.
     await waitFor(() => expect(window.location.pathname).toBe(`/reports/${MATCHING_ID}`));
+    expect(window.location.search).toBe('');
+  });
+
+  it('resolves a ?pubkey= deep-link to found when its only reports are note-reports that p-tag it (relay filter is authoritative, not a false "gone")', async () => {
+    window.history.pushState({}, '', `/reports?pubkey=${PWITHNOTE}`);
+    stubFetch(() => jsonResponse({ success: true, events: [NOTE_REPORT] }));
+
+    render(
+      <TestApp>
+        <Reports relayUrl="wss://relay.example" />
+      </TestApp>
+    );
+
+    await waitFor(() => expect(window.location.pathname).toBe(`/reports/${NOTE_REPORT_ID}`));
+    expect(window.location.search).toBe('');
+  });
+
+  it('resolves a ?event= deep-link to found when the matching report\'s first e-tag is a different note (relay #e filter is authoritative)', async () => {
+    window.history.pushState({}, '', `/reports?event=${EFOUND}`);
+    stubFetch(() => jsonResponse({ success: true, events: [MULTI_ETAG_REPORT] }));
+
+    render(
+      <TestApp>
+        <Reports relayUrl="wss://relay.example" />
+      </TestApp>
+    );
+
+    await waitFor(() => expect(window.location.pathname).toBe(`/reports/${MULTI_ETAG_ID}`));
     expect(window.location.search).toBe('');
   });
 

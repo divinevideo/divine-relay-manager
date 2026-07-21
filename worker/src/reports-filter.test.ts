@@ -14,6 +14,10 @@ describe('buildReportsFilter', () => {
   it('prefers event over pubkey when both are present', () => {
     expect(buildReportsFilter(new URLSearchParams('event=abc&pubkey=def'))).toEqual({ kinds: [1984], '#e': ['abc'] });
   });
+  it('lowercases uppercase-hex target params so the relay filter still matches', () => {
+    expect(buildReportsFilter(new URLSearchParams('event=ABC123'))).toEqual({ kinds: [1984], '#e': ['abc123'] });
+    expect(buildReportsFilter(new URLSearchParams('pubkey=DEADBEEF'))).toEqual({ kinds: [1984], '#p': ['deadbeef'] });
+  });
 });
 
 describe('isUnconfirmedTargetedMiss', () => {

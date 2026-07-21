@@ -28,15 +28,14 @@ export function reportsMatchingTarget<E>(
   });
 }
 
-// The moderation decisions recorded for a target, matching both the raw id and
-// the mobile "user_<pubkey>" form the report/decision pipeline sometimes uses.
+// The moderation decisions recorded for a target. Every decision writer keys
+// target_id on the bare pubkey/event id (ReportWatcher.logDecision, handleLogDecision,
+// bulk-moderate — including age_review_case_created), so an exact match is complete.
 // Generic so it preserves the caller's element type (e.g. ModerationDecision).
 export function decisionsForTarget<T extends { target_id: string }>(
   allDecisions: T[] | undefined,
   targetValue: string
 ): T[] {
   if (!allDecisions) return [];
-  return allDecisions.filter(
-    (d) => d.target_id === targetValue || d.target_id === `user_${targetValue}`
-  );
+  return allDecisions.filter((d) => d.target_id === targetValue);
 }

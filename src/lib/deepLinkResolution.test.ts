@@ -16,14 +16,17 @@ describe('classifyTargetedFetch', () => {
 describe('decisionsForTarget', () => {
   const decisions = [
     { target_id: 'PK', action: 'banned' },
-    { target_id: 'user_PK', action: 'age_review_case_created' },
+    { target_id: 'PK', action: 'age_review_case_created' }, // written with the bare pubkey
     { target_id: 'OTHER', action: 'deleted' },
   ];
-  it('matches both raw and user_-prefixed target ids', () => {
+  it('matches every decision recorded against the bare target id', () => {
     expect(decisionsForTarget(decisions, 'PK').map((d) => d.action)).toEqual([
       'banned',
       'age_review_case_created',
     ]);
+  });
+  it('does not match a different target id', () => {
+    expect(decisionsForTarget(decisions, 'PK').some((d) => d.target_id === 'OTHER')).toBe(false);
   });
   it('returns [] for undefined input', () => {
     expect(decisionsForTarget(undefined, 'PK')).toEqual([]);
