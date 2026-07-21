@@ -967,6 +967,28 @@ describe('mobile NIP-98 endpoint host allowlist (#173)', () => {
     );
     expect(res.status).toBe(401);
   });
+
+  // #195 replay nonce: the consume check is gated behind `if (env.DB)`, so with
+  // no DB binding it's never reached — replaying the SAME signed event twice
+  // both succeed. This is the fail-open case named in Fork #5: an outage that
+  // takes down env.DB loses replay protection but not availability, matching
+  // #197's existing fail-open posture for this same endpoint.
+  it('replay nonce check is skipped (fail open) when env.DB is unavailable — same event succeeds twice', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const header = nip98Header(OWN_HOST_URL);
+    const first = await worker.fetch(
+      new Request(OWN_HOST_URL, { method: 'GET', headers: { Authorization: header } }),
+      {} as never,
+      ctx,
+    );
+    const second = await worker.fetch(
+      new Request(OWN_HOST_URL, { method: 'GET', headers: { Authorization: header } }),
+      {} as never,
+      ctx,
+    );
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+  });
 });
 
 describe('zendesk pre-auth NIP-98 scope boundary (#173)', () => {

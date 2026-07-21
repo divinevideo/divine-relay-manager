@@ -1093,6 +1093,19 @@ describe('sendDbUnavailableAlert', () => {
 // -- handleParentContact ------------------------------------------------------
 
 describe('handleParentContact', () => {
+  // #195: parent-contact fails closed on !env.DB (unlike moderation-status,
+  // which fails open per #197). The route-level replay-nonce check is gated
+  // behind `if (env.DB)`, so it's moot here — this endpoint stays closed
+  // regardless of the nonce layer.
+  it('returns 500 when DB not configured (stays closed regardless of the #195 nonce check)', async () => {
+    const req = new Request('https://api.test/v1/minor-review-cases/case-1/parent-contact', {
+      method: 'POST',
+      body: JSON.stringify({ email: 'parent@example.com' }),
+    });
+    const res = await handleParentContact(req, 'case-1', 'a'.repeat(64), makeEnv(), corsHeaders);
+    expect(res.status).toBe(500);
+  });
+
   it('saves email and pauses clock for age_13_15 case', async () => {
     const c = makeCase({ state: 'restricted_pending_user_response' });
     const db = createMockDb([c]);

@@ -129,4 +129,18 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       value TEXT NOT NULL
     )
   `).run();
+
+  // Single-use NIP-98 replay nonces for the mobile minor-review endpoints (#195).
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS nip98_used_nonces (
+      event_id   TEXT PRIMARY KEY,
+      expires_at INTEGER NOT NULL
+    )
+  `).run();
+
+  try {
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_nip98_nonces_expires ON nip98_used_nonces(expires_at)`).run();
+  } catch {
+    // Index already exists
+  }
 }
