@@ -579,7 +579,15 @@ export async function handleGetModerationStatus(
   corsHeaders: Record<string, string>,
 ): Promise<Response> {
   if (!env.DB) {
-    console.warn('[age-review] DB not available — returning fail-open active status for', userPubkey);
+    // Distinct, greppable marker so this fail-open path is alertable via log
+    // monitoring (#197) -- the minor-review gate failing open during a DB
+    // outage should never be silent, even though we deliberately keep it
+    // fail-open here (see the proactive cron alert in index.ts scheduled()).
+    // MODERATION_STATUS_DB_UNAVAILABLE is intentionally a separate marker from
+    // index.ts's "D1 UNAVAILABLE" -- this one fires per live request that just
+    // failed open; that one fires from the cron proactively detecting the DB
+    // binding is absent. Not a typo -- two distinct signals.
+    console.error('[age-review] MODERATION_STATUS_DB_UNAVAILABLE — DB binding absent, returning fail-open active status for', userPubkey);
     return json({ restriction: { status: 'active' } }, 200, corsHeaders);
   }
 
@@ -1260,6 +1268,29 @@ async function sendSlackAlert(
     return true;
   } catch (error) {
     console.error('[age-review] Failed to send Slack alert:', error);
+    return false;
+  }
+}
+
+// Proactive alert for the moderation-status DB-unavailable fail-open (#197).
+// Called from index.ts scheduled() once per cron tick when env.DB is absent,
+// so the outage isn't silent even though the request path keeps failing open.
+export async function sendDbUnavailableAlert(webhookUrl: string, environment: string): Promise<boolean> {
+  try {
+    const res = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: `:rotating_light: [${environment}] D1 unavailable — age-review moderation-status is failing open (returning unrestricted \`active\`). Investigate the moderation-decisions D1 binding.`,
+      }),
+    });
+    if (!res.ok) {
+      console.error(`[age-review] DB-unavailable Slack alert returned ${res.status}`);
+      return false;
+    }
+    return true;
+  } catch (error) {
+    console.error('[age-review] Failed to send DB-unavailable Slack alert:', error);
     return false;
   }
 }

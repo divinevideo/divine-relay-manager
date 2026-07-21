@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { finalizeEvent, generateSecretKey } from 'nostr-tools';
 import worker from './index';
 
@@ -1011,5 +1011,142 @@ describe('zendesk pre-auth NIP-98 scope boundary (#173)', () => {
       ctx,
     );
     expect(res.status).toBe(401);
+  });
+});
+
+// -- scheduled() DB-unavailable alert (#197) ----------------------------------
+
+describe('scheduled cron — DB-unavailable alert', () => {
+  const scheduledEvent = {} as ScheduledEvent;
+
+  // The REPORT_WATCHER keep-alive check runs before the DB block and returns
+  // early if the binding is absent, so it must be present to exercise the DB
+  // branch below.
+  function makeReportWatcher() {
+    return {
+      idFromName: vi.fn().mockReturnValue('singleton-id'),
+      get: vi.fn().mockReturnValue({
+        fetch: vi.fn().mockResolvedValue(new Response(JSON.stringify({ status: { running: true } }), { status: 200 })),
+      }),
+    };
+  }
+
+  // Tolerates ensureSchema's DDL and checkAgeReviewDeadlines' queries without
+  // producing any rows, so the DB-present case exercises the real code path
+  // without also triggering the deadline-alert Slack call.
+  function makeTolerantDb() {
+    const statement = (sql: string): unknown => ({
+      bind: () => statement(sql),
+      run: async () => ({ success: true, meta: { changes: 0 } }),
+      first: async () => null,
+      all: async () => ({ results: [] }),
+    });
+    return { prepare: statement };
+  }
+
+  beforeEach(() => {
+    // scheduled() unconditionally logs a ReportWatcher status line; keep it
+    // out of test stdout.
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('sends the DB-unavailable Slack alert (with environment) when the DB binding is absent', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal('fetch', mockFetch);
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const cronEnv = {
+      ALLOWED_ORIGINS: 'https://app.divine.video',
+      RELAY_URL: 'wss://relay.divine.video',
+      REPORT_WATCHER: makeReportWatcher(),
+      SLACK_WEBHOOK_URL: 'https://hooks.slack.com/test',
+      ENVIRONMENT: 'staging',
+      // DB intentionally absent
+    } as never;
+
+    await worker.scheduled(scheduledEvent, cronEnv, ctx);
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(mockFetch.mock.calls[0][0]).toBe('https://hooks.slack.com/test');
+    const options = mockFetch.mock.calls[0][1] as { body: string };
+    const payload = JSON.parse(options.body) as { text: string };
+    expect(payload.text).toContain('[staging]');
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('D1 UNAVAILABLE'));
+  });
+
+  it('defaults the environment to "unknown" when ENVIRONMENT is not configured', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal('fetch', mockFetch);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const cronEnv = {
+      ALLOWED_ORIGINS: 'https://app.divine.video',
+      RELAY_URL: 'wss://relay.divine.video',
+      REPORT_WATCHER: makeReportWatcher(),
+      SLACK_WEBHOOK_URL: 'https://hooks.slack.com/test',
+      // ENVIRONMENT and DB both intentionally absent
+    } as never;
+
+    await worker.scheduled(scheduledEvent, cronEnv, ctx);
+
+    const options = mockFetch.mock.calls[0][1] as { body: string };
+    const payload = JSON.parse(options.body) as { text: string };
+    expect(payload.text).toContain('[unknown]');
+  });
+
+  it('sends the DB-unavailable alert even when REPORT_WATCHER is not configured', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal('fetch', mockFetch);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const cronEnv = {
+      ALLOWED_ORIGINS: 'https://app.divine.video',
+      RELAY_URL: 'wss://relay.divine.video',
+      SLACK_WEBHOOK_URL: 'https://hooks.slack.com/test',
+      // REPORT_WATCHER and DB both intentionally absent
+    } as never;
+
+    await worker.scheduled(scheduledEvent, cronEnv, ctx);
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(mockFetch.mock.calls[0][0]).toBe('https://hooks.slack.com/test');
+  });
+
+  it('does not send the DB-unavailable alert when the DB binding is present', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal('fetch', mockFetch);
+
+    const cronEnv = {
+      ALLOWED_ORIGINS: 'https://app.divine.video',
+      RELAY_URL: 'wss://relay.divine.video',
+      REPORT_WATCHER: makeReportWatcher(),
+      SLACK_WEBHOOK_URL: 'https://hooks.slack.com/test',
+      DB: makeTolerantDb(),
+    } as never;
+
+    await worker.scheduled(scheduledEvent, cronEnv, ctx);
+
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('does not send the DB-unavailable alert when no webhook is configured', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal('fetch', mockFetch);
+
+    const cronEnv = {
+      ALLOWED_ORIGINS: 'https://app.divine.video',
+      RELAY_URL: 'wss://relay.divine.video',
+      REPORT_WATCHER: makeReportWatcher(),
+      // SLACK_WEBHOOK_URL intentionally absent, DB absent too
+    } as never;
+
+    await worker.scheduled(scheduledEvent, cronEnv, ctx);
+
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 });
