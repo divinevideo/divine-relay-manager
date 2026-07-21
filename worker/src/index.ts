@@ -426,6 +426,9 @@ export default {
         if (!authResult.valid || !authResult.pubkey) return jsonResponse({ success: false, error: authResult.error ?? 'Unauthorized' }, 401, corsHeaders);
         if (env.DB) {
           await ensureSchemaOnce(env.DB);
+          // `authResult.eventId` is always set here (it's `event.id`, populated on a
+          // `valid: true` result after verifyEvent) -- the `&&` is TS narrowing
+          // `eventId?: string` to `string` for consumeNip98Nonce, not a fail-open branch.
           if (authResult.eventId && !(await consumeNip98Nonce(env.DB, authResult.eventId))) {
             return jsonResponse({ success: false, error: 'Replayed NIP-98 token' }, 401, corsHeaders);
           }
@@ -438,6 +441,8 @@ export default {
         if (!authResult.valid || !authResult.pubkey) return jsonResponse({ success: false, error: authResult.error ?? 'Unauthorized' }, 401, corsHeaders);
         if (env.DB) {
           await ensureSchemaOnce(env.DB);
+          // Same guard as the moderation-status route above: `eventId` is always
+          // present on a valid result, so this is type-narrowing, not fail-open.
           if (authResult.eventId && !(await consumeNip98Nonce(env.DB, authResult.eventId))) {
             return jsonResponse({ success: false, error: 'Replayed NIP-98 token' }, 401, corsHeaders);
           }
