@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import worker from './index';
 
 const env = {
@@ -934,6 +934,12 @@ describe('scheduled cron — DB-unavailable alert', () => {
     });
     return { prepare: statement };
   }
+
+  beforeEach(() => {
+    // scheduled() unconditionally logs a ReportWatcher status line; keep it
+    // out of test stdout.
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
 
   afterEach(() => {
     vi.unstubAllGlobals();
