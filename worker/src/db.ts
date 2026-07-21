@@ -129,4 +129,45 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       value TEXT NOT NULL
     )
   `).run();
+
+  // Zendesk tables — previously existed only in migrations/0001 and 0003,
+  // which are legacy/manual and not run against fresh D1 instances (this
+  // repo's schema path is ensureSchema, not `wrangler d1 migrations apply`).
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS zendesk_preauth_nonces (
+      nonce TEXT PRIMARY KEY,
+      pubkey TEXT NOT NULL,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      expires_at INTEGER NOT NULL
+    )
+  `).run();
+
+  try {
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_nonces_expires ON zendesk_preauth_nonces(expires_at)`).run();
+  } catch {
+    // Index already exists
+  }
+
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS zendesk_tickets (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ticket_id INTEGER NOT NULL UNIQUE,
+      event_id TEXT,
+      author_pubkey TEXT,
+      violation_type TEXT,
+      status TEXT DEFAULT 'open',
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      resolved_at TEXT,
+      resolution_action TEXT,
+      resolution_moderator TEXT
+    )
+  `).run();
+
+  try {
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_zendesk_event ON zendesk_tickets(event_id)`).run();
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_zendesk_author ON zendesk_tickets(author_pubkey)`).run();
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_zendesk_status ON zendesk_tickets(status)`).run();
+  } catch {
+    // Indexes already exist
+  }
 }
