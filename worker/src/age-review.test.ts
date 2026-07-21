@@ -1051,6 +1051,7 @@ describe('handleGetModerationStatus', () => {
 describe('sendDbUnavailableAlert', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   it('posts the fixed DB-unavailable message to the webhook and returns true on success', async () => {
@@ -1070,6 +1071,7 @@ describe('sendDbUnavailableAlert', () => {
   });
 
   it('returns false when Slack responds non-ok', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 500 }));
 
     const result = await sendDbUnavailableAlert('https://hooks.slack.com/test');
@@ -1078,6 +1080,7 @@ describe('sendDbUnavailableAlert', () => {
   });
 
   it('returns false when fetch throws', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network down')));
 
     const result = await sendDbUnavailableAlert('https://hooks.slack.com/test');

@@ -583,6 +583,10 @@ export async function handleGetModerationStatus(
     // monitoring (#197) -- the minor-review gate failing open during a DB
     // outage should never be silent, even though we deliberately keep it
     // fail-open here (see the proactive cron alert in index.ts scheduled()).
+    // MODERATION_STATUS_DB_UNAVAILABLE is intentionally a separate marker from
+    // index.ts's "D1 UNAVAILABLE" -- this one fires per live request that just
+    // failed open; that one fires from the cron proactively detecting the DB
+    // binding is absent. Not a typo -- two distinct signals.
     console.error('[age-review] MODERATION_STATUS_DB_UNAVAILABLE — DB binding absent, returning fail-open active status for', userPubkey);
     return json({ restriction: { status: 'active' } }, 200, corsHeaders);
   }

@@ -658,7 +658,15 @@ export default {
     } else if (env.SLACK_WEBHOOK_URL) {
       // #197: D1 binding unavailable — moderation-status is failing open (returning
       // unrestricted). Alert once per cron tick so the outage isn't silent.
+      // "D1 UNAVAILABLE" is intentionally a separate marker from age-review.ts's
+      // MODERATION_STATUS_DB_UNAVAILABLE -- this one is the cron proactively
+      // detecting the DB binding is absent; that one fires per live request
+      // that just failed open. Not a typo -- two distinct signals.
       console.error('[scheduled] D1 UNAVAILABLE — moderation-status failing open; investigate the moderation-decisions DB binding');
+      // No throttle/dedup here: D1 is the resource that's down, so a D1-backed
+      // last_alerted_at-style throttle would fail during the very outage this
+      // targets. Repeated ~5-min reminders during a sustained outage are
+      // acceptable (and preferable to a throttle silently failing open too).
       try {
         await sendDbUnavailableAlert(env.SLACK_WEBHOOK_URL);
       } catch (error) {
