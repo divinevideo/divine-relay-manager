@@ -25,6 +25,7 @@ import {
   handleParentContact,
   handleAgeReviewReplyWebhook,
   checkAgeReviewDeadlines,
+  sendDbUnavailableAlert,
   getAgeReviewConfig,
   updateAgeReviewConfig,
 } from './age-review';
@@ -619,19 +620,18 @@ export default {
   // Cron keep-alive: wake the ReportWatcher DO every 5 minutes so the alarm
   // chain can't break permanently after a Cloudflare-initiated eviction.
   async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext): Promise<void> {
-    if (!env.REPORT_WATCHER) {
-      console.log('[scheduled] REPORT_WATCHER binding not configured, skipping');
-      return;
-    }
-
-    try {
-      const id = env.REPORT_WATCHER.idFromName('singleton');
-      const stub = env.REPORT_WATCHER.get(id);
-      const response = await stub.fetch(new Request('https://do/status'));
-      const status = await response.json() as { status?: { running: boolean } };
-      console.log(`[scheduled] ReportWatcher status: running=${status?.status?.running}`);
-    } catch (error) {
-      console.error('[scheduled] Failed to check ReportWatcher:', error);
+    if (env.REPORT_WATCHER) {
+      try {
+        const id = env.REPORT_WATCHER.idFromName('singleton');
+        const stub = env.REPORT_WATCHER.get(id);
+        const response = await stub.fetch(new Request('https://do/status'));
+        const status = await response.json() as { status?: { running: boolean } };
+        console.log(`[scheduled] ReportWatcher status: running=${status?.status?.running}`);
+      } catch (error) {
+        console.error('[scheduled] Failed to check ReportWatcher:', error);
+      }
+    } else {
+      console.log('[scheduled] REPORT_WATCHER binding not configured, skipping keep-alive');
     }
 
     // Clean up expired pre-auth nonces
@@ -653,6 +653,23 @@ export default {
         await checkAgeReviewDeadlines(env);
       } catch (error) {
         console.error('[scheduled] Age review deadline check failed:', error);
+      }
+    } else if (env.SLACK_WEBHOOK_URL) {
+      // #197: D1 binding unavailable — moderation-status is failing open (returning
+      // unrestricted). Alert once per cron tick so the outage isn't silent.
+      // "D1 UNAVAILABLE" is intentionally a separate marker from age-review.ts's
+      // MODERATION_STATUS_DB_UNAVAILABLE -- this one is the cron proactively
+      // detecting the DB binding is absent; that one fires per live request
+      // that just failed open. Not a typo -- two distinct signals.
+      console.error('[scheduled] D1 UNAVAILABLE — moderation-status failing open; investigate the moderation-decisions DB binding');
+      // No throttle/dedup here: D1 is the resource that's down, so a D1-backed
+      // last_alerted_at-style throttle would fail during the very outage this
+      // targets. Repeated ~5-min reminders during a sustained outage are
+      // acceptable (and preferable to a throttle silently failing open too).
+      try {
+        await sendDbUnavailableAlert(env.SLACK_WEBHOOK_URL, env.ENVIRONMENT ?? 'unknown');
+      } catch (error) {
+        console.error('[scheduled] Failed to send DB-unavailable Slack alert:', error);
       }
     }
   },
