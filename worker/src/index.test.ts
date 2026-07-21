@@ -919,16 +919,20 @@ describe('mobile NIP-98 endpoint host allowlist (#173)', () => {
     return 'Nostr ' + btoa(JSON.stringify(evt));
   }
 
+  beforeEach(() => {
+    // No DB in env → handleGetModerationStatus fails open to 200 (age-review.ts:581-591),
+    // so a 200 here proves the auth gate passed, with no D1 harness needed. The
+    // fail-open path logs an expected `MODERATION_STATUS_DB_UNAVAILABLE` marker via
+    // console.error; silence it (and console.warn) so the suite output stays clean.
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  // No DB in env → handleGetModerationStatus fails open to 200 (age-review.ts:581-584),
-  // so a 200 here proves the auth gate passed, with no D1 harness needed. The
-  // fail-open path logs an expected `[age-review] DB not available` warning;
-  // silence it so the suite output stays clean.
   it('accepts a public-host-signed request when the host is allowlisted (the fix, end-to-end)', async () => {
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
     const res = await worker.fetch(
       new Request(OWN_HOST_URL, { method: 'GET', headers: { Authorization: nip98Header(PUBLIC_HOST_URL) } }),
       { NIP98_PUBLIC_HOST_ALLOWLIST: 'api.divine.video' } as never,
@@ -940,7 +944,6 @@ describe('mobile NIP-98 endpoint host allowlist (#173)', () => {
   // Config is user-edited free text (unlike URL.hostname, which the platform always
   // lowercases), so a mixed-case entry must still normalize to match at compare time.
   it('accepts a public host configured with mixed case (config is case-insensitive)', async () => {
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
     const res = await worker.fetch(
       new Request(OWN_HOST_URL, { method: 'GET', headers: { Authorization: nip98Header(PUBLIC_HOST_URL) } }),
       { NIP98_PUBLIC_HOST_ALLOWLIST: 'API.Divine.Video' } as never,
@@ -950,7 +953,6 @@ describe('mobile NIP-98 endpoint host allowlist (#173)', () => {
   });
 
   it('accepts an own-host-signed request with no allowlist configured (regression)', async () => {
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
     const res = await worker.fetch(
       new Request(OWN_HOST_URL, { method: 'GET', headers: { Authorization: nip98Header(OWN_HOST_URL) } }),
       {} as never,
@@ -974,7 +976,6 @@ describe('mobile NIP-98 endpoint host allowlist (#173)', () => {
   // takes down env.DB loses replay protection but not availability, matching
   // #197's existing fail-open posture for this same endpoint.
   it('replay nonce check is skipped (fail open) when env.DB is unavailable — same event succeeds twice', async () => {
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
     const header = nip98Header(OWN_HOST_URL);
     const first = await worker.fetch(
       new Request(OWN_HOST_URL, { method: 'GET', headers: { Authorization: header } }),
