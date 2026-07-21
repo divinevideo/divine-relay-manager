@@ -1275,13 +1275,13 @@ async function sendSlackAlert(
 // Proactive alert for the moderation-status DB-unavailable fail-open (#197).
 // Called from index.ts scheduled() once per cron tick when env.DB is absent,
 // so the outage isn't silent even though the request path keeps failing open.
-export async function sendDbUnavailableAlert(webhookUrl: string): Promise<boolean> {
+export async function sendDbUnavailableAlert(webhookUrl: string, environment: string): Promise<boolean> {
   try {
     const res = await fetch(webhookUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        text: ':rotating_light: D1 unavailable — age-review moderation-status is failing open (returning unrestricted `active`). Investigate the moderation-decisions D1 binding.',
+        text: `:rotating_light: [${environment}] D1 unavailable — age-review moderation-status is failing open (returning unrestricted \`active\`). Investigate the moderation-decisions D1 binding.`,
       }),
     });
     if (!res.ok) {

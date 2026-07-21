@@ -1054,11 +1054,11 @@ describe('sendDbUnavailableAlert', () => {
     vi.restoreAllMocks();
   });
 
-  it('posts the fixed DB-unavailable message to the webhook and returns true on success', async () => {
+  it('posts the DB-unavailable message with the environment to the webhook and returns true on success', async () => {
     const mockFetch = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal('fetch', mockFetch);
 
-    const result = await sendDbUnavailableAlert('https://hooks.slack.com/test');
+    const result = await sendDbUnavailableAlert('https://hooks.slack.com/test', 'staging');
 
     expect(result).toBe(true);
     expect(mockFetch).toHaveBeenCalledTimes(1);
@@ -1068,13 +1068,14 @@ describe('sendDbUnavailableAlert', () => {
     const payload = JSON.parse(options.body) as { text: string };
     expect(payload.text).toContain('D1 unavailable');
     expect(payload.text).toContain('failing open');
+    expect(payload.text).toContain('[staging]');
   });
 
   it('returns false when Slack responds non-ok', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 500 }));
 
-    const result = await sendDbUnavailableAlert('https://hooks.slack.com/test');
+    const result = await sendDbUnavailableAlert('https://hooks.slack.com/test', 'production');
 
     expect(result).toBe(false);
   });
@@ -1083,7 +1084,7 @@ describe('sendDbUnavailableAlert', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network down')));
 
-    const result = await sendDbUnavailableAlert('https://hooks.slack.com/test');
+    const result = await sendDbUnavailableAlert('https://hooks.slack.com/test', 'production');
 
     expect(result).toBe(false);
   });
