@@ -25,6 +25,7 @@ import {
   handleParentContact,
   handleAgeReviewReplyWebhook,
   checkAgeReviewDeadlines,
+  sendDbUnavailableAlert,
   getAgeReviewConfig,
   updateAgeReviewConfig,
 } from './age-review';
@@ -653,6 +654,15 @@ export default {
         await checkAgeReviewDeadlines(env);
       } catch (error) {
         console.error('[scheduled] Age review deadline check failed:', error);
+      }
+    } else if (env.SLACK_WEBHOOK_URL) {
+      // #197: D1 binding unavailable — moderation-status is failing open (returning
+      // unrestricted). Alert once per cron tick so the outage isn't silent.
+      console.error('[scheduled] D1 UNAVAILABLE — moderation-status failing open; investigate the moderation-decisions DB binding');
+      try {
+        await sendDbUnavailableAlert(env.SLACK_WEBHOOK_URL);
+      } catch (error) {
+        console.error('[scheduled] Failed to send DB-unavailable Slack alert:', error);
       }
     }
   },

@@ -9,6 +9,7 @@ import {
   handleAgeReviewReplyWebhook,
   handleCreateMinorAccount,
   checkAgeReviewDeadlines,
+  sendDbUnavailableAlert,
   syncAgeReviewTicketResolution,
   getAgeReviewConfig,
   updateAgeReviewConfig,
@@ -1026,12 +1027,62 @@ describe('handleGetModerationStatus', () => {
     expect(body.restriction.status).toBe('active');
   });
 
-  it('returns active (fail-open) when DB unavailable', async () => {
+  it('returns active (fail-open) when DB unavailable, logging a greppable alert marker', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
     const res = await handleGetModerationStatus('a'.repeat(64), makeEnv(), corsHeaders);
     const body = await res.json() as { restriction: { status: string } };
 
     expect(res.status).toBe(200);
     expect(body.restriction.status).toBe('active');
+    // Distinct marker so this fail-open path is alertable via log monitoring,
+    // separate from the general Slack-based cron alert (#197).
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('MODERATION_STATUS_DB_UNAVAILABLE'),
+      'a'.repeat(64),
+    );
+
+    errorSpy.mockRestore();
+  });
+});
+
+// -- sendDbUnavailableAlert ---------------------------------------------------
+
+describe('sendDbUnavailableAlert', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('posts the fixed DB-unavailable message to the webhook and returns true on success', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal('fetch', mockFetch);
+
+    const result = await sendDbUnavailableAlert('https://hooks.slack.com/test');
+
+    expect(result).toBe(true);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(mockFetch.mock.calls[0][0]).toBe('https://hooks.slack.com/test');
+    const options = mockFetch.mock.calls[0][1] as { method: string; headers: Record<string, string>; body: string };
+    expect(options.method).toBe('POST');
+    const payload = JSON.parse(options.body) as { text: string };
+    expect(payload.text).toContain('D1 unavailable');
+    expect(payload.text).toContain('failing open');
+  });
+
+  it('returns false when Slack responds non-ok', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 500 }));
+
+    const result = await sendDbUnavailableAlert('https://hooks.slack.com/test');
+
+    expect(result).toBe(false);
+  });
+
+  it('returns false when fetch throws', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network down')));
+
+    const result = await sendDbUnavailableAlert('https://hooks.slack.com/test');
+
+    expect(result).toBe(false);
   });
 });
 
