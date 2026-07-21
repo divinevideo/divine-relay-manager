@@ -275,11 +275,12 @@ function getAllowedOrigin(requestOrigin: string | null, allowedOriginsEnv: strin
 }
 
 // Parse the NIP-98 public-host allowlist (#173). Same split/trim/filter shape as
-// getAllowedOrigin. Bare hostnames, no wildcards. Empty/unset ⇒ [] ⇒ strict.
+// getAllowedOrigin, plus lowercasing since it's matched against URL.hostname
+// (always lowercase). Bare hostnames, no wildcards. Empty/unset ⇒ [] ⇒ strict.
 function getNip98AllowedHosts(env: Env): string[] {
   return (env.NIP98_PUBLIC_HOST_ALLOWLIST ?? '')
     .split(',')
-    .map((host) => host.trim())
+    .map((host) => host.trim().toLowerCase())
     .filter(Boolean);
 }
 

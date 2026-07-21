@@ -937,6 +937,18 @@ describe('mobile NIP-98 endpoint host allowlist (#173)', () => {
     expect(res.status).toBe(200);
   });
 
+  // Config is user-edited free text (unlike URL.hostname, which the platform always
+  // lowercases), so a mixed-case entry must still normalize to match at compare time.
+  it('accepts a public host configured with mixed case (config is case-insensitive)', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const res = await worker.fetch(
+      new Request(OWN_HOST_URL, { method: 'GET', headers: { Authorization: nip98Header(PUBLIC_HOST_URL) } }),
+      { NIP98_PUBLIC_HOST_ALLOWLIST: 'API.Divine.Video' } as never,
+      ctx,
+    );
+    expect(res.status).toBe(200);
+  });
+
   it('accepts an own-host-signed request with no allowlist configured (regression)', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const res = await worker.fetch(
