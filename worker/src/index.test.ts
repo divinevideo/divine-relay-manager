@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { finalizeEvent, generateSecretKey } from 'nostr-tools';
 import worker from './index';
 
 const env = {
@@ -902,6 +903,114 @@ describe('summarize-user cache validation', () => {
     const response = await worker.fetch(summarizeRequest(), env, ctx);
     expect(await response.json()).toEqual({ summary: 'fresh', riskLevel: 'low' }); // write failure did not collapse it
     expect(kv.put).toHaveBeenCalled();
+  });
+});
+
+describe('mobile NIP-98 endpoint host allowlist (#173)', () => {
+  const OWN_HOST_URL = 'https://api-relay-prod.divine.video/v1/account/moderation-status';
+  const PUBLIC_HOST_URL = 'https://api.divine.video/v1/account/moderation-status';
+
+  function nip98Header(u: string): string {
+    const sk = generateSecretKey();
+    const evt = finalizeEvent(
+      { kind: 27235, content: '', tags: [['u', u], ['method', 'GET']], created_at: Math.floor(Date.now() / 1000) },
+      sk,
+    );
+    return 'Nostr ' + btoa(JSON.stringify(evt));
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // No DB in env → handleGetModerationStatus fails open to 200 (age-review.ts:581-584),
+  // so a 200 here proves the auth gate passed, with no D1 harness needed. The
+  // fail-open path logs an expected `[age-review] DB not available` warning;
+  // silence it so the suite output stays clean.
+  it('accepts a public-host-signed request when the host is allowlisted (the fix, end-to-end)', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const res = await worker.fetch(
+      new Request(OWN_HOST_URL, { method: 'GET', headers: { Authorization: nip98Header(PUBLIC_HOST_URL) } }),
+      { NIP98_PUBLIC_HOST_ALLOWLIST: 'api.divine.video' } as never,
+      ctx,
+    );
+    expect(res.status).toBe(200);
+  });
+
+  // Config is user-edited free text (unlike URL.hostname, which the platform always
+  // lowercases), so a mixed-case entry must still normalize to match at compare time.
+  it('accepts a public host configured with mixed case (config is case-insensitive)', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const res = await worker.fetch(
+      new Request(OWN_HOST_URL, { method: 'GET', headers: { Authorization: nip98Header(PUBLIC_HOST_URL) } }),
+      { NIP98_PUBLIC_HOST_ALLOWLIST: 'API.Divine.Video' } as never,
+      ctx,
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it('accepts an own-host-signed request with no allowlist configured (regression)', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const res = await worker.fetch(
+      new Request(OWN_HOST_URL, { method: 'GET', headers: { Authorization: nip98Header(OWN_HOST_URL) } }),
+      {} as never,
+      ctx,
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it('rejects a public-host-signed request when the host is NOT allowlisted', async () => {
+    const res = await worker.fetch(
+      new Request(OWN_HOST_URL, { method: 'GET', headers: { Authorization: nip98Header(PUBLIC_HOST_URL) } }),
+      {} as never,
+      ctx,
+    );
+    expect(res.status).toBe(401);
+  });
+});
+
+describe('zendesk pre-auth NIP-98 scope boundary (#173)', () => {
+  const OWN_HOST_PREAUTH_URL = 'https://api-relay-prod.divine.video/api/zendesk/pre-auth';
+  const PUBLIC_HOST_PREAUTH_URL = 'https://api.divine.video/api/zendesk/pre-auth';
+
+  // Tolerates ensureSchemaOnce's DDL (db.ts: a sequence of `.prepare(sql).run()`
+  // calls, no `.bind()`/`.first()` needed for schema setup) as async no-ops. The
+  // pre-auth nonce INSERT is never reached in this test — auth fails first.
+  function makeZendeskDb() {
+    const statement = (): { bind: () => unknown; run: () => Promise<{ success: boolean }>; first: () => Promise<null> } => ({
+      bind: () => statement(),
+      run: async () => ({ success: true }),
+      first: async () => null,
+    });
+    return { prepare: statement };
+  }
+
+  // Proves the Zendesk pre-auth route stays same-host-only even with the mobile
+  // allowlist configured (Global Constraint 4: Zendesk is out of #173's scope).
+  it('rejects a public-host-signed request even when the mobile allowlist is configured (scope boundary)', async () => {
+    const sk = generateSecretKey();
+    const evt = finalizeEvent(
+      {
+        kind: 27235,
+        content: '',
+        tags: [['u', PUBLIC_HOST_PREAUTH_URL], ['method', 'POST']],
+        created_at: Math.floor(Date.now() / 1000),
+      },
+      sk,
+    );
+    const res = await worker.fetch(
+      new Request(OWN_HOST_PREAUTH_URL, {
+        method: 'POST',
+        headers: { Authorization: 'Nostr ' + btoa(JSON.stringify(evt)) },
+      }),
+      {
+        ZENDESK_PREAUTH_SECRET: 'test-secret',
+        DB: makeZendeskDb(),
+        NIP98_PUBLIC_HOST_ALLOWLIST: 'api.divine.video',
+      } as never,
+      ctx,
+    );
+    expect(res.status).toBe(401);
   });
 });
 

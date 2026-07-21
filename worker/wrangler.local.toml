@@ -27,6 +27,8 @@ MODERATION_ADMIN_URL = "https://moderation-api.divine.video"
 REALNESS_API_URL = "https://realness.admin.divine.video"
 # Allow admin UI plus the managed web app and its preview deployments
 ALLOWED_ORIGINS = "https://relay.admin.divine.video,https://app.divine.video,https://*.openvine-app.pages.dev,*.divine-relay-manager.pages.dev,*.divine-relay-admin.pages.dev"
+# NIP-98 public-host allowlist (#173). Empty for local dev (strict same-host).
+NIP98_PUBLIC_HOST_ALLOWLIST = ""
 # Zendesk custom field IDs for auto-solve required fields
 ZENDESK_FIELD_CATEGORY = "14559549220879"
 ZENDESK_FIELD_ISSUE = "14560383908879"

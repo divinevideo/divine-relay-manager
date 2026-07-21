@@ -49,6 +49,10 @@ interface Env extends KeycastEnv {
   NOSTR_NSEC: string | SecretStoreSecret;
   RELAY_URL: string;
   ALLOWED_ORIGINS: string;
+  // Comma-separated public hostnames whose NIP-98 `u`-tag host is accepted in
+  // addition to the worker's own request host, for the two mobile endpoints only
+  // (divine-relay-manager#173). Non-secret. Empty/unset ⇒ strict same-host.
+  NIP98_PUBLIC_HOST_ALLOWLIST?: string;
   ANTHROPIC_API_KEY?: string;
   // Cloudflare Access Service Token for moderation.admin.divine.video
   CF_ACCESS_CLIENT_ID?: string | SecretStoreSecret;
@@ -271,6 +275,16 @@ function getAllowedOrigin(requestOrigin: string | null, allowedOriginsEnv: strin
   return null;
 }
 
+// Parse the NIP-98 public-host allowlist (#173). Same split/trim/filter shape as
+// getAllowedOrigin, plus lowercasing since it's matched against URL.hostname
+// (always lowercase). Bare hostnames, no wildcards. Empty/unset ⇒ [] ⇒ strict.
+function getNip98AllowedHosts(env: Env): string[] {
+  return (env.NIP98_PUBLIC_HOST_ALLOWLIST ?? '')
+    .split(',')
+    .map((host) => host.trim().toLowerCase())
+    .filter(Boolean);
+}
+
 function originMatchesRule(requestOrigin: string, allowedRule: string): boolean {
   if (requestOrigin === allowedRule) {
     return true;
@@ -408,14 +422,14 @@ export default {
 
       // Mobile-facing endpoints: NIP-98 user auth, not admin auth
       if (path === '/v1/account/moderation-status' && request.method === 'GET') {
-        const authResult = await verifyNip98Auth(request, request.url);
+        const authResult = await verifyNip98Auth(request, request.url, getNip98AllowedHosts(env));
         if (!authResult.valid || !authResult.pubkey) return jsonResponse({ success: false, error: authResult.error ?? 'Unauthorized' }, 401, corsHeaders);
         if (env.DB) await ensureSchemaOnce(env.DB);
         return handleGetModerationStatus(authResult.pubkey, env, corsHeaders);
       }
 
       if (path.startsWith('/v1/minor-review-cases/') && path.endsWith('/parent-contact') && request.method === 'POST') {
-        const authResult = await verifyNip98Auth(request, request.url);
+        const authResult = await verifyNip98Auth(request, request.url, getNip98AllowedHosts(env));
         if (!authResult.valid || !authResult.pubkey) return jsonResponse({ success: false, error: authResult.error ?? 'Unauthorized' }, 401, corsHeaders);
         if (env.DB) await ensureSchemaOnce(env.DB);
         const caseId = path.replace('/v1/minor-review-cases/', '').replace('/parent-contact', '');
@@ -1879,9 +1893,32 @@ interface Nip98Result {
   error?: string;
 }
 
-async function verifyNip98Auth(
+// Returns true iff `signedUrl` matches `expectedUrl` in scheme + path + query,
+// and its hostname is in `allowedHosts` (bare hostnames). Port and fragment are
+// intentionally not compared — this is a bare-hostname allowlist by design;
+// tightening to port would mean comparing `.host` instead of `.hostname`. Used
+// only by the two mobile endpoints (#173); strict callers pass an empty
+// allowlist, so this can never return true for them. Malformed URLs → false.
+function hostAllowlistedUrlMatch(signedUrl: string, expectedUrl: string, allowedHosts: string[]): boolean {
+  if (allowedHosts.length === 0) return false;
+  try {
+    const signed = new URL(signedUrl);
+    const expected = new URL(expectedUrl);
+    return (
+      signed.protocol === expected.protocol && // scheme not dropped (Constraint 2)
+      signed.pathname === expected.pathname &&  // path stays exactly bound
+      signed.search === expected.search &&      // query stays exactly bound
+      allowedHosts.includes(signed.hostname)    // host is the only relaxation
+    );
+  } catch {
+    return false;
+  }
+}
+
+export async function verifyNip98Auth(
   request: Request,
-  expectedUrl: string
+  expectedUrl: string,
+  allowedHosts: string[] = []
 ): Promise<Nip98Result> {
   const authHeader = request.headers.get('Authorization');
   if (!authHeader || !authHeader.startsWith('Nostr ')) {
@@ -1911,9 +1948,19 @@ async function verifyNip98Auth(
       return { valid: false, error: 'Event timestamp too old or in future' };
     }
 
-    // Verify URL tag
+    // Verify URL tag. Exact string match is the unchanged fast path (covers all
+    // same-host callers, including strict callers that pass no allowedHosts).
+    // Only when the strings differ do we relax the HOST — and only the host:
+    // scheme, path, and query must still match the worker's own request exactly,
+    // and the signed host must be a member of the caller-supplied allowlist.
+    // This closes divine-relay-manager#173, where the mobile client signs for the
+    // public host (api.divine.video) but the request is forwarded to the worker's
+    // real host, so request.url (== expectedUrl) never string-matches the signed u.
     const urlTag = event.tags.find((t: string[]) => t[0] === 'u');
-    if (!urlTag || urlTag[1] !== expectedUrl) {
+    if (!urlTag) {
+      return { valid: false, error: `URL mismatch (expected ${expectedUrl})` };
+    }
+    if (urlTag[1] !== expectedUrl && !hostAllowlistedUrlMatch(urlTag[1], expectedUrl, allowedHosts)) {
       return { valid: false, error: `URL mismatch (expected ${expectedUrl})` };
     }
 
@@ -2455,7 +2502,8 @@ async function handleZendeskPreAuth(
     // Ensure nonce table exists
     await ensureSchemaOnce(env.DB);
 
-    // Verify NIP-98 auth
+    // Verify NIP-98 auth. Intentionally strict: no allowedHosts passed, so this
+    // Zendesk pre-auth path stays same-host only (#173 scope — do not relax).
     const authResult = await verifyNip98Auth(request, request.url);
     if (!authResult.valid) {
       return jsonResponse(
