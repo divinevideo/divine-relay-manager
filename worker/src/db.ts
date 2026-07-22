@@ -1,5 +1,6 @@
 // ABOUTME: Shared D1 schema initialization for worker and Durable Objects
-// ABOUTME: Single source of truth for moderation_decisions and moderation_targets DDL
+// ABOUTME: Creates moderation_decisions, moderation_targets, age_review_cases,
+// ABOUTME: age_review_config, and zendesk_preauth_nonces DDL on a fresh D1
 
 /**
  * Ensure all moderation tables and indexes exist.
@@ -130,9 +131,11 @@ export async function ensureSchema(db: D1Database): Promise<void> {
     )
   `).run();
 
-  // Zendesk tables — previously existed only in migrations/0001 and 0003,
-  // which are legacy/manual and not run against fresh D1 instances (this
-  // repo's schema path is ensureSchema, not `wrangler d1 migrations apply`).
+  // zendesk_preauth_nonces previously existed only in migrations/0003, which
+  // is legacy/manual and not run against fresh D1 instances (this repo's
+  // schema path is ensureSchema, not `wrangler d1 migrations apply`).
+  // (zendesk_tickets is self-healed separately by ensureZendeskTable() in
+  // zendesk-sync.ts — not duplicated here.)
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS zendesk_preauth_nonces (
       nonce TEXT PRIMARY KEY,
@@ -146,28 +149,5 @@ export async function ensureSchema(db: D1Database): Promise<void> {
     await db.prepare(`CREATE INDEX IF NOT EXISTS idx_nonces_expires ON zendesk_preauth_nonces(expires_at)`).run();
   } catch {
     // Index already exists
-  }
-
-  await db.prepare(`
-    CREATE TABLE IF NOT EXISTS zendesk_tickets (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      ticket_id INTEGER NOT NULL UNIQUE,
-      event_id TEXT,
-      author_pubkey TEXT,
-      violation_type TEXT,
-      status TEXT DEFAULT 'open',
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-      resolved_at TEXT,
-      resolution_action TEXT,
-      resolution_moderator TEXT
-    )
-  `).run();
-
-  try {
-    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_zendesk_event ON zendesk_tickets(event_id)`).run();
-    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_zendesk_author ON zendesk_tickets(author_pubkey)`).run();
-    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_zendesk_status ON zendesk_tickets(status)`).run();
-  } catch {
-    // Indexes already exist
   }
 }
