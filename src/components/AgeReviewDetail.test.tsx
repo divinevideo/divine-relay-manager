@@ -4,6 +4,12 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 
 import { AgeReviewDetail } from './AgeReviewDetail';
 import { ApiError } from '@/lib/adminApi';
+
+// AgeReviewDetail reads relay content-presence via useUserStats (which needs a
+// NostrProvider). This unit test isolates the case-action logic, so stub it.
+vi.mock('@/hooks/useUserStats', () => ({
+  useUserStats: () => ({ data: undefined }),
+}));
 import type { AgeReviewCase, AgeBand, AgeReviewState } from '../../shared/age-review';
 
 const updateAgeReviewCase = vi.fn().mockResolvedValue({ success: true });
@@ -418,6 +424,14 @@ describe('AgeReviewDetail', () => {
       screen.queryByText(/protections that apply to this account/i)
     ).not.toBeInTheDocument();
     expect(screen.queryByText(/rolling out \(not yet enforced/i)).not.toBeInTheDocument();
+  });
+
+  it('renders the account-type indicator (self-custody) for a not_found account', async () => {
+    getAccountStatus.mockResolvedValue({ success: false, not_found: true });
+
+    renderDetail(makeCase({ suspected_age_band: 'age_13_15' }));
+
+    expect(await screen.findByText('Self-custody (not in keycast)')).toBeInTheDocument();
   });
 
   it('shows status-unavailable when the account-status query rejects', async () => {

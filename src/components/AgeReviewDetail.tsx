@@ -1,6 +1,9 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAdminApi, useApiUrl } from "@/hooks/useAdminApi";
+import { useAccountStatus } from "@/hooks/useAccountStatus";
+import { useUserStats } from "@/hooks/useUserStats";
+import { AccountTypeIndicator } from "@/components/AccountTypeIndicator";
 import { ApiError } from "@/lib/adminApi";
 import { reconcileCaseIntoList, type AgeReviewListParams } from "@/lib/ageReviewCache";
 import { useToast } from "@/hooks/useToast";
@@ -213,12 +216,8 @@ export function AgeReviewDetail({ caseData: c }: Props) {
 
   // Keycast-backed protected-minor status (verified_minor). Best-effort: a
   // keycast blip resolves to success:false, so we show status unavailable.
-  const { data: accountStatus, isError: accountStatusFailed } = useQuery({
-    queryKey: ['account-status', apiUrl, c.pubkey],
-    queryFn: () => api.getAccountStatus(c.pubkey),
-    enabled: !!apiUrl && !!c.pubkey,
-    staleTime: 60_000, // verified_minor is durable; avoid refetching per case reopen
-  });
+  const { data: accountStatus, isError: accountStatusFailed } = useAccountStatus(c.pubkey);
+  const { data: userStats } = useUserStats(c.pubkey);
   const verifiedMinorAtDate = accountStatus?.verified_minor_at
     ? new Date(accountStatus.verified_minor_at)
     : null;
@@ -261,6 +260,13 @@ export function AgeReviewDetail({ caseData: c }: Props) {
               </span>
             ) : null}
           </div>
+
+          <AccountTypeIndicator
+            accountStatus={accountStatus}
+            accountStatusError={accountStatusFailed}
+            postCount={userStats?.postCount}
+            ticketLinked={!!c.zendesk_ticket_id}
+          />
 
           {/* Protections that apply to an approved protected minor (#143).
               POLICY-DERIVED from verified_minor: these are client-enforced
