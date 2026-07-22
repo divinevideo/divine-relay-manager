@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useAdminApi, useApiUrl } from "@/hooks/useAdminApi";
+import { useAdminApi } from "@/hooks/useAdminApi";
 import { useAccountStatus } from "@/hooks/useAccountStatus";
 import { useUserStats } from "@/hooks/useUserStats";
 import { AccountTypeIndicator } from "@/components/AccountTypeIndicator";
@@ -101,7 +101,6 @@ const ENFORCEMENT_STATES: AgeReviewState[] = [
 
 export function AgeReviewDetail({ caseData: c }: Props) {
   const api = useAdminApi();
-  const apiUrl = useApiUrl();
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [resolutionNote, setResolutionNote] = useState(c.resolution_note ?? "");
@@ -216,8 +215,12 @@ export function AgeReviewDetail({ caseData: c }: Props) {
 
   // Keycast-backed protected-minor status (verified_minor). Best-effort: a
   // keycast blip resolves to success:false, so we show status unavailable.
-  const { data: accountStatus, isError: accountStatusFailed } = useAccountStatus(c.pubkey);
-  const { data: userStats } = useUserStats(c.pubkey);
+  const { data: accountStatus, isError: accountStatusFailed, isLoading: accountStatusLoading } = useAccountStatus(c.pubkey);
+  const { data: userStats, isError: userStatsFailed } = useUserStats(c.pubkey);
+  // Content presence is trustworthy only once the relay read resolves without
+  // error; a failed/in-flight read must not read as "no content" (would
+  // under-state available enforcement).
+  const contentPresenceKnown = userStats !== undefined && !userStatsFailed;
   const verifiedMinorAtDate = accountStatus?.verified_minor_at
     ? new Date(accountStatus.verified_minor_at)
     : null;
@@ -264,7 +267,9 @@ export function AgeReviewDetail({ caseData: c }: Props) {
           <AccountTypeIndicator
             accountStatus={accountStatus}
             accountStatusError={accountStatusFailed}
+            accountStatusLoading={accountStatusLoading}
             postCount={userStats?.postCount}
+            contentPresenceKnown={contentPresenceKnown}
             ticketLinked={!!c.zendesk_ticket_id}
           />
 

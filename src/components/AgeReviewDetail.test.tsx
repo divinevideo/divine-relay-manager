@@ -6,9 +6,14 @@ import { AgeReviewDetail } from './AgeReviewDetail';
 import { ApiError } from '@/lib/adminApi';
 
 // AgeReviewDetail reads relay content-presence via useUserStats (which needs a
-// NostrProvider). This unit test isolates the case-action logic, so stub it.
+// NostrProvider). This unit test isolates the case-action logic, so stub it with
+// a resolved, empty read (not in-flight) so the indicator's content-presence
+// note doesn't bleed into unrelated assertions.
 vi.mock('@/hooks/useUserStats', () => ({
-  useUserStats: () => ({ data: undefined }),
+  useUserStats: () => ({
+    data: { postCount: 0, reportCount: 0, labelCount: 0, recentPosts: [], existingLabels: [], previousReports: [] },
+    isError: false,
+  }),
 }));
 import type { AgeReviewCase, AgeBand, AgeReviewState } from '../../shared/age-review';
 

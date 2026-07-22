@@ -16,7 +16,10 @@ const getAgeReviewConfig = vi.fn();
 const getAccountStatus = vi.fn();
 
 vi.mock('@/hooks/useUserStats', () => ({
-  useUserStats: () => ({ data: undefined }),
+  useUserStats: () => ({
+    data: { postCount: 0, reportCount: 0, labelCount: 0, recentPosts: [], existingLabels: [], previousReports: [] },
+    isError: false,
+  }),
 }));
 
 vi.mock('@/hooks/useAdminApi', () => ({

@@ -7,7 +7,9 @@ import { deriveAccountVerdict, type LegState } from '@/lib/accountVerdict';
 interface Props {
   accountStatus: AccountStatusResponse | undefined;
   accountStatusError: boolean;
+  accountStatusLoading: boolean;
   postCount: number | undefined;
+  contentPresenceKnown: boolean;
   ticketLinked: boolean;
 }
 
@@ -37,8 +39,25 @@ const LEG_CLASS: Record<LegState, string> = {
   not_tracked: 'text-muted-foreground italic',
 };
 
-export function AccountTypeIndicator({ accountStatus, accountStatusError, postCount, ticketLinked }: Props) {
-  const v = deriveAccountVerdict({ accountStatus, accountStatusError, postCount, ticketLinked });
+export function AccountTypeIndicator({
+  accountStatus,
+  accountStatusError,
+  accountStatusLoading,
+  postCount,
+  contentPresenceKnown,
+  ticketLinked,
+}: Props) {
+  // Cold open: the account-status query is in flight with nothing cached yet.
+  // Show a neutral "checking" state rather than flashing "unavailable — retry".
+  if (accountStatusLoading && !accountStatus && !accountStatusError) {
+    return (
+      <div className="rounded-md border p-3 text-sm text-muted-foreground">
+        Checking account status…
+      </div>
+    );
+  }
+
+  const v = deriveAccountVerdict({ accountStatus, accountStatusError, postCount, contentPresenceKnown, ticketLinked });
 
   return (
     <div className="space-y-2 rounded-md border p-3">
