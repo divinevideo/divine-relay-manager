@@ -13,7 +13,6 @@ export interface ComplianceLeg {
 
 export interface AccountVerdict {
   accountType: AccountType;
-  suspended: boolean;
   contentPresence: 'visible' | 'hidden_suspended' | 'none' | 'unknown';
   legs: ComplianceLeg[];
   verdict: string;
@@ -81,7 +80,6 @@ export function deriveAccountVerdict(input: DeriveInput): AccountVerdict {
 
   return {
     accountType,
-    suspended,
     contentPresence,
     legs,
     verdict: buildVerdict(accountType, contentPresence, signinState, ticketLinked),
