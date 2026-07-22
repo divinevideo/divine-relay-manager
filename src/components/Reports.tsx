@@ -887,9 +887,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // the two views cannot drift. Reports render attacker-authored event data:
   // a crashing report degrades to the inline fallback (with the target's
   // identifiers and retry/dismiss) while the reports list stays usable (#158).
+  // Lowercase to match the worker's reports filter (buildReportsFilter also
+  // lowercases), so decisionsForTarget below keys off the same normalized hex
+  // an uppercase-hex deep link would otherwise miss lowercase-keyed decisions.
   const deepLinkTarget = searchParams.get('event')
-    ? { type: 'event' as const, value: searchParams.get('event')! }
-    : { type: 'pubkey' as const, value: searchParams.get('pubkey') ?? '' };
+    ? { type: 'event' as const, value: searchParams.get('event')!.toLowerCase() }
+    : { type: 'pubkey' as const, value: (searchParams.get('pubkey') ?? '').toLowerCase() };
   const showDeepLinkFallback =
     !selectedReport && hasDeepLinkParams && (deepLinkStatus === 'gone' || deepLinkStatus === 'unavailable');
   const showDeepLinkResolving =
