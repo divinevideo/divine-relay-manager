@@ -174,6 +174,7 @@ export interface UserStatusResult {
   suspended_at?: string;
   verified_minor?: boolean;
   verified_minor_at?: string;
+  notFound?: boolean;
   error?: string;
 }
 
@@ -194,6 +195,11 @@ export async function getUserStatus(pubkey: string, env: KeycastEnv): Promise<Us
     });
     if (!res.ok) {
       const text = await res.text();
+      // A 404 is "not a keycast user" (self-custody) — an expected, informational
+      // state, not a failure. Distinguish it so the UI never shows it as an error.
+      if (res.status === 404) {
+        return { success: false, notFound: true };
+      }
       return { success: false, error: `${res.status}: ${text}` };
     }
     const data = await res.json() as Record<string, unknown>;
