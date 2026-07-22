@@ -2,14 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { classifyTargetedFetch, decisionsForTarget, reportsMatchingTarget } from './deepLinkResolution';
 
 describe('classifyTargetedFetch', () => {
-  it('unavailable when the fetch failed', () => {
-    expect(classifyTargetedFetch({ ok: false })).toBe('unavailable');
+  it('gone when the successful fetch returned nothing', () => {
+    expect(classifyTargetedFetch([])).toBe('gone');
   });
-  it('gone when the fetch succeeded but returned nothing', () => {
-    expect(classifyTargetedFetch({ ok: true, events: [] })).toBe('gone');
-  });
-  it('found when the fetch returned at least one report', () => {
-    expect(classifyTargetedFetch({ ok: true, events: [{}] })).toBe('found');
+  it('found when the successful fetch returned at least one report', () => {
+    expect(classifyTargetedFetch([{}])).toBe('found');
   });
 });
 

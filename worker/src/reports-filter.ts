@@ -14,11 +14,11 @@ export function buildReportsFilter(params: URLSearchParams): {
   // Normalize so an uppercase-hex deep link still resolves instead of false-'gone'.
   const event = params.get('event');
   if (event) {
-    return { kinds: [REPORT_KIND], '#e': [event.toLowerCase()] };
+    return { kinds: [REPORT_KIND], '#e': [event.toLowerCase()], limit: BULK_LIMIT };
   }
   const pubkey = params.get('pubkey');
   if (pubkey) {
-    return { kinds: [REPORT_KIND], '#p': [pubkey.toLowerCase()] };
+    return { kinds: [REPORT_KIND], '#p': [pubkey.toLowerCase()], limit: BULK_LIMIT };
   }
   return { kinds: [REPORT_KIND], limit: BULK_LIMIT };
 }

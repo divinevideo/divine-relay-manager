@@ -724,6 +724,17 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     }
   }, [selectedReportId, reports, selectedReport]);
 
+  // A deep link can select a report before ban/label/decision queries finish.
+  // Re-check the selected target as resolution data arrives so it cannot stay
+  // hidden from the list while its detail pane is open.
+  useEffect(() => {
+    if (!hideResolved || !selectedReport) return;
+    const target = getReportTarget(selectedReport);
+    if (target && resolvedTargets.has(`${target.type}:${target.value}`)) {
+      setHideResolved(false);
+    }
+  }, [hideResolved, selectedReport, resolvedTargets]);
+
   // Handle deep linking via query params (?event=... or ?pubkey=... or &env=...)
   useEffect(() => {
     const eventParam = searchParams.get('event');
@@ -813,7 +824,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         // result here is a relay-confirmed absence; an empty *timeout* never reaches this
         // branch (the worker 502s it → the catch below → 'unavailable').
         const matching = reportsMatchingTarget(events, target, getReportTarget);
-        const verdict = classifyTargetedFetch({ ok: true, events });
+        const verdict = classifyTargetedFetch(events);
         if (verdict === 'found') {
           // Prefer a report whose resolved target IS the deep-link target for display;
           // fall back to any returned report (all of them tag the target).

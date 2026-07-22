@@ -36,6 +36,10 @@ function ev(id: string, tags: string[][]) {
 const OTHER_REPORT = ev('5'.repeat(64), [['e', OTHER_EVENT]]); // in the bulk list, unrelated target
 const MATCHING_REPORT = ev(MATCHING_ID, [['e', EFOUND]]); // resolves to event:EFOUND
 
+const PBULK = 'd'.repeat(64);
+const BULK_PUBKEY_REPORT_ID = 'e'.repeat(64);
+const BULK_PUBKEY_REPORT = ev(BULK_PUBKEY_REPORT_ID, [['p', PBULK]]);
+
 const PWITHNOTE = '7'.repeat(64); // pubkey deep-link whose only reports are note-reports
 const NOTE_REPORT_ID = '8'.repeat(64);
 // A note-report: p-tags the reported author (PWITHNOTE) but also e-tags the note, so
@@ -113,9 +117,67 @@ describe('Reports deep-link resolution', () => {
     );
 
     // The fix: navigate to /reports/:id, and the redundant setSearchParams({}) that used to
-    // clobber it back to /reports is gone — so the resolved URL is bookmarkable.
+    // clobber it back to /reports is gone, so the query params stay cleared.
     await waitFor(() => expect(window.location.pathname).toBe(`/reports/${MATCHING_ID}`));
     expect(window.location.search).toBe('');
+  });
+
+  it('resolves a bulk-hit target and clears deep-link params without a targeted fetch', async () => {
+    window.history.pushState({}, '', `/reports?event=${OTHER_EVENT}`);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/reports') && (url.includes('event=') || url.includes('pubkey='))) {
+        throw new Error('bulk hit should not issue targeted lookup');
+      }
+      if (url.includes('/api/reports')) return jsonResponse({ success: true, events: [OTHER_REPORT] });
+      if (url.includes('/api/resolution-labels')) return jsonResponse({ success: true, events: [] });
+      if (url.includes('/api/decisions')) return jsonResponse({ success: true, decisions: [] });
+      if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
+      return jsonResponse({ success: true });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(
+      <TestApp>
+        <Reports relayUrl="wss://relay.example" />
+      </TestApp>
+    );
+
+    await waitFor(() => expect(window.location.pathname).toBe(`/reports/${OTHER_REPORT.id}`));
+    expect(window.location.search).toBe('');
+    expect(fetchMock.mock.calls.some((c) => String(c[0]).includes('event='))).toBe(false);
+  });
+
+  it('keeps a selected bulk-hit deep-link visible when ban data marks it resolved after navigation', async () => {
+    window.history.pushState({}, '', `/reports?pubkey=${PBULK}`);
+    let resolveBannedPubkeys!: (r: Response) => void;
+    const bannedPubkeysPromise = new Promise<Response>((res) => { resolveBannedPubkeys = res; });
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/reports')) return jsonResponse({ success: true, events: [BULK_PUBKEY_REPORT] });
+      if (url.includes('/api/resolution-labels')) return jsonResponse({ success: true, events: [] });
+      if (url.includes('/api/decisions')) return jsonResponse({ success: true, decisions: [] });
+      if (url.includes('/api/relay-rpc')) {
+        const body = typeof init?.body === 'string' ? JSON.parse(init.body) as { method?: string } : {};
+        if (body.method === 'listbannedpubkeys') return bannedPubkeysPromise;
+        return jsonResponse({ success: true, result: [] });
+      }
+      return jsonResponse({ success: true });
+    }));
+
+    render(
+      <TestApp>
+        <Reports relayUrl="wss://relay.example" />
+      </TestApp>
+    );
+
+    await waitFor(() => expect(window.location.pathname).toBe(`/reports/${BULK_PUBKEY_REPORT_ID}`));
+    resolveBannedPubkeys(jsonResponse({ success: true, result: [{ pubkey: PBULK }] }));
+
+    await waitFor(() =>
+      expect(screen.getByRole('switch', { name: /hide resolved/i })).not.toBeChecked()
+    );
+    expect(screen.getByText(/Grouped \(1\)/)).toBeInTheDocument();
   });
 
   it('resolves a ?pubkey= deep-link to found when its only reports are note-reports that p-tag it (relay filter is authoritative, not a false "gone")', async () => {

@@ -3,20 +3,16 @@
 
 export type DeepLinkStatus = 'idle' | 'resolving' | 'found' | 'gone' | 'unavailable';
 
-// Classify a targeted relay lookup for a deep-link's report. A failed request
-// (timeout/502) is 'unavailable' — never treated as 'gone' — so a transient
-// relay problem is not reported to a moderator as a deletion.
-export function classifyTargetedFetch(
-  outcome: { ok: boolean; events?: unknown[] }
-): 'found' | 'gone' | 'unavailable' {
-  if (!outcome.ok) return 'unavailable';
-  return (outcome.events?.length ?? 0) > 0 ? 'found' : 'gone';
+// Classify a successful targeted relay lookup for a deep-link's report.
+// Failed requests throw at the API boundary and are surfaced as 'unavailable'
+// by the component's catch path.
+export function classifyTargetedFetch(events: unknown[]): 'found' | 'gone' {
+  return events.length > 0 ? 'found' : 'gone';
 }
 
-// Keep only the reports whose resolved target (via the caller's getReportTarget)
-// matches the deep-link target. This mirrors the bulk list's consolidation rule so
-// a targeted lookup and the bulk search agree: a report that merely p-tags a pubkey
-// but resolves to an event target does NOT satisfy a ?pubkey= deep-link.
+// Prefer reports whose resolved target (via the caller's getReportTarget) matches
+// the deep-link target for display. This is not an existence gate: the relay's
+// own #e/#p filter result is authoritative for found/gone.
 export function reportsMatchingTarget<E>(
   events: E[],
   target: { type: string; value: string },
