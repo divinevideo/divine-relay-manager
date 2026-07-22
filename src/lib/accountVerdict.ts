@@ -47,6 +47,9 @@ export function deriveAccountVerdict(input: DeriveInput): AccountVerdict {
   }
 
   const suspended = accountStatus?.status === 'suspended';
+  // Both suspended and banned block sign-in. Kept separate from `suspended`
+  // because only *suspend* hides content reversibly — ban purges it.
+  const signInBlocked = suspended || accountStatus?.status === 'banned';
   const hasContent = (postCount ?? 0) > 0;
   // Suspension hides content, so 'hidden_suspended' is the honest read there
   // regardless of the relay result. Otherwise, an unresolved read is 'unknown'
@@ -66,7 +69,7 @@ export function deriveAccountVerdict(input: DeriveInput): AccountVerdict {
   const signinState: LegState =
     accountType === 'self_custody' ? 'na'
     : accountType === 'unknown' ? 'not_tracked'
-    : suspended ? 'done'
+    : signInBlocked ? 'done'
     : 'missing';
 
   const legs: ComplianceLeg[] = [
@@ -91,9 +94,6 @@ function buildVerdict(
   signinState: LegState,
   ticketLinked: boolean,
 ): string {
-  if (accountType === 'unknown') {
-    return 'Sign-in lever unconfirmed (account status unavailable) — retry before relying on it.';
-  }
   const contentUnknownNote =
     'Relay content status unavailable — verify content directly before ruling out a content action.';
 
@@ -106,6 +106,18 @@ function buildVerdict(
     available.push('age-restrict/remove content');
   }
   if (!ticketLinked) available.push('open ticket');
+
+  // Keycast unavailable: only the SIGN-IN leg is unconfirmed. Content-presence
+  // and ticket don't depend on keycast, so still surface those actions instead
+  // of collapsing the whole verdict to "retry". (signinState is 'not_tracked'
+  // here, so 'suspend sign-in' is never in `available`.)
+  if (accountType === 'unknown') {
+    const note = 'Sign-in lever unconfirmed (account status unavailable) — retry before relying on it.';
+    const tail = contentPresence === 'unknown' ? ` ${contentUnknownNote}` : '';
+    return available.length > 0
+      ? `${note} Content/ticket actions still apply: ${available.join(', ')}.${tail}`
+      : `${note}${tail}`;
+  }
 
   const prefix = accountType === 'self_custody' ? 'Sign-in suspend N/A (self-custody). ' : '';
 

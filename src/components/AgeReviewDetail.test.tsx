@@ -439,6 +439,17 @@ describe('AgeReviewDetail', () => {
     expect(await screen.findByText('Self-custody (not in keycast)')).toBeInTheDocument();
   });
 
+  it('does not show "protected-minor status unavailable" for a self-custody (not_found) account (review)', async () => {
+    getAccountStatus.mockResolvedValue({ success: false, not_found: true });
+
+    const { queryClient } = renderDetail(makeCase({ suspected_age_band: 'age_13_15' }));
+
+    await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+    // not_found is definitive (self-custody), not a keycast error — the "unavailable"
+    // protected-minor label is reserved for genuine errors.
+    expect(screen.queryByText(/protected-minor status unavailable/i)).not.toBeInTheDocument();
+  });
+
   it('shows status-unavailable when the account-status query rejects', async () => {
     getAccountStatus.mockRejectedValue(new Error('network'));
 

@@ -255,9 +255,11 @@ export function AgeReviewDetail({ caseData: c }: Props) {
                   </span>
                 ) : null}
               </>
-            ) : accountStatusFailed || accountStatus?.success === false ? (
+            ) : accountStatusFailed || (accountStatus?.success === false && !accountStatus?.not_found) ? (
               // Couldn't determine (keycast down/misconfig) — don't let a blip
               // read the same as a confirmed non-minor; keep the safety signal.
+              // not_found (self-custody) is definitive, not an error, so it is
+              // excluded here — the account-type indicator states it directly.
               <span className="text-xs text-muted-foreground">
                 protected-minor status unavailable
               </span>

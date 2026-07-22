@@ -4,6 +4,7 @@ import type { AccountStatusResponse } from './adminApi';
 
 const divineActive: AccountStatusResponse = { success: true, status: 'active' };
 const divineSuspended: AccountStatusResponse = { success: true, status: 'suspended' };
+const divineBanned: AccountStatusResponse = { success: true, status: 'banned' };
 const selfCustody: AccountStatusResponse = { success: false, not_found: true };
 const unavailable: AccountStatusResponse = { success: false, error: '500: boom' };
 
@@ -63,6 +64,20 @@ describe('deriveAccountVerdict — content presence + verdict', () => {
     expect(v.contentPresence).toBe('unknown');
     // Applicable-but-unconfirmed, NOT n/a — never under-state the content lever.
     expect(legState(v, 'content_restrict')).toBe('not_tracked');
+  });
+
+  it('treats banned as sign-in blocked (done), never offers "suspend sign-in" (review)', () => {
+    const v = deriveAccountVerdict({ accountStatus: divineBanned, accountStatusError: false, contentPresenceKnown: true, postCount: 2, ticketLinked: true });
+    expect(legState(v, 'signin')).toBe('done');
+    expect(v.verdict.toLowerCase()).not.toContain('suspend sign-in');
+  });
+
+  it('keycast-unavailable still surfaces content/ticket actions, not just "retry" (review)', () => {
+    const v = deriveAccountVerdict({ accountStatus: unavailable, accountStatusError: false, contentPresenceKnown: true, postCount: 5, ticketLinked: false });
+    expect(v.accountType).toBe('unknown');
+    expect(v.verdict.toLowerCase()).toContain('unavailable'); // sign-in note preserved
+    expect(v.verdict.toLowerCase()).toContain('age-restrict'); // content action still shown
+    expect(v.verdict.toLowerCase()).toContain('open ticket'); // ticket action still shown
   });
 
   it('an unresolved read never concludes "no effective enforcement" (Finding #1 regression)', () => {

@@ -65,7 +65,9 @@ export function AccountTypeIndicator({
         <Badge className={TYPE_CLASS[v.accountType]}>{TYPE_LABEL[v.accountType]}</Badge>
         {v.accountType === 'divine' ? (
           <span className="text-xs text-muted-foreground">
-            {v.suspended ? 'sign-in suspended' : 'sign-in active'}
+            {accountStatus?.status === 'suspended' ? 'sign-in suspended'
+              : accountStatus?.status === 'banned' ? 'sign-in banned'
+              : 'sign-in active'}
           </span>
         ) : null}
       </div>
