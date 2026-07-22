@@ -784,9 +784,16 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     }
 
     // Bulk list is loaded and the target isn't in it. Do one targeted relay fetch
-    // per target to tell "aged out / vanished" apart from "still loading".
-    if (attemptedTargetRef.current === target.value) return;
-    attemptedTargetRef.current = target.value;
+    // per target to tell "aged out / vanished" apart from "still loading". Key the
+    // attempt on the full target identity (relay + type + value) so a same-value
+    // target across type, or a relay/environment switch, re-resolves instead of
+    // reusing the prior attempt or its stale result.
+    const targetKey = `${relayUrl}|${target.type}|${target.value}`;
+    if (attemptedTargetRef.current === targetKey) return;
+    attemptedTargetRef.current = targetKey;
+    // Drop any prior selection so the resolving / gone / unavailable panes (which
+    // gate on !selectedReport) render for this new target rather than stale detail.
+    setSelectedReport(null);
     setDeepLinkStatus('resolving');
 
     (async () => {
@@ -797,8 +804,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         // Drop the result if this run was superseded (target changed) or the component
         // unmounted while the fetch was in flight — otherwise a late navigate() would yank
         // the moderator back to this report. (A benign same-target re-run keeps
-        // attemptedTargetRef === target.value, so this correctly still applies.)
-        if (!mountedRef.current || attemptedTargetRef.current !== target.value) return;
+        // attemptedTargetRef === targetKey, so this correctly still applies.)
+        if (!mountedRef.current || attemptedTargetRef.current !== targetKey) return;
         // The relay's own #e/#p filter is authoritative for existence: every returned
         // report tags the deep-link target. Gate found/gone on the raw result, not on
         // reportsMatchingTarget — re-filtering by resolved target made a note-report that
@@ -827,7 +834,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           setDeepLinkStatus(verdict); // 'gone' — relay-confirmed empty (timeout is a 502 → catch)
         }
       } catch {
-        if (!mountedRef.current || attemptedTargetRef.current !== target.value) return;
+        if (!mountedRef.current || attemptedTargetRef.current !== targetKey) return;
         setDeepLinkStatus('unavailable');
       }
     })();
@@ -1172,7 +1179,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
       {/* Mobile Sheet - Report Detail */}
       {isMobile && (
-        <Sheet open={!!selectedReport} onOpenChange={(open) => !open && handleSelectReport(null)}>
+        <Sheet
+          open={!!selectedReport || showDeepLinkResolving || showDeepLinkFallback}
+          onOpenChange={(open) => !open && handleSelectReport(null)}
+        >
           <SheetContent side="right" className="!w-full !max-w-[100vw] pt-10 px-0 pb-0 overflow-y-auto">
             {reportDetailPane}
           </SheetContent>

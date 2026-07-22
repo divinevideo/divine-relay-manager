@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MockInstance } from 'vitest';
 import TestApp from '@/test/TestApp';
 import { Reports } from './Reports';
+import { useIsMobile } from '@/hooks/useIsMobile';
 
 // Benign detail pane, so a "found" resolution renders instead of crashing (unlike #158's test).
 vi.mock('@/components/ReportDetail', () => ({
@@ -13,6 +14,15 @@ vi.mock('@/components/ReportDetail', () => ({
     <div data-testid="report-detail">{report ? report.id : 'none'}</div>
   ),
 }));
+
+// Default desktop; the mobile-fallback test overrides to true.
+vi.mock('@/hooks/useIsMobile', () => ({ useIsMobile: vi.fn(() => false) }));
+
+// In-test navigation: TestApp uses BrowserRouter, which listens to popstate.
+function navigateTo(url: string) {
+  window.history.pushState({}, '', url);
+  window.dispatchEvent(new PopStateEvent('popstate'));
+}
 
 const EFOUND = '1'.repeat(64);
 const MATCHING_ID = '2'.repeat(64);
@@ -39,6 +49,13 @@ const MULTI_ETAG_ID = '9'.repeat(64);
 // relay's #e filter matched EFOUND (the second e-tag). Must still resolve 'found'.
 const MULTI_ETAG_REPORT = ev(MULTI_ETAG_ID, [['e', OTHER_EVENT], ['e', EFOUND]]);
 
+// Same 64-hex value used as BOTH an ?event= and a ?pubkey= target, to prove the
+// resolution guard keys on the full identity (type+value) and doesn't reuse the
+// first attempt for the second.
+const SHARED = 'a'.repeat(64);
+const SHARED_FOUND_ID = 'c'.repeat(64);
+const SHARED_FOUND_REPORT = ev(SHARED_FOUND_ID, [['p', SHARED]]);
+
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 }
@@ -62,6 +79,7 @@ function stubFetch(targeted: (url: string) => Response) {
 
 beforeEach(() => {
   consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+  vi.mocked(useIsMobile).mockReturnValue(false);
 });
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -174,5 +192,61 @@ describe('Reports deep-link resolution', () => {
     await new Promise((r) => setTimeout(r, 0));
 
     expect(window.location.pathname).toBe('/reports'); // unchanged — not /reports/:id
+  });
+
+  it('re-resolves when the same value switches target type (identity guard, not value-only)', async () => {
+    // event=SHARED → gone; pubkey=SHARED → found. The guard must NOT reuse the
+    // event attempt for the pubkey target just because the value matches.
+    stubFetch((url) =>
+      url.includes('pubkey=')
+        ? jsonResponse({ success: true, events: [SHARED_FOUND_REPORT] })
+        : jsonResponse({ success: true, events: [] })
+    );
+
+    window.history.pushState({}, '', `/reports?event=${SHARED}`);
+    render(
+      <TestApp>
+        <Reports relayUrl="wss://relay.example" />
+      </TestApp>
+    );
+    expect(await screen.findByText(/no longer on the relay/i)).toBeInTheDocument();
+
+    navigateTo(`/reports?pubkey=${SHARED}`);
+    // Must re-resolve (not skip on the value-only guard) and land found.
+    await waitFor(() => expect(window.location.pathname).toBe(`/reports/${SHARED_FOUND_ID}`));
+  });
+
+  it('clears a prior selection when a new target resolves gone (fallback, not stale detail)', async () => {
+    stubFetch((url) =>
+      url.includes(`event=${EFOUND}`)
+        ? jsonResponse({ success: true, events: [MATCHING_REPORT] })
+        : jsonResponse({ success: true, events: [] }) // pubkey=PGONE → gone
+    );
+
+    window.history.pushState({}, '', `/reports?event=${EFOUND}`);
+    render(
+      <TestApp>
+        <Reports relayUrl="wss://relay.example" />
+      </TestApp>
+    );
+    await waitFor(() => expect(window.location.pathname).toBe(`/reports/${MATCHING_ID}`));
+
+    navigateTo(`/reports?pubkey=${PGONE}`);
+    // Selection must be cleared so the gone fallback renders, not the stale report.
+    expect(await screen.findByText(/no longer on the relay/i)).toBeInTheDocument();
+  });
+
+  it('shows the gone fallback on mobile (Sheet opens for fallback states, not just selection)', async () => {
+    vi.mocked(useIsMobile).mockReturnValue(true);
+    window.history.pushState({}, '', `/reports?pubkey=${PGONE}`);
+    stubFetch(() => jsonResponse({ success: true, events: [] }));
+
+    render(
+      <TestApp>
+        <Reports relayUrl="wss://relay.example" />
+      </TestApp>
+    );
+    // On mobile the fallback lives inside the Sheet; it must still be visible.
+    expect(await screen.findByText(/no longer on the relay/i)).toBeInTheDocument();
   });
 });
