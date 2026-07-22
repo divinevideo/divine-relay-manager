@@ -39,6 +39,13 @@ const LEG_CLASS: Record<LegState, string> = {
   not_tracked: 'text-muted-foreground italic',
 };
 
+const SIGN_IN_LABEL = {
+  active: 'sign-in active',
+  blocked: 'sign-in blocked',
+  unknown: 'sign-in status unavailable',
+  not_applicable: '',
+} as const;
+
 export function AccountTypeIndicator({
   accountStatus,
   accountStatusError,
@@ -65,9 +72,7 @@ export function AccountTypeIndicator({
         <Badge className={TYPE_CLASS[v.accountType]}>{TYPE_LABEL[v.accountType]}</Badge>
         {v.accountType === 'divine' ? (
           <span className="text-xs text-muted-foreground">
-            {accountStatus?.status === 'suspended' ? 'sign-in suspended'
-              : accountStatus?.status === 'banned' ? 'sign-in banned'
-              : 'sign-in active'}
+            {SIGN_IN_LABEL[v.signInStatus]}
           </span>
         ) : null}
       </div>

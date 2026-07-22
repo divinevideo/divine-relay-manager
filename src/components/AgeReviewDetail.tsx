@@ -6,6 +6,7 @@ import { useUserStats } from "@/hooks/useUserStats";
 import { AccountTypeIndicator } from "@/components/AccountTypeIndicator";
 import { ApiError } from "@/lib/adminApi";
 import { reconcileCaseIntoList, type AgeReviewListParams } from "@/lib/ageReviewCache";
+import { deriveAccountVerdict } from "@/lib/accountVerdict";
 import { useToast } from "@/hooks/useToast";
 import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
 import { UserActions } from "@/components/UserActions";
@@ -221,6 +222,15 @@ export function AgeReviewDetail({ caseData: c }: Props) {
   // error; a failed/in-flight read must not read as "no content" (would
   // under-state available enforcement).
   const contentPresenceKnown = userStats !== undefined && !userStatsFailed;
+  const accountVerdict = deriveAccountVerdict({
+    accountStatus,
+    accountStatusError: accountStatusFailed,
+    postCount: userStats?.postCount,
+    contentPresenceKnown,
+    ticketLinked: !!c.zendesk_ticket_id,
+  });
+  const protectedMinorStatusUnavailable =
+    !accountStatusLoading && accountVerdict.accountType === 'unknown';
   const verifiedMinorAtDate = accountStatus?.verified_minor_at
     ? new Date(accountStatus.verified_minor_at)
     : null;
@@ -255,7 +265,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
                   </span>
                 ) : null}
               </>
-            ) : accountStatusFailed || (accountStatus?.success === false && !accountStatus?.not_found) ? (
+            ) : protectedMinorStatusUnavailable ? (
               // Couldn't determine (keycast down/misconfig) — don't let a blip
               // read the same as a confirmed non-minor; keep the safety signal.
               // not_found (self-custody) is definitive, not an error, so it is

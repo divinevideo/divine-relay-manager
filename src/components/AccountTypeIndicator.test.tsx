@@ -19,6 +19,11 @@ describe('AccountTypeIndicator', () => {
     expect(screen.getByText(/divine account/i)).toBeInTheDocument();
     expect(screen.getByText(/Sign-in \(keycast\) suspend/i)).toBeInTheDocument();
   });
+  it('does not assert active sign-in when keycast omits status', () => {
+    render(<AccountTypeIndicator accountStatus={{ success: true }} accountStatusError={false} accountStatusLoading={false} contentPresenceKnown={true} postCount={4} ticketLinked={false} />);
+    expect(screen.getAllByText(/sign-in status unavailable/i).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/sign-in active/i)).not.toBeInTheDocument();
+  });
   it('shows a checking state while account status loads (no unavailable flash)', () => {
     render(<AccountTypeIndicator accountStatus={undefined} accountStatusError={false} accountStatusLoading={true} contentPresenceKnown={false} postCount={undefined} ticketLinked={false} />);
     expect(screen.getByText(/checking account status/i)).toBeInTheDocument();

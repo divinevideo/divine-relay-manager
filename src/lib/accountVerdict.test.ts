@@ -24,6 +24,9 @@ describe('deriveAccountVerdict — account type', () => {
   it('unknown when the query itself errored', () => {
     expect(deriveAccountVerdict({ accountStatus: undefined, accountStatusError: true, contentPresenceKnown: true, postCount: 0, ticketLinked: false }).accountType).toBe('unknown');
   });
+  it('keeps cached successful data authoritative after a background refetch error', () => {
+    expect(deriveAccountVerdict({ accountStatus: divineActive, accountStatusError: true, contentPresenceKnown: true, postCount: 0, ticketLinked: false }).accountType).toBe('divine');
+  });
 });
 
 describe('deriveAccountVerdict — legs', () => {
@@ -32,6 +35,15 @@ describe('deriveAccountVerdict — legs', () => {
   });
   it('sign-in missing when divine + active', () => {
     expect(legState(deriveAccountVerdict({ accountStatus: divineActive, accountStatusError: false, contentPresenceKnown: true, postCount: 2, ticketLinked: false }), 'signin')).toBe('missing');
+  });
+  it('sign-in not_tracked when keycast omits status', () => {
+    const v = deriveAccountVerdict({ accountStatus: { success: true }, accountStatusError: false, contentPresenceKnown: true, postCount: 0, ticketLinked: true });
+    expect(v.accountType).toBe('divine');
+    expect(v.signInStatus).toBe('unknown');
+    expect(legState(v, 'signin')).toBe('not_tracked');
+    expect(v.verdict.toLowerCase()).not.toContain('suspend sign-in');
+    expect(v.verdict.toLowerCase()).not.toContain('fully enforced');
+    expect(v.verdict.toLowerCase()).toContain('sign-in status unavailable');
   });
   it('sign-in na when self-custody', () => {
     expect(legState(deriveAccountVerdict({ accountStatus: selfCustody, accountStatusError: false, contentPresenceKnown: true, postCount: 2, ticketLinked: false }), 'signin')).toBe('na');

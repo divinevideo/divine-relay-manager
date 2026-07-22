@@ -11,8 +11,11 @@ export interface ComplianceLeg {
   state: LegState;
 }
 
+export type SignInStatus = 'active' | 'blocked' | 'unknown' | 'not_applicable';
+
 export interface AccountVerdict {
   accountType: AccountType;
+  signInStatus: SignInStatus;
   contentPresence: 'visible' | 'hidden_suspended' | 'none' | 'unknown';
   legs: ComplianceLeg[];
   verdict: string;
@@ -32,15 +35,15 @@ export interface DeriveInput {
 export function deriveAccountVerdict(input: DeriveInput): AccountVerdict {
   const { accountStatus, accountStatusError, postCount, contentPresenceKnown, ticketLinked } = input;
 
-  // Account type: a query error, OR success:false without not_found, is "unknown"
-  // (keycast unavailable). not_found is self-custody; success is a Divine account.
+  // Account type is data-first: if TanStack keeps cached success data after a
+  // failed background refetch, the UI should not contradict that cached status.
   let accountType: AccountType;
-  if (accountStatusError || (accountStatus?.success === false && !accountStatus.not_found)) {
-    accountType = 'unknown';
-  } else if (accountStatus?.not_found) {
+  if (accountStatus?.not_found) {
     accountType = 'self_custody';
   } else if (accountStatus?.success) {
     accountType = 'divine';
+  } else if (accountStatusError || accountStatus?.success === false) {
+    accountType = 'unknown';
   } else {
     accountType = 'unknown';
   }
@@ -65,10 +68,17 @@ export function deriveAccountVerdict(input: DeriveInput): AccountVerdict {
   const contentApplicable = contentPresence !== 'none';
   const contentLegState: LegState = contentApplicable ? 'not_tracked' : 'na';
 
+  const signInStatus: SignInStatus =
+    accountType === 'self_custody' ? 'not_applicable'
+    : accountType === 'unknown' ? 'unknown'
+    : signInBlocked ? 'blocked'
+    : accountStatus?.status === 'active' ? 'active'
+    : 'unknown';
+
   const signinState: LegState =
-    accountType === 'self_custody' ? 'na'
-    : accountType === 'unknown' ? 'not_tracked'
-    : signInBlocked ? 'done'
+    signInStatus === 'not_applicable' ? 'na'
+    : signInStatus === 'unknown' ? 'not_tracked'
+    : signInStatus === 'blocked' ? 'done'
     : 'missing';
 
   const legs: ComplianceLeg[] = [
@@ -80,6 +90,7 @@ export function deriveAccountVerdict(input: DeriveInput): AccountVerdict {
 
   return {
     accountType,
+    signInStatus,
     contentPresence,
     legs,
     verdict: buildVerdict(accountType, contentPresence, signinState, ticketLinked),
@@ -114,6 +125,14 @@ function buildVerdict(
     const tail = contentPresence === 'unknown' ? ` ${contentUnknownNote}` : '';
     return available.length > 0
       ? `${note} Content/ticket actions still apply: ${available.join(', ')}.${tail}`
+      : `${note}${tail}`;
+  }
+
+  if (signinState === 'not_tracked') {
+    const note = 'Sign-in status unavailable — retry before relying on it.';
+    const tail = contentPresence === 'unknown' ? ` ${contentUnknownNote}` : '';
+    return available.length > 0
+      ? `${note} Available: ${available.join(', ')}.${tail}`
       : `${note}${tail}`;
   }
 

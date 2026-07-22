@@ -21,7 +21,7 @@ const updateAgeReviewCase = vi.fn().mockResolvedValue({ success: true });
 const getAgeReviewConfig = vi.fn().mockResolvedValue({ auto_delete_on_deny: false });
 const getAccountStatus = vi
   .fn()
-  .mockResolvedValue({ success: true, verified_minor: false });
+  .mockResolvedValue({ success: true, status: 'active', verified_minor: false });
 const writeText = vi.fn().mockResolvedValue(undefined);
 const toast = vi.fn();
 
@@ -95,7 +95,7 @@ describe('AgeReviewDetail', () => {
     getAgeReviewConfig.mockClear();
     getAgeReviewConfig.mockResolvedValue({ auto_delete_on_deny: false });
     getAccountStatus.mockClear();
-    getAccountStatus.mockResolvedValue({ success: true, verified_minor: false });
+    getAccountStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: false });
     toast.mockClear();
     writeText.mockClear();
     Object.assign(navigator, {
@@ -321,7 +321,7 @@ describe('AgeReviewDetail', () => {
   });
 
   it('does not show the protected-minor badge when verified_minor is false', async () => {
-    getAccountStatus.mockResolvedValue({ success: true, verified_minor: false });
+    getAccountStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: false });
 
     const { queryClient } = renderDetail(makeCase());
 
@@ -370,7 +370,7 @@ describe('AgeReviewDetail', () => {
   });
 
   it('shows the DM restriction in a separate rolling-out section, not as an applied protection', async () => {
-    getAccountStatus.mockResolvedValue({ success: true, verified_minor: true });
+    getAccountStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: true });
 
     renderDetail(makeCase());
 
@@ -387,7 +387,7 @@ describe('AgeReviewDetail', () => {
   });
 
   it('frames the protections as policy-derived, not per-device confirmed', async () => {
-    getAccountStatus.mockResolvedValue({ success: true, verified_minor: true });
+    getAccountStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: true });
 
     renderDetail(makeCase());
 
@@ -402,7 +402,7 @@ describe('AgeReviewDetail', () => {
   });
 
   it('does not show the protections block when verified_minor is false', async () => {
-    getAccountStatus.mockResolvedValue({ success: true, verified_minor: false });
+    getAccountStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: false });
 
     const { queryClient } = renderDetail(makeCase());
 
