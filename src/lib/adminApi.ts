@@ -1088,6 +1088,7 @@ export interface AccountStatusResponse {
   suspended_at?: string;
   verified_minor?: boolean;
   verified_minor_at?: string;
+  not_found?: boolean;
   error?: string;
 }
 
