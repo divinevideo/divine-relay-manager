@@ -174,7 +174,22 @@ export interface UserStatusResult {
   suspended_at?: string;
   verified_minor?: boolean;
   verified_minor_at?: string;
+  notFound?: boolean;
   error?: string;
+}
+
+function isKeycastUserNotFound(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+
+  try {
+    const data = JSON.parse(trimmed) as Record<string, unknown>;
+    const code = typeof data.code === 'string' ? data.code.toLowerCase() : '';
+    const error = typeof data.error === 'string' ? data.error.toLowerCase() : '';
+    return code === 'user_not_found' || error === 'user_not_found' || error === 'user not found';
+  } catch {
+    return trimmed.toLowerCase() === 'user not found';
+  }
 }
 
 export async function getUserStatus(pubkey: string, env: KeycastEnv): Promise<UserStatusResult> {
@@ -194,6 +209,17 @@ export async function getUserStatus(pubkey: string, env: KeycastEnv): Promise<Us
     });
     if (!res.ok) {
       const text = await res.text();
+      // Keycast's user-not-found response is "not a keycast user"
+      // (self-custody). Other 404s can be route/config errors and must stay
+      // unavailable so the UI keeps the safety label.
+      if (res.status === 404 && isKeycastUserNotFound(text)) {
+        return { success: false, notFound: true };
+      }
+      if (res.status === 404) {
+        console.warn('Keycast status endpoint returned an unrecognized 404 body', {
+          body: text.slice(0, 200),
+        });
+      }
       return { success: false, error: `${res.status}: ${text}` };
     }
     const data = await res.json() as Record<string, unknown>;

@@ -15,6 +15,13 @@ const updateAgeReviewCase = vi.fn();
 const getAgeReviewConfig = vi.fn();
 const getAccountStatus = vi.fn();
 
+vi.mock('@/hooks/useUserStats', () => ({
+  useUserStats: () => ({
+    data: { postCount: 0, reportCount: 0, labelCount: 0, recentPosts: [], existingLabels: [], previousReports: [] },
+    isError: false,
+  }),
+}));
+
 vi.mock('@/hooks/useAdminApi', () => ({
   useApiUrl: () => 'https://api.test.divine.video',
   useAdminApi: () => ({
