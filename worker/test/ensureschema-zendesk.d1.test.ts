@@ -51,6 +51,22 @@ describe('ensureSchema self-heals zendesk_preauth_nonces on a fresh D1', () => {
     expect(row).toEqual({ nonce: 'nonce-1', pubkey: 'pk_abc', expires_at: 9999999999 });
   });
 
+  it('defaults created_at to unixepoch() when not specified', async () => {
+    await ensureSchema(DB);
+
+    // Deliberately omit created_at to exercise the column's NOT NULL DEFAULT.
+    await DB.prepare(
+      'INSERT INTO zendesk_preauth_nonces (nonce, pubkey, expires_at) VALUES (?, ?, ?)'
+    ).bind('nonce-2', 'pk_def', 9999999999).run();
+
+    const row = await DB.prepare(
+      'SELECT created_at FROM zendesk_preauth_nonces WHERE nonce = ?'
+    ).bind('nonce-2').first<{ created_at: number }>();
+
+    expect(typeof row?.created_at).toBe('number');
+    expect(row?.created_at).toBeGreaterThan(0);
+  });
+
   it('creates the expected index', async () => {
     await ensureSchema(DB);
 
