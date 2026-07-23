@@ -1058,6 +1058,46 @@ describe('NIP-98 nonce-storage THROWN error (#202 review)', () => {
     expect(body.error).toBe('Replay protection unavailable');
     expect(errorSpy).toHaveBeenCalled();
   });
+
+  // Residual gap from the #202 review: `ensureSchemaOnce` ran BEFORE the GET
+  // route's fail-open try (outside it), so a throw there (e.g. cold-isolate
+  // CREATE TABLE hitting the same D1 write outage) escaped to the worker-wide
+  // catch and 500'd a read-only endpoint. `ensureSchemaOnce` is now inside the
+  // same try as the nonce consume above, so this proves that path fails open too.
+  //
+  // `ensureSchemaOnce` memoizes success via a module-level `schemaReady` flag
+  // (index.ts:39-44) shared across every test in this file, so the top-level
+  // `worker` import already has it set to `true` by the time this test runs --
+  // a throwing DB here would never reach the DDL, since `ensureSchemaOnce`
+  // short-circuits before calling `ensureSchema(db)`. `vi.resetModules()` plus
+  // a fresh dynamic `import('./index')` gets a clean, unmemoized module
+  // instance so the throwing DDL statement is actually exercised.
+  it('GET moderation-status: a thrown ensureSchemaOnce error also fails OPEN (200, not 500)', async () => {
+    vi.resetModules();
+    const { default: freshWorker } = await import('./index');
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    // Only the schema DDL's first statement (db.ts's `CREATE TABLE IF NOT EXISTS
+    // moderation_decisions`) throws -- everything else, including the SELECT
+    // handleGetModerationStatus issues once the route's fail-open catch swallows
+    // the schema error, is tolerated. Mirrors makeNonceThrowingDb's targeted style.
+    const statement = (sql: string): { bind: () => unknown; run: () => Promise<{ success: boolean }>; first: () => Promise<null> } => ({
+      bind: () => statement(sql),
+      run: async () => {
+        if (sql.includes('CREATE TABLE IF NOT EXISTS moderation_decisions')) throw new Error('simulated D1 schema-DDL failure');
+        return { success: true };
+      },
+      first: async () => null,
+    });
+    const schemaThrowingDb = { prepare: statement };
+
+    const res = await freshWorker.fetch(
+      new Request(OWN_MOD_STATUS_URL, { method: 'GET', headers: { Authorization: nip98Header(OWN_MOD_STATUS_URL, 'GET') } }),
+      { DB: schemaThrowingDb } as never,
+      ctx,
+    );
+    expect(res.status).toBe(200);
+    expect(errorSpy).toHaveBeenCalled();
+  });
 });
 
 describe('zendesk pre-auth NIP-98 scope boundary (#173)', () => {

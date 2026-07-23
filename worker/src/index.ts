@@ -426,23 +426,17 @@ export default {
         const authResult = await verifyNip98Auth(request, request.url, getNip98AllowedHosts(env));
         if (!authResult.valid || !authResult.pubkey) return jsonResponse({ success: false, error: authResult.error ?? 'Unauthorized' }, 401, corsHeaders);
         if (env.DB) {
-          await ensureSchemaOnce(env.DB);
-          // `authResult.eventId` is always set here (it's `event.id`, populated on a
-          // `valid: true` result after verifyEvent) -- the `if` is TS narrowing
-          // `eventId?: string` to `string` for consumeNip98Nonce, not a fail-open branch.
-          if (authResult.eventId) {
-            // Read-only endpoint: a nonce-storage outage must not turn a status
-            // check into a 500, so only a THROWN error fails open here. A
-            // detected replay (consume resolves `false`) still 401s below --
-            // the asymmetry with the POST route's fail-closed catch is intentional
-            // (#202 review).
-            try {
-              if (!(await consumeNip98Nonce(env.DB, authResult.eventId))) {
-                return jsonResponse({ success: false, error: 'Replayed NIP-98 token' }, 401, corsHeaders);
-              }
-            } catch (e) {
-              console.error('[nip98] nonce storage failed on moderation-status; proceeding fail-open', e);
+          // Read-only endpoint: a storage outage (schema-ensure OR nonce write) must not
+          // turn a status check into a 500 -- both are wrapped fail-open. A detected replay
+          // (consume resolves false) still 401s. The asymmetry with the POST route's
+          // fail-closed handling is intentional (#202 review).
+          try {
+            await ensureSchemaOnce(env.DB);
+            if (authResult.eventId && !(await consumeNip98Nonce(env.DB, authResult.eventId))) {
+              return jsonResponse({ success: false, error: 'Replayed NIP-98 token' }, 401, corsHeaders);
             }
+          } catch (e) {
+            console.error('[nip98] nonce/schema storage failed on moderation-status; proceeding fail-open', e);
           }
         }
         return handleGetModerationStatus(authResult.pubkey, env, corsHeaders);
