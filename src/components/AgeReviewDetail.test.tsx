@@ -4,13 +4,24 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 
 import { AgeReviewDetail } from './AgeReviewDetail';
 import { ApiError } from '@/lib/adminApi';
+
+// AgeReviewDetail reads relay content-presence via useUserStats (which needs a
+// NostrProvider). This unit test isolates the case-action logic, so stub it with
+// a resolved, empty read (not in-flight) so the indicator's content-presence
+// note doesn't bleed into unrelated assertions.
+vi.mock('@/hooks/useUserStats', () => ({
+  useUserStats: () => ({
+    data: { postCount: 0, reportCount: 0, labelCount: 0, recentPosts: [], existingLabels: [], previousReports: [] },
+    isError: false,
+  }),
+}));
 import type { AgeReviewCase, AgeBand, AgeReviewState } from '../../shared/age-review';
 
 const updateAgeReviewCase = vi.fn().mockResolvedValue({ success: true });
 const getAgeReviewConfig = vi.fn().mockResolvedValue({ auto_delete_on_deny: false });
 const getAccountStatus = vi
   .fn()
-  .mockResolvedValue({ success: true, verified_minor: false });
+  .mockResolvedValue({ success: true, status: 'active', verified_minor: false });
 const writeText = vi.fn().mockResolvedValue(undefined);
 const toast = vi.fn();
 
@@ -84,7 +95,7 @@ describe('AgeReviewDetail', () => {
     getAgeReviewConfig.mockClear();
     getAgeReviewConfig.mockResolvedValue({ auto_delete_on_deny: false });
     getAccountStatus.mockClear();
-    getAccountStatus.mockResolvedValue({ success: true, verified_minor: false });
+    getAccountStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: false });
     toast.mockClear();
     writeText.mockClear();
     Object.assign(navigator, {
@@ -310,7 +321,7 @@ describe('AgeReviewDetail', () => {
   });
 
   it('does not show the protected-minor badge when verified_minor is false', async () => {
-    getAccountStatus.mockResolvedValue({ success: true, verified_minor: false });
+    getAccountStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: false });
 
     const { queryClient } = renderDetail(makeCase());
 
@@ -359,7 +370,7 @@ describe('AgeReviewDetail', () => {
   });
 
   it('shows the DM restriction in a separate rolling-out section, not as an applied protection', async () => {
-    getAccountStatus.mockResolvedValue({ success: true, verified_minor: true });
+    getAccountStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: true });
 
     renderDetail(makeCase());
 
@@ -376,7 +387,7 @@ describe('AgeReviewDetail', () => {
   });
 
   it('frames the protections as policy-derived, not per-device confirmed', async () => {
-    getAccountStatus.mockResolvedValue({ success: true, verified_minor: true });
+    getAccountStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: true });
 
     renderDetail(makeCase());
 
@@ -391,7 +402,7 @@ describe('AgeReviewDetail', () => {
   });
 
   it('does not show the protections block when verified_minor is false', async () => {
-    getAccountStatus.mockResolvedValue({ success: true, verified_minor: false });
+    getAccountStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: false });
 
     const { queryClient } = renderDetail(makeCase());
 
@@ -418,6 +429,25 @@ describe('AgeReviewDetail', () => {
       screen.queryByText(/protections that apply to this account/i)
     ).not.toBeInTheDocument();
     expect(screen.queryByText(/rolling out \(not yet enforced/i)).not.toBeInTheDocument();
+  });
+
+  it('renders the account-type indicator (self-custody) for a not_found account', async () => {
+    getAccountStatus.mockResolvedValue({ success: false, not_found: true });
+
+    renderDetail(makeCase({ suspected_age_band: 'age_13_15' }));
+
+    expect(await screen.findByText('Self-custody (not in keycast)')).toBeInTheDocument();
+  });
+
+  it('does not show "protected-minor status unavailable" for a self-custody (not_found) account (review)', async () => {
+    getAccountStatus.mockResolvedValue({ success: false, not_found: true });
+
+    const { queryClient } = renderDetail(makeCase({ suspected_age_band: 'age_13_15' }));
+
+    await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+    // not_found is definitive (self-custody), not a keycast error — the "unavailable"
+    // protected-minor label is reserved for genuine errors.
+    expect(screen.queryByText(/protected-minor status unavailable/i)).not.toBeInTheDocument();
   });
 
   it('shows status-unavailable when the account-status query rejects', async () => {

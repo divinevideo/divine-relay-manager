@@ -44,6 +44,8 @@ import { nip19 } from "nostr-tools";
 import { ReportDetail } from "@/components/ReportDetail";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { ReportDetailErrorFallback } from "@/components/ReportDetailErrorFallback";
+import { DeepLinkFallback } from "@/components/DeepLinkFallback";
+import { classifyTargetedFetch, decisionsForTarget, reportsMatchingTarget, type DeepLinkStatus } from "@/lib/deepLinkResolution";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { AUTO_HIDE_ACTIONS, CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, getReportCategory } from "@/lib/constants";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -355,8 +357,8 @@ function IndividualReportItem({
 
 export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
-  const { listBannedPubkeys, listBannedEvents, getAllDecisions, fetchReports, fetchResolutionLabels } = useAdminApi();
+  const [searchParams] = useSearchParams();
+  const { listBannedPubkeys, listBannedEvents, getAllDecisions, fetchReports, fetchReportsByTarget, fetchResolutionLabels } = useAdminApi();
   const { config, updateConfig } = useAppContext();
   const queryClient = useQueryClient();
   const isMobile = useIsMobile();
@@ -370,6 +372,19 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const [filterTargetType, setFilterTargetType] = useState<'all' | 'event' | 'pubkey'>('all');
   // Check for deep link params to force fresh data fetch
   const hasDeepLinkParams = !!(searchParams.get('event') || searchParams.get('pubkey'));
+  // Deep-link resolution: 'resolving' while we look a target up, 'gone' when the
+  // relay confirms the report is absent, 'unavailable' when the relay itself failed.
+  const [deepLinkStatus, setDeepLinkStatus] = useState<DeepLinkStatus>('idle');
+  const attemptedTargetRef = useRef<string | null>(null); // one targeted fetch per target
+  const [retryNonce, setRetryNonce] = useState(0); // forces the deep-link effect to re-run on retry
+  // Tracks mount state so an in-flight targeted lookup that resolves after the component
+  // unmounts (e.g. the moderator switched tabs) can't fire a late navigate() and yank them back.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    // Set on mount (not only cleared on unmount) so a StrictMode remount restores it.
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   // Reports and resolution labels fetched via server-side relay query through
   // the worker. Replaces browser-side WebSocket (nostrify NPool) which served
@@ -392,7 +407,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
   // Query banned pubkeys from relay (NIP-86 RPC)
   // Force fresh fetch (staleTime: 0) when deep linking to ensure accurate ban status
-  const { data: bannedPubkeys, isFetching: isFetchingBanned } = useQuery({
+  const { data: bannedPubkeys } = useQuery({
     queryKey: ['banned-pubkeys'],
     queryFn: async () => {
       try {
@@ -709,6 +724,17 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     }
   }, [selectedReportId, reports, selectedReport]);
 
+  // A deep link can select a report before ban/label/decision queries finish.
+  // Re-check the selected target as resolution data arrives so it cannot stay
+  // hidden from the list while its detail pane is open.
+  useEffect(() => {
+    if (!hideResolved || !selectedReport) return;
+    const target = getReportTarget(selectedReport);
+    if (target && resolvedTargets.has(`${target.type}:${target.value}`)) {
+      setHideResolved(false);
+    }
+  }, [hideResolved, selectedReport, resolvedTargets]);
+
   // Handle deep linking via query params (?event=... or ?pubkey=... or &env=...)
   useEffect(() => {
     const eventParam = searchParams.get('event');
@@ -732,39 +758,98 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       }
     }
 
-    if (!allConsolidated || allConsolidated.length === 0) return;
-
-    // Wait for fresh ban data before processing deep link
-    if (isFetchingBanned) return;
-
-    let targetReport: ConsolidatedReport | undefined;
-
-    if (eventParam) {
-      targetReport = allConsolidated.find(c =>
-        c.target.type === 'event' && c.target.value === eventParam
-      );
-    } else if (pubkeyParam) {
-      targetReport = allConsolidated.find(c =>
-        c.target.type === 'pubkey' && c.target.value === pubkeyParam
-      );
+    // Still loading the bulk list — resolving, don't conclude yet. We intentionally
+    // do NOT gate on isFetchingBanned: ban data affects how a report is displayed,
+    // not whether it exists, and gating on it flips a resolved pane back to
+    // 'resolving' (and re-fires the lookup) on every background ban refetch.
+    if (isLoading) {
+      setDeepLinkStatus('resolving');
+      return;
     }
 
-    if (targetReport) {
+    const target: { type: 'event' | 'pubkey'; value: string } | null = eventParam
+      ? { type: 'event', value: eventParam }
+      : pubkeyParam
+      ? { type: 'pubkey', value: pubkeyParam }
+      : null;
+    if (!target) return;
+
+    const inBulk = allConsolidated.find(
+      c => c.target.type === target.type && c.target.value === target.value
+    );
+
+    if (inBulk) {
       // If target is resolved and we're hiding resolved, temporarily show it
-      const targetKey = `${targetReport.target.type}:${targetReport.target.value}`;
+      const targetKey = `${inBulk.target.type}:${inBulk.target.value}`;
       if (hideResolved && resolvedTargets.has(targetKey)) {
         setHideResolved(false);
       }
-
-      // Select the report
-      setSelectedReport(targetReport.latestReport);
-      navigate(`/reports/${targetReport.latestReport.id}`, { replace: true });
-
-      // Clear params from URL now that we've navigated
-      setSearchParams({}, { replace: true });
+      setSelectedReport(inBulk.latestReport);
+      setDeepLinkStatus('found');
+      // Navigating to the path (no query string) already clears the deep-link params;
+      // a separate setSearchParams({}) here would run against the stale pre-navigate path
+      // and clobber this back to /reports.
+      navigate(`/reports/${inBulk.latestReport.id}`, { replace: true });
+      attemptedTargetRef.current = null;
+      return;
     }
-    // If report not found, keep params — effect will re-run when more data loads
-  }, [allConsolidated, searchParams, hideResolved, resolvedTargets, navigate, setSearchParams, isFetchingBanned, config.relayUrl, config.apiUrl, updateConfig, queryClient]);
+
+    // Bulk list is loaded and the target isn't in it. Do one targeted relay fetch
+    // per target to tell "aged out / vanished" apart from "still loading". Key the
+    // attempt on the full target identity (relay + type + value) so a same-value
+    // target across type, or a relay/environment switch, re-resolves instead of
+    // reusing the prior attempt or its stale result.
+    const targetKey = `${relayUrl}|${target.type}|${target.value}`;
+    if (attemptedTargetRef.current === targetKey) return;
+    attemptedTargetRef.current = targetKey;
+    // Drop any prior selection so the resolving / gone / unavailable panes (which
+    // gate on !selectedReport) render for this new target rather than stale detail.
+    setSelectedReport(null);
+    setDeepLinkStatus('resolving');
+
+    (async () => {
+      try {
+        const events = await fetchReportsByTarget(
+          target.type === 'event' ? { event: target.value } : { pubkey: target.value }
+        );
+        // Drop the result if this run was superseded (target changed) or the component
+        // unmounted while the fetch was in flight — otherwise a late navigate() would yank
+        // the moderator back to this report. (A benign same-target re-run keeps
+        // attemptedTargetRef === targetKey, so this correctly still applies.)
+        if (!mountedRef.current || attemptedTargetRef.current !== targetKey) return;
+        // The relay's own #e/#p filter is authoritative for existence: every returned
+        // report tags the deep-link target. Gate found/gone on the raw result, not on
+        // reportsMatchingTarget — re-filtering by resolved target made a note-report that
+        // p-tags a ?pubkey= target (but resolves to an event) a false 'gone'. An empty
+        // result here is a relay-confirmed absence; an empty *timeout* never reaches this
+        // branch (the worker 502s it → the catch below → 'unavailable').
+        const matching = reportsMatchingTarget(events, target, getReportTarget);
+        const verdict = classifyTargetedFetch(events);
+        if (verdict === 'found') {
+          // Prefer a report whose resolved target IS the deep-link target for display;
+          // fall back to any returned report (all of them tag the target).
+          const pool = matching.length > 0 ? matching : events;
+          // Merge into the reports cache so the detail pane has full context,
+          queryClient.setQueryData<NostrEvent[]>(['reports', relayUrl], (old) => {
+            const merged = [...(old ?? [])];
+            for (const e of pool) if (!merged.some(m => m.id === e.id)) merged.push(e);
+            return merged;
+          });
+          // and select the newest report directly — not via a re-run, so a
+          // consolidation mismatch can neither loop nor hang the pane on 'resolving'.
+          const latest = pool.reduce((a, b) => (b.created_at > a.created_at ? b : a));
+          setSelectedReport(latest);
+          setDeepLinkStatus('found');
+          navigate(`/reports/${latest.id}`, { replace: true });
+        } else {
+          setDeepLinkStatus(verdict); // 'gone' — relay-confirmed empty (timeout is a 502 → catch)
+        }
+      } catch {
+        if (!mountedRef.current || attemptedTargetRef.current !== targetKey) return;
+        setDeepLinkStatus('unavailable');
+      }
+    })();
+  }, [allConsolidated, searchParams, hideResolved, resolvedTargets, navigate, isLoading, config.relayUrl, config.apiUrl, updateConfig, queryClient, fetchReportsByTarget, relayUrl, retryNonce]);
 
   // Update URL when report selection changes
   const handleSelectReport = (report: NostrEvent | null) => {
@@ -773,6 +858,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     // boundary explicitly (no-op when the pane is healthy).
     detailBoundaryRef.current?.reset();
     setSelectedReport(report);
+    setDeepLinkStatus('idle'); // clear any deep-link fallback once the user interacts
+    // Invalidate any in-flight targeted lookup: a user selection/dismissal
+    // supersedes the deep link, so a late response must not pass the resolution
+    // guard and re-navigate (e.g. closing the mobile resolving Sheet mid-lookup).
+    attemptedTargetRef.current = null;
     if (report) {
       navigate(`/reports/${report.id}`, { replace: true });
     } else {
@@ -819,7 +909,34 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // the two views cannot drift. Reports render attacker-authored event data:
   // a crashing report degrades to the inline fallback (with the target's
   // identifiers and retry/dismiss) while the reports list stays usable (#158).
-  const reportDetailPane = (
+  // Lowercase to match the worker's reports filter (buildReportsFilter also
+  // lowercases), so decisionsForTarget below keys off the same normalized hex
+  // an uppercase-hex deep link would otherwise miss lowercase-keyed decisions.
+  const deepLinkTarget = searchParams.get('event')
+    ? { type: 'event' as const, value: searchParams.get('event')!.toLowerCase() }
+    : { type: 'pubkey' as const, value: (searchParams.get('pubkey') ?? '').toLowerCase() };
+  const showDeepLinkFallback =
+    !selectedReport && hasDeepLinkParams && (deepLinkStatus === 'gone' || deepLinkStatus === 'unavailable');
+  const showDeepLinkResolving =
+    !selectedReport && deepLinkStatus === 'resolving' && hasDeepLinkParams;
+
+  const reportDetailPane = showDeepLinkFallback ? (
+    <DeepLinkFallback
+      status={deepLinkStatus === 'gone' ? 'gone' : 'unavailable'}
+      target={deepLinkTarget}
+      decisions={decisionsForTarget(allDecisions, deepLinkTarget.value)}
+      onRetry={() => {
+        attemptedTargetRef.current = null;
+        setDeepLinkStatus('resolving');
+        setRetryNonce(n => n + 1);
+        refetch();
+      }}
+    />
+  ) : showDeepLinkResolving ? (
+    <Card className="h-full">
+      <CardContent className="p-6 text-sm text-muted-foreground">Looking up this report…</CardContent>
+    </Card>
+  ) : (
     <ErrorBoundary
       ref={detailBoundaryRef}
       resetKeys={[selectedReport?.id]}
@@ -1077,7 +1194,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
       {/* Mobile Sheet - Report Detail */}
       {isMobile && (
-        <Sheet open={!!selectedReport} onOpenChange={(open) => !open && handleSelectReport(null)}>
+        <Sheet
+          open={!!selectedReport || showDeepLinkResolving || showDeepLinkFallback}
+          onOpenChange={(open) => !open && handleSelectReport(null)}
+        >
           <SheetContent side="right" className="!w-full !max-w-[100vw] pt-10 px-0 pb-0 overflow-y-auto">
             {reportDetailPane}
           </SheetContent>

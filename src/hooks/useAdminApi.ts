@@ -65,6 +65,8 @@ export function useAdminApi() {
     // Server-side relay queries (replaces browser WebSocket for freshness)
     fetchReports: () =>
       adminApi.fetchReports(apiUrl),
+    fetchReportsByTarget: (target: { event: string } | { pubkey: string }) =>
+      adminApi.fetchReportsByTarget(apiUrl, target),
     fetchResolutionLabels: () =>
       adminApi.fetchResolutionLabels(apiUrl),
 

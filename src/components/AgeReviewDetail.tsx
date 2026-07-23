@@ -1,8 +1,12 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useAdminApi, useApiUrl } from "@/hooks/useAdminApi";
+import { useAdminApi } from "@/hooks/useAdminApi";
+import { useAccountStatus } from "@/hooks/useAccountStatus";
+import { useUserStats } from "@/hooks/useUserStats";
+import { AccountTypeIndicator } from "@/components/AccountTypeIndicator";
 import { ApiError } from "@/lib/adminApi";
 import { reconcileCaseIntoList, type AgeReviewListParams } from "@/lib/ageReviewCache";
+import { deriveAccountVerdict } from "@/lib/accountVerdict";
 import { useToast } from "@/hooks/useToast";
 import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
 import { UserActions } from "@/components/UserActions";
@@ -98,7 +102,6 @@ const ENFORCEMENT_STATES: AgeReviewState[] = [
 
 export function AgeReviewDetail({ caseData: c }: Props) {
   const api = useAdminApi();
-  const apiUrl = useApiUrl();
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [resolutionNote, setResolutionNote] = useState(c.resolution_note ?? "");
@@ -213,12 +216,21 @@ export function AgeReviewDetail({ caseData: c }: Props) {
 
   // Keycast-backed protected-minor status (verified_minor). Best-effort: a
   // keycast blip resolves to success:false, so we show status unavailable.
-  const { data: accountStatus, isError: accountStatusFailed } = useQuery({
-    queryKey: ['account-status', apiUrl, c.pubkey],
-    queryFn: () => api.getAccountStatus(c.pubkey),
-    enabled: !!apiUrl && !!c.pubkey,
-    staleTime: 60_000, // verified_minor is durable; avoid refetching per case reopen
+  const { data: accountStatus, isError: accountStatusFailed, isLoading: accountStatusLoading } = useAccountStatus(c.pubkey);
+  const { data: userStats, isError: userStatsFailed } = useUserStats(c.pubkey);
+  // Content presence is trustworthy only once the relay read resolves without
+  // error; a failed/in-flight read must not read as "no content" (would
+  // under-state available enforcement).
+  const contentPresenceKnown = userStats !== undefined && !userStatsFailed;
+  const accountVerdict = deriveAccountVerdict({
+    accountStatus,
+    accountStatusError: accountStatusFailed,
+    postCount: userStats?.postCount,
+    contentPresenceKnown,
+    ticketLinked: !!c.zendesk_ticket_id,
   });
+  const protectedMinorStatusUnavailable =
+    !accountStatusLoading && accountVerdict.accountType === 'unknown';
   const verifiedMinorAtDate = accountStatus?.verified_minor_at
     ? new Date(accountStatus.verified_minor_at)
     : null;
@@ -253,14 +265,25 @@ export function AgeReviewDetail({ caseData: c }: Props) {
                   </span>
                 ) : null}
               </>
-            ) : accountStatusFailed || accountStatus?.success === false ? (
+            ) : protectedMinorStatusUnavailable ? (
               // Couldn't determine (keycast down/misconfig) — don't let a blip
               // read the same as a confirmed non-minor; keep the safety signal.
+              // not_found (self-custody) is definitive, not an error, so it is
+              // excluded here — the account-type indicator states it directly.
               <span className="text-xs text-muted-foreground">
                 protected-minor status unavailable
               </span>
             ) : null}
           </div>
+
+          <AccountTypeIndicator
+            accountStatus={accountStatus}
+            accountStatusError={accountStatusFailed}
+            accountStatusLoading={accountStatusLoading}
+            postCount={userStats?.postCount}
+            contentPresenceKnown={contentPresenceKnown}
+            ticketLinked={!!c.zendesk_ticket_id}
+          />
 
           {/* Protections that apply to an approved protected minor (#143).
               POLICY-DERIVED from verified_minor: these are client-enforced

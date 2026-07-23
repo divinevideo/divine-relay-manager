@@ -298,6 +298,31 @@ describe('keycast-client', () => {
       const result = await getUserStatus(VALID_PUBKEY, makeEnv());
       expect(result.success).toBe(false);
       expect(result.error).toContain('500');
+      // A generic failure is NOT not-found.
+      expect(result.notFound).toBeFalsy();
+    });
+
+    it('returns notFound on a keycast 404 (self-custody), not a generic error', async () => {
+      fetchMock.mockResolvedValue({ ok: false, status: 404, text: () => Promise.resolve('User not found') });
+      const result = await getUserStatus(VALID_PUBKEY, makeEnv());
+      expect(result.success).toBe(false);
+      expect(result.notFound).toBe(true);
+    });
+
+    it('does not return notFound for an unrecognized 404 body', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      fetchMock.mockResolvedValue({ ok: false, status: 404, text: () => Promise.resolve('<h1>Not Found</h1>') });
+
+      const result = await getUserStatus(VALID_PUBKEY, makeEnv());
+
+      expect(result.success).toBe(false);
+      expect(result.notFound).toBeFalsy();
+      expect(result.error).toContain('404');
+      expect(warnSpy).toHaveBeenCalledWith(
+        'Keycast status endpoint returned an unrecognized 404 body',
+        { body: '<h1>Not Found</h1>' },
+      );
+      warnSpy.mockRestore();
     });
   });
 

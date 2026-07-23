@@ -82,7 +82,27 @@ describe('handleAccountStatus', () => {
     const res = await handleAccountStatus(VALID_PUBKEY, makeEnv(), CORS);
 
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { success: boolean };
+    const body = (await res.json()) as { success: boolean; not_found?: boolean };
     expect(body.success).toBe(false);
+    // A server error is unavailable, NOT self-custody.
+    expect(body.not_found).toBeFalsy();
+  });
+
+  it('surfaces not_found (self-custody) for a keycast 404, distinct from unavailable', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 404,
+        text: () => Promise.resolve('User not found'),
+      }),
+    );
+
+    const res = await handleAccountStatus(VALID_PUBKEY, makeEnv(), CORS);
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { success: boolean; not_found?: boolean };
+    expect(body.success).toBe(false);
+    expect(body.not_found).toBe(true);
   });
 });

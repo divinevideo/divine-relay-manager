@@ -38,7 +38,15 @@ export async function handleAccountStatus(
 
   const result = await getUserStatus(pubkey, env);
   if (!result.success) {
-    return json({ success: false, error: result.error ?? 'unavailable' }, 200, corsHeaders);
+    // not_found (keycast 404) is self-custody — informational, distinct from an
+    // unavailable/errored lookup, so the UI can style it non-destructively (#191).
+    return json(
+      result.notFound
+        ? { success: false, not_found: true }
+        : { success: false, error: result.error ?? 'unavailable' },
+      200,
+      corsHeaders,
+    );
   }
 
   return json(
