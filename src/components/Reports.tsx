@@ -859,6 +859,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     detailBoundaryRef.current?.reset();
     setSelectedReport(report);
     setDeepLinkStatus('idle'); // clear any deep-link fallback once the user interacts
+    // Invalidate any in-flight targeted lookup: a user selection/dismissal
+    // supersedes the deep link, so a late response must not pass the resolution
+    // guard and re-navigate (e.g. closing the mobile resolving Sheet mid-lookup).
+    attemptedTargetRef.current = null;
     if (report) {
       navigate(`/reports/${report.id}`, { replace: true });
     } else {

@@ -1,7 +1,7 @@
 // ABOUTME: Integration tests for the Reports deep-link resolver — the gone / found (+ the
 // ABOUTME: resulting /reports/:id URL) / unavailable states driven by ?event=/?pubkey= params.
 
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MockInstance } from 'vitest';
 import TestApp from '@/test/TestApp';
@@ -310,5 +310,41 @@ describe('Reports deep-link resolution', () => {
     );
     // On mobile the fallback lives inside the Sheet; it must still be visible.
     expect(await screen.findByText(/no longer on the relay/i)).toBeInTheDocument();
+  });
+
+  it('drops a late lookup after the mobile resolving Sheet is closed mid-flight (no reopen)', async () => {
+    vi.mocked(useIsMobile).mockReturnValue(true);
+    window.history.pushState({}, '', `/reports?event=${EFOUND}`);
+    let resolveTargeted!: (r: Response) => void;
+    const targetedPromise = new Promise<Response>((res) => { resolveTargeted = res; });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/reports') && url.includes('event=')) return targetedPromise;
+      if (url.includes('/api/reports')) return jsonResponse({ success: true, events: [OTHER_REPORT] });
+      if (url.includes('/api/resolution-labels')) return jsonResponse({ success: true, events: [] });
+      if (url.includes('/api/decisions')) return jsonResponse({ success: true, decisions: [] });
+      if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
+      return jsonResponse({ success: true });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(
+      <TestApp>
+        <Reports relayUrl="wss://relay.example" />
+      </TestApp>
+    );
+
+    // The mobile resolving Sheet is up while the targeted lookup is pending.
+    expect(await screen.findByText(/looking up this report/i)).toBeInTheDocument();
+
+    // Close the Sheet mid-lookup.
+    fireEvent.click(screen.getByRole('button', { name: /close/i }));
+
+    // The late response resolves as a would-be 'found' — it must be dropped, not
+    // reopen the report after the moderator returned to the queue.
+    resolveTargeted(jsonResponse({ success: true, events: [MATCHING_REPORT] }));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(window.location.pathname).toBe('/reports'); // no reopen
   });
 });
