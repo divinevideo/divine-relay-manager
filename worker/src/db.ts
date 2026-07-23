@@ -1,5 +1,6 @@
 // ABOUTME: Shared D1 schema initialization for worker and Durable Objects
-// ABOUTME: Single source of truth for moderation_decisions and moderation_targets DDL
+// ABOUTME: Creates moderation_decisions, moderation_targets, age_review_cases,
+// ABOUTME: age_review_config, and zendesk_preauth_nonces DDL on a fresh D1
 
 /**
  * Ensure all moderation tables and indexes exist.
@@ -129,4 +130,24 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       value TEXT NOT NULL
     )
   `).run();
+
+  // zendesk_preauth_nonces previously existed only in migrations/0003, which
+  // is legacy/manual and not run against fresh D1 instances (this repo's
+  // schema path is ensureSchema, not `wrangler d1 migrations apply`).
+  // (zendesk_tickets is self-healed separately by ensureZendeskTable() in
+  // zendesk-sync.ts — not duplicated here.)
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS zendesk_preauth_nonces (
+      nonce TEXT PRIMARY KEY,
+      pubkey TEXT NOT NULL,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      expires_at INTEGER NOT NULL
+    )
+  `).run();
+
+  try {
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_nonces_expires ON zendesk_preauth_nonces(expires_at)`).run();
+  } catch {
+    // Index already exists
+  }
 }
