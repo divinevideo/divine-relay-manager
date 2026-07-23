@@ -380,6 +380,24 @@ export async function fetchReports(apiUrl: string): Promise<NostrEvent[]> {
   return sanitizeRelayEvents(data.events).sort((a, b) => b.created_at - a.created_at);
 }
 
+// Fetch reports scoped to a single target (reported event id or pubkey) via the
+// worker's /api/reports filter. Used to resolve a deep-link whose target isn't in
+// the bulk window, so we can tell "aged out / vanished" apart from "still loading".
+export async function fetchReportsByTarget(
+  apiUrl: string,
+  target: { event: string } | { pubkey: string }
+): Promise<NostrEvent[]> {
+  const qs = 'event' in target
+    ? `?event=${encodeURIComponent(target.event)}`
+    : `?pubkey=${encodeURIComponent(target.pubkey)}`;
+  const data = await apiRequest<{ success: boolean; events: NostrEvent[] }>(
+    apiUrl,
+    `/api/reports${qs}`,
+    'GET'
+  );
+  return sanitizeRelayEvents(data.events);
+}
+
 // Fetch resolution labels via server-side relay query (replaces browser WebSocket)
 export async function fetchResolutionLabels(apiUrl: string): Promise<NostrEvent[]> {
   const data = await apiRequest<{ success: boolean; events: NostrEvent[] }>(apiUrl, '/api/resolution-labels', 'GET');

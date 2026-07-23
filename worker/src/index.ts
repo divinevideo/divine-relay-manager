@@ -9,6 +9,7 @@ import {
   type SecretStoreSecret,
 } from './nip86';
 import { ensureSchema } from './db';
+import { buildReportsFilter, isUnconfirmedTargetedMiss } from './reports-filter';
 import { generatePreAuthToken, verifyPreAuthToken, base64UrlEncode } from './zendesk-preauth';
 import { deriveFunnelcakeApiUrl, proxyFunnelcakeRequest } from './funnelcake-proxy';
 import type { KeycastEnv } from './keycast-client';
@@ -520,9 +521,15 @@ export default {
       // nostrify NPool connection caching. The worker opens a fresh WebSocket
       // per request via queryRelay(), so every poll gets current data.
       if (path === '/api/reports' && request.method === 'GET') {
-        const result = await queryRelay({ kinds: [1984], limit: 200 }, env.RELAY_URL);
+        const filter = buildReportsFilter(url.searchParams);
+        const result = await queryRelay(filter, env.RELAY_URL);
         if (!result.success) {
           return jsonResponse({ success: false, error: result.error }, 502, corsHeaders);
+        }
+        // A targeted lookup that came back empty but unconfirmed (relay never sent EOSE) is
+        // ambiguous — 502 so the client shows "unavailable" (retry), not a false "deleted".
+        if (isUnconfirmedTargetedMiss(url.searchParams, result)) {
+          return jsonResponse({ success: false, error: 'Relay did not confirm results (timeout)' }, 502, corsHeaders);
         }
         return jsonResponse({ success: true, events: result.events }, 200, corsHeaders);
       }
@@ -1625,7 +1632,7 @@ async function handleModerateMedia(
 async function queryRelay(
   filter: object,
   relayUrl: string
-): Promise<{ success: boolean; events?: object[]; error?: string }> {
+): Promise<{ success: boolean; events?: object[]; error?: string; complete?: boolean }> {
   return new Promise((resolve) => {
     try {
       const ws = new WebSocket(relayUrl);
@@ -1637,7 +1644,8 @@ async function queryRelay(
         if (!resolved) {
           resolved = true;
           ws.close();
-          resolve({ success: true, events });
+          // Timed out without EOSE: results may be truncated, so absence is unconfirmed.
+          resolve({ success: true, events, complete: false });
         }
       }, 5000);
 
@@ -1654,7 +1662,8 @@ async function queryRelay(
             clearTimeout(timeout);
             resolved = true;
             ws.close();
-            resolve({ success: true, events });
+            // EOSE = relay confirmed end of stored events, so an empty result is real.
+            resolve({ success: true, events, complete: true });
           }
         } catch {
           // Ignore parse errors
@@ -1673,7 +1682,8 @@ async function queryRelay(
         if (!resolved) {
           clearTimeout(timeout);
           resolved = true;
-          resolve({ success: true, events });
+          // Closed before EOSE: absence is unconfirmed.
+          resolve({ success: true, events, complete: false });
         }
       });
     } catch (error) {
