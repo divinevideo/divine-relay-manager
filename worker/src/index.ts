@@ -428,10 +428,21 @@ export default {
         if (env.DB) {
           await ensureSchemaOnce(env.DB);
           // `authResult.eventId` is always set here (it's `event.id`, populated on a
-          // `valid: true` result after verifyEvent) -- the `&&` is TS narrowing
+          // `valid: true` result after verifyEvent) -- the `if` is TS narrowing
           // `eventId?: string` to `string` for consumeNip98Nonce, not a fail-open branch.
-          if (authResult.eventId && !(await consumeNip98Nonce(env.DB, authResult.eventId))) {
-            return jsonResponse({ success: false, error: 'Replayed NIP-98 token' }, 401, corsHeaders);
+          if (authResult.eventId) {
+            // Read-only endpoint: a nonce-storage outage must not turn a status
+            // check into a 500, so only a THROWN error fails open here. A
+            // detected replay (consume resolves `false`) still 401s below --
+            // the asymmetry with the POST route's fail-closed catch is intentional
+            // (#202 review).
+            try {
+              if (!(await consumeNip98Nonce(env.DB, authResult.eventId))) {
+                return jsonResponse({ success: false, error: 'Replayed NIP-98 token' }, 401, corsHeaders);
+              }
+            } catch (e) {
+              console.error('[nip98] nonce storage failed on moderation-status; proceeding fail-open', e);
+            }
           }
         }
         return handleGetModerationStatus(authResult.pubkey, env, corsHeaders);
@@ -444,8 +455,22 @@ export default {
           await ensureSchemaOnce(env.DB);
           // Same guard as the moderation-status route above: `eventId` is always
           // present on a valid result, so this is type-narrowing, not fail-open.
-          if (authResult.eventId && !(await consumeNip98Nonce(env.DB, authResult.eventId))) {
-            return jsonResponse({ success: false, error: 'Replayed NIP-98 token' }, 401, corsHeaders);
+          if (authResult.eventId) {
+            // State-changing endpoint: unlike moderation-status above, a
+            // nonce-storage outage here fails CLOSED -- proceeding without
+            // replay protection recorded would let a captured request be
+            // replayed to re-trigger a parent-contact action (#202 review).
+            try {
+              if (!(await consumeNip98Nonce(env.DB, authResult.eventId))) {
+                return jsonResponse({ success: false, error: 'Replayed NIP-98 token' }, 401, corsHeaders);
+              }
+            } catch (e) {
+              console.error('[nip98] nonce storage failed on parent-contact; failing closed', e);
+              // 500 to match this route's existing !env.DB behavior (age-review.ts
+              // handleParentContact: 'Database not configured'), with a distinct
+              // message so the two fail-closed causes are separable in logs/alerts.
+              return jsonResponse({ success: false, error: 'Replay protection unavailable' }, 500, corsHeaders);
+            }
           }
         }
         const caseId = path.replace('/v1/minor-review-cases/', '').replace('/parent-contact', '');

@@ -992,6 +992,74 @@ describe('mobile NIP-98 endpoint host allowlist (#173)', () => {
   });
 });
 
+describe('NIP-98 nonce-storage THROWN error (#202 review)', () => {
+  const OWN_MOD_STATUS_URL = 'https://api-relay-prod.divine.video/v1/account/moderation-status';
+  const OWN_PARENT_CONTACT_URL = 'https://api-relay-prod.divine.video/v1/minor-review-cases/case-1/parent-contact';
+
+  function nip98Header(u: string, method: string): string {
+    const sk = generateSecretKey();
+    const evt = finalizeEvent(
+      { kind: 27235, content: '', tags: [['u', u], ['method', method]], created_at: Math.floor(Date.now() / 1000) },
+      sk,
+    );
+    return 'Nostr ' + btoa(JSON.stringify(evt));
+  }
+
+  // Distinct from the `!env.DB` fail-open case above (#173's tests): here env.DB
+  // IS present and ensureSchemaOnce's DDL succeeds, but the nonce INSERT itself
+  // throws (e.g. a transient D1 write outage). Any other statement (schema DDL,
+  // or a later handler query) is tolerated so only the targeted INSERT fails.
+  function makeNonceThrowingDb() {
+    const statement = (sql: string): { bind: () => unknown; run: () => Promise<{ success: boolean }>; first: () => Promise<null> } => ({
+      bind: () => statement(sql),
+      run: async () => {
+        if (sql.includes('INSERT INTO nip98_used_nonces')) throw new Error('simulated D1 write failure');
+        return { success: true };
+      },
+      first: async () => {
+        if (sql.includes('INSERT INTO nip98_used_nonces')) throw new Error('simulated D1 write failure');
+        return null;
+      },
+    });
+    return { prepare: statement };
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('GET moderation-status: a thrown nonce-storage error fails OPEN (200, not 500) and is logged', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = await worker.fetch(
+      new Request(OWN_MOD_STATUS_URL, { method: 'GET', headers: { Authorization: nip98Header(OWN_MOD_STATUS_URL, 'GET') } }),
+      { DB: makeNonceThrowingDb() } as never,
+      ctx,
+    );
+    // Read-only endpoint: a nonce-storage outage must not turn a status check
+    // into a 500 -- this is the fail-open case the review flagged (without the
+    // try/catch, the throw escapes to the worker-wide catch and this is 500).
+    expect(res.status).toBe(200);
+    expect(errorSpy).toHaveBeenCalled();
+  });
+
+  it('POST parent-contact: a thrown nonce-storage error fails CLOSED (explicit error, not 2xx) and is logged', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = await worker.fetch(
+      new Request(OWN_PARENT_CONTACT_URL, { method: 'POST', headers: { Authorization: nip98Header(OWN_PARENT_CONTACT_URL, 'POST') } }),
+      { DB: makeNonceThrowingDb() } as never,
+      ctx,
+    );
+    // State-changing endpoint: unlike moderation-status, a storage outage here
+    // must NOT proceed without replay protection recorded -- explicit fail-closed,
+    // distinct from the 401 'Replayed NIP-98 token' a detected replay returns.
+    expect(res.status).toBe(500);
+    const body = await res.json() as { success: boolean; error: string };
+    expect(body.success).toBe(false);
+    expect(body.error).toBe('Replay protection unavailable');
+    expect(errorSpy).toHaveBeenCalled();
+  });
+});
+
 describe('zendesk pre-auth NIP-98 scope boundary (#173)', () => {
   const OWN_HOST_PREAUTH_URL = 'https://api-relay-prod.divine.video/api/zendesk/pre-auth';
   const PUBLIC_HOST_PREAUTH_URL = 'https://api.divine.video/api/zendesk/pre-auth';
