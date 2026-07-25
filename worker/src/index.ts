@@ -425,14 +425,48 @@ export default {
       if (path === '/v1/account/moderation-status' && request.method === 'GET') {
         const authResult = await verifyNip98Auth(request, request.url, getNip98AllowedHosts(env));
         if (!authResult.valid || !authResult.pubkey) return jsonResponse({ success: false, error: authResult.error ?? 'Unauthorized' }, 401, corsHeaders);
-        if (env.DB) await ensureSchemaOnce(env.DB);
+        if (env.DB) {
+          // Read-only endpoint: a storage outage (schema-ensure OR nonce write) must not
+          // turn a status check into a 500 -- both are wrapped fail-open. A detected replay
+          // (consume resolves false) still 401s. The asymmetry with the POST route's
+          // fail-closed handling is intentional (#202 review).
+          try {
+            await ensureSchemaOnce(env.DB);
+            if (authResult.eventId && !(await consumeNip98Nonce(env.DB, authResult.eventId))) {
+              return jsonResponse({ success: false, error: 'Replayed NIP-98 token' }, 401, corsHeaders);
+            }
+          } catch (e) {
+            console.error('[nip98] nonce/schema storage failed on moderation-status; proceeding fail-open', e);
+          }
+        }
         return handleGetModerationStatus(authResult.pubkey, env, corsHeaders);
       }
 
       if (path.startsWith('/v1/minor-review-cases/') && path.endsWith('/parent-contact') && request.method === 'POST') {
         const authResult = await verifyNip98Auth(request, request.url, getNip98AllowedHosts(env));
         if (!authResult.valid || !authResult.pubkey) return jsonResponse({ success: false, error: authResult.error ?? 'Unauthorized' }, 401, corsHeaders);
-        if (env.DB) await ensureSchemaOnce(env.DB);
+        if (env.DB) {
+          await ensureSchemaOnce(env.DB);
+          // Same guard as the moderation-status route above: `eventId` is always
+          // present on a valid result, so this is type-narrowing, not fail-open.
+          if (authResult.eventId) {
+            // State-changing endpoint: unlike moderation-status above, a
+            // nonce-storage outage here fails CLOSED -- proceeding without
+            // replay protection recorded would let a captured request be
+            // replayed to re-trigger a parent-contact action (#202 review).
+            try {
+              if (!(await consumeNip98Nonce(env.DB, authResult.eventId))) {
+                return jsonResponse({ success: false, error: 'Replayed NIP-98 token' }, 401, corsHeaders);
+              }
+            } catch (e) {
+              console.error('[nip98] nonce storage failed on parent-contact; failing closed', e);
+              // 500 to match this route's existing !env.DB behavior (age-review.ts
+              // handleParentContact: 'Database not configured'), with a distinct
+              // message so the two fail-closed causes are separable in logs/alerts.
+              return jsonResponse({ success: false, error: 'Replay protection unavailable' }, 500, corsHeaders);
+            }
+          }
+        }
         const caseId = path.replace('/v1/minor-review-cases/', '').replace('/parent-contact', '');
         if (!caseId) return jsonResponse({ success: false, error: 'Invalid caseId' }, 400, corsHeaders);
         return handleParentContact(request, caseId, authResult.pubkey, env, corsHeaders);
@@ -666,6 +700,18 @@ export default {
         }
       } catch (error) {
         console.error('[scheduled] Failed to clean up pre-auth nonces:', error);
+      }
+
+      // Clean up expired NIP-98 replay nonces (#195)
+      try {
+        const nip98Cleanup = await env.DB.prepare(
+          'DELETE FROM nip98_used_nonces WHERE expires_at < unixepoch()'
+        ).run();
+        if (nip98Cleanup.meta.changes > 0) {
+          console.log(`[scheduled] Cleaned up ${nip98Cleanup.meta.changes} expired NIP-98 nonces`);
+        }
+      } catch (error) {
+        console.error('[scheduled] Failed to clean up NIP-98 nonces:', error);
       }
 
       // Check age review deadlines and auto-close expired cases
@@ -1900,6 +1946,7 @@ async function verifyZendeskWebhook(
 interface Nip98Result {
   valid: boolean;
   pubkey?: string;
+  eventId?: string;
   error?: string;
 }
 
@@ -1980,11 +2027,31 @@ export async function verifyNip98Auth(
       return { valid: false, error: 'Method mismatch' };
     }
 
-    return { valid: true, pubkey: event.pubkey };
+    return { valid: true, pubkey: event.pubkey, eventId: event.id };
   } catch (e) {
     console.error('[verifyNip98Auth] Error:', e);
     return { valid: false, error: 'Failed to parse auth event' };
   }
+}
+
+// Single-use replay protection for the two mobile NIP-98 endpoints (#195).
+// event.id is the sha256 of the canonical event serialization and is bound to
+// the signature verified in verifyNip98Auth — a client cannot present an
+// arbitrary id, so it's a safe dedup key without needing a separate nonce tag.
+// Atomic INSERT ... ON CONFLICT DO NOTHING: uniqueness enforced by the PK, no
+// SELECT-then-INSERT race. TTL is 2x the 60s freshness window (finding: a
+// token first used at the earliest allowed instant, now = T-60, must still be
+// rejected as a replay up to T+60, so expiry needs to reach (T-60)+120 = T+60).
+const NIP98_NONCE_TTL_SECONDS = 120;
+
+export async function consumeNip98Nonce(db: D1Database, eventId: string): Promise<boolean> {
+  const result = await db.prepare(
+    `INSERT INTO nip98_used_nonces (event_id, expires_at)
+     VALUES (?, unixepoch() + ?)
+     ON CONFLICT(event_id) DO NOTHING
+     RETURNING event_id`
+  ).bind(eventId, NIP98_NONCE_TTL_SECONDS).first();
+  return result !== null;
 }
 
 // Proxy handler for blocked media preview (Blossom admin bypass)

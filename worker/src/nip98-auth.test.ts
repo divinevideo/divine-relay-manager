@@ -39,6 +39,13 @@ describe('verifyNip98Auth host allowlist', () => {
     expect(res.pubkey).toBe(evt.pubkey);
   });
 
+  it('returns eventId on a valid event, bound to the signed event.id (#195 replay nonce key)', async () => {
+    const evt = signEvent({ u: OWN, method: 'GET' });
+    const res = await verifyNip98Auth(reqAtOwnHost(toHeader(evt)), OWN, [PUBLIC_HOST]);
+    expect(res.valid).toBe(true);
+    expect(res.eventId).toBe(evt.id);
+  });
+
   it('accepts a public host that is in the allowlist (the fix)', async () => {
     const evt = signEvent({ u: PUBLIC, method: 'GET' });
     const res = await verifyNip98Auth(reqAtOwnHost(toHeader(evt)), OWN, [PUBLIC_HOST]);

@@ -919,16 +919,20 @@ describe('mobile NIP-98 endpoint host allowlist (#173)', () => {
     return 'Nostr ' + btoa(JSON.stringify(evt));
   }
 
+  beforeEach(() => {
+    // No DB in env → handleGetModerationStatus fails open to 200 (age-review.ts:581-591),
+    // so a 200 here proves the auth gate passed, with no D1 harness needed. The
+    // fail-open path logs an expected `MODERATION_STATUS_DB_UNAVAILABLE` marker via
+    // console.error; silence it (and console.warn) so the suite output stays clean.
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  // No DB in env → handleGetModerationStatus fails open to 200 (age-review.ts:581-584),
-  // so a 200 here proves the auth gate passed, with no D1 harness needed. The
-  // fail-open path logs an expected `[age-review] DB not available` warning;
-  // silence it so the suite output stays clean.
   it('accepts a public-host-signed request when the host is allowlisted (the fix, end-to-end)', async () => {
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
     const res = await worker.fetch(
       new Request(OWN_HOST_URL, { method: 'GET', headers: { Authorization: nip98Header(PUBLIC_HOST_URL) } }),
       { NIP98_PUBLIC_HOST_ALLOWLIST: 'api.divine.video' } as never,
@@ -940,7 +944,6 @@ describe('mobile NIP-98 endpoint host allowlist (#173)', () => {
   // Config is user-edited free text (unlike URL.hostname, which the platform always
   // lowercases), so a mixed-case entry must still normalize to match at compare time.
   it('accepts a public host configured with mixed case (config is case-insensitive)', async () => {
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
     const res = await worker.fetch(
       new Request(OWN_HOST_URL, { method: 'GET', headers: { Authorization: nip98Header(PUBLIC_HOST_URL) } }),
       { NIP98_PUBLIC_HOST_ALLOWLIST: 'API.Divine.Video' } as never,
@@ -950,7 +953,6 @@ describe('mobile NIP-98 endpoint host allowlist (#173)', () => {
   });
 
   it('accepts an own-host-signed request with no allowlist configured (regression)', async () => {
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
     const res = await worker.fetch(
       new Request(OWN_HOST_URL, { method: 'GET', headers: { Authorization: nip98Header(OWN_HOST_URL) } }),
       {} as never,
@@ -966,6 +968,135 @@ describe('mobile NIP-98 endpoint host allowlist (#173)', () => {
       ctx,
     );
     expect(res.status).toBe(401);
+  });
+
+  // #195 replay nonce: the consume check is gated behind `if (env.DB)`, so with
+  // no DB binding it's never reached — replaying the SAME signed event twice
+  // both succeed. This is the fail-open case named in Fork #5: an outage that
+  // takes down env.DB loses replay protection but not availability, matching
+  // #197's existing fail-open posture for this same endpoint.
+  it('replay nonce check is skipped (fail open) when env.DB is unavailable — same event succeeds twice', async () => {
+    const header = nip98Header(OWN_HOST_URL);
+    const first = await worker.fetch(
+      new Request(OWN_HOST_URL, { method: 'GET', headers: { Authorization: header } }),
+      {} as never,
+      ctx,
+    );
+    const second = await worker.fetch(
+      new Request(OWN_HOST_URL, { method: 'GET', headers: { Authorization: header } }),
+      {} as never,
+      ctx,
+    );
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+  });
+});
+
+describe('NIP-98 nonce-storage THROWN error (#202 review)', () => {
+  const OWN_MOD_STATUS_URL = 'https://api-relay-prod.divine.video/v1/account/moderation-status';
+  const OWN_PARENT_CONTACT_URL = 'https://api-relay-prod.divine.video/v1/minor-review-cases/case-1/parent-contact';
+
+  function nip98Header(u: string, method: string): string {
+    const sk = generateSecretKey();
+    const evt = finalizeEvent(
+      { kind: 27235, content: '', tags: [['u', u], ['method', method]], created_at: Math.floor(Date.now() / 1000) },
+      sk,
+    );
+    return 'Nostr ' + btoa(JSON.stringify(evt));
+  }
+
+  // Distinct from the `!env.DB` fail-open case above (#173's tests): here env.DB
+  // IS present and ensureSchemaOnce's DDL succeeds, but the nonce INSERT itself
+  // throws (e.g. a transient D1 write outage). Any other statement (schema DDL,
+  // or a later handler query) is tolerated so only the targeted INSERT fails.
+  function makeNonceThrowingDb() {
+    const statement = (sql: string): { bind: () => unknown; run: () => Promise<{ success: boolean }>; first: () => Promise<null> } => ({
+      bind: () => statement(sql),
+      run: async () => {
+        if (sql.includes('INSERT INTO nip98_used_nonces')) throw new Error('simulated D1 write failure');
+        return { success: true };
+      },
+      first: async () => {
+        if (sql.includes('INSERT INTO nip98_used_nonces')) throw new Error('simulated D1 write failure');
+        return null;
+      },
+    });
+    return { prepare: statement };
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('GET moderation-status: a thrown nonce-storage error fails OPEN (200, not 500) and is logged', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = await worker.fetch(
+      new Request(OWN_MOD_STATUS_URL, { method: 'GET', headers: { Authorization: nip98Header(OWN_MOD_STATUS_URL, 'GET') } }),
+      { DB: makeNonceThrowingDb() } as never,
+      ctx,
+    );
+    // Read-only endpoint: a nonce-storage outage must not turn a status check
+    // into a 500 -- this is the fail-open case the review flagged (without the
+    // try/catch, the throw escapes to the worker-wide catch and this is 500).
+    expect(res.status).toBe(200);
+    expect(errorSpy).toHaveBeenCalled();
+  });
+
+  it('POST parent-contact: a thrown nonce-storage error fails CLOSED (explicit error, not 2xx) and is logged', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = await worker.fetch(
+      new Request(OWN_PARENT_CONTACT_URL, { method: 'POST', headers: { Authorization: nip98Header(OWN_PARENT_CONTACT_URL, 'POST') } }),
+      { DB: makeNonceThrowingDb() } as never,
+      ctx,
+    );
+    // State-changing endpoint: unlike moderation-status, a storage outage here
+    // must NOT proceed without replay protection recorded -- explicit fail-closed,
+    // distinct from the 401 'Replayed NIP-98 token' a detected replay returns.
+    expect(res.status).toBe(500);
+    const body = await res.json() as { success: boolean; error: string };
+    expect(body.success).toBe(false);
+    expect(body.error).toBe('Replay protection unavailable');
+    expect(errorSpy).toHaveBeenCalled();
+  });
+
+  // Residual gap from the #202 review: `ensureSchemaOnce` ran BEFORE the GET
+  // route's fail-open try (outside it), so a throw there (e.g. cold-isolate
+  // CREATE TABLE hitting the same D1 write outage) escaped to the worker-wide
+  // catch and 500'd a read-only endpoint. `ensureSchemaOnce` is now inside the
+  // same try as the nonce consume above, so this proves that path fails open too.
+  //
+  // `ensureSchemaOnce` memoizes success via a module-level `schemaReady` flag
+  // (index.ts:39-44) shared across every test in this file, so the top-level
+  // `worker` import already has it set to `true` by the time this test runs --
+  // a throwing DB here would never reach the DDL, since `ensureSchemaOnce`
+  // short-circuits before calling `ensureSchema(db)`. `vi.resetModules()` plus
+  // a fresh dynamic `import('./index')` gets a clean, unmemoized module
+  // instance so the throwing DDL statement is actually exercised.
+  it('GET moderation-status: a thrown ensureSchemaOnce error also fails OPEN (200, not 500)', async () => {
+    vi.resetModules();
+    const { default: freshWorker } = await import('./index');
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    // Only the schema DDL's first statement (db.ts's `CREATE TABLE IF NOT EXISTS
+    // moderation_decisions`) throws -- everything else, including the SELECT
+    // handleGetModerationStatus issues once the route's fail-open catch swallows
+    // the schema error, is tolerated. Mirrors makeNonceThrowingDb's targeted style.
+    const statement = (sql: string): { bind: () => unknown; run: () => Promise<{ success: boolean }>; first: () => Promise<null> } => ({
+      bind: () => statement(sql),
+      run: async () => {
+        if (sql.includes('CREATE TABLE IF NOT EXISTS moderation_decisions')) throw new Error('simulated D1 schema-DDL failure');
+        return { success: true };
+      },
+      first: async () => null,
+    });
+    const schemaThrowingDb = { prepare: statement };
+
+    const res = await freshWorker.fetch(
+      new Request(OWN_MOD_STATUS_URL, { method: 'GET', headers: { Authorization: nip98Header(OWN_MOD_STATUS_URL, 'GET') } }),
+      { DB: schemaThrowingDb } as never,
+      ctx,
+    );
+    expect(res.status).toBe(200);
+    expect(errorSpy).toHaveBeenCalled();
   });
 });
 

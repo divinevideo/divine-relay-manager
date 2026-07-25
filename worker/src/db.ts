@@ -1,6 +1,7 @@
 // ABOUTME: Shared D1 schema initialization for worker and Durable Objects
 // ABOUTME: Creates moderation_decisions, moderation_targets, age_review_cases,
-// ABOUTME: age_review_config, and zendesk_preauth_nonces DDL on a fresh D1
+// ABOUTME: age_review_config, nip98_used_nonces, and zendesk_preauth_nonces
+// ABOUTME: DDL on a fresh D1
 
 /**
  * Ensure all moderation tables and indexes exist.
@@ -130,6 +131,20 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       value TEXT NOT NULL
     )
   `).run();
+
+  // Single-use NIP-98 replay nonces for the mobile minor-review endpoints (#195).
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS nip98_used_nonces (
+      event_id   TEXT PRIMARY KEY,
+      expires_at INTEGER NOT NULL
+    )
+  `).run();
+
+  try {
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_nip98_nonces_expires ON nip98_used_nonces(expires_at)`).run();
+  } catch {
+    // Index already exists
+  }
 
   // zendesk_preauth_nonces previously existed only in migrations/0003, which
   // is legacy/manual and not run against fresh D1 instances (this repo's
