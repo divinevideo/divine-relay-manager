@@ -4,6 +4,8 @@ import { useAdminApi } from "@/hooks/useAdminApi";
 import { useAccountStatus } from "@/hooks/useAccountStatus";
 import { useUserStats } from "@/hooks/useUserStats";
 import { AccountTypeIndicator } from "@/components/AccountTypeIndicator";
+import { AgeReviewContent } from "@/components/AgeReviewContent";
+import { useReportedEvent } from "@/hooks/useReportedEvent";
 import { ApiError } from "@/lib/adminApi";
 import { reconcileCaseIntoList, type AgeReviewListParams } from "@/lib/ageReviewCache";
 import { deriveAccountVerdict } from "@/lib/accountVerdict";
@@ -217,7 +219,8 @@ export function AgeReviewDetail({ caseData: c }: Props) {
   // Keycast-backed protected-minor status (verified_minor). Best-effort: a
   // keycast blip resolves to success:false, so we show status unavailable.
   const { data: accountStatus, isError: accountStatusFailed, isLoading: accountStatusLoading } = useAccountStatus(c.pubkey);
-  const { data: userStats, isError: userStatsFailed } = useUserStats(c.pubkey);
+  const { data: userStats, isError: userStatsFailed, isLoading: userStatsLoading, refetch: refetchUserStats } = useUserStats(c.pubkey);
+  const { data: reportedEvent, isLoading: reportedEventLoading, isError: reportedEventFailed, refetch: refetchReported } = useReportedEvent(c.report_id ?? undefined);
   // Content presence is trustworthy only once the relay read resolves without
   // error; a failed/in-flight read must not read as "no content" (would
   // under-state available enforcement).
@@ -283,6 +286,20 @@ export function AgeReviewDetail({ caseData: c }: Props) {
             postCount={userStats?.postCount}
             contentPresenceKnown={contentPresenceKnown}
             ticketLinked={!!c.zendesk_ticket_id}
+          />
+
+          <AgeReviewContent
+            postCount={userStats?.postCount}
+            contentLoading={userStatsLoading}
+            contentError={userStatsFailed}
+            accountStatus={accountStatus}
+            recentPosts={userStats?.recentPosts ?? []}
+            onRetry={() => { void refetchUserStats(); }}
+            reportedEvent={reportedEvent}
+            reportedEventLoading={reportedEventLoading}
+            reportedEventError={reportedEventFailed}
+            onRetryReported={() => { void refetchReported(); }}
+            hasReportId={!!c.report_id}
           />
 
           {/* Protections that apply to an approved protected minor (#143).
