@@ -802,6 +802,61 @@ describe('ReportWatcher', () => {
       expect(mockDbRun).toHaveBeenCalled();
     });
 
+    // divine-mobile sends `Divine`; TRUSTED_CLIENTS carries the stylized `diVine`.
+    it('should accept a trusted client whose casing differs (divine-mobile sends "Divine")', async () => {
+      for (const clientName of ['Divine', 'DIVINE', ' divine ', 'Divine-Web']) {
+        mockFetch.mockClear();
+        mockFetch.mockResolvedValue({ ok: true, json: async () => ({ result: true }) });
+
+        await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+        await new Promise(resolve => setTimeout(resolve, 10));
+        const ws = getLastMockWebSocket();
+
+        ws!.simulateMessage(JSON.stringify(['EVENT', 'auto-hide-reports', {
+          id: `case_insensitive_${clientName.trim()}`,
+          pubkey: 'reporter',
+          kind: 1984,
+          content: 'CSAM report',
+          tags: [
+            ['e', `target_${clientName.trim()}`],
+            ['report', 'sexual_minors'],
+            ['client', clientName],
+          ],
+          created_at: Math.floor(Date.now() / 1000),
+        }]));
+        await new Promise(resolve => setTimeout(resolve, 50));
+
+        // banevent must have been called: the report was NOT dropped by the gate
+        expect(mockFetch, `client '${clientName}' should be trusted`).toHaveBeenCalled();
+      }
+    });
+
+    it('should still reject a genuinely untrusted client regardless of casing', async () => {
+      for (const clientName of ['Some-Random-App', 'notdivine', 'divine-evil']) {
+        mockFetch.mockClear();
+
+        await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+        await new Promise(resolve => setTimeout(resolve, 10));
+        const ws = getLastMockWebSocket();
+
+        ws!.simulateMessage(JSON.stringify(['EVENT', 'auto-hide-reports', {
+          id: `reject_${clientName}`,
+          pubkey: 'reporter',
+          kind: 1984,
+          content: 'CSAM report',
+          tags: [
+            ['e', `target_reject_${clientName}`],
+            ['report', 'sexual_minors'],
+            ['client', clientName],
+          ],
+          created_at: Math.floor(Date.now() / 1000),
+        }]));
+        await new Promise(resolve => setTimeout(resolve, 50));
+
+        expect(mockFetch, `client '${clientName}' must not be trusted`).not.toHaveBeenCalled();
+      }
+    });
+
     it('should accept reports from all configured trusted clients', async () => {
       for (const clientName of ['diVine', 'divine-web', 'divine-mobile']) {
         // Reset mocks for each iteration
