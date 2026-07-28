@@ -85,7 +85,9 @@ worker/
 - `npx tsc -p tsconfig.app.json --noEmit`: frontend type-check. **Bare `npx tsc --noEmit` is a false green here** — the root `tsconfig.json` has `"files": []` with project references, so in non-build mode it type-checks nothing and exits 0. Always pass `-p tsconfig.app.json` (or run `npm run test`).
 - `npx vite build`: frontend production build.
 - `npx vite --port 8080`: frontend dev server.
-- `cd worker && npx vitest run`: worker tests when touching worker code.
+- `cd worker && npx vitest run`: worker tests when touching worker code. **This is a partial run.** `worker/vitest.config.ts` deliberately excludes `test/**/*.d1.test.ts` and `test/**/*.e2e.test.ts` to keep the default suite fast and free of a Miniflare/workerd or local-relay dependency. Tests living in those files do not run here and their absence looks like a pass.
+- `cd worker && npm run test:d1`: D1-backed worker tests. Run these whenever a change touches D1 schema, migrations, or a route that reads or writes D1. A worker change can be fully green under `npx vitest run` while every test written for it sits in an excluded file.
+- `cd worker && npm run test:e2e`: end-to-end worker tests. Requires a running local relay.
 - `cd worker && npx wrangler dev --config wrangler.local.toml`: local worker development. Never deploy with local config.
 
 ```bash
@@ -104,7 +106,9 @@ npx wrangler deploy --config wrangler.prod.toml
 npx vite build && npx wrangler pages deploy dist --project-name divine-relay-admin --branch main
 
 # Tests
-cd worker && npx vitest run
+cd worker && npx vitest run     # excludes *.d1.test.ts and *.e2e.test.ts
+cd worker && npm run test:d1    # D1-backed tests, run when touching D1
+cd worker && npm run test:e2e   # end-to-end, needs a local relay
 ```
 
 **There is no `wrangler.toml`.** Each environment has its own config file:
@@ -276,6 +280,7 @@ These must stay in sync. The frontend environment selector reads VITE_ vars to d
 - Read the file(s) you're modifying. Don't assume current state.
 - Check `wrangler.staging.toml` and `wrangler.prod.toml` for env vars and bindings.
 - Run `npx tsc -p tsconfig.app.json --noEmit` after edits (bare `tsc --noEmit` is a false green — see Build/Test/Validation).
+- If touching D1 schema or a D1-backed route: run `cd worker && npm run test:d1`. The default `npx vitest run` excludes `*.d1.test.ts`, so a change whose tests all live there passes without running any of them (a second false green, see Build/Test/Validation).
 - If touching `handleModerate()`: trace ALL side effects. Verify none are duplicated and none are fire-and-forget.
 - If touching media URLs or external service calls: verify domains against wrangler config env vars.
 
