@@ -137,13 +137,18 @@ describe('AgeReviewDetail feeds the content derivations', () => {
     expect(reportedEvent).toHaveBeenCalledWith('report-1', PUBKEY);
   });
 
-  it('surfaces a foreign-authored reported event rather than rendering it', async () => {
+  it('labels a foreign-authored reported event instead of attributing it', async () => {
+    const foreign = {
+      id: 'c'.repeat(64), pubkey: 'e'.repeat(64), created_at: 1, kind: 34235,
+      tags: [], content: 'clip', sig: '',
+    };
     reportedEvent.mockReturnValue({
-      data: { status: 'target_foreign', targetEventId: 'c'.repeat(64), authorPubkey: 'e'.repeat(64) },
+      data: { status: 'target_foreign', event: foreign, authorPubkey: 'e'.repeat(64), banned: false },
       isFetching: false, isError: false, refetch: vi.fn(),
     });
     show();
-    await waitFor(() => expect(screen.getByText(/authored by a different account/i)).toBeInTheDocument());
-    expect(screen.queryByTestId('media-preview')).not.toBeInTheDocument();
+    // Evidence is shown, but the attribution warning must come with it.
+    await waitFor(() => expect(screen.getByText(/not by this case's subject/i)).toBeInTheDocument());
+    expect(screen.getByTestId('media-preview')).toBeInTheDocument();
   });
 });

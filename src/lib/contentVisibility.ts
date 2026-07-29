@@ -57,11 +57,18 @@ export function deriveContentVisibility(input: ContentVisibilityInput): ContentV
   // regardless of the read result); otherwise a failed read is surfaced as an
   // error (never claimed as "absent"); only a clean, complete, empty read against
   // a known-unsuspended account is "absent".
-  if (accountStatus?.status === 'suspended') {
-    return { state: 'suspended', message: 'Content hidden by suspension (reversible; visible again if cleared).' };
-  }
-  if (accountStatus?.status === 'banned') {
-    return { state: 'banned', message: 'Content removed (account banned).' };
+  // Only attribute to enforcement while the status is still trusted. TanStack
+  // keeps the last successful data after a failed refetch, so without this gate
+  // a lifted suspension could keep being blamed, and this section would assert a
+  // suspension while the reported-content section above says the status is
+  // unavailable. Both halves of the pane must reach the same conclusion.
+  if (!accountStatusFailed) {
+    if (accountStatus?.status === 'suspended') {
+      return { state: 'suspended', message: 'Content hidden by suspension (reversible; visible again if cleared).' };
+    }
+    if (accountStatus?.status === 'banned') {
+      return { state: 'banned', message: 'Content removed (account banned).' };
+    }
   }
   if (contentError || contentIncomplete) {
     return { state: 'error', message: "Couldn't load this account's content (relay error). Retry." };

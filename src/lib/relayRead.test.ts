@@ -42,6 +42,26 @@ describe('queryStrict', () => {
     await expect(queryStrict(relay, [{ ids: ['a'] }], opts())).rejects.toThrow(/closed the subscription/i);
   });
 
+  it('rejects rather than resolving when the read times out', async () => {
+    // The live failure path. A relay that stops responding (or closes, which
+    // NRelay1 swallows) hangs until our timeout aborts the iterator, and the
+    // abort must surface as a rejection. If it ever resolved instead, an empty
+    // result would be reported to a moderator as "no content found".
+    const hanging: ReqCapable = {
+      async *req(_filters, opts) {
+        await new Promise((_resolve, reject) => {
+          opts?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('The signal has been aborted', 'AbortError')));
+        });
+        yield ['EOSE', 'sub'] as [string, ...unknown[]]; // unreachable
+      },
+    } as ReqCapable;
+
+    await expect(
+      queryStrict(hanging, [{ ids: ['a'] }], { signal: new AbortController().signal, timeoutMs: 50 }),
+    ).rejects.toThrow();
+  });
+
   it('throws when the stream ends without EOSE', async () => {
     // NPool.req returns immediately when no relay is routed to, and an aborted
     // read simply stops. Neither established what the relay holds.

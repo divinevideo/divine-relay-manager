@@ -24,8 +24,13 @@ export type ReportedEventResult =
   | { status: "not_a_report" }
   /** The report carries an `e` tag we cannot parse, so its target is unknown. */
   | { status: "target_unreadable" }
-  /** The report points at an event authored by someone other than this case's subject. */
-  | { status: "target_foreign"; targetEventId: string; authorPubkey: string };
+  /**
+   * The report points at an event authored by someone other than this case's
+   * subject. The event is carried so the pane can still show it, labelled, since
+   * hiding it would lose evidence a moderator may legitimately need (a report
+   * about a repost can name the original, which a third party authored).
+   */
+  | { status: "target_foreign"; event: NostrEvent; authorPubkey: string; banned: boolean };
 
 // Per hop, not shared: a single budget across both hops meant a healthy but slow
 // relay got roughly half the time the pre-two-hop lookup had.
@@ -33,7 +38,7 @@ const HOP_TIMEOUT_MS = 5000;
 
 const REPORT_KIND = 1984;
 
-export function useReportedEvent(reportId: string | undefined, casePubkey?: string) {
+export function useReportedEvent(reportId: string | undefined, casePubkey: string | undefined) {
   const { nostr } = useNostr();
   const { callRelayRpc } = useAdminApi();
   // Both the relay and the management API change with the environment, and the
@@ -62,9 +67,13 @@ export function useReportedEvent(reportId: string | undefined, casePubkey?: stri
       // A report may carry more than one `e` tag (a threaded reply also tags its
       // root, a repost its original), so consider all of them rather than
       // declaring the first one foreign and hiding the real target.
+      // Hex is compared lowercased throughout: isHex64 accepts either case and
+      // the case pubkey is stored verbatim from the reporter's `p` tag, so a
+      // non-canonical client could otherwise make an account look foreign to
+      // its own post.
       const targetIds = report.tags
         .filter((t) => t[0] === "e" && isHex64(t[1]))
-        .map((t) => t[1]);
+        .map((t) => t[1].toLowerCase());
       if (targetIds.length === 0) {
         // An `e` tag we could not parse is not the same as no `e` tag at all:
         // saying "filed against the account" would be a claim about the report.
@@ -72,36 +81,53 @@ export function useReportedEvent(reportId: string | undefined, casePubkey?: stri
           ? { status: "target_unreadable" }
           : { status: "account_level" };
       }
+      const subject = casePubkey?.toLowerCase();
 
       const events = await queryStrict(nostr, [{ ids: targetIds }], { signal, timeoutMs: HOP_TIMEOUT_MS });
-      if (events.length > 0) {
-        // NIP-56 does not require the reported event to be authored by the
-        // reported pubkey, and case creation does not check it, so a mis-filed
-        // or crafted report can point at a stranger's post. Showing that as this
-        // account's "reported content" would put a moderator's age judgement on
-        // the wrong person's video. Prefer a tagged event this account actually
-        // wrote; only if none of them is do we treat the report as mis-targeted.
-        const own = casePubkey ? events.find((e) => e.pubkey === casePubkey) : events[0];
-        if (own) return { status: "found", event: own, banned: false };
-        return { status: "target_foreign", targetEventId: events[0].id, authorPubkey: events[0].pubkey };
+      const byId = new Map(events.map((e) => [e.id.toLowerCase(), e]));
+      // Walk in tag order, not relay arrival order, so the pane always names the
+      // same event as any other code that reads the first `e` tag.
+      const readable = targetIds.map((id) => byId.get(id)).filter((e): e is NostrEvent => !!e);
+
+      // NIP-56 does not require the reported event to be authored by the reported
+      // pubkey, and case creation does not check it, so a mis-filed report can
+      // name a third party's post. Prefer one this account actually wrote.
+      const own = subject ? readable.find((e) => e.pubkey.toLowerCase() === subject) : readable[0];
+      if (own) return { status: "found", event: own, banned: false };
+
+      // Anything not publicly readable may be banned, which admins can still
+      // fetch. This runs even when another tagged event was readable: skipping it
+      // would silently disable the banned-content path this feature exists for.
+      let bannedForeign: NostrEvent | undefined;
+      for (const id of targetIds.filter((i) => !byId.has(i))) {
+        try {
+          const banned = await callRelayRpc<NostrEvent>("getbannedevent", [id]);
+          // Shape-check before trusting it: a malformed response would otherwise
+          // fail the author comparison and then crash the render on .slice().
+          if (!banned || !isHex64(banned.pubkey)) continue;
+          if (!subject || banned.pubkey.toLowerCase() === subject) {
+            return { status: "found", event: banned, banned: true };
+          }
+          bannedForeign ??= banned;
+        } catch (e) {
+          // Only "the relay says it is not banned" is a real negative. Transport,
+          // auth, and unknown failures propagate, so the pane shows an error
+          // rather than asserting the content was deleted.
+          if (!isDefinitiveRpcNegative(e)) throw e;
+        }
       }
 
-      // Not publicly readable. It may be banned, which admins can still fetch.
-      try {
-        const banned = await callRelayRpc<NostrEvent>("getbannedevent", [targetIds[0]]);
-        // Shape-check before trusting it: a malformed response would otherwise
-        // fail the author comparison and then crash the render on .slice().
-        if (banned && isHex64(banned.pubkey)) {
-          if (casePubkey && banned.pubkey !== casePubkey) {
-            return { status: "target_foreign", targetEventId: targetIds[0], authorPubkey: banned.pubkey };
-          }
-          return { status: "found", event: banned, banned: true };
-        }
-      } catch (e) {
-        // Only "the relay says it is not banned" is a real negative. Transport,
-        // auth, and unknown failures propagate, so the pane shows an error
-        // rather than asserting the content was deleted.
-        if (!isDefinitiveRpcNegative(e)) throw e;
+      // Nothing the subject authored. Show what the report does name, labelled,
+      // rather than hiding it: a report about a repost legitimately names the
+      // original, and a moderator may need to see it.
+      const foreign = readable[0] ?? bannedForeign;
+      if (foreign) {
+        return {
+          status: "target_foreign",
+          event: foreign,
+          authorPubkey: foreign.pubkey,
+          banned: foreign === bannedForeign,
+        };
       }
 
       return { status: "target_missing", targetEventId: targetIds[0] };

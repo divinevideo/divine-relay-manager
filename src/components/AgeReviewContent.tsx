@@ -75,8 +75,8 @@ function reportedMissingReason(
 ): string {
   // A status we no longer trust cannot explain anything. TanStack keeps the last
   // successful data while isError is true, so without this the section could
-  // blame a suspension that has since been lifted, while the card directly below
-  // correctly says the status is unavailable.
+  // blame a suspension that has since been lifted. deriveContentVisibility
+  // applies the same gate, so the two halves of the pane agree.
   if (!accountStatusFailed) {
     if (accountStatus?.status === "suspended") {
       return "The reported post is hidden by the account's suspension, so it cannot be shown here.";
@@ -143,13 +143,17 @@ export function AgeReviewContent({
   ) : reportedEvent?.status === "target_unreadable" ? (
     <Note>This report names a target we cannot read, so the reported post cannot be resolved.</Note>
   ) : reportedEvent?.status === "target_foreign" ? (
-    // Deliberately not rendered: judging this account by another account's post
-    // is how the wrong person gets enforced against. Stated as a fact about the
-    // tag, not an accusation, since a client quirk is likelier than bad faith.
-    <div className="rounded-md border border-amber-500/40 p-2.5 text-xs text-amber-700 dark:text-amber-400">
-      This report points at an event authored by a different account
-      (<span className="font-mono">{reportedEvent.authorPubkey.slice(0, 12)}…</span>),
-      not by this case's subject, so it is not shown here as this account's content.
+    // Shown, but never as this account's content. Hiding it would lose evidence
+    // (a report about a repost legitimately names the original), so the warning
+    // carries the attribution instead. Stated as a fact about the tag rather
+    // than an accusation: a client quirk is likelier than bad faith.
+    <div className="space-y-1.5">
+      <div className="rounded-md border border-amber-500/40 p-2.5 text-xs text-amber-700 dark:text-amber-400">
+        This post was authored by{" "}
+        <span className="font-mono">{reportedEvent.authorPubkey.slice(0, 12)}…</span>, not by this
+        case's subject. Do not judge this account by it without confirming the connection.
+      </div>
+      <ContentCard key={reportedEvent.event.id} event={reportedEvent.event} />
     </div>
   ) : reportedEvent?.status === "target_missing" ? (
     <Note>{reportedMissingReason(accountStatus, accountStatusFailed)}</Note>
@@ -162,9 +166,11 @@ export function AgeReviewContent({
         <div className="space-y-1.5">
           <h4 className="flex items-center gap-2 text-sm font-medium">
             Reported content
-            {foundReported?.banned ? (
-              <Badge variant="destructive" className="text-xs">removed (banned)</Badge>
-            ) : null}
+            {reportedEvent?.status === "found" || reportedEvent?.status === "target_foreign"
+              ? reportedEvent.banned && (
+                  <Badge variant="destructive" className="text-xs">removed (banned)</Badge>
+                )
+              : null}
           </h4>
           {reportedBody}
         </div>

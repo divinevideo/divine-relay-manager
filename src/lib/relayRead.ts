@@ -51,6 +51,11 @@ export async function queryStrict(
       complete = true;
       break;
     } else if (msg[0] === 'CLOSED') {
+      // Defensive rather than hot: NRelay1 currently breaks on CLOSED without
+      // forwarding it, so in practice a relay-side close surfaces here as the
+      // timeout below (an AbortError) rather than through this branch. CLOSED is
+      // part of the message contract and the typings advertise it, so handle it
+      // explicitly instead of relying on that implementation detail.
       throw new RelayReadError('Relay closed the subscription before the read completed');
     }
   }

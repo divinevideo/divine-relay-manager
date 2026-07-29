@@ -43,7 +43,7 @@ function wrapper({ children }: { children: ReactNode }) {
   return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
 }
 
-const render = () => renderHook(() => useReportedEvent(REPORT_ID), { wrapper });
+const render = () => renderHook(() => useReportedEvent(REPORT_ID, undefined), { wrapper });
 
 beforeEach(() => vi.clearAllMocks());
 
@@ -120,7 +120,7 @@ describe('useReportedEvent', () => {
 
     const { result } = renderHook(() => useReportedEvent(REPORT_ID, CASE_PUBKEY), { wrapper });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(result.current.data).toEqual({ status: 'target_foreign', targetEventId: TARGET_ID, authorPubkey: stranger });
+    expect(result.current.data).toEqual({ status: 'target_foreign', event: foreign, authorPubkey: stranger, banned: false });
   });
 
   it('shows a target authored by the case subject', async () => {
@@ -153,7 +153,7 @@ describe('useReportedEvent', () => {
     expect(result.current.data).toEqual({ status: 'not_a_report' });
   });
 
-  it('refuses to show a banned target authored by someone else', async () => {
+  it('labels a banned target authored by someone else, and marks it banned', async () => {
     // The banned path needs the same author check as the plain relay path.
     const stranger = 'ee'.repeat(32);
     relayReturns([report([['e', TARGET_ID]])], []);
@@ -161,7 +161,55 @@ describe('useReportedEvent', () => {
 
     const { result } = renderHook(() => useReportedEvent(REPORT_ID, CASE_PUBKEY), { wrapper });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(result.current.data).toEqual({ status: 'target_foreign', targetEventId: TARGET_ID, authorPubkey: stranger });
+    expect(result.current.data).toMatchObject({ status: 'target_foreign', authorPubkey: stranger, banned: true });
+  });
+
+  it('still tries the banned lookup when another tagged event was readable', async () => {
+    // Regression: returning early on any readable event silently disabled the
+    // banned fallback, which is the capability this feature exists for.
+    const OTHER = 'cc'.repeat(32);
+    const strangerRoot = { ...content(OTHER), pubkey: 'ee'.repeat(32) };
+    const ownBanned = { ...content(TARGET_ID), pubkey: CASE_PUBKEY };
+    relayReturns([report([['e', TARGET_ID], ['e', OTHER]])], [strangerRoot]);
+    callRelayRpc.mockResolvedValueOnce(ownBanned);
+
+    const { result } = renderHook(() => useReportedEvent(REPORT_ID, CASE_PUBKEY), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(callRelayRpc).toHaveBeenCalledWith('getbannedevent', [TARGET_ID]);
+    expect(result.current.data).toEqual({ status: 'found', event: ownBanned, banned: true });
+  });
+
+  it('names the first tagged event, not whichever the relay returned first', async () => {
+    // Relay arrival order is arbitrary; the pane must agree with any other code
+    // that treats the first e tag as the target.
+    const FIRST = 'cc'.repeat(32);
+    const first = { ...content(FIRST), pubkey: 'ee'.repeat(32) };
+    const second = { ...content(TARGET_ID), pubkey: 'ff'.repeat(32) };
+    relayReturns([report([['e', FIRST], ['e', TARGET_ID]])], [second, first]);
+
+    const { result } = renderHook(() => useReportedEvent(REPORT_ID, CASE_PUBKEY), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toMatchObject({ status: 'target_foreign', authorPubkey: 'ee'.repeat(32) });
+  });
+
+  it('ignores a malformed banned response instead of crashing on it', async () => {
+    // Without the shape guard this reaches target_foreign with an undefined
+    // author, which the pane then calls .slice() on during render.
+    relayReturns([report([['e', TARGET_ID]])], []);
+    callRelayRpc.mockResolvedValueOnce({ notAnEvent: true });
+
+    const { result } = renderHook(() => useReportedEvent(REPORT_ID, CASE_PUBKEY), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toEqual({ status: 'target_missing', targetEventId: TARGET_ID });
+  });
+
+  it('matches the case subject regardless of hex casing', async () => {
+    const upper = { ...content(TARGET_ID), pubkey: CASE_PUBKEY.toUpperCase() };
+    relayReturns([report([['e', TARGET_ID]])], [upper]);
+
+    const { result } = renderHook(() => useReportedEvent(REPORT_ID, CASE_PUBKEY), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toMatchObject({ status: 'found', banned: false });
   });
 
   it('prefers a tagged event this account authored over another tagged event', async () => {
@@ -197,7 +245,7 @@ describe('useReportedEvent', () => {
   });
 
   it('does not run without a report id', () => {
-    const { result } = renderHook(() => useReportedEvent(undefined), { wrapper });
+    const { result } = renderHook(() => useReportedEvent(undefined, undefined), { wrapper });
     expect(result.current.fetchStatus).toBe('idle');
     expect(req).not.toHaveBeenCalled();
   });

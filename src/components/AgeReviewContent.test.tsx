@@ -163,7 +163,7 @@ describe("AgeReviewContent: reported content", () => {
     expect(screen.queryByText(/deleted, aged out/i)).not.toBeInTheDocument();
   });
 
-  it("does not blame a suspension it can no longer verify", () => {
+  it("does not blame a suspension it can no longer verify, in either section", () => {
     // Stale suspended status retained after a failed refetch: blaming it here
     // would contradict the account card below, which says status is unavailable.
     render(
@@ -177,6 +177,24 @@ describe("AgeReviewContent: reported content", () => {
     );
     expect(screen.getByText(/not retrievable/i)).toBeInTheDocument();
     expect(screen.queryByText(/hidden by the account's suspension/i)).not.toBeInTheDocument();
+    // ...and the account-content card below must not assert it either, or the
+    // two halves of the pane contradict each other on the same screen.
+    expect(screen.queryByText(/content hidden by suspension/i)).not.toBeInTheDocument();
+  });
+
+  it("shows a foreign-authored post, but labelled and never as this account's", () => {
+    const foreign = ev("c".repeat(64));
+    render(
+      <AgeReviewContent
+        {...base}
+        hasReportId
+        reportedEvent={{ status: "target_foreign", event: foreign, authorPubkey: "e".repeat(64), banned: false }}
+      />,
+    );
+    // Evidence is preserved...
+    expect(screen.getByTestId("media-preview")).toBeInTheDocument();
+    // ...but attribution is explicit, so it cannot be read as this account's post.
+    expect(screen.getByText(/not by this case's subject/i)).toBeInTheDocument();
   });
 
   it("says the linked event is not a report, rather than that it is missing", () => {
