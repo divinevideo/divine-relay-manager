@@ -14,7 +14,6 @@ const base = {
   contentLoading: false,
   contentError: false,
   accountStatus: active,
-  accountStatusFailed: false,
 };
 
 describe('deriveContentVisibility', () => {
@@ -68,8 +67,8 @@ describe('deriveContentVisibility', () => {
     expect(r.state).toBe('error');
   });
 
-  it('does not rule out suspension when the status read failed', () => {
-    const r = deriveContentVisibility({ ...base, postCount: 0, accountStatus: statusUnavailable, accountStatusFailed: true });
+  it('does not rule out suspension when keycast could not answer', () => {
+    const r = deriveContentVisibility({ ...base, postCount: 0, accountStatus: statusUnavailable });
     expect(r.state).toBe('unknown');
     expect(r.state).not.toBe('absent');
     expect(r.message.toLowerCase()).toContain('cannot be ruled out');
@@ -87,12 +86,12 @@ describe('deriveContentVisibility', () => {
     expect(r.state).toBe('unknown');
   });
 
-  it('does not trust stale successful status data once the read has failed', () => {
-    // TanStack retains the last good `data` while isError is true, so a stale
-    // "active" must not be read as current truth.
-    const r = deriveContentVisibility({ ...base, postCount: 0, accountStatus: active, accountStatusFailed: true });
-    expect(r.state).toBe('unknown');
-    expect(r.state).not.toBe('absent');
+  it('keeps using the last definitive status after a failed refetch (data-first)', () => {
+    // Deliberate: deriveAccountVerdict renders immediately above this and is
+    // data-first on stale status. Diverging here would put two contradictory
+    // claims about the same account on one screen.
+    const r = deriveContentVisibility({ ...base, postCount: 0, accountStatus: suspended });
+    expect(r.state).toBe('suspended');
   });
 
   it('treats self-custody (not_found) as a definitive answer, not as unavailable', () => {

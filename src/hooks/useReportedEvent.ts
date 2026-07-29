@@ -28,15 +28,41 @@ export type ReportedEventResult =
    * The report points at an event authored by someone other than this case's
    * subject. The event is carried so the pane can still show it, labelled, since
    * hiding it would lose evidence a moderator may legitimately need (a report
-   * about a repost can name the original, which a third party authored).
+   * about a repost can name the original, which a third party authored). The
+   * author is read from the event itself, so the label and the byline cannot
+   * disagree.
    */
-  | { status: "target_foreign"; event: NostrEvent; authorPubkey: string; banned: boolean };
+  | { status: "target_foreign"; event: NostrEvent; banned: boolean };
 
 // Per hop, not shared: a single budget across both hops meant a healthy but slow
 // relay got roughly half the time the pre-two-hop lookup had.
 const HOP_TIMEOUT_MS = 5000;
 
 const REPORT_KIND = 1984;
+
+// A NIP-56 report names one target. The list is untrusted input and each
+// unresolved id costs a signed management request, so cap it.
+const MAX_TARGET_IDS = 4;
+
+/**
+ * Whether a management-API result is shaped well enough to render. The RPC
+ * result is unvalidated `unknown` at the type level, and ContentCard reads
+ * `pubkey`, `kind`, `created_at` and `content` directly, so a malformed
+ * response would otherwise crash the pane during render (an object in
+ * `content` throws "Objects are not valid as a React child").
+ */
+function isRenderableEvent(value: unknown): value is NostrEvent {
+  if (!value || typeof value !== "object") return false;
+  const e = value as Partial<NostrEvent>;
+  return (
+    isHex64(e.pubkey) &&
+    isHex64(e.id) &&
+    typeof e.kind === "number" &&
+    typeof e.created_at === "number" &&
+    typeof e.content === "string" &&
+    Array.isArray(e.tags)
+  );
+}
 
 export function useReportedEvent(reportId: string | undefined, casePubkey: string | undefined) {
   const { nostr } = useNostr();
@@ -82,33 +108,44 @@ export function useReportedEvent(reportId: string | undefined, casePubkey: strin
           : { status: "account_level" };
       }
       const subject = casePubkey?.toLowerCase();
+      // Deduped and capped. The tag list comes from an untrusted event: anyone
+      // can publish a report, and each unresolved id below costs a signed
+      // management request. A NIP-56 report names one target, so a handful is
+      // already generous, and the cap keeps a hostile report from turning one
+      // case-open into hundreds of RPCs.
+      const uniqueIds = [...new Set(targetIds)].slice(0, MAX_TARGET_IDS);
 
-      const events = await queryStrict(nostr, [{ ids: targetIds }], { signal, timeoutMs: HOP_TIMEOUT_MS });
-      const byId = new Map(events.map((e) => [e.id.toLowerCase(), e]));
-      // Walk in tag order, not relay arrival order, so the pane always names the
-      // same event as any other code that reads the first `e` tag.
-      const readable = targetIds.map((id) => byId.get(id)).filter((e): e is NostrEvent => !!e);
+      const events = await queryStrict(nostr, [{ ids: uniqueIds }], { signal, timeoutMs: HOP_TIMEOUT_MS });
+      // Keyed by id so selection can walk tag order rather than relay arrival
+      // order, and so the banned results below join the same ordering.
+      const resolved = new Map<string, { event: NostrEvent; banned: boolean }>();
+      for (const e of events) resolved.set(e.id.toLowerCase(), { event: e, banned: false });
 
       // NIP-56 does not require the reported event to be authored by the reported
       // pubkey, and case creation does not check it, so a mis-filed report can
-      // name a third party's post. Prefer one this account actually wrote.
-      const own = subject ? readable.find((e) => e.pubkey.toLowerCase() === subject) : readable[0];
-      if (own) return { status: "found", event: own, banned: false };
+      // name a third party's post. Prefer one this account actually wrote, taking
+      // the earliest such tag.
+      const pickSubjectOwned = () => {
+        for (const id of uniqueIds) {
+          const hit = resolved.get(id);
+          if (hit && (!subject || hit.event.pubkey.toLowerCase() === subject)) return hit;
+        }
+      };
+
+      const ownReadable = pickSubjectOwned();
+      if (ownReadable) return { status: "found", event: ownReadable.event, banned: ownReadable.banned };
 
       // Anything not publicly readable may be banned, which admins can still
       // fetch. This runs even when another tagged event was readable: skipping it
       // would silently disable the banned-content path this feature exists for.
-      let bannedForeign: NostrEvent | undefined;
-      for (const id of targetIds.filter((i) => !byId.has(i))) {
+      for (const id of uniqueIds.filter((i) => !resolved.has(i))) {
+        // callRelayRpc takes no signal and each call can run for 30s, so check
+        // between iterations: without this the loop keeps issuing signed requests
+        // after the moderator has moved to another case.
+        if (signal.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
         try {
           const banned = await callRelayRpc<NostrEvent>("getbannedevent", [id]);
-          // Shape-check before trusting it: a malformed response would otherwise
-          // fail the author comparison and then crash the render on .slice().
-          if (!banned || !isHex64(banned.pubkey)) continue;
-          if (!subject || banned.pubkey.toLowerCase() === subject) {
-            return { status: "found", event: banned, banned: true };
-          }
-          bannedForeign ??= banned;
+          if (isRenderableEvent(banned)) resolved.set(id, { event: banned, banned: true });
         } catch (e) {
           // Only "the relay says it is not banned" is a real negative. Transport,
           // auth, and unknown failures propagate, so the pane shows an error
@@ -117,20 +154,19 @@ export function useReportedEvent(reportId: string | undefined, casePubkey: strin
         }
       }
 
+      const own = pickSubjectOwned();
+      if (own) return { status: "found", event: own.event, banned: own.banned };
+
       // Nothing the subject authored. Show what the report does name, labelled,
       // rather than hiding it: a report about a repost legitimately names the
-      // original, and a moderator may need to see it.
-      const foreign = readable[0] ?? bannedForeign;
-      if (foreign) {
-        return {
-          status: "target_foreign",
-          event: foreign,
-          authorPubkey: foreign.pubkey,
-          banned: foreign === bannedForeign,
-        };
+      // original, and a moderator may need to see it. Tag order again, so a
+      // banned first tag is not passed over for a readable second one.
+      for (const id of uniqueIds) {
+        const hit = resolved.get(id);
+        if (hit) return { status: "target_foreign", event: hit.event, banned: hit.banned };
       }
 
-      return { status: "target_missing", targetEventId: targetIds[0] };
+      return { status: "target_missing", targetEventId: uniqueIds[0] };
     },
     enabled: !!reportId,
     staleTime: 60_000,

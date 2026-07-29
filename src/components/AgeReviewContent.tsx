@@ -22,7 +22,6 @@ interface AgeReviewContentProps {
   // The account read resolved but was truncated, so a zero count proves nothing.
   contentIncomplete?: boolean;
   accountStatus: AccountStatusResponse | undefined;
-  accountStatusFailed?: boolean;
   recentPosts: NostrEvent[];
   onRetry?: () => void;
   // Outcome of resolving what the report targets. Undefined while it has not run.
@@ -69,21 +68,16 @@ function Note({ children }: { children: ReactNode }) {
  * only knows per-event bans, so without this an enforced account reads as
  * "deleted", which is a different and much more final claim.
  */
-function reportedMissingReason(
-  accountStatus: AccountStatusResponse | undefined,
-  accountStatusFailed: boolean | undefined,
-): string {
-  // A status we no longer trust cannot explain anything. TanStack keeps the last
-  // successful data while isError is true, so without this the section could
-  // blame a suspension that has since been lifted. deriveContentVisibility
-  // applies the same gate, so the two halves of the pane agree.
-  if (!accountStatusFailed) {
-    if (accountStatus?.status === "suspended") {
-      return "The reported post is hidden by the account's suspension, so it cannot be shown here.";
-    }
-    if (accountStatus?.status === "banned") {
-      return "The reported post was removed with the account ban.";
-    }
+function reportedMissingReason(accountStatus: AccountStatusResponse | undefined): string {
+  // Data-first, matching deriveContentVisibility and deriveAccountVerdict: all
+  // three read the same status, so all three must reach the same conclusion
+  // about it. A cached success that a later refetch failed to renew is still the
+  // last thing keycast told us.
+  if (accountStatus?.status === "suspended") {
+    return "The reported post is hidden by the account's suspension, so it cannot be shown here.";
+  }
+  if (accountStatus?.status === "banned") {
+    return "The reported post was removed with the account ban.";
   }
   return "The reported post is not retrievable from the relay (deleted, aged out, or hidden).";
 }
@@ -94,7 +88,6 @@ export function AgeReviewContent({
   contentError,
   contentIncomplete,
   accountStatus,
-  accountStatusFailed,
   recentPosts,
   onRetry,
   reportedEvent,
@@ -109,20 +102,42 @@ export function AgeReviewContent({
     contentError,
     contentIncomplete,
     accountStatus,
-    accountStatusFailed,
   });
 
-  const foundReported = reportedEvent?.status === "found" ? reportedEvent : undefined;
-  const reportedId = foundReported?.event.id;
+  // The one resolved event, if any. Both the body and the badge derive from
+  // this, so a "removed (banned)" badge can never appear over a loading or error
+  // message, detached from the attribution warning that belongs with it.
+  // Resolved content also survives a background refetch rather than being
+  // replaced by "Loading…".
+  const shown =
+    reportedEvent?.status === "found" || reportedEvent?.status === "target_foreign"
+      ? reportedEvent
+      : undefined;
+  const reportedId = shown?.status === "found" ? shown.event.id : undefined;
   const otherPosts = recentPosts.filter((e) => e.id !== reportedId);
 
   // Built first so the heading is only rendered when something sits under it,
   // rather than leaving a bare "Reported content" label over empty space.
-  const reportedBody = !hasReportId ? null : foundReported ? (
-    // Keyed so the click-to-reveal state cannot carry over when the pane is
-    // reused for another case (MediaPreview keeps `showMedia` across an event
-    // swap, and revealing media is a deliberate gate here).
-    <ContentCard key={foundReported.event.id} event={foundReported.event} />
+  const reportedBody = !hasReportId ? null : shown ? (
+    shown.status === "target_foreign" ? (
+      // Shown, but never as this account's content. Hiding it would lose evidence
+      // (a report about a repost legitimately names the original), so the warning
+      // carries the attribution instead. Stated as a fact about the tag rather
+      // than an accusation: a client quirk is likelier than bad faith.
+      <div className="space-y-1.5">
+        <div className="rounded-md border border-amber-500/40 p-2.5 text-xs text-amber-700 dark:text-amber-400">
+          This post was authored by{" "}
+          <span className="font-mono">{shown.event.pubkey.slice(0, 12)}…</span>, not by this case's
+          subject. Do not judge this account by it without confirming the connection.
+        </div>
+        <ContentCard key={shown.event.id} event={shown.event} />
+      </div>
+    ) : (
+      // Keyed so the click-to-reveal state cannot carry over when the pane is
+      // reused for another case (MediaPreview keeps `showMedia` across an event
+      // swap, and revealing media is a deliberate gate here).
+      <ContentCard key={shown.event.id} event={shown.event} />
+    )
   ) : reportedEventLoading ? (
     <Note>Loading reported content…</Note>
   ) : reportedEventError ? (
@@ -142,21 +157,8 @@ export function AgeReviewContent({
     <Note>The linked event is not a report, so what it refers to cannot be determined.</Note>
   ) : reportedEvent?.status === "target_unreadable" ? (
     <Note>This report names a target we cannot read, so the reported post cannot be resolved.</Note>
-  ) : reportedEvent?.status === "target_foreign" ? (
-    // Shown, but never as this account's content. Hiding it would lose evidence
-    // (a report about a repost legitimately names the original), so the warning
-    // carries the attribution instead. Stated as a fact about the tag rather
-    // than an accusation: a client quirk is likelier than bad faith.
-    <div className="space-y-1.5">
-      <div className="rounded-md border border-amber-500/40 p-2.5 text-xs text-amber-700 dark:text-amber-400">
-        This post was authored by{" "}
-        <span className="font-mono">{reportedEvent.authorPubkey.slice(0, 12)}…</span>, not by this
-        case's subject. Do not judge this account by it without confirming the connection.
-      </div>
-      <ContentCard key={reportedEvent.event.id} event={reportedEvent.event} />
-    </div>
   ) : reportedEvent?.status === "target_missing" ? (
-    <Note>{reportedMissingReason(accountStatus, accountStatusFailed)}</Note>
+    <Note>{reportedMissingReason(accountStatus)}</Note>
   ) : null;
 
   return (
@@ -166,11 +168,9 @@ export function AgeReviewContent({
         <div className="space-y-1.5">
           <h4 className="flex items-center gap-2 text-sm font-medium">
             Reported content
-            {reportedEvent?.status === "found" || reportedEvent?.status === "target_foreign"
-              ? reportedEvent.banned && (
-                  <Badge variant="destructive" className="text-xs">removed (banned)</Badge>
-                )
-              : null}
+            {shown?.banned ? (
+              <Badge variant="destructive" className="text-xs">removed (banned)</Badge>
+            ) : null}
           </h4>
           {reportedBody}
         </div>

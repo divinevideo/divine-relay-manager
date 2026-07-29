@@ -30,6 +30,7 @@ function ev(id: string) {
   return { id, pubkey: "d4".repeat(32), created_at: 1751000000, kind: 34235, tags: [], content: "", sig: "" } as never;
 }
 const found = (event: ReturnType<typeof ev>): ReportedEventResult => ({ status: "found", event, banned: false });
+const foreign = (event: ReturnType<typeof ev>): ReportedEventResult => ({ status: "target_foreign", event, banned: false });
 
 const base = {
   postCount: 0,
@@ -56,6 +57,21 @@ describe("AgeReviewContent reveal state", () => {
     rerender(<AgeReviewContent {...base} reportedEvent={found(caseB)} />);
 
     expect(screen.getByText("b2".repeat(32))).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "reveal" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "revealed" })).not.toBeInTheDocument();
+  });
+
+  it("does not carry a revealed clip over on the foreign-author path either", () => {
+    // Mis-targeted content is still gated: it is shown for evidence, not exposed
+    // by default, and the gate must reset per case like the normal path.
+    const caseA = ev("a1".repeat(32));
+    const caseB = ev("b2".repeat(32));
+
+    const { rerender } = render(<AgeReviewContent {...base} reportedEvent={foreign(caseA)} />);
+    fireEvent.click(screen.getByRole("button", { name: "reveal" }));
+    expect(screen.getByRole("button", { name: "revealed" })).toBeInTheDocument();
+
+    rerender(<AgeReviewContent {...base} reportedEvent={foreign(caseB)} />);
     expect(screen.getByRole("button", { name: "reveal" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "revealed" })).not.toBeInTheDocument();
   });

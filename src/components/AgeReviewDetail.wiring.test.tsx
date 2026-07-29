@@ -86,12 +86,22 @@ describe('AgeReviewDetail feeds the content derivations', () => {
     expect(screen.queryByText(/no content found/i)).not.toBeInTheDocument();
   });
 
-  it('passes account-status failure through, so suspension is not ruled out unchecked', async () => {
-    // Stale successful data retained alongside isError: only the failed flag can
-    // reveal that this answer is no longer trustworthy.
-    accountStatus.mockReturnValue({ data: { success: true, status: 'active' }, isError: true, isLoading: false, refetch: vi.fn() });
+  it('does not rule out suspension when keycast could not answer', async () => {
+    accountStatus.mockReturnValue({ data: { success: false }, isError: true, isLoading: false, refetch: vi.fn() });
     show();
     await waitFor(() => expect(screen.getByText(/suspension cannot be ruled out/i)).toBeInTheDocument());
+  });
+
+  it('does not let the account panel and the content card contradict each other', async () => {
+    // Both read the same status. A stale suspended value retained after a failed
+    // refetch must not make one assert the suspension while the other says it
+    // cannot be ruled out, 20px apart on the same screen.
+    accountStatus.mockReturnValue({
+      data: { success: true, status: 'suspended' }, isError: true, isLoading: false, refetch: vi.fn(),
+    });
+    const { container } = show();
+    await waitFor(() => expect(screen.getByText(/hidden by suspension/i)).toBeInTheDocument());
+    expect(container.textContent).not.toMatch(/cannot be ruled out/i);
   });
 
   it('does not claim absence before account status has arrived', async () => {
@@ -143,7 +153,7 @@ describe('AgeReviewDetail feeds the content derivations', () => {
       tags: [], content: 'clip', sig: '',
     };
     reportedEvent.mockReturnValue({
-      data: { status: 'target_foreign', event: foreign, authorPubkey: 'e'.repeat(64), banned: false },
+      data: { status: 'target_foreign', event: foreign, banned: false },
       isFetching: false, isError: false, refetch: vi.fn(),
     });
     show();

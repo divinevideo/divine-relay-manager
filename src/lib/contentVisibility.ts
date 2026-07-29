@@ -22,12 +22,6 @@ export interface ContentVisibilityInput {
   contentIncomplete?: boolean;
   // Keycast account status — the verified source for suspended/banned.
   accountStatus: AccountStatusResponse | undefined;
-  // Whether the status read failed. Needed because TanStack keeps the last
-  // successful `data` while `isError` is true after a failed refetch, so without
-  // this a stale success would be treated as current and "not suspended" would be
-  // asserted from an answer we no longer trust. An in-flight read needs no flag:
-  // it has no `accountStatus` yet, which is already treated as not-known below.
-  accountStatusFailed?: boolean;
 }
 
 export interface ContentVisibilityResult {
@@ -42,7 +36,6 @@ export function deriveContentVisibility(input: ContentVisibilityInput): ContentV
     contentError,
     contentIncomplete,
     accountStatus,
-    accountStatusFailed,
   } = input;
 
   if (contentLoading && postCount === undefined) {
@@ -57,18 +50,17 @@ export function deriveContentVisibility(input: ContentVisibilityInput): ContentV
   // regardless of the read result); otherwise a failed read is surfaced as an
   // error (never claimed as "absent"); only a clean, complete, empty read against
   // a known-unsuspended account is "absent".
-  // Only attribute to enforcement while the status is still trusted. TanStack
-  // keeps the last successful data after a failed refetch, so without this gate
-  // a lifted suspension could keep being blamed, and this section would assert a
-  // suspension while the reported-content section above says the status is
-  // unavailable. Both halves of the pane must reach the same conclusion.
-  if (!accountStatusFailed) {
-    if (accountStatus?.status === 'suspended') {
-      return { state: 'suspended', message: 'Content hidden by suspension (reversible; visible again if cleared).' };
-    }
-    if (accountStatus?.status === 'banned') {
-      return { state: 'banned', message: 'Content removed (account banned).' };
-    }
+  // Data-first, matching deriveAccountVerdict, which renders directly above this
+  // and states the same enforcement. A cached success that a later refetch failed
+  // to renew is still the last thing keycast actually told us, and having one
+  // panel assert a suspension while the card beneath it says the status is
+  // unavailable is worse than either answer alone. The two must agree, so this
+  // follows the policy already shipped rather than inventing a second one.
+  if (accountStatus?.status === 'suspended') {
+    return { state: 'suspended', message: 'Content hidden by suspension (reversible; visible again if cleared).' };
+  }
+  if (accountStatus?.status === 'banned') {
+    return { state: 'banned', message: 'Content removed (account banned).' };
   }
   if (contentError || contentIncomplete) {
     return { state: 'error', message: "Couldn't load this account's content (relay error). Retry." };
@@ -82,9 +74,11 @@ export function deriveContentVisibility(input: ContentVisibilityInput): ContentV
   // account, so it is self-custody and no keycast suspension can be hiding
   // anything. The rest of this screen already treats it that way, and calling it
   // "unavailable" here would contradict the account-type indicator beside it.
-  const statusIsDefinitive =
+  // Data-first here too: a definitive answer stays definitive even if a later
+  // refetch failed. A read that has never succeeded leaves accountStatus
+  // undefined, which falls through to unknown without needing a separate flag.
+  const statusKnown =
     accountStatus?.success === true || accountStatus?.not_found === true;
-  const statusKnown = !accountStatusFailed && statusIsDefinitive;
   if (!statusKnown) {
     return {
       state: 'unknown',

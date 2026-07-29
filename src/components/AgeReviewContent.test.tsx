@@ -30,7 +30,6 @@ const base = {
   contentLoading: false,
   contentError: false,
   accountStatus: active,
-  accountStatusFailed: false,
   recentPosts: [] as never[],
 };
 
@@ -75,7 +74,7 @@ describe("AgeReviewContent: account content", () => {
   });
 
   it("does not rule out suspension when account status is unavailable", () => {
-    render(<AgeReviewContent {...base} accountStatus={statusUnavailable} accountStatusFailed />);
+    render(<AgeReviewContent {...base} accountStatus={statusUnavailable} />);
     expect(screen.getByText(/suspension cannot be ruled out/i)).toBeInTheDocument();
   });
 
@@ -84,13 +83,7 @@ describe("AgeReviewContent: account content", () => {
     expect(screen.getByText(/suspension cannot be ruled out/i)).toBeInTheDocument();
   });
 
-  it("does not trust stale status data after the status read failed", () => {
-    // TanStack keeps the last successful `data` while isError is true, so without
-    // the failed flag a stale "active" would be treated as current truth.
-    render(<AgeReviewContent {...base} accountStatus={active} accountStatusFailed />);
-    expect(screen.getByText(/suspension cannot be ruled out/i)).toBeInTheDocument();
-    expect(screen.queryByText(/not suspended/i)).not.toBeInTheDocument();
-  });
+
 
   it("treats a self-custody account as a definitive answer, not unavailable", () => {
     render(<AgeReviewContent {...base} accountStatus={{ success: false, not_found: true }} />);
@@ -108,6 +101,31 @@ describe("AgeReviewContent: reported content", () => {
 
   it("badges a reported event retrieved via getbannedevent as removed", () => {
     render(<AgeReviewContent {...base} hasReportId reportedEvent={found(ev("f".repeat(64)), true)} />);
+    expect(screen.getByText(/removed \(banned\)/i)).toBeInTheDocument();
+  });
+
+  it("badges a banned foreign post, and never shows the badge without the content", () => {
+    const e = ev("c".repeat(64));
+    const { rerender } = render(
+      <AgeReviewContent {...base} hasReportId reportedEvent={{ status: "target_foreign", event: e, banned: true }} />,
+    );
+    expect(screen.getByText(/removed \(banned\)/i)).toBeInTheDocument();
+    expect(screen.getByText(/not by this case's subject/i)).toBeInTheDocument();
+
+    // A background refetch must not strip the content and the warning while
+    // leaving the badge behind: "removed (banned)" over "Loading…" is a claim
+    // about nothing, and a banned post shown without its attribution warning is
+    // the misattribution this path exists to prevent.
+    rerender(
+      <AgeReviewContent
+        {...base}
+        hasReportId
+        reportedEvent={{ status: "target_foreign", event: e, banned: true }}
+        reportedEventLoading
+      />,
+    );
+    expect(screen.queryByText(/loading reported content/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/not by this case's subject/i)).toBeInTheDocument();
     expect(screen.getByText(/removed \(banned\)/i)).toBeInTheDocument();
   });
 
@@ -163,38 +181,19 @@ describe("AgeReviewContent: reported content", () => {
     expect(screen.queryByText(/deleted, aged out/i)).not.toBeInTheDocument();
   });
 
-  it("does not blame a suspension it can no longer verify, in either section", () => {
-    // Stale suspended status retained after a failed refetch: blaming it here
-    // would contradict the account card below, which says status is unavailable.
+  it("keeps the two sections agreeing about a stale suspended status", () => {
+    // Data-first, matching the account panel above: both attribute to the
+    // suspension rather than one asserting it and the other doubting it.
     render(
       <AgeReviewContent
         {...base}
         accountStatus={suspended}
-        accountStatusFailed
         hasReportId
         reportedEvent={{ status: "target_missing", targetEventId: "a".repeat(64) }}
       />,
     );
-    expect(screen.getByText(/not retrievable/i)).toBeInTheDocument();
-    expect(screen.queryByText(/hidden by the account's suspension/i)).not.toBeInTheDocument();
-    // ...and the account-content card below must not assert it either, or the
-    // two halves of the pane contradict each other on the same screen.
-    expect(screen.queryByText(/content hidden by suspension/i)).not.toBeInTheDocument();
-  });
-
-  it("shows a foreign-authored post, but labelled and never as this account's", () => {
-    const foreign = ev("c".repeat(64));
-    render(
-      <AgeReviewContent
-        {...base}
-        hasReportId
-        reportedEvent={{ status: "target_foreign", event: foreign, authorPubkey: "e".repeat(64), banned: false }}
-      />,
-    );
-    // Evidence is preserved...
-    expect(screen.getByTestId("media-preview")).toBeInTheDocument();
-    // ...but attribution is explicit, so it cannot be read as this account's post.
-    expect(screen.getByText(/not by this case's subject/i)).toBeInTheDocument();
+    expect(screen.getByText(/hidden by the account's suspension/i)).toBeInTheDocument();
+    expect(screen.queryByText(/cannot be ruled out/i)).not.toBeInTheDocument();
   });
 
   it("says the linked event is not a report, rather than that it is missing", () => {

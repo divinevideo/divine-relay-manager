@@ -120,7 +120,7 @@ describe('useReportedEvent', () => {
 
     const { result } = renderHook(() => useReportedEvent(REPORT_ID, CASE_PUBKEY), { wrapper });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(result.current.data).toEqual({ status: 'target_foreign', event: foreign, authorPubkey: stranger, banned: false });
+    expect(result.current.data).toEqual({ status: 'target_foreign', event: foreign, banned: false });
   });
 
   it('shows a target authored by the case subject', async () => {
@@ -161,7 +161,7 @@ describe('useReportedEvent', () => {
 
     const { result } = renderHook(() => useReportedEvent(REPORT_ID, CASE_PUBKEY), { wrapper });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(result.current.data).toMatchObject({ status: 'target_foreign', authorPubkey: stranger, banned: true });
+    expect(result.current.data).toMatchObject({ status: 'target_foreign', banned: true });
   });
 
   it('still tries the banned lookup when another tagged event was readable', async () => {
@@ -189,7 +189,7 @@ describe('useReportedEvent', () => {
 
     const { result } = renderHook(() => useReportedEvent(REPORT_ID, CASE_PUBKEY), { wrapper });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(result.current.data).toMatchObject({ status: 'target_foreign', authorPubkey: 'ee'.repeat(32) });
+    expect(result.current.data).toMatchObject({ status: 'target_foreign' });
   });
 
   it('ignores a malformed banned response instead of crashing on it', async () => {
@@ -242,6 +242,65 @@ describe('useReportedEvent', () => {
     const { result } = render();
     await waitFor(() => expect(result.current.isError).toBe(true));
     expect(result.current.data).toBeUndefined();
+  });
+
+  it('caps how many tagged ids it will chase, so a hostile report cannot fan out', async () => {
+    // Each unresolved id costs a signed management request. The tag list comes
+    // from an untrusted event, so it must be bounded.
+    const many = Array.from({ length: 40 }, (_, i) => ['e', i.toString(16).padStart(2, '0').repeat(32)]);
+    relayReturns([report(many)], []);
+    callRelayRpc.mockRejectedValue(new ApiError('Event not found or not banned', 400, 'Bad Request'));
+
+    const { result } = renderHook(() => useReportedEvent(REPORT_ID, CASE_PUBKEY), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(callRelayRpc.mock.calls.length).toBeLessThanOrEqual(4);
+  });
+
+  it('does not issue duplicate lookups for a repeated tag', async () => {
+    relayReturns([report([['e', TARGET_ID], ['e', TARGET_ID], ['e', TARGET_ID]])], []);
+    callRelayRpc.mockRejectedValue(new ApiError('Event not found or not banned', 400, 'Bad Request'));
+
+    const { result } = renderHook(() => useReportedEvent(REPORT_ID, CASE_PUBKEY), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(callRelayRpc).toHaveBeenCalledTimes(1);
+  });
+
+  it('names the earliest tag even when a later one is readable and the earlier is banned', async () => {
+    // Tag order must hold across the readable/banned boundary, or the pane names
+    // a different event than the one the first tag points at.
+    const FIRST = 'cc'.repeat(32);
+    const bannedFirst = { ...content(FIRST), pubkey: 'ee'.repeat(32) };
+    const readableSecond = { ...content(TARGET_ID), pubkey: 'ff'.repeat(32) };
+    relayReturns([report([['e', FIRST], ['e', TARGET_ID]])], [readableSecond]);
+    callRelayRpc.mockResolvedValueOnce(bannedFirst);
+
+    const { result } = renderHook(() => useReportedEvent(REPORT_ID, CASE_PUBKEY), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toEqual({ status: 'target_foreign', event: bannedFirst, banned: true });
+  });
+
+  it('keys the query by the case subject, so two cases cannot share a cached answer', async () => {
+    // One shared client, or each render gets its own cache and the key cannot
+    // be observed at all.
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const shared = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    const own = { ...content(TARGET_ID), pubkey: CASE_PUBKEY };
+    relayReturns([report([['e', TARGET_ID]])], [own]);
+
+    const first = renderHook(() => useReportedEvent(REPORT_ID, CASE_PUBKEY), { wrapper: shared });
+    await waitFor(() => expect(first.result.current.isSuccess).toBe(true));
+    const callsAfterFirst = req.mock.calls.length;
+
+    // Same report id, different subject: the author check differs, so the answer
+    // must be recomputed rather than served from the first case's entry.
+    relayReturns([report([['e', TARGET_ID]])], [own]);
+    const second = renderHook(() => useReportedEvent(REPORT_ID, 'ab'.repeat(32)), { wrapper: shared });
+    await waitFor(() => expect(second.result.current.isSuccess).toBe(true));
+
+    expect(req.mock.calls.length).toBeGreaterThan(callsAfterFirst);
+    expect(second.result.current.data).toMatchObject({ status: 'target_foreign' });
   });
 
   it('does not run without a report id', () => {

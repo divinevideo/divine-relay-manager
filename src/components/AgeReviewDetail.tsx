@@ -218,12 +218,17 @@ export function AgeReviewDetail({ caseData: c }: Props) {
 
   // Keycast-backed protected-minor status (verified_minor). Best-effort: a
   // keycast blip resolves to success:false, so we show status unavailable.
-  const { data: accountStatus, isError: accountStatusFailed, isLoading: accountStatusLoading, refetch: refetchAccountStatus } = useAccountStatus(c.pubkey);
-  const { data: userStats, isError: userStatsFailed, isFetching: userStatsFetching, refetch: refetchUserStats } = useUserStats(c.pubkey);
+  // Normalized once here: the case pubkey is stored verbatim from the report's
+  // `p` tag, which is untrusted, while relays and the worker both require
+  // lowercase hex. Passing it raw makes a mixed-case tag look like an account
+  // with no content and no available enforcement.
+  const subjectPubkey = c.pubkey.toLowerCase();
+  const { data: accountStatus, isError: accountStatusFailed, isLoading: accountStatusLoading, refetch: refetchAccountStatus } = useAccountStatus(subjectPubkey);
+  const { data: userStats, isError: userStatsFailed, isFetching: userStatsFetching, refetch: refetchUserStats } = useUserStats(subjectPubkey);
   // isFetching, not isLoading: isLoading stays false while an errored query
   // refetches, so a Retry click would leave the error copy on screen with no
   // sign anything happened.
-  const { data: reportedEvent, isFetching: reportedEventFetching, isError: reportedEventFailed, refetch: refetchReported } = useReportedEvent(c.report_id ?? undefined, c.pubkey);
+  const { data: reportedEvent, isFetching: reportedEventFetching, isError: reportedEventFailed, refetch: refetchReported } = useReportedEvent(c.report_id ?? undefined, subjectPubkey);
   // Content presence is trustworthy only once the relay read resolves without
   // error; a failed/in-flight read must not read as "no content" (would
   // under-state available enforcement).
@@ -300,7 +305,6 @@ export function AgeReviewDetail({ caseData: c }: Props) {
             contentError={userStatsFailed}
             contentIncomplete={userStats?.relayIncomplete}
             accountStatus={accountStatus}
-            accountStatusFailed={accountStatusFailed}
             recentPosts={userStats?.recentPosts ?? []}
             onRetry={() => { void refetchUserStats(); void refetchAccountStatus(); }}
             reportedEvent={reportedEvent}
