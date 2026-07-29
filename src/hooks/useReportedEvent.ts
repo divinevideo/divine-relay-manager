@@ -40,9 +40,10 @@ const HOP_TIMEOUT_MS = 5000;
 
 const REPORT_KIND = 1984;
 
-// A NIP-56 report names one target. The list is untrusted input and each
-// unresolved id costs a signed management request, so cap it.
-const MAX_TARGET_IDS = 4;
+// A NIP-56 report names one target, so this is far above any legitimate shape.
+// The list is untrusted input and each unresolved id costs a signed management
+// request, so it still has to be bounded.
+const MAX_TARGET_IDS = 16;
 
 /**
  * Whether a management-API result is shaped well enough to render. The RPC
@@ -145,7 +146,20 @@ export function useReportedEvent(reportId: string | undefined, casePubkey: strin
         if (signal.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
         try {
           const banned = await callRelayRpc<NostrEvent>("getbannedevent", [id]);
-          if (isRenderableEvent(banned)) resolved.set(id, { event: banned, banned: true });
+          // Must be the event we asked for: results are keyed by the requested
+          // id, so a mismatched response would otherwise be adopted under it.
+          if (isRenderableEvent(banned) && banned.id.toLowerCase() === id) {
+            resolved.set(id, { event: banned, banned: true });
+            // Return as soon as the subject's own post is in hand. Every earlier
+            // id was already ruled out, and this loop walks tag order, so this is
+            // the earliest subject-owned target: exactly what the post-loop pick
+            // would choose. Continuing would expose a settled answer to an
+            // unrelated later lookup failing, throwing away content we already
+            // have and showing the moderator a relay error instead.
+            if (!subject || banned.pubkey.toLowerCase() === subject) {
+              return { status: "found", event: banned, banned: true };
+            }
+          }
         } catch (e) {
           // Only "the relay says it is not banned" is a real negative. Transport,
           // auth, and unknown failures propagate, so the pane shows an error

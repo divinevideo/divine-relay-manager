@@ -22,6 +22,9 @@ interface AgeReviewContentProps {
   // The account read resolved but was truncated, so a zero count proves nothing.
   contentIncomplete?: boolean;
   accountStatus: AccountStatusResponse | undefined;
+  // Status refetch failed with cached data retained: marks the claim as possibly
+  // stale and offers a retry, without changing what the claim is.
+  accountStatusFailed?: boolean;
   recentPosts: NostrEvent[];
   onRetry?: () => void;
   // Outcome of resolving what the report targets. Undefined while it has not run.
@@ -68,16 +71,22 @@ function Note({ children }: { children: ReactNode }) {
  * only knows per-event bans, so without this an enforced account reads as
  * "deleted", which is a different and much more final claim.
  */
-function reportedMissingReason(accountStatus: AccountStatusResponse | undefined): string {
+function reportedMissingReason(
+  accountStatus: AccountStatusResponse | undefined,
+  accountStatusFailed: boolean | undefined,
+): string {
+  const stale = accountStatusFailed
+    ? " Status could not be refreshed just now, so this is the last answer keycast gave."
+    : "";
   // Data-first, matching deriveContentVisibility and deriveAccountVerdict: all
   // three read the same status, so all three must reach the same conclusion
   // about it. A cached success that a later refetch failed to renew is still the
   // last thing keycast told us.
   if (accountStatus?.status === "suspended") {
-    return "The reported post is hidden by the account's suspension, so it cannot be shown here.";
+    return `The reported post is hidden by the account's suspension, so it cannot be shown here.${stale}`;
   }
   if (accountStatus?.status === "banned") {
-    return "The reported post was removed with the account ban.";
+    return `The reported post was removed with the account ban.${stale}`;
   }
   return "The reported post is not retrievable from the relay (deleted, aged out, or hidden).";
 }
@@ -88,6 +97,7 @@ export function AgeReviewContent({
   contentError,
   contentIncomplete,
   accountStatus,
+  accountStatusFailed,
   recentPosts,
   onRetry,
   reportedEvent,
@@ -102,6 +112,7 @@ export function AgeReviewContent({
     contentError,
     contentIncomplete,
     accountStatus,
+    accountStatusFailed,
   });
 
   // The one resolved event, if any. Both the body and the badge derive from
@@ -158,7 +169,7 @@ export function AgeReviewContent({
   ) : reportedEvent?.status === "target_unreadable" ? (
     <Note>This report names a target we cannot read, so the reported post cannot be resolved.</Note>
   ) : reportedEvent?.status === "target_missing" ? (
-    <Note>{reportedMissingReason(accountStatus)}</Note>
+    <Note>{reportedMissingReason(accountStatus, accountStatusFailed)}</Note>
   ) : null;
 
   return (
@@ -197,9 +208,10 @@ export function AgeReviewContent({
           >
             <div className="flex items-center justify-between gap-2">
               <span>{vis.message}</span>
-              {/* `unknown` gets a retry too: it is reached when the account-status
-                  read failed, and refetching content alone can never clear it. */}
-              {(vis.state === "error" || vis.state === "unknown") && onRetry ? (
+              {/* Retry for anything the moderator can actually act on: a failed
+                  content read, an unknown status, or a claim resting on a status
+                  we could not refresh. onRetry refetches both queries. */}
+              {(vis.state === "error" || vis.state === "unknown" || accountStatusFailed) && onRetry ? (
                 <Button variant="outline" size="sm" onClick={onRetry}>
                   <RefreshCw className="mr-1 h-3 w-3" /> Retry
                 </Button>

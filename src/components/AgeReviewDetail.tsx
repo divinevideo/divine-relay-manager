@@ -305,6 +305,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
             contentError={userStatsFailed}
             contentIncomplete={userStats?.relayIncomplete}
             accountStatus={accountStatus}
+            accountStatusFailed={accountStatusFailed}
             recentPosts={userStats?.recentPosts ?? []}
             onRetry={() => { void refetchUserStats(); void refetchAccountStatus(); }}
             reportedEvent={reportedEvent}

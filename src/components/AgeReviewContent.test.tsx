@@ -181,19 +181,25 @@ describe("AgeReviewContent: reported content", () => {
     expect(screen.queryByText(/deleted, aged out/i)).not.toBeInTheDocument();
   });
 
-  it("keeps the two sections agreeing about a stale suspended status", () => {
-    // Data-first, matching the account panel above: both attribute to the
-    // suspension rather than one asserting it and the other doubting it.
+  it("marks both sections as stale, and offers a retry, when the status is unrefreshed", () => {
+    // Data-first keeps the two sections agreeing, but neither may present a
+    // claim resting on an unrefreshed status as though it were current, and the
+    // moderator needs a way to re-ask.
+    const onRetry = vi.fn();
     render(
       <AgeReviewContent
         {...base}
         accountStatus={suspended}
+        accountStatusFailed
+        onRetry={onRetry}
         hasReportId
         reportedEvent={{ status: "target_missing", targetEventId: "a".repeat(64) }}
       />,
     );
     expect(screen.getByText(/hidden by the account's suspension/i)).toBeInTheDocument();
-    expect(screen.queryByText(/cannot be ruled out/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/hidden by suspension/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/could not be refreshed/i).length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
   });
 
   it("says the linked event is not a report, rather than that it is missing", () => {

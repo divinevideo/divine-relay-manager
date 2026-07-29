@@ -45,7 +45,7 @@ function wrapper({ children }: { children: ReactNode }) {
 
 const render = () => renderHook(() => useReportedEvent(REPORT_ID, undefined), { wrapper });
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => vi.resetAllMocks());
 
 describe('useReportedEvent', () => {
   it('resolves the reported content through the report, not the report itself', async () => {
@@ -189,7 +189,8 @@ describe('useReportedEvent', () => {
 
     const { result } = renderHook(() => useReportedEvent(REPORT_ID, CASE_PUBKEY), { wrapper });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(result.current.data).toMatchObject({ status: 'target_foreign' });
+    // Identity, not just status: without it the ordering guard is unobservable.
+    expect(result.current.data).toEqual({ status: 'target_foreign', event: first, banned: false });
   });
 
   it('ignores a malformed banned response instead of crashing on it', async () => {
@@ -247,13 +248,13 @@ describe('useReportedEvent', () => {
   it('caps how many tagged ids it will chase, so a hostile report cannot fan out', async () => {
     // Each unresolved id costs a signed management request. The tag list comes
     // from an untrusted event, so it must be bounded.
-    const many = Array.from({ length: 40 }, (_, i) => ['e', i.toString(16).padStart(2, '0').repeat(32)]);
+    const many = Array.from({ length: 60 }, (_, i) => ['e', i.toString(16).padStart(2, '0').repeat(32)]);
     relayReturns([report(many)], []);
     callRelayRpc.mockRejectedValue(new ApiError('Event not found or not banned', 400, 'Bad Request'));
 
     const { result } = renderHook(() => useReportedEvent(REPORT_ID, CASE_PUBKEY), { wrapper });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(callRelayRpc.mock.calls.length).toBeLessThanOrEqual(4);
+    expect(callRelayRpc.mock.calls.length).toBeLessThanOrEqual(16);
   });
 
   it('does not issue duplicate lookups for a repeated tag', async () => {
@@ -301,6 +302,69 @@ describe('useReportedEvent', () => {
 
     expect(req.mock.calls.length).toBeGreaterThan(callsAfterFirst);
     expect(second.result.current.data).toMatchObject({ status: 'target_foreign' });
+  });
+
+  it('keeps a retrieved post when a later unrelated lookup fails', async () => {
+    // Regression: running the loop to completion exposed an already-settled
+    // answer to an unrelated tag's failure, so the moderator lost content we
+    // had in hand and saw a relay error instead.
+    const OTHER = 'cc'.repeat(32);
+    const ownBanned = { ...content(TARGET_ID), pubkey: CASE_PUBKEY };
+    relayReturns([report([['e', TARGET_ID], ['e', OTHER]])], []);
+    callRelayRpc
+      .mockResolvedValueOnce(ownBanned)
+      .mockRejectedValueOnce(new ApiError('Internal Server Error', 500, 'ISE'));
+
+    const { result } = renderHook(() => useReportedEvent(REPORT_ID, CASE_PUBKEY), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toEqual({ status: 'found', event: ownBanned, banned: true });
+    // The second lookup should never have been issued.
+    expect(callRelayRpc).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a banned response for a different event than the one requested', async () => {
+    relayReturns([report([['e', TARGET_ID]])], []);
+    callRelayRpc.mockResolvedValueOnce({ ...content('cc'.repeat(32)), pubkey: CASE_PUBKEY });
+
+    const { result } = renderHook(() => useReportedEvent(REPORT_ID, CASE_PUBKEY), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toEqual({ status: 'target_missing', targetEventId: TARGET_ID });
+  });
+
+  it('picks the earliest subject-owned tag, not the last', async () => {
+    const FIRST = 'cc'.repeat(32);
+    const firstOwn = { ...content(FIRST), pubkey: CASE_PUBKEY };
+    const secondOwn = { ...content(TARGET_ID), pubkey: CASE_PUBKEY };
+    relayReturns([report([['e', FIRST], ['e', TARGET_ID]])], [secondOwn, firstOwn]);
+
+    const { result } = renderHook(() => useReportedEvent(REPORT_ID, CASE_PUBKEY), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toEqual({ status: 'found', event: firstOwn, banned: false });
+  });
+
+  it('stops issuing lookups once the query has been cancelled', async () => {
+    // Unmounting cancels the query and aborts its signal. callRelayRpc takes no
+    // signal and can run for 30s, so without the in-loop check the remaining ids
+    // keep costing signed requests after the moderator has moved on.
+    const A = 'cc'.repeat(32);
+    const B = 'dd'.repeat(32);
+    relayReturns([report([['e', A], ['e', B]])], []);
+    let settleFirst: () => void = () => {};
+    callRelayRpc.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          settleFirst = () => reject(new ApiError('Event not found or not banned', 400, 'Bad Request'));
+        }),
+    );
+
+    const { unmount } = renderHook(() => useReportedEvent(REPORT_ID, CASE_PUBKEY), { wrapper });
+    await waitFor(() => expect(callRelayRpc).toHaveBeenCalledTimes(1));
+
+    unmount();
+    settleFirst();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(callRelayRpc).toHaveBeenCalledTimes(1);
   });
 
   it('does not run without a report id', () => {

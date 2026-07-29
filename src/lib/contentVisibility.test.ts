@@ -86,12 +86,21 @@ describe('deriveContentVisibility', () => {
     expect(r.state).toBe('unknown');
   });
 
-  it('keeps using the last definitive status after a failed refetch (data-first)', () => {
-    // Deliberate: deriveAccountVerdict renders immediately above this and is
-    // data-first on stale status. Diverging here would put two contradictory
-    // claims about the same account on one screen.
-    const r = deriveContentVisibility({ ...base, postCount: 0, accountStatus: suspended });
-    expect(r.state).toBe('suspended');
+  it('keeps the state but marks the claim when the status could not be refreshed', () => {
+    // Data-first on the STATE, so this and deriveAccountVerdict (rendered
+    // directly above) cannot contradict each other, while the moderator still
+    // learns the answer may be minutes old.
+    const fresh = deriveContentVisibility({ ...base, postCount: 0, accountStatus: suspended });
+    const stale = deriveContentVisibility({ ...base, postCount: 0, accountStatus: suspended, accountStatusFailed: true });
+    expect(stale.state).toBe(fresh.state);
+    expect(stale.message).not.toBe(fresh.message);
+    expect(stale.message.toLowerCase()).toContain('could not be refreshed');
+  });
+
+  it('marks a confirmed-absent claim as stale too, since it also rests on the status', () => {
+    const r = deriveContentVisibility({ ...base, postCount: 0, accountStatus: active, accountStatusFailed: true });
+    expect(r.state).toBe('absent');
+    expect(r.message.toLowerCase()).toContain('could not be refreshed');
   });
 
   it('treats self-custody (not_found) as a definitive answer, not as unavailable', () => {

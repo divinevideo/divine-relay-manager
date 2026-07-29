@@ -22,6 +22,13 @@ export interface ContentVisibilityInput {
   contentIncomplete?: boolean;
   // Keycast account status — the verified source for suspended/banned.
   accountStatus: AccountStatusResponse | undefined;
+  /**
+   * The status refetch failed while cached data was retained. This changes the
+   * *message* only, never the state: the state stays data-first so this card and
+   * the account panel above it cannot contradict each other, while the moderator
+   * still learns the answer may be minutes old rather than current.
+   */
+  accountStatusFailed?: boolean;
 }
 
 export interface ContentVisibilityResult {
@@ -36,6 +43,7 @@ export function deriveContentVisibility(input: ContentVisibilityInput): ContentV
     contentError,
     contentIncomplete,
     accountStatus,
+    accountStatusFailed,
   } = input;
 
   if (contentLoading && postCount === undefined) {
@@ -56,11 +64,17 @@ export function deriveContentVisibility(input: ContentVisibilityInput): ContentV
   // panel assert a suspension while the card beneath it says the status is
   // unavailable is worse than either answer alone. The two must agree, so this
   // follows the policy already shipped rather than inventing a second one.
+  // Appended, not substituted: the claim still stands on the last definitive
+  // answer, but an answer we could not refresh is marked as such.
+  const stale = accountStatusFailed
+    ? ' Status could not be refreshed just now, so this is the last answer keycast gave.'
+    : '';
+
   if (accountStatus?.status === 'suspended') {
-    return { state: 'suspended', message: 'Content hidden by suspension (reversible; visible again if cleared).' };
+    return { state: 'suspended', message: `Content hidden by suspension (reversible; visible again if cleared).${stale}` };
   }
   if (accountStatus?.status === 'banned') {
-    return { state: 'banned', message: 'Content removed (account banned).' };
+    return { state: 'banned', message: `Content removed (account banned).${stale}` };
   }
   if (contentError || contentIncomplete) {
     return { state: 'error', message: "Couldn't load this account's content (relay error). Retry." };
@@ -89,9 +103,9 @@ export function deriveContentVisibility(input: ContentVisibilityInput): ContentV
   if (accountStatus?.not_found === true) {
     return {
       state: 'absent',
-      message: 'No content found on the relay. This is a self-custody account, so it cannot be suspended in keycast.',
+      message: `No content found on the relay. This is a self-custody account, so it cannot be suspended in keycast.${stale}`,
     };
   }
 
-  return { state: 'absent', message: 'No content found on the relay, and the account is not suspended.' };
+  return { state: 'absent', message: `No content found on the relay, and the account is not suspended.${stale}` };
 }
