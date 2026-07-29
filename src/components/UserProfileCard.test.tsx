@@ -61,6 +61,9 @@ function stats(recentPosts: NostrEvent[]): UserStats {
     recentPosts,
     existingLabels: [],
     previousReports: [],
+    authoredContentIncomplete: false,
+    labelsIncomplete: false,
+    reportsIncomplete: false,
     relayIncomplete: false,
   };
 }

@@ -235,7 +235,10 @@ export function AgeReviewDetail({ caseData: c }: Props) {
   // A truncated relay read leaves userStats defined with isError false and a
   // zero count, which would read as "this account has no content" and render the
   // content-enforcement legs as n/a, under-stating what a moderator can do.
-  const contentPresenceKnown = userStats !== undefined && !userStatsFailed && !userStats.relayIncomplete;
+  const contentPresenceKnown =
+    userStats !== undefined &&
+    !userStatsFailed &&
+    !userStats.authoredContentIncomplete;
   const accountVerdict = deriveAccountVerdict({
     accountStatus,
     accountStatusError: accountStatusFailed,
@@ -303,7 +306,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
             postCount={userStats?.postCount}
             contentLoading={userStatsFetching}
             contentError={userStatsFailed}
-            contentIncomplete={userStats?.relayIncomplete}
+            contentIncomplete={userStats?.authoredContentIncomplete}
             accountStatus={accountStatus}
             accountStatusFailed={accountStatusFailed}
             recentPosts={userStats?.recentPosts ?? []}

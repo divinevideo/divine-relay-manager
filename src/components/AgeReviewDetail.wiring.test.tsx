@@ -69,7 +69,11 @@ const emptyStats = (over: Record<string, unknown> = {}) => ({
   data: {
     postCount: 0, reportCount: 0, labelCount: 0,
     recentPosts: [], existingLabels: [], previousReports: [],
-    relayIncomplete: false, ...over,
+    relayIncomplete: false,
+    authoredContentIncomplete: false,
+    labelsIncomplete: false,
+    reportsIncomplete: false,
+    ...over,
   },
   isError: false, isFetching: false, refetch: vi.fn(),
 });
@@ -89,11 +93,26 @@ beforeEach(() => {
 const show = () => render(<AgeReviewDetail caseData={makeCase()} />, { wrapper });
 
 describe('AgeReviewDetail feeds the content derivations', () => {
-  it('passes relayIncomplete through, so a truncated read is not shown as absence', async () => {
-    userStats.mockReturnValue(emptyStats({ relayIncomplete: true }));
+  it('passes authoredContentIncomplete through, so a truncated content read is not shown as absence', async () => {
+    userStats.mockReturnValue(emptyStats({
+      relayIncomplete: true,
+      authoredContentIncomplete: true,
+    }));
     show();
     await waitFor(() => expect(screen.getByText(/couldn't load/i)).toBeInTheDocument());
     expect(screen.queryByText(/no content found/i)).not.toBeInTheDocument();
+  });
+
+  it('does not treat an ancillary stats failure as an authored-content failure', async () => {
+    userStats.mockReturnValue(emptyStats({
+      relayIncomplete: true,
+      authoredContentIncomplete: false,
+      labelsIncomplete: true,
+    }));
+    const { container } = show();
+    await waitFor(() => expect(screen.getByText(/no content found/i)).toBeInTheDocument());
+    expect(screen.queryByText(/couldn't load this account's content/i)).not.toBeInTheDocument();
+    expect(container.textContent).toMatch(/n\/a/i);
   });
 
   it('does not rule out suspension when keycast could not answer', async () => {
@@ -123,7 +142,10 @@ describe('AgeReviewDetail feeds the content derivations', () => {
   it('keeps content enforcement available when the relay read was truncated', async () => {
     // A zero count from an unfinished read must not mark the content levers n/a:
     // that tells a moderator an action is unavailable when it may well apply.
-    userStats.mockReturnValue(emptyStats({ relayIncomplete: true }));
+    userStats.mockReturnValue(emptyStats({
+      relayIncomplete: true,
+      authoredContentIncomplete: true,
+    }));
     const { container } = show();
     await waitFor(() => expect(screen.getByText(/couldn't load/i)).toBeInTheDocument());
     expect(container.textContent).not.toMatch(/n\/a/i);

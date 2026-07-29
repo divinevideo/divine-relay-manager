@@ -47,9 +47,12 @@ describe('useUserStats', () => {
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data?.postCount).toBe(0);
     expect(result.current.data?.relayIncomplete).toBe(false);
+    expect(result.current.data?.authoredContentIncomplete).toBe(false);
+    expect(result.current.data?.labelsIncomplete).toBe(false);
+    expect(result.current.data?.reportsIncomplete).toBe(false);
   });
 
-  it('flags a read the relay closed, so a zero count is not read as absence', async () => {
+  it('flags an authored-content read the relay closed, so a zero count is not read as absence', async () => {
     // The whole point: without this flag, postCount 0 from a failed read is
     // indistinguishable from an account that has posted nothing.
     req.mockImplementation(closes());
@@ -57,9 +60,10 @@ describe('useUserStats', () => {
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data?.postCount).toBe(0);
     expect(result.current.data?.relayIncomplete).toBe(true);
+    expect(result.current.data?.authoredContentIncomplete).toBe(true);
   });
 
-  it('flags the result when only one of the three reads fails', async () => {
+  it('keeps a label-only failure separate from authored-content completeness', async () => {
     req
       .mockImplementationOnce(completes([post('a')]))
       .mockImplementationOnce(closes())
@@ -67,6 +71,22 @@ describe('useUserStats', () => {
     const { result } = show();
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data?.relayIncomplete).toBe(true);
+    expect(result.current.data?.authoredContentIncomplete).toBe(false);
+    expect(result.current.data?.labelsIncomplete).toBe(true);
+    expect(result.current.data?.reportsIncomplete).toBe(false);
+  });
+
+  it('keeps a report-only failure separate from authored-content completeness', async () => {
+    req
+      .mockImplementationOnce(completes([]))
+      .mockImplementationOnce(completes([]))
+      .mockImplementationOnce(closes());
+    const { result } = show();
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data?.relayIncomplete).toBe(true);
+    expect(result.current.data?.authoredContentIncomplete).toBe(false);
+    expect(result.current.data?.labelsIncomplete).toBe(false);
+    expect(result.current.data?.reportsIncomplete).toBe(true);
   });
 
   it('does not disguise a programming error as a relay problem', async () => {

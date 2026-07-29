@@ -15,13 +15,15 @@ export interface UserStats {
   recentPosts: NostrEvent[];
   existingLabels: NostrEvent[];
   previousReports: NostrEvent[];
+  /** True when the authored-content read did not complete. */
+  authoredContentIncomplete: boolean;
+  /** True when the labels-against-this-user read did not complete. */
+  labelsIncomplete: boolean;
+  /** True when the reports-against-this-user read did not complete. */
+  reportsIncomplete: boolean;
   /**
-   * True when the relay read was cut short by our timeout, so the counts below
-   * are a floor rather than a fact. `NPool.query` resolves with partial results
-   * instead of throwing, so without this a dead relay is indistinguishable from
-   * an empty account. Reported as a flag rather than a thrown error to keep this
-   * shared hook's behaviour unchanged for its other consumers; callers that
-   * state absence to a user (age review) must check it.
+   * Aggregate compatibility signal for consumers that treat these stats as a
+   * single unit. Read-specific consumers should use the flags above.
    */
   relayIncomplete: boolean;
 }
@@ -44,6 +46,9 @@ export function useUserStats(pubkey: string | undefined) {
           recentPosts: [],
           existingLabels: [],
           previousReports: [],
+          authoredContentIncomplete: false,
+          labelsIncomplete: false,
+          reportsIncomplete: false,
           relayIncomplete: false,
         };
       }
@@ -53,10 +58,12 @@ export function useUserStats(pubkey: string | undefined) {
       // hook has four other consumers whose behaviour is not in scope to change
       // here, so the failure is reported as a flag and only callers that state
       // absence to a user act on it. Promoting this to a real error is #210.
-      let incomplete = false;
       const read = async (filters: Parameters<typeof queryStrict>[1]) => {
         try {
-          return await queryStrict(nostr, filters, { signal, timeoutMs: 8000 });
+          return {
+            events: await queryStrict(nostr, filters, { signal, timeoutMs: 8000 }),
+            incomplete: false,
+          };
         } catch (e) {
           // Only classify as a relay problem what queryStrict actually raises for
           // one. A TypeError from our own code would otherwise be reported to the
@@ -64,13 +71,12 @@ export function useUserStats(pubkey: string | undefined) {
           const isReadFailure =
             e instanceof RelayReadError || (e instanceof DOMException && e.name === 'AbortError');
           if (!isReadFailure) throw e;
-          incomplete = true;
-          return [];
+          return { events: [], incomplete: true };
         }
       };
 
       // Fetch in parallel
-      const [recentPosts, existingLabels, previousReports] = await Promise.all([
+      const [authoredContentRead, labelsRead, reportsRead] = await Promise.all([
         // User's recent authored content — RECENT_CONTENT_KINDS is shared with
         // BannedUserCard so the two review surfaces stay aligned (#159).
         read([{ kinds: [...RECENT_CONTENT_KINDS], authors: [pubkey], limit: 20 }]),
@@ -79,6 +85,9 @@ export function useUserStats(pubkey: string | undefined) {
         // Reports against this user
         read([{ kinds: [1984], '#p': [pubkey], limit: 50 }]),
       ]);
+      const recentPosts = authoredContentRead.events;
+      const existingLabels = labelsRead.events;
+      const previousReports = reportsRead.events;
 
       return {
         postCount: recentPosts.length, // Recent authored events of any queried kind (posts, comments, reposts) — not a total
@@ -87,9 +96,13 @@ export function useUserStats(pubkey: string | undefined) {
         recentPosts: recentPosts.sort((a, b) => b.created_at - a.created_at),
         existingLabels,
         previousReports,
-        // At least one read did not finish, so these counts are a floor, not a
-        // fact, and a zero here proves nothing about the account.
-        relayIncomplete: incomplete,
+        authoredContentIncomplete: authoredContentRead.incomplete,
+        labelsIncomplete: labelsRead.incomplete,
+        reportsIncomplete: reportsRead.incomplete,
+        relayIncomplete:
+          authoredContentRead.incomplete ||
+          labelsRead.incomplete ||
+          reportsRead.incomplete,
       };
     },
     enabled: !!pubkey,
