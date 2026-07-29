@@ -36,9 +36,10 @@ describe('queryStrict', () => {
   it('throws when the relay CLOSES the subscription', async () => {
     // Funnelcake sends CLOSED with "could not complete query" when its query
     // layer degrades. NPool.query would swallow this and return [], which is
-    // indistinguishable from an empty account.
+    // indistinguishable from an empty account. Assert the message, not just the
+    // type, or turning this throw into a break still passes via the EOSE check.
     const relay = fakeRelay([['CLOSED', 'sub', 'error: could not complete query']]);
-    await expect(queryStrict(relay, [{ ids: ['a'] }], opts())).rejects.toBeInstanceOf(RelayReadError);
+    await expect(queryStrict(relay, [{ ids: ['a'] }], opts())).rejects.toThrow(/closed the subscription/i);
   });
 
   it('throws when the stream ends without EOSE', async () => {
@@ -76,6 +77,20 @@ describe('isDefinitiveRpcNegative', () => {
 
   it('rejects an unrecognised relay-side failure rather than assuming a negative', () => {
     expect(isDefinitiveRpcNegative(new ApiError('database unavailable', 400, 'Bad Request'))).toBe(false);
+  });
+
+  it('rejects a management-endpoint 404, which the worker also delivers as a 400', () => {
+    // callNip86Rpc renders any non-ok relay response as "Relay error: <status>
+    // <text>" and handleRelayRpc returns every failure as HTTP 400. A loose
+    // match would read this as "not banned" and report a deletion during an
+    // outage, which is the failure this whole module exists to prevent.
+    expect(isDefinitiveRpcNegative(new ApiError('Relay error: 404 Not Found', 400, 'Bad Request'))).toBe(false);
+  });
+
+  it('rejects the relay sentence when it arrives with a non-400 status', () => {
+    // Exercises the status gate independently of the message, so neither check
+    // can be removed without a test noticing.
+    expect(isDefinitiveRpcNegative(new ApiError('Event not found or not banned', 500, 'ISE'))).toBe(false);
   });
 
   it('rejects non-ApiError failures (network, abort)', () => {

@@ -149,7 +149,51 @@ describe('useReportedEvent', () => {
 
     const { result } = render();
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(result.current.data).toEqual({ status: 'report_missing' });
+    // Distinct from report_missing: the event IS on the relay, it just is not a report.
+    expect(result.current.data).toEqual({ status: 'not_a_report' });
+  });
+
+  it('refuses to show a banned target authored by someone else', async () => {
+    // The banned path needs the same author check as the plain relay path.
+    const stranger = 'ee'.repeat(32);
+    relayReturns([report([['e', TARGET_ID]])], []);
+    callRelayRpc.mockResolvedValueOnce({ ...content(TARGET_ID), pubkey: stranger });
+
+    const { result } = renderHook(() => useReportedEvent(REPORT_ID, CASE_PUBKEY), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toEqual({ status: 'target_foreign', targetEventId: TARGET_ID, authorPubkey: stranger });
+  });
+
+  it('prefers a tagged event this account authored over another tagged event', async () => {
+    // A threaded reply tags its root too, so the first e tag is not always the
+    // reported post. Declaring it foreign would hide real evidence.
+    const root = { ...content('ff'.repeat(32)), pubkey: 'ee'.repeat(32) };
+    const own = { ...content(TARGET_ID), pubkey: CASE_PUBKEY };
+    relayReturns([report([['e', 'ff'.repeat(32)], ['e', TARGET_ID]])], [root, own]);
+
+    const { result } = renderHook(() => useReportedEvent(REPORT_ID, CASE_PUBKEY), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toEqual({ status: 'found', event: own, banned: false });
+  });
+
+  it('does not claim an account-level report when the e tag is unparseable', async () => {
+    relayReturns([report([['e', 'not-hex']])]);
+
+    const { result } = render();
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toEqual({ status: 'target_unreadable' });
+  });
+
+  it('does not read a management-endpoint 404 as "not banned"', async () => {
+    // The worker collapses every RPC failure to HTTP 400 and renders a relay
+    // transport failure as "Relay error: 404 Not Found". Treating that as a
+    // negative would tell a moderator the post was deleted during an outage.
+    relayReturns([report([['e', TARGET_ID]])], []);
+    callRelayRpc.mockRejectedValueOnce(new ApiError('Relay error: 404 Not Found', 400, 'Bad Request'));
+
+    const { result } = render();
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(result.current.data).toBeUndefined();
   });
 
   it('does not run without a report id', () => {

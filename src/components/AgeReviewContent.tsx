@@ -69,12 +69,21 @@ function Note({ children }: { children: ReactNode }) {
  * only knows per-event bans, so without this an enforced account reads as
  * "deleted", which is a different and much more final claim.
  */
-function reportedMissingReason(accountStatus: AccountStatusResponse | undefined): string {
-  if (accountStatus?.status === "suspended") {
-    return "The reported post is hidden by the account's suspension, so it cannot be shown here.";
-  }
-  if (accountStatus?.status === "banned") {
-    return "The reported post was removed with the account ban.";
+function reportedMissingReason(
+  accountStatus: AccountStatusResponse | undefined,
+  accountStatusFailed: boolean | undefined,
+): string {
+  // A status we no longer trust cannot explain anything. TanStack keeps the last
+  // successful data while isError is true, so without this the section could
+  // blame a suspension that has since been lifted, while the card directly below
+  // correctly says the status is unavailable.
+  if (!accountStatusFailed) {
+    if (accountStatus?.status === "suspended") {
+      return "The reported post is hidden by the account's suspension, so it cannot be shown here.";
+    }
+    if (accountStatus?.status === "banned") {
+      return "The reported post was removed with the account ban.";
+    }
   }
   return "The reported post is not retrievable from the relay (deleted, aged out, or hidden).";
 }
@@ -129,16 +138,21 @@ export function AgeReviewContent({
     <Note>This report was filed against the account rather than a specific post, so there is no single item to show.</Note>
   ) : reportedEvent?.status === "report_missing" ? (
     <Note>The report event is no longer on the relay, so its target cannot be resolved.</Note>
+  ) : reportedEvent?.status === "not_a_report" ? (
+    <Note>The linked event is not a report, so what it refers to cannot be determined.</Note>
+  ) : reportedEvent?.status === "target_unreadable" ? (
+    <Note>This report names a target we cannot read, so the reported post cannot be resolved.</Note>
   ) : reportedEvent?.status === "target_foreign" ? (
     // Deliberately not rendered: judging this account by another account's post
-    // is how the wrong person gets enforced against.
+    // is how the wrong person gets enforced against. Stated as a fact about the
+    // tag, not an accusation, since a client quirk is likelier than bad faith.
     <div className="rounded-md border border-amber-500/40 p-2.5 text-xs text-amber-700 dark:text-amber-400">
       This report points at an event authored by a different account
       (<span className="font-mono">{reportedEvent.authorPubkey.slice(0, 12)}…</span>),
-      not by this case's subject, so it is not shown here. Treat the report itself as suspect.
+      not by this case's subject, so it is not shown here as this account's content.
     </div>
   ) : reportedEvent?.status === "target_missing" ? (
-    <Note>{reportedMissingReason(accountStatus)}</Note>
+    <Note>{reportedMissingReason(accountStatus, accountStatusFailed)}</Note>
   ) : null;
 
   return (

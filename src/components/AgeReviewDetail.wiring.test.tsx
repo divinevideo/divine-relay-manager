@@ -18,7 +18,7 @@ const reportedEvent = vi.fn();
 
 vi.mock('@/hooks/useUserStats', () => ({ useUserStats: () => userStats() }));
 vi.mock('@/hooks/useAccountStatus', () => ({ useAccountStatus: () => accountStatus() }));
-vi.mock('@/hooks/useReportedEvent', () => ({ useReportedEvent: () => reportedEvent() }));
+vi.mock('@/hooks/useReportedEvent', () => ({ useReportedEvent: (...args: unknown[]) => reportedEvent(...args) }));
 vi.mock('@/components/MediaPreview', () => ({ MediaPreview: () => <div data-testid="media-preview" /> }));
 vi.mock('@/hooks/useAuthor', () => ({ useAuthor: () => ({ data: undefined, isLoading: false }) }));
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast: vi.fn() }) }));
@@ -127,6 +127,14 @@ describe('AgeReviewDetail feeds the content derivations', () => {
     reportedEvent.mockReturnValue({ data: undefined, isFetching: true, isError: false, refetch: vi.fn() });
     show();
     await waitFor(() => expect(screen.getByText(/loading reported content/i)).toBeInTheDocument());
+  });
+
+  it('passes the case subject to the lookup, so the author check can run at all', async () => {
+    // The guard is `if (casePubkey && ...)`, so dropping this argument silently
+    // disables author verification with no type error and no visible change.
+    show();
+    await waitFor(() => expect(reportedEvent).toHaveBeenCalled());
+    expect(reportedEvent).toHaveBeenCalledWith('report-1', PUBKEY);
   });
 
   it('surfaces a foreign-authored reported event rather than rendering it', async () => {

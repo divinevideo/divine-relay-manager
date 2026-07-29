@@ -163,6 +163,34 @@ describe("AgeReviewContent: reported content", () => {
     expect(screen.queryByText(/deleted, aged out/i)).not.toBeInTheDocument();
   });
 
+  it("does not blame a suspension it can no longer verify", () => {
+    // Stale suspended status retained after a failed refetch: blaming it here
+    // would contradict the account card below, which says status is unavailable.
+    render(
+      <AgeReviewContent
+        {...base}
+        accountStatus={suspended}
+        accountStatusFailed
+        hasReportId
+        reportedEvent={{ status: "target_missing", targetEventId: "a".repeat(64) }}
+      />,
+    );
+    expect(screen.getByText(/not retrievable/i)).toBeInTheDocument();
+    expect(screen.queryByText(/hidden by the account's suspension/i)).not.toBeInTheDocument();
+  });
+
+  it("says the linked event is not a report, rather than that it is missing", () => {
+    render(<AgeReviewContent {...base} hasReportId reportedEvent={{ status: "not_a_report" }} />);
+    expect(screen.getByText(/not a report/i)).toBeInTheDocument();
+    expect(screen.queryByText(/no longer on the relay/i)).not.toBeInTheDocument();
+  });
+
+  it("does not call an unparseable target an account-level report", () => {
+    render(<AgeReviewContent {...base} hasReportId reportedEvent={{ status: "target_unreadable" }} />);
+    expect(screen.getByText(/target we cannot read/i)).toBeInTheDocument();
+    expect(screen.queryByText(/filed against the account/i)).not.toBeInTheDocument();
+  });
+
   it("attributes a missing target to the ban when the account is banned", () => {
     render(
       <AgeReviewContent

@@ -55,8 +55,10 @@ export async function queryStrict(
     }
   }
 
-  // No EOSE: timed out, aborted, or no relay was routed to at all. Whatever the
-  // cause, we did not establish what the relay holds, so we must not answer.
+  // No EOSE and no CLOSED. In practice this is the no-route case: an aborted or
+  // timed-out read does not fall through here, it throws AbortError out of the
+  // iterator (NPool's Machina rejects on abort). Either way we never established
+  // what the relay holds, so we must not answer.
   if (!complete) {
     throw new RelayReadError('Relay read did not complete');
   }
@@ -65,20 +67,33 @@ export async function queryStrict(
 }
 
 /**
+ * The relay's verbatim answer when an event exists but is not banned. Source:
+ * funnelcake `crates/clickhouse/src/management.rs` ("Event not found or not
+ * banned"). Anchored deliberately, see below.
+ */
+const RELAY_NOT_BANNED = /^event not found or not banned$/i;
+
+/**
  * True when a `callRelayRpc` rejection is the relay definitively answering "no"
  * rather than us failing to ask.
  *
- * `getbannedevent` for an event that is not banned answers
- * `{"success":false,"error":"Event not found or not banned"}`, which the worker
- * returns as **HTTP 400** (verified end to end against production, including the
- * status code). So a 400 means the relay was reached and refused; the message
- * distinguishes this refusal from some other relay-side failure. A 401/403/5xx,
- * or any non-ApiError, means we never got an answer, and reporting that as
- * "not banned" would let a moderator read an outage as a deletion.
+ * The HTTP status cannot be used to tell those apart. The worker collapses
+ * *every* management-RPC failure into HTTP 400 (`handleRelayRpc`), and turns any
+ * non-ok response from the relay into the prose `Relay error: <status> <text>`
+ * (`callNip86Rpc`). So a misrouted management URL arrives here as
+ * `ApiError("Relay error: 404 Not Found", 400)`: a 400 whose message contains
+ * "not found", indistinguishable by shape from a real negative.
+ *
+ * Hence an exact match on the relay's own sentence and nothing else. The failure
+ * mode matters: if the relay ever rewords it, this returns false, the error
+ * propagates, and the moderator sees "couldn't load" instead of "not
+ * retrievable". That is the safe direction. Loose matching fails the other way,
+ * telling a moderator content was deleted when the relay was simply unreachable.
  */
 export function isDefinitiveRpcNegative(error: unknown): boolean {
   if (!(error instanceof ApiError)) return false;
-  const reachedRelay = error.statusCode === undefined || error.statusCode === 400;
-  if (!reachedRelay) return false;
-  return /not found|not banned/i.test(error.message);
+  // Belt and braces: the relay's negative is delivered as a 400 (or, for a
+  // non-HTTP RPC failure, with no status at all). Anything else is not it.
+  if (error.statusCode !== undefined && error.statusCode !== 400) return false;
+  return RELAY_NOT_BANNED.test(error.message.trim());
 }

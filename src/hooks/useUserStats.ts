@@ -4,7 +4,7 @@
 import { useNostr } from "@nostrify/react";
 import { useQuery } from "@tanstack/react-query";
 import { useAppContext } from "@/hooks/useAppContext";
-import { queryStrict } from "@/lib/relayRead";
+import { queryStrict, RelayReadError } from "@/lib/relayRead";
 import { RECENT_CONTENT_KINDS } from "@/lib/constants";
 import type { NostrEvent } from "@nostrify/nostrify";
 
@@ -57,7 +57,13 @@ export function useUserStats(pubkey: string | undefined) {
       const read = async (filters: Parameters<typeof queryStrict>[1]) => {
         try {
           return await queryStrict(nostr, filters, { signal, timeoutMs: 8000 });
-        } catch {
+        } catch (e) {
+          // Only classify as a relay problem what queryStrict actually raises for
+          // one. A TypeError from our own code would otherwise be reported to the
+          // moderator as "relay error, retry" forever, with nothing logged.
+          const isReadFailure =
+            e instanceof RelayReadError || (e instanceof DOMException && e.name === 'AbortError');
+          if (!isReadFailure) throw e;
           incomplete = true;
           return [];
         }
