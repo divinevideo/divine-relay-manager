@@ -280,7 +280,7 @@ These must stay in sync. The frontend environment selector reads VITE_ vars to d
 - Read the file(s) you're modifying. Don't assume current state.
 - Check `wrangler.staging.toml` and `wrangler.prod.toml` for env vars and bindings.
 - Run `npx tsc -p tsconfig.app.json --noEmit` after edits (bare `tsc --noEmit` is a false green — see Build/Test/Validation).
-- If touching D1 schema or a D1-backed route: run `cd worker && npm run test:d1`. The default `npx vitest run` excludes `*.d1.test.ts`, so a change whose tests all live there passes without running any of them (a second false green, see Build/Test/Validation).
+- If touching any worker behavior that reads or writes D1 — including schema, migrations, or a D1-backed route — run `cd worker && npm run test:d1`. The default `npx vitest run` excludes `*.d1.test.ts`, so a change whose tests all live there passes without running any of them (a second false green, see Build/Test/Validation).
 - If touching `handleModerate()`: trace ALL side effects. Verify none are duplicated and none are fire-and-forget.
 - If touching media URLs or external service calls: verify domains against wrangler config env vars.
 
