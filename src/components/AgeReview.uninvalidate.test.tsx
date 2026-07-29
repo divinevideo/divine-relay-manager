@@ -15,9 +15,10 @@ const updateAgeReviewCase = vi.fn();
 const getAgeReviewConfig = vi.fn();
 const getAccountStatus = vi.fn();
 
+vi.mock('@/hooks/useReportedEvent', () => ({ useReportedEvent: () => ({ data: undefined, isFetching: false, isError: false, refetch: () => Promise.resolve() }) }));
 vi.mock('@/hooks/useUserStats', () => ({
   useUserStats: () => ({
-    data: { postCount: 0, reportCount: 0, labelCount: 0, recentPosts: [], existingLabels: [], previousReports: [] },
+    data: { postCount: 0, reportCount: 0, labelCount: 0, recentPosts: [], existingLabels: [], previousReports: [], relayIncomplete: false },
     isError: false,
   }),
 }));

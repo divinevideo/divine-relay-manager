@@ -9,9 +9,14 @@ import { ApiError } from '@/lib/adminApi';
 // NostrProvider). This unit test isolates the case-action logic, so stub it with
 // a resolved, empty read (not in-flight) so the indicator's content-presence
 // note doesn't bleed into unrelated assertions.
+// AgeReviewContent reads the reported event via useReportedEvent (which needs a
+// NostrProvider). This unit test isolates the case-action logic, so stub it.
+vi.mock('@/hooks/useReportedEvent', () => ({
+  useReportedEvent: () => ({ data: undefined, isFetching: false, isError: false, refetch: () => Promise.resolve() }),
+}));
 vi.mock('@/hooks/useUserStats', () => ({
   useUserStats: () => ({
-    data: { postCount: 0, reportCount: 0, labelCount: 0, recentPosts: [], existingLabels: [], previousReports: [] },
+    data: { postCount: 0, reportCount: 0, labelCount: 0, recentPosts: [], existingLabels: [], previousReports: [], relayIncomplete: false },
     isError: false,
   }),
 }));

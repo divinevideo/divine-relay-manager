@@ -4,6 +4,8 @@ import { useAdminApi } from "@/hooks/useAdminApi";
 import { useAccountStatus } from "@/hooks/useAccountStatus";
 import { useUserStats } from "@/hooks/useUserStats";
 import { AccountTypeIndicator } from "@/components/AccountTypeIndicator";
+import { AgeReviewContent } from "@/components/AgeReviewContent";
+import { useReportedEvent } from "@/hooks/useReportedEvent";
 import { ApiError } from "@/lib/adminApi";
 import { reconcileCaseIntoList, type AgeReviewListParams } from "@/lib/ageReviewCache";
 import { deriveAccountVerdict } from "@/lib/accountVerdict";
@@ -216,12 +218,27 @@ export function AgeReviewDetail({ caseData: c }: Props) {
 
   // Keycast-backed protected-minor status (verified_minor). Best-effort: a
   // keycast blip resolves to success:false, so we show status unavailable.
-  const { data: accountStatus, isError: accountStatusFailed, isLoading: accountStatusLoading } = useAccountStatus(c.pubkey);
-  const { data: userStats, isError: userStatsFailed } = useUserStats(c.pubkey);
+  // Normalized once here: the case pubkey is stored verbatim from the report's
+  // `p` tag, which is untrusted, while relays and the worker both require
+  // lowercase hex. Passing it raw makes a mixed-case tag look like an account
+  // with no content and no available enforcement.
+  const subjectPubkey = c.pubkey.toLowerCase();
+  const { data: accountStatus, isError: accountStatusFailed, isLoading: accountStatusLoading, refetch: refetchAccountStatus } = useAccountStatus(subjectPubkey);
+  const { data: userStats, isError: userStatsFailed, isFetching: userStatsFetching, refetch: refetchUserStats } = useUserStats(subjectPubkey);
+  // isFetching, not isLoading: isLoading stays false while an errored query
+  // refetches, so a Retry click would leave the error copy on screen with no
+  // sign anything happened.
+  const { data: reportedEvent, isFetching: reportedEventFetching, isError: reportedEventFailed, refetch: refetchReported } = useReportedEvent(c.report_id ?? undefined, subjectPubkey);
   // Content presence is trustworthy only once the relay read resolves without
   // error; a failed/in-flight read must not read as "no content" (would
   // under-state available enforcement).
-  const contentPresenceKnown = userStats !== undefined && !userStatsFailed;
+  // A truncated relay read leaves userStats defined with isError false and a
+  // zero count, which would read as "this account has no content" and render the
+  // content-enforcement legs as n/a, under-stating what a moderator can do.
+  const contentPresenceKnown =
+    userStats !== undefined &&
+    !userStatsFailed &&
+    !userStats.authoredContentIncomplete;
   const accountVerdict = deriveAccountVerdict({
     accountStatus,
     accountStatusError: accountStatusFailed,
@@ -278,11 +295,27 @@ export function AgeReviewDetail({ caseData: c }: Props) {
 
           <AccountTypeIndicator
             accountStatus={accountStatus}
-            accountStatusError={accountStatusFailed}
             accountStatusLoading={accountStatusLoading}
+            accountStatusError={accountStatusFailed}
             postCount={userStats?.postCount}
             contentPresenceKnown={contentPresenceKnown}
             ticketLinked={!!c.zendesk_ticket_id}
+          />
+
+          <AgeReviewContent
+            postCount={userStats?.postCount}
+            contentLoading={userStatsFetching}
+            contentError={userStatsFailed}
+            contentIncomplete={userStats?.authoredContentIncomplete}
+            accountStatus={accountStatus}
+            accountStatusFailed={accountStatusFailed}
+            recentPosts={userStats?.recentPosts ?? []}
+            onRetry={() => { void refetchUserStats(); void refetchAccountStatus(); }}
+            reportedEvent={reportedEvent}
+            reportedEventLoading={reportedEventFetching}
+            reportedEventError={reportedEventFailed}
+            onRetryReported={() => { void refetchReported(); }}
+            hasReportId={!!c.report_id}
           />
 
           {/* Protections that apply to an approved protected minor (#143).
@@ -631,7 +664,11 @@ export function AgeReviewDetail({ caseData: c }: Props) {
           <div className="border-t pt-4 mt-4">
             <p className="text-xs text-muted-foreground mb-2">Auto-delete is disabled. You can manually delete content:</p>
             <UserActions
-              pubkey={c.pubkey}
+              // Normalized, like the reads above: the worker forwards this
+              // verbatim to the relay, which keys on lowercase hex, so a
+              // mixed-case `p` tag would enforce against nothing while
+              // reporting success.
+              pubkey={subjectPubkey}
               context="age-review"
               onActionComplete={() => queryClient.invalidateQueries({ queryKey: ['age-review-cases'] })}
             />
