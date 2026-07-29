@@ -661,7 +661,11 @@ export function AgeReviewDetail({ caseData: c }: Props) {
           <div className="border-t pt-4 mt-4">
             <p className="text-xs text-muted-foreground mb-2">Auto-delete is disabled. You can manually delete content:</p>
             <UserActions
-              pubkey={c.pubkey}
+              // Normalized, like the reads above: the worker forwards this
+              // verbatim to the relay, which keys on lowercase hex, so a
+              // mixed-case `p` tag would enforce against nothing while
+              // reporting success.
+              pubkey={subjectPubkey}
               context="age-review"
               onActionComplete={() => queryClient.invalidateQueries({ queryKey: ['age-review-cases'] })}
             />

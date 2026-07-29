@@ -22,6 +22,11 @@ vi.mock('@/hooks/useReportedEvent', () => ({ useReportedEvent: (...args: unknown
 vi.mock('@/components/MediaPreview', () => ({ MediaPreview: () => <div data-testid="media-preview" /> }));
 vi.mock('@/hooks/useAuthor', () => ({ useAuthor: () => ({ data: undefined, isLoading: false }) }));
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast: vi.fn() }) }));
+// Exposes the pubkey the enforcement path would act on, which is the one value
+// in this component that is written rather than read.
+vi.mock('@/components/UserActions', () => ({
+  UserActions: ({ pubkey }: { pubkey: string }) => <div data-testid="user-actions">{pubkey}</div>,
+}));
 vi.mock('@/hooks/useAdminApi', () => ({
   useApiUrl: () => 'https://api.test',
   useAdminApi: () => ({
@@ -31,12 +36,16 @@ vi.mock('@/hooks/useAdminApi', () => ({
   }),
 }));
 
-const PUBKEY = 'a'.repeat(64);
+// Deliberately mixed case: the case pubkey is stored verbatim from an untrusted
+// `p` tag, and every consumer (relay filters, the worker, the management API)
+// requires lowercase. A lowercase fixture cannot observe the normalization.
+const RAW_PUBKEY = 'AbCd'.repeat(16);
+const PUBKEY = RAW_PUBKEY.toLowerCase();
 
-function makeCase(): AgeReviewCase {
+function makeCase(over: Partial<AgeReviewCase> = {}): AgeReviewCase {
   return {
     id: 'case-1',
-    pubkey: PUBKEY,
+    pubkey: RAW_PUBKEY,
     reporter_pubkey: 'b'.repeat(64),
     report_id: 'report-1',
     suspected_age_band: 'age_13_15',
@@ -52,6 +61,7 @@ function makeCase(): AgeReviewCase {
     last_alerted_at: null,
     zendesk_ticket_id: null,
     created_via: null,
+    ...over,
   } as AgeReviewCase;
 }
 
@@ -145,6 +155,34 @@ describe('AgeReviewDetail feeds the content derivations', () => {
     show();
     await waitFor(() => expect(reportedEvent).toHaveBeenCalled());
     expect(reportedEvent).toHaveBeenCalledWith('report-1', PUBKEY);
+  });
+
+  it('normalizes the case pubkey before handing it to the lookups', async () => {
+    show();
+    await waitFor(() => expect(reportedEvent).toHaveBeenCalled());
+    expect(reportedEvent).toHaveBeenCalledWith('report-1', PUBKEY);
+  });
+
+  it('marks a claim resting on an unrefreshed status, and offers a retry', async () => {
+    // Cached status with a failed refetch. The state stays data-first so this
+    // and the panel above agree, but the moderator must be able to see that the
+    // answer is not current, and to re-ask.
+    accountStatus.mockReturnValue({
+      data: { success: true, status: 'active' }, isError: true, isLoading: false, refetch: vi.fn(),
+    });
+    show();
+    await waitFor(() => expect(screen.getByText(/could not be refreshed/i)).toBeInTheDocument());
+    expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument();
+  });
+
+  it('enforces against the normalized pubkey, not the raw one from the report', async () => {
+    // The reads and the writes must target the same account. The worker forwards
+    // this value verbatim to the relay, which keys on lowercase hex, so a raw
+    // mixed-case pubkey would report success while enforcing nothing.
+    render(<AgeReviewDetail caseData={makeCase({ state: 'denied_closed' })} />, { wrapper });
+    await waitFor(() => expect(screen.getByTestId('user-actions')).toBeInTheDocument());
+    expect(screen.getByTestId('user-actions')).toHaveTextContent(PUBKEY);
+    expect(screen.getByTestId('user-actions')).not.toHaveTextContent(RAW_PUBKEY);
   });
 
   it('labels a foreign-authored reported event instead of attributing it', async () => {

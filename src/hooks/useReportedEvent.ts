@@ -108,7 +108,7 @@ export function useReportedEvent(reportId: string | undefined, casePubkey: strin
           ? { status: "target_unreadable" }
           : { status: "account_level" };
       }
-      const subject = casePubkey?.toLowerCase();
+      const subject = casePubkey ? casePubkey.toLowerCase() : undefined;
       // Deduped and capped. The tag list comes from an untrusted event: anyone
       // can publish a report, and each unresolved id below costs a signed
       // management request. A NIP-56 report names one target, so a handful is
@@ -129,7 +129,7 @@ export function useReportedEvent(reportId: string | undefined, casePubkey: strin
       const pickSubjectOwned = () => {
         for (const id of uniqueIds) {
           const hit = resolved.get(id);
-          if (hit && (!subject || hit.event.pubkey.toLowerCase() === subject)) return hit;
+          if (hit && (subject === undefined || hit.event.pubkey.toLowerCase() === subject)) return hit;
         }
       };
 
@@ -156,7 +156,7 @@ export function useReportedEvent(reportId: string | undefined, casePubkey: strin
             // would choose. Continuing would expose a settled answer to an
             // unrelated later lookup failing, throwing away content we already
             // have and showing the moderator a relay error instead.
-            if (!subject || banned.pubkey.toLowerCase() === subject) {
+            if (subject === undefined || banned.pubkey.toLowerCase() === subject) {
               return { status: "found", event: banned, banned: true };
             }
           }
@@ -164,7 +164,16 @@ export function useReportedEvent(reportId: string | undefined, casePubkey: strin
           // Only "the relay says it is not banned" is a real negative. Transport,
           // auth, and unknown failures propagate, so the pane shows an error
           // rather than asserting the content was deleted.
-          if (!isDefinitiveRpcNegative(e)) throw e;
+          if (!isDefinitiveRpcNegative(e)) {
+            // ...unless we already hold a target. The subject-owned case returns
+            // above, so what we hold here is foreign, which this pane deliberately
+            // shows with an attribution warning. Discarding it because an
+            // unrelated later tag failed would hide evidence behind a relay
+            // error, and a persistent failure makes Retry useless. Absence is
+            // only asserted when we have nothing at all.
+            if (uniqueIds.some((i) => resolved.has(i))) break;
+            throw e;
+          }
         }
       }
 

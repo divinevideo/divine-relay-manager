@@ -211,7 +211,7 @@ export function AgeReviewContent({
               {/* Retry for anything the moderator can actually act on: a failed
                   content read, an unknown status, or a claim resting on a status
                   we could not refresh. onRetry refetches both queries. */}
-              {(vis.state === "error" || vis.state === "unknown" || accountStatusFailed) && onRetry ? (
+              {vis.state !== "loading" && (vis.state === "error" || vis.state === "unknown" || accountStatusFailed) && onRetry ? (
                 <Button variant="outline" size="sm" onClick={onRetry}>
                   <RefreshCw className="mr-1 h-3 w-3" /> Retry
                 </Button>

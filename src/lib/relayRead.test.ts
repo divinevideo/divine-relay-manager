@@ -9,7 +9,6 @@ function ev(id: string) {
 /** A relay whose stream yields exactly the given messages, then ends. */
 function fakeRelay(msgs: Array<[string, ...unknown[]]>): ReqCapable {
   return {
-    // eslint-disable-next-line require-yield
     async *req() {
       for (const m of msgs) yield m;
     },

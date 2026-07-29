@@ -45,7 +45,10 @@ function wrapper({ children }: { children: ReactNode }) {
 
 const render = () => renderHook(() => useReportedEvent(REPORT_ID, undefined), { wrapper });
 
-beforeEach(() => vi.resetAllMocks());
+// Targeted: resetAllMocks would also clear the shared jsdom mocks in
+// src/test/setup.ts (matchMedia, ResizeObserver), which any component render
+// added to this file would then fail on.
+beforeEach(() => { req.mockReset(); callRelayRpc.mockReset(); });
 
 describe('useReportedEvent', () => {
   it('resolves the reported content through the report, not the report itself', async () => {
@@ -320,6 +323,29 @@ describe('useReportedEvent', () => {
     expect(result.current.data).toEqual({ status: 'found', event: ownBanned, banned: true });
     // The second lookup should never have been issued.
     expect(callRelayRpc).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a foreign target already in hand when a later lookup fails', async () => {
+    // The early return only covers subject-owned events, so without the break a
+    // later tag's failure still discarded a foreign target. This pane
+    // deliberately shows those, labelled, so losing one hides real evidence.
+    const OTHER = 'cc'.repeat(32);
+    const strangerPost = { ...content(TARGET_ID), pubkey: 'ee'.repeat(32) };
+    relayReturns([report([['e', TARGET_ID], ['e', OTHER]])], [strangerPost]);
+    callRelayRpc.mockRejectedValueOnce(new ApiError('Internal Server Error', 500, 'ISE'));
+
+    const { result } = renderHook(() => useReportedEvent(REPORT_ID, CASE_PUBKEY), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toEqual({ status: 'target_foreign', event: strangerPost, banned: false });
+  });
+
+  it('still reports an error when a lookup fails and nothing was retrieved', async () => {
+    // The counterpart: with nothing in hand, absence must not be asserted.
+    relayReturns([report([['e', TARGET_ID]])], []);
+    callRelayRpc.mockRejectedValueOnce(new ApiError('Internal Server Error', 500, 'ISE'));
+
+    const { result } = renderHook(() => useReportedEvent(REPORT_ID, CASE_PUBKEY), { wrapper });
+    await waitFor(() => expect(result.current.isError).toBe(true));
   });
 
   it('rejects a banned response for a different event than the one requested', async () => {
