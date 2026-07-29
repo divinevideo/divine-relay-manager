@@ -6,9 +6,9 @@
 
 ## Motivation
 
-Zendesk ticket 4306: a parent wrote "we're still waiting to be accepted back into the app." The ticket carried a placeholder contact name, an empty body, and nothing identifying which Divine account it concerned. Recovering that took a manual pivot through the requester's other tickets, which revealed they were the parent on case `a72823a3`, who had verified themselves six days earlier and never received a reply.
+A parent wrote in asking when they would be let back into the app. Their ticket carried a placeholder contact name, an empty body, and nothing identifying which Divine account it concerned. Recovering that took a manual pivot through the requester's other tickets, which revealed they were the parent on an existing case — one where they had already confirmed themselves days earlier and never received a reply.
 
-The linking was not the defect. **We never capture a human-readable identifier for any account.** Every table is pubkey-keyed, so even a perfectly linked ticket could only ever say "this is about `2aa86dff…`".
+The linking was not the defect. **We never capture a human-readable identifier for any account.** Every table is pubkey-keyed, so even a perfectly linked ticket could only ever name a hex pubkey.
 
 And the one readable signal that exists — the kind-0 profile — is destroyed by our own enforcement. `suspendpubkey` hides an account's content, so by the time a moderator opens the case there is nothing left to look at. Both current parent-contact cases return no kind-0 on the prod relay.
 
@@ -22,7 +22,7 @@ And the one readable signal that exists — the kind-0 profile — is destroyed 
 | `notes` renders in the agent sidebar with no setup | Observed in the agent UI; zero user fields defined in the account |
 | The raw From name is retained but unreachable by API token | `/raw_email/…` and `/tickets/{id}/comments/{cid}/original` both 301 to the help centre; agent session only |
 | Neither current case resolves to a name | kind-0 query against `wss://relay.divine.video` returned nothing for both pubkeys |
-| Zendesk renders the stored contact name into the `To:` header of outbound mail | Auto-ack received at the test alias read `To: "test+contacttest@jeito.org" <test+contacttest@jeito.org>` |
+| Zendesk renders the stored contact name into the `To:` header of outbound mail | Auto-ack received at a disposable test alias carried the stored name in `To:` |
 
 ## Privacy constraint (load-bearing — do not relax without re-deciding)
 
@@ -87,7 +87,7 @@ Handle resolution order: `display_name → name → vine_username → nip05 → 
 
 The name upgrade is why the ticket *list* becomes readable: the Requester column renders the name and nothing else, so an agent scanning the queue sees which account each ticket concerns without opening anything.
 
-Contact-record writes happen **only** when a real parent email is attached. On the no-parent path the ticket requester falls back to the API caller — 47 of ~56 case tickets currently have `matthew@divine.video` as requester — so an unguarded write would scribble case data onto a live admin profile.
+Contact-record writes happen **only** when a real parent email is attached. On the no-parent path the ticket requester falls back to the API caller, which is an admin account on the large majority of existing case tickets, so an unguarded write would scribble case data onto a live admin profile.
 
 `notes` is a single free-text field, so writes must compose rather than clobber whatever a human put there.
 
