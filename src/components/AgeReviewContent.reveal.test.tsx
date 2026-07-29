@@ -36,7 +36,6 @@ const base = {
   contentLoading: false,
   contentError: false,
   accountStatus: active,
-  accountStatusLoading: false,
   accountStatusFailed: false,
   recentPosts: [] as never[],
   hasReportId: true,

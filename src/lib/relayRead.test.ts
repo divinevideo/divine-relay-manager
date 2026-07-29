@@ -1,42 +1,81 @@
 import { describe, it, expect } from 'vitest';
-import { assertRelayReadCompleted, isDefinitiveRpcNegative } from './relayRead';
+import { queryStrict, isDefinitiveRpcNegative, RelayReadError, type ReqCapable } from './relayRead';
 import { ApiError } from './adminApi';
 
-function aborted(): AbortSignal {
-  const c = new AbortController();
-  c.abort();
-  return c.signal;
+function ev(id: string) {
+  return { id, pubkey: 'd4'.repeat(32), created_at: 1, kind: 1, tags: [], content: '', sig: '' };
 }
-const live = () => new AbortController().signal;
 
-describe('assertRelayReadCompleted', () => {
-  it('throws when our timeout fired, so an empty result is not read as absence', () => {
-    expect(() => assertRelayReadCompleted(aborted(), live())).toThrow(/timed out/i);
+/** A relay whose stream yields exactly the given messages, then ends. */
+function fakeRelay(msgs: Array<[string, ...unknown[]]>): ReqCapable {
+  return {
+    // eslint-disable-next-line require-yield
+    async *req() {
+      for (const m of msgs) yield m;
+    },
+  } as ReqCapable;
+}
+
+const opts = () => ({ signal: new AbortController().signal, timeoutMs: 1000 });
+
+describe('queryStrict', () => {
+  it('returns events once the relay signals EOSE', async () => {
+    const relay = fakeRelay([
+      ['EVENT', 'sub', ev('a')],
+      ['EVENT', 'sub', ev('b')],
+      ['EOSE', 'sub'],
+    ]);
+    await expect(queryStrict(relay, [{ ids: ['a'] }], opts())).resolves.toHaveLength(2);
   });
 
-  it('does not throw when the read completed normally', () => {
-    expect(() => assertRelayReadCompleted(live(), live())).not.toThrow();
+  it('returns an empty result for a genuinely empty relay (EOSE, no events)', async () => {
+    const relay = fakeRelay([['EOSE', 'sub']]);
+    await expect(queryStrict(relay, [{ ids: ['a'] }], opts())).resolves.toEqual([]);
   });
 
-  it('stays silent when the query itself was cancelled', () => {
-    // Unmount or key change aborts TanStack's signal; that is not a failure to
-    // report, and throwing would surface a spurious error to the moderator.
-    expect(() => assertRelayReadCompleted(aborted(), aborted())).not.toThrow();
+  it('throws when the relay CLOSES the subscription', async () => {
+    // Funnelcake sends CLOSED with "could not complete query" when its query
+    // layer degrades. NPool.query would swallow this and return [], which is
+    // indistinguishable from an empty account.
+    const relay = fakeRelay([['CLOSED', 'sub', 'error: could not complete query']]);
+    await expect(queryStrict(relay, [{ ids: ['a'] }], opts())).rejects.toBeInstanceOf(RelayReadError);
+  });
+
+  it('throws when the stream ends without EOSE', async () => {
+    // NPool.req returns immediately when no relay is routed to, and an aborted
+    // read simply stops. Neither established what the relay holds.
+    const relay = fakeRelay([]);
+    await expect(queryStrict(relay, [{ ids: ['a'] }], opts())).rejects.toBeInstanceOf(RelayReadError);
+  });
+
+  it('does not treat events received before a CLOSE as a complete read', async () => {
+    const relay = fakeRelay([
+      ['EVENT', 'sub', ev('a')],
+      ['CLOSED', 'sub', 'error: stored replay timed out'],
+    ]);
+    await expect(queryStrict(relay, [{ ids: ['a'] }], opts())).rejects.toBeInstanceOf(RelayReadError);
   });
 });
 
 describe('isDefinitiveRpcNegative', () => {
-  it('accepts the relay answering "not banned" (no HTTP status)', () => {
+  it('accepts the production shape of "not banned" (HTTP 400)', () => {
+    // Verified end to end: the relay answers success:false and the worker
+    // returns it as HTTP 400, so the ApiError DOES carry a status code.
+    expect(isDefinitiveRpcNegative(new ApiError('Event not found or not banned', 400, 'Bad Request'))).toBe(true);
+  });
+
+  it('accepts a statusless RPC-level negative', () => {
     expect(isDefinitiveRpcNegative(new ApiError('Event not found or not banned'))).toBe(true);
   });
 
-  it('rejects a transport or auth failure, which must not read as a negative', () => {
+  it('rejects auth and server failures, which must not read as a negative', () => {
+    expect(isDefinitiveRpcNegative(new ApiError('Unauthorized', 401, 'Unauthorized'))).toBe(false);
     expect(isDefinitiveRpcNegative(new ApiError('Forbidden', 403, 'Forbidden'))).toBe(false);
     expect(isDefinitiveRpcNegative(new ApiError('Internal Server Error', 500, 'ISE'))).toBe(false);
   });
 
   it('rejects an unrecognised relay-side failure rather than assuming a negative', () => {
-    expect(isDefinitiveRpcNegative(new ApiError('database unavailable'))).toBe(false);
+    expect(isDefinitiveRpcNegative(new ApiError('database unavailable', 400, 'Bad Request'))).toBe(false);
   });
 
   it('rejects non-ApiError failures (network, abort)', () => {

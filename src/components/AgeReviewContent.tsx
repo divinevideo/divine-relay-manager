@@ -22,7 +22,6 @@ interface AgeReviewContentProps {
   // The account read resolved but was truncated, so a zero count proves nothing.
   contentIncomplete?: boolean;
   accountStatus: AccountStatusResponse | undefined;
-  accountStatusLoading?: boolean;
   accountStatusFailed?: boolean;
   recentPosts: NostrEvent[];
   onRetry?: () => void;
@@ -39,7 +38,7 @@ interface AgeReviewContentProps {
 }
 
 // One content item: click-to-reveal media (MediaPreview default; the media-proxy
-// fallback handles Blossom-blocked blobs), kind + timestamp, and any text.
+// fallback handles Blossom-blocked blobs), kind + timestamp, author, and any text.
 function ContentCard({ event }: { event: NostrEvent }) {
   return (
     <div className="rounded-md border p-2.5 space-y-1.5">
@@ -47,6 +46,9 @@ function ContentCard({ event }: { event: NostrEvent }) {
         <span>{getKindName(event.kind)}</span>
         <span>·</span>
         <span>{new Date(event.created_at * 1000).toLocaleString()}</span>
+        <span>·</span>
+        {/* Author is shown so content can never be attributed by position alone. */}
+        <span className="font-mono">{event.pubkey.slice(0, 12)}…</span>
       </div>
       <MediaPreview event={event} maxItems={4} />
       {event.content ? (
@@ -83,7 +85,6 @@ export function AgeReviewContent({
   contentError,
   contentIncomplete,
   accountStatus,
-  accountStatusLoading,
   accountStatusFailed,
   recentPosts,
   onRetry,
@@ -99,7 +100,6 @@ export function AgeReviewContent({
     contentError,
     contentIncomplete,
     accountStatus,
-    accountStatusLoading,
     accountStatusFailed,
   });
 
@@ -129,6 +129,14 @@ export function AgeReviewContent({
     <Note>This report was filed against the account rather than a specific post, so there is no single item to show.</Note>
   ) : reportedEvent?.status === "report_missing" ? (
     <Note>The report event is no longer on the relay, so its target cannot be resolved.</Note>
+  ) : reportedEvent?.status === "target_foreign" ? (
+    // Deliberately not rendered: judging this account by another account's post
+    // is how the wrong person gets enforced against.
+    <div className="rounded-md border border-amber-500/40 p-2.5 text-xs text-amber-700 dark:text-amber-400">
+      This report points at an event authored by a different account
+      (<span className="font-mono">{reportedEvent.authorPubkey.slice(0, 12)}…</span>),
+      not by this case's subject, so it is not shown here. Treat the report itself as suspect.
+    </div>
   ) : reportedEvent?.status === "target_missing" ? (
     <Note>{reportedMissingReason(accountStatus)}</Note>
   ) : null;
@@ -169,7 +177,9 @@ export function AgeReviewContent({
           >
             <div className="flex items-center justify-between gap-2">
               <span>{vis.message}</span>
-              {vis.state === "error" && onRetry ? (
+              {/* `unknown` gets a retry too: it is reached when the account-status
+                  read failed, and refetching content alone can never clear it. */}
+              {(vis.state === "error" || vis.state === "unknown") && onRetry ? (
                 <Button variant="outline" size="sm" onClick={onRetry}>
                   <RefreshCw className="mr-1 h-3 w-3" /> Retry
                 </Button>

@@ -14,7 +14,6 @@ const base = {
   contentLoading: false,
   contentError: false,
   accountStatus: active,
-  accountStatusLoading: false,
   accountStatusFailed: false,
 };
 
@@ -77,7 +76,7 @@ describe('deriveContentVisibility', () => {
   });
 
   it('does not rule out suspension while the status read is still in flight', () => {
-    const r = deriveContentVisibility({ ...base, postCount: 0, accountStatus: undefined, accountStatusLoading: true });
+    const r = deriveContentVisibility({ ...base, postCount: 0, accountStatus: undefined });
     expect(r.state).toBe('unknown');
     expect(r.state).not.toBe('absent');
   });
@@ -86,5 +85,21 @@ describe('deriveContentVisibility', () => {
     // A keycast blip resolves to success:false, which is not evidence of anything.
     const r = deriveContentVisibility({ ...base, postCount: 0, accountStatus: statusUnavailable });
     expect(r.state).toBe('unknown');
+  });
+
+  it('does not trust stale successful status data once the read has failed', () => {
+    // TanStack retains the last good `data` while isError is true, so a stale
+    // "active" must not be read as current truth.
+    const r = deriveContentVisibility({ ...base, postCount: 0, accountStatus: active, accountStatusFailed: true });
+    expect(r.state).toBe('unknown');
+    expect(r.state).not.toBe('absent');
+  });
+
+  it('treats self-custody (not_found) as a definitive answer, not as unavailable', () => {
+    // keycast has no such account, so no keycast suspension can be hiding content.
+    // Calling this "unavailable" would contradict the account-type indicator.
+    const r = deriveContentVisibility({ ...base, postCount: 0, accountStatus: { success: false, not_found: true } });
+    expect(r.state).toBe('absent');
+    expect(r.message.toLowerCase()).toContain('self-custody');
   });
 });

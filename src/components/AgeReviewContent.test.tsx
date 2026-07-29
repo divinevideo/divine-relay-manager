@@ -30,7 +30,6 @@ const base = {
   contentLoading: false,
   contentError: false,
   accountStatus: active,
-  accountStatusLoading: false,
   accountStatusFailed: false,
   recentPosts: [] as never[],
 };
@@ -80,9 +79,23 @@ describe("AgeReviewContent: account content", () => {
     expect(screen.getByText(/suspension cannot be ruled out/i)).toBeInTheDocument();
   });
 
-  it("does not rule out suspension while account status is still loading", () => {
-    render(<AgeReviewContent {...base} accountStatus={undefined} accountStatusLoading />);
+  it("does not rule out suspension before account status has arrived", () => {
+    render(<AgeReviewContent {...base} accountStatus={undefined} />);
     expect(screen.getByText(/suspension cannot be ruled out/i)).toBeInTheDocument();
+  });
+
+  it("does not trust stale status data after the status read failed", () => {
+    // TanStack keeps the last successful `data` while isError is true, so without
+    // the failed flag a stale "active" would be treated as current truth.
+    render(<AgeReviewContent {...base} accountStatus={active} accountStatusFailed />);
+    expect(screen.getByText(/suspension cannot be ruled out/i)).toBeInTheDocument();
+    expect(screen.queryByText(/not suspended/i)).not.toBeInTheDocument();
+  });
+
+  it("treats a self-custody account as a definitive answer, not unavailable", () => {
+    render(<AgeReviewContent {...base} accountStatus={{ success: false, not_found: true }} />);
+    expect(screen.getByText(/self-custody account/i)).toBeInTheDocument();
+    expect(screen.queryByText(/cannot be ruled out/i)).not.toBeInTheDocument();
   });
 });
 

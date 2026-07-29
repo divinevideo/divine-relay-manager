@@ -4,6 +4,7 @@
 import { useNostr } from "@nostrify/react";
 import { useQuery } from "@tanstack/react-query";
 import { useAppContext } from "@/hooks/useAppContext";
+import { queryStrict } from "@/lib/relayRead";
 import { RECENT_CONTENT_KINDS } from "@/lib/constants";
 import type { NostrEvent } from "@nostrify/nostrify";
 
@@ -47,27 +48,30 @@ export function useUserStats(pubkey: string | undefined) {
         };
       }
 
-      const timeout = AbortSignal.timeout(8000);
-      const combinedSignal = AbortSignal.any([signal, timeout]);
+      // queryStrict throws on anything short of a completed read (timeout, a
+      // relay CLOSED, no route). We record that rather than rethrowing: this
+      // hook has four other consumers whose behaviour is not in scope to change
+      // here, so the failure is reported as a flag and only callers that state
+      // absence to a user act on it. Promoting this to a real error is #210.
+      let incomplete = false;
+      const read = async (filters: Parameters<typeof queryStrict>[1]) => {
+        try {
+          return await queryStrict(nostr, filters, { signal, timeoutMs: 8000 });
+        } catch {
+          incomplete = true;
+          return [];
+        }
+      };
 
       // Fetch in parallel
       const [recentPosts, existingLabels, previousReports] = await Promise.all([
         // User's recent authored content — RECENT_CONTENT_KINDS is shared with
         // BannedUserCard so the two review surfaces stay aligned (#159).
-        nostr.query(
-          [{ kinds: [...RECENT_CONTENT_KINDS], authors: [pubkey], limit: 20 }],
-          { signal: combinedSignal }
-        ),
+        read([{ kinds: [...RECENT_CONTENT_KINDS], authors: [pubkey], limit: 20 }]),
         // Labels against this user
-        nostr.query(
-          [{ kinds: [1985], '#p': [pubkey], limit: 50 }],
-          { signal: combinedSignal }
-        ),
+        read([{ kinds: [1985], '#p': [pubkey], limit: 50 }]),
         // Reports against this user
-        nostr.query(
-          [{ kinds: [1984], '#p': [pubkey], limit: 50 }],
-          { signal: combinedSignal }
-        ),
+        read([{ kinds: [1984], '#p': [pubkey], limit: 50 }]),
       ]);
 
       return {
@@ -77,9 +81,9 @@ export function useUserStats(pubkey: string | undefined) {
         recentPosts: recentPosts.sort((a, b) => b.created_at - a.created_at),
         existingLabels,
         previousReports,
-        // Our timeout fired rather than the query being cancelled upstream, so
-        // the relay did not finish answering and these counts understate.
-        relayIncomplete: timeout.aborted && !signal.aborted,
+        // At least one read did not finish, so these counts are a floor, not a
+        // fact, and a zero here proves nothing about the account.
+        relayIncomplete: incomplete,
       };
     },
     enabled: !!pubkey,

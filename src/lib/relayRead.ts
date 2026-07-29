@@ -1,45 +1,84 @@
-// ABOUTME: Helpers for telling a completed relay read apart from a failed one.
-// ABOUTME: NPool.query swallows relay errors and resolves with partial results,
-// ABOUTME: so an empty array means "nothing found" AND "the read never worked".
-// ABOUTME: Callers that report absence to a moderator must not conflate those.
+// ABOUTME: Relay reads that fail loudly, for callers that report absence to a
+// ABOUTME: moderator. NPool.query swallows relay errors and resolves with partial
+// ABOUTME: results, so an empty array means both "nothing found" and "the read
+// ABOUTME: never worked". Anything that says "no content" must tell those apart.
+import type { NostrEvent, NostrFilter } from '@nostrify/nostrify';
 import { ApiError } from './adminApi';
 
-/**
- * Throws when a relay read was cut short by our own timeout rather than
- * completing.
- *
- * `NPool.query` documents that it "will return partial results instead of
- * throwing" and wraps its read loop in a bare catch, so a dead or slow relay
- * resolves to `[]` exactly like a genuinely empty result. Without this check a
- * failed read is indistinguishable from a verified absence, and any UI that
- * says "no content found" is making a claim it never established.
- *
- * `querySignal` is TanStack Query's own signal: if that aborted, the query was
- * cancelled (unmount, key change) and there is no failure to report.
- */
-export function assertRelayReadCompleted(
-  timeoutSignal: AbortSignal,
-  querySignal: AbortSignal,
-): void {
-  if (timeoutSignal.aborted && !querySignal.aborted) {
-    throw new Error('Relay read timed out before completing');
+/** The slice of NPool that queryStrict needs, kept structural so it is testable. */
+export interface ReqCapable {
+  req(
+    filters: NostrFilter[],
+    opts?: { signal?: AbortSignal },
+  ): AsyncIterable<[string, ...unknown[]]>;
+}
+
+export class RelayReadError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RelayReadError';
   }
+}
+
+/**
+ * Reads events and treats anything other than a completed read as an error.
+ *
+ * `NPool.query` is unusable for this: it documents that it "will return partial
+ * results instead of throwing", breaks out of its loop on `CLOSED`, wraps
+ * everything in a bare catch, and returns immediately when no relay routes
+ * match. Every one of those paths yields `[]`, indistinguishable from a genuine
+ * absence. Funnelcake closes subscriptions with "could not complete query" when
+ * its query layer degrades, so this is a live path, not a theoretical one.
+ *
+ * Driving `req` directly lets us insist on the one signal that actually means
+ * "the relay finished answering": EOSE.
+ */
+export async function queryStrict(
+  nostr: ReqCapable,
+  filters: NostrFilter[],
+  opts: { signal: AbortSignal; timeoutMs: number },
+): Promise<NostrEvent[]> {
+  const timeout = AbortSignal.timeout(opts.timeoutMs);
+  const combined = AbortSignal.any([opts.signal, timeout]);
+
+  const events: NostrEvent[] = [];
+  let complete = false;
+
+  for await (const msg of nostr.req(filters, { signal: combined })) {
+    if (msg[0] === 'EVENT') {
+      events.push(msg[2] as NostrEvent);
+    } else if (msg[0] === 'EOSE') {
+      complete = true;
+      break;
+    } else if (msg[0] === 'CLOSED') {
+      throw new RelayReadError('Relay closed the subscription before the read completed');
+    }
+  }
+
+  // No EOSE: timed out, aborted, or no relay was routed to at all. Whatever the
+  // cause, we did not establish what the relay holds, so we must not answer.
+  if (!complete) {
+    throw new RelayReadError('Relay read did not complete');
+  }
+
+  return events;
 }
 
 /**
  * True when a `callRelayRpc` rejection is the relay definitively answering "no"
  * rather than us failing to ask.
  *
- * `getbannedevent` on an event that is not banned returns
- * `{"success":false,"error":"Event not found or not banned"}` (verified against
- * the live relay), which `callRelayRpc` surfaces as an `ApiError` with no HTTP
- * status. An `ApiError` that *does* carry a status is a transport or auth
- * failure (expired CF Access, worker 5xx), and any other error is unknown.
- * Both of those must propagate: reporting them as "not banned" would let a
- * moderator read an outage as a deletion.
+ * `getbannedevent` for an event that is not banned answers
+ * `{"success":false,"error":"Event not found or not banned"}`, which the worker
+ * returns as **HTTP 400** (verified end to end against production, including the
+ * status code). So a 400 means the relay was reached and refused; the message
+ * distinguishes this refusal from some other relay-side failure. A 401/403/5xx,
+ * or any non-ApiError, means we never got an answer, and reporting that as
+ * "not banned" would let a moderator read an outage as a deletion.
  */
 export function isDefinitiveRpcNegative(error: unknown): boolean {
   if (!(error instanceof ApiError)) return false;
-  if (error.statusCode !== undefined) return false;
+  const reachedRelay = error.statusCode === undefined || error.statusCode === 400;
+  if (!reachedRelay) return false;
   return /not found|not banned/i.test(error.message);
 }

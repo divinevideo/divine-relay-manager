@@ -22,10 +22,11 @@ export interface ContentVisibilityInput {
   contentIncomplete?: boolean;
   // Keycast account status — the verified source for suspended/banned.
   accountStatus: AccountStatusResponse | undefined;
-  // Whether that status is actually known yet. Without these, an in-flight or
-  // failed status read silently becomes "not suspended", which is how "not
-  // attributable to suspension" gets asserted about an account we never checked.
-  accountStatusLoading?: boolean;
+  // Whether the status read failed. Needed because TanStack keeps the last
+  // successful `data` while `isError` is true after a failed refetch, so without
+  // this a stale success would be treated as current and "not suspended" would be
+  // asserted from an answer we no longer trust. An in-flight read needs no flag:
+  // it has no `accountStatus` yet, which is already treated as not-known below.
   accountStatusFailed?: boolean;
 }
 
@@ -41,7 +42,6 @@ export function deriveContentVisibility(input: ContentVisibilityInput): ContentV
     contentError,
     contentIncomplete,
     accountStatus,
-    accountStatusLoading,
     accountStatusFailed,
   } = input;
 
@@ -70,12 +70,25 @@ export function deriveContentVisibility(input: ContentVisibilityInput): ContentV
   // The read was clean and empty, but "absent" is only honest if we also know the
   // account is not suspended. If that status is unknown, say so rather than
   // ruling out a cause we never checked.
-  const statusKnown =
-    !accountStatusLoading && !accountStatusFailed && accountStatus?.success === true;
+  //
+  // `not_found` is a definitive answer, not a failure: keycast has no such
+  // account, so it is self-custody and no keycast suspension can be hiding
+  // anything. The rest of this screen already treats it that way, and calling it
+  // "unavailable" here would contradict the account-type indicator beside it.
+  const statusIsDefinitive =
+    accountStatus?.success === true || accountStatus?.not_found === true;
+  const statusKnown = !accountStatusFailed && statusIsDefinitive;
   if (!statusKnown) {
     return {
       state: 'unknown',
       message: 'No content found on the relay. Account status is unavailable, so suspension cannot be ruled out.',
+    };
+  }
+
+  if (accountStatus?.not_found === true) {
+    return {
+      state: 'absent',
+      message: 'No content found on the relay. This is a self-custody account, so it cannot be suspended in keycast.',
     };
   }
 

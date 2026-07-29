@@ -218,16 +218,19 @@ export function AgeReviewDetail({ caseData: c }: Props) {
 
   // Keycast-backed protected-minor status (verified_minor). Best-effort: a
   // keycast blip resolves to success:false, so we show status unavailable.
-  const { data: accountStatus, isError: accountStatusFailed, isLoading: accountStatusLoading } = useAccountStatus(c.pubkey);
+  const { data: accountStatus, isError: accountStatusFailed, isLoading: accountStatusLoading, refetch: refetchAccountStatus } = useAccountStatus(c.pubkey);
   const { data: userStats, isError: userStatsFailed, isFetching: userStatsFetching, refetch: refetchUserStats } = useUserStats(c.pubkey);
   // isFetching, not isLoading: isLoading stays false while an errored query
   // refetches, so a Retry click would leave the error copy on screen with no
   // sign anything happened.
-  const { data: reportedEvent, isFetching: reportedEventFetching, isError: reportedEventFailed, refetch: refetchReported } = useReportedEvent(c.report_id ?? undefined);
+  const { data: reportedEvent, isFetching: reportedEventFetching, isError: reportedEventFailed, refetch: refetchReported } = useReportedEvent(c.report_id ?? undefined, c.pubkey);
   // Content presence is trustworthy only once the relay read resolves without
   // error; a failed/in-flight read must not read as "no content" (would
   // under-state available enforcement).
-  const contentPresenceKnown = userStats !== undefined && !userStatsFailed;
+  // A truncated relay read leaves userStats defined with isError false and a
+  // zero count, which would read as "this account has no content" and render the
+  // content-enforcement legs as n/a, under-stating what a moderator can do.
+  const contentPresenceKnown = userStats !== undefined && !userStatsFailed && !userStats.relayIncomplete;
   const accountVerdict = deriveAccountVerdict({
     accountStatus,
     accountStatusError: accountStatusFailed,
@@ -284,8 +287,8 @@ export function AgeReviewDetail({ caseData: c }: Props) {
 
           <AccountTypeIndicator
             accountStatus={accountStatus}
-            accountStatusError={accountStatusFailed}
             accountStatusLoading={accountStatusLoading}
+            accountStatusError={accountStatusFailed}
             postCount={userStats?.postCount}
             contentPresenceKnown={contentPresenceKnown}
             ticketLinked={!!c.zendesk_ticket_id}
@@ -297,10 +300,9 @@ export function AgeReviewDetail({ caseData: c }: Props) {
             contentError={userStatsFailed}
             contentIncomplete={userStats?.relayIncomplete}
             accountStatus={accountStatus}
-            accountStatusLoading={accountStatusLoading}
             accountStatusFailed={accountStatusFailed}
             recentPosts={userStats?.recentPosts ?? []}
-            onRetry={() => { void refetchUserStats(); }}
+            onRetry={() => { void refetchUserStats(); void refetchAccountStatus(); }}
             reportedEvent={reportedEvent}
             reportedEventLoading={reportedEventFetching}
             reportedEventError={reportedEventFailed}
