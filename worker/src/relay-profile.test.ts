@@ -1,0 +1,91 @@
+// ABOUTME: Tests for the shared relay profile fetch used to capture account identity.
+// ABOUTME: Mocks the WebSocket rather than the module, so the real queryRelay is exercised.
+
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { fetchAccountIdentity } from './relay-profile';
+
+/**
+ * Mirrors mockRelay in bulk-moderate.test.ts. We stub the socket, not the module:
+ * fetchAccountIdentity calls queryRelay inside the same module, so spying on the
+ * module export would never intercept the call and the test would pass for the
+ * wrong reason.
+ */
+function mockRelay(events: Array<Record<string, unknown>>) {
+  vi.spyOn(globalThis, 'WebSocket').mockImplementation((function () {
+    const listeners = new Map<string, Array<(value?: unknown) => void>>();
+    let subId = 'identity-test';
+
+    queueMicrotask(() => {
+      listeners.get('open')?.forEach((h) => h());
+      for (const event of events) {
+        listeners.get('message')?.forEach((h) => h({ data: JSON.stringify(['EVENT', subId, event]) }));
+      }
+      listeners.get('message')?.forEach((h) => h({ data: JSON.stringify(['EOSE', subId]) }));
+    });
+
+    return {
+      addEventListener: (e: string, h: (value?: unknown) => void) => {
+        listeners.set(e, [...(listeners.get(e) || []), h]);
+      },
+      send: vi.fn((payload: string) => {
+        const parsed = JSON.parse(payload);
+        if (parsed[0] === 'REQ') subId = parsed[1];
+      }),
+      close: vi.fn(),
+    };
+  } as unknown as typeof WebSocket));
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+describe('fetchAccountIdentity', () => {
+  it('returns null when no relay URL is configured', async () => {
+    expect(await fetchAccountIdentity('abc123', undefined)).toBeNull();
+  });
+
+  it('parses a kind-0 result into a profile', async () => {
+    mockRelay([{
+      id: 'e1',
+      kind: 0,
+      pubkey: 'abc123',
+      tags: [],
+      content: JSON.stringify({ display_name: 'Some One', nip05: 'x@y.z' }),
+    }]);
+
+    const profile = await fetchAccountIdentity('abc123', 'wss://relay.test');
+
+    expect(profile?.name).toBe('Some One');
+    expect(profile?.nip05).toBe('x@y.z');
+  });
+
+  it('surfaces a vine username for a restored OG account', async () => {
+    mockRelay([{
+      id: 'e2',
+      kind: 0,
+      pubkey: 'abc123',
+      tags: [['client', 'vine-archive-importer'], ['vine_username', 'someuser']],
+      content: JSON.stringify({}),
+    }]);
+
+    const profile = await fetchAccountIdentity('abc123', 'wss://relay.test');
+
+    expect(profile?.isVineImport).toBe(true);
+    expect(profile?.vineUsername).toBe('someuser');
+  });
+
+  it('returns null rather than throwing when the socket cannot be opened', async () => {
+    vi.spyOn(globalThis, 'WebSocket').mockImplementation((() => {
+      throw new Error('relay down');
+    }) as unknown as typeof WebSocket);
+
+    await expect(fetchAccountIdentity('abc123', 'wss://relay.test')).resolves.toBeNull();
+  });
+
+  it('returns null when the account has no kind-0', async () => {
+    mockRelay([]);
+
+    expect(await fetchAccountIdentity('abc123', 'wss://relay.test')).toBeNull();
+  });
+});
