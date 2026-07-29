@@ -671,12 +671,18 @@ export class ReportWatcher implements DurableObject {
       return;
     }
 
-    // Check trusted-client gate if tier requires it
+    // Check trusted-client gate if tier requires it.
+    //
+    // Matched case-insensitively: per NIP-89 this tag element is a display name, not a
+    // stable identifier, so its casing is each app's choice and shouldn't decide
+    // enforcement. divine-mobile sends `Divine` while TRUSTED_CLIENTS carries the
+    // stylized `diVine`, so an exact match skipped mobile reports.
     if (tier.requireTrustedClient) {
       const clientTag = event.tags.find((t: string[]) => t[0] === 'client');
       const clientName = clientTag?.[1];
+      const normalizedClient = clientName?.trim().toLowerCase();
 
-      if (!clientName || !config.trustedClients.includes(clientName)) {
+      if (!normalizedClient || !config.trustedClients.some(c => c.trim().toLowerCase() === normalizedClient)) {
         console.log(`[ReportWatcher] Report from untrusted client '${clientName || 'none'}', skipping (tier: ${tier.name})`);
         await this.logDecision({
           targetType: 'event',
