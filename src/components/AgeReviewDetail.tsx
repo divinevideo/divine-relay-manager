@@ -219,8 +219,11 @@ export function AgeReviewDetail({ caseData: c }: Props) {
   // Keycast-backed protected-minor status (verified_minor). Best-effort: a
   // keycast blip resolves to success:false, so we show status unavailable.
   const { data: accountStatus, isError: accountStatusFailed, isLoading: accountStatusLoading } = useAccountStatus(c.pubkey);
-  const { data: userStats, isError: userStatsFailed, isLoading: userStatsLoading, refetch: refetchUserStats } = useUserStats(c.pubkey);
-  const { data: reportedEvent, isLoading: reportedEventLoading, isError: reportedEventFailed, refetch: refetchReported } = useReportedEvent(c.report_id ?? undefined);
+  const { data: userStats, isError: userStatsFailed, isFetching: userStatsFetching, refetch: refetchUserStats } = useUserStats(c.pubkey);
+  // isFetching, not isLoading: isLoading stays false while an errored query
+  // refetches, so a Retry click would leave the error copy on screen with no
+  // sign anything happened.
+  const { data: reportedEvent, isFetching: reportedEventFetching, isError: reportedEventFailed, refetch: refetchReported } = useReportedEvent(c.report_id ?? undefined);
   // Content presence is trustworthy only once the relay read resolves without
   // error; a failed/in-flight read must not read as "no content" (would
   // under-state available enforcement).
@@ -290,13 +293,16 @@ export function AgeReviewDetail({ caseData: c }: Props) {
 
           <AgeReviewContent
             postCount={userStats?.postCount}
-            contentLoading={userStatsLoading}
+            contentLoading={userStatsFetching}
             contentError={userStatsFailed}
+            contentIncomplete={userStats?.relayIncomplete}
             accountStatus={accountStatus}
+            accountStatusLoading={accountStatusLoading}
+            accountStatusFailed={accountStatusFailed}
             recentPosts={userStats?.recentPosts ?? []}
             onRetry={() => { void refetchUserStats(); }}
             reportedEvent={reportedEvent}
-            reportedEventLoading={reportedEventLoading}
+            reportedEventLoading={reportedEventFetching}
             reportedEventError={reportedEventFailed}
             onRetryReported={() => { void refetchReported(); }}
             hasReportId={!!c.report_id}

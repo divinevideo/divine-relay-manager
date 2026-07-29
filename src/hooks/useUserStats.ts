@@ -3,6 +3,7 @@
 
 import { useNostr } from "@nostrify/react";
 import { useQuery } from "@tanstack/react-query";
+import { useAppContext } from "@/hooks/useAppContext";
 import { RECENT_CONTENT_KINDS } from "@/lib/constants";
 import type { NostrEvent } from "@nostrify/nostrify";
 
@@ -13,13 +14,26 @@ export interface UserStats {
   recentPosts: NostrEvent[];
   existingLabels: NostrEvent[];
   previousReports: NostrEvent[];
+  /**
+   * True when the relay read was cut short by our timeout, so the counts below
+   * are a floor rather than a fact. `NPool.query` resolves with partial results
+   * instead of throwing, so without this a dead relay is indistinguishable from
+   * an empty account. Reported as a flag rather than a thrown error to keep this
+   * shared hook's behaviour unchanged for its other consumers; callers that
+   * state absence to a user (age review) must check it.
+   */
+  relayIncomplete: boolean;
 }
 
 export function useUserStats(pubkey: string | undefined) {
   const { nostr } = useNostr();
+  const { config } = useAppContext();
+  const relayUrl = config.relayUrl;
 
   return useQuery<UserStats>({
-    queryKey: ['user-stats', pubkey],
+    // relayUrl in the key: the QueryClient is a singleton and these events are
+    // shown as evidence, so a cached read must never cross environments.
+    queryKey: ['user-stats', relayUrl, pubkey],
     queryFn: async ({ signal }) => {
       if (!pubkey) {
         return {
@@ -29,6 +43,7 @@ export function useUserStats(pubkey: string | undefined) {
           recentPosts: [],
           existingLabels: [],
           previousReports: [],
+          relayIncomplete: false,
         };
       }
 
@@ -62,6 +77,9 @@ export function useUserStats(pubkey: string | undefined) {
         recentPosts: recentPosts.sort((a, b) => b.created_at - a.created_at),
         existingLabels,
         previousReports,
+        // Our timeout fired rather than the query being cancelled upstream, so
+        // the relay did not finish answering and these counts understate.
+        relayIncomplete: timeout.aborted && !signal.aborted,
       };
     },
     enabled: !!pubkey,

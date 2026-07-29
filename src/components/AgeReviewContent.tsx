@@ -1,7 +1,9 @@
-// ABOUTME: Renders an age-review target's content — the reported event (relay or
-// ABOUTME: getbannedevent fallback) plus recent posts via MediaPreview (which proxies
-// ABOUTME: Blossom-blocked media) — or a verified "why not visible" reason. Never a
-// ABOUTME: blank, never a guess, never an error masked as absent.
+// ABOUTME: Renders an age-review target's content: the reported event (resolved
+// ABOUTME: through the report's target tag, with a getbannedevent fallback) plus
+// ABOUTME: recent posts via MediaPreview (which proxies Blossom-blocked media),
+// ABOUTME: or a verified reason it is not visible. Never a blank, never a guess,
+// ABOUTME: never an error or an in-flight read presented as absence.
+import type { ReactNode } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -17,21 +19,26 @@ interface AgeReviewContentProps {
   postCount: number | undefined;
   contentLoading: boolean;
   contentError: boolean;
+  // The account read resolved but was truncated, so a zero count proves nothing.
+  contentIncomplete?: boolean;
   accountStatus: AccountStatusResponse | undefined;
+  accountStatusLoading?: boolean;
+  accountStatusFailed?: boolean;
   recentPosts: NostrEvent[];
   onRetry?: () => void;
-  // The specific reported event (relay-visible or retrieved via getbannedevent).
+  // Outcome of resolving what the report targets. Undefined while it has not run.
   reportedEvent?: ReportedEventResult | null;
   reportedEventLoading?: boolean;
-  // The reported-event read errored (relay/timeout) — distinct from a confirmed
-  // not-found, so we never label a transient failure as "deleted or aged out".
+  // The lookup failed. Distinct from any "not retrievable" outcome, so a
+  // transient failure is never labelled as a deletion.
   reportedEventError?: boolean;
   onRetryReported?: () => void;
-  // Whether the case has a report_id at all (so "not found" only shows when it does).
+  // Whether the case has a report_id at all (so the reported section only
+  // appears for cases that came from a report).
   hasReportId?: boolean;
 }
 
-// One content item — click-to-reveal media (MediaPreview default; the media-proxy
+// One content item: click-to-reveal media (MediaPreview default; the media-proxy
 // fallback handles Blossom-blocked blobs), kind + timestamp, and any text.
 function ContentCard({ event }: { event: NostrEvent }) {
   return (
@@ -49,11 +56,35 @@ function ContentCard({ event }: { event: NostrEvent }) {
   );
 }
 
+function Note({ children }: { children: ReactNode }) {
+  return <p className="text-xs text-muted-foreground">{children}</p>;
+}
+
+/**
+ * Why the reported event is not on screen. A suspend or ban explains it
+ * definitively, so those are checked before falling back to "not retrievable":
+ * suspension hides the account's events from the relay read and `getbannedevent`
+ * only knows per-event bans, so without this an enforced account reads as
+ * "deleted", which is a different and much more final claim.
+ */
+function reportedMissingReason(accountStatus: AccountStatusResponse | undefined): string {
+  if (accountStatus?.status === "suspended") {
+    return "The reported post is hidden by the account's suspension, so it cannot be shown here.";
+  }
+  if (accountStatus?.status === "banned") {
+    return "The reported post was removed with the account ban.";
+  }
+  return "The reported post is not retrievable from the relay (deleted, aged out, or hidden).";
+}
+
 export function AgeReviewContent({
   postCount,
   contentLoading,
   contentError,
+  contentIncomplete,
   accountStatus,
+  accountStatusLoading,
+  accountStatusFailed,
   recentPosts,
   onRetry,
   reportedEvent,
@@ -62,38 +93,59 @@ export function AgeReviewContent({
   onRetryReported,
   hasReportId,
 }: AgeReviewContentProps) {
-  const vis = deriveContentVisibility({ postCount, contentLoading, contentError, accountStatus });
-  const reportedId = reportedEvent?.event.id;
+  const vis = deriveContentVisibility({
+    postCount,
+    contentLoading,
+    contentError,
+    contentIncomplete,
+    accountStatus,
+    accountStatusLoading,
+    accountStatusFailed,
+  });
+
+  const foundReported = reportedEvent?.status === "found" ? reportedEvent : undefined;
+  const reportedId = foundReported?.event.id;
   const otherPosts = recentPosts.filter((e) => e.id !== reportedId);
+
+  // Built first so the heading is only rendered when something sits under it,
+  // rather than leaving a bare "Reported content" label over empty space.
+  const reportedBody = !hasReportId ? null : foundReported ? (
+    // Keyed so the click-to-reveal state cannot carry over when the pane is
+    // reused for another case (MediaPreview keeps `showMedia` across an event
+    // swap, and revealing media is a deliberate gate here).
+    <ContentCard key={foundReported.event.id} event={foundReported.event} />
+  ) : reportedEventLoading ? (
+    <Note>Loading reported content…</Note>
+  ) : reportedEventError ? (
+    <div className="flex items-center justify-between gap-2 text-xs text-amber-700 dark:text-amber-400">
+      <span>Couldn't load the reported content (relay error).</span>
+      {onRetryReported ? (
+        <Button variant="outline" size="sm" onClick={onRetryReported}>
+          <RefreshCw className="mr-1 h-3 w-3" /> Retry
+        </Button>
+      ) : null}
+    </div>
+  ) : reportedEvent?.status === "account_level" ? (
+    <Note>This report was filed against the account rather than a specific post, so there is no single item to show.</Note>
+  ) : reportedEvent?.status === "report_missing" ? (
+    <Note>The report event is no longer on the relay, so its target cannot be resolved.</Note>
+  ) : reportedEvent?.status === "target_missing" ? (
+    <Note>{reportedMissingReason(accountStatus)}</Note>
+  ) : null;
 
   return (
     <div className="space-y-3">
-      {/* The specific event that triggered the case. */}
-      {reportedEvent ? (
+      {/* The specific content the case was opened about. */}
+      {reportedBody ? (
         <div className="space-y-1.5">
           <h4 className="flex items-center gap-2 text-sm font-medium">
             Reported content
-            {reportedEvent.banned ? (
+            {foundReported?.banned ? (
               <Badge variant="destructive" className="text-xs">removed (banned)</Badge>
             ) : null}
           </h4>
-          <ContentCard event={reportedEvent.event} />
+          {reportedBody}
         </div>
-      ) : reportedEventLoading ? (
-        <p className="text-xs text-muted-foreground">Loading reported content…</p>
-      ) : reportedEventError ? (
-        <div className="flex items-center justify-between gap-2 text-xs text-amber-700 dark:text-amber-400">
-          <span>Couldn't load the reported event (relay error).</span>
-          {onRetryReported ? (
-            <Button variant="outline" size="sm" onClick={onRetryReported}>
-              <RefreshCw className="mr-1 h-3 w-3" /> Retry
-            </Button>
-          ) : null}
-        </div>
-      ) : hasReportId ? (
-        <p className="text-xs text-muted-foreground">
-          The reported event is not on the relay (deleted or aged out).
-        </p>
       ) : null}
 
       {/* The account's other recent content, or a verified reason it isn't visible. */}

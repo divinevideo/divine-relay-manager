@@ -61,6 +61,7 @@ function stats(recentPosts: NostrEvent[]): UserStats {
     recentPosts,
     existingLabels: [],
     previousReports: [],
+    relayIncomplete: false,
   };
 }
 
