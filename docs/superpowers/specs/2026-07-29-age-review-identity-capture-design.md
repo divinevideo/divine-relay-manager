@@ -22,16 +22,28 @@ And the one readable signal that exists — the kind-0 profile — is destroyed 
 | `notes` renders in the agent sidebar with no setup | Observed in the agent UI; zero user fields defined in the account |
 | The raw From name is retained but unreachable by API token | `/raw_email/…` and `/tickets/{id}/comments/{cid}/original` both 301 to the help centre; agent session only |
 | Neither current case resolves to a name | kind-0 query against `wss://relay.divine.video` returned nothing for both pubkeys |
+| Zendesk renders the stored contact name into the `To:` header of outbound mail | Auto-ack received at the test alias read `To: "test+contacttest@jeito.org" <test+contacttest@jeito.org>` |
 
 ## Privacy constraint (load-bearing — do not relax without re-deciding)
 
-**The contact name must not carry the account handle.**
+**The contact name carries the handle only after the parent has replied.**
 
-The active macro *"Customer not responding"* posts `Hello {{ticket.requester.name}}.` and sets no `comment_mode_is_public`, so it defaults to public. A contact named `Claimed parent of someuser` would therefore send that handle to the requester in an email body.
+The contact name is requester-visible, and not only through templates. Zendesk renders it into the `To:` header of every outbound email — verified against a real auto-ack. So a contact named `Claimed parent of someuser` discloses that handle to whoever holds the address, permanently.
 
-The parent email is supplied by the **teen** and is never verified, so a mistyped or nominated address would receive a real account handle alongside the fact that an under-16 review is underway.
+That matters because the parent email is supplied by the **teen** and is never verified. The outreach email is sent *before* anyone has confirmed the address is even correct, so it is the message most likely to reach a stranger.
 
-Note the asymmetry that makes this specific: the existing subject already discloses `Age review: parental verification needed [<case-uuid>]` to that same address. A UUID is meaningless to a stranger; **a handle identifies a person.** Adding the handle is an escalation the UUID is not.
+Hence the split:
+
+- **At attach time** the name is the email address alone. The outreach goes out carrying no handle.
+- **On the parent's first reply** the name is rewritten to `Claimed parent of <handle>`. By then the address is demonstrably live and held by someone engaging with the review.
+
+`handleAgeReviewReplyWebhook` is the natural hook — it already fires on that reply and resolves ticket → case → handle.
+
+"Claimed" is deliberate: whether they are the parent is precisely what the review exists to establish, and the name must not assert it as fact.
+
+Note the asymmetry that makes the timing matter: the existing subject already discloses `Age review: parental verification needed [<case-uuid>]` to that address. A UUID is meaningless to a stranger; **a handle identifies a person.** Adding the handle is an escalation the UUID is not, which is why it waits for a reply.
+
+Separately, the active macro *"Customer not responding"* posts `Hello {{ticket.requester.name}}.` as a public comment. Once names carry handles, that macro will render one into an email body. Reword it or keep it off age-review tickets.
 
 This mirrors the principle #190 was hardened on: artifacts reachable by a requester must be worthless to a hostile one.
 
@@ -68,9 +80,12 @@ Handle resolution order: `display_name → name → vine_username → nip05 → 
 
 | Surface | Carries | Visibility |
 |---|---|---|
-| Contact `name` | email address only | requester-visible — see privacy constraint |
+| Contact `name`, at attach | email address alone | requester-visible, incl. `To:` header |
+| Contact `name`, after first reply | `Claimed parent of <handle>` | requester-visible — see privacy constraint |
 | Contact `notes` | case deeplink, handle, npub, pubkey, origin ticket | agent-only |
 | Case ticket internal note | same block | agent-only |
+
+The name upgrade is why the ticket *list* becomes readable: the Requester column renders the name and nothing else, so an agent scanning the queue sees which account each ticket concerns without opening anything.
 
 Contact-record writes happen **only** when a real parent email is attached. On the no-parent path the ticket requester falls back to the API caller — 47 of ~56 case tickets currently have `matthew@divine.video` as requester — so an unguarded write would scribble case data onto a live admin profile.
 
