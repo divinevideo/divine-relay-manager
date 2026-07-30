@@ -2,7 +2,6 @@
 // ABOUTME: Includes raw JSON, linked events, author profile, user stats, related reports, and moderation actions
 
 import { useState, useMemo } from "react";
-import { useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNostr } from "@/hooks/useNostr";
 import { useAuthor } from "@/hooks/useAuthor";
@@ -11,7 +10,7 @@ import { useModerationStatus } from "@/hooks/useModerationStatus";
 import { useToast } from "@/hooks/useToast";
 import { getKindInfo, getKindCategory } from "@/lib/kindNames";
 import { useAdminApi } from "@/hooks/useAdminApi";
-import { ApiError } from "@/lib/adminApi";
+import { useAgeReviewGuardRedirect } from "@/hooks/useAgeReviewGuardRedirect";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { UserIdentifier } from "@/components/UserIdentifier";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -361,7 +360,7 @@ function TagsTable({ tags }: { tags: string[][] }) {
 export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReports }: EventDetailProps) {
   const { nostr } = useNostr();
   const { toast } = useToast();
-  const navigate = useNavigate();
+  const redirectIfGuarded = useAgeReviewGuardRedirect();
   const { banPubkey, deleteEvent, unbanPubkey, allowEvent, verifyPubkeyBanned, verifyPubkeyUnbanned, verifyEventDeleted, logDecision } = useAdminApi();
   const { getModeratorPubkey } = useCurrentUser();
   const queryClient = useQueryClient();
@@ -563,14 +562,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
       }
     },
     onError: (error: Error, variables: { pubkey: string }) => {
-      // Unban lifts the Keycast hold as well as the ban, so the worker refuses it
-      // on an open age-review case. Route to the case rather than a raw error, so
-      // enforcement cannot drift from the case out of band.
-      if (error instanceof ApiError && error.code === 'age_review_active') {
-        toast({ title: "This account is under age review", description: "Opening it in the Age Review flow." });
-        navigate(`/age-review?pubkey=${encodeURIComponent(variables.pubkey)}`);
-        return;
-      }
+      if (redirectIfGuarded(error, variables.pubkey)) return;
       toast({
         title: "Failed to unban user",
         description: error.message,

@@ -966,6 +966,14 @@ async function handleModerate(
         });
         // Pass ctx so the unbanpubkey Keycast restore (non-critical) is kept alive.
         const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders, ctx);
+        if (!rpcResponse.ok) {
+          // Forward the inner response rather than re-wrapping at 500. The
+          // age-review guard answers a refused unban with a structured 409
+          // (code/caseId/state) that callers route on, and flattening it to 500
+          // both destroys that contract and mislabels a permanent refusal as
+          // transient, which is the shape retrying clients treat as "try again".
+          return rpcResponse;
+        }
         const rpcResult = await rpcResponse.json() as { success: boolean; error?: string };
         if (!rpcResult.success) {
           return jsonResponse({ success: false, error: rpcResult.error || 'unbanpubkey RPC failed' }, 500, corsHeaders);
@@ -1016,11 +1024,18 @@ async function handleRelayRpc(
   // the case, which is exactly what this guard exists to prevent. Nothing reached
   // it from outside until the Coop enforcement adapter made unbanpubkey callable.
   //
-  // banpubkey is deliberately NOT included. It is a severe-action escape hatch:
-  // a moderator who finds something like CSAM on an account under review must be
-  // able to act immediately rather than resolve the case first. The distinction
-  // that makes this coherent is that suspend half-enforces and orphans the case,
-  // whereas a ban resolves the matter outright. Pinned by an existing test.
+  // banpubkey is deliberately NOT included: it is a severe-action escape hatch, so
+  // a moderator who finds something like CSAM on an account under review can act
+  // without resolving the case first. Pinned by an existing test.
+  //
+  // What makes guarding one direction but not the other coherent is mechanical,
+  // not a matter of taste. banpubkey performs a destructive content purge that
+  // unbanpubkey cannot reverse (see nip86.ts, where suspendpubkey is documented
+  // as the reversible alternative "without the destructive purge that banpubkey
+  // performs"). So guarding the unban removes no recovery path that ever existed
+  // for content; it defers only restoring login and signing, which is precisely
+  // the hold the case owns. Nor is it a one-way door: once the case reaches a
+  // terminal state getActiveAgeReviewCase returns null and the unban proceeds.
   //
   // Age-review's own enforcement calls the nip86 helpers directly, so it does not
   // reach this guard and can still act on its own cases.

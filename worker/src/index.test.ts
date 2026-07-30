@@ -412,6 +412,41 @@ describe('relay-rpc account-state side effects', () => {
     fetchSpy.mockRestore();
   });
 
+  it('allow_pubkey via /api/moderate forwards the guard 409 instead of flattening it to 500', async () => {
+    // allow_pubkey re-enters handleRelayRpc with unbanpubkey, so it inherits the
+    // guard. Re-wrapping at 500 would drop code/caseId/state that callers route
+    // on, and would label a permanent refusal as transient, which retrying
+    // clients treat as "try again".
+    const fetchSpy = makeFetchSpy();
+    const waitUntil = vi.fn();
+    const testCtx = { waitUntil } as unknown as ExecutionContext;
+    const env = makeAccountStateEnvWithDb({ id: 'case-allow', state: 'restricted_pending_user_response' });
+
+    const response = await worker.fetch(
+      new Request('https://api-relay-prod.divine.video/api/moderate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Admin-Key': 'test-admin-key',
+          Origin: 'https://app.divine.video',
+        },
+        body: JSON.stringify({ action: 'allow_pubkey', pubkey: VALID_PUBKEY }),
+      }),
+      env,
+      testCtx,
+    );
+
+    expect(response.status).toBe(409);
+    const body = await response.json() as { code: string; caseId: string };
+    expect(body.code).toBe('age_review_active');
+    expect(body.caseId).toBe('case-allow');
+
+    await drain(waitUntil);
+    expect(keycastCalls(fetchSpy)).toHaveLength(0);
+
+    fetchSpy.mockRestore();
+  });
+
   it('suspendpubkey is refused when the target has an active age-review case', async () => {
     const fetchSpy = makeFetchSpy();
     const waitUntil = vi.fn();

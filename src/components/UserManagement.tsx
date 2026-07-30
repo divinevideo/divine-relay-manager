@@ -18,12 +18,12 @@ import { UserX, UserCheck, Plus, Users, Trash2, User, X, Pause, Play } from "luc
 import { BannedUserCard } from "@/components/BannedUserCard";
 import { nip19 } from "nostr-tools";
 import { useAdminApi } from "@/hooks/useAdminApi";
+import { useAgeReviewGuardRedirect } from "@/hooks/useAgeReviewGuardRedirect";
 import { UserActions } from "@/components/UserActions";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { UserDisplayName } from "@/components/UserIdentifier";
 import { CopyableId } from "@/components/CopyableId";
 import type { BannedPubkeyEntry } from "@/lib/adminApi";
-import { ApiError } from "@/lib/adminApi";
 
 interface UserManagementProps {
   selectedPubkey?: string;
@@ -41,6 +41,7 @@ interface AllowedUser {
 
 export function UserManagement({ selectedPubkey }: UserManagementProps) {
   const { toast } = useToast();
+  const redirectIfGuarded = useAgeReviewGuardRedirect();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { callRelayRpc, verifyPubkeyBanned, verifyPubkeyUnbanned, unbanPubkey, unsuspendPubkey, logDecision } = useAdminApi();
@@ -143,7 +144,9 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
       setNewPubkey("");
       setNewReason("");
     },
-    onError: (error: Error) => {
+    onError: (error: Error, variables: { pubkey: string; reason?: string }) => {
+      // allow_user calls unbanpubkey, so it hits the same guard as unban below.
+      if (redirectIfGuarded(error, variables.pubkey)) return;
       toast({
         title: "Failed to allow user",
         description: error.message,
@@ -215,14 +218,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
       });
     },
     onError: (error: Error, variables: { pubkey: string }) => {
-      // Unban lifts the Keycast hold as well as the ban, so the worker refuses it
-      // on an open age-review case. Route to the case rather than a raw error,
-      // matching unsuspend below.
-      if (error instanceof ApiError && error.code === 'age_review_active') {
-        toast({ title: "This account is under age review", description: "Opening it in the Age Review flow." });
-        navigate(`/age-review?pubkey=${encodeURIComponent(variables.pubkey)}`);
-        return;
-      }
+      if (redirectIfGuarded(error, variables.pubkey)) return;
       toast({
         title: "Failed to unban user",
         description: error.message,
@@ -249,11 +245,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
       toast({ title: "User unsuspended successfully" });
     },
     onError: (error: Error, variables: { pubkey: string }) => {
-      if (error instanceof ApiError && error.code === 'age_review_active') {
-        toast({ title: "This account is under age review", description: "Opening it in the Age Review flow." });
-        navigate(`/age-review?pubkey=${encodeURIComponent(variables.pubkey)}`);
-        return;
-      }
+      if (redirectIfGuarded(error, variables.pubkey)) return;
       toast({
         title: "Failed to unsuspend user",
         description: error.message,
