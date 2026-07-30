@@ -214,7 +214,15 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
         }
       });
     },
-    onError: (error: Error) => {
+    onError: (error: Error, variables: { pubkey: string }) => {
+      // Unban lifts the Keycast hold as well as the ban, so the worker refuses it
+      // on an open age-review case. Route to the case rather than a raw error,
+      // matching unsuspend below.
+      if (error instanceof ApiError && error.code === 'age_review_active') {
+        toast({ title: "This account is under age review", description: "Opening it in the Age Review flow." });
+        navigate(`/age-review?pubkey=${encodeURIComponent(variables.pubkey)}`);
+        return;
+      }
       toast({
         title: "Failed to unban user",
         description: error.message,
