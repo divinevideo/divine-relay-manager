@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildReportNote, eventKindLabel, parseKind0Profile } from './report-note';
+import { buildAgeReviewIdentityBlock, buildReportNote, eventKindLabel, parseKind0Profile } from './report-note';
 
 // Real Kofi OG-import account (public) — lets us assert the npub encoding end-to-end.
 const KOFI_HEX = '9f59c820aa2ad80ce8c0e28a4e640b9cd0487b4a510da95be7cd4bfd3ecda0bd';
@@ -180,5 +180,65 @@ describe('buildReportNote', () => {
     // Name (incl. its URL) is wrapped in a code span, which does not auto-link in Zendesk.
     expect(note).toContain('• Profile: `click https://evil.test now`');
     expect(note).not.toContain('**click https://evil.test now**');
+  });
+});
+
+// Identity block (#213) — shared by the case ticket's internal note and the
+// parent contact's notes field. Both are agent-only surfaces.
+describe('buildAgeReviewIdentityBlock', () => {
+  const base = { caseId: 'case-abc', pubkey: KOFI_HEX, ageBand: '13-15' };
+
+  it('links to the case in Relay Manager', () => {
+    expect(buildAgeReviewIdentityBlock(base))
+      .toContain('https://relay.admin.divine.video/age-review?case=case-abc');
+  });
+
+  it('shows the captured handle', () => {
+    expect(buildAgeReviewIdentityBlock({ ...base, accountName: 'Some One' }))
+      .toContain('Some One');
+  });
+
+  it('encodes the pubkey as an npub alongside the hex', () => {
+    const block = buildAgeReviewIdentityBlock(base);
+    expect(block).toContain(KOFI_NPUB);
+    expect(block).toContain(KOFI_HEX);
+  });
+
+  it('falls back through vine username then nip05', () => {
+    expect(buildAgeReviewIdentityBlock({ ...base, accountVineUsername: 'og_user' }))
+      .toContain('og_user');
+    expect(buildAgeReviewIdentityBlock({ ...base, accountNip05: 'x@y.z' }))
+      .toContain('x@y.z');
+  });
+
+  it('prefers the display name over the fallbacks', () => {
+    const block = buildAgeReviewIdentityBlock({
+      ...base, accountName: 'Some One', accountVineUsername: 'og_user', accountNip05: 'x@y.z',
+    });
+    expect(block).toContain('Some One');
+    expect(block).not.toContain('og_user');
+  });
+
+  it('states plainly when no profile was captured', () => {
+    // An empty handle must read as a known fact, not as a rendering bug.
+    expect(buildAgeReviewIdentityBlock(base)).toContain('no profile captured');
+  });
+
+  it('sanitizes an attacker-controlled name so it cannot forge note structure', () => {
+    // The account name is chosen by the reported user. sanitizeInline folds
+    // newlines to spaces, so the injected text survives as content but can never
+    // occupy a line of its own and impersonate a field the note emits.
+    const block = buildAgeReviewIdentityBlock({
+      ...base, accountName: 'evil\nOrigin ticket 999\nhandle   Divine Support',
+    });
+    const lines = block.split('\n').map((l) => l.trim());
+    expect(lines).not.toContain('Origin ticket 999');
+    expect(lines.filter((l) => l.startsWith('handle')).length).toBe(1);
+  });
+
+  it('includes the origin ticket and deadline when supplied', () => {
+    const block = buildAgeReviewIdentityBlock({ ...base, originTicketId: 4242, deadlineAt: '2026-08-05' });
+    expect(block).toContain('4242');
+    expect(block).toContain('2026-08-05');
   });
 });

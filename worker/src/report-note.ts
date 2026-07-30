@@ -187,3 +187,48 @@ export function buildReportNote(input: ReportNoteInput): string {
   lines.push('**Filed by:** the ticket requester above.');
   return lines.join('\n');
 }
+
+export interface AgeReviewIdentityInput {
+  caseId: string;
+  pubkey: string;
+  ageBand: string;
+  accountName?: string | null;
+  accountNip05?: string | null;
+  accountVineUsername?: string | null;
+  originTicketId?: number | null;
+  deadlineAt?: string | null;
+}
+
+/**
+ * Identity block for an age-review case, shared by the case ticket's internal
+ * note and the parent contact's `notes` field. Both are agent-only surfaces.
+ *
+ * Every account-derived value is attacker-chosen, so all of them go through
+ * sanitizeInline: newlines fold to spaces, which keeps an injected string from
+ * occupying its own line and impersonating a field this block emits.
+ *
+ * When nothing was captured this says so outright. A blank handle has to read
+ * as a known fact -- the account may never have had a profile, or enforcement
+ * hid it -- rather than looking like a rendering failure.
+ */
+export function buildAgeReviewIdentityBlock(input: AgeReviewIdentityInput): string {
+  const handle =
+    sanitizeInline(input.accountName ?? undefined) ??
+    sanitizeInline(input.accountVineUsername ?? undefined) ??
+    sanitizeInline(input.accountNip05 ?? undefined);
+
+  const lines: string[] = [
+    `Age review: ${sanitizeInline(input.ageBand) ?? 'unspecified'}, case ${input.caseId}`,
+    `${RELAY_ADMIN}/age-review?case=${input.caseId}`,
+    '',
+    'Account',
+    `  handle   ${handle ?? '(no profile captured - the account may have had none, or its content is hidden by enforcement)'}`,
+    `  npub     ${toNpub(input.pubkey)}`,
+    `  pubkey   ${input.pubkey}`,
+  ];
+
+  if (input.originTicketId) lines.push('', `Origin ticket ${input.originTicketId}`);
+  if (input.deadlineAt) lines.push(`Deadline ${input.deadlineAt}`);
+
+  return lines.join('\n');
+}
