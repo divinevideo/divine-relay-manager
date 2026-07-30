@@ -440,6 +440,54 @@ describe('adminApi', () => {
       );
     });
 
+    it('surfaces a guard 409 as structured ApiError fields, not an opaque message', async () => {
+      // This is the only link that turns the worker's age-review 409 into
+      // something the UI can branch on. Every guarded call goes through here:
+      // unbanPubkey, suspendPubkey, unsuspendPubkey, and UserManagement's
+      // allow_user calling callRelayRpc('unbanpubkey') directly. Drop `code`
+      // and all five silently fall through to a destructive toast instead of
+      // routing to the case, with nothing else failing.
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 409,
+        statusText: 'Conflict',
+        json: async () => ({
+          success: false,
+          error: 'This account is under age review.',
+          code: 'age_review_active',
+          caseId: 'case-1',
+          state: 'restricted_pending_user_response',
+        }),
+      });
+
+      expect.assertions(4);
+      try {
+        await callRelayRpc(API_URL, 'unbanpubkey', ['a'.repeat(64)]);
+      } catch (err) {
+        expect(err).toBeInstanceOf(ApiError);
+        expect((err as ApiError).code).toBe('age_review_active');
+        expect((err as ApiError).statusCode).toBe(409);
+        expect((err as ApiError).message).toBe('This account is under age review.');
+      }
+    });
+
+    it('falls back to the status line when the error body is not JSON', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 502,
+        statusText: 'Bad Gateway',
+        json: async () => { throw new Error('not json'); },
+      });
+
+      expect.assertions(2);
+      try {
+        await callRelayRpc(API_URL, 'unbanpubkey', ['a'.repeat(64)]);
+      } catch (err) {
+        expect((err as ApiError).message).toBe('HTTP 502: Bad Gateway');
+        expect((err as ApiError).code).toBeUndefined();
+      }
+    });
+
     it('should throw ApiError on unsuccessful RPC response', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
