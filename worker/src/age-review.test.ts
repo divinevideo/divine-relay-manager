@@ -1865,6 +1865,38 @@ describe('handleCreateMinorAccount', () => {
     expect(body.case_id).toBeDefined();
   });
 
+  // Identity capture (#213). This path is handed the username and display name
+  // directly, so unlike the report paths it needs no relay lookup -- it just has
+  // to store what it already knows.
+  it('records the supplied display name as the account identity', async () => {
+    const db = makeMinorDb();
+    await handleCreateMinorAccount(
+      makeRequest({ username: 'someuser', display_name: 'Some One' }),
+      makeEnv(db), corsHeaders,
+    );
+
+    const prepareMock = db.prepare as ReturnType<typeof vi.fn>;
+    const insertIdx = prepareMock.mock.calls.findIndex(
+      (c: unknown[]) => String(c[0]).includes('INSERT INTO age_review_cases'),
+    );
+    expect(String(prepareMock.mock.calls[insertIdx][0])).toContain('account_name');
+
+    const binds = prepareMock.mock.results[insertIdx].value.bind.mock.calls.flat();
+    expect(binds).toContain('Some One');
+  });
+
+  it('falls back to the username when no display name is given', async () => {
+    const db = makeMinorDb();
+    await handleCreateMinorAccount(makeRequest({ username: 'someuser' }), makeEnv(db), corsHeaders);
+
+    const prepareMock = db.prepare as ReturnType<typeof vi.fn>;
+    const insertIdx = prepareMock.mock.calls.findIndex(
+      (c: unknown[]) => String(c[0]).includes('INSERT INTO age_review_cases'),
+    );
+    const binds = prepareMock.mock.results[insertIdx].value.bind.mock.calls.flat();
+    expect(binds).toContain('someuser');
+  });
+
   it('rejects missing username', async () => {
     const db = makeMinorDb();
     const res = await handleCreateMinorAccount(makeRequest({}), makeEnv(db), corsHeaders);

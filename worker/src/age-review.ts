@@ -598,11 +598,24 @@ export async function handleCreateMinorAccount(
 
   const caseId = crypto.randomUUID();
   try {
+    // Identity is known up front on this path -- the operator supplied it -- so
+    // there is nothing to look up. Storing it keeps this case as identifiable as
+    // a report-created one, where the name has to be fetched before enforcement
+    // hides the profile.
     await env.DB.prepare(`
       INSERT INTO age_review_cases
-      (id, pubkey, suspected_age_band, state, allowed_resolution, resolution_note, created_via, claim_link_url, claim_link_expires_at, zendesk_ticket_id)
-      VALUES (?, ?, 'age_13_15', 'cleared', 'parent_video_or_email', 'Approved via parental consent (minor onboarding)', 'minor_onboarding', ?, ?, ?)
-    `).bind(caseId, result.pubkey, result.claim_url, result.expires_at ?? null, body.zendesk_ticket_id ?? null).run();
+      (id, pubkey, suspected_age_band, state, allowed_resolution, resolution_note, created_via, claim_link_url, claim_link_expires_at, zendesk_ticket_id,
+       account_name, identity_captured_at)
+      VALUES (?, ?, 'age_13_15', 'cleared', 'parent_video_or_email', 'Approved via parental consent (minor onboarding)', 'minor_onboarding', ?, ?, ?, ?, ?)
+    `).bind(
+      caseId,
+      result.pubkey,
+      result.claim_url,
+      result.expires_at ?? null,
+      body.zendesk_ticket_id ?? null,
+      displayName ?? username,
+      new Date().toISOString(),
+    ).run();
   } catch (err) {
     console.error(`[age-review] D1 audit record failed for minor account: pubkey=${result.pubkey}, case=${caseId}`, err);
     return json({
