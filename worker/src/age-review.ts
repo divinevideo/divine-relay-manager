@@ -149,20 +149,39 @@ export async function ageReviewActiveGuard(
   error: string,
   opts: { failClosed?: boolean } = {},
 ): Promise<Response | null> {
-  if (!/^[0-9a-f]{64}$/.test(pubkey) || !env.DB) return null;
+  // A malformed pubkey skips the guard in both modes: there is nothing to query,
+  // and the caller's own validation produces the 400.
+  if (!/^[0-9a-f]{64}$/.test(pubkey)) return null;
+
+  // 503, not 409: "could not check" is a different answer from "there is a
+  // case", and 5xx is the retryable class. No caseId/state, since neither is
+  // known.
+  const cannotCheck = () => json({
+    success: false,
+    error: 'Could not check age-review status. Try again.',
+    code: 'age_review_check_failed',
+  }, 503, corsHeaders);
+
+  // A missing binding is the check not happening, so it refuses under
+  // failClosed exactly as a thrown lookup does. Handling only the throw would
+  // leave the PERSISTENT failure lifting holds while the transient one refused,
+  // which is the wrong way round. Every deployment binds DB (wrangler prod,
+  // staging and local), so this costs real traffic nothing.
+  if (!env.DB) {
+    if (opts.failClosed) {
+      console.error('[ageReviewActiveGuard] no DB binding; refusing (fail-closed)');
+      return cannotCheck();
+    }
+    return null;
+  }
+
   let activeCase: AgeReviewCase | null = null;
   try {
     activeCase = await getActiveAgeReviewCase(pubkey, env);
   } catch (err) {
     if (opts.failClosed) {
-      // 503, not 409: this is "could not check", not "there is a case". The
-      // distinction matters to the caller, and 5xx is the retryable class.
       console.error('[ageReviewActiveGuard] lookup failed; refusing (fail-closed):', err);
-      return json({
-        success: false,
-        error: 'Could not check age-review status. Try again.',
-        code: 'age_review_check_failed',
-      }, 503, corsHeaders);
+      return cannotCheck();
     }
     console.error('[ageReviewActiveGuard] lookup failed; proceeding:', err);
   }

@@ -372,7 +372,7 @@ describe('relay-rpc account-state side effects', () => {
     const waitUntil = vi.fn();
     const testCtx = { waitUntil } as unknown as ExecutionContext;
 
-    const response = await callRelayRpc('unsuspendpubkey', [VALID_PUBKEY], makeAccountStateEnv(), testCtx);
+    const response = await callRelayRpc('unsuspendpubkey', [VALID_PUBKEY], makeAccountStateEnvWithDb(null), testCtx);
     expect(response.status).toBe(200);
     await drain(waitUntil);
 
@@ -392,7 +392,7 @@ describe('relay-rpc account-state side effects', () => {
     const waitUntil = vi.fn();
     const testCtx = { waitUntil } as unknown as ExecutionContext;
 
-    const response = await callRelayRpc('unbanpubkey', [VALID_PUBKEY], makeAccountStateEnv(), testCtx);
+    const response = await callRelayRpc('unbanpubkey', [VALID_PUBKEY], makeAccountStateEnvWithDb(null), testCtx);
     expect(response.status).toBe(200);
     await drain(waitUntil);
 
@@ -484,6 +484,40 @@ describe('relay-rpc account-state side effects', () => {
     fetchSpy.mockRestore();
   });
 
+  it('refuses a reversal when there is no DB binding at all', async () => {
+    // The persistent version of "the check cannot happen". Handling only the
+    // thrown lookup would leave this case lifting holds while the transient one
+    // refused, which is the wrong way round.
+    const fetchSpy = makeFetchSpy();
+    const waitUntil = vi.fn();
+    const testCtx = { waitUntil } as unknown as ExecutionContext;
+
+    const response = await callRelayRpc('unbanpubkey', [VALID_PUBKEY], makeAccountStateEnv(), testCtx);
+    expect(response.status).toBe(503);
+    const body = await response.json() as { code: string };
+    expect(body.code).toBe('age_review_check_failed');
+
+    await drain(waitUntil);
+    expect(keycastCalls(fetchSpy)).toHaveLength(0);
+
+    fetchSpy.mockRestore();
+  });
+
+  it('still lets a suspend through with no DB binding', async () => {
+    const fetchSpy = makeFetchSpy();
+    const waitUntil = vi.fn();
+    const testCtx = { waitUntil } as unknown as ExecutionContext;
+
+    const response = await callRelayRpc('suspendpubkey', [VALID_PUBKEY, 'policy'], makeAccountStateEnv(), testCtx);
+    expect(response.status).toBe(200);
+    await drain(waitUntil);
+    const kc = keycastCalls(fetchSpy);
+    expect(kc).toHaveLength(1);
+    expect(kc[0].status).toBe('suspended');
+
+    fetchSpy.mockRestore();
+  });
+
   it('refuses unsuspendpubkey the same way when the lookup fails', async () => {
     const fetchSpy = makeFetchSpy();
     const waitUntil = vi.fn();
@@ -511,6 +545,12 @@ describe('relay-rpc account-state side effects', () => {
       'suspendpubkey', [VALID_PUBKEY, 'policy'], makeAccountStateEnvWithFailingCaseLookup(), testCtx,
     );
     expect(response.status).toBe(200);
+
+    // Failing open must actually let the enforcement through, not just return 200.
+    await drain(waitUntil);
+    const kc = keycastCalls(fetchSpy);
+    expect(kc).toHaveLength(1);
+    expect(kc[0].status).toBe('suspended');
 
     fetchSpy.mockRestore();
   });
@@ -645,7 +685,7 @@ describe('relay-rpc account-state side effects', () => {
         },
         body: JSON.stringify({ action: 'allow_pubkey', pubkey: VALID_PUBKEY }),
       }),
-      makeAccountStateEnv(),
+      makeAccountStateEnvWithDb(null),
       testCtx,
     );
     expect(response.status).toBe(200);
