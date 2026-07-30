@@ -94,6 +94,18 @@ export interface AgeReviewCase {
   created_via: string | null;
   claim_link_url: string | null;
   claim_link_expires_at: string | null;
+  /**
+   * Human-readable identity for the reported account, captured when the case was
+   * created. Enforcement hides a suspended account's content from relay queries,
+   * so these cannot be resolved on read after the fact.
+   *
+   * identity_captured_at is stamped even when nothing resolved: null means the
+   * lookup never ran, not that the account has no profile.
+   */
+  account_name: string | null;
+  account_nip05: string | null;
+  account_vine_username: string | null;
+  identity_captured_at: string | null;
   created_at: string;
   updated_at: string;
   version: number;
