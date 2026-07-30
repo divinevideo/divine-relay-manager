@@ -972,6 +972,14 @@ async function handleModerate(
           // (code/caseId/state) that callers route on, and flattening it to 500
           // both destroys that contract and mislabels a permanent refusal as
           // transient, which is the shape retrying clients treat as "try again".
+          //
+          // Note this is not 409-only. handleRelayRpc has one other reachable
+          // non-ok return: a 400 when the underlying NIP-86 call fails. So a
+          // relay-side failure now surfaces here as 400 rather than 500, which
+          // makes /api/moderate consistent with /api/relay-rpc (already 400 in
+          // that case) but does flip it from retryable to terminal for an
+          // automated caller. Deliberate: consistency is worth more than an
+          // accidental 500, and no current caller consumes this path.
           return rpcResponse;
         }
         const rpcResult = await rpcResponse.json() as { success: boolean; error?: string };
