@@ -1005,13 +1005,30 @@ async function handleRelayRpc(
     return jsonResponse({ success: false, error: 'Missing method' }, 400, corsHeaders);
   }
 
-  // Age-review guard: a bare suspend/unsuspend on a pubkey with an open
+  // Age-review guard: a bare account-state change on a pubkey with an open
   // (non-terminal) age-review case must not half-enforce (Suspend orphans the
   // case) or silently lift the hold (Unsuspend skips verification). Refuse and
   // route the moderator to the case; Restrict/Clear live in the age-review flow.
-  // Age-review's own enforcement calls the nip86 helpers directly, and internal
-  // moderation/bulk callers use ban*/unban* only, so neither reaches this guard.
-  if (body.method === 'suspendpubkey' || body.method === 'unsuspendpubkey') {
+  //
+  // unbanpubkey is included because it calls unsuspendUser, which sets Keycast
+  // status to active and so lifts a suspension as well as a ban. An unban on an
+  // account under age review therefore restores login and signing while skipping
+  // the case, which is exactly what this guard exists to prevent. Nothing reached
+  // it from outside until the Coop enforcement adapter made unbanpubkey callable.
+  //
+  // banpubkey is deliberately NOT included. It is a severe-action escape hatch:
+  // a moderator who finds something like CSAM on an account under review must be
+  // able to act immediately rather than resolve the case first. The distinction
+  // that makes this coherent is that suspend half-enforces and orphans the case,
+  // whereas a ban resolves the matter outright. Pinned by an existing test.
+  //
+  // Age-review's own enforcement calls the nip86 helpers directly, so it does not
+  // reach this guard and can still act on its own cases.
+  if (
+    body.method === 'suspendpubkey' ||
+    body.method === 'unsuspendpubkey' ||
+    body.method === 'unbanpubkey'
+  ) {
     const target = body.params?.[0] ? String(body.params[0]) : '';
     const guarded = await ageReviewActiveGuard(target, env, corsHeaders,
       'This account is under age review. Restrict or clear it from the Age Review flow.');

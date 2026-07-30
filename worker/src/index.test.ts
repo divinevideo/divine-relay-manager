@@ -390,6 +390,28 @@ describe('relay-rpc account-state side effects', () => {
     fetchSpy.mockRestore();
   });
 
+  it('unbanpubkey is refused when the target has an active age-review case', async () => {
+    // unbanpubkey calls unsuspendUser, which sets Keycast status to active and so
+    // lifts an age-review suspension as well as a ban. Without the guard, a Coop
+    // Unban-User restores login and signing on an account still under review.
+    const fetchSpy = makeFetchSpy();
+    const waitUntil = vi.fn();
+    const testCtx = { waitUntil } as unknown as ExecutionContext;
+    const env = makeAccountStateEnvWithDb({ id: 'case-unban', state: 'restricted_pending_user_response' });
+
+    const response = await callRelayRpc('unbanpubkey', [VALID_PUBKEY], env, testCtx);
+    expect(response.status).toBe(409);
+    const body = await response.json() as { code: string; caseId: string };
+    expect(body.code).toBe('age_review_active');
+    expect(body.caseId).toBe('case-unban');
+
+    // No Keycast status change: the hold must survive the refused unban.
+    await drain(waitUntil);
+    expect(keycastCalls(fetchSpy)).toHaveLength(0);
+
+    fetchSpy.mockRestore();
+  });
+
   it('suspendpubkey is refused when the target has an active age-review case', async () => {
     const fetchSpy = makeFetchSpy();
     const waitUntil = vi.fn();
