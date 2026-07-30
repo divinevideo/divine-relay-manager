@@ -4,6 +4,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ReportWatcher, type ReportWatcherEnv, type ReportEvent, type ReportWatcherStatus, type AutoHideConfig } from './ReportWatcher';
 
+vi.mock('./relay-profile', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./relay-profile')>();
+  return {
+    ...actual,
+    fetchAccountIdentity: vi.fn().mockResolvedValue(null),
+  };
+});
+
 vi.mock('./keycast-client', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./keycast-client')>();
   return {
@@ -12,6 +20,7 @@ vi.mock('./keycast-client', async (importOriginal) => {
   };
 });
 import { getUserStatus } from './keycast-client';
+import { fetchAccountIdentity } from './relay-profile';
 
 // Mock WebSocket instances created during tests
 let mockWebSockets: MockWebSocket[] = [];
@@ -1559,6 +1568,95 @@ describe('ReportWatcher', () => {
         );
         expect(insertCall).toBeDefined();
       }, { timeout: 2000 });
+    });
+
+    // Identity capture (#213). A suspended account's content is hidden from relay
+    // queries, so the readable name has to be recorded when the case opens; it
+    // cannot be resolved on read afterwards.
+    function bindCallsFor(fragment: string): unknown[][] {
+      const prepareMock = ageEnv.DB!.prepare as ReturnType<typeof vi.fn>;
+      const matched = prepareMock.mock.calls
+        .map((c, i) => ({ sql: String(c[0]), stmt: prepareMock.mock.results[i]?.value }))
+        .filter((entry) => entry.sql.includes(fragment));
+      return matched.flatMap((entry) =>
+        (entry.stmt?.bind as ReturnType<typeof vi.fn> | undefined)?.mock.calls ?? []
+      );
+    }
+
+    async function sendUnderageReport(reportId: string, reportedPubkey: string) {
+      await ageWatcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+      getLastMockWebSocket()!.simulateMessage(JSON.stringify(['EVENT', 'auto-hide-reports', {
+        id: reportId,
+        pubkey: 'reporter_pubkey',
+        kind: 1984,
+        content: 'Underage user report',
+        tags: [
+          ['p', reportedPubkey],
+          ['l', 'NS-underageUser', 'social.nos.ontology'],
+          ['client', 'diVine'],
+        ],
+        created_at: Math.floor(Date.now() / 1000),
+      }]));
+      await vi.waitFor(() => {
+        expect((ageEnv.DB!.prepare as ReturnType<typeof vi.fn>).mock.calls.some(
+          (c: unknown[]) => typeof c[0] === 'string' && c[0].includes('age_review_cases') && c[0].includes('INSERT')
+        )).toBe(true);
+      }, { timeout: 2000 });
+    }
+
+    it('records the captured handle on the case', async () => {
+      mockGetUserStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: false });
+      vi.mocked(fetchAccountIdentity).mockResolvedValue({
+        name: 'Some One', nip05: 'x@y.z', isVineImport: false, vineUsername: undefined,
+      });
+
+      await sendUnderageReport('identity_report_1', 'reported_identity_1');
+
+      expect(fetchAccountIdentity).toHaveBeenCalledWith('reported_identity_1', expect.anything());
+      const binds = bindCallsFor('INSERT INTO age_review_cases').flat();
+      expect(binds).toContain('Some One');
+      expect(binds).toContain('x@y.z');
+    });
+
+    it('stamps identity_captured_at even when no profile resolves', async () => {
+      mockGetUserStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: false });
+      vi.mocked(fetchAccountIdentity).mockResolvedValue(null);
+
+      await sendUnderageReport('identity_report_2', 'reported_identity_2');
+
+      const insertSql = (ageEnv.DB!.prepare as ReturnType<typeof vi.fn>).mock.calls
+        .map((c: unknown[]) => String(c[0]))
+        .find((sql) => sql.includes('INSERT INTO age_review_cases'));
+      expect(insertSql).toContain('identity_captured_at');
+      // A stamp with null values means "looked, found nothing" — distinct from
+      // "never looked", which the backfill uses to decide what to retry.
+      const binds = bindCallsFor('INSERT INTO age_review_cases').flat();
+      expect(binds.some((v) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(v))).toBe(true);
+    });
+
+    it('still creates the case when the identity lookup fails', async () => {
+      mockGetUserStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: false });
+      vi.mocked(fetchAccountIdentity).mockRejectedValue(new Error('relay down'));
+
+      await sendUnderageReport('identity_report_3', 'reported_identity_3');
+
+      // The assertion is sendUnderageReport's own waitFor: the INSERT happened.
+      expect(mockDbRun).toHaveBeenCalled();
+    });
+
+    it('records the captured handle on the auto-clear path too', async () => {
+      mockGetUserStatus.mockResolvedValue({
+        success: true, pubkey: 'reported_identity_4', status: 'active', verified_minor: true,
+      });
+      vi.mocked(fetchAccountIdentity).mockResolvedValue({
+        name: 'Cleared Person', nip05: undefined, isVineImport: false, vineUsername: undefined,
+      });
+
+      await sendUnderageReport('identity_report_4', 'reported_identity_4');
+
+      const binds = bindCallsFor('INSERT INTO age_review_cases').flat();
+      expect(binds).toContain('Cleared Person');
     });
 
     it('should auto-clear age review case for verified minors', async () => {
