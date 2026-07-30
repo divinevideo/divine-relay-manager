@@ -125,24 +125,45 @@ export async function getActiveAgeReviewCase(
  * (`age_review_active` + caseId/state) that the frontend turns into a redirect
  * to the case; returns null when nothing blocks the action.
  *
- * Fails open: the guard is a safety net (the report hand-off is the primary
- * path), so a transient D1 error must not block core moderation — log and
- * proceed. A malformed pubkey also skips the guard (no point querying; the
+ * Fails open by default: the guard is a safety net (the report hand-off is the
+ * primary path), so a transient D1 error must not block core moderation — log
+ * and proceed. A malformed pubkey also skips the guard (no point querying; the
  * caller's own validation produces the 400). Age-review's own enforcement
  * calls the nip86 helpers / runBulkModeration directly, so it never hits the
  * guarded endpoints.
+ *
+ * `failClosed` inverts that for the REVERSAL direction, where the default is
+ * the wrong trade. Failing open on a suspend over-enforces: visible, and
+ * undone by the moderator who did it. Failing open on an unsuspend or unban
+ * silently LIFTS a minor-safety hold while reporting success, so nobody learns
+ * the check never ran — and those calls now arrive from automation rather than
+ * a human who might notice. The cost is that a real outage blocks reversals
+ * entirely, which is accepted: an outage long enough to matter is not tenable
+ * and has to be fixed rather than papered over. `banpubkey` is unguarded, so
+ * severe enforcement still works throughout.
  */
 export async function ageReviewActiveGuard(
   pubkey: string,
   env: AgeReviewEnv,
   corsHeaders: Record<string, string>,
   error: string,
+  opts: { failClosed?: boolean } = {},
 ): Promise<Response | null> {
   if (!/^[0-9a-f]{64}$/.test(pubkey) || !env.DB) return null;
   let activeCase: AgeReviewCase | null = null;
   try {
     activeCase = await getActiveAgeReviewCase(pubkey, env);
   } catch (err) {
+    if (opts.failClosed) {
+      // 503, not 409: this is "could not check", not "there is a case". The
+      // distinction matters to the caller, and 5xx is the retryable class.
+      console.error('[ageReviewActiveGuard] lookup failed; refusing (fail-closed):', err);
+      return json({
+        success: false,
+        error: 'Could not check age-review status. Try again.',
+        code: 'age_review_check_failed',
+      }, 503, corsHeaders);
+    }
     console.error('[ageReviewActiveGuard] lookup failed; proceeding:', err);
   }
   if (!activeCase) return null;

@@ -248,6 +248,22 @@ describe('relay-rpc account-state side effects', () => {
     } as never;
   }
 
+  // D1 present but throwing, to exercise the guard's fail-open / fail-closed split.
+  function makeAccountStateEnvWithFailingCaseLookup() {
+    return {
+      ...(makeAccountStateEnvWithDb(null) as unknown as Record<string, unknown>),
+      DB: {
+        prepare: () => ({
+          bind: () => ({
+            first: async () => {
+              throw new Error('D1 unavailable');
+            },
+          }),
+        }),
+      },
+    } as never;
+  }
+
   // Routes a mocked fetch by URL so each backend can be asserted independently.
   function makeFetchSpy() {
     return vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
@@ -443,6 +459,58 @@ describe('relay-rpc account-state side effects', () => {
 
     await drain(waitUntil);
     expect(keycastCalls(fetchSpy)).toHaveLength(0);
+
+    fetchSpy.mockRestore();
+  });
+
+  it('refuses a reversal when the case lookup itself fails, rather than lifting the hold', async () => {
+    // Fail closed on the reversal direction: an unchecked unban silently lifts a
+    // minor-safety hold and reports success, so nobody learns the check never
+    // ran. 503, not 409 -- "could not check", not "there is a case".
+    const fetchSpy = makeFetchSpy();
+    const waitUntil = vi.fn();
+    const testCtx = { waitUntil } as unknown as ExecutionContext;
+    const env = makeAccountStateEnvWithFailingCaseLookup();
+
+    const response = await callRelayRpc('unbanpubkey', [VALID_PUBKEY], env, testCtx);
+    expect(response.status).toBe(503);
+    const body = await response.json() as { code: string };
+    expect(body.code).toBe('age_review_check_failed');
+
+    // Nothing lifted: no Keycast status change on a refused reversal.
+    await drain(waitUntil);
+    expect(keycastCalls(fetchSpy)).toHaveLength(0);
+
+    fetchSpy.mockRestore();
+  });
+
+  it('refuses unsuspendpubkey the same way when the lookup fails', async () => {
+    const fetchSpy = makeFetchSpy();
+    const waitUntil = vi.fn();
+    const testCtx = { waitUntil } as unknown as ExecutionContext;
+
+    const response = await callRelayRpc(
+      'unsuspendpubkey', [VALID_PUBKEY], makeAccountStateEnvWithFailingCaseLookup(), testCtx,
+    );
+    expect(response.status).toBe(503);
+    await drain(waitUntil);
+    expect(keycastCalls(fetchSpy)).toHaveLength(0);
+
+    fetchSpy.mockRestore();
+  });
+
+  it('still lets a suspend through when the lookup fails (over-enforcing is the safe side)', async () => {
+    // The enforce direction keeps failing open: a suspend applied without the
+    // check is visible and reversible, and blocking it would stop moderation
+    // during an outage.
+    const fetchSpy = makeFetchSpy();
+    const waitUntil = vi.fn();
+    const testCtx = { waitUntil } as unknown as ExecutionContext;
+
+    const response = await callRelayRpc(
+      'suspendpubkey', [VALID_PUBKEY, 'policy'], makeAccountStateEnvWithFailingCaseLookup(), testCtx,
+    );
+    expect(response.status).toBe(200);
 
     fetchSpy.mockRestore();
   });

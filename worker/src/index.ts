@@ -1053,8 +1053,13 @@ async function handleRelayRpc(
     body.method === 'unbanpubkey'
   ) {
     const target = body.params?.[0] ? String(body.params[0]) : '';
+    // Reversals fail closed: if the case lookup itself fails we refuse rather
+    // than lift a hold without having checked. Suspend keeps the default,
+    // because failing open there over-enforces, which is visible and undoable.
+    const isReversal = body.method === 'unsuspendpubkey' || body.method === 'unbanpubkey';
     const guarded = await ageReviewActiveGuard(target, env, corsHeaders,
-      'This account is under age review. Restrict or clear it from the Age Review flow.');
+      'This account is under age review. Restrict or clear it from the Age Review flow.',
+      { failClosed: isReversal });
     if (guarded) return guarded;
   }
 
