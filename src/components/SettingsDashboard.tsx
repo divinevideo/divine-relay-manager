@@ -10,7 +10,6 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { CopyableId } from "@/components/CopyableId";
 import { useAppContext } from "@/hooks/useAppContext";
 import { useAdminApi } from "@/hooks/useAdminApi";
-import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { getCurrentEnvironment } from "@/lib/environments";
 import {
   Globe, Shield, Clock, Zap, FileText, ExternalLink,
@@ -166,7 +165,6 @@ export function SettingsDashboard() {
   const { config } = useAppContext();
   const { relayUrl, apiUrl } = config;
   const { callRelayRpc, getWorkerInfo } = useAdminApi();
-  const { user } = useCurrentUser();
 
   const env = getCurrentEnvironment(relayUrl, apiUrl);
 
@@ -192,14 +190,17 @@ export function SettingsDashboard() {
     enabled: !!apiUrl,
   });
 
-  // ── NIP-86 queries (auth-gated) ──
+  // ── NIP-86 queries ──
+  // Not gated on a divine-login session: CF Access is the access gate, and the
+  // worker signs these with the shared admin key (useAdminApi.callRelayRpc takes
+  // no signer). `user` is attribution only (#181).
   const {
     data: allowedKinds,
     isLoading: kindsLoading,
   } = useQuery({
     queryKey: ['allowed-kinds', relayUrl],
     queryFn: () => callRelayRpc<number[]>('listallowedkinds'),
-    enabled: !!user && !!relayUrl,
+    enabled: !!relayUrl,
   });
 
   const {
@@ -208,7 +209,7 @@ export function SettingsDashboard() {
   } = useQuery({
     queryKey: ['blocked-ips', relayUrl],
     queryFn: () => callRelayRpc<Array<{ ip: string; reason?: string }>>('listblockedips'),
-    enabled: !!user && !!relayUrl,
+    enabled: !!relayUrl,
   });
 
   const {
@@ -217,7 +218,7 @@ export function SettingsDashboard() {
   } = useQuery({
     queryKey: ['banned-users', relayUrl],
     queryFn: () => callRelayRpc<Array<string | { pubkey: string; reason?: string }>>('listbannedpubkeys'),
-    enabled: !!user && !!relayUrl,
+    enabled: !!relayUrl,
   });
 
   const {
@@ -226,7 +227,7 @@ export function SettingsDashboard() {
   } = useQuery({
     queryKey: ['allowed-users', relayUrl],
     queryFn: () => callRelayRpc<string[]>('listallowedpubkeys'),
-    enabled: !!user && !!relayUrl,
+    enabled: !!relayUrl,
   });
 
   const {
@@ -235,7 +236,7 @@ export function SettingsDashboard() {
   } = useQuery({
     queryKey: ['banned-events'],
     queryFn: () => callRelayRpc<Array<{ id: string; reason?: string }>>('listbannedevents'),
-    enabled: !!user && !!relayUrl,
+    enabled: !!relayUrl,
   });
 
   const {
@@ -244,7 +245,7 @@ export function SettingsDashboard() {
   } = useQuery({
     queryKey: ['events-needing-moderation', relayUrl],
     queryFn: () => callRelayRpc<unknown[]>('listeventsneedingmoderation'),
-    enabled: !!user && !!relayUrl,
+    enabled: !!relayUrl,
   });
 
   const {
@@ -253,7 +254,7 @@ export function SettingsDashboard() {
   } = useQuery({
     queryKey: ['supported-methods', relayUrl],
     queryFn: () => callRelayRpc<string[]>('supportedmethods'),
-    enabled: !!user && !!relayUrl,
+    enabled: !!relayUrl,
   });
 
   // ── Connection status derived from query states ──
@@ -663,136 +664,126 @@ export function SettingsDashboard() {
           </>
         ) : null}
 
-        {/* ── NIP-86 Sections (auth-gated) ── */}
-        {!user ? (
-          <Card>
-            <CardContent className="py-8 text-center">
-              <p className="text-muted-foreground">Log in to view relay management data</p>
-            </CardContent>
-          </Card>
-        ) : (
-          <>
-            {/* ── 7. Event Kind Configuration ── */}
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2 text-base">
-                  <List className="h-5 w-5" />
-                  Event Kind Configuration
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                {kindsLoading ? (
-                  <div className="space-y-2">
-                    <Skeleton className="h-4 w-48" />
-                    <Skeleton className="h-4 w-32" />
-                  </div>
-                ) : allowedKinds && allowedKinds.length > 0 ? (
-                  <div className="flex flex-wrap gap-2">
-                    {allowedKinds.map((kind) => (
-                      <Badge key={kind} variant="secondary">
-                        Kind {kind}
-                        {KIND_NAMES[kind] ? ` — ${KIND_NAMES[kind]}` : ''}
-                      </Badge>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="text-sm text-muted-foreground">All event kinds are allowed</p>
-                )}
-              </CardContent>
-            </Card>
+        {/* ── NIP-86 Sections ── */}
+        {/* ── 7. Event Kind Configuration ── */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <List className="h-5 w-5" />
+              Event Kind Configuration
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {kindsLoading ? (
+              <div className="space-y-2">
+                <Skeleton className="h-4 w-48" />
+                <Skeleton className="h-4 w-32" />
+              </div>
+            ) : allowedKinds && allowedKinds.length > 0 ? (
+              <div className="flex flex-wrap gap-2">
+                {allowedKinds.map((kind) => (
+                  <Badge key={kind} variant="secondary">
+                    Kind {kind}
+                    {KIND_NAMES[kind] ? ` — ${KIND_NAMES[kind]}` : ''}
+                  </Badge>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground">All event kinds are allowed</p>
+            )}
+          </CardContent>
+        </Card>
 
-            {/* ── 8. Blocked IPs ── */}
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2 text-base">
-                  <ShieldBan className="h-5 w-5" />
-                  Blocked IPs
-                  {blockedIps && (
-                    <Badge variant="outline" className="ml-1">{blockedIps.length}</Badge>
-                  )}
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                {ipsLoading ? (
-                  <div className="space-y-2">
-                    <Skeleton className="h-4 w-40" />
-                    <Skeleton className="h-4 w-36" />
+        {/* ── 8. Blocked IPs ── */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <ShieldBan className="h-5 w-5" />
+              Blocked IPs
+              {blockedIps && (
+                <Badge variant="outline" className="ml-1">{blockedIps.length}</Badge>
+              )}
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {ipsLoading ? (
+              <div className="space-y-2">
+                <Skeleton className="h-4 w-40" />
+                <Skeleton className="h-4 w-36" />
+              </div>
+            ) : blockedIps && blockedIps.length > 0 ? (
+              <div className="space-y-1.5">
+                {blockedIps.map((entry, i) => (
+                  <div key={i} className="flex items-center gap-2 text-sm">
+                    <span className="font-mono">{entry.ip}</span>
+                    {entry.reason && (
+                      <span className="text-muted-foreground">— {entry.reason}</span>
+                    )}
                   </div>
-                ) : blockedIps && blockedIps.length > 0 ? (
-                  <div className="space-y-1.5">
-                    {blockedIps.map((entry, i) => (
-                      <div key={i} className="flex items-center gap-2 text-sm">
-                        <span className="font-mono">{entry.ip}</span>
-                        {entry.reason && (
-                          <span className="text-muted-foreground">— {entry.reason}</span>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="text-sm text-muted-foreground">No blocked IP addresses</p>
-                )}
-              </CardContent>
-            </Card>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground">No blocked IP addresses</p>
+            )}
+          </CardContent>
+        </Card>
 
-            {/* ── 9. Moderation Overview ── */}
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2 text-base">
-                  <AlertTriangle className="h-5 w-5" />
-                  Moderation Overview
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                  <div className="text-center">
-                    <p className="text-2xl font-bold">
-                      {bannedUsersLoading ? <Skeleton className="h-8 w-12 mx-auto" /> : (Array.isArray(bannedUsers) ? bannedUsers.length : 0)}
-                    </p>
-                    <p className="text-sm text-muted-foreground">Banned Users</p>
-                  </div>
-                  <div className="text-center">
-                    <p className="text-2xl font-bold">
-                      {allowedUsersLoading ? <Skeleton className="h-8 w-12 mx-auto" /> : (Array.isArray(allowedUsers) ? allowedUsers.length : 0)}
-                    </p>
-                    <p className="text-sm text-muted-foreground">Allowed Users</p>
-                  </div>
-                  <div className="text-center">
-                    <p className="text-2xl font-bold">
-                      {bannedEventsLoading ? <Skeleton className="h-8 w-12 mx-auto" /> : (Array.isArray(bannedEvents) ? bannedEvents.length : 0)}
-                    </p>
-                    <p className="text-sm text-muted-foreground">Banned Events</p>
-                  </div>
-                  <div className="text-center">
-                    <p className={cn(
-                      "text-2xl font-bold",
-                      Array.isArray(pendingModeration) && pendingModeration.length > 0 && "text-orange-500"
-                    )}>
-                      {pendingLoading ? <Skeleton className="h-8 w-12 mx-auto" /> : (Array.isArray(pendingModeration) ? pendingModeration.length : 0)}
-                    </p>
-                    <p className="text-sm text-muted-foreground">Pending Moderation</p>
-                  </div>
+        {/* ── 9. Moderation Overview ── */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <AlertTriangle className="h-5 w-5" />
+              Moderation Overview
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div className="text-center">
+                <p className="text-2xl font-bold">
+                  {bannedUsersLoading ? <Skeleton className="h-8 w-12 mx-auto" /> : (Array.isArray(bannedUsers) ? bannedUsers.length : 0)}
+                </p>
+                <p className="text-sm text-muted-foreground">Banned Users</p>
+              </div>
+              <div className="text-center">
+                <p className="text-2xl font-bold">
+                  {allowedUsersLoading ? <Skeleton className="h-8 w-12 mx-auto" /> : (Array.isArray(allowedUsers) ? allowedUsers.length : 0)}
+                </p>
+                <p className="text-sm text-muted-foreground">Allowed Users</p>
+              </div>
+              <div className="text-center">
+                <p className="text-2xl font-bold">
+                  {bannedEventsLoading ? <Skeleton className="h-8 w-12 mx-auto" /> : (Array.isArray(bannedEvents) ? bannedEvents.length : 0)}
+                </p>
+                <p className="text-sm text-muted-foreground">Banned Events</p>
+              </div>
+              <div className="text-center">
+                <p className={cn(
+                  "text-2xl font-bold",
+                  Array.isArray(pendingModeration) && pendingModeration.length > 0 && "text-orange-500"
+                )}>
+                  {pendingLoading ? <Skeleton className="h-8 w-12 mx-auto" /> : (Array.isArray(pendingModeration) ? pendingModeration.length : 0)}
+                </p>
+                <p className="text-sm text-muted-foreground">Pending Moderation</p>
+              </div>
+            </div>
+
+            {/* Supported NIP-86 methods */}
+            {methodsLoading ? (
+              <Skeleton className="h-4 w-64" />
+            ) : supportedMethods && supportedMethods.length > 0 ? (
+              <div>
+                <p className="text-sm font-medium mb-2">Supported NIP-86 Methods</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {supportedMethods.map((method) => (
+                    <Badge key={method} variant="outline" className="font-mono text-xs">
+                      {method}
+                    </Badge>
+                  ))}
                 </div>
-
-                {/* Supported NIP-86 methods */}
-                {methodsLoading ? (
-                  <Skeleton className="h-4 w-64" />
-                ) : supportedMethods && supportedMethods.length > 0 ? (
-                  <div>
-                    <p className="text-sm font-medium mb-2">Supported NIP-86 Methods</p>
-                    <div className="flex flex-wrap gap-1.5">
-                      {supportedMethods.map((method) => (
-                        <Badge key={method} variant="outline" className="font-mono text-xs">
-                          {method}
-                        </Badge>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-              </CardContent>
-            </Card>
-          </>
-        )}
+              </div>
+            ) : null}
+          </CardContent>
+        </Card>
 
       </div>
     </ScrollArea>
