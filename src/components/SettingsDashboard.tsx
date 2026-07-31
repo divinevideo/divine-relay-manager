@@ -664,7 +664,6 @@ export function SettingsDashboard() {
           </>
         ) : null}
 
-        {/* ── NIP-86 Sections ── */}
         {/* ── 7. Event Kind Configuration ── */}
         <Card>
           <CardHeader>
@@ -739,30 +738,30 @@ export function SettingsDashboard() {
           <CardContent className="space-y-4">
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               <div className="text-center">
-                <p className="text-2xl font-bold">
+                <div className="text-2xl font-bold">
                   {bannedUsersLoading ? <Skeleton className="h-8 w-12 mx-auto" /> : (Array.isArray(bannedUsers) ? bannedUsers.length : 0)}
-                </p>
+                </div>
                 <p className="text-sm text-muted-foreground">Banned Users</p>
               </div>
               <div className="text-center">
-                <p className="text-2xl font-bold">
+                <div className="text-2xl font-bold">
                   {allowedUsersLoading ? <Skeleton className="h-8 w-12 mx-auto" /> : (Array.isArray(allowedUsers) ? allowedUsers.length : 0)}
-                </p>
+                </div>
                 <p className="text-sm text-muted-foreground">Allowed Users</p>
               </div>
               <div className="text-center">
-                <p className="text-2xl font-bold">
+                <div className="text-2xl font-bold">
                   {bannedEventsLoading ? <Skeleton className="h-8 w-12 mx-auto" /> : (Array.isArray(bannedEvents) ? bannedEvents.length : 0)}
-                </p>
+                </div>
                 <p className="text-sm text-muted-foreground">Banned Events</p>
               </div>
               <div className="text-center">
-                <p className={cn(
+                <div className={cn(
                   "text-2xl font-bold",
                   Array.isArray(pendingModeration) && pendingModeration.length > 0 && "text-orange-500"
                 )}>
                   {pendingLoading ? <Skeleton className="h-8 w-12 mx-auto" /> : (Array.isArray(pendingModeration) ? pendingModeration.length : 0)}
-                </p>
+                </div>
                 <p className="text-sm text-muted-foreground">Pending Moderation</p>
               </div>
             </div>
