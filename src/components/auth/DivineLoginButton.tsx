@@ -52,11 +52,12 @@ export function DivineLoginButton() {
     return (
       <div className="flex items-center gap-2">
         <span
+          role="status"
           className="flex items-center gap-1.5 text-sm text-destructive"
-          title="Signed in, but your moderator identity could not be loaded. Moderation still works, but your actions are recorded without attribution. Sign out and back in; if it persists, this account may have no Keycast-managed key."
+          title="Your moderator identity could not be loaded, so moderation actions are recorded without attribution. Moderation itself still works. If signing out and back in does not help, this account may have no Keycast-managed key."
         >
           <AlertTriangle className="h-4 w-4" aria-hidden />
-          Identity unavailable
+          Identity unavailable, actions unattributed
         </span>
         <Button variant="ghost" size="sm" onClick={logout} title="Sign out">
           <LogOut className="h-4 w-4" />

@@ -114,7 +114,95 @@ describe('signed in but identity never resolves', () => {
   });
 });
 
+// The trap is reachable from transitions, not just from boot. Each of these
+// drives the provider through a change of session state.
+describe('session transitions', () => {
+  it('a rotated token whose identity fails does not keep showing the old moderator', async () => {
+    session.getSession.mockResolvedValueOnce({ accessToken: 'tok-1' });
+    getPublicKey.mockResolvedValueOnce(PUBKEY);
+
+    renderButton();
+    await screen.findByTitle(PUBKEY);
+
+    // Token rotates (refresh on focus) and the new token cannot resolve an identity.
+    session.getSession.mockResolvedValue({ accessToken: 'tok-2' });
+    getPublicKey.mockRejectedValue(new Error('login server 500'));
+    fireEvent.focus(window);
+
+    // Must not keep asserting an identity that no longer resolves: attribution
+    // writes read the live signer and would land null while the header claims a
+    // moderator.
+    await waitFor(() => expect(screen.queryByTitle(PUBKEY)).toBeNull());
+    expect(await screen.findByText(/identity unavailable/i)).toBeInTheDocument();
+  });
+
+  it('a healthy re-resolve of the same token does not flash the error state', async () => {
+    // Resolve normally first, so this token counts as already resolved.
+    session.getSession.mockResolvedValueOnce({ accessToken: 'tok-abc' });
+    getPublicKey.mockResolvedValueOnce(PUBKEY);
+    renderButton();
+    await screen.findByTitle(PUBKEY);
+
+    // A transient blip collapses the session to signed-out (documented provider
+    // behaviour), clearing the pubkey.
+    session.getSession.mockResolvedValueOnce(null);
+    fireEvent.focus(window);
+    await screen.findByRole('button', { name: /^sign in$/i });
+
+    // The SAME token comes back and its pubkey is legitimately in flight. This
+    // is a healthy re-resolve, not a failure, so it must not show a red error.
+    session.getSession.mockResolvedValue({ accessToken: 'tok-abc' });
+    getPublicKey.mockReturnValue(new Promise(() => {}));
+    fireEvent.focus(window);
+
+    await waitFor(() => expect(session.getSession).toHaveBeenCalledTimes(3));
+    expect(screen.queryByText(/identity unavailable/i)).toBeNull();
+  });
+
+  it('a rotated token returning a malformed pubkey does not retain the old identity', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      session.getSession.mockResolvedValueOnce({ accessToken: 'tok-1' });
+      getPublicKey.mockResolvedValueOnce(PUBKEY);
+
+      renderButton();
+      await screen.findByTitle(PUBKEY);
+
+      session.getSession.mockResolvedValue({ accessToken: 'tok-2' });
+      getPublicKey.mockResolvedValue('not-a-pubkey');
+      fireEvent.focus(window);
+
+      await waitFor(() => expect(screen.queryByTitle(PUBKEY)).toBeNull());
+      expect(await screen.findByText(/identity unavailable/i)).toBeInTheDocument();
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('a stored session with no access token is still escapable', async () => {
+    // StoredCredentials.accessToken is optional (a bunker-only session). There is
+    // no signer, so no identity -- the original dead end in a different shape.
+    session.getSession.mockResolvedValue({ bunkerUrl: 'bunker://x' });
+
+    renderButton();
+
+    expect(await screen.findByRole('button', { name: /sign out/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^sign in$/i })).toBeNull();
+  });
+});
+
 describe('states that must not regress', () => {
+  it('does not render the error state while the pubkey is in flight', async () => {
+    session.getSession.mockResolvedValue({ accessToken: 'tok-abc' });
+    getPublicKey.mockReturnValue(new Promise(() => {}));
+
+    renderButton();
+
+    await waitFor(() => expect(session.getSession).toHaveBeenCalled());
+    expect(screen.queryByText(/identity unavailable/i)).toBeNull();
+  });
+
   it('a fully resolved moderator still shows their identity and sign out', async () => {
     session.getSession.mockResolvedValue({ accessToken: 'tok-abc' });
     getPublicKey.mockResolvedValue(PUBKEY);

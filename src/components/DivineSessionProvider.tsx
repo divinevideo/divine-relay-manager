@@ -120,22 +120,35 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
       setPubkey(undefined);
       return;
     }
+    // This token owns its own identity: until this attempt settles, nothing is
+    // known. Without the reset, a token that drops out and comes back (a blip
+    // clears the session, then the same token returns) still matches the old
+    // marker, so it reads as already-resolved-with-no-pubkey and flashes the
+    // identity-unavailable state through an ordinary re-resolve.
+    setResolvedForToken(undefined);
     signer
       .getPublicKey()
       .then((pk) => {
         if (cancelled) return;
         // The worker requires canonical lowercase 64-hex. Normalize the common
-        // non-canonical shapes (uppercase / whitespace); keep the prior pubkey
-        // and warn on anything still invalid rather than degrading silently.
+        // non-canonical shapes (uppercase / whitespace) and warn on anything
+        // still invalid rather than degrading silently.
         const normalized = pk.trim().toLowerCase();
         if (HEX_64.test(normalized)) {
           setPubkey(normalized);
         } else {
           console.warn('[divine-login] getPublicKey returned a non-canonical pubkey; attribution unavailable', pk);
+          // Never carry a previous token's identity forward: a stale pubkey
+          // renders as a confident moderator while attribution writes null.
+          setPubkey(undefined);
         }
       })
-      .catch(() => {
-        /* attribution degrades to null; never block on identity */
+      .catch((err) => {
+        // Attribution degrades to null and never blocks a moderation action, but
+        // it must not look like a resolved identity, and the reason has to be
+        // diagnosable when a moderator reports the banner.
+        if (!cancelled) setPubkey(undefined);
+        console.warn('[divine-login] getPublicKey failed; attribution unavailable', err);
       })
       .finally(() => {
         // Mark this token resolved (success or failure) so isResolving settles.
@@ -161,7 +174,10 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
   // Settled on a token but no pubkey came back: a real session with no moderator
   // identity. Distinct from signed-out, and the UI must not render it as such --
   // without this the header shows "Sign in" with no way to sign out.
-  const identityUnavailable = !!accessToken && identityResolved && !pubkey;
+  // Keyed on credentials, not the access token: StoredCredentials.accessToken is
+  // optional (a bunker-only session), and that shape has no signer at all, so it
+  // is the same dead end. With no token, identityResolved is already true.
+  const identityUnavailable = !!credentials && identityResolved && !pubkey;
 
   const value = useMemo<DivineSessionValue>(
     () => ({
