@@ -51,13 +51,15 @@ export function DivineLoginButton() {
   if (identityUnavailable) {
     return (
       <div className="flex items-center gap-2">
+        {/* No role="status": it is not a name-from-content role, so the title
+            would replace the visible label as the accessible name, and a region
+            inserted already-populated is not reliably announced anyway. */}
         <span
-          role="status"
-          className="flex items-center gap-1.5 text-sm text-destructive"
-          title="Your moderator identity could not be loaded, so moderation actions are recorded without attribution. Moderation itself still works. If signing out and back in does not help, this account may have no Keycast-managed key."
+          className="flex items-center gap-1.5 text-sm text-destructive whitespace-nowrap"
+          title="Your moderator identity could not be loaded, so moderation actions may be recorded without attribution. Moderation itself still works. If signing out and back in does not help, this account may have no Keycast-managed key."
         >
-          <AlertTriangle className="h-4 w-4" aria-hidden />
-          Identity unavailable, actions unattributed
+          <AlertTriangle className="h-4 w-4 shrink-0" aria-hidden />
+          <span className="max-w-[16rem] truncate">Identity unavailable, actions unattributed</span>
         </span>
         <Button variant="ghost" size="sm" onClick={logout} title="Sign out">
           <LogOut className="h-4 w-4" />

@@ -118,13 +118,19 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
     let cancelled = false;
     if (!signer) {
       setPubkey(undefined);
+      // Also drop the resolved marker. Without it, a token that goes away and
+      // comes back identical still matches, so the very next RENDER reads as
+      // resolved-with-no-pubkey and commits the error state before the resolve
+      // effect below can correct it. One render is enough to flash a red alarm.
+      setResolvedForToken(undefined);
       return;
     }
-    // This token owns its own identity: until this attempt settles, nothing is
-    // known. Without the reset, a token that drops out and comes back (a blip
-    // clears the session, then the same token returns) still matches the old
-    // marker, so it reads as already-resolved-with-no-pubkey and flashes the
-    // identity-unavailable state through an ordinary re-resolve.
+    // Invariant: a resolve attempt that has not settled has resolved nothing.
+    // Every path that reaches here today is already covered (a changed token
+    // makes identityResolved false on its own, and a token returning after the
+    // session dropped is reset in the !signer branch above), so no test pins
+    // this line. It is kept so the invariant does not depend on those two
+    // coincidences continuing to hold.
     setResolvedForToken(undefined);
     signer
       .getPublicKey()
@@ -147,7 +153,8 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
         // Attribution degrades to null and never blocks a moderation action, but
         // it must not look like a resolved identity, and the reason has to be
         // diagnosable when a moderator reports the banner.
-        if (!cancelled) setPubkey(undefined);
+        if (cancelled) return;
+        setPubkey(undefined);
         console.warn('[divine-login] getPublicKey failed; attribution unavailable', err);
       })
       .finally(() => {

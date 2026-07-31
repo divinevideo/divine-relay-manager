@@ -13,7 +13,7 @@
 //
 // These drive the REAL DivineSessionProvider and the REAL useCurrentUser; only
 // the SDK boundary (session + signer) is mocked.
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 import { DivineSessionProvider } from '@/components/DivineSessionProvider';
@@ -66,12 +66,32 @@ function SessionProbe() {
   return <div data-testid='probe'>{String(identityUnavailable)}</div>;
 }
 
+/**
+ * Records identityUnavailable on EVERY render. Settled-state assertions cannot
+ * see a value that is committed for one render and corrected by an effect, and
+ * a one-render red alarm is still a red alarm on screen.
+ */
+function RenderLog({ log }: { log: boolean[] }) {
+  const { identityUnavailable } = useDivineSession();
+  log.push(identityUnavailable);
+  return null;
+}
+
+// The provider warns by design on every identity failure, and most tests here
+// drive exactly that. Capture it so assertions can read it and the suite output
+// stays clean.
+let warn: ReturnType<typeof vi.spyOn>;
+
 beforeEach(() => {
   session.getSession.mockReset();
   session.logout.mockReset();
   session.startLogin.mockReset();
   getPublicKey.mockReset();
-  localStorage.clear();
+  warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+});
+
+afterEach(() => {
+  warn.mockRestore();
 });
 
 describe('signed in but identity never resolves', () => {
@@ -93,7 +113,7 @@ describe('signed in but identity never resolves', () => {
 
   it('says the moderator is unattributed rather than failing silently', async () => {
     renderButton();
-    expect(await screen.findByText(/not attributed|unattributed|identity unavailable/i))
+    expect(await screen.findByText(/actions unattributed/i))
       .toBeInTheDocument();
   });
 
@@ -134,6 +154,12 @@ describe('session transitions', () => {
     // moderator.
     await waitFor(() => expect(screen.queryByTitle(PUBKEY)).toBeNull());
     expect(await screen.findByText(/identity unavailable/i)).toBeInTheDocument();
+    // The reason must be diagnosable: this is the only trace of WHY, and a
+    // moderator reporting the banner leaves nothing else to go on.
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('getPublicKey failed'),
+      expect.anything(),
+    );
   });
 
   it('a healthy re-resolve of the same token does not flash the error state', async () => {
@@ -160,24 +186,47 @@ describe('session transitions', () => {
   });
 
   it('a rotated token returning a malformed pubkey does not retain the old identity', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    try {
-      session.getSession.mockResolvedValueOnce({ accessToken: 'tok-1' });
-      getPublicKey.mockResolvedValueOnce(PUBKEY);
+    session.getSession.mockResolvedValueOnce({ accessToken: 'tok-1' });
+    getPublicKey.mockResolvedValueOnce(PUBKEY);
 
-      renderButton();
-      await screen.findByTitle(PUBKEY);
+    renderButton();
+    await screen.findByTitle(PUBKEY);
 
-      session.getSession.mockResolvedValue({ accessToken: 'tok-2' });
-      getPublicKey.mockResolvedValue('not-a-pubkey');
-      fireEvent.focus(window);
+    session.getSession.mockResolvedValue({ accessToken: 'tok-2' });
+    getPublicKey.mockResolvedValue('not-a-pubkey');
+    fireEvent.focus(window);
 
-      await waitFor(() => expect(screen.queryByTitle(PUBKEY)).toBeNull());
-      expect(await screen.findByText(/identity unavailable/i)).toBeInTheDocument();
-      expect(warn).toHaveBeenCalled();
-    } finally {
-      warn.mockRestore();
-    }
+    await waitFor(() => expect(screen.queryByTitle(PUBKEY)).toBeNull());
+    expect(await screen.findByText(/identity unavailable/i)).toBeInTheDocument();
+    expect(warn).toHaveBeenCalled();
+  });
+
+  it('never commits an error render while a returning token re-resolves', async () => {
+    const log: boolean[] = [];
+    session.getSession.mockResolvedValueOnce({ accessToken: 'tok-abc' });
+    getPublicKey.mockResolvedValueOnce(PUBKEY);
+
+    render(
+      <DivineSessionProvider>
+        <RenderLog log={log} />
+      </DivineSessionProvider>,
+    );
+    await waitFor(() => expect(log.at(-1)).toBe(false));
+
+    // Blip clears the session, then the SAME token returns and re-resolves.
+    session.getSession.mockResolvedValueOnce(null);
+    fireEvent.focus(window);
+    await waitFor(() => expect(session.getSession).toHaveBeenCalledTimes(2));
+
+    const before = log.length;
+    session.getSession.mockResolvedValue({ accessToken: 'tok-abc' });
+    getPublicKey.mockReturnValue(new Promise(() => {}));
+    fireEvent.focus(window);
+    await waitFor(() => expect(session.getSession).toHaveBeenCalledTimes(3));
+
+    // Not one render may claim the identity is unavailable: this is a healthy
+    // re-resolve, and the moderator would see a red alarm flash.
+    expect(log.slice(before)).not.toContain(true);
   });
 
   it('a stored session with no access token is still escapable', async () => {
@@ -212,7 +261,7 @@ describe('states that must not regress', () => {
     expect(await screen.findByRole('button', { name: /sign out/i })).toBeInTheDocument();
     expect(screen.getByTitle(PUBKEY)).toBeInTheDocument();
     // A working session is not the broken state.
-    expect(screen.queryByText(/not attributed|unattributed|identity unavailable/i)).toBeNull();
+    expect(screen.queryByText(/actions unattributed/i)).toBeNull();
   });
 
   it('a signed-out moderator still gets a plain sign-in', async () => {
@@ -222,7 +271,7 @@ describe('states that must not regress', () => {
 
     expect(await screen.findByRole('button', { name: /^sign in$/i })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /sign out/i })).toBeNull();
-    expect(screen.queryByText(/not attributed|unattributed|identity unavailable/i)).toBeNull();
+    expect(screen.queryByText(/actions unattributed/i)).toBeNull();
   });
 
   it('is not "unavailable" while the pubkey is still in flight', async () => {
