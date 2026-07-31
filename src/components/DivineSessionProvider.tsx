@@ -158,6 +158,10 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
   // Derived during render so it never lags the token by a frame.
   const identityResolved = !accessToken || resolvedForToken === accessToken;
   const isResolving = !credentialsResolved || !identityResolved;
+  // Settled on a token but no pubkey came back: a real session with no moderator
+  // identity. Distinct from signed-out, and the UI must not render it as such --
+  // without this the header shows "Sign in" with no way to sign out.
+  const identityUnavailable = !!accessToken && identityResolved && !pubkey;
 
   const value = useMemo<DivineSessionValue>(
     () => ({
@@ -165,12 +169,13 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
       pubkey,
       signer,
       isResolving,
+      identityUnavailable,
       getModeratorPubkey,
       startLogin: sdkStartLogin,
       logout,
       refresh,
     }),
-    [credentials, pubkey, signer, isResolving, getModeratorPubkey, logout, refresh],
+    [credentials, pubkey, signer, isResolving, identityUnavailable, getModeratorPubkey, logout, refresh],
   );
 
   return <DivineSessionContext.Provider value={value}>{children}</DivineSessionContext.Provider>;

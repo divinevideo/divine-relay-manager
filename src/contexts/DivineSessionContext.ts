@@ -15,6 +15,14 @@ export interface DivineSessionValue {
   /** True until the session (and, with a token, the pubkey) has resolved. */
   isResolving: boolean;
   /**
+   * A real session whose moderator identity could not be resolved: the login
+   * succeeded but getPublicKey did not yield a canonical pubkey (an account with
+   * no Keycast-managed key, an RPC failure, a token without signing scope).
+   * Actions still work (CF Access is the access gate) but record no attribution,
+   * so the UI must say so and offer a way out rather than rendering "Sign in".
+   */
+  identityUnavailable: boolean;
+  /**
    * Snapshot the moderator pubkey for an audit write. Captures the signer at
    * call time (call at action START so a later logout/switch can't retarget a
    * long job's attribution) and waits briefly for an in-flight pubkey before
@@ -33,6 +41,7 @@ export const DivineSessionContext = createContext<DivineSessionValue>({
   pubkey: undefined,
   signer: null,
   isResolving: false,
+  identityUnavailable: false,
   getModeratorPubkey: async () => undefined,
   startLogin: sdkStartLogin,
   logout: () => {},

@@ -1,7 +1,7 @@
 // ABOUTME: Sign-in surface for the shell header. Signed out -> "Sign in";
 // signed in -> the moderator's name/pubkey + "Sign out". Attribution only;
 // CF Access remains the access gate.
-import { LogIn, LogOut } from 'lucide-react';
+import { AlertTriangle, LogIn, LogOut } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useDivineSession } from '@/hooks/useDivineSession';
@@ -13,7 +13,7 @@ function shortPubkey(pubkey: string): string {
 
 export function DivineLoginButton() {
   const { user, metadata } = useCurrentUser();
-  const { startLogin, logout, isResolving } = useDivineSession();
+  const { startLogin, logout, isResolving, identityUnavailable } = useDivineSession();
   const { toast } = useToast();
 
   // startLogin builds the authorize URL (can reject on a network failure) before
@@ -37,6 +37,26 @@ export function DivineLoginButton() {
       <div className="flex items-center gap-2">
         <span className="text-sm font-medium max-w-[12rem] truncate" title={user.pubkey}>
           {metadata?.name || shortPubkey(user.pubkey)}
+        </span>
+        <Button variant="ghost" size="sm" onClick={logout} title="Sign out">
+          <LogOut className="h-4 w-4" />
+          <span className="sr-only">Sign out</span>
+        </Button>
+      </div>
+    );
+  }
+
+  // Signed in, but no identity came back. Say so and offer the way out; sending
+  // them back through "Sign in" just loops them through the same failure.
+  if (identityUnavailable) {
+    return (
+      <div className="flex items-center gap-2">
+        <span
+          className="flex items-center gap-1.5 text-sm text-destructive"
+          title="Signed in, but your moderator identity could not be loaded. Moderation still works, but your actions are recorded without attribution. Sign out and back in; if it persists, this account may have no Keycast-managed key."
+        >
+          <AlertTriangle className="h-4 w-4" aria-hidden />
+          Identity unavailable
         </span>
         <Button variant="ghost" size="sm" onClick={logout} title="Sign out">
           <LogOut className="h-4 w-4" />
