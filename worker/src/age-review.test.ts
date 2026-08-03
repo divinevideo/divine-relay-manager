@@ -1889,6 +1889,47 @@ describe('handleCreateMinorAccount', () => {
     expect(binds).toContain('Some One');
   });
 
+  // account_name prefers display_name, so without this the operator-supplied
+  // username is dropped whenever a display name is present -- and these rows
+  // stamp identity_captured_at, which excludes them from any backfill keyed on
+  // IS NULL. Divine's NIP-05 is the subdomain form, so the username survives
+  // inside it and stays recoverable.
+  it('derives the account nip05 from the username so it is not discarded', async () => {
+    const db = makeMinorDb();
+    await handleCreateMinorAccount(
+      makeRequest({ username: 'someuser', display_name: 'Some One' }),
+      makeEnv(db, { NIP05_DOMAIN: 'divine.video' }), corsHeaders,
+    );
+
+    const prepareMock = db.prepare as ReturnType<typeof vi.fn>;
+    const insertIdx = prepareMock.mock.calls.findIndex(
+      (c: unknown[]) => String(c[0]).includes('INSERT INTO age_review_cases'),
+    );
+    expect(String(prepareMock.mock.calls[insertIdx][0])).toContain('account_nip05');
+
+    const binds = prepareMock.mock.results[insertIdx].value.bind.mock.calls.flat();
+    expect(binds).toContain('_@someuser.divine.video');
+  });
+
+  // Staging accounts do not live under the production identity domain, so a
+  // hardcoded fallback would write a wrong address into an agent-facing record.
+  // Storing nothing is the honest outcome when the domain is not configured.
+  it('stores no nip05 when the identity domain is not configured', async () => {
+    const db = makeMinorDb();
+    await handleCreateMinorAccount(
+      makeRequest({ username: 'someuser', display_name: 'Some One' }),
+      makeEnv(db), corsHeaders,
+    );
+
+    const prepareMock = db.prepare as ReturnType<typeof vi.fn>;
+    const insertIdx = prepareMock.mock.calls.findIndex(
+      (c: unknown[]) => String(c[0]).includes('INSERT INTO age_review_cases'),
+    );
+    const binds = prepareMock.mock.results[insertIdx].value.bind.mock.calls.flat();
+    expect(binds).not.toContain('_@someuser.divine.video');
+    expect(binds.some((b: unknown) => typeof b === 'string' && b.startsWith('_@'))).toBe(false);
+  });
+
   it('falls back to the username when no display name is given', async () => {
     const db = makeMinorDb();
     await handleCreateMinorAccount(makeRequest({ username: 'someuser' }), makeEnv(db), corsHeaders);

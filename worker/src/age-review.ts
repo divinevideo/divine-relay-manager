@@ -34,6 +34,10 @@ export interface AgeReviewEnv extends BulkModerateEnv, KeycastEnv {
   // Group to route resolved tickets to (the Trust & Safety queue), instead of
   // assigning the API credential's owner. Numeric Zendesk group id as a string.
   ZENDESK_GROUP_ID?: string;
+  // Identity domain used to derive an account's NIP-05 from its username on the
+  // operator-created path. Environment-specific: staging accounts do not live
+  // under the production domain.
+  NIP05_DOMAIN?: string;
 }
 
 interface ZendeskClientConfig {
@@ -602,11 +606,25 @@ export async function handleCreateMinorAccount(
     // there is nothing to look up. Storing it keeps this case as identifiable as
     // a report-created one, where the name has to be fetched before enforcement
     // hides the profile.
+    //
+    // account_name prefers display_name, so the username would be dropped
+    // entirely whenever one is supplied. Keep it by storing the NIP-05 it
+    // implies: Divine's NIP-05 is the subdomain form `_@<username>.<domain>`,
+    // so the username stays recoverable from that value and needs no column of
+    // its own. This is derived from what the operator gave us, not read back
+    // from Keycast -- the create-minor-account response does not return a
+    // nip05 -- so it records the address the account is expected to claim.
+    //
+    // No fallback domain on purpose. Staging accounts do not live under the
+    // production identity domain, so guessing one would write a wrong address
+    // into a record agents read to decide who a case is about. Unconfigured
+    // means we store nothing rather than something plausible and false.
+    const nip05 = env.NIP05_DOMAIN ? `_@${username}.${env.NIP05_DOMAIN}` : null;
     await env.DB.prepare(`
       INSERT INTO age_review_cases
       (id, pubkey, suspected_age_band, state, allowed_resolution, resolution_note, created_via, claim_link_url, claim_link_expires_at, zendesk_ticket_id,
-       account_name, identity_captured_at)
-      VALUES (?, ?, 'age_13_15', 'cleared', 'parent_video_or_email', 'Approved via parental consent (minor onboarding)', 'minor_onboarding', ?, ?, ?, ?, ?)
+       account_name, account_nip05, identity_captured_at)
+      VALUES (?, ?, 'age_13_15', 'cleared', 'parent_video_or_email', 'Approved via parental consent (minor onboarding)', 'minor_onboarding', ?, ?, ?, ?, ?, ?)
     `).bind(
       caseId,
       result.pubkey,
@@ -614,6 +632,7 @@ export async function handleCreateMinorAccount(
       result.expires_at ?? null,
       body.zendesk_ticket_id ?? null,
       displayName ?? username,
+      nip05,
       new Date().toISOString(),
     ).run();
   } catch (err) {
