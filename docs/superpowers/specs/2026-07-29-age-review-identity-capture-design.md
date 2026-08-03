@@ -1,7 +1,7 @@
 # Age-review identity capture: make tickets and contacts say who they are about
 
-**Date:** 2026-07-29
-**Status:** Approved design (brainstormed with Matt; every load-bearing claim verified against prod this session)
+**Date:** 2026-07-29 (revalidated 2026-08-03)
+**Status:** Approved design (brainstormed with Matt; every load-bearing claim verified against prod this session). Revalidated against the code on 2026-08-03 — see "Revalidation" below for the two claims that needed correcting.
 **Related:** #190 (link-and-sync — shares the hostile-requester privacy principle) · #200 (render target content — sets the ceiling on backfill) · Zendesk trigger/tag/view changes already landed in `divine-zendesk-tooling@2c23520`
 
 ## Motivation
@@ -55,9 +55,13 @@ Three creation paths:
 
 - `ReportWatcher.ts:955` — main report-driven creation. Fetch kind-0, parse, store.
 - `ReportWatcher.ts:929` — verified-minor auto-clear path. Same.
-- `age-review.ts:547` — `handleCreateMinorAccount` already receives `username` and `display_name` in the request body. No relay fetch.
+- `age-review.ts:550` — `handleCreateMinorAccount` already receives `username` and `display_name` in the request body. No relay fetch.
 
-**Ordering is the whole point.** Capture must complete before any enforcement leg fires, because suspension hides the profile. Best-effort and wrapped: a relay failure logs and continues, never blocking case creation (graceful-degradation rule — the case is the critical path, enrichment is not).
+On that third path the operator supplies a **Divine username**, which is not the same string as a NIP-05 but is mechanically related to one: Divine's NIP-05 is a subdomain form, `_@<username>.divine.video`. Store the derived NIP-05 so the username survives — `account_name` prefers `display_name`, so binding `display_name ?? username` alone silently discards the username whenever a display name is supplied, and these rows stamp `identity_captured_at`, which permanently excludes them from a backfill keyed on `IS NULL`. The derived value is recoverable back to the username, so no fourth column is needed.
+
+**Ordering is the whole point.** Capture must complete before any enforcement leg that hides the account's profile, because suspension makes the kind-0 unqueryable. Best-effort and wrapped: a relay failure logs and continues, never blocking case creation (graceful-degradation rule — the case is the critical path, enrichment is not).
+
+State the guarantee precisely, because the stronger version is false. `handleReportEvent` awaits `processAutoHide` (`ReportWatcher.ts:627`) *before* `createAgeReviewCase` (`:639`), so a relay mutation does run first. It is harmless here for reasons that are worth writing down rather than rediscovering: `processAutoHide` reaches only `banEvent`, which targets a single event id and leaves the author's kind-0 queryable; it is gated on `targetType === 'event'`; and `NS-underageUser` appears in neither default tier. The enforcement that actually hides a profile — `suspendPubkey` / `banPubkey` — runs only from `handleUpdateAgeReviewCase` and the deadline cron, both of which act on a case that already exists and has already captured. So the invariant to hold is *nothing that hides a pubkey's profile precedes capture*, not *nothing at all precedes capture*. An admin adding `NS-underageUser` to a stored tier would make a `banevent` precede capture without breaking that invariant.
 
 Reuse `parseKind0Profile()` from `report-note.ts`. It already extracts `display_name || name`, `nip05`, `isVineImport` and `vineUsername`, and already runs every field through `sanitizeInline` (80-char cap, control characters stripped). These are attacker-controlled strings landing in agent-visible fields; do not hand-roll a second parser.
 
@@ -106,6 +110,29 @@ Recovering those depends on #200.
 - **No template changes.** Not asking parents for their name, and not adding a case ID to the Greenlight mailto. That screen serves two populations — restricted teens and families with no account yet — and is reachable signed-out, so it often has no case to reference.
 - **No attempt to recover the real From name.** Unreachable by API; an agent can read it via view-original and edit the profile by hand, and that sticks.
 - **No email→case lookup endpoint.** Zendesk's Interaction History already answers it: every case with a parent email also has a ticket, and the case ID is in that ticket's subject.
+
+## Revalidation (2026-08-03)
+
+Three independent read-only passes over the branch re-checked every load-bearing claim. Two needed correcting; the rest held.
+
+| Claim | Outcome |
+|---|---|
+| Exactly three paths insert into `age_review_cases` | **Holds.** Exhaustive grep finds three in production code, plus test-only inserts. No migration or script path. |
+| Display name, NIP-05 and npub are all obtainable | **Holds**, with a caveat now fixed above: the operator path captured name only, discarding the username. npub is derived from the stored pubkey via `nip19.npubEncode`, so it needs no column. |
+| No enforcement can run before capture | **Overstated** — corrected in §1. The design's intent is satisfied; its literal claim was not. |
+| No UPDATE can null the identity columns | **Holds.** `handleUpdateAgeReviewCase` builds its SET list from a whitelist that excludes them. |
+| Capture cannot fail case creation | **Holds**, three layers deep: `fetchAccountIdentity` never throws, `queryRelay` resolves rather than rejects, and both call sites add a redundant `.catch`. |
+
+### Deferred to their own PRs
+
+- **Backfill (§4).** Needs a staging dry-run and a reported yield split before prod, which is its own review cycle.
+- **Outbound-email identity and rewording.** Whether the outreach itself should name the account, and any change to its wording, is being decided separately. This PR leaves the pre-reply message exactly as handle-free as it is today, so the privacy constraint above stands unmodified.
+
+### Known gaps not addressed here
+
+- The identity columns ship only as a `db.ts` ALTER, with no numbered `worker/migrations/00NN_*.sql`, diverging from how columns 0007–0011 were added. `worker/migrations/` is therefore an incomplete record of live schema.
+- They are also the only columns absent from the base `CREATE TABLE IF NOT EXISTS`, leaving that DDL non-authoritative.
+- Pre-existing: the auto-clear INSERT sits inside a try whose catch logs "Keycast verified_minor check failed", so a D1 failure there produces a misleading log and falls through to create an `open_reported` case.
 
 ## Risks
 
