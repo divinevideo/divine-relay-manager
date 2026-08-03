@@ -241,4 +241,11 @@ describe('buildAgeReviewIdentityBlock', () => {
     expect(block).toContain('4242');
     expect(block).toContain('2026-08-05');
   });
+
+  // A case with no deadline is a real state, not a missing value. Say so, for
+  // the same reason an uncaptured handle says so: a silently absent line reads
+  // as a rendering fault and invites an agent to go looking for the value.
+  it('says the deadline is not set rather than omitting the line', () => {
+    expect(buildAgeReviewIdentityBlock(base)).toContain('Deadline not set');
+  });
 });

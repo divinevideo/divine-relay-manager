@@ -228,7 +228,9 @@ export function buildAgeReviewIdentityBlock(input: AgeReviewIdentityInput): stri
   ];
 
   if (input.originTicketId) lines.push('', `Origin ticket ${input.originTicketId}`);
-  if (input.deadlineAt) lines.push(`Deadline ${input.deadlineAt}`);
+  // Always emitted. "No deadline" is a real case state, and an absent line
+  // would read as a rendering fault rather than the fact that there is none.
+  lines.push(`Deadline ${sanitizeInline(input.deadlineAt ?? undefined) ?? 'not set'}`);
 
   return lines.join('\n');
 }

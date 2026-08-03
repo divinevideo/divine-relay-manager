@@ -419,6 +419,59 @@ describe('handleUpdateAgeReviewCase', () => {
 
     vi.unstubAllGlobals();
   });
+
+  // Identity capture (#213). The note previously carried a bare pubkey and no
+  // way to reach the case it described, so an agent reading the ticket could
+  // not tell which account it concerned or open the review.
+  it('puts the case deeplink and captured identity in the internal ticket note', async () => {
+    const reviewCase = makeCase({
+      state: 'under_moderator_review',
+      account_name: 'Some One',
+      account_nip05: '_@someuser.divine.video',
+    });
+    const updatedCase = { ...reviewCase, state: 'restricted_pending_support_email' };
+
+    let selectCount = 0;
+    const db = {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        bind: vi.fn().mockImplementation(() => ({
+          first: vi.fn().mockImplementation(async () => {
+            if (sql === 'SELECT * FROM age_review_cases WHERE id = ?') {
+              selectCount += 1;
+              return selectCount === 1 ? reviewCase : updatedCase;
+            }
+            return null;
+          }),
+          run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+        })),
+      })),
+    };
+
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ ticket: { id: 322 } }),
+    });
+    vi.stubGlobal('fetch', mockFetch);
+
+    const req = new Request('https://api.test/api/age-review/cases/case-1', {
+      method: 'PATCH',
+      body: JSON.stringify({ state: 'restricted_pending_support_email' }),
+    });
+    await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db, {
+      ZENDESK_SUBDOMAIN: 'test',
+      ZENDESK_API_TOKEN: 'tok',
+      ZENDESK_EMAIL: 'agent@test.com',
+    }), corsHeaders);
+
+    const payload = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(payload.ticket.comment.body).toContain('/age-review?case=case-1');
+    expect(payload.ticket.comment.body).toContain('Some One');
+    expect(payload.ticket.comment.body).toContain('a'.repeat(64));
+    // Agent-only: this block carries the pubkey and must never go public.
+    expect(payload.ticket.comment.public).toBe(false);
+
+    vi.unstubAllGlobals();
+  });
 });
 
 // -- Keycast suspension wiring ------------------------------------------------

@@ -22,6 +22,17 @@ import { resolveZendeskCreds } from './zendesk-sync';
 import type { BulkAction } from '../../shared/bulk-moderation';
 import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, createMinorAccount, type KeycastEnv } from './keycast-client';
 import { suspendPubkey, unsuspendPubkey, banPubkey, type SecretStoreSecret } from './nip86';
+import { buildAgeReviewIdentityBlock } from './report-note';
+
+/**
+ * The identity a case captured at creation, as stored on `age_review_cases`.
+ * Every field is optional: capture is best-effort, and an account that had no
+ * profile -- or whose profile was already hidden by enforcement -- yields none.
+ */
+type AgeReviewCaseIdentity = Pick<
+  Partial<AgeReviewCase>,
+  'account_name' | 'account_nip05' | 'account_vine_username'
+>;
 
 export interface AgeReviewEnv extends BulkModerateEnv, KeycastEnv {
   SLACK_WEBHOOK_URL?: string;
@@ -408,6 +419,7 @@ export async function handleUpdateAgeReviewCase(
         (updated?.suspected_age_band ?? existing.suspected_age_band) as AgeBand,
         updated?.deadline_at ?? existing.deadline_at,
         env,
+        updated ?? existing,
       );
       if (updated && zendeskTicketId) {
         updated = { ...updated, zendesk_ticket_id: zendeskTicketId };
@@ -978,6 +990,7 @@ async function createAgeReviewInternalTicket(
   ageBand: AgeBand,
   deadlineAt: string | null,
   env: AgeReviewEnv,
+  identity: AgeReviewCaseIdentity = {},
 ): Promise<number | null> {
   const zendesk = await getZendeskClientConfig(env);
   if (!zendesk) {
@@ -987,10 +1000,19 @@ async function createAgeReviewInternalTicket(
   if (!env.DB) return null;
 
   const subject = `Age review: ${BAND_DISPLAY[ageBand]} account restricted [${caseId}]`;
+  // Agent-only. The identity block leads so the first thing a moderator sees is
+  // which account this is and a link that opens the case; the pubkey alone told
+  // them neither.
   const note = [
-    `Account \`${pubkey}\` restricted for age review.`,
-    `Suspected age band: ${BAND_DISPLAY[ageBand]}`,
-    deadlineAt ? `Deadline: ${deadlineAt.split('T')[0]}` : 'No deadline set',
+    buildAgeReviewIdentityBlock({
+      caseId,
+      pubkey,
+      ageBand: BAND_DISPLAY[ageBand],
+      accountName: identity.account_name,
+      accountNip05: identity.account_nip05,
+      accountVineUsername: identity.account_vine_username,
+      deadlineAt: deadlineAt ? deadlineAt.split('T')[0] : null,
+    }),
     '',
     'This ticket was created automatically when a moderator restricted the account.',
     'It will be updated if a parent/guardian email is provided or the case is resolved.',
