@@ -974,12 +974,21 @@ export class ReportWatcher implements DurableObject {
     const band = 'age_13_15' as const;
     const deadline = new Date(Date.now() + DEADLINE_DAYS * 24 * 60 * 60 * 1000).toISOString();
 
-    // Capture a readable identifier while one is still visible. This has to run
-    // before any enforcement leg: suspension hides the account's content from
-    // relay queries, and a later lookup returns nothing. Best-effort by
-    // contract -- fetchAccountIdentity swallows its own errors, and the extra
-    // catch here covers an unexpected throw so enrichment can never be the
-    // reason a case fails to open.
+    // Capture a readable identifier while one is still visible. The invariant
+    // is that nothing which hides a *pubkey's* profile may run first:
+    // suspendpubkey/banpubkey hide the account's content from relay queries and
+    // a later lookup returns nothing. Those run only from the case-update
+    // handler and the deadline cron, both of which act on a case that already
+    // exists and has already captured.
+    //
+    // Not the stronger claim that no enforcement at all precedes this.
+    // handleReportEvent awaits processAutoHide first, which can reach banEvent
+    // -- but that targets a single event id and leaves the author's kind-0
+    // queryable, so it does not threaten the capture.
+    //
+    // Best-effort by contract -- fetchAccountIdentity swallows its own errors,
+    // and the extra catch here covers an unexpected throw so enrichment can
+    // never be the reason a case fails to open.
     const identity = await fetchAccountIdentity(reportedPubkey, this.env.RELAY_URL).catch(() => null);
     const identityCapturedAt = new Date().toISOString();
 
