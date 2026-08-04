@@ -1873,6 +1873,144 @@ describe('syncAgeReviewTicketResolution', () => {
 
 // -- handleAgeReviewReplyWebhook ------------------------------------------------
 
+// -- Contact name upgrade on parent reply (#213) ------------------------------
+
+describe('contact name upgrade on parent reply', () => {
+  function makeReplyDb(c: AgeReviewCase) {
+    return {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        bind: vi.fn().mockReturnValue({
+          first: vi.fn().mockResolvedValue(sql.includes('zendesk_ticket_id') ? c : null),
+          run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+        }),
+      })),
+    };
+  }
+
+  function makeTicketFetch() {
+    return vi.fn().mockImplementation((url: string, init?: { method?: string }) => {
+      if (url.includes('/users/') && init?.method === 'PUT') {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ user: { id: 77 } }) });
+      }
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ ticket: { id: 42, requester_id: 77 } }),
+      });
+    });
+  }
+
+  const zendeskEnv = {
+    ZENDESK_SUBDOMAIN: 'test',
+    ZENDESK_API_TOKEN: 'tok',
+    ZENDESK_EMAIL: 'agent@test.com',
+  };
+
+  function replyRequest() {
+    return new Request('https://api.test/api/zendesk/age-review-reply', {
+      method: 'POST',
+      body: JSON.stringify({ ticket_id: 42 }),
+    });
+  }
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  function namePutFrom(mockFetch: ReturnType<typeof vi.fn>) {
+    return mockFetch.mock.calls.find(
+      (call: unknown[]) => (call[0] as string).includes('/users/') && (call[1] as { method?: string })?.method === 'PUT',
+    );
+  }
+
+  // By the time the parent has replied the address is demonstrably live and
+  // held by someone engaging with the review, so the handle can go in the name
+  // that Zendesk renders into the To: header. This is what makes the agent
+  // queue readable: the Requester column shows the name and nothing else.
+  it('renames the contact to claim the handle once the parent replies', async () => {
+    const c = makeCase({
+      state: 'restricted_pending_parental_consent',
+      zendesk_ticket_id: 42,
+      parent_contact_email: 'parent@example.com',
+      account_name: 'Some One',
+    });
+    const mockFetch = makeTicketFetch();
+    vi.stubGlobal('fetch', mockFetch);
+
+    await handleAgeReviewReplyWebhook(replyRequest(), makeEnv(makeReplyDb(c), zendeskEnv), corsHeaders);
+
+    const put = namePutFrom(mockFetch);
+    expect(put).toBeTruthy();
+    // "Claimed" is deliberate: whether they are the parent is exactly what the
+    // review exists to establish, so the name must not assert it as fact.
+    expect(JSON.parse((put![1] as { body: string }).body).user.name).toBe('Claimed parent of Some One');
+  });
+
+  it('leaves the contact alone when no handle was captured', async () => {
+    const c = makeCase({
+      state: 'restricted_pending_parental_consent',
+      zendesk_ticket_id: 42,
+      parent_contact_email: 'parent@example.com',
+      account_name: null,
+      account_nip05: null,
+      account_vine_username: null,
+    });
+    const mockFetch = makeTicketFetch();
+    vi.stubGlobal('fetch', mockFetch);
+
+    await handleAgeReviewReplyWebhook(replyRequest(), makeEnv(makeReplyDb(c), zendeskEnv), corsHeaders);
+
+    expect(namePutFrom(mockFetch)).toBeUndefined();
+  });
+
+  // No parent address means the requester is the API caller -- an admin. A
+  // rename would retitle a live staff profile after a teenager's account.
+  it('leaves the contact alone when the case has no parent email', async () => {
+    const c = makeCase({
+      state: 'restricted_pending_parental_consent',
+      zendesk_ticket_id: 42,
+      parent_contact_email: null,
+      account_name: 'Some One',
+    });
+    const mockFetch = makeTicketFetch();
+    vi.stubGlobal('fetch', mockFetch);
+
+    await handleAgeReviewReplyWebhook(replyRequest(), makeEnv(makeReplyDb(c), zendeskEnv), corsHeaders);
+
+    expect(namePutFrom(mockFetch)).toBeUndefined();
+  });
+
+  it('still advances the case when the rename fails', async () => {
+    const c = makeCase({
+      state: 'restricted_pending_parental_consent',
+      zendesk_ticket_id: 42,
+      parent_contact_email: 'parent@example.com',
+      account_name: 'Some One',
+    });
+    const mockFetch = vi.fn().mockRejectedValue(new Error('Zendesk down'));
+    vi.stubGlobal('fetch', mockFetch);
+
+    const res = await handleAgeReviewReplyWebhook(replyRequest(), makeEnv(makeReplyDb(c), zendeskEnv), corsHeaders);
+    const body = await res.json() as { success: boolean; new_state: string };
+
+    expect(res.status).toBe(200);
+    expect(body.new_state).toBe('submitted_for_review');
+  });
+
+  it('sanitizes an attacker-chosen account name before it reaches the contact', async () => {
+    const c = makeCase({
+      state: 'restricted_pending_parental_consent',
+      zendesk_ticket_id: 42,
+      parent_contact_email: 'parent@example.com',
+      account_name: 'Evil\nDivine Support',
+    });
+    const mockFetch = makeTicketFetch();
+    vi.stubGlobal('fetch', mockFetch);
+
+    await handleAgeReviewReplyWebhook(replyRequest(), makeEnv(makeReplyDb(c), zendeskEnv), corsHeaders);
+
+    const name = JSON.parse((namePutFrom(mockFetch)![1] as { body: string }).body).user.name;
+    expect(name).not.toContain('\n');
+  });
+});
+
 describe('handleAgeReviewReplyWebhook', () => {
   it('transitions pending case to submitted_for_review', async () => {
     const c = makeCase({

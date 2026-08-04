@@ -188,13 +188,17 @@ export function buildReportNote(input: ReportNoteInput): string {
   return lines.join('\n');
 }
 
-export interface AgeReviewIdentityInput {
-  caseId: string;
-  pubkey: string;
-  ageBand: string;
+/** The captured identity fields, in the shape the renderers consume. */
+export interface AgeReviewIdentityCandidates {
   accountName?: string | null;
   accountNip05?: string | null;
   accountVineUsername?: string | null;
+}
+
+export interface AgeReviewIdentityInput extends AgeReviewIdentityCandidates {
+  caseId: string;
+  pubkey: string;
+  ageBand: string;
   originTicketId?: number | null;
   deadlineAt?: string | null;
 }
@@ -211,11 +215,36 @@ export interface AgeReviewIdentityInput {
  * as a known fact -- the account may never have had a profile, or enforcement
  * hid it -- rather than looking like a rendering failure.
  */
-export function buildAgeReviewIdentityBlock(input: AgeReviewIdentityInput): string {
-  const handle =
+/**
+ * The single readable identifier for a captured account, in preference order.
+ * Sanitized: every candidate is chosen by the account itself.
+ */
+function resolveHandle(input: AgeReviewIdentityCandidates): string | undefined {
+  return (
     sanitizeInline(input.accountName ?? undefined) ??
     sanitizeInline(input.accountVineUsername ?? undefined) ??
-    sanitizeInline(input.accountNip05 ?? undefined);
+    sanitizeInline(input.accountNip05 ?? undefined)
+  );
+}
+
+/**
+ * Zendesk contact name for a parent who has replied about a case.
+ *
+ * "Claimed" is deliberate. Whether they are the parent is precisely what the
+ * review exists to establish, so the name must not assert it as fact.
+ *
+ * Returns undefined when nothing was captured, so a caller cannot rename a
+ * contact after an empty handle. Only ever for a contact known to be a real
+ * parent address, and only after they have replied -- Zendesk renders this
+ * into the To: header of outbound mail.
+ */
+export function buildClaimedParentName(input: AgeReviewIdentityCandidates): string | undefined {
+  const handle = resolveHandle(input);
+  return handle ? `Claimed parent of ${handle}` : undefined;
+}
+
+export function buildAgeReviewIdentityBlock(input: AgeReviewIdentityInput): string {
+  const handle = resolveHandle(input);
 
   const lines: string[] = [
     `Age review: ${sanitizeInline(input.ageBand) ?? 'unspecified'}, case ${input.caseId}`,

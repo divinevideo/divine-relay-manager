@@ -22,7 +22,7 @@ import { resolveZendeskCreds } from './zendesk-sync';
 import type { BulkAction } from '../../shared/bulk-moderation';
 import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, createMinorAccount, type KeycastEnv } from './keycast-client';
 import { suspendPubkey, unsuspendPubkey, banPubkey, type SecretStoreSecret } from './nip86';
-import { buildAgeReviewIdentityBlock } from './report-note';
+import { buildAgeReviewIdentityBlock, buildClaimedParentName } from './report-note';
 
 /**
  * The identity a case captured at creation, as stored on `age_review_cases`.
@@ -1227,6 +1227,65 @@ export async function syncAgeReviewTicketResolution(
 }
 
 // Caller (index.ts) must verify HMAC signature before dispatching here.
+/**
+ * Rename the parent's Zendesk contact to carry the account handle, once they
+ * have replied.
+ *
+ * Staged deliberately. Zendesk renders the stored contact name into the To:
+ * header of outbound mail, and the address is supplied unverified by the teen
+ * under review, so naming the contact after the account any earlier would
+ * disclose a real handle to whoever holds a mistyped address. A reply proves
+ * the address is live and held by someone engaging with the review.
+ *
+ * Guarded on a real parent address: without one the ticket requester is the
+ * API credential's owner, and this would retitle a live staff profile.
+ *
+ * Best-effort by contract -- the caller has already advanced the case, and a
+ * Zendesk failure must not change what the webhook reports.
+ */
+async function upgradeParentContactName(
+  ticketId: number,
+  caseRow: AgeReviewCase,
+  env: AgeReviewEnv,
+): Promise<void> {
+  if (!caseRow.parent_contact_email) return;
+
+  const name = buildClaimedParentName({
+    accountName: caseRow.account_name,
+    accountNip05: caseRow.account_nip05,
+    accountVineUsername: caseRow.account_vine_username,
+  });
+  if (!name) return;
+
+  try {
+    // Credential resolution is inside the try on purpose: a Secrets Store
+    // binding can throw on .get(), and that must degrade like any other
+    // enrichment failure rather than escaping this function.
+    const zendesk = await getZendeskClientConfig(env);
+    if (!zendesk) return;
+
+    const headers = {
+      'Authorization': `Basic ${zendesk.auth}`,
+      'Content-Type': 'application/json',
+    };
+
+    const ticketRes = await fetch(`${zendesk.baseUrl}/tickets/${ticketId}`, { headers });
+    if (!ticketRes.ok) throw new Error(`Zendesk ticket read failed: ${ticketRes.status}`);
+    const requesterId = (await ticketRes.json() as { ticket?: { requester_id?: number } }).ticket?.requester_id;
+    if (!requesterId) return;
+
+    const res = await fetch(`${zendesk.baseUrl}/users/${requesterId}`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ user: { name } }),
+    });
+    if (!res.ok) throw new Error(`Zendesk contact rename failed: ${res.status}`);
+    console.log(`[age-review] Renamed parent contact for ticket #${ticketId}`);
+  } catch (error) {
+    console.error('[age-review] Failed to rename parent contact:', error);
+  }
+}
+
 export async function handleAgeReviewReplyWebhook(
   request: Request,
   env: AgeReviewEnv,
@@ -1284,6 +1343,7 @@ export async function handleAgeReviewReplyWebhook(
 
     if (result.meta?.changes === 1) {
       console.log(`[age-review] Parent replied on ticket #${ticketId}, case ${target.id} → submitted_for_review (clock paused)`);
+      await upgradeParentContactName(ticketId, target, env);
       return json({ success: true, case_id: target.id, new_state: 'submitted_for_review' }, 200, corsHeaders);
     }
 

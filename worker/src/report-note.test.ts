@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildAgeReviewIdentityBlock, buildReportNote, eventKindLabel, parseKind0Profile } from './report-note';
+import { buildAgeReviewIdentityBlock, buildClaimedParentName, buildReportNote, eventKindLabel, parseKind0Profile } from './report-note';
 
 // Real Kofi OG-import account (public) — lets us assert the npub encoding end-to-end.
 const KOFI_HEX = '9f59c820aa2ad80ce8c0e28a4e640b9cd0487b4a510da95be7cd4bfd3ecda0bd';
@@ -247,5 +247,32 @@ describe('buildAgeReviewIdentityBlock', () => {
   // as a rendering fault and invites an agent to go looking for the value.
   it('says the deadline is not set rather than omitting the line', () => {
     expect(buildAgeReviewIdentityBlock(base)).toContain('Deadline not set');
+  });
+});
+
+describe('buildClaimedParentName', () => {
+  it('names the contact after the captured handle', () => {
+    expect(buildClaimedParentName({ accountName: 'Some One' })).toBe('Claimed parent of Some One');
+  });
+
+  it('falls back through vine username then nip05', () => {
+    expect(buildClaimedParentName({ accountVineUsername: 'oldviner' })).toBe('Claimed parent of oldviner');
+    expect(buildClaimedParentName({ accountNip05: '_@someuser.divine.video' }))
+      .toBe('Claimed parent of _@someuser.divine.video');
+  });
+
+  // Nothing captured means nothing to rename to. Returning undefined keeps the
+  // caller from writing a contact named after an empty string.
+  it('returns undefined when no handle was captured', () => {
+    expect(buildClaimedParentName({})).toBeUndefined();
+    expect(buildClaimedParentName({ accountName: '   ' })).toBeUndefined();
+  });
+
+  // The account chooses this string, and it lands in a field Zendesk renders
+  // into the To: header of outbound mail.
+  it('sanitizes an attacker-chosen name', () => {
+    const name = buildClaimedParentName({ accountName: 'Evil\nDivine Support' });
+    expect(name).not.toContain('\n');
+    expect(name).toBe('Claimed parent of Evil Divine Support');
   });
 });
