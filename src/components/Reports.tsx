@@ -897,7 +897,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
   // Full-pane error only when there is nothing to show. When a REFRESH fails
   // (e.g. the worker 502s on a relay timeout), the last good list stays
-  // rendered with a stale-data warning below — replacing a populated queue
+  // rendered with a stale-data warning below. Replacing a populated queue
   // with an error pane (or, before the worker fix, with silent emptiness)
   // made one slow poll look like "no reports pending".
   if (error && !reports) {
@@ -1011,7 +1011,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           {error && (
             <Alert variant="destructive" className="mt-2 py-2">
               <AlertDescription className="text-xs">
-                Live refresh is failing. Showing reports loaded {lastUpdatedText ?? 'earlier'}; retrying automatically.
+                Live refresh is failing. Showing reports loaded {lastUpdatedText || 'earlier'}; retrying automatically.
               </AlertDescription>
             </Alert>
           )}

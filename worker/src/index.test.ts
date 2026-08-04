@@ -1157,7 +1157,7 @@ describe('scheduled cron — DB-unavailable alert', () => {
 // API returns 502 and the frontend keeps its last good data. Surfaced by a
 // slow staging backend, but any relay answer past the timeout does the same
 // in production.
-describe('/api/reports relay-query integrity', () => {
+describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', () => {
   class FakeRelaySocket {
     static instances: FakeRelaySocket[] = [];
     url: string;
@@ -1190,8 +1190,13 @@ describe('/api/reports relay-query integrity', () => {
     headers: { 'X-Admin-Key': 'test-admin-key' },
   });
 
+  const labelsRequest = () => new Request('https://api.example/api/resolution-labels', {
+    headers: { 'X-Admin-Key': 'test-admin-key' },
+  });
+
   const EVENT_A = { id: 'a'.repeat(64), kind: 1984, pubkey: 'b'.repeat(64), tags: [], content: '', sig: 'c'.repeat(128), created_at: 1 };
   const EVENT_B = { id: 'd'.repeat(64), kind: 1984, pubkey: 'b'.repeat(64), tags: [], content: '', sig: 'c'.repeat(128), created_at: 2 };
+  const LABEL_A = { id: 'e'.repeat(64), kind: 1985, pubkey: 'f'.repeat(64), tags: [['L', 'moderation/resolution']], content: '', sig: 'c'.repeat(128), created_at: 3 };
 
   beforeEach(() => {
     FakeRelaySocket.instances = [];
@@ -1239,6 +1244,52 @@ describe('/api/reports relay-query integrity', () => {
     const sock = FakeRelaySocket.instances[0];
     expect(sock).toBeDefined();
     sock.message(['EVENT', sock.subId(), EVENT_A]);
+    sock.emit('close', {});
+    const res = await resPromise;
+    expect(res.status).toBe(502);
+    const body = await res.json() as { success: boolean; error?: string };
+    expect(body.success).toBe(false);
+    expect(body.error).toMatch(/closed before/i);
+  });
+
+  // /api/resolution-labels feeds the queue's resolvedTargets set, which decides
+  // whether a handled target stays hidden. A truncated read here is worse than
+  // an error: it silently re-presents resolved work as pending (#221).
+  it('returns labels on an EOSE-complete result', async () => {
+    const resPromise = worker.fetch(labelsRequest(), reportsEnv, ctx);
+    await new Promise((r) => setTimeout(r, 0));
+    const sock = FakeRelaySocket.instances[0];
+    expect(sock).toBeDefined();
+    sock.message(['EVENT', sock.subId(), LABEL_A]);
+    sock.message(['EOSE', sock.subId()]);
+    const res = await resPromise;
+    expect(res.status).toBe(200);
+    const body = await res.json() as { success: boolean; events: unknown[] };
+    expect(body.success).toBe(true);
+    expect(body.events).toHaveLength(1);
+  });
+
+  it('returns 502 when the resolution-label query times out before EOSE', async () => {
+    vi.useFakeTimers();
+    const resPromise = worker.fetch(labelsRequest(), reportsEnv, ctx);
+    await vi.advanceTimersByTimeAsync(0);
+    const sock = FakeRelaySocket.instances[0];
+    expect(sock).toBeDefined();
+    sock.message(['EVENT', sock.subId(), LABEL_A]); // partial labels arrived, then the relay stalls
+    await vi.advanceTimersByTimeAsync(5000);
+    const res = await resPromise;
+    expect(res.status).toBe(502);
+    const body = await res.json() as { success: boolean; error?: string };
+    expect(body.success).toBe(false);
+    expect(body.error).toMatch(/timed out/i);
+  });
+
+  it('returns 502 when the relay closes before EOSE on resolution labels', async () => {
+    const resPromise = worker.fetch(labelsRequest(), reportsEnv, ctx);
+    await new Promise((r) => setTimeout(r, 0));
+    const sock = FakeRelaySocket.instances[0];
+    expect(sock).toBeDefined();
+    sock.message(['EVENT', sock.subId(), LABEL_A]);
     sock.emit('close', {});
     const res = await resPromise;
     expect(res.status).toBe(502);
