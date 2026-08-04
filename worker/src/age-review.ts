@@ -958,9 +958,13 @@ export function composeContactNotes(current: string, block: string): string {
   let tail = '';
   if (start !== -1) {
     const endIdx = current.indexOf(CONTACT_NOTES_END, start);
-    // A block with no end marker was written by an older version; treat the
-    // rest of the field as ours rather than duplicating it.
-    tail = endIdx === -1 ? '' : current.slice(endIdx + CONTACT_NOTES_END.length).trimStart();
+    tail = endIdx === -1
+      // No end marker, so we cannot tell where our block stopped and an agent's
+      // text began. Keep the remainder: this field belongs to the agent, and a
+      // visible duplicate is something they can fix, whereas a silent deletion
+      // is not something they can even notice.
+      ? current.slice(start + CONTACT_NOTES_START.length).trimStart()
+      : current.slice(endIdx + CONTACT_NOTES_END.length).trimStart();
   }
 
   return [head, CONTACT_NOTES_START, block, CONTACT_NOTES_END, tail]

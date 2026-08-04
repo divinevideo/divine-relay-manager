@@ -1511,11 +1511,18 @@ describe('composeContactNotes', () => {
     expect(out).toBe(['Above.', START, BLOCK, END, 'Below.'].join('\n'));
   });
 
-  // An older write may have left a start marker with no end marker.
-  it('does not duplicate when an earlier block has no end marker', () => {
-    const out = composeContactNotes(['Above.', START, 'legacy block'].join('\n'), BLOCK);
-    expect(out).toBe(['Above.', START, BLOCK, END].join('\n'));
-    expect(out).not.toContain('legacy block');
+  // A start marker with no end marker means we cannot tell where our block
+  // stopped and an agent's text began -- an older write, or an agent who
+  // edited or part-copied a marker. Keep the remainder: a visible duplicate is
+  // recoverable by the agent who owns this field, silent deletion is not.
+  it('keeps text after a start marker that has no end marker', () => {
+    const out = composeContactNotes(['Above.', START, 'AGENT TEXT'].join('\n'), BLOCK);
+    expect(out).toContain('Above.');
+    expect(out).toContain('AGENT TEXT');
+  });
+
+  it('keeps text after a marker an agent pasted mid-line', () => {
+    expect(composeContactNotes(`agent said ${START} inline`, BLOCK)).toContain('inline');
   });
 });
 
