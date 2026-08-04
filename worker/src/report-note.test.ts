@@ -198,6 +198,20 @@ describe('buildAgeReviewIdentityBlock', () => {
       .toContain('Some One');
   });
 
+  // The account chooses this string, and could name itself "Divine Trust &
+  // Safety". buildReportNote already labels the same fields as unverified, and
+  // an agent reading a case ticket needs the same warning.
+  it('marks the handle as self-chosen rather than presenting it as fact', () => {
+    expect(buildAgeReviewIdentityBlock({ ...base, accountName: 'Divine Trust & Safety' }))
+      .toContain('claimed, unverified');
+  });
+
+  // No qualifier when there is nothing to qualify -- the no-profile line is our
+  // own text, not the account's.
+  it('does not mark an absent handle as claimed', () => {
+    expect(buildAgeReviewIdentityBlock(base)).not.toContain('claimed, unverified');
+  });
+
   it('encodes the pubkey as an npub alongside the hex', () => {
     const block = buildAgeReviewIdentityBlock(base);
     expect(block).toContain(KOFI_NPUB);

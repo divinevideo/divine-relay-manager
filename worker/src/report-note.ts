@@ -251,7 +251,9 @@ export function buildAgeReviewIdentityBlock(input: AgeReviewIdentityInput): stri
     `${RELAY_ADMIN}/age-review?case=${input.caseId}`,
     '',
     'Account',
-    `  handle   ${handle ?? '(no profile captured - the account may have had none, or its content is hidden by enforcement)'}`,
+    // Qualified for the same reason buildReportNote qualifies it: the account
+    // picks this string and can name itself after Divine staff.
+    `  handle   ${handle ? `${handle} (claimed, unverified)` : '(no profile captured - the account may have had none, or its content is hidden by enforcement)'}`,
     `  npub     ${toNpub(input.pubkey)}`,
     `  pubkey   ${input.pubkey}`,
   ];

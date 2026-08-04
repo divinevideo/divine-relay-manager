@@ -892,46 +892,106 @@ function buildAgeReviewCustomFields(
   return customFields;
 }
 
-const CONTACT_NOTES_DELIMITER = '--- Divine age review ---';
+// Bracketed on purpose: sanitizeInline strips [ and ], so no account-chosen
+// name can reproduce these markers and forge a block boundary in the notes.
+const CONTACT_NOTES_START = '--- [Divine age review] ---';
+const CONTACT_NOTES_END = '--- [end Divine age review] ---';
+
+/**
+ * Resolve a ticket requester to a contact it is safe to write case data onto.
+ *
+ * The parent address is supplied by the teen under review and is validated
+ * only as email-shaped. Zendesk resolves `requester: {email}` to an *existing*
+ * user when one matches, and permits agents to be requesters -- so naming a
+ * Divine staff address makes that staff member the requester of the case
+ * ticket. A Zendesk display name is global, so renaming them would put a
+ * minor's handle in the header of every mail they later send, on any ticket.
+ *
+ * A non-null `parent_contact_email` on the case does not establish this: that
+ * column is written before the Zendesk call, and the call's failure is
+ * swallowed, so the row can claim a parent while the requester is still the
+ * admin who opened the internal ticket.
+ *
+ * Returns null when the contact is anyone other than the end user at exactly
+ * the address we were given. Callers must not write on null.
+ */
+async function resolveVerifiedParentContact(
+  requesterId: number,
+  expectedEmail: string,
+  zendesk: ZendeskClientConfig,
+): Promise<{ notes: string } | null> {
+  const res = await fetch(`${zendesk.baseUrl}/users/${requesterId}`, {
+    headers: { 'Authorization': `Basic ${zendesk.auth}`, 'Content-Type': 'application/json' },
+  });
+  if (!res.ok) throw new Error(`Zendesk contact read failed: ${res.status}`);
+
+  const user = (await res.json() as {
+    user?: { role?: string; email?: string; notes?: string | null };
+  }).user;
+  if (!user) return null;
+
+  if (user.role !== 'end-user') {
+    console.warn(`[age-review] Refusing to write case data to a non-end-user contact (role=${user.role})`);
+    return null;
+  }
+  if ((user.email ?? '').toLowerCase() !== expectedEmail.toLowerCase()) {
+    console.warn('[age-review] Refusing to write case data: requester is not the parent address on the case');
+    return null;
+  }
+  return { notes: user.notes ?? '' };
+}
+
+/**
+ * Splice our block into a contact's existing `notes`, replacing only a block we
+ * wrote before.
+ *
+ * `notes` is a single free-text field a human writes in too, and the bottom of
+ * it is exactly where an agent adds a line. So both sides are preserved: text
+ * before our block and text after it. Only the region between our own markers
+ * is replaced, which keeps repeated attaches -- a re-submitted parent address,
+ * or two cases sharing one address -- from stacking copies up.
+ */
+export function composeContactNotes(current: string, block: string): string {
+  const start = current.indexOf(CONTACT_NOTES_START);
+  const head = (start === -1 ? current : current.slice(0, start)).trimEnd();
+
+  let tail = '';
+  if (start !== -1) {
+    const endIdx = current.indexOf(CONTACT_NOTES_END, start);
+    // A block with no end marker was written by an older version; treat the
+    // rest of the field as ours rather than duplicating it.
+    tail = endIdx === -1 ? '' : current.slice(endIdx + CONTACT_NOTES_END.length).trimStart();
+  }
+
+  return [head, CONTACT_NOTES_START, block, CONTACT_NOTES_END, tail]
+    .filter((part) => part !== '')
+    .join('\n');
+}
 
 /**
  * Append the identity block to a Zendesk contact's `notes`, which is where an
  * agent sees who a requester is without opening the case.
  *
- * Only ever called for a contact we know is a real parent address. Without one
- * the ticket requester falls back to the API credential's owner -- an admin on
- * most existing case tickets -- and this would write case data onto a live
- * staff profile.
+ * Writes nothing unless the requester verifies as the end user at the parent
+ * address on the case -- see resolveVerifiedParentContact for why the case row
+ * alone is not evidence of that.
  *
- * `notes` is a single free-text field a human may already have written in, so
- * this reads before writing and appends under a delimiter. Best-effort by
- * contract: the caller's outreach must not fail because enrichment did.
+ * Best-effort by contract: the caller's outreach must not fail because
+ * enrichment did.
  */
 async function writeParentContactNotes(
   requesterId: number,
+  parentEmail: string,
   block: string,
   zendesk: ZendeskClientConfig,
 ): Promise<void> {
-  const headers = {
-    'Authorization': `Basic ${zendesk.auth}`,
-    'Content-Type': 'application/json',
-  };
-
-  const existing = await fetch(`${zendesk.baseUrl}/users/${requesterId}`, { headers });
-  if (!existing.ok) {
-    throw new Error(`Zendesk contact read failed: ${existing.status}`);
-  }
-  const current = (await existing.json() as { user?: { notes?: string | null } }).user?.notes ?? '';
-
-  // Replace only our own previous block, so repeated attaches don't stack up
-  // while anything an agent wrote survives untouched.
-  const preserved = current.split(CONTACT_NOTES_DELIMITER)[0].trimEnd();
-  const notes = [preserved, CONTACT_NOTES_DELIMITER, block].filter(Boolean).join('\n');
+  const contact = await resolveVerifiedParentContact(requesterId, parentEmail, zendesk);
+  if (!contact) return;
 
   const res = await fetch(`${zendesk.baseUrl}/users/${requesterId}`, {
     method: 'PUT',
-    headers,
-    body: JSON.stringify({ user: { notes } }),
+    headers: { 'Authorization': `Basic ${zendesk.auth}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ user: { notes: composeContactNotes(contact.notes, block) } }),
   });
   if (!res.ok) {
     throw new Error(`Zendesk contact write failed: ${res.status}`);
@@ -992,30 +1052,48 @@ async function createAgeReviewTicket(
     console.log(`[age-review] Created Zendesk ticket #${data.ticket.id} for case ${caseId}`);
   }
 
-  await attachIdentityToParentContact(data.ticket?.requester_id, caseId, ageBand, deadlineAt, data.ticket?.id ?? null, identity, zendesk);
+  await attachIdentityToParentContact({
+    requesterId: data.ticket?.requester_id,
+    parentEmail,
+    caseId,
+    ageBand,
+    deadlineAt,
+    originTicketId: data.ticket?.id ?? null,
+    identity,
+    zendesk,
+  });
 }
 
 /**
  * Put the case identity on the parent's contact record. Agent-only surface.
  *
+ * Named arguments rather than positional: this takes several strings, numbers
+ * and nullables of the same shape (case id, ticket id, requester id, email),
+ * and a silent swap between them would write one case's data onto another
+ * case's contact.
+ *
  * Wrapped whole and swallowed: the parent's outreach is the critical path and
  * must survive a Zendesk contact API failure.
  */
-async function attachIdentityToParentContact(
-  requesterId: number | undefined,
-  caseId: string,
-  ageBand: AgeBand,
-  deadlineAt: string | null,
-  originTicketId: number | null,
-  identity: AgeReviewCaseIdentity & { pubkey?: string },
-  zendesk: ZendeskClientConfig,
-): Promise<void> {
+async function attachIdentityToParentContact(args: {
+  requesterId: number | undefined;
+  parentEmail: string;
+  caseId: string;
+  ageBand: AgeBand;
+  deadlineAt: string | null;
+  originTicketId: number | null;
+  identity: AgeReviewCaseIdentity & { pubkey?: string };
+  zendesk: ZendeskClientConfig;
+}): Promise<void> {
+  const { requesterId, parentEmail, caseId, ageBand, deadlineAt, originTicketId, identity, zendesk } = args;
+
   // Without a requester id there is no contact to write to; without a pubkey or
   // case id the block would render a broken deeplink and identify nothing.
-  if (!requesterId || !identity.pubkey || !caseId) return;
+  if (!requesterId || !identity.pubkey || !caseId || !parentEmail) return;
   try {
     await writeParentContactNotes(
       requesterId,
+      parentEmail,
       buildAgeReviewIdentityBlock({
         caseId,
         pubkey: identity.pubkey,
@@ -1071,15 +1149,16 @@ async function updateTicketWithParentContact(
   console.log(`[age-review] Updated Zendesk ticket #${ticketId} with parent contact`);
 
   const data = await res.json().catch(() => null) as { ticket?: { requester_id?: number } } | null;
-  await attachIdentityToParentContact(
-    data?.ticket?.requester_id,
-    identity.id ?? '',
+  await attachIdentityToParentContact({
+    requesterId: data?.ticket?.requester_id,
+    parentEmail,
+    caseId: identity.id ?? '',
     ageBand,
-    identity.deadline_at ?? null,
-    ticketId,
+    deadlineAt: identity.deadline_at ?? null,
+    originTicketId: ticketId,
     identity,
     zendesk,
-  );
+  });
 }
 
 function buildDeadlineCustomField(
@@ -1237,8 +1316,10 @@ export async function syncAgeReviewTicketResolution(
  * disclose a real handle to whoever holds a mistyped address. A reply proves
  * the address is live and held by someone engaging with the review.
  *
- * Guarded on a real parent address: without one the ticket requester is the
- * API credential's owner, and this would retitle a live staff profile.
+ * The contact is verified before the write, not merely assumed from the case
+ * row -- see resolveVerifiedParentContact. A Zendesk display name is global,
+ * so renaming the wrong user would put a minor's handle in the header of every
+ * mail they subsequently send.
  *
  * Best-effort by contract -- the caller has already advanced the case, and a
  * Zendesk failure must not change what the webhook reports.
@@ -1273,6 +1354,8 @@ async function upgradeParentContactName(
     if (!ticketRes.ok) throw new Error(`Zendesk ticket read failed: ${ticketRes.status}`);
     const requesterId = (await ticketRes.json() as { ticket?: { requester_id?: number } }).ticket?.requester_id;
     if (!requesterId) return;
+
+    if (!await resolveVerifiedParentContact(requesterId, caseRow.parent_contact_email, zendesk)) return;
 
     const res = await fetch(`${zendesk.baseUrl}/users/${requesterId}`, {
       method: 'PUT',
