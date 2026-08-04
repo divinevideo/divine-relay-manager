@@ -1054,6 +1054,7 @@ async function handleRelayRpc(
     body.method === 'unsuspendpubkey' ||
     body.method === 'unbanpubkey'
   ) {
+    if (env.DB) await ensureSchemaOnce(env.DB);
     const target = body.params?.[0] ? String(body.params[0]) : '';
     // Reversals fail closed: if the case lookup itself fails we refuse rather
     // than lift a hold without having checked. Suspend keeps the default,

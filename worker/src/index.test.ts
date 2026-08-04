@@ -231,8 +231,9 @@ describe('relay-rpc account-state side effects', () => {
   // Same env with a DB whose active-case lookup returns `caseRow` only when it
   // is non-terminal, mirroring the guard query's WHERE state NOT IN
   // (cleared, denied_closed). A terminal or null row resolves to null.
-  function makeAccountStateEnvWithDb(caseRow: { id: string; state: string } | null) {
+  function makeAccountStateEnvWithDb(caseRow: { id: string; state: string } | null, opts: { requireSchema?: boolean } = {}) {
     const active = caseRow && !['cleared', 'denied_closed'].includes(caseRow.state) ? caseRow : null;
+    let ageReviewCasesExists = !opts.requireSchema;
     return {
       ALLOWED_ORIGINS: 'https://app.divine.video',
       RELAY_URL: 'wss://relay.divine.video',
@@ -243,7 +244,23 @@ describe('relay-rpc account-state side effects', () => {
       KEYCAST_URL: 'https://login.divine.video',
       KEYCAST_SERVICE_TOKEN: 'keycast-token',
       DB: {
-        prepare: () => ({ bind: () => ({ first: async () => active }) }),
+        prepare: (sql: string) => ({
+          bind: () => ({
+            first: async () => {
+              if (sql.includes('FROM age_review_cases') && !ageReviewCasesExists) {
+                throw new Error('no such table: age_review_cases');
+              }
+              return active;
+            },
+            run: async () => ({ success: true, meta: { changes: 1 } }),
+          }),
+          run: async () => {
+            if (sql.includes('CREATE TABLE IF NOT EXISTS age_review_cases')) {
+              ageReviewCasesExists = true;
+            }
+            return { success: true, meta: { changes: 0 } };
+          },
+        }),
       },
     } as never;
   }
@@ -363,6 +380,26 @@ describe('relay-rpc account-state side effects', () => {
     expect(kc).toHaveLength(1);
     expect(kc[0].url).toContain(`/api/admin/users/${VALID_PUBKEY}/status`);
     expect(kc[0].status).toBe('suspended');
+
+    fetchSpy.mockRestore();
+  });
+
+  it('bootstraps age-review schema before guarding a relay-rpc reversal', async () => {
+    // /api/relay-rpc can be the first request to touch a freshly provisioned D1.
+    // The guard must create age_review_cases before querying it, otherwise
+    // fail-closed turns a missing table into a permanent reversal outage.
+    const fetchSpy = makeFetchSpy();
+    const waitUntil = vi.fn();
+    const testCtx = { waitUntil } as unknown as ExecutionContext;
+    const env = makeAccountStateEnvWithDb(null, { requireSchema: true });
+
+    const response = await callRelayRpc('unbanpubkey', [VALID_PUBKEY], env, testCtx);
+    expect(response.status).toBe(200);
+
+    await drain(waitUntil);
+    const kc = keycastCalls(fetchSpy);
+    expect(kc).toHaveLength(1);
+    expect(kc[0].status).toBe('active');
 
     fetchSpy.mockRestore();
   });
