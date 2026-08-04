@@ -20,18 +20,16 @@ Two additions beyond the original plan, both from revalidating it against the co
 - **Task 4 keeps the username.** `account_name` prefers `display_name`, so the operator-supplied username was discarded whenever one was given — permanently, since these rows stamp `identity_captured_at` and a backfill keyed on `IS NULL` never revisits them. It is now stored as the NIP-05 the username implies, with the identity domain in `NIP05_DOMAIN` config rather than hardcoded (staging accounts come from a different Keycast instance, and an unconfigured environment records nothing rather than a wrong address).
 - **Contact verification before any write.** The plan's guard — "only when a real parent email is attached" — was necessary but not sufficient. See the constraint added below.
 
-### Blocking Zendesk-side dependencies
+### Zendesk-side dependencies — both closed (verified live 2026-08-04)
 
-Neither is fixable in this repo. Both need confirming before this reaches production.
-
-1. **The "Customer not responding" macro** posts `Hello {{ticket.requester.name}}.` as a **public** comment. Once contact names carry handles, an agent applying it emails a minor's handle to an unverified address. Reword it, or keep it off age-review tickets, before the rename ships.
-2. **The "parent replied" trigger condition is unverified.** The webhook payload is `{ticket_id}` only, with no comment author, so the code cannot tell an end-user reply from an agent's. If that trigger fires on any public comment rather than only end-user comments, a T&S agent's own follow-up would advance the case and trigger the rename — defeating the staging the whole privacy constraint rests on. Confirm the trigger condition in Zendesk Admin and write it down.
+1. **The parent-reply trigger was never a risk.** `Age Review: notify relay-manager on parent reply` gates on `role is end_user` in addition to `comment_is_public` and the `age-review` tag. An agent's own follow-up cannot fire the webhook, so it cannot advance a case or trigger the rename. The staging holds.
+2. **The "Customer not responding" macro is fixed** in `divine-zendesk-tooling`. The real defect was not the requester name but that the macro set **no comment mode at all**, so it inherited the agent's composer state — the same macro either emailed the customer or wrote a private note depending on an incidental UI setting. On an age-review ticket both outcomes cause harm: a public comment satisfies `Age Review: clear parent-replied on agent reply` and drops the ticket out of the waiting-on-us view, while an internal one keeps it queued but never nudges the parent. It is now pinned public, and the greeting no longer interpolates the requester name (the `first_name` variant would be worse — it renders "Hello Claimed."). That defect predated this work.
 
 ## Global Constraints
 
 - **`cd worker && npx vitest run` is a PARTIAL run.** `worker/vitest.config.ts` excludes `test/**/*.d1.test.ts` and `test/**/*.e2e.test.ts`. This change touches D1 schema and D1 writes, so **every task must also run `cd worker && npm run test:d1`**. A green partial run on a D1 change is a false green (see #208).
 - Frontend type-check is `npx tsc -p tsconfig.app.json --noEmit`. Bare `npx tsc --noEmit` is a false green (root tsconfig has `"files": []`).
-- Run `npm run lint` before pushing. `tsc` + tests passing is not sufficient for this repo's CI.
+- There is **no `npm run lint`** in this repo, at the root or in `worker/`. CI (`.github/workflows/test.yml`) runs exactly four things: root `npm run test`, then `npm run typecheck`, `npm run test:run` and `npm run test:d1` in `worker/`. Run those four.
 - **Never run `wrangler d1 migrations apply`** against this database. Schema is applied at runtime by `ensureSchema` in `worker/src/db.ts`, using idempotent `try { ALTER TABLE … ADD COLUMN } catch {}`.
 - All profile-derived strings are attacker-controlled. They must pass through the existing `sanitizeInline` in `report-note.ts` (80-char cap, control characters stripped). Do not write a second sanitizer.
 - **This repo is public.** No ticket numbers, case IDs, pubkeys, or user email addresses in code comments, commit messages, or PR text. Describe cases obliquely.
