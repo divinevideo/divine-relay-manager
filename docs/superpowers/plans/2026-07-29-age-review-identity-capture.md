@@ -11,6 +11,22 @@
 **Spec:** `docs/superpowers/specs/2026-07-29-age-review-identity-capture-design.md`
 **Issue:** divinevideo/divine-relay-manager#213
 
+## Status (2026-08-04)
+
+Tasks 1-8 are implemented and committed. **Task 9 (backfill) is deferred to its own PR** — it needs a staging dry-run and a reported yield split before it can be run against prod, which is its own review cycle.
+
+Two additions beyond the original plan, both from revalidating it against the code:
+
+- **Task 4 keeps the username.** `account_name` prefers `display_name`, so the operator-supplied username was discarded whenever one was given — permanently, since these rows stamp `identity_captured_at` and a backfill keyed on `IS NULL` never revisits them. It is now stored as the NIP-05 the username implies, with the identity domain in `NIP05_DOMAIN` config rather than hardcoded (staging accounts come from a different Keycast instance, and an unconfigured environment records nothing rather than a wrong address).
+- **Contact verification before any write.** The plan's guard — "only when a real parent email is attached" — was necessary but not sufficient. See the constraint added below.
+
+### Blocking Zendesk-side dependencies
+
+Neither is fixable in this repo. Both need confirming before this reaches production.
+
+1. **The "Customer not responding" macro** posts `Hello {{ticket.requester.name}}.` as a **public** comment. Once contact names carry handles, an agent applying it emails a minor's handle to an unverified address. Reword it, or keep it off age-review tickets, before the rename ships.
+2. **The "parent replied" trigger condition is unverified.** The webhook payload is `{ticket_id}` only, with no comment author, so the code cannot tell an end-user reply from an agent's. If that trigger fires on any public comment rather than only end-user comments, a T&S agent's own follow-up would advance the case and trigger the rename — defeating the staging the whole privacy constraint rests on. Confirm the trigger condition in Zendesk Admin and write it down.
+
 ## Global Constraints
 
 - **`cd worker && npx vitest run` is a PARTIAL run.** `worker/vitest.config.ts` excludes `test/**/*.d1.test.ts` and `test/**/*.e2e.test.ts`. This change touches D1 schema and D1 writes, so **every task must also run `cd worker && npm run test:d1`**. A green partial run on a D1 change is a false green (see #208).
@@ -22,6 +38,7 @@
 - Capture is best-effort. A relay failure logs and continues; it must never block case creation or enforcement.
 - Contact-record writes happen **only** when a real parent email is attached. On the no-parent path the ticket requester is an admin account, and an unguarded write would corrupt a live admin profile.
 - The account handle must not enter the contact `name` until the parent has replied. Zendesk renders the stored name into the `To:` header of outbound mail.
+- **A non-null `parent_contact_email` does not prove the ticket's requester is that parent.** The address is supplied by the account under review and validated only as email-shaped; Zendesk resolves a requester by email to an *existing* user and permits agents to be requesters. So naming a Divine staff address makes that staff member the requester — and because a Zendesk display name is global, renaming them puts a minor's handle in the header of every mail they later send, on any ticket. The column is also written before the Zendesk call and that call's failure is swallowed, so it can assert a parent while the requester is still an admin. Resolve the contact and require an end user at exactly the address on the case before writing to `/users/{id}`.
 
 ---
 
