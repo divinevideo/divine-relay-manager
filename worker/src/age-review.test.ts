@@ -1468,6 +1468,169 @@ describe('checkAgeReviewDeadlines', () => {
   });
 });
 
+// -- Parent contact record (#213) ---------------------------------------------
+
+describe('parent contact record', () => {
+  /** Routes Zendesk calls by URL and method so a contact write can be observed. */
+  function makeZendeskFetch(existingNotes: string | null = null) {
+    return vi.fn().mockImplementation((url: string, init?: { method?: string }) => {
+      if (url.includes('/users/') && (init?.method ?? 'GET') === 'GET') {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ user: { id: 77, notes: existingNotes } }),
+        });
+      }
+      if (url.includes('/users/')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ user: { id: 77 } }) });
+      }
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ ticket: { id: 42, requester_id: 77 } }),
+      });
+    });
+  }
+
+  function makeParentDb(c: AgeReviewCase) {
+    return {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        bind: vi.fn().mockReturnValue({
+          first: vi.fn().mockResolvedValue(sql.includes('WHERE id = ? AND pubkey = ?') ? c : null),
+          run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+        }),
+      })),
+    };
+  }
+
+  const zendeskEnv = {
+    ZENDESK_SUBDOMAIN: 'test',
+    ZENDESK_API_TOKEN: 'tok',
+    ZENDESK_EMAIL: 'agent@test.com',
+  };
+
+  function parentRequest() {
+    return new Request('https://api.test/v1/minor-review-cases/case-1/parent-contact', {
+      method: 'POST',
+      body: JSON.stringify({ email: 'parent@example.com' }),
+    });
+  }
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  // The outreach goes to an address the teen supplied and nobody has verified,
+  // and Zendesk renders the stored contact name into the To: header. The
+  // address is the join key and is safe there; the handle is not, until the
+  // parent has replied.
+  it('names the contact by address alone at attach time, never by handle', async () => {
+    const c = makeCase({ state: 'restricted_pending_user_response', account_name: 'Some One' });
+    const mockFetch = makeZendeskFetch();
+    vi.stubGlobal('fetch', mockFetch);
+
+    await handleParentContact(parentRequest(), 'case-1', c.pubkey, makeEnv(makeParentDb(c), zendeskEnv), corsHeaders);
+
+    const ticketCall = mockFetch.mock.calls.find((call: unknown[]) => /\/tickets(\/|$|\?)/.test(call[0] as string));
+    const payload = JSON.parse((ticketCall![1] as { body: string }).body);
+    expect(payload.ticket.requester.name).toBe('parent@example.com');
+    expect(payload.ticket.requester.name).not.toContain('Claimed parent');
+    expect(payload.ticket.requester.name).not.toBe('Parent/Guardian');
+    expect(payload.ticket.comment.body).not.toContain('Some One');
+  });
+
+  it('writes the identity block to the contact notes', async () => {
+    const c = makeCase({ state: 'restricted_pending_user_response', account_name: 'Some One' });
+    const mockFetch = makeZendeskFetch();
+    vi.stubGlobal('fetch', mockFetch);
+
+    await handleParentContact(parentRequest(), 'case-1', c.pubkey, makeEnv(makeParentDb(c), zendeskEnv), corsHeaders);
+
+    const put = mockFetch.mock.calls.find(
+      (call: unknown[]) => (call[0] as string).includes('/users/') && (call[1] as { method?: string })?.method === 'PUT',
+    );
+    expect(put).toBeTruthy();
+    const notes = JSON.parse((put![1] as { body: string }).body).user.notes;
+    expect(notes).toContain('/age-review?case=case-1');
+    expect(notes).toContain('Some One');
+  });
+
+  // notes is a single free-text field an agent may already have written in.
+  it('appends to existing contact notes rather than clobbering them', async () => {
+    const c = makeCase({ state: 'restricted_pending_user_response', account_name: 'Some One' });
+    const mockFetch = makeZendeskFetch('Spoke to this parent on the phone 2026-08-01.');
+    vi.stubGlobal('fetch', mockFetch);
+
+    await handleParentContact(parentRequest(), 'case-1', c.pubkey, makeEnv(makeParentDb(c), zendeskEnv), corsHeaders);
+
+    const put = mockFetch.mock.calls.find(
+      (call: unknown[]) => (call[0] as string).includes('/users/') && (call[1] as { method?: string })?.method === 'PUT',
+    );
+    const notes = JSON.parse((put![1] as { body: string }).body).user.notes;
+    expect(notes).toContain('Spoke to this parent on the phone 2026-08-01.');
+    expect(notes).toContain('/age-review?case=case-1');
+  });
+
+  // Enrichment must never cost the parent their outreach. Asserting only on the
+  // 200 would prove nothing -- handleParentContact already swallows everything
+  // this function throws -- so assert the failure was contained at the contact
+  // write itself, and that the ticket the parent was mailed still got recorded.
+  it('contains a contact-write failure without disturbing the outreach', async () => {
+    const c = makeCase({ state: 'restricted_pending_user_response', account_name: 'Some One' });
+    const db = makeParentDb(c);
+    const mockFetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/users/')) return Promise.reject(new Error('Zendesk user API down'));
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ ticket: { id: 42, requester_id: 77 } }) });
+    });
+    vi.stubGlobal('fetch', mockFetch);
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const res = await handleParentContact(parentRequest(), 'case-1', c.pubkey, makeEnv(db, zendeskEnv), corsHeaders);
+    expect(res.status).toBe(200);
+
+    // Handled at the contact write, not bubbled up to the generic ticket handler.
+    const messages = errorLog.mock.calls.map((call) => String(call[0]));
+    expect(messages).toContain('[age-review] Failed to write parent contact notes:');
+    expect(messages).not.toContain('[age-review] Failed to create Zendesk ticket:');
+
+    // The parent was mailed, so the ticket must still be linked to the case.
+    const storeCall = db.prepare.mock.calls.find((call: string[]) => call[0]?.includes('zendesk_ticket_id'));
+    expect(storeCall).toBeTruthy();
+
+    errorLog.mockRestore();
+  });
+
+  // Without a parent address the ticket requester falls back to the API
+  // caller, which is an admin on most existing case tickets. An unguarded
+  // write would scribble case data onto a live staff profile.
+  it('touches no contact record when the case has no parent email', async () => {
+    const reviewCase = makeCase({ state: 'under_moderator_review', account_name: 'Some One' });
+    const updatedCase = { ...reviewCase, state: 'restricted_pending_support_email' };
+    let selectCount = 0;
+    const db = {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        bind: vi.fn().mockReturnValue({
+          first: vi.fn().mockImplementation(async () => {
+            if (sql === 'SELECT * FROM age_review_cases WHERE id = ?') {
+              selectCount += 1;
+              return selectCount === 1 ? reviewCase : updatedCase;
+            }
+            return null;
+          }),
+          run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+        }),
+      })),
+    };
+    const mockFetch = makeZendeskFetch();
+    vi.stubGlobal('fetch', mockFetch);
+
+    const req = new Request('https://api.test/api/age-review/cases/case-1', {
+      method: 'PATCH',
+      body: JSON.stringify({ state: 'restricted_pending_support_email' }),
+    });
+    await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db, zendeskEnv), corsHeaders);
+
+    const userCalls = mockFetch.mock.calls.filter((call: unknown[]) => (call[0] as string).includes('/users/'));
+    expect(userCalls).toEqual([]);
+  });
+});
+
 // -- handleParentContact + Zendesk ticket creation ----------------------------
 
 describe('handleParentContact Zendesk integration', () => {

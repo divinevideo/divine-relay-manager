@@ -820,13 +820,14 @@ export async function handleParentContact(
         body.email,
         activeCase.suspected_age_band as AgeBand,
         env,
+        activeCase,
       );
     } catch (error) {
       console.error('[age-review] Failed to update Zendesk ticket with parent contact:', error);
     }
   } else {
     try {
-      await createAgeReviewTicket(caseId, body.email, activeCase.suspected_age_band as AgeBand, activeCase.deadline_at, env);
+      await createAgeReviewTicket(caseId, body.email, activeCase.suspected_age_band as AgeBand, activeCase.deadline_at, env, activeCase);
     } catch (error) {
       console.error('[age-review] Failed to create Zendesk ticket:', error);
     }
@@ -891,12 +892,59 @@ function buildAgeReviewCustomFields(
   return customFields;
 }
 
+const CONTACT_NOTES_DELIMITER = '--- Divine age review ---';
+
+/**
+ * Append the identity block to a Zendesk contact's `notes`, which is where an
+ * agent sees who a requester is without opening the case.
+ *
+ * Only ever called for a contact we know is a real parent address. Without one
+ * the ticket requester falls back to the API credential's owner -- an admin on
+ * most existing case tickets -- and this would write case data onto a live
+ * staff profile.
+ *
+ * `notes` is a single free-text field a human may already have written in, so
+ * this reads before writing and appends under a delimiter. Best-effort by
+ * contract: the caller's outreach must not fail because enrichment did.
+ */
+async function writeParentContactNotes(
+  requesterId: number,
+  block: string,
+  zendesk: ZendeskClientConfig,
+): Promise<void> {
+  const headers = {
+    'Authorization': `Basic ${zendesk.auth}`,
+    'Content-Type': 'application/json',
+  };
+
+  const existing = await fetch(`${zendesk.baseUrl}/users/${requesterId}`, { headers });
+  if (!existing.ok) {
+    throw new Error(`Zendesk contact read failed: ${existing.status}`);
+  }
+  const current = (await existing.json() as { user?: { notes?: string | null } }).user?.notes ?? '';
+
+  // Replace only our own previous block, so repeated attaches don't stack up
+  // while anything an agent wrote survives untouched.
+  const preserved = current.split(CONTACT_NOTES_DELIMITER)[0].trimEnd();
+  const notes = [preserved, CONTACT_NOTES_DELIMITER, block].filter(Boolean).join('\n');
+
+  const res = await fetch(`${zendesk.baseUrl}/users/${requesterId}`, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({ user: { notes } }),
+  });
+  if (!res.ok) {
+    throw new Error(`Zendesk contact write failed: ${res.status}`);
+  }
+}
+
 async function createAgeReviewTicket(
   caseId: string,
   parentEmail: string,
   ageBand: AgeBand,
   deadlineAt: string | null,
   env: AgeReviewEnv,
+  identity: AgeReviewCaseIdentity & { pubkey?: string } = {},
 ): Promise<void> {
   const zendesk = await getZendeskClientConfig(env);
   if (!zendesk) {
@@ -919,7 +967,11 @@ async function createAgeReviewTicket(
       ticket: {
         subject,
         comment: { body: outreachBody, public: true },
-        requester: { email: parentEmail, name: 'Parent/Guardian' },
+        // The address alone. Zendesk renders this into the To: header of every
+        // outbound mail, and this ticket's first message goes to an address the
+        // teen supplied that nobody has verified -- so it must not carry the
+        // account's handle. It gains one only once the parent replies.
+        requester: { email: parentEmail, name: parentEmail },
         tags: ['age-review', `age-band-${ageBand}`],
         priority: 'high',
         custom_fields: customFields.length > 0 ? customFields : undefined,
@@ -932,12 +984,52 @@ async function createAgeReviewTicket(
     throw new Error(`Zendesk ticket creation failed: ${res.status} - ${errorText}`);
   }
 
-  const data = await res.json() as { ticket?: { id: number } };
+  const data = await res.json() as { ticket?: { id: number; requester_id?: number } };
   if (data.ticket?.id) {
     await env.DB.prepare(
       'UPDATE age_review_cases SET zendesk_ticket_id = ? WHERE id = ?'
     ).bind(data.ticket.id, caseId).run();
     console.log(`[age-review] Created Zendesk ticket #${data.ticket.id} for case ${caseId}`);
+  }
+
+  await attachIdentityToParentContact(data.ticket?.requester_id, caseId, ageBand, deadlineAt, data.ticket?.id ?? null, identity, zendesk);
+}
+
+/**
+ * Put the case identity on the parent's contact record. Agent-only surface.
+ *
+ * Wrapped whole and swallowed: the parent's outreach is the critical path and
+ * must survive a Zendesk contact API failure.
+ */
+async function attachIdentityToParentContact(
+  requesterId: number | undefined,
+  caseId: string,
+  ageBand: AgeBand,
+  deadlineAt: string | null,
+  originTicketId: number | null,
+  identity: AgeReviewCaseIdentity & { pubkey?: string },
+  zendesk: ZendeskClientConfig,
+): Promise<void> {
+  // Without a requester id there is no contact to write to; without a pubkey or
+  // case id the block would render a broken deeplink and identify nothing.
+  if (!requesterId || !identity.pubkey || !caseId) return;
+  try {
+    await writeParentContactNotes(
+      requesterId,
+      buildAgeReviewIdentityBlock({
+        caseId,
+        pubkey: identity.pubkey,
+        ageBand: BAND_DISPLAY[ageBand],
+        accountName: identity.account_name,
+        accountNip05: identity.account_nip05,
+        accountVineUsername: identity.account_vine_username,
+        originTicketId,
+        deadlineAt: deadlineAt ? deadlineAt.split('T')[0] : null,
+      }),
+      zendesk,
+    );
+  } catch (error) {
+    console.error('[age-review] Failed to write parent contact notes:', error);
   }
 }
 
@@ -946,6 +1038,7 @@ async function updateTicketWithParentContact(
   parentEmail: string,
   ageBand: AgeBand,
   env: AgeReviewEnv,
+  identity: AgeReviewCaseIdentity & { pubkey?: string; id?: string; deadline_at?: string | null } = {},
 ): Promise<void> {
   const zendesk = await getZendeskClientConfig(env);
   if (!zendesk) return;
@@ -960,7 +1053,10 @@ async function updateTicketWithParentContact(
     },
     body: JSON.stringify({
       ticket: {
-        requester: { email: parentEmail, name: 'Parent/Guardian' },
+        // Address only -- see the note on the creation path. This one is
+        // riskier still: it reassigns the requester on a ticket that already
+        // exists, so the name lands on a contact an agent may already see.
+        requester: { email: parentEmail, name: parentEmail },
         comment: { body: outreachBody, public: true },
       },
     }),
@@ -970,7 +1066,20 @@ async function updateTicketWithParentContact(
     const errorText = await res.text();
     throw new Error(`Zendesk ticket update failed: ${res.status} - ${errorText}`);
   }
-  console.log(`[age-review] Updated Zendesk ticket #${ticketId} with parent contact ${parentEmail}`);
+  // The ticket id is the useful identifier here. The address itself is a
+  // parent's personal data and does not belong in worker logs.
+  console.log(`[age-review] Updated Zendesk ticket #${ticketId} with parent contact`);
+
+  const data = await res.json().catch(() => null) as { ticket?: { requester_id?: number } } | null;
+  await attachIdentityToParentContact(
+    data?.ticket?.requester_id,
+    identity.id ?? '',
+    ageBand,
+    identity.deadline_at ?? null,
+    ticketId,
+    identity,
+    zendesk,
+  );
 }
 
 function buildDeadlineCustomField(
