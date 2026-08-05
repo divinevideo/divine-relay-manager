@@ -26,10 +26,12 @@ import { useToast } from '@/hooks/useToast';
  * `UserManagement` unsuspend, which was its own inline copy). Eight
  * near-identical copies is how one gets missed, so the handling lives here.
  *
- * Only covers the 409. The same three RPCs also answer 503
- * `age_review_check_failed` when the check cannot run at all, which is not a
- * routable case — there is no case id to route to — so this returns false and
- * each site shows its own error toast. That message is already actionable.
+ * Only covers the 409. The two REVERSALS, `unsuspendpubkey` and `unbanpubkey`,
+ * also answer 503 `age_review_check_failed` when the check cannot run at all.
+ * `suspendpubkey` never does: fail-closed is passed only for reversals, so a
+ * suspend whose lookup fails proceeds and enforces. The 503 is not a routable
+ * case either way, since there is no case id to route to, so this returns false
+ * and each site shows its own error toast. That message is already actionable.
  *
  * `DebugPanel` deliberately does not use this. It issues arbitrary RPC methods
  * as a raw diagnostic and reports whatever came back, rather than running a

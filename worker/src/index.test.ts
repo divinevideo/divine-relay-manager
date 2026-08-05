@@ -547,6 +547,39 @@ describe('relay-rpc account-state side effects', () => {
     fetchSpy.mockRestore();
   });
 
+  it('allow_pubkey via /api/moderate forwards the 503 too, not just the 409', async () => {
+    // The other half of the same contract, and the half a caller most needs: a
+    // permanent refusal and an unrunnable check must stay distinguishable across
+    // the hop. Flattening this one to 500 strips `code`, so the caller cannot tell
+    // "there is a case" from "we could not look" from "the relay broke".
+    const fetchSpy = makeFetchSpy();
+    const waitUntil = vi.fn();
+    const testCtx = { waitUntil } as unknown as ExecutionContext;
+
+    const response = await worker.fetch(
+      new Request('https://api-relay-prod.divine.video/api/moderate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Admin-Key': 'test-admin-key',
+          Origin: 'https://app.divine.video',
+        },
+        body: JSON.stringify({ action: 'allow_pubkey', pubkey: VALID_PUBKEY }),
+      }),
+      makeAccountStateEnvWithFailingCaseLookup(),
+      testCtx,
+    );
+
+    expect(response.status).toBe(503);
+    const body = await response.json() as { code: string };
+    expect(body.code).toBe('age_review_check_failed');
+
+    await drain(waitUntil);
+    expect(keycastCalls(fetchSpy)).toHaveLength(0);
+
+    fetchSpy.mockRestore();
+  });
+
   it('refuses a reversal when the case lookup itself fails, rather than lifting the hold', async () => {
     // Fail closed on the reversal direction: an unchecked unban silently lifts a
     // minor-safety hold and reports success, so nobody learns the check never
