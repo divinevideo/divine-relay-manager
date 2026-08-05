@@ -1067,6 +1067,8 @@ async function handleRelayRpc(
     body.method === 'unsuspendpubkey' ||
     body.method === 'unbanpubkey'
   ) {
+    const target = body.params?.[0] ? String(body.params[0]) : '';
+
     // Canonical hex or nothing, decided before the guard. The guard's lookup is
     // byte-exact, so a non-canonical pubkey could never match a real case, and
     // the relay stores these bytes exactly, so it could never enforce either.
@@ -1075,7 +1077,7 @@ async function handleRelayRpc(
     // outage a malformed pubkey never becomes valid on a retry, so the retryable
     // class would be a lie. The guard keeps its own check for anything that
     // reaches it by another route.
-    if (!/^[0-9a-f]{64}$/.test(body.params?.[0] ? String(body.params[0]) : '')) {
+    if (!/^[0-9a-f]{64}$/.test(target)) {
       return jsonResponse({ success: false, error: 'Invalid pubkey' }, 400, corsHeaders);
     }
 
@@ -1094,7 +1096,6 @@ async function handleRelayRpc(
         console.error('[handleRelayRpc] age-review schema bootstrap failed:', err);
       }
     }
-    const target = body.params?.[0] ? String(body.params[0]) : '';
     // Reversals fail closed: if the case lookup itself fails we refuse rather
     // than lift a hold without having checked. Suspend keeps the default,
     // because failing open there over-enforces, which is visible and undoable.

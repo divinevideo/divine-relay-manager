@@ -142,7 +142,9 @@ export async function getActiveAgeReviewCase(
  *
  * Under `failClosed` there are three ways the check "cannot happen", and all
  * three refuse identically: no DB binding, a thrown lookup, and a non-canonical
- * pubkey the byte-exact lookup could never match.
+ * pubkey the byte-exact lookup could never match. The last is defence in depth
+ * — relay-rpc answers a malformed pubkey with 400 before reaching here — but
+ * the guard does not assume its callers validate.
  *
  * `failClosed` is opt-in PER CALL SITE, not a property of the guard. Only
  * relay-rpc's reversals pass it today; bulk-moderate deliberately does not, for
@@ -167,10 +169,15 @@ export async function ageReviewActiveGuard(
   // A non-canonical pubkey is also "the check cannot happen": the lookup below
   // is byte-exact, so it would miss and report "no case" for an account that may
   // well have one. Under failClosed that refuses like any other unrunnable
-  // check. Nothing here relies on a downstream format check to stop the
-  // mutation -- the ones that exist (Keycast's HEX_64, ClickHouse's
-  // case-sensitive match) are written for other purposes and could be relaxed
-  // without anyone connecting the change to this guard.
+  // check.
+  //
+  // Defence in depth, not the primary check: handleRelayRpc rejects these with a
+  // 400 before calling the guard, which is the better answer (a malformed pubkey
+  // never becomes valid on a retry). This stays because the guard must not
+  // depend on its callers validating -- the previous version did, and what
+  // actually stopped the mutation was byte-exact matching in Keycast and
+  // ClickHouse, written for other purposes and free to be relaxed without
+  // anyone connecting the change to this guard.
   if (!/^[0-9a-f]{64}$/.test(pubkey)) {
     if (opts.failClosed) {
       console.error('[ageReviewActiveGuard] non-canonical pubkey; refusing (fail-closed)');
