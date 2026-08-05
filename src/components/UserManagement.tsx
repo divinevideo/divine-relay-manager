@@ -183,6 +183,13 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
     } else if (!/^[0-9a-f]{64}$/i.test(raw)) {
       toast({ title: "Invalid pubkey", description: "Enter a 64-character hex pubkey or an npub", variant: "destructive" });
       return;
+    } else {
+      // Accepted case-insensitively above (people paste from anywhere), but
+      // canonicalised here: every consumer matches these bytes exactly. The
+      // relay's ban/suspend lists are case-sensitive, so an uppercase value
+      // bans nobody while reporting success, and the age-review guard's lookup
+      // would miss a real open case for the same reason.
+      hexPubkey = raw.toLowerCase();
     }
 
     if (actionType === 'ban') {

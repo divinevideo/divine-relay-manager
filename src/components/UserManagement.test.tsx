@@ -99,6 +99,22 @@ describe('UserManagement age-review guard wiring', () => {
     await waitFor(() => expect(navigate).toHaveBeenCalledWith(`/age-review?pubkey=${PUBKEY}`));
   });
 
+  it('canonicalises an uppercase hex pubkey before it reaches the relay', async () => {
+    // The input is validated case-insensitively, but every consumer matches
+    // these bytes exactly: the relay's ban list, and the age-review guard's
+    // lookup. Sending uppercase through bans nobody while reporting success,
+    // and makes the guard miss a real open case.
+    renderWithProvider();
+    fireEvent.click(await screen.findByRole('button', { name: /Add User/i }));
+    fireEvent.change(await screen.findByPlaceholderText(/hex pubkey or npub1/i), {
+      target: { value: PUBKEY.toUpperCase() },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^Allow$/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^Allow User$/i }));
+
+    await waitFor(() => expect(api.callRelayRpc).toHaveBeenCalledWith('unbanpubkey', [PUBKEY, undefined]));
+  });
+
   it('still shows an error toast for a failure that is not a guard refusal', async () => {
     // The redirect must not swallow real errors, or a relay outage would look
     // like an age-review case.

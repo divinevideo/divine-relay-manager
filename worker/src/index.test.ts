@@ -431,7 +431,11 @@ describe('relay-rpc account-state side effects', () => {
     const testCtx = { waitUntil } as unknown as ExecutionContext;
     const env = makeAccountStateEnvWithDb(null, { requireSchema: true });
 
-    const response = await callRelayRpc('unbanpubkey', [VALID_PUBKEY], env, testCtx);
+    // Cold isolate, or this asserts nothing: `schemaReady` is module-level, so
+    // once any earlier test has reached ensureSchemaOnce the bootstrap is a
+    // no-op here and the test passes without exercising it. That also made it
+    // the file's last order-dependent test.
+    const response = await callRelayRpcColdIsolate('unbanpubkey', [VALID_PUBKEY], env, testCtx);
     expect(response.status).toBe(200);
 
     await drain(waitUntil);
@@ -747,10 +751,13 @@ describe('relay-rpc account-state side effects', () => {
     expect(body.code).toBe('age_review_active');
     expect(body.caseId).toBe('case-1');
 
-    // The guard short-circuits before any enforcement side effect.
+    // The guard short-circuits before any enforcement side effect. Keycast and
+    // the DM are waitUntil work skipped on any early return, so they cannot show
+    // that the refusal beat the relay call -- assert nothing went out at all.
     await drain(waitUntil);
     expect(keycastCalls(fetchSpy)).toHaveLength(0);
     expect(await notifyBodies(fetchSpy)).toHaveLength(0);
+    expect(fetchSpy).not.toHaveBeenCalled();
 
     fetchSpy.mockRestore();
   });
@@ -766,6 +773,8 @@ describe('relay-rpc account-state side effects', () => {
     const body = await response.json() as { code: string };
     expect(body.code).toBe('age_review_active');
     expect(keycastCalls(fetchSpy)).toHaveLength(0);
+    // As above: the refusal has to land before the relay call, not after it.
+    expect(fetchSpy).not.toHaveBeenCalled();
 
     fetchSpy.mockRestore();
   });

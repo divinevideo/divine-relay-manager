@@ -22,13 +22,21 @@ import { useToast } from '@/hooks/useToast';
  * Shared rather than copied because extending the guard to `unbanpubkey` makes
  * four new call sites able to receive this code — `UserActions` un-ban,
  * `UserManagement` allow_user and un-ban, and `EventDetail` un-ban — on top of
- * the two that already handled it. Six near-identical copies is how one gets
- * missed, so the handling lives here and each site calls it.
+ * the four that already handled it (`UserActions` suspend, unsuspend and bulk;
+ * `UserManagement` unsuspend, which was its own inline copy). Eight
+ * near-identical copies is how one gets missed, so the handling lives here.
  *
- * Not every caller of a guarded RPC needs it: `DebugPanel` issues arbitrary RPC
- * methods and records the error into an action log rather than surfacing a
- * moderator-facing toast, so it deliberately does not use this. The rule is
- * whether a moderator is waiting on the outcome, not whether the RPC is guarded.
+ * Only covers the 409. The same three RPCs also answer 503
+ * `age_review_check_failed` when the check cannot run at all, which is not a
+ * routable case — there is no case id to route to — so this returns false and
+ * each site shows its own error toast. That message is already actionable.
+ *
+ * `DebugPanel` deliberately does not use this. It issues arbitrary RPC methods
+ * as a raw diagnostic and reports whatever came back, rather than running a
+ * moderator workflow with somewhere to be sent. The test is whether a moderator
+ * is waiting on the outcome, not whether the RPC is guarded. (It does toast, and
+ * currently reports a guard refusal as "Partial success", which is misleading
+ * but is a DebugPanel problem rather than one this hook should solve.)
  */
 export function useAgeReviewGuardRedirect() {
   const navigate = useNavigate();
