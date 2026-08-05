@@ -576,13 +576,18 @@ export async function getAllDecisions(apiUrl: string): Promise<ModerationDecisio
 // or were read but could not be removed, so some may survive and keep the
 // report hidden even though its decisions are gone. Callers must surface that
 // rather than reporting a clean reopen.
+// targetType lets the worker query only the label tag that can match ('e' for
+// an event, 'p' for a pubkey). Omitting it is safe: the worker then checks
+// both, which is what an older frontend gets.
 export async function deleteDecisions(
   apiUrl: string,
-  targetId: string
+  targetId: string,
+  targetType?: 'event' | 'pubkey'
 ): Promise<{ deleted: number; labelCleanupFailed: boolean }> {
+  const qs = targetType ? `?targetType=${targetType}` : '';
   const data = await apiRequest<{ success: boolean; deleted: number; labelCleanupFailed?: boolean }>(
     apiUrl,
-    `/api/decisions/${targetId}`,
+    `/api/decisions/${targetId}${qs}`,
     'DELETE'
   );
   return { deleted: data.deleted || 0, labelCleanupFailed: data.labelCleanupFailed === true };

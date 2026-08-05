@@ -97,8 +97,8 @@ export function useAdminApi() {
       adminApi.getDecisions(apiUrl, targetId),
     getAllDecisions: () =>
       adminApi.getAllDecisions(apiUrl),
-    deleteDecisions: (targetId: string) =>
-      adminApi.deleteDecisions(apiUrl, targetId),
+    deleteDecisions: (targetId: string, targetType?: 'event' | 'pubkey') =>
+      adminApi.deleteDecisions(apiUrl, targetId, targetType),
 
     // Classifier data (scene classification + topic profile)
     getClassifierData: (sha256: string) =>

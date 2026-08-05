@@ -1101,6 +1101,32 @@ describe('adminApi', () => {
 
       expect(await deleteDecisions(API_URL, 'event123')).toEqual({ deleted: 1, labelCleanupFailed: false });
     });
+
+    // A resolution label carries an 'e' tag or a 'p' tag, never both, so the
+    // type lets the worker skip the query that could not have matched. Without
+    // it the worker checks both, and a stall on the dead one reports a failed
+    // cleanup that no retry can fix.
+    it('names the target type so the worker skips the filter that cannot match', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, deleted: 1, labelCleanupFailed: false }),
+      });
+
+      await deleteDecisions(API_URL, 'event123', 'event');
+
+      expect(mockFetch.mock.calls[0][0]).toContain('/api/decisions/event123?targetType=event');
+    });
+
+    it('omits the target type when it is not known', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, deleted: 1, labelCleanupFailed: false }),
+      });
+
+      await deleteDecisions(API_URL, 'event123');
+
+      expect(mockFetch.mock.calls[0][0]).not.toContain('targetType');
+    });
   });
 
   describe('extractMediaHashes', () => {

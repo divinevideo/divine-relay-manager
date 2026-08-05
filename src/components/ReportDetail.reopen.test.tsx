@@ -208,6 +208,18 @@ describe('ReportDetail reopen reporting', () => {
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['resolution-labels'] });
   });
 
+  // Each target's type is known here, so the worker never has to run the label
+  // filter that cannot match it. Passing it is easy to drop silently in a
+  // wrapper, so it is asserted at the call the component actually makes.
+  it('names each target type so neither cleanup runs a dead filter', async () => {
+    renderDetail();
+    clickReopen();
+
+    await waitFor(() => expect(toast).toHaveBeenCalled());
+    expect(api.deleteDecisions).toHaveBeenNthCalledWith(1, TARGET_EVENT, 'event');
+    expect(api.deleteDecisions).toHaveBeenNthCalledWith(2, REPORTED_PUBKEY, 'pubkey');
+  });
+
   // The tooltip makes the same promise the toast does, and is the copy a
   // moderator reads BEFORE deciding to reopen.
   it('does not promise the queue in the reopen tooltip either', async () => {

@@ -242,11 +242,11 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     mutationFn: async () => {
       if (!context.target) throw new Error('No target');
       // Delete all decisions for this target
-      const primary = await deleteDecisions(context.target.value);
+      const primary = await deleteDecisions(context.target.value, context.target.type);
       // Also delete decisions for the pubkey if this is an event report
       let secondary = { labelCleanupFailed: false };
       if (context.target.type === 'event' && context.reportedUser.pubkey) {
-        secondary = await deleteDecisions(context.reportedUser.pubkey);
+        secondary = await deleteDecisions(context.reportedUser.pubkey, 'pubkey');
       }
       return { labelCleanupFailed: primary.labelCleanupFailed || secondary.labelCleanupFailed };
     },

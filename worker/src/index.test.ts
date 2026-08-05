@@ -1516,6 +1516,91 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
     expect(body.labelCleanupFailed).toBe(true); // and the read is still reported incomplete
   });
 
+  // publishLabel writes exactly one target tag -- 'e' for an event, 'p' for a
+  // pubkey, never both -- so of the two filters the worker runs, one can never
+  // match. That was harmless when a stalled read was an empty success; now that
+  // it is a failure, a stall on the dead filter reports a failed cleanup and
+  // tells the moderator to retry something that cannot help. Naming the target
+  // type removes the query that was never going to match.
+  it('queries only the filter that can match when the target type is known', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response(JSON.stringify({ result: true }), { status: 200 })
+    ));
+
+    const resPromise = worker.fetch(
+      new Request(`https://api.example/api/decisions/${'a'.repeat(64)}?targetType=event`, {
+        method: 'DELETE',
+        headers: { 'X-Admin-Key': 'test-admin-key' },
+      }),
+      { ...(reportsEnv as object), DB: reopenDb(), NOSTR_NSEC: TEST_NSEC } as never,
+      ctx,
+    );
+    for (let t = 0; t < 100 && !FakeRelaySocket.instances[0]; t++) {
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    const sock = FakeRelaySocket.instances[0];
+    expect(sock).toBeDefined();
+    sock.message(['EOSE', sock.subId()]);
+
+    const res = await resPromise;
+    const body = await res.json() as { labelCleanupFailed: boolean };
+    expect(body.labelCleanupFailed).toBe(false);
+    // One socket, and it asked about the e-tag.
+    expect(FakeRelaySocket.instances).toHaveLength(1);
+    expect(JSON.parse(sock.sent[0])[2]['#e']).toEqual([ 'a'.repeat(64) ]);
+  });
+
+  it('queries the pubkey filter alone for a pubkey target', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response(JSON.stringify({ result: true }), { status: 200 })
+    ));
+
+    const resPromise = worker.fetch(
+      new Request(`https://api.example/api/decisions/${'a'.repeat(64)}?targetType=pubkey`, {
+        method: 'DELETE',
+        headers: { 'X-Admin-Key': 'test-admin-key' },
+      }),
+      { ...(reportsEnv as object), DB: reopenDb(), NOSTR_NSEC: TEST_NSEC } as never,
+      ctx,
+    );
+    for (let t = 0; t < 100 && !FakeRelaySocket.instances[0]; t++) {
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    const sock = FakeRelaySocket.instances[0];
+    expect(sock).toBeDefined();
+    sock.message(['EOSE', sock.subId()]);
+
+    await resPromise;
+    expect(FakeRelaySocket.instances).toHaveLength(1);
+    expect(JSON.parse(sock.sent[0])[2]['#p']).toEqual([ 'a'.repeat(64) ]);
+  });
+
+  // Worker and Pages deploy separately, so a new worker serves an old frontend
+  // that sends no targetType. It must keep checking both tags rather than
+  // guessing one and silently skipping the labels that matter.
+  it('still queries both filters when the target type is not given', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response(JSON.stringify({ result: true }), { status: 200 })
+    ));
+
+    const resPromise = worker.fetch(
+      reopenRequest(),
+      { ...(reportsEnv as object), DB: reopenDb(), NOSTR_NSEC: TEST_NSEC } as never,
+      ctx,
+    );
+    for (let i = 0; i < 2; i++) {
+      for (let t = 0; t < 100 && !FakeRelaySocket.instances[i]; t++) {
+        await new Promise((r) => setTimeout(r, 0));
+      }
+      const sock = FakeRelaySocket.instances[i];
+      expect(sock).toBeDefined();
+      sock.message(['EOSE', sock.subId()]);
+    }
+
+    await resPromise;
+    expect(FakeRelaySocket.instances).toHaveLength(2);
+  });
+
   // Each failure path carries its events independently, so each is pinned
   // independently. The timeout is the one this branch is named for.
   it('bans a label received before the read timed out', async () => {

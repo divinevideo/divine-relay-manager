@@ -490,7 +490,10 @@ export default {
 
       if (path.startsWith('/api/decisions/') && request.method === 'DELETE') {
         const targetId = path.replace('/api/decisions/', '');
-        return handleDeleteDecisions(targetId, env, corsHeaders);
+        // Optional: an older frontend omits it, and then both tags are checked.
+        const rawType = url.searchParams.get('targetType');
+        const targetType = rawType === 'event' || rawType === 'pubkey' ? rawType : undefined;
+        return handleDeleteDecisions(targetId, env, corsHeaders, targetType);
       }
 
       if (path.startsWith('/api/check-result/') && request.method === 'GET') {
@@ -1412,7 +1415,8 @@ const LABEL_CLEANUP_LIMIT = 200;
 async function handleDeleteDecisions(
   targetId: string,
   env: Env,
-  corsHeaders: Record<string, string>
+  corsHeaders: Record<string, string>,
+  targetType?: 'event' | 'pubkey'
 ): Promise<Response> {
   try {
     if (!env.DB) {
@@ -1424,12 +1428,19 @@ async function handleDeleteDecisions(
     let labelsDeleted = 0;
     let labelCleanupFailed = false;
 
-    // First, query for and delete any resolution labels (kind 1985) on the relay
-    // Try both 'e' tag (event target) and 'p' tag (pubkey target)
-    const labelFilters = [
-      { kinds: [1985], '#e': [targetId], '#L': ['moderation/resolution'], limit: LABEL_CLEANUP_LIMIT },
-      { kinds: [1985], '#p': [targetId], '#L': ['moderation/resolution'], limit: LABEL_CLEANUP_LIMIT },
-    ];
+    // Query for and delete any resolution labels (kind 1985) on the relay.
+    // publishLabel tags a label with 'e' for an event target or 'p' for a
+    // pubkey target, never both, so naming the type skips a query that could
+    // not have matched. Without a type (an older frontend) both are checked:
+    // guessing wrong would silently skip the labels that do exist.
+    const tagForType = { event: '#e', pubkey: '#p' } as const;
+    const labelTags = targetType ? [tagForType[targetType]] : ['#e', '#p'];
+    const labelFilters = labelTags.map((tag) => ({
+      kinds: [1985],
+      [tag]: [targetId],
+      '#L': ['moderation/resolution'],
+      limit: LABEL_CLEANUP_LIMIT,
+    }));
 
     for (const filter of labelFilters) {
       const queryResult = await queryRelay(filter, env.RELAY_URL);
