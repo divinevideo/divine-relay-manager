@@ -266,6 +266,9 @@ describe('relay-rpc account-state side effects', () => {
   }
 
   // D1 present but throwing, to exercise the guard's fail-open / fail-closed split.
+  // A real outage fails the schema DDL too, not just the lookup: `.run()` is what
+  // ensureSchemaOnce calls, and modelling only `.first()` hid the bootstrap
+  // escaping as an unhandled rejection instead of reaching the guard's decision.
   function makeAccountStateEnvWithFailingCaseLookup() {
     return {
       ...(makeAccountStateEnvWithDb(null) as unknown as Record<string, unknown>),
@@ -275,7 +278,13 @@ describe('relay-rpc account-state side effects', () => {
             first: async () => {
               throw new Error('D1 unavailable');
             },
+            run: async () => {
+              throw new Error('D1 unavailable');
+            },
           }),
+          run: async () => {
+            throw new Error('D1 unavailable');
+          },
         }),
       },
     } as never;
@@ -303,6 +312,35 @@ describe('relay-rpc account-state side effects', () => {
     testCtx: ExecutionContext,
   ): Promise<Response> {
     return worker.fetch(
+      new Request('https://api-relay-prod.divine.video/api/relay-rpc', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Admin-Key': 'test-admin-key',
+          Origin: 'https://app.divine.video',
+        },
+        body: JSON.stringify({ method, params }),
+      }),
+      testEnv,
+      testCtx,
+    );
+  }
+
+  // Same request against a COLD isolate. `schemaReady` in index.ts is module-level,
+  // so the first test to reach ensureSchemaOnce makes it a no-op for every test
+  // after it -- which silently stops the bootstrap path from being exercised at
+  // all. Re-importing under vi.resetModules() is the only way to test what a
+  // freshly started worker does on its first request, which is the only time the
+  // DDL actually runs.
+  async function callRelayRpcColdIsolate(
+    method: string,
+    params: string[],
+    testEnv: never,
+    testCtx: ExecutionContext,
+  ): Promise<Response> {
+    vi.resetModules();
+    const freshWorker = (await import('./index')).default;
+    return freshWorker.fetch(
       new Request('https://api-relay-prod.divine.video/api/relay-rpc', {
         method: 'POST',
         headers: {
@@ -461,6 +499,11 @@ describe('relay-rpc account-state side effects', () => {
     // No Keycast status change: the hold must survive the refused unban.
     await drain(waitUntil);
     expect(keycastCalls(fetchSpy)).toHaveLength(0);
+    // And nothing went out at all -- the relay un-ban is the action being
+    // guarded, so the refusal has to land BEFORE it, not merely report 409
+    // afterwards. Asserting only on Keycast would miss a guard that ran late,
+    // since Keycast is a waitUntil side effect skipped on any early return.
+    expect(fetchSpy).not.toHaveBeenCalled();
 
     fetchSpy.mockRestore();
   });
@@ -588,6 +631,106 @@ describe('relay-rpc account-state side effects', () => {
     const kc = keycastCalls(fetchSpy);
     expect(kc).toHaveLength(1);
     expect(kc[0].status).toBe('suspended');
+
+    fetchSpy.mockRestore();
+  });
+
+  // The three below run against a cold isolate, so the schema bootstrap actually
+  // executes rather than being skipped by a flag an earlier test already set.
+  // Bootstrapping is part of the check, not a precondition for it: when D1 is
+  // down the DDL fails too, and that failure must reach the same fail-open /
+  // fail-closed decision as a failed lookup instead of escaping the handler.
+  it('still lets a suspend through on a cold isolate when D1 is down entirely', async () => {
+    const fetchSpy = makeFetchSpy();
+    const waitUntil = vi.fn();
+    const testCtx = { waitUntil } as unknown as ExecutionContext;
+
+    const response = await callRelayRpcColdIsolate(
+      'suspendpubkey', [VALID_PUBKEY, 'policy'], makeAccountStateEnvWithFailingCaseLookup(), testCtx,
+    );
+    expect(response.status).toBe(200);
+    // CORS must survive: a bare rejection loses the headers and the UI sees a
+    // network error instead of the documented body.
+    expect(response.headers.get('Access-Control-Allow-Origin')).toBe('https://app.divine.video');
+
+    await drain(waitUntil);
+    const kc = keycastCalls(fetchSpy);
+    expect(kc).toHaveLength(1);
+    expect(kc[0].status).toBe('suspended');
+
+    fetchSpy.mockRestore();
+  });
+
+  it('refuses an unban on a cold isolate when D1 is down entirely', async () => {
+    const fetchSpy = makeFetchSpy();
+    const waitUntil = vi.fn();
+    const testCtx = { waitUntil } as unknown as ExecutionContext;
+
+    const response = await callRelayRpcColdIsolate(
+      'unbanpubkey', [VALID_PUBKEY], makeAccountStateEnvWithFailingCaseLookup(), testCtx,
+    );
+    expect(response.status).toBe(503);
+    const body = await response.json() as { code: string };
+    expect(body.code).toBe('age_review_check_failed');
+    expect(response.headers.get('Access-Control-Allow-Origin')).toBe('https://app.divine.video');
+
+    await drain(waitUntil);
+    expect(keycastCalls(fetchSpy)).toHaveLength(0);
+
+    fetchSpy.mockRestore();
+  });
+
+  it('refuses a reversal whose pubkey is not canonical hex, rather than skipping the check', async () => {
+    // The guard's lookup is byte-exact, so a non-canonical pubkey cannot match a
+    // real case even when one exists -- it would report "no case" for an account
+    // that may well be under review. That is the same "the check cannot happen"
+    // the missing-binding and failed-lookup paths already refuse on, so it
+    // refuses identically instead of relying on a downstream format check in
+    // another module to stop the mutation.
+    const fetchSpy = makeFetchSpy();
+    const waitUntil = vi.fn();
+    const testCtx = { waitUntil } as unknown as ExecutionContext;
+
+    const response = await callRelayRpc(
+      'unbanpubkey', [VALID_PUBKEY.toUpperCase()], makeAccountStateEnvWithDb(null), testCtx,
+    );
+    expect(response.status).toBe(503);
+    const body = await response.json() as { code: string };
+    expect(body.code).toBe('age_review_check_failed');
+
+    await drain(waitUntil);
+    expect(keycastCalls(fetchSpy)).toHaveLength(0);
+
+    fetchSpy.mockRestore();
+  });
+
+  it('still lets a suspend through with a non-canonical pubkey (enforce direction stays open)', async () => {
+    const fetchSpy = makeFetchSpy();
+    const waitUntil = vi.fn();
+    const testCtx = { waitUntil } as unknown as ExecutionContext;
+
+    const response = await callRelayRpc(
+      'suspendpubkey', [VALID_PUBKEY.toUpperCase(), 'policy'], makeAccountStateEnvWithDb(null), testCtx,
+    );
+    expect(response.status).toBe(200);
+
+    fetchSpy.mockRestore();
+  });
+
+  it('refuses an unsuspend on a cold isolate when D1 is down entirely', async () => {
+    const fetchSpy = makeFetchSpy();
+    const waitUntil = vi.fn();
+    const testCtx = { waitUntil } as unknown as ExecutionContext;
+
+    const response = await callRelayRpcColdIsolate(
+      'unsuspendpubkey', [VALID_PUBKEY], makeAccountStateEnvWithFailingCaseLookup(), testCtx,
+    );
+    expect(response.status).toBe(503);
+    const body = await response.json() as { code: string };
+    expect(body.code).toBe('age_review_check_failed');
+
+    await drain(waitUntil);
+    expect(keycastCalls(fetchSpy)).toHaveLength(0);
 
     fetchSpy.mockRestore();
   });

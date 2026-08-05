@@ -558,6 +558,17 @@ export default {
         // enqueue-time only — a case opened while a chunked job is already
         // draining does not abort it (aborting mid-job would leave
         // half-applied state; the job was legitimate when it started).
+        // No `failClosed` here, deliberately, and NOT because bulk has no
+        // reversal: `un-age-restrict-all` is one, and it lifts restrictions this
+        // very case imposed. The guard's docstring argues fail-closed by
+        // direction, which taken alone would cover it. Bulk is partitioned by
+        // blast radius instead. A refused bulk job is one moderator's click
+        // failing loudly in the UI, with no automated caller behind it, so an
+        // outage that blocks all three actions stops content moderation
+        // wholesale for a human who has no other route -- whereas a refused
+        // reversal only defers restoring an account that stays held meanwhile.
+        // If bulk ever becomes reachable from automation, revisit this: the
+        // reasoning is about who is on the other end, not about the actions.
         let peeked: { pubkey?: string } | undefined;
         try {
           peeked = await request.clone().json() as { pubkey?: string };
@@ -977,11 +988,13 @@ async function handleModerate(
           // non-ok returns: the guard's 409, its 503 when the case lookup
           // cannot run under fail-closed, and a 400 when the underlying NIP-86
           // call fails. So a relay-side failure now surfaces here as 400 rather
-          // than 500, which
-          // makes /api/moderate consistent with /api/relay-rpc (already 400 in
-          // that case) but does flip it from retryable to terminal for an
-          // automated caller. Deliberate: consistency is worth more than an
-          // accidental 500, and no current caller consumes this path.
+          // than 500, which makes /api/moderate consistent with /api/relay-rpc
+          // (already 400 in that case) but does flip it from retryable to
+          // terminal for an automated caller. Deliberate: consistency is worth
+          // more than an accidental 500, and no current caller consumes this
+          // path. Only allow_pubkey forwards: delete_event and ban_pubkey still
+          // flatten to 500, because neither is guarded and so neither can
+          // produce a 409/503 whose code a caller would need.
           return rpcResponse;
         }
         const rpcResult = await rpcResponse.json() as { success: boolean; error?: string };
@@ -1054,7 +1067,21 @@ async function handleRelayRpc(
     body.method === 'unsuspendpubkey' ||
     body.method === 'unbanpubkey'
   ) {
-    if (env.DB) await ensureSchemaOnce(env.DB);
+    if (env.DB) {
+      // Bootstrapping is part of the check, not a precondition for it: a DDL
+      // failure must reach the same fail-open/fail-closed decision as a failed
+      // lookup rather than escape as an unhandled rejection. This route returns
+      // its promise without awaiting (see the /api/relay-rpc case above), so the
+      // top-level catch never sees a rejection from here -- it would leave the
+      // caller with no body and no CORS headers. Swallow and let the guard
+      // decide: the lookup below fails the same way, refusing a reversal and
+      // proceeding for a suspend.
+      try {
+        await ensureSchemaOnce(env.DB);
+      } catch (err) {
+        console.error('[handleRelayRpc] age-review schema bootstrap failed:', err);
+      }
+    }
     const target = body.params?.[0] ? String(body.params[0]) : '';
     // Reversals fail closed: if the case lookup itself fails we refuse rather
     // than lift a hold without having checked. Suspend keeps the default,

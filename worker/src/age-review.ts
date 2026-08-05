@@ -120,17 +120,15 @@ export async function getActiveAgeReviewCase(
 
 /**
  * Refuse-and-route guard shared by the interactive enforcement endpoints
- * (relay-rpc suspend/unsuspend, bulk-moderate enqueue): if the pubkey has an
- * open (non-terminal) age-review case, returns a structured 409
+ * (relay-rpc suspend/unsuspend/unban, bulk-moderate enqueue): if the pubkey has
+ * an open (non-terminal) age-review case, returns a structured 409
  * (`age_review_active` + caseId/state) that the frontend turns into a redirect
  * to the case; returns null when nothing blocks the action.
  *
  * Fails open by default: the guard is a safety net (the report hand-off is the
  * primary path), so a transient D1 error must not block core moderation — log
- * and proceed. A malformed pubkey also skips the guard (no point querying; the
- * caller's own validation produces the 400). Age-review's own enforcement
- * calls the nip86 helpers / runBulkModeration directly, so it never hits the
- * guarded endpoints.
+ * and proceed. Age-review's own enforcement calls the nip86 helpers /
+ * runBulkModeration directly, so it never hits the guarded endpoints.
  *
  * `failClosed` inverts that for the REVERSAL direction, where the default is
  * the wrong trade. Failing open on a suspend over-enforces: visible, and
@@ -141,6 +139,14 @@ export async function getActiveAgeReviewCase(
  * entirely, which is accepted: an outage long enough to matter is not tenable
  * and has to be fixed rather than papered over. `banpubkey` is unguarded, so
  * severe enforcement still works throughout.
+ *
+ * Under `failClosed` there are three ways the check "cannot happen", and all
+ * three refuse identically: no DB binding, a thrown lookup, and a non-canonical
+ * pubkey the byte-exact lookup could never match.
+ *
+ * `failClosed` is opt-in PER CALL SITE, not a property of the guard. Only
+ * relay-rpc's reversals pass it today; bulk-moderate deliberately does not, for
+ * reasons recorded at its call site in index.ts.
  */
 export async function ageReviewActiveGuard(
   pubkey: string,
@@ -149,10 +155,6 @@ export async function ageReviewActiveGuard(
   error: string,
   opts: { failClosed?: boolean } = {},
 ): Promise<Response | null> {
-  // A malformed pubkey skips the guard in both modes: there is nothing to query,
-  // and the caller's own validation produces the 400.
-  if (!/^[0-9a-f]{64}$/.test(pubkey)) return null;
-
   // 503, not 409: "could not check" is a different answer from "there is a
   // case", and 5xx is the retryable class. No caseId/state, since neither is
   // known.
@@ -161,6 +163,21 @@ export async function ageReviewActiveGuard(
     error: 'Could not check age-review status. Try again.',
     code: 'age_review_check_failed',
   }, 503, corsHeaders);
+
+  // A non-canonical pubkey is also "the check cannot happen": the lookup below
+  // is byte-exact, so it would miss and report "no case" for an account that may
+  // well have one. Under failClosed that refuses like any other unrunnable
+  // check. Nothing here relies on a downstream format check to stop the
+  // mutation -- the ones that exist (Keycast's HEX_64, ClickHouse's
+  // case-sensitive match) are written for other purposes and could be relaxed
+  // without anyone connecting the change to this guard.
+  if (!/^[0-9a-f]{64}$/.test(pubkey)) {
+    if (opts.failClosed) {
+      console.error('[ageReviewActiveGuard] non-canonical pubkey; refusing (fail-closed)');
+      return cannotCheck();
+    }
+    return null;
+  }
 
   // A missing binding is the check not happening, so it refuses under
   // failClosed exactly as a thrown lookup does. Handling only the throw would
