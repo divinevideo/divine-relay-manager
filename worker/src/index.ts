@@ -1067,6 +1067,18 @@ async function handleRelayRpc(
     body.method === 'unsuspendpubkey' ||
     body.method === 'unbanpubkey'
   ) {
+    // Canonical hex or nothing, decided before the guard. The guard's lookup is
+    // byte-exact, so a non-canonical pubkey could never match a real case, and
+    // the relay stores these bytes exactly, so it could never enforce either.
+    // 400 rather than the guard's 503: this is the same answer
+    // handleGetActiveAgeReviewCase gives for the same regex, and unlike a D1
+    // outage a malformed pubkey never becomes valid on a retry, so the retryable
+    // class would be a lie. The guard keeps its own check for anything that
+    // reaches it by another route.
+    if (!/^[0-9a-f]{64}$/.test(body.params?.[0] ? String(body.params[0]) : '')) {
+      return jsonResponse({ success: false, error: 'Invalid pubkey' }, 400, corsHeaders);
+    }
+
     if (env.DB) {
       // Bootstrapping is part of the check, not a precondition for it: a DDL
       // failure must reach the same fail-open/fail-closed decision as a failed

@@ -16,6 +16,7 @@ import {
   bucketModerationCounts,
   fetchZendeskTagCount,
   handleGetAgeReviewFunnel,
+  ageReviewActiveGuard,
   type AgeReviewEnv,
 } from './age-review';
 import type { AgeReviewCase } from '../../shared/age-review';
@@ -2148,5 +2149,26 @@ describe('handleGetAgeReviewFunnel', () => {
     for (const query of Object.values(FUNNEL_ZENDESK_QUERIES)) {
       expect(calledUrls.some((u) => u.includes(encodeURIComponent(query)))).toBe(true);
     }
+  });
+});
+
+describe('ageReviewActiveGuard — non-canonical pubkey', () => {
+  // handleRelayRpc rejects these with a 400 before the guard is reached, so in
+  // practice this branch does not fire. It is kept as defence in depth for any
+  // future caller that skips that check, and tested directly because the
+  // handler now shields it from the route-level tests.
+  const CORS = { 'Access-Control-Allow-Origin': 'https://app.divine.video' };
+  const envWithDb = { DB: { prepare: () => ({ bind: () => ({ first: async () => null }) }) } } as unknown as AgeReviewEnv;
+
+  it('refuses under failClosed, because a byte-exact lookup could never match it', async () => {
+    const response = await ageReviewActiveGuard('NOT_CANONICAL_HEX', envWithDb, CORS, 'err', { failClosed: true });
+    expect(response?.status).toBe(503);
+    const body = await response?.json() as { code: string };
+    expect(body.code).toBe('age_review_check_failed');
+  });
+
+  it('proceeds when not failing closed, matching every other unrunnable check', async () => {
+    const response = await ageReviewActiveGuard('NOT_CANONICAL_HEX', envWithDb, CORS, 'err');
+    expect(response).toBeNull();
   });
 });

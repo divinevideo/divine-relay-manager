@@ -684,13 +684,13 @@ describe('relay-rpc account-state side effects', () => {
     fetchSpy.mockRestore();
   });
 
-  it('refuses a reversal whose pubkey is not canonical hex, rather than skipping the check', async () => {
+  it('rejects a non-canonical pubkey with a 400, before the guard runs', async () => {
     // The guard's lookup is byte-exact, so a non-canonical pubkey cannot match a
     // real case even when one exists -- it would report "no case" for an account
-    // that may well be under review. That is the same "the check cannot happen"
-    // the missing-binding and failed-lookup paths already refuse on, so it
-    // refuses identically instead of relying on a downstream format check in
-    // another module to stop the mutation.
+    // that may well be under review. Answer it here rather than leaving it to
+    // the guard: this is the same 400 handleGetActiveAgeReviewCase already gives
+    // for the same regex, and a malformed pubkey never becomes valid on a retry,
+    // so the retryable 5xx class is the wrong answer for it.
     const fetchSpy = makeFetchSpy();
     const waitUntil = vi.fn();
     const testCtx = { waitUntil } as unknown as ExecutionContext;
@@ -698,17 +698,19 @@ describe('relay-rpc account-state side effects', () => {
     const response = await callRelayRpc(
       'unbanpubkey', [VALID_PUBKEY.toUpperCase()], makeAccountStateEnvWithDb(null), testCtx,
     );
-    expect(response.status).toBe(503);
-    const body = await response.json() as { code: string };
-    expect(body.code).toBe('age_review_check_failed');
+    expect(response.status).toBe(400);
+    const body = await response.json() as { error: string };
+    expect(body.error).toBe('Invalid pubkey');
 
     await drain(waitUntil);
-    expect(keycastCalls(fetchSpy)).toHaveLength(0);
+    expect(fetchSpy).not.toHaveBeenCalled();
 
     fetchSpy.mockRestore();
   });
 
-  it('still lets a suspend through with a non-canonical pubkey (enforce direction stays open)', async () => {
+  it('rejects a non-canonical pubkey on the enforce direction too', async () => {
+    // Not a fail-open/fail-closed question: the value is unusable for suspend as
+    // well, since the relay stores these bytes exactly.
     const fetchSpy = makeFetchSpy();
     const waitUntil = vi.fn();
     const testCtx = { waitUntil } as unknown as ExecutionContext;
@@ -716,7 +718,10 @@ describe('relay-rpc account-state side effects', () => {
     const response = await callRelayRpc(
       'suspendpubkey', [VALID_PUBKEY.toUpperCase(), 'policy'], makeAccountStateEnvWithDb(null), testCtx,
     );
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(400);
+
+    await drain(waitUntil);
+    expect(fetchSpy).not.toHaveBeenCalled();
 
     fetchSpy.mockRestore();
   });
