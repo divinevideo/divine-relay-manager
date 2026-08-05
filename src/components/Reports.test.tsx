@@ -231,4 +231,29 @@ describe('Reports resolution-state availability', () => {
     expect(await screen.findByText(pendingCount(1))).toBeInTheDocument();
     expect(await screen.findByText(/resolution state is unavailable/i)).toBeInTheDocument();
   });
+
+  // The warning claims handled work may be listed as pending, which is only
+  // true while resolvedTargets is actually filtering the list. With hide
+  // resolved off nothing is filtered by it, so the claim does not apply and
+  // the banner must stand down rather than cry wolf.
+  it('drops the warning when resolved targets are not being filtered anyway', async () => {
+    stubFetch(() => new Response(JSON.stringify({ success: false, error: 'Relay query timed out before EOSE' }), {
+      status: 502,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+
+    render(
+      <TestApp>
+        <Reports relayUrl="wss://relay.example" />
+      </TestApp>
+    );
+
+    expect(await screen.findByText(/resolution state is unavailable/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('switch', { name: /hide resolved/i }));
+
+    await waitFor(() =>
+      expect(screen.queryByText(/resolution state is unavailable/i)).not.toBeInTheDocument()
+    );
+  });
 });

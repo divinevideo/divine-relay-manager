@@ -573,8 +573,9 @@ export async function getAllDecisions(apiUrl: string): Promise<ModerationDecisio
 
 // Delete all decisions for a target (reopens the report).
 // labelCleanupFailed means the relay-side resolution labels could not be read,
-// so some may survive and keep the report hidden even though its decisions are
-// gone. Callers must surface that rather than reporting a clean reopen.
+// or were read but could not be removed, so some may survive and keep the
+// report hidden even though its decisions are gone. Callers must surface that
+// rather than reporting a clean reopen.
 export async function deleteDecisions(
   apiUrl: string,
   targetId: string

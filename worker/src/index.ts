@@ -1467,6 +1467,12 @@ async function handleDeleteDecisions(
               labelCleanupFailed = true;
               console.error('Failed to delete resolution label:', eventId, err);
             }
+          } else {
+            // Events come off the wire unvalidated, so an id-less label is
+            // possible. It cannot be banned, so it survives and keeps the
+            // report hidden: the same outcome as any other failed cleanup.
+            labelCleanupFailed = true;
+            console.warn('[reopen] resolution label has no id, cannot remove it');
           }
         }
       }

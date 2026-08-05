@@ -1344,12 +1344,8 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
     expect(body.labelCleanupFailed).toBe(true); // but the reopen is not clean
   });
 
-  // The label read can succeed while the delete fails: a relay admin key
-  // mismatch 403s every management command but leaves reads working. The label
-  // survives and keeps the report hidden, so this reopen is no cleaner than a
-  // failed read and must not report one.
-  it('flags labelCleanupFailed when the label is found but banevent fails', async () => {
-    const db = {
+  function reopenDb() {
+    return {
       prepare: () => {
         const stmt: Record<string, unknown> = {
           bind: () => stmt,
@@ -1360,31 +1356,95 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
         return stmt;
       },
     };
+  }
+
+  // Each label filter opens its own socket, and the second only exists after the
+  // first query resolves. Polling for it keeps the feed from racing ahead.
+  async function feedLabelToEachFilter() {
+    for (let i = 0; i < 2; i++) {
+      for (let t = 0; t < 100 && !FakeRelaySocket.instances[i]; t++) {
+        await new Promise((r) => setTimeout(r, 0));
+      }
+      const sock = FakeRelaySocket.instances[i];
+      expect(sock).toBeDefined();
+      sock.message(['EVENT', sock.subId(), LABEL_A]);
+      sock.message(['EOSE', sock.subId()]);
+    }
+  }
+
+  const reopenRequest = () => new Request(`https://api.example/api/decisions/${'a'.repeat(64)}`, {
+    method: 'DELETE',
+    headers: { 'X-Admin-Key': 'test-admin-key' },
+  });
+
+  // The label read can succeed while the delete fails. A relay admin key
+  // mismatch 403s every management command but leaves reads working, and that
+  // refusal does NOT throw: the RPC comes back success:false. The label
+  // survives and keeps the report hidden, so this reopen is no cleaner than a
+  // failed read and must not report one.
+  it('flags labelCleanupFailed when the label is found but banevent is refused', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
-    vi.spyOn(console, 'error').mockImplementation(() => {});
+    // Signing succeeds; the relay refuses the management command.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('forbidden', { status: 403 })));
 
     const resPromise = worker.fetch(
-      new Request(`https://api.example/api/decisions/${'a'.repeat(64)}`, {
-        method: 'DELETE',
-        headers: { 'X-Admin-Key': 'test-admin-key' },
-      }),
-      // No NOSTR_NSEC, so the NIP-86 banevent cannot be signed and fails.
-      { ...(reportsEnv as object), DB: db } as never,
+      reopenRequest(),
+      { ...(reportsEnv as object), DB: reopenDb(), NOSTR_NSEC: TEST_NSEC } as never,
       ctx,
     );
+    await feedLabelToEachFilter();
 
-    // Both label queries return a label and complete cleanly; only the delete fails.
+    const res = await resPromise;
+    const body = await res.json() as { labelsDeleted: number; labelCleanupFailed: boolean };
+    expect(body.labelsDeleted).toBe(0); // nothing was actually removed
+    expect(body.labelCleanupFailed).toBe(true);
+  });
+
+  // Events arrive off the wire unvalidated, so a label with no id reaches the
+  // cleanup loop. It cannot be banned, so it survives exactly like a refused
+  // delete and must not report a clean reopen either.
+  it('flags labelCleanupFailed when a resolution label has no id to ban', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { id: _dropped, ...LABEL_WITHOUT_ID } = LABEL_A;
+
+    const resPromise = worker.fetch(
+      reopenRequest(),
+      { ...(reportsEnv as object), DB: reopenDb(), NOSTR_NSEC: TEST_NSEC } as never,
+      ctx,
+    );
     for (let i = 0; i < 2; i++) {
-      await new Promise((r) => setTimeout(r, 0));
+      for (let t = 0; t < 100 && !FakeRelaySocket.instances[i]; t++) {
+        await new Promise((r) => setTimeout(r, 0));
+      }
       const sock = FakeRelaySocket.instances[i];
-      if (!sock) break;
-      sock.message(['EVENT', sock.subId(), LABEL_A]);
+      expect(sock).toBeDefined();
+      sock.message(['EVENT', sock.subId(), LABEL_WITHOUT_ID]);
       sock.message(['EOSE', sock.subId()]);
     }
 
     const res = await resPromise;
-    const body = await res.json() as { success: boolean; labelsDeleted: number; labelCleanupFailed: boolean };
-    expect(body.labelsDeleted).toBe(0); // nothing was actually removed
+    const body = await res.json() as { labelsDeleted: number; labelCleanupFailed: boolean };
+    expect(body.labelsDeleted).toBe(0);
+    expect(body.labelCleanupFailed).toBe(true);
+  });
+
+  // The other way the delete can fail: signing itself throws, so the RPC never
+  // gets made. Reaches the flag through the catch rather than the refusal
+  // branch, which is why both cases are pinned separately.
+  it('flags labelCleanupFailed when the banevent call throws', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const resPromise = worker.fetch(
+      reopenRequest(),
+      // No NOSTR_NSEC, so the banevent cannot be signed at all.
+      { ...(reportsEnv as object), DB: reopenDb() } as never,
+      ctx,
+    );
+    await feedLabelToEachFilter();
+
+    const res = await resPromise;
+    const body = await res.json() as { labelsDeleted: number; labelCleanupFailed: boolean };
+    expect(body.labelsDeleted).toBe(0);
     expect(body.labelCleanupFailed).toBe(true);
   });
 

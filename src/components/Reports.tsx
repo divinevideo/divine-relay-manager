@@ -1023,8 +1023,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           {/* Resolution labels never loaded, so nothing they would have hidden
               is hidden. The count above is an overcount and some rows are work
               already done. Only warn when there is no previous label data to
-              fall back on; a failed refresh still has the last good set. */}
-          {labelsError && !resolutionLabels && (
+              fall back on (a failed refresh still has the last good set), and
+              only while resolvedTargets is actually being applied: the pending
+              review queue and the hide-resolved-off view are not filtered by
+              it, so the warning would not be true there. */}
+          {labelsError && !resolutionLabels && hideResolved && !showPendingReview && (
             <Alert variant="destructive" className="mt-2 py-2">
               <AlertDescription className="text-xs">
                 Resolution state is unavailable, so reports you have already handled may be listed below as pending. Retrying automatically.

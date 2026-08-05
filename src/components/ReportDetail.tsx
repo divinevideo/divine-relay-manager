@@ -262,7 +262,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
       toast(labelCleanupFailed
         ? {
             title: "Reopened, but resolution labels could not be cleared",
-            description: "The relay did not answer, so this report may stay hidden. Try reopening again.",
+            description: "The relay did not clear them, so this report may stay hidden. Try reopening again.",
             variant: "destructive" as const,
           }
         : {
