@@ -436,3 +436,54 @@ describe('warm failure keeps the stale filter and says so (#221)', () => {
     expect(screen.queryByText(/showing resolution state from/i)).not.toBeInTheDocument();
   });
 });
+
+describe('truncated resolution history is stated, not silent (#221)', () => {
+  function stubTruncated(oldestCovered: string | null, truncated: boolean) {
+    stubFetch({ labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty' });
+    const healthy = globalThis.fetch as unknown as typeof fetch;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/decisions')) {
+        return jsonResponse({ success: true, decisions: [], truncated, oldest_covered: oldestCovered });
+      }
+      return healthy(input, init);
+    }));
+  }
+
+  it('names the date resolution history reaches back to', async () => {
+    stubTruncated('2026-06-14 00:00:00', true);
+    renderReports();
+
+    expect(await screen.findByText(/resolution history only reaches back to/i)).toBeInTheDocument();
+    // '2026-06-14 00:00:00' is UTC (matching parseOldestCovered's handling of
+    // SQLite CURRENT_TIMESTAMP) but the banner renders it in the runner's
+    // local time, so which calendar day shows depends on the runner's
+    // timezone (e.g. it lands on the 13th under America/Los_Angeles in June).
+    // Assert against the same computation the component does rather than a
+    // hardcoded day, which would be locale/timezone-flaky, or a bare /2026/,
+    // which would pass regardless of what date is actually shown.
+    const expectedDate = new Date(Date.parse('2026-06-14T00:00:00Z')).toLocaleDateString(undefined, {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+    });
+    expect(screen.getByText(new RegExp(expectedDate.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'))).toBeInTheDocument();
+  });
+
+  it('shows no truncation banner when the window covers everything', async () => {
+    stubTruncated('2026-06-14 00:00:00', false);
+    renderReports();
+
+    await screen.findByText(REPORTED_NPUB);
+    expect(screen.queryByText(/resolution history only reaches back to/i)).not.toBeInTheDocument();
+  });
+
+  it('shows no truncation banner against a worker that predates the field', async () => {
+    // Pages and the worker deploy separately; a missing field is not truncation.
+    stubFetch({ labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty' });
+    renderReports();
+
+    await screen.findByText(REPORTED_NPUB);
+    expect(screen.queryByText(/resolution history only reaches back to/i)).not.toBeInTheDocument();
+  });
+});

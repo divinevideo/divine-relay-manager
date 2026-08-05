@@ -86,6 +86,27 @@ export function StaleResolutionBanner({
   );
 }
 
+// Both /api/decisions and /api/resolution-labels cap how far back they read.
+// Neither cap binds today, but when one does, a target whose only resolution
+// signal is older than the window ages out of resolvedTargets and sits in the
+// queue forever with nothing explaining why (#221).
+export function TruncatedHistoryBanner({ oldestCovered }: { oldestCovered: number }) {
+  const date = new Date(oldestCovered).toLocaleDateString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  });
+
+  return (
+    <Alert className="mt-2 py-2">
+      <AlertDescription className="text-xs">
+        Resolution history only reaches back to {date}. Anything resolved before then may
+        be listed as pending.
+      </AlertDescription>
+    </Alert>
+  );
+}
+
 // Stays on screen for as long as the override is in effect. A one-off toast
 // would let a moderator forget they are looking at an unfiltered queue.
 export function ResolutionOverrideWarning({

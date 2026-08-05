@@ -12,7 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { ResolutionUnavailablePane, ResolutionOverrideWarning, StaleResolutionBanner } from "@/components/ResolutionStateNotice";
+import { ResolutionUnavailablePane, ResolutionOverrideWarning, StaleResolutionBanner, TruncatedHistoryBanner } from "@/components/ResolutionStateNotice";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Switch } from "@/components/ui/switch";
@@ -403,18 +403,19 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   });
 
   const {
-    data: resolutionLabels,
+    data: labelsResult,
     error: labelsError,
     dataUpdatedAt: labelsUpdatedAt,
     isPending: labelsPending,
     fetchStatus: labelsFetchStatus,
   } = useQuery({
     queryKey: ['resolution-labels', relayUrl],
-    queryFn: async () => (await fetchResolutionLabels()).items,
+    queryFn: fetchResolutionLabels,
     refetchInterval: 15 * 1000,
     placeholderData: (previousData) => previousData,
     retry: 1,
   });
+  const resolutionLabels = labelsResult?.items;
 
   // Query banned pubkeys from relay (NIP-86 RPC)
   // Force fresh fetch (staleTime: 0) when deep linking to ensure accurate ban status
@@ -470,7 +471,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // not fail safe, it un-hides work already handled (#221). One retry buys back
   // most of the single-timeout case without stacking.
   const {
-    data: allDecisions,
+    data: decisionsResult,
     error: decisionsError,
     dataUpdatedAt: decisionsUpdatedAt,
     isPending: decisionsPending,
@@ -479,7 +480,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     queryKey: ['decisions'],
     queryFn: async () => {
       try {
-        return (await getAllDecisions()).items;
+        return await getAllDecisions();
       } catch (error) {
         console.warn('[Reports] Decisions query failed:', error);
         throw error;
@@ -490,6 +491,18 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     placeholderData: (previousData) => previousData,
     retry: 1,
   });
+  const allDecisions = decisionsResult?.items;
+
+  // The oldest point either capped source can still speak to. A target resolved
+  // before this is invisible to the filter and would sit in the queue forever
+  // with nothing explaining why.
+  const truncatedOldestCovered = useMemo(() => {
+    const bounds = [
+      labelsResult?.truncated ? labelsResult.oldestCovered : null,
+      decisionsResult?.truncated ? decisionsResult.oldestCovered : null,
+    ].filter((v): v is number => typeof v === 'number');
+    return bounds.length > 0 ? Math.max(...bounds) : null;
+  }, [labelsResult, decisionsResult]);
 
   // Track relative time since last data update for freshness indicator
   const [lastUpdatedText, setLastUpdatedText] = useState<string>('');
@@ -1163,6 +1176,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
             <StaleResolutionBanner
               sources={staleSources.map(s => ({ key: s.key, label: s.label, updatedAt: s.updatedAt }))}
             />
+          )}
+
+          {truncatedOldestCovered !== null && resolvedFilterActive && (
+            <TruncatedHistoryBanner oldestCovered={truncatedOldestCovered} />
           )}
 
           {/* View mode toggle */}
