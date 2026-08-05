@@ -1341,16 +1341,30 @@ async function handleGetAllDecisions(
 
     await ensureSchemaOnce(env.DB);
 
-    // Get all decisions, ordered by most recent first
+    // The queue subtracts these rows to hide handled work, so a silently capped
+    // read un-hides resolved targets with nothing saying why (#221). Fetch one
+    // past the cap: a full extra row is the truncation signal, and no second
+    // COUNT query is needed.
+    const DECISIONS_LIMIT = 1000;
+
     const decisions = await env.DB.prepare(`
       SELECT * FROM moderation_decisions
       ORDER BY created_at DESC
-      LIMIT 1000
-    `).all();
+      LIMIT ?
+    `).bind(DECISIONS_LIMIT + 1).all();
+
+    const rows = (decisions.results || []) as Array<Record<string, unknown>>;
+    const truncated = rows.length > DECISIONS_LIMIT;
+    const kept = truncated ? rows.slice(0, DECISIONS_LIMIT) : rows;
+    const oldestCovered = kept.length > 0
+      ? (kept[kept.length - 1].created_at as string ?? null)
+      : null;
 
     return new Response(JSON.stringify({
       success: true,
-      decisions: decisions.results || [],
+      decisions: kept,
+      truncated,
+      oldest_covered: oldestCovered,
     }), {
       status: 200,
       headers: { 'Content-Type': 'application/json', ...corsHeaders },

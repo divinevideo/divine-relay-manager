@@ -1150,3 +1150,69 @@ describe('scheduled cron — DB-unavailable alert', () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 });
+
+describe('GET /api/decisions truncation reporting (#221)', () => {
+  function makeDecisionsEnv(rowCount: number) {
+    const rows = Array.from({ length: rowCount }, (_, i) => ({
+      id: rowCount - i,
+      target_type: 'pubkey',
+      target_id: 'a'.repeat(64),
+      action: 'dismissed',
+      // Newest first, one second apart, so the oldest returned row is predictable.
+      created_at: `2026-06-${String(14 + Math.floor(i / 100)).padStart(2, '0')} 00:00:${String(i % 60).padStart(2, '0')}`,
+    }));
+    return {
+      ALLOWED_ORIGINS: 'https://app.divine.video',
+      RELAY_URL: 'wss://relay.divine.video',
+      ADMIN_API_KEY: 'test-admin-key',
+      DB: {
+        prepare: (_sql: string) => ({
+          bind: (limit: number) => ({
+            all: async () => ({ results: rows.slice(0, limit) }),
+          }),
+          run: async () => ({}),
+          all: async () => ({ results: [] }),
+        }),
+      },
+    } as never;
+  }
+
+  async function getDecisions(env: never) {
+    return worker.fetch(
+      new Request('https://api.example/api/decisions', {
+        headers: { 'X-Admin-Key': 'test-admin-key' },
+      }),
+      env,
+      ctx
+    );
+  }
+
+  it('reports truncated with the oldest covered row when more than 1000 decisions exist', async () => {
+    const res = await getDecisions(makeDecisionsEnv(1500));
+    const body = await res.json() as { decisions: unknown[]; truncated: boolean; oldest_covered: string | null };
+
+    expect(res.status).toBe(200);
+    expect(body.decisions).toHaveLength(1000);
+    expect(body.truncated).toBe(true);
+    // The 1001st row must not leak out, and oldest_covered describes what DID come back.
+    expect(body.oldest_covered).toBe('2026-06-23 00:00:39');
+  });
+
+  it('reports not truncated when the table fits under the cap', async () => {
+    const res = await getDecisions(makeDecisionsEnv(3));
+    const body = await res.json() as { decisions: unknown[]; truncated: boolean; oldest_covered: string | null };
+
+    expect(body.decisions).toHaveLength(3);
+    expect(body.truncated).toBe(false);
+    expect(body.oldest_covered).toBe('2026-06-14 00:00:02');
+  });
+
+  it('reports a null oldest_covered on an empty table rather than truncated', async () => {
+    const res = await getDecisions(makeDecisionsEnv(0));
+    const body = await res.json() as { decisions: unknown[]; truncated: boolean; oldest_covered: string | null };
+
+    expect(body.decisions).toEqual([]);
+    expect(body.truncated).toBe(false);
+    expect(body.oldest_covered).toBeNull();
+  });
+});
