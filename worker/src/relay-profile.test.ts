@@ -109,6 +109,36 @@ describe('fetchAccountIdentity', () => {
     expect(profile?.vineUsername).toBe('someuser');
   });
 
+  // What comes back here is persisted, not rendered. sanitizeInline is a
+  // display transform -- it strips markdown punctuation and truncates at 80
+  // characters -- so applying it on the way in silently stores a handle the
+  // account never used, and the whole premise is that the real one is about to
+  // become unrecoverable. Both render paths sanitize on the way out.
+  it('preserves the account name exactly as the profile carried it', async () => {
+    const name = '*Star*Girl*';
+    mockRelay([{
+      id: 'e3', kind: 0, pubkey: 'abc123', tags: [],
+      content: JSON.stringify({ display_name: name }),
+    }]);
+
+    const { profile } = await fetchAccountIdentity('abc123', 'wss://relay.test');
+
+    expect(profile?.name).toBe(name);
+  });
+
+  it('does not truncate a long account name on the way into storage', async () => {
+    const name = 'A'.repeat(120);
+    mockRelay([{
+      id: 'e4', kind: 0, pubkey: 'abc123', tags: [],
+      content: JSON.stringify({ display_name: name }),
+    }]);
+
+    const { profile } = await fetchAccountIdentity('abc123', 'wss://relay.test');
+
+    expect(profile?.name).toBe(name);
+    expect(profile?.name).not.toContain('…');
+  });
+
   it('never throws, whatever the socket does', async () => {
     vi.spyOn(globalThis, 'WebSocket').mockImplementation((() => {
       throw new Error('relay down');

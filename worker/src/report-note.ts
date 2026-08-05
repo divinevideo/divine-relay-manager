@@ -74,8 +74,18 @@ function sanitizeInline(value: string | undefined, maxLen = 80): string | undefi
 }
 
 /** Parse a raw kind-0 event into the profile facts the note needs. Never throws. */
+/**
+ * @param options.raw Return the profile's values verbatim instead of running
+ *   them through `sanitizeInline`. For callers that **persist** the result:
+ *   sanitizeInline is a display transform (strips markdown punctuation,
+ *   truncates at 80 with an ellipsis), so applying it on the way in stores a
+ *   handle the account never used — and identity capture exists precisely
+ *   because the real one is about to become unrecoverable. Raw values must
+ *   still be sanitized wherever they are rendered.
+ */
 export function parseKind0Profile(
   event: { content?: string; tags?: string[][] } | null | undefined,
+  options: { raw?: boolean } = {},
 ): ReportedProfile {
   const tags = event?.tags ?? [];
   const tagValue = (name: string): string | undefined => tags.find((t) => t[0] === name)?.[1];
@@ -100,12 +110,16 @@ export function parseKind0Profile(
     // Malformed kind-0 content: fall back to tag-derived facts (e.g. the OG-import flag).
   }
 
-  // Sanitize every attacker-controlled field before it reaches the note.
+  // Sanitize every attacker-controlled field before it reaches the note, unless
+  // the caller is storing rather than rendering (see options.raw).
+  const clean = (value: string | undefined) =>
+    options.raw ? (value || undefined) : sanitizeInline(value);
+
   return {
-    name: sanitizeInline(name),
-    nip05: sanitizeInline(nip05),
+    name: clean(name),
+    nip05: clean(nip05),
     isVineImport,
-    vineUsername: sanitizeInline(tagValue('vine_username')),
+    vineUsername: clean(tagValue('vine_username')),
   };
 }
 

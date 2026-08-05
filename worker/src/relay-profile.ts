@@ -121,7 +121,13 @@ export async function fetchAccountIdentity(
     if (!res.events?.length) return { completed: true, profile: null };
     return {
       completed: true,
-      profile: parseKind0Profile(res.events[0] as { content?: string; tags?: string[][] }),
+      // Raw: this is persisted, and both surfaces that render it
+      // (buildAgeReviewIdentityBlock, buildClaimedParentName) sanitize on the
+      // way out. Sanitizing here instead would store a mangled handle.
+      profile: parseKind0Profile(
+        res.events[0] as { content?: string; tags?: string[][] },
+        { raw: true },
+      ),
     };
   } catch (err) {
     console.warn('[relay-profile] identity fetch failed (continuing without it):', err);
