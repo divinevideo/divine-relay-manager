@@ -1284,6 +1284,26 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
     expect(body.error).toMatch(/timed out/i);
   });
 
+  // NIP-01 CLOSED is how a relay says it refused or killed the subscription.
+  // funnelcake sends "error: could not complete query" when its store fails a
+  // query, which is exactly the incident behind this fix. Waiting out the 5s
+  // timeout on a failure the relay already reported is both slow and mislabeled.
+  it('fails immediately with the relay reason when the subscription is CLOSED', async () => {
+    vi.useFakeTimers();
+    const resPromise = worker.fetch(reportsRequest(), reportsEnv, ctx);
+    await vi.advanceTimersByTimeAsync(0);
+    const sock = FakeRelaySocket.instances[0];
+    expect(sock).toBeDefined();
+    sock.message(['CLOSED', sock.subId(), 'error: could not complete query']);
+    // Resolves without needing the 5s timer to run down.
+    const res = await resPromise;
+    expect(res.status).toBe(502);
+    const body = await res.json() as { success: boolean; error?: string };
+    expect(body.success).toBe(false);
+    expect(body.error).toMatch(/could not complete query/i);
+    expect(body.error).not.toMatch(/timed out/i); // reported as what the relay said
+  });
+
   // A reopen deletes the D1 decisions unconditionally, but clearing the relay's
   // resolution labels is best-effort. When that read fails the label survives and
   // keeps the report hidden, so the response has to say so or the UI reports a
