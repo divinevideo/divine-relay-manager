@@ -12,8 +12,11 @@ interface TestAppProps {
 export function TestApp({ children }: TestAppProps) {
   const queryClient = new QueryClient({
     defaultOptions: {
-      queries: { retry: false },
-      mutations: { retry: false },
+      // retryDelay: 0 because components that set their own `retry` opt back
+      // into React Query's 1000ms default backoff, which pushes error-state
+      // assertions past the 1000ms findBy timeout and flakes under CI load.
+      queries: { retry: false, retryDelay: 0 },
+      mutations: { retry: false, retryDelay: 0 },
     },
   });
 

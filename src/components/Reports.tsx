@@ -397,34 +397,49 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     retry: false,
   });
 
-  const { data: resolutionLabels } = useQuery({
+  const {
+    data: resolutionLabels,
+    error: labelsError,
+    dataUpdatedAt: labelsUpdatedAt,
+    isPending: labelsPending,
+  } = useQuery({
     queryKey: ['resolution-labels', relayUrl],
     queryFn: async () => (await fetchResolutionLabels()).items,
     refetchInterval: 15 * 1000,
     placeholderData: (previousData) => previousData,
-    retry: false,
+    retry: 1,
   });
 
   // Query banned pubkeys from relay (NIP-86 RPC)
   // Force fresh fetch (staleTime: 0) when deep linking to ensure accurate ban status
-  const { data: bannedPubkeys } = useQuery({
+  const {
+    data: bannedPubkeys,
+    error: bannedPubkeysError,
+    dataUpdatedAt: bannedPubkeysUpdatedAt,
+    isPending: bannedPubkeysPending,
+  } = useQuery({
     queryKey: ['banned-pubkeys'],
     queryFn: async () => {
       try {
         return await listBannedPubkeys();
       } catch (error) {
         console.warn('NIP-86 listbannedpubkeys failed:', error);
-        throw error; // let React Query handle it, but retry: false + placeholderData keeps UI stable
+        throw error; // let React Query handle it, but retry: 1 + placeholderData keeps UI stable
       }
     },
     staleTime: hasDeepLinkParams ? 0 : 30 * 1000,
     refetchInterval: 15 * 1000,
     placeholderData: (previousData) => previousData,
-    retry: false,
+    retry: 1,
   });
 
   // Query banned/deleted events from relay (NIP-86 RPC)
-  const { data: bannedEvents } = useQuery({
+  const {
+    data: bannedEvents,
+    error: bannedEventsError,
+    dataUpdatedAt: bannedEventsUpdatedAt,
+    isPending: bannedEventsPending,
+  } = useQuery({
     queryKey: ['banned-events'],
     queryFn: async () => {
       try {
@@ -437,15 +452,21 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     staleTime: 30 * 1000,
     refetchInterval: 15 * 1000,
     placeholderData: (previousData) => previousData,
-    retry: false,
+    retry: 1,
   });
 
   // Query all moderation decisions from our D1 database.
-  // retry: false is intentional — placeholderData keeps stale data visible on failure,
-  // and refetchInterval (15s) provides automatic recovery. This avoids stacking retries
-  // on cold-start timeouts which compound latency. (Previously retry: 2, changed to
-  // match the resilience pattern across all polling queries in this component.)
-  const { data: allDecisions, isLoading: decisionsLoading } = useQuery({
+  // retry: 1, not 0. The original reasoning still holds (stacking retries on a
+  // cold-start timeout compounds latency), but it no longer justifies zero:
+  // resolvedTargets is subtractive, so a source that gives up immediately does
+  // not fail safe, it un-hides work already handled (#221). One retry buys back
+  // most of the single-timeout case without stacking.
+  const {
+    data: allDecisions,
+    error: decisionsError,
+    dataUpdatedAt: decisionsUpdatedAt,
+    isPending: decisionsPending,
+  } = useQuery({
     queryKey: ['decisions'],
     queryFn: async () => {
       try {
@@ -458,7 +479,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     staleTime: 30 * 1000,
     refetchInterval: 15 * 1000,
     placeholderData: (previousData) => previousData,
-    retry: false,
+    retry: 1,
   });
 
   // Track relative time since last data update for freshness indicator
@@ -555,6 +576,72 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
     return pending;
   }, [allDecisions]);
+
+  // The four sources that build resolvedTargets, described once so the gate,
+  // the banners, and the blocked pane cannot drift apart the way the queries
+  // themselves did.
+  interface ResolutionSource {
+    key: 'labels' | 'banned-pubkeys' | 'banned-events' | 'decisions';
+    label: string;
+    hasData: boolean;
+    error: unknown;
+    updatedAt: number;
+    isPending: boolean;
+    gatesAlways: boolean;
+  }
+
+  const resolutionSources = useMemo<ResolutionSource[]>(() => [
+    {
+      key: 'labels',
+      label: 'Resolution labels',
+      hasData: !!resolutionLabels,
+      error: labelsError,
+      updatedAt: labelsUpdatedAt,
+      isPending: labelsPending,
+      gatesAlways: false,
+    },
+    {
+      key: 'banned-pubkeys',
+      label: 'Banned accounts',
+      hasData: !!bannedPubkeys,
+      error: bannedPubkeysError,
+      updatedAt: bannedPubkeysUpdatedAt,
+      isPending: bannedPubkeysPending,
+      gatesAlways: false,
+    },
+    {
+      key: 'banned-events',
+      label: 'Banned posts',
+      hasData: !!bannedEvents,
+      error: bannedEventsError,
+      updatedAt: bannedEventsUpdatedAt,
+      isPending: bannedEventsPending,
+      gatesAlways: false,
+    },
+    {
+      // Decisions feeds pendingReviewTargets as well as resolvedTargets, and
+      // pendingReviewTargets is applied on every path (filtered TO it in the
+      // pending view, filtered OUT of it otherwise). So it gates regardless of
+      // the hide-resolved toggle, which is what the old decisionsLoading guard
+      // did for loading and failed to do for errors.
+      key: 'decisions',
+      label: 'Moderation decisions',
+      hasData: !!allDecisions,
+      error: decisionsError,
+      updatedAt: decisionsUpdatedAt,
+      isPending: decisionsPending,
+      gatesAlways: true,
+    },
+  ], [
+    resolutionLabels, labelsError, labelsUpdatedAt, labelsPending,
+    bannedPubkeys, bannedPubkeysError, bannedPubkeysUpdatedAt, bannedPubkeysPending,
+    bannedEvents, bannedEventsError, bannedEventsUpdatedAt, bannedEventsPending,
+    allDecisions, decisionsError, decisionsUpdatedAt, decisionsPending,
+  ]);
+
+  const resolvedFilterActive = hideResolved && !showPendingReview;
+  const gatingSources = resolutionSources.filter(s => s.gatesAlways || resolvedFilterActive);
+  const blockingLoad = gatingSources.filter(s => !s.hasData && s.isPending);
 
   // Get all unique categories from reports for filter chips
   const availableCategories = useMemo(() => {
@@ -873,9 +960,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // fallback, so the two paths cannot drift.
   const dismissDetail = () => handleSelectReport(null);
 
-  // Wait for both reports AND decisions to load before rendering
-  // This prevents auto-hidden CSAM from briefly appearing in default view
-  if (isLoading || decisionsLoading) {
+  // Wait for reports AND every gating resolution source. A source that has not
+  // landed contributes nothing to resolvedTargets, so rendering here would show
+  // handled work as pending, and would show auto-hidden content in the default
+  // view (#221).
+  if (isLoading || blockingLoad.length > 0) {
     return (
       <Card className="h-[calc(100vh-200px)]">
         <CardHeader>
