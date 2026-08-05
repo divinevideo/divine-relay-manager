@@ -1344,6 +1344,50 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
     expect(body.labelCleanupFailed).toBe(true); // but the reopen is not clean
   });
 
+  // The label read can succeed while the delete fails: a relay admin key
+  // mismatch 403s every management command but leaves reads working. The label
+  // survives and keeps the report hidden, so this reopen is no cleaner than a
+  // failed read and must not report one.
+  it('flags labelCleanupFailed when the label is found but banevent fails', async () => {
+    const db = {
+      prepare: () => {
+        const stmt: Record<string, unknown> = {
+          bind: () => stmt,
+          run: async () => ({ success: true, meta: { changes: 2 } }),
+          first: async () => null,
+          all: async () => ({ results: [] }),
+        };
+        return stmt;
+      },
+    };
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const resPromise = worker.fetch(
+      new Request(`https://api.example/api/decisions/${'a'.repeat(64)}`, {
+        method: 'DELETE',
+        headers: { 'X-Admin-Key': 'test-admin-key' },
+      }),
+      // No NOSTR_NSEC, so the NIP-86 banevent cannot be signed and fails.
+      { ...(reportsEnv as object), DB: db } as never,
+      ctx,
+    );
+
+    // Both label queries return a label and complete cleanly; only the delete fails.
+    for (let i = 0; i < 2; i++) {
+      await new Promise((r) => setTimeout(r, 0));
+      const sock = FakeRelaySocket.instances[i];
+      if (!sock) break;
+      sock.message(['EVENT', sock.subId(), LABEL_A]);
+      sock.message(['EOSE', sock.subId()]);
+    }
+
+    const res = await resPromise;
+    const body = await res.json() as { success: boolean; labelsDeleted: number; labelCleanupFailed: boolean };
+    expect(body.labelsDeleted).toBe(0); // nothing was actually removed
+    expect(body.labelCleanupFailed).toBe(true);
+  });
+
   it('returns 502 when the relay closes before EOSE on resolution labels', async () => {
     const resPromise = worker.fetch(labelsRequest(), reportsEnv, ctx);
     await new Promise((r) => setTimeout(r, 0));

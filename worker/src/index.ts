@@ -349,6 +349,9 @@ interface ApiResponse {
   eventId?: string;
   deleted?: number;
   labelsDeleted?: number;
+  // Reopen could not clear every relay-side resolution label, so the report
+  // may stay hidden even though its decisions were deleted.
+  labelCleanupFailed?: boolean;
   // Realness proxy pass-through
   details?: string;
   // Zendesk parse-report responses
@@ -1452,8 +1455,16 @@ async function handleDeleteDecisions(
               const rpcResult = await rpcResponse.json() as { success: boolean };
               if (rpcResult.success) {
                 labelsDeleted++;
+              } else {
+                // The label was found but could not be removed (a relay admin
+                // key mismatch 403s every management command while reads keep
+                // working). It survives and keeps the report hidden, so this
+                // reopen is no cleaner than a failed read.
+                labelCleanupFailed = true;
+                console.warn('[reopen] banevent failed for resolution label:', eventId);
               }
             } catch (err) {
+              labelCleanupFailed = true;
               console.error('Failed to delete resolution label:', eventId, err);
             }
           }

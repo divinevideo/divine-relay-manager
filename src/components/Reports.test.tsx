@@ -209,6 +209,9 @@ describe('Reports resolution-state availability', () => {
 
     expect(await screen.findByText(pendingCount(0))).toBeInTheDocument();
     expect(screen.queryByText(/1 report$/)).not.toBeInTheDocument();
+    // Pins the negative side: a warning that is always on is a warning nobody
+    // reads, and an unconditional banner would otherwise pass every test here.
+    expect(screen.queryByText(/resolution state is unavailable/i)).not.toBeInTheDocument();
   });
 
   it('warns that resolution state is unavailable when the labels query fails on first load', async () => {
