@@ -12,6 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { ResolutionUnavailablePane, ResolutionOverrideWarning } from "@/components/ResolutionStateNotice";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Switch } from "@/components/ui/switch";
@@ -370,6 +371,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const [sortBy, setSortBy] = useState<SortOption>('reports');
   const [filterCategory, setFilterCategory] = useState<string | null>(null);
   const [filterTargetType, setFilterTargetType] = useState<'all' | 'event' | 'pubkey'>('all');
+  // Component-local on purpose: the override survives polls within this mount so
+  // a moderator is not thrown back to the blocked pane every 15s, and resets on
+  // reload so the safe default reasserts itself.
+  const [resolutionOverride, setResolutionOverride] = useState(false);
   // Check for deep link params to force fresh data fetch
   const hasDeepLinkParams = !!(searchParams.get('event') || searchParams.get('pubkey'));
   // Deep-link resolution: 'resolving' while we look a target up, 'gone' when the
@@ -402,6 +407,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     error: labelsError,
     dataUpdatedAt: labelsUpdatedAt,
     isPending: labelsPending,
+    fetchStatus: labelsFetchStatus,
   } = useQuery({
     queryKey: ['resolution-labels', relayUrl],
     queryFn: async () => (await fetchResolutionLabels()).items,
@@ -417,6 +423,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     error: bannedPubkeysError,
     dataUpdatedAt: bannedPubkeysUpdatedAt,
     isPending: bannedPubkeysPending,
+    fetchStatus: bannedPubkeysFetchStatus,
   } = useQuery({
     queryKey: ['banned-pubkeys'],
     queryFn: async () => {
@@ -439,6 +446,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     error: bannedEventsError,
     dataUpdatedAt: bannedEventsUpdatedAt,
     isPending: bannedEventsPending,
+    fetchStatus: bannedEventsFetchStatus,
   } = useQuery({
     queryKey: ['banned-events'],
     queryFn: async () => {
@@ -466,6 +474,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     error: decisionsError,
     dataUpdatedAt: decisionsUpdatedAt,
     isPending: decisionsPending,
+    fetchStatus: decisionsFetchStatus,
   } = useQuery({
     queryKey: ['decisions'],
     queryFn: async () => {
@@ -587,6 +596,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     error: unknown;
     updatedAt: number;
     isPending: boolean;
+    // True when the query is holding off fetching because the browser is
+    // offline (fetchStatus 'paused'), as distinct from isPending, which stays
+    // true throughout a paused wait and cannot tell "loading" from "stuck
+    // offline" on its own.
+    isPaused: boolean;
     gatesAlways: boolean;
   }
 
@@ -598,6 +612,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       error: labelsError,
       updatedAt: labelsUpdatedAt,
       isPending: labelsPending,
+      isPaused: labelsFetchStatus === 'paused',
       gatesAlways: false,
     },
     {
@@ -607,6 +622,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       error: bannedPubkeysError,
       updatedAt: bannedPubkeysUpdatedAt,
       isPending: bannedPubkeysPending,
+      isPaused: bannedPubkeysFetchStatus === 'paused',
       gatesAlways: false,
     },
     {
@@ -616,6 +632,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       error: bannedEventsError,
       updatedAt: bannedEventsUpdatedAt,
       isPending: bannedEventsPending,
+      isPaused: bannedEventsFetchStatus === 'paused',
       gatesAlways: false,
     },
     {
@@ -630,18 +647,25 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       error: decisionsError,
       updatedAt: decisionsUpdatedAt,
       isPending: decisionsPending,
+      isPaused: decisionsFetchStatus === 'paused',
       gatesAlways: true,
     },
   ], [
-    resolutionLabels, labelsError, labelsUpdatedAt, labelsPending,
-    bannedPubkeys, bannedPubkeysError, bannedPubkeysUpdatedAt, bannedPubkeysPending,
-    bannedEvents, bannedEventsError, bannedEventsUpdatedAt, bannedEventsPending,
-    allDecisions, decisionsError, decisionsUpdatedAt, decisionsPending,
+    resolutionLabels, labelsError, labelsUpdatedAt, labelsPending, labelsFetchStatus,
+    bannedPubkeys, bannedPubkeysError, bannedPubkeysUpdatedAt, bannedPubkeysPending, bannedPubkeysFetchStatus,
+    bannedEvents, bannedEventsError, bannedEventsUpdatedAt, bannedEventsPending, bannedEventsFetchStatus,
+    allDecisions, decisionsError, decisionsUpdatedAt, decisionsPending, decisionsFetchStatus,
   ]);
 
   const resolvedFilterActive = hideResolved && !showPendingReview;
   const gatingSources = resolutionSources.filter(s => s.gatesAlways || resolvedFilterActive);
   const blockingLoad = gatingSources.filter(s => !s.hasData && s.isPending);
+  // Offline addition (#221): fetchStatus 'paused' (not isPending, which stays
+  // true the whole time) is the only signal that a blocking source isn't
+  // merely slow, so the indefinite skeleton can say why instead of just sitting there.
+  const blockingPaused = blockingLoad.some(s => s.isPaused);
+  const blockingErrors = gatingSources.filter(s => !s.hasData && s.error);
+  const decisionsUnavailable = blockingErrors.some(s => s.key === 'decisions');
 
   // Get all unique categories from reports for filter chips
   const availableCategories = useMemo(() => {
@@ -974,13 +998,42 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="space-y-3" data-testid="reports-loading-skeleton">
-            {[...Array(5)].map((_, i) => (
-              <Skeleton key={i} className="h-16 w-full" />
-            ))}
-          </div>
+          {blockingPaused ? (
+            // isPending stays true throughout a paused wait, so without this the
+            // moderator sees the same indefinite skeleton whether the network is
+            // merely slow or the browser has no connection at all.
+            <p className="text-sm text-muted-foreground">
+              The queue cannot check what has already been handled while offline.
+              It will resume automatically when the connection returns.
+            </p>
+          ) : (
+            <div className="space-y-3" data-testid="reports-loading-skeleton">
+              {[...Array(5)].map((_, i) => (
+                <Skeleton key={i} className="h-16 w-full" />
+              ))}
+            </div>
+          )}
         </CardContent>
       </Card>
+    );
+  }
+
+  // A gating source failed cold (no previous data to fall back on). Rendering
+  // the queue here would present handled work as pending; the moderator gets
+  // an explicit, named override instead of a silent wrong list or a hard lock-out.
+  if (blockingErrors.length > 0 && !resolutionOverride) {
+    return (
+      <ResolutionUnavailablePane
+        sources={blockingErrors.map(s => ({ key: s.key, label: s.label }))}
+        decisionsUnavailable={decisionsUnavailable}
+        onRetry={() => {
+          queryClient.invalidateQueries({ queryKey: ['resolution-labels'] });
+          queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
+          queryClient.invalidateQueries({ queryKey: ['banned-events'] });
+          queryClient.invalidateQueries({ queryKey: ['decisions'] });
+        }}
+        onOverride={() => setResolutionOverride(true)}
+      />
     );
   }
 
@@ -1089,6 +1142,16 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
               </Button>
             </div>
           </div>
+
+          {/* Stays up for as long as the override is in effect, not a one-off
+              toast, so a moderator can't forget they are looking at an
+              unfiltered queue (#221). */}
+          {resolutionOverride && blockingErrors.length > 0 && (
+            <ResolutionOverrideWarning
+              sources={blockingErrors.map(s => ({ key: s.key, label: s.label }))}
+              decisionsUnavailable={decisionsUnavailable}
+            />
+          )}
 
           {/* View mode toggle */}
           <Tabs value={viewMode} onValueChange={(v) => setViewMode(v as 'consolidated' | 'individual')} className="mt-2">

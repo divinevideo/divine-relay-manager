@@ -2,8 +2,9 @@
 // ABOUTME: missing or errored un-hides handled work rather than hiding more (#221)
 
 import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
-import { QueryClient } from '@tanstack/react-query';
+import { QueryClient, onlineManager } from '@tanstack/react-query';
 import { nip19 } from 'nostr-tools';
 import TestApp from '@/test/TestApp';
 import { Reports } from './Reports';
@@ -251,5 +252,108 @@ describe('cold load does not render an unfiltered queue (#221)', () => {
     renderReports();
 
     expect(await screen.findByText(REPORTED_NPUB)).toBeInTheDocument();
+  });
+});
+
+describe('cold error blocks the queue and offers an override (#221)', () => {
+  it('blocks rather than presenting a resolved target as pending when decisions fails cold', async () => {
+    // decisions is the source that would have hidden this target.
+    stubFetch({ labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'error' });
+    renderReports();
+
+    expect(await screen.findByText(/resolution state is unavailable/i)).toBeInTheDocument();
+    expect(screen.getByText(/moderation decisions/i)).toBeInTheDocument();
+    expect(screen.queryByText(REPORTED_NPUB)).not.toBeInTheDocument();
+  });
+
+  it('blocks when the banned accounts list fails cold', async () => {
+    stubFetch({ labels: 'empty', bannedPubkeys: 'error', bannedEvents: 'empty', decisions: 'empty' });
+    renderReports();
+
+    expect(await screen.findByText(/resolution state is unavailable/i)).toBeInTheDocument();
+    expect(screen.getByText(/banned accounts/i)).toBeInTheDocument();
+  });
+
+  it('renders the unfiltered queue with a persistent warning once the moderator overrides', async () => {
+    stubFetch({ labels: 'empty', bannedPubkeys: 'error', bannedEvents: 'empty', decisions: 'empty' });
+    const user = userEvent.setup();
+    renderReports();
+
+    await user.click(await screen.findByRole('button', { name: /show the queue without resolution filtering/i }));
+
+    expect(await screen.findByText(REPORTED_NPUB)).toBeInTheDocument();
+    // The warning must persist alongside the list, not flash and vanish.
+    expect(screen.getByText(/some of these may already be handled/i)).toBeInTheDocument();
+  });
+
+  it('warns that auto-hidden content can appear when decisions is the failed source', async () => {
+    stubFetch({ labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'error' });
+    const user = userEvent.setup();
+    renderReports();
+
+    await user.click(await screen.findByRole('button', { name: /show the queue without resolution filtering/i }));
+
+    expect(await screen.findByText(/auto-hidden/i)).toBeInTheDocument();
+  });
+
+  it('does not block on a cold labels error while hide-resolved is off', async () => {
+    // resolvedTargets is not applied in that view, so labels cannot un-hide
+    // anything and blocking would be a lie.
+    stubFetch({ labels: 'error', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty' });
+    const user = userEvent.setup();
+    renderReports();
+
+    // Brief assertion amended: hideResolved defaults to true, so with resolvedFilterActive
+    // true at mount, labels genuinely does gate (matching the other "blocks" tests above) and
+    // the blocked pane fully replaces the queue, filters included, the same way the loading
+    // skeleton does. There is no way to reach the hide-resolved switch except through the
+    // override, so use it to get there, then confirm the block does not return once
+    // hide-resolved is off -- that's the actual claim this test makes.
+    await user.click(await screen.findByRole('button', { name: /show the queue without resolution filtering/i }));
+    // The "Hide resolved" control is a shadcn/Radix Switch (role="switch") with
+    // an associated <Label htmlFor="hide-resolved">; verified against
+    // Reports.tsx:1217-1230 and the existing selector in
+    // Reports.deeplink.test.tsx:178.
+    await user.click(await screen.findByRole('switch', { name: /hide resolved/i }));
+
+    expect(await screen.findByText(REPORTED_NPUB)).toBeInTheDocument();
+    expect(screen.queryByText(/resolution state is unavailable/i)).not.toBeInTheDocument();
+    // The override is still on (component state, nothing reset it), so an
+    // absent pane alone doesn't prove labels stopped gating -- the override
+    // would mask that regardless. The persistent warning is driven by the
+    // same blockingErrors set as the pane, so its disappearance is the real
+    // signal that gatingSources actually dropped labels once hide-resolved
+    // went off, not just that the override happens to still be in effect.
+    expect(screen.queryByText(/some of these may already be handled/i)).not.toBeInTheDocument();
+  });
+
+  it('shows no unavailable pane when every source is healthy', async () => {
+    // Pinning the negative: a pane that renders unconditionally passes every
+    // positive test above.
+    stubFetch({ labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty' });
+    renderReports();
+
+    await screen.findByText(REPORTED_NPUB);
+    expect(screen.queryByText(/resolution state is unavailable/i)).not.toBeInTheDocument();
+  });
+});
+
+describe('offline pauses resolution sources instead of failing them (#221)', () => {
+  afterEach(() => {
+    // Guard against a failing assertion above leaving the manager offline for
+    // later tests in this file.
+    onlineManager.setOnline(true);
+  });
+
+  it('explains the queue cannot check resolution state while offline, instead of an indefinite skeleton', async () => {
+    stubFetch({ labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty' });
+    // Set offline before mount: React Query only reaches fetchStatus 'paused'
+    // when a query wants to start a fetch while the manager reports offline.
+    // Going offline mid-fetch would not retroactively pause an in-flight call.
+    onlineManager.setOnline(false);
+    renderReports();
+
+    expect(await screen.findByText(/cannot check .*while offline/i)).toBeInTheDocument();
+    expect(screen.queryByTestId('reports-loading-skeleton')).not.toBeInTheDocument();
   });
 });
