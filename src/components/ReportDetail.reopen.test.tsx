@@ -59,12 +59,31 @@ vi.mock('@/hooks/useUserSummary', () => ({
   useUserSummary: () => ({ data: null, isLoading: false }),
 }));
 vi.mock('@/hooks/useMediaStatus', () => ({ useMediaStatus: () => ({}) }));
+// Shaped against the real hook's return (src/hooks/useReportContext.ts). A
+// partial mock here silently drives the component into its "event not found"
+// branch, which still renders Reopen -- so the tests would pass while
+// exercising a degraded path rather than the normal one.
+const TARGET_EVENT_OBJ: NostrEvent = {
+  id: TARGET_EVENT,
+  pubkey: REPORTED_PUBKEY,
+  created_at: 1751000100,
+  kind: 1,
+  tags: [],
+  content: 'reported content',
+  sig: 'c'.repeat(128),
+};
 vi.mock('@/hooks/useReportContext', () => ({
   useReportContext: () => ({
     target: { type: 'event', value: TARGET_EVENT },
-    reportedUser: { pubkey: REPORTED_PUBKEY },
-    targetEvent: null,
+    thread: { event: TARGET_EVENT_OBJ, ancestors: [], replies: [] },
+    threadLoading: false,
+    reportedUser: { profile: undefined, pubkey: REPORTED_PUBKEY, isFunnelcakeUser: false },
+    userStats: undefined,
+    reporter: { profile: undefined, pubkey: 'a'.repeat(64), reportCount: 0, isFunnelcakeUser: false },
     isLoading: false,
+    error: null,
+    relayHint: undefined,
+    reportTags: REPORT.tags,
   }),
 }));
 
@@ -184,5 +203,19 @@ describe('ReportDetail reopen reporting', () => {
     await waitFor(() => expect(toast).toHaveBeenCalled());
     expect(toast.mock.calls[0][0].variant).toBe('destructive');
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['decisions'] });
+    // The labels drive whether the target is hidden, so they go stale on a
+    // part-way failure exactly as the decisions do.
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['resolution-labels'] });
+  });
+
+  // The tooltip makes the same promise the toast does, and is the copy a
+  // moderator reads BEFORE deciding to reopen.
+  it('does not promise the queue in the reopen tooltip either', async () => {
+    renderDetail();
+    fireEvent.focus(screen.getByRole('button', { name: /reopen/i }));
+
+    const tip = await screen.findByRole('tooltip');
+    expect(tip.textContent).not.toMatch(/back in the pending queue/i);
+    expect(tip.textContent).toMatch(/stays hidden until that is lifted/i);
   });
 });

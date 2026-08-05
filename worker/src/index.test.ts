@@ -1516,6 +1516,133 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
     expect(body.labelCleanupFailed).toBe(true); // and the read is still reported incomplete
   });
 
+  // Each failure path carries its events independently, so each is pinned
+  // independently. The timeout is the one this branch is named for.
+  it('bans a label received before the read timed out', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response(JSON.stringify({ result: true }), { status: 200 })
+    ));
+
+    const resPromise = worker.fetch(
+      reopenRequest(),
+      { ...(reportsEnv as object), DB: reopenDb(), NOSTR_NSEC: TEST_NSEC } as never,
+      ctx,
+    );
+    for (let i = 0; i < 2; i++) {
+      for (let t = 0; t < 100 && !FakeRelaySocket.instances[i]; t++) {
+        await vi.advanceTimersByTimeAsync(0);
+      }
+      const sock = FakeRelaySocket.instances[i];
+      expect(sock).toBeDefined();
+      if (i === 0) sock.message(['EVENT', sock.subId(), LABEL_A]);
+      await vi.advanceTimersByTimeAsync(5000);
+    }
+
+    const res = await resPromise;
+    const body = await res.json() as { labelsDeleted: number; labelCleanupFailed: boolean };
+    expect(body.labelsDeleted).toBe(1);
+    expect(body.labelCleanupFailed).toBe(true);
+  });
+
+  it('bans a label received before the relay CLOSED the subscription', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response(JSON.stringify({ result: true }), { status: 200 })
+    ));
+
+    const resPromise = worker.fetch(
+      reopenRequest(),
+      { ...(reportsEnv as object), DB: reopenDb(), NOSTR_NSEC: TEST_NSEC } as never,
+      ctx,
+    );
+    for (let i = 0; i < 2; i++) {
+      for (let t = 0; t < 100 && !FakeRelaySocket.instances[i]; t++) {
+        await new Promise((r) => setTimeout(r, 0));
+      }
+      const sock = FakeRelaySocket.instances[i];
+      expect(sock).toBeDefined();
+      if (i === 0) sock.message(['EVENT', sock.subId(), LABEL_A]);
+      sock.message(['CLOSED', sock.subId(), 'error: could not complete query']);
+    }
+
+    const res = await resPromise;
+    const body = await res.json() as { labelsDeleted: number; labelCleanupFailed: boolean };
+    expect(body.labelsDeleted).toBe(1);
+    expect(body.labelCleanupFailed).toBe(true);
+  });
+
+  it('bans a label received before the socket errored', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response(JSON.stringify({ result: true }), { status: 200 })
+    ));
+
+    const resPromise = worker.fetch(
+      reopenRequest(),
+      { ...(reportsEnv as object), DB: reopenDb(), NOSTR_NSEC: TEST_NSEC } as never,
+      ctx,
+    );
+    for (let i = 0; i < 2; i++) {
+      for (let t = 0; t < 100 && !FakeRelaySocket.instances[i]; t++) {
+        await new Promise((r) => setTimeout(r, 0));
+      }
+      const sock = FakeRelaySocket.instances[i];
+      expect(sock).toBeDefined();
+      if (i === 0) sock.message(['EVENT', sock.subId(), LABEL_A]);
+      sock.emit('error', {});
+    }
+
+    const res = await resPromise;
+    const body = await res.json() as { labelsDeleted: number; labelCleanupFailed: boolean };
+    expect(body.labelsDeleted).toBe(1);
+    expect(body.labelCleanupFailed).toBe(true);
+  });
+
+  // A completed read that fills the page is indistinguishable from a truncated
+  // one, so it must report an incomplete cleanup even though EOSE arrived. The
+  // 200 is written out rather than imported: the cap being high enough to make
+  // truncation implausible is part of what the test pins.
+  it('reports incomplete cleanup when the label read fills the page', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response(JSON.stringify({ result: true }), { status: 200 })
+    ));
+    const fullPage = Array.from({ length: 200 }, (_, i) => ({
+      ...LABEL_A,
+      id: i.toString(16).padStart(64, '0'),
+    }));
+
+    const resPromise = worker.fetch(
+      reopenRequest(),
+      { ...(reportsEnv as object), DB: reopenDb(), NOSTR_NSEC: TEST_NSEC } as never,
+      ctx,
+    );
+    for (let i = 0; i < 2; i++) {
+      // A full page means 200 sequential banevent round-trips before the second
+      // filter opens its socket, so this wait needs a far bigger budget than
+      // the single-label cases above.
+      for (let t = 0; t < 5000 && !FakeRelaySocket.instances[i]; t++) {
+        await new Promise((r) => setTimeout(r, 0));
+      }
+      const sock = FakeRelaySocket.instances[i];
+      expect(sock).toBeDefined();
+      if (i === 0) for (const label of fullPage) sock.message(['EVENT', sock.subId(), label]);
+      sock.message(['EOSE', sock.subId()]);
+    }
+
+    // The cap is what makes truncation implausible rather than merely
+    // detectable, so the requested page size is pinned too: detection only
+    // fires on our own limit, never on a lower one the relay imposes.
+    expect(JSON.parse(FakeRelaySocket.instances[0].sent[0])[2].limit).toBe(200);
+
+    const res = await resPromise;
+    const body = await res.json() as { labelsDeleted: number; labelCleanupFailed: boolean };
+    expect(body.labelsDeleted).toBe(200); // every label on the page was removed
+    expect(body.labelCleanupFailed).toBe(true); // but there may be more beyond it
+  });
+
   it('returns 502 when the relay closes before EOSE on resolution labels', async () => {
     const resPromise = worker.fetch(labelsRequest(), reportsEnv, ctx);
     await new Promise((r) => setTimeout(r, 0));

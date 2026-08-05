@@ -228,4 +228,32 @@ describe('Reports resolution filtering', () => {
 
     expect(await screen.findByText(pendingCount(1))).toBeInTheDocument();
   });
+
+  // The labels read is the one polling query here that retries. Measured
+  // against production it runs at p90 ~3.2s against a 5s cap, so a single slow
+  // read is common and would otherwise cost a moderator their whole resolution
+  // filter until the next poll -- re-presenting handled work as pending.
+  it('recovers the resolution filter when the labels read fails once', async () => {
+    let labelCalls = 0;
+    stubFetch(() => {
+      labelCalls++;
+      if (labelCalls === 1) {
+        return new Response(JSON.stringify({ success: false, error: 'Relay query timed out before EOSE' }), {
+          status: 502,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return jsonResponse({ success: true, events: [RESOLUTION_LABEL] });
+    });
+
+    render(
+      <TestApp>
+        <Reports relayUrl="wss://relay.example" />
+      </TestApp>
+    );
+
+    // The retry lands and the resolved target is hidden again.
+    expect(await screen.findByText(pendingCount(0))).toBeInTheDocument();
+    expect(labelCalls).toBeGreaterThan(1);
+  });
 });
