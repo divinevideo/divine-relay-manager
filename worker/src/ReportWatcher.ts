@@ -935,8 +935,11 @@ export class ReportWatcher implements DurableObject {
         // Capture here too. This case opens already cleared, so nothing hides the
         // profile today -- but the account may be actioned later, and a cleared
         // case is still one a moderator may need to identify after the fact.
-        const identity = await fetchAccountIdentity(reportedPubkey, this.env.RELAY_URL).catch(() => null);
-        const identityCapturedAt = new Date().toISOString();
+        const lookup = await fetchAccountIdentity(reportedPubkey, this.env.RELAY_URL)
+          .catch(() => ({ completed: false, profile: null }));
+        const identity = lookup.profile;
+        // Null unless the relay answered -- see the note on the main path.
+        const identityCapturedAt = lookup.completed ? new Date().toISOString() : null;
 
         await this.env.DB.prepare(`
           INSERT INTO age_review_cases
@@ -989,8 +992,14 @@ export class ReportWatcher implements DurableObject {
     // Best-effort by contract -- fetchAccountIdentity swallows its own errors,
     // and the extra catch here covers an unexpected throw so enrichment can
     // never be the reason a case fails to open.
-    const identity = await fetchAccountIdentity(reportedPubkey, this.env.RELAY_URL).catch(() => null);
-    const identityCapturedAt = new Date().toISOString();
+    const lookup = await fetchAccountIdentity(reportedPubkey, this.env.RELAY_URL)
+      .catch(() => ({ completed: false, profile: null }));
+    const identity = lookup.profile;
+    // Only stamp when the relay actually answered. A timeout or an unreachable
+    // relay is not evidence the account has no profile, and a stamp would
+    // exclude this case from the backfill for good -- right before enforcement
+    // hides the profile and makes the loss permanent.
+    const identityCapturedAt = lookup.completed ? new Date().toISOString() : null;
 
     await this.env.DB.prepare(`
       INSERT INTO age_review_cases

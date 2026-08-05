@@ -40,11 +40,45 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('fetchAccountIdentity', () => {
-  it('returns null when no relay URL is configured', async () => {
-    expect(await fetchAccountIdentity('abc123', undefined)).toBeNull();
+// The backfill treats a null identity_captured_at as "never looked". A caller
+// that cannot tell a completed-but-empty lookup from a failed one will stamp
+// the timestamp either way, and a case whose relay lookup merely timed out is
+// then excluded from recovery permanently -- while the account's profile is
+// about to be hidden by enforcement. So the failure has to be distinguishable.
+describe('fetchAccountIdentity lookup outcome', () => {
+  it('reports a completed lookup when the account has no kind-0', async () => {
+    mockRelay([]);
+    const res = await fetchAccountIdentity('abc123', 'wss://relay.test');
+    expect(res.completed).toBe(true);
+    expect(res.profile).toBeNull();
   });
 
+  it('reports a completed lookup when a profile is found', async () => {
+    mockRelay([{
+      id: 'e1', kind: 0, pubkey: 'abc123', tags: [],
+      content: JSON.stringify({ display_name: 'Some One' }),
+    }]);
+    const res = await fetchAccountIdentity('abc123', 'wss://relay.test');
+    expect(res.completed).toBe(true);
+    expect(res.profile?.name).toBe('Some One');
+  });
+
+  it('reports an incomplete lookup when the socket cannot be opened', async () => {
+    vi.spyOn(globalThis, 'WebSocket').mockImplementation((() => {
+      throw new Error('relay down');
+    }) as unknown as typeof WebSocket);
+    const res = await fetchAccountIdentity('abc123', 'wss://relay.test');
+    expect(res.completed).toBe(false);
+    expect(res.profile).toBeNull();
+  });
+
+  it('reports an incomplete lookup when no relay is configured', async () => {
+    const res = await fetchAccountIdentity('abc123', undefined);
+    expect(res.completed).toBe(false);
+  });
+});
+
+describe('fetchAccountIdentity', () => {
   it('parses a kind-0 result into a profile', async () => {
     mockRelay([{
       id: 'e1',
@@ -54,7 +88,7 @@ describe('fetchAccountIdentity', () => {
       content: JSON.stringify({ display_name: 'Some One', nip05: 'x@y.z' }),
     }]);
 
-    const profile = await fetchAccountIdentity('abc123', 'wss://relay.test');
+    const { profile } = await fetchAccountIdentity('abc123', 'wss://relay.test');
 
     expect(profile?.name).toBe('Some One');
     expect(profile?.nip05).toBe('x@y.z');
@@ -69,23 +103,20 @@ describe('fetchAccountIdentity', () => {
       content: JSON.stringify({}),
     }]);
 
-    const profile = await fetchAccountIdentity('abc123', 'wss://relay.test');
+    const { profile } = await fetchAccountIdentity('abc123', 'wss://relay.test');
 
     expect(profile?.isVineImport).toBe(true);
     expect(profile?.vineUsername).toBe('someuser');
   });
 
-  it('returns null rather than throwing when the socket cannot be opened', async () => {
+  it('never throws, whatever the socket does', async () => {
     vi.spyOn(globalThis, 'WebSocket').mockImplementation((() => {
       throw new Error('relay down');
     }) as unknown as typeof WebSocket);
 
-    await expect(fetchAccountIdentity('abc123', 'wss://relay.test')).resolves.toBeNull();
-  });
-
-  it('returns null when the account has no kind-0', async () => {
-    mockRelay([]);
-
-    expect(await fetchAccountIdentity('abc123', 'wss://relay.test')).toBeNull();
+    await expect(fetchAccountIdentity('abc123', 'wss://relay.test')).resolves.toEqual({
+      completed: false,
+      profile: null,
+    });
   });
 });

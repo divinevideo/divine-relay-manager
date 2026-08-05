@@ -8,7 +8,7 @@ vi.mock('./relay-profile', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./relay-profile')>();
   return {
     ...actual,
-    fetchAccountIdentity: vi.fn().mockResolvedValue(null),
+    fetchAccountIdentity: vi.fn().mockResolvedValue({ completed: true, profile: null }),
   };
 });
 
@@ -1605,23 +1605,45 @@ describe('ReportWatcher', () => {
       }, { timeout: 2000 });
     }
 
+    /**
+     * Identity binds on the main INSERT, by position:
+     * 7 name, 8 nip05, 9 vine username, 10 identity_captured_at.
+     * Membership assertions cannot distinguish these -- the row already binds
+     * a deadline ISO timestamp, so a "some bind looks like a date" check passes
+     * even when identity_captured_at is dropped entirely.
+     */
+    function identityBinds(expectedArity = 11) {
+      // The SQL filter also matches the dedup SELECT and the decision log, and
+      // flattening them together silently shifts every position. Pick the bind
+      // call belonging to the INSERT itself, by its arity.
+      const call = bindCallsFor('INSERT INTO age_review_cases')
+        .find((binds: unknown[]) => binds.length === expectedArity);
+      if (!call) throw new Error(`no INSERT bind call with ${expectedArity} params`);
+      const [, , , , , , , name, nip05, vineUsername, capturedAt] = call as unknown[];
+      return expectedArity === 11
+        ? { name, nip05, vineUsername, capturedAt }
+        // Auto-clear binds fewer leading columns: id, pubkey, reporter, report, then identity.
+        : { name: call[4], nip05: call[5], vineUsername: call[6], capturedAt: call[7] };
+    }
+
     it('records the captured handle on the case', async () => {
       mockGetUserStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: false });
       vi.mocked(fetchAccountIdentity).mockResolvedValue({
-        name: 'Some One', nip05: 'x@y.z', isVineImport: false, vineUsername: undefined,
+        completed: true,
+        profile: { name: 'Some One', nip05: 'x@y.z', isVineImport: false, vineUsername: undefined },
       });
 
       await sendUnderageReport('identity_report_1', 'reported_identity_1');
 
       expect(fetchAccountIdentity).toHaveBeenCalledWith('reported_identity_1', expect.anything());
-      const binds = bindCallsFor('INSERT INTO age_review_cases').flat();
-      expect(binds).toContain('Some One');
-      expect(binds).toContain('x@y.z');
+      const { name, nip05 } = identityBinds();
+      expect(name).toBe('Some One');
+      expect(nip05).toBe('x@y.z');
     });
 
-    it('stamps identity_captured_at even when no profile resolves', async () => {
+    it('stamps identity_captured_at when the relay answered but had no profile', async () => {
       mockGetUserStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: false });
-      vi.mocked(fetchAccountIdentity).mockResolvedValue(null);
+      vi.mocked(fetchAccountIdentity).mockResolvedValue({ completed: true, profile: null });
 
       await sendUnderageReport('identity_report_2', 'reported_identity_2');
 
@@ -1629,20 +1651,37 @@ describe('ReportWatcher', () => {
         .map((c: unknown[]) => String(c[0]))
         .find((sql) => sql.includes('INSERT INTO age_review_cases'));
       expect(insertSql).toContain('identity_captured_at');
-      // A stamp with null values means "looked, found nothing" — distinct from
-      // "never looked", which the backfill uses to decide what to retry.
-      const binds = bindCallsFor('INSERT INTO age_review_cases').flat();
-      expect(binds.some((v) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(v))).toBe(true);
+
+      // "Looked, found nothing" -- distinct from "never looked", which is what
+      // the backfill uses to decide which rows to retry.
+      const { name, capturedAt } = identityBinds();
+      expect(name).toBeNull();
+      expect(capturedAt).toEqual(expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/));
     });
 
-    it('still creates the case when the identity lookup fails', async () => {
+    /**
+     * The case this whole column exists for. A relay that times out or refuses
+     * the socket has told us nothing about the account, so stamping would mark
+     * the row "already looked" and exclude it from the backfill permanently --
+     * just as enforcement is about to hide the profile for good.
+     */
+    it('leaves identity_captured_at null when the lookup never completed', async () => {
+      mockGetUserStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: false });
+      vi.mocked(fetchAccountIdentity).mockResolvedValue({ completed: false, profile: null });
+
+      await sendUnderageReport('identity_report_5', 'reported_identity_5');
+
+      expect(identityBinds().capturedAt).toBeNull();
+    });
+
+    it('leaves identity_captured_at null when the lookup throws', async () => {
       mockGetUserStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: false });
       vi.mocked(fetchAccountIdentity).mockRejectedValue(new Error('relay down'));
 
       await sendUnderageReport('identity_report_3', 'reported_identity_3');
 
-      // The assertion is sendUnderageReport's own waitFor: the INSERT happened.
       expect(mockDbRun).toHaveBeenCalled();
+      expect(identityBinds().capturedAt).toBeNull();
     });
 
     it('records the captured handle on the auto-clear path too', async () => {
@@ -1650,7 +1689,8 @@ describe('ReportWatcher', () => {
         success: true, pubkey: 'reported_identity_4', status: 'active', verified_minor: true,
       });
       vi.mocked(fetchAccountIdentity).mockResolvedValue({
-        name: 'Cleared Person', nip05: undefined, isVineImport: false, vineUsername: undefined,
+        completed: true,
+        profile: { name: 'Cleared Person', nip05: undefined, isVineImport: false, vineUsername: undefined },
       });
 
       await sendUnderageReport('identity_report_4', 'reported_identity_4');
