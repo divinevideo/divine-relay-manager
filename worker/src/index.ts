@@ -553,17 +553,15 @@ export default {
           .map((e) => e.created_at)
           .filter((t): t is number => typeof t === 'number');
         // Not jsonResponse(): its ApiResponse type is shared across every route,
-        // and truncated/oldest_covered only apply here and on /api/decisions
-        // (which took the same approach in worker/src/index.ts around line 1381).
-        return new Response(JSON.stringify({
+        // and truncated/oldest_covered only apply here and on /api/decisions.
+        // proxyJsonResponse produces the same status/content-type/CORS shape
+        // without weakening jsonResponse's type guard.
+        return proxyJsonResponse({
           success: true,
           events: result.events,
           truncated: events.length >= RESOLUTION_LABEL_LIMIT,
           oldest_covered: timestamps.length > 0 ? Math.min(...timestamps) : null,
-        }), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json', ...corsHeaders },
-        });
+        }, 200, corsHeaders);
       }
 
       // Bulk moderation (server-side iteration for batch operations)
@@ -1384,15 +1382,12 @@ async function handleGetAllDecisions(
       ? (kept[kept.length - 1].created_at as string ?? null)
       : null;
 
-    return new Response(JSON.stringify({
+    return proxyJsonResponse({
       success: true,
       decisions: kept,
       truncated,
       oldest_covered: oldestCovered,
-    }), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json', ...corsHeaders },
-    });
+    }, 200, corsHeaders);
   } catch (error) {
     console.error('Get all decisions error:', error);
     return jsonResponse(
