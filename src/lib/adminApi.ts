@@ -398,10 +398,38 @@ export async function fetchReportsByTarget(
   return sanitizeRelayEvents(data.events);
 }
 
+// A capped resolution read that does not say it was capped un-hides handled
+// work with nothing explaining why (#221). oldestCovered is normalized to
+// epoch milliseconds here so callers never juggle SQLite TEXT against Nostr
+// unix seconds.
+export interface TruncatableResult<T> {
+  items: T[];
+  truncated: boolean;
+  oldestCovered: number | null;
+}
+
+// SQLite CURRENT_TIMESTAMP has no zone suffix but IS UTC; Nostr created_at is
+// unix seconds. Anything else is reported as unknown rather than NaN.
+export function parseOldestCovered(value: string | number | null | undefined): number | null {
+  if (typeof value === 'number') return Number.isFinite(value) ? value * 1000 : null;
+  if (typeof value !== 'string' || value.length === 0) return null;
+  const parsed = Date.parse(value.includes('T') ? value : `${value.replace(' ', 'T')}Z`);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
 // Fetch resolution labels via server-side relay query (replaces browser WebSocket)
-export async function fetchResolutionLabels(apiUrl: string): Promise<NostrEvent[]> {
-  const data = await apiRequest<{ success: boolean; events: NostrEvent[] }>(apiUrl, '/api/resolution-labels', 'GET');
-  return sanitizeRelayEvents(data.events);
+export async function fetchResolutionLabels(apiUrl: string): Promise<TruncatableResult<NostrEvent>> {
+  const data = await apiRequest<{
+    success: boolean;
+    events: NostrEvent[];
+    truncated?: boolean;
+    oldest_covered?: number | null;
+  }>(apiUrl, '/api/resolution-labels', 'GET');
+  return {
+    items: sanitizeRelayEvents(data.events),
+    truncated: data.truncated === true,
+    oldestCovered: parseOldestCovered(data.oldest_covered),
+  };
 }
 
 // Publish a NIP-32 label (kind 1985)
@@ -556,19 +584,25 @@ export async function getDecisions(apiUrl: string, targetId: string): Promise<Mo
 }
 
 // Get all decisions (for building resolved targets list)
-export async function getAllDecisions(apiUrl: string): Promise<ModerationDecision[]> {
-  const data = await apiRequest<{ success: boolean; decisions: ModerationDecision[]; error?: string }>(
-    apiUrl,
-    '/api/decisions',
-    'GET'
-  );
+export async function getAllDecisions(apiUrl: string): Promise<TruncatableResult<ModerationDecision>> {
+  const data = await apiRequest<{
+    success: boolean;
+    decisions: ModerationDecision[];
+    truncated?: boolean;
+    oldest_covered?: string | null;
+    error?: string;
+  }>(apiUrl, '/api/decisions', 'GET');
 
   if (!data.success) {
     console.error('[adminApi] getAllDecisions failed:', data.error);
     throw new ApiError(data.error || 'Failed to get decisions');
   }
 
-  return data.decisions || [];
+  return {
+    items: data.decisions || [],
+    truncated: data.truncated === true,
+    oldestCovered: parseOldestCovered(data.oldest_covered),
+  };
 }
 
 // Delete all decisions for a target (reopens the report)

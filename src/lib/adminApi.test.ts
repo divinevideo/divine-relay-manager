@@ -27,6 +27,7 @@ import {
   verifyAgeRestricted,
   logDecision,
   getDecisions,
+  getAllDecisions,
   extractMediaHashes,
   isBlockedMediaAction,
   updateAgeReviewCase,
@@ -1288,7 +1289,7 @@ describe('adminApi', () => {
       });
 
       const result = await fetchResolutionLabels(API_URL);
-      expect(result[0].tags).toEqual([]);
+      expect(result.items[0].tags).toEqual([]);
     });
 
     it('should call /api/resolution-labels and return events', async () => {
@@ -1307,7 +1308,7 @@ describe('adminApi', () => {
         expect.stringContaining('/api/resolution-labels'),
         expect.objectContaining({ method: 'GET' })
       );
-      expect(result).toEqual(events);
+      expect(result.items).toEqual(events);
     });
 
     it('should return empty array when no events', async () => {
@@ -1317,7 +1318,7 @@ describe('adminApi', () => {
       });
 
       const result = await fetchResolutionLabels(API_URL);
-      expect(result).toEqual([]);
+      expect(result.items).toEqual([]);
     });
   });
 
@@ -1359,6 +1360,52 @@ describe('adminApi', () => {
         expect.stringContaining('/api/bulk-moderate/status/job-9'),
         expect.objectContaining({ method: 'GET' }),
       );
+    });
+  });
+
+  describe('resolution source truncation reporting (#221)', () => {
+    function mockFetchOnce(body: unknown) {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => body });
+    }
+
+    it('normalizes the decisions TEXT timestamp to epoch milliseconds and carries truncated', async () => {
+      mockFetchOnce({ success: true, decisions: [{ id: 1 }], truncated: true, oldest_covered: '2026-06-14 00:00:00' });
+
+      const result = await getAllDecisions(API_URL);
+
+      expect(result.items).toHaveLength(1);
+      expect(result.truncated).toBe(true);
+      // SQLite CURRENT_TIMESTAMP is UTC with no zone suffix. Parsing it as
+      // local time would shift the reported coverage date by the TZ offset.
+      expect(result.oldestCovered).toBe(Date.UTC(2026, 5, 14, 0, 0, 0));
+    });
+
+    it('normalizes the label unix seconds to epoch milliseconds', async () => {
+      mockFetchOnce({ success: true, events: [], truncated: true, oldest_covered: 1_760_000_000 });
+
+      const result = await fetchResolutionLabels(API_URL);
+
+      expect(result.truncated).toBe(true);
+      expect(result.oldestCovered).toBe(1_760_000_000_000);
+    });
+
+    it('defaults to not-truncated when the worker predates the field', async () => {
+      // Pages and the worker deploy separately, so the new frontend must not
+      // read a missing field as "truncated" and warn on every load.
+      mockFetchOnce({ success: true, decisions: [{ id: 1 }] });
+
+      const result = await getAllDecisions(API_URL);
+
+      expect(result.truncated).toBe(false);
+      expect(result.oldestCovered).toBeNull();
+    });
+
+    it('reports an unparseable oldest_covered as null instead of NaN', async () => {
+      mockFetchOnce({ success: true, decisions: [], truncated: false, oldest_covered: 'not-a-timestamp' });
+
+      const result = await getAllDecisions(API_URL);
+
+      expect(result.oldestCovered).toBeNull();
     });
   });
 });

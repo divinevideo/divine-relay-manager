@@ -399,7 +399,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
   const { data: resolutionLabels } = useQuery({
     queryKey: ['resolution-labels', relayUrl],
-    queryFn: fetchResolutionLabels,
+    queryFn: async () => (await fetchResolutionLabels()).items,
     refetchInterval: 15 * 1000,
     placeholderData: (previousData) => previousData,
     retry: false,
@@ -449,7 +449,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     queryKey: ['decisions'],
     queryFn: async () => {
       try {
-        return await getAllDecisions();
+        return (await getAllDecisions()).items;
       } catch (error) {
         console.warn('[Reports] Decisions query failed:', error);
         throw error;
