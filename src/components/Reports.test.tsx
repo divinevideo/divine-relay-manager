@@ -229,10 +229,11 @@ describe('Reports resolution filtering', () => {
     expect(await screen.findByText(pendingCount(1))).toBeInTheDocument();
   });
 
-  // The labels read is the one polling query here that retries. Measured
-  // against production it runs at p90 ~3.2s against a 5s cap, so a single slow
-  // read is common and would otherwise cost a moderator their whole resolution
-  // filter until the next poll -- re-presenting handled work as pending.
+  // The labels read is the one polling query here that retries. queryRelay
+  // gives it a hard 5s cap, so a slow relay crosses it on ordinary variance
+  // (see #185 for the production timings behind that claim), and without a
+  // retry one slow read costs a moderator their whole resolution filter until
+  // the next poll -- re-presenting handled work as pending.
   it('recovers the resolution filter when the labels read fails once', async () => {
     let labelCalls = 0;
     stubFetch(() => {

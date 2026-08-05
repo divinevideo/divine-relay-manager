@@ -572,10 +572,11 @@ export async function getAllDecisions(apiUrl: string): Promise<ModerationDecisio
 }
 
 // Delete all decisions for a target (reopens the report).
-// labelCleanupFailed means the relay-side resolution labels could not be read,
-// or were read but could not be removed, so some may survive and keep the
-// report hidden even though its decisions are gone. Callers must surface that
-// rather than reporting a clean reopen.
+// labelCleanupFailed means the relay-side resolution labels could not be fully
+// cleared -- the read failed, the read filled its page so there may be more
+// beyond it, or a label was read but could not be removed. Any of those leaves
+// labels alive that keep the report hidden even though its decisions are gone,
+// so callers must surface it rather than reporting a clean reopen.
 // targetType lets the worker query only the label tag that can match ('e' for
 // an event, 'p' for a pubkey). Omitting it is safe: the worker then checks
 // both, which is what an older frontend gets.
