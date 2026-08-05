@@ -1672,7 +1672,16 @@ describe('parent contact record', () => {
     const mockFetch = vi.fn().mockImplementation((url: string, init?: { method?: string }) => {
       const method = init?.method ?? 'GET';
       if (url.includes('/users/') && method === failingMethod) {
-        return Promise.resolve({ ok: false, status: 403, text: () => Promise.resolve('Forbidden') });
+        // json() is supplied deliberately, and returns a body that would
+        // otherwise sail through verification. Without it, deleting the guard
+        // would throw a TypeError that lands in the same catch and emits the
+        // same log -- so the test would pass whether the guard exists or not.
+        return Promise.resolve({
+          ok: false,
+          status: 403,
+          text: () => Promise.resolve('Forbidden'),
+          json: () => Promise.resolve({ user: { id: 77, role: 'end-user', email: 'parent@example.com', notes: '' } }),
+        });
       }
       if (url.includes('/users/') && method === 'GET') {
         return Promise.resolve({
@@ -1692,6 +1701,43 @@ describe('parent contact record', () => {
     expect(errorLog.mock.calls.map((call) => String(call[0])))
       .toContain('[age-review] Failed to write parent contact notes:');
     errorLog.mockRestore();
+  });
+
+  // The early-return guard on the attach path. Each clause stops a distinct way
+  // of writing a useless or misleading block onto a real parent's contact: no
+  // requester means no contact to write to, and a missing pubkey or case id
+  // would render an identity block that identifies nothing and a deeplink that
+  // goes nowhere. Without a parent address there is nothing to verify against.
+  it.each([
+    ['no requester id on the ticket', { ticket: { id: 42 } }],
+    ['no requester id at all', { ticket: { id: 42, requester_id: null } }],
+  ])('writes no contact notes when the ticket yields %s', async (_label, ticketBody) => {
+    const c = makeCase({ state: 'restricted_pending_user_response', account_name: 'Some One' });
+    const mockFetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/users/')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ user: { id: 77, role: 'end-user', email: 'parent@example.com', notes: '' } }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(ticketBody) });
+    });
+    vi.stubGlobal('fetch', mockFetch);
+
+    await handleParentContact(parentRequest(), 'case-1', c.pubkey, makeEnv(makeParentDb(c), zendeskEnv), corsHeaders);
+
+    // The guard returns before Zendesk's user API is touched at all.
+    expect(mockFetch.mock.calls.filter((call: unknown[]) => (call[0] as string).includes('/users/'))).toEqual([]);
+  });
+
+  it('writes no contact notes when the case has no pubkey to identify', async () => {
+    const c = makeCase({ state: 'restricted_pending_user_response', account_name: 'Some One', pubkey: '' });
+    const mockFetch = makeZendeskFetch();
+    vi.stubGlobal('fetch', mockFetch);
+
+    await handleParentContact(parentRequest(), 'case-1', '', makeEnv(makeParentDb(c), zendeskEnv), corsHeaders);
+
+    expect(mockFetch.mock.calls.filter((call: unknown[]) => (call[0] as string).includes('/users/'))).toEqual([]);
   });
 
   it('refuses to write to a contact that is not an end user', async () => {
@@ -2189,10 +2235,18 @@ describe('contact name upgrade on parent reply', () => {
     });
     const mockFetch = makeTicketFetch();
     vi.stubGlobal('fetch', mockFetch);
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     await handleAgeReviewReplyWebhook(replyRequest(), makeEnv(makeReplyDb(c), zendeskEnv), corsHeaders);
 
-    expect(namePutFrom(mockFetch)).toBeUndefined();
+    // Asserting only on the absent PUT would prove nothing: with the guard
+    // removed, the flow still writes nothing because it crashes comparing a
+    // null address and the crash is swallowed. So assert on what the guard
+    // uniquely achieves -- returning before Zendesk is touched at all, and
+    // without an error being logged.
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(errorLog).not.toHaveBeenCalled();
+    errorLog.mockRestore();
   });
 
   // A Zendesk display name is global. Renaming a staff member would put a

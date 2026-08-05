@@ -67,6 +67,15 @@ export async function queryRelay(
   });
 }
 
+/**
+ * Cap on best-effort relay enrichment.
+ *
+ * Originally sized so a slow relay could not push the Zendesk webhook handler
+ * toward Zendesk's delivery timeout; report-note enrichment posts without the
+ * profile when it fires. Identity capture reuses it despite having no delivery
+ * deadline of its own — there, a fired timeout means the lookup did not
+ * complete, so no capture is recorded and the case stays eligible for backfill.
+ */
 export const ENRICHMENT_TIMEOUT_MS = 3000;
 
 export function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
@@ -79,16 +88,6 @@ export function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | nul
   });
 }
 
-/**
- * Best-effort kind-0 lookup for an account, used to capture a human-readable
- * identifier while one is still visible.
- *
- * Ordering matters at every call site: a suspended account's content is hidden
- * from relay queries, so this has to run before any enforcement leg fires. Once
- * an account is suspended the profile is gone and a later lookup returns nothing.
- *
- * Never throws. Enrichment must not be able to fail a case creation.
- */
 export interface AccountIdentityLookup {
   /**
    * Whether the relay actually answered. False means we never got to look --
@@ -105,6 +104,16 @@ export interface AccountIdentityLookup {
   profile: ReportedProfile | null;
 }
 
+/**
+ * Best-effort kind-0 lookup for an account, used to capture a human-readable
+ * identifier while one is still visible.
+ *
+ * Ordering matters at every call site: a suspended account's content is hidden
+ * from relay queries, so this has to run before any enforcement leg fires. Once
+ * an account is suspended the profile is gone and a later lookup returns nothing.
+ *
+ * Never throws. Enrichment must not be able to fail a case creation.
+ */
 export async function fetchAccountIdentity(
   pubkey: string,
   relayUrl: string | undefined,
@@ -118,7 +127,12 @@ export async function fetchAccountIdentity(
     // A timeout resolves to null and an unreachable relay resolves to
     // { success: false }; neither is evidence the account has no profile.
     if (!res?.success) return { completed: false, profile: null };
-    if (!res.events?.length) return { completed: true, profile: null };
+    if (!res.events?.length) {
+      // An empty result only means "this account has no profile" when the relay
+      // sent EOSE. queryRelay reports complete: false when it timed out or the
+      // socket closed first, and that absence is unconfirmed.
+      return { completed: res.complete === true, profile: null };
+    }
     return {
       completed: true,
       // Raw: this is persisted, and both surfaces that render it

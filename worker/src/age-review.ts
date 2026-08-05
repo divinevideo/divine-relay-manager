@@ -1093,6 +1093,14 @@ async function attachIdentityToParentContact(args: {
 
   // Without a requester id there is no contact to write to; without a pubkey or
   // case id the block would render a broken deeplink and identify nothing.
+  //
+  // The requester-id and pubkey clauses are reachable and tested. The caseId and
+  // parentEmail clauses are defence-in-depth against a future caller and are
+  // unreachable today: both call sites take caseId from a validated route param
+  // or the case row's own id, and parentEmail is rejected as empty by
+  // handleParentContact before either path runs. Kept because this function
+  // writes a minor's identity to an external system, and cheap; deliberately
+  // left untested rather than reached through a contorted fixture.
   if (!requesterId || !identity.pubkey || !caseId || !parentEmail) return;
   try {
     await writeParentContactNotes(

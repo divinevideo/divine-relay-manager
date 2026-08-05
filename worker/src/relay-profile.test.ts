@@ -63,6 +63,34 @@ describe('fetchAccountIdentity lookup outcome', () => {
     expect(res.profile?.name).toBe('Some One');
   });
 
+  // queryRelay resolves { success: true, events: [], complete: false } when the
+  // socket closes or times out before EOSE. Only EOSE proves the relay had
+  // nothing; an unconfirmed absence must not count as a completed lookup, or a
+  // dropped connection excludes the case from backfill exactly as a hard error
+  // would have.
+  it('reports an incomplete lookup when the relay closed before EOSE', async () => {
+    vi.spyOn(globalThis, 'WebSocket').mockImplementation((function () {
+      const listeners = new Map<string, Array<(value?: unknown) => void>>();
+      queueMicrotask(() => {
+        listeners.get('open')?.forEach((h) => h());
+        // Drops without ever sending EOSE.
+        listeners.get('close')?.forEach((h) => h());
+      });
+      return {
+        addEventListener: (e: string, h: (value?: unknown) => void) => {
+          listeners.set(e, [...(listeners.get(e) || []), h]);
+        },
+        send: vi.fn(),
+        close: vi.fn(),
+      };
+    } as unknown as typeof WebSocket));
+
+    const res = await fetchAccountIdentity('abc123', 'wss://relay.test');
+
+    expect(res.completed).toBe(false);
+    expect(res.profile).toBeNull();
+  });
+
   it('reports an incomplete lookup when the socket cannot be opened', async () => {
     vi.spyOn(globalThis, 'WebSocket').mockImplementation((() => {
       throw new Error('relay down');

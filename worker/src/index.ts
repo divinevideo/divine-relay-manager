@@ -2404,9 +2404,6 @@ async function handleZendeskRoutes(
   return jsonResponse({ success: false, error: 'Not found' }, 404, corsHeaders);
 }
 
-// Cap best-effort report-note enrichment so a slow relay can't push the Zendesk webhook
-// handler toward Zendesk's delivery timeout. On timeout we post the note without enrichment.
-
 // Parse content report ticket and store mapping, add helpful links as internal note
 async function handleParseReport(
   request: Request,
