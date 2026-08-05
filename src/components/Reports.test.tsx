@@ -133,6 +133,10 @@ describe('Reports stale-data resilience', () => {
     );
 
     expect(await screen.findByText(/1 report$/)).toBeInTheDocument();
+    // Pins the negative side: a warning that is always on is a warning nobody
+    // reads, and an unconditional banner would otherwise pass every assertion
+    // below.
+    expect(screen.queryByText(/refresh is failing/i)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByTitle(/last updated|refresh/i));
 
@@ -164,12 +168,14 @@ describe('Reports stale-data resilience', () => {
   });
 });
 
-// resolvedTargets is subtractive: it hides work a moderator already handled.
-// When a source of it fails, the queue does not get smaller and safer, it gets
-// bigger and wrong, re-presenting handled targets as pending (#221). The list
-// still renders (a moderator with no queue can do nothing), but it must not
-// claim to be complete when the resolution state behind it is missing.
-describe('Reports resolution-state availability', () => {
+// resolvedTargets is subtractive: it hides work a moderator already handled, so
+// a failed source makes the queue bigger and wrong rather than smaller and safe
+// (#221). Surfacing that incompleteness in the UI is #221's job, not this PR's
+// -- fix/221-resolution-state-completeness reports per-source completeness from
+// the worker and gates the queue on it, which supersedes the narrower banner
+// this branch briefly carried. What stays here is the control below, which
+// pins that a resolution label genuinely hides its target.
+describe('Reports resolution filtering', () => {
   const RESOLUTION_LABEL = {
     id: '1'.repeat(64),
     pubkey: '2'.repeat(64),
@@ -196,8 +202,6 @@ describe('Reports resolution-state availability', () => {
   const pendingCount = (n: number) => (_: string, el: Element | null) =>
     el?.tagName === 'P' && (el.textContent ?? '').trim().startsWith(`${n} pending`);
 
-  // Control: proves the label genuinely hides the target, so the test below is
-  // measuring a real un-hide rather than a report that was never filtered.
   it('hides a target that a resolution label has already resolved', async () => {
     stubFetch(() => jsonResponse({ success: true, events: [RESOLUTION_LABEL] }));
 
@@ -209,16 +213,12 @@ describe('Reports resolution-state availability', () => {
 
     expect(await screen.findByText(pendingCount(0))).toBeInTheDocument();
     expect(screen.queryByText(/1 report$/)).not.toBeInTheDocument();
-    // Pins the negative side: a warning that is always on is a warning nobody
-    // reads, and an unconditional banner would otherwise pass every test here.
-    expect(screen.queryByText(/resolution state is unavailable/i)).not.toBeInTheDocument();
   });
 
-  it('warns that resolution state is unavailable when the labels query fails on first load', async () => {
-    stubFetch(() => new Response(JSON.stringify({ success: false, error: 'Relay query timed out before EOSE' }), {
-      status: 502,
-      headers: { 'Content-Type': 'application/json' },
-    }));
+  // The inverse, and the reason the labels read is worth retrying: with no
+  // label set the same target is presented as pending work again.
+  it('lists the target as pending when its resolution label is missing', async () => {
+    stubFetch(() => jsonResponse({ success: true, events: [] }));
 
     render(
       <TestApp>
@@ -226,34 +226,6 @@ describe('Reports resolution-state availability', () => {
       </TestApp>
     );
 
-    // The previously-resolved target is back in the list. That is tolerable
-    // only because the moderator is told the filter behind it is incomplete.
     expect(await screen.findByText(pendingCount(1))).toBeInTheDocument();
-    expect(await screen.findByText(/resolution state is unavailable/i)).toBeInTheDocument();
-  });
-
-  // The warning claims handled work may be listed as pending, which is only
-  // true while resolvedTargets is actually filtering the list. With hide
-  // resolved off nothing is filtered by it, so the claim does not apply and
-  // the banner must stand down rather than cry wolf.
-  it('drops the warning when resolved targets are not being filtered anyway', async () => {
-    stubFetch(() => new Response(JSON.stringify({ success: false, error: 'Relay query timed out before EOSE' }), {
-      status: 502,
-      headers: { 'Content-Type': 'application/json' },
-    }));
-
-    render(
-      <TestApp>
-        <Reports relayUrl="wss://relay.example" />
-      </TestApp>
-    );
-
-    expect(await screen.findByText(/resolution state is unavailable/i)).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('switch', { name: /hide resolved/i }));
-
-    await waitFor(() =>
-      expect(screen.queryByText(/resolution state is unavailable/i)).not.toBeInTheDocument()
-    );
   });
 });

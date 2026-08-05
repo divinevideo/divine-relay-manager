@@ -397,11 +397,13 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     retry: false,
   });
 
-  // resolvedTargets is subtractive: these labels HIDE work already handled. A
-  // failed fetch therefore makes the queue bigger and wrong, not smaller and
-  // safe, so the error has to reach the UI (#221). One retry, because a single
-  // slow relay read should not cost a moderator their whole resolution filter.
-  const { data: resolutionLabels, error: labelsError } = useQuery({
+  // resolvedTargets is subtractive: these labels HIDE work already handled, so
+  // a failed fetch makes the queue bigger and wrong rather than smaller and
+  // safe (#221). One retry, because a single slow relay read should not cost a
+  // moderator their whole resolution filter -- this is the only polling query
+  // here that retries, for that reason. Surfacing the incompleteness in the UI
+  // belongs to #221, which reports per-source completeness from the worker.
+  const { data: resolutionLabels } = useQuery({
     queryKey: ['resolution-labels', relayUrl],
     queryFn: fetchResolutionLabels,
     refetchInterval: 15 * 1000,
@@ -447,8 +449,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // Query all moderation decisions from our D1 database.
   // retry: false is intentional — placeholderData keeps stale data visible on failure,
   // and refetchInterval (15s) provides automatic recovery. This avoids stacking retries
-  // on cold-start timeouts which compound latency. (Previously retry: 2, changed to
-  // match the resilience pattern across all polling queries in this component.)
+  // on cold-start timeouts which compound latency. (Previously retry: 2.) The
+  // resolution-labels query above is the one deliberate exception.
   const { data: allDecisions, isLoading: decisionsLoading } = useQuery({
     queryKey: ['decisions'],
     queryFn: async () => {
@@ -1016,21 +1018,6 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
             <Alert variant="destructive" className="mt-2 py-2">
               <AlertDescription className="text-xs">
                 Live refresh is failing. Showing reports loaded {lastUpdatedText || 'earlier'}; retrying automatically.
-              </AlertDescription>
-            </Alert>
-          )}
-
-          {/* Resolution labels never loaded, so nothing they would have hidden
-              is hidden. The count above is an overcount and some rows are work
-              already done. Only warn when there is no previous label data to
-              fall back on (a failed refresh still has the last good set), and
-              only while resolvedTargets is actually being applied: the pending
-              review queue and the hide-resolved-off view are not filtered by
-              it, so the warning would not be true there. */}
-          {labelsError && !resolutionLabels && hideResolved && !showPendingReview && (
-            <Alert variant="destructive" className="mt-2 py-2">
-              <AlertDescription className="text-xs">
-                Resolution state is unavailable, so reports you have already handled may be listed below as pending. Retrying automatically.
               </AlertDescription>
             </Alert>
           )}
