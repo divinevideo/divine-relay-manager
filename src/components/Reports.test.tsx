@@ -163,3 +163,69 @@ describe('Reports stale-data resilience', () => {
     expect(await screen.findByText(/failed to load reports/i)).toBeInTheDocument();
   });
 });
+
+// resolvedTargets is subtractive: it hides work a moderator already handled.
+// When a source of it fails, the queue does not get smaller and safer, it gets
+// bigger and wrong, re-presenting handled targets as pending (#221). The list
+// still renders (a moderator with no queue can do nothing), but it must not
+// claim to be complete when the resolution state behind it is missing.
+describe('Reports resolution-state availability', () => {
+  const RESOLUTION_LABEL = {
+    id: '1'.repeat(64),
+    pubkey: '2'.repeat(64),
+    created_at: 1751000200,
+    kind: 1985,
+    tags: [['L', 'moderation/resolution'], ['e', 'c'.repeat(64)]],
+    content: '',
+    sig: 'e'.repeat(128),
+  };
+
+  function stubFetch(labelsResponse: () => Response) {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/resolution-labels')) return labelsResponse();
+      if (url.includes('/api/reports')) return jsonResponse({ success: true, events: [REPORT] });
+      if (url.includes('/api/decisions')) return jsonResponse({ success: true, decisions: [] });
+      if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
+      return jsonResponse({ success: true });
+    }));
+  }
+
+  // The pending count sits in a node with a sibling span, so match on the
+  // element's own normalized text rather than a bare string.
+  const pendingCount = (n: number) => (_: string, el: Element | null) =>
+    el?.tagName === 'P' && (el.textContent ?? '').trim().startsWith(`${n} pending`);
+
+  // Control: proves the label genuinely hides the target, so the test below is
+  // measuring a real un-hide rather than a report that was never filtered.
+  it('hides a target that a resolution label has already resolved', async () => {
+    stubFetch(() => jsonResponse({ success: true, events: [RESOLUTION_LABEL] }));
+
+    render(
+      <TestApp>
+        <Reports relayUrl="wss://relay.example" />
+      </TestApp>
+    );
+
+    expect(await screen.findByText(pendingCount(0))).toBeInTheDocument();
+    expect(screen.queryByText(/1 report$/)).not.toBeInTheDocument();
+  });
+
+  it('warns that resolution state is unavailable when the labels query fails on first load', async () => {
+    stubFetch(() => new Response(JSON.stringify({ success: false, error: 'Relay query timed out before EOSE' }), {
+      status: 502,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+
+    render(
+      <TestApp>
+        <Reports relayUrl="wss://relay.example" />
+      </TestApp>
+    );
+
+    // The previously-resolved target is back in the list. That is tolerable
+    // only because the moderator is told the filter behind it is incomplete.
+    expect(await screen.findByText(pendingCount(1))).toBeInTheDocument();
+    expect(await screen.findByText(/resolution state is unavailable/i)).toBeInTheDocument();
+  });
+});

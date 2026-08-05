@@ -242,20 +242,33 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     mutationFn: async () => {
       if (!context.target) throw new Error('No target');
       // Delete all decisions for this target
-      await deleteDecisions(context.target.value);
+      const primary = await deleteDecisions(context.target.value);
       // Also delete decisions for the pubkey if this is an event report
+      let secondary = { labelCleanupFailed: false };
       if (context.target.type === 'event' && context.reportedUser.pubkey) {
-        await deleteDecisions(context.reportedUser.pubkey);
+        secondary = await deleteDecisions(context.reportedUser.pubkey);
       }
+      return { labelCleanupFailed: primary.labelCleanupFailed || secondary.labelCleanupFailed };
     },
-    onSuccess: () => {
+    onSuccess: ({ labelCleanupFailed }) => {
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      // Resolution labels also gate whether the report reappears, so a reopen
+      // that does not refresh them can leave the target hidden for a poll cycle.
+      queryClient.invalidateQueries({ queryKey: ['resolution-labels'] });
       decisionLog.refetch();
       pubkeyDecisionLog.refetch();
-      toast({
-        title: "Report reopened",
-        description: "This report is now back in the pending queue",
-      });
+      // The decisions are gone either way, but a surviving resolution label
+      // keeps the report out of the queue. Do not claim it is back.
+      toast(labelCleanupFailed
+        ? {
+            title: "Reopened, but resolution labels could not be cleared",
+            description: "The relay did not answer, so this report may stay hidden. Try reopening again.",
+            variant: "destructive" as const,
+          }
+        : {
+            title: "Report reopened",
+            description: "This report is now back in the pending queue",
+          });
     },
     onError: (error: Error) => {
       toast({

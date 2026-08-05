@@ -1284,6 +1284,46 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
     expect(body.error).toMatch(/timed out/i);
   });
 
+  // A reopen deletes the D1 decisions unconditionally, but clearing the relay's
+  // resolution labels is best-effort. When that read fails the label survives and
+  // keeps the report hidden, so the response has to say so or the UI reports a
+  // clean reopen that did not happen.
+  it('flags labelCleanupFailed when the resolution-label query fails during a reopen', async () => {
+    const db = {
+      prepare: () => {
+        const stmt: Record<string, unknown> = {
+          bind: () => stmt,
+          run: async () => ({ success: true, meta: { changes: 3 } }),
+          first: async () => null,
+          all: async () => ({ results: [] }),
+        };
+        return stmt;
+      },
+    };
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const resPromise = worker.fetch(
+      new Request(`https://api.example/api/decisions/${'a'.repeat(64)}`, {
+        method: 'DELETE',
+        headers: { 'X-Admin-Key': 'test-admin-key' },
+      }),
+      { ...(reportsEnv as object), DB: db } as never,
+      ctx,
+    );
+    await new Promise((r) => setTimeout(r, 0));
+    // Both label filters close before EOSE, so neither cleanup can run.
+    for (const sock of FakeRelaySocket.instances) sock.emit('close', {});
+    await new Promise((r) => setTimeout(r, 0));
+    for (const sock of FakeRelaySocket.instances) sock.emit('close', {});
+
+    const res = await resPromise;
+    expect(res.status).toBe(200);
+    const body = await res.json() as { success: boolean; deleted: number; labelCleanupFailed: boolean };
+    expect(body.success).toBe(true);
+    expect(body.deleted).toBe(3); // the decisions really were deleted
+    expect(body.labelCleanupFailed).toBe(true); // but the reopen is not clean
+  });
+
   it('returns 502 when the relay closes before EOSE on resolution labels', async () => {
     const resPromise = worker.fetch(labelsRequest(), reportsEnv, ctx);
     await new Promise((r) => setTimeout(r, 0));

@@ -397,12 +397,16 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     retry: false,
   });
 
-  const { data: resolutionLabels } = useQuery({
+  // resolvedTargets is subtractive: these labels HIDE work already handled. A
+  // failed fetch therefore makes the queue bigger and wrong, not smaller and
+  // safe, so the error has to reach the UI (#221). One retry, because a single
+  // slow relay read should not cost a moderator their whole resolution filter.
+  const { data: resolutionLabels, error: labelsError } = useQuery({
     queryKey: ['resolution-labels', relayUrl],
     queryFn: fetchResolutionLabels,
     refetchInterval: 15 * 1000,
     placeholderData: (previousData) => previousData,
-    retry: false,
+    retry: 1,
   });
 
   // Query banned pubkeys from relay (NIP-86 RPC)
@@ -1012,6 +1016,18 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
             <Alert variant="destructive" className="mt-2 py-2">
               <AlertDescription className="text-xs">
                 Live refresh is failing. Showing reports loaded {lastUpdatedText || 'earlier'}; retrying automatically.
+              </AlertDescription>
+            </Alert>
+          )}
+
+          {/* Resolution labels never loaded, so nothing they would have hidden
+              is hidden. The count above is an overcount and some rows are work
+              already done. Only warn when there is no previous label data to
+              fall back on; a failed refresh still has the last good set. */}
+          {labelsError && !resolutionLabels && (
+            <Alert variant="destructive" className="mt-2 py-2">
+              <AlertDescription className="text-xs">
+                Resolution state is unavailable, so reports you have already handled may be listed below as pending. Retrying automatically.
               </AlertDescription>
             </Alert>
           )}

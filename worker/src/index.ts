@@ -9,7 +9,7 @@ import {
   type SecretStoreSecret,
 } from './nip86';
 import { ensureSchema } from './db';
-import { buildReportsFilter, isUnconfirmedTargetedMiss } from './reports-filter';
+import { buildReportsFilter } from './reports-filter';
 import { generatePreAuthToken, verifyPreAuthToken, base64UrlEncode } from './zendesk-preauth';
 import { deriveFunnelcakeApiUrl, proxyFunnelcakeRequest } from './funnelcake-proxy';
 import type { KeycastEnv } from './keycast-client';
@@ -523,13 +523,12 @@ export default {
       if (path === '/api/reports' && request.method === 'GET') {
         const filter = buildReportsFilter(url.searchParams);
         const result = await queryRelay(filter, env.RELAY_URL);
+        // An unconfirmed read is now a failure inside queryRelay itself, so a
+        // targeted lookup can no longer come back empty-but-unconfirmed here:
+        // that case 502s below, and the client still shows "unavailable"
+        // rather than a false "deleted".
         if (!result.success) {
           return jsonResponse({ success: false, error: result.error }, 502, corsHeaders);
-        }
-        // A targeted lookup that came back empty but unconfirmed (relay never sent EOSE) is
-        // ambiguous — 502 so the client shows "unavailable" (retry), not a false "deleted".
-        if (isUnconfirmedTargetedMiss(url.searchParams, result)) {
-          return jsonResponse({ success: false, error: 'Relay did not confirm results (timeout)' }, 502, corsHeaders);
         }
         return jsonResponse({ success: true, events: result.events }, 200, corsHeaders);
       }
@@ -1414,6 +1413,7 @@ async function handleDeleteDecisions(
     await ensureSchemaOnce(env.DB);
 
     let labelsDeleted = 0;
+    let labelCleanupFailed = false;
 
     // First, query for and delete any resolution labels (kind 1985) on the relay
     // Try both 'e' tag (event target) and 'p' tag (pubkey target)
@@ -1425,8 +1425,12 @@ async function handleDeleteDecisions(
     for (const filter of labelFilters) {
       const queryResult = await queryRelay(filter, env.RELAY_URL);
       if (!queryResult.success) {
-        // Best-effort cleanup: a timed-out label query means some resolution
-        // labels may survive this reopen. Log it; a later reopen retries.
+        // Best-effort cleanup, but the caller has to hear about it. The D1
+        // delete below is unconditional, so a surviving resolution label
+        // leaves the report hidden by resolvedTargets even though its
+        // decisions are gone. Reporting a clean reopen would tell the
+        // moderator the report is back in the queue when it is not.
+        labelCleanupFailed = true;
         console.warn('[reopen] resolution-label query failed, labels may remain:', queryResult.error);
       }
       if (queryResult.success && queryResult.events && queryResult.events.length > 0) {
@@ -1468,6 +1472,7 @@ async function handleDeleteDecisions(
       success: true,
       deleted: result.meta.changes || 0,
       labelsDeleted,
+      labelCleanupFailed,
     }, 200, corsHeaders);
   } catch (error) {
     console.error('Delete decisions error:', error);
@@ -1637,7 +1642,7 @@ async function handleModerateMedia(
 async function queryRelay(
   filter: object,
   relayUrl: string
-): Promise<{ success: boolean; events?: object[]; error?: string; complete?: boolean }> {
+): Promise<{ success: boolean; events?: object[]; error?: string }> {
   return new Promise((resolve) => {
     try {
       const ws = new WebSocket(relayUrl);
@@ -1674,7 +1679,19 @@ async function queryRelay(
             resolved = true;
             ws.close();
             // EOSE = relay confirmed end of stored events, so an empty result is real.
-            resolve({ success: true, events, complete: true });
+            resolve({ success: true, events });
+          } else if (data[0] === 'CLOSED' && data[1] === subId) {
+            // NIP-01: the relay ended the subscription instead of fulfilling it,
+            // with a machine-readable reason (funnelcake sends
+            // "error: could not complete query" when its store fails the query).
+            // Without this branch the socket just sits until the timeout, so a
+            // failure the relay already reported gets called a timeout instead,
+            // 5s later than it needed to be.
+            clearTimeout(timeout);
+            resolved = true;
+            ws.close();
+            const reason = typeof data[2] === 'string' && data[2] ? data[2] : 'no reason given';
+            resolve({ success: false, error: `Relay closed the subscription: ${reason}` });
           }
         } catch {
           // Ignore parse errors
