@@ -257,8 +257,10 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
       queryClient.invalidateQueries({ queryKey: ['resolution-labels'] });
       decisionLog.refetch();
       pubkeyDecisionLog.refetch();
-      // The decisions are gone either way, but a surviving resolution label
-      // keeps the report out of the queue. Do not claim it is back.
+      // Report what the reopen did, not where the report ends up. Whether it
+      // returns to the queue depends on resolvedTargets, which is also built
+      // from relay bans and deletions that reopen never undoes -- so a
+      // ban-resolved report stays hidden even on a fully clean run.
       toast(labelCleanupFailed
         ? {
             title: "Reopened, but resolution labels could not be cleared",
@@ -267,10 +269,18 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
           }
         : {
             title: "Report reopened",
-            description: "This report is now back in the pending queue",
+            description: "Moderation decisions and resolution labels were cleared",
           });
     },
     onError: (error: Error) => {
+      // The first delete may already have committed server-side before the
+      // second threw, so the cached decision state can be stale even though
+      // the action reports failure. Refresh it rather than leaving the panel
+      // showing decisions the server no longer has.
+      queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      queryClient.invalidateQueries({ queryKey: ['resolution-labels'] });
+      decisionLog.refetch();
+      pubkeyDecisionLog.refetch();
       toast({
         title: "Failed to reopen",
         description: error.message,
@@ -1088,7 +1098,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent side="bottom" className="max-w-xs">
-                    <p>Reopen this report for review. Removes the dismiss decision and puts it back in the pending queue.</p>
+                    <p>Reopen this report for review. Clears its moderation decisions and resolution labels. A report hidden by a relay ban or deletion stays hidden until that is lifted.</p>
                   </TooltipContent>
                 </Tooltip>
               )}
