@@ -1304,6 +1304,38 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
     expect(body.error).not.toMatch(/timed out/i); // reported as what the relay said
   });
 
+  // The subscription id is what makes CLOSED ours. A relay multiplexes frames
+  // for every open subscription down one socket, so an unmatched CLOSED must
+  // not end a query that is still legitimately running.
+  it('ignores a CLOSED naming a different subscription', async () => {
+    vi.useFakeTimers();
+    const resPromise = worker.fetch(reportsRequest(), reportsEnv, ctx);
+    await vi.advanceTimersByTimeAsync(0);
+    const sock = FakeRelaySocket.instances[0];
+    expect(sock).toBeDefined();
+    sock.message(['CLOSED', 'some-other-subscription', 'error: could not complete query']);
+    // Still running: only the 5s timeout ends it, and it ends as a timeout.
+    await vi.advanceTimersByTimeAsync(5000);
+    const res = await resPromise;
+    const body = await res.json() as { error?: string };
+    expect(body.error).toMatch(/timed out/i);
+    expect(body.error).not.toMatch(/closed the subscription/i);
+  });
+
+  // NIP-01 makes the CLOSED message a required field, but a relay that sends an
+  // empty one must still produce a readable error rather than "undefined".
+  it('reports a CLOSED with no reason as an unexplained close', async () => {
+    const resPromise = worker.fetch(reportsRequest(), reportsEnv, ctx);
+    await new Promise((r) => setTimeout(r, 0));
+    const sock = FakeRelaySocket.instances[0];
+    expect(sock).toBeDefined();
+    sock.message(['CLOSED', sock.subId()]);
+    const res = await resPromise;
+    expect(res.status).toBe(502);
+    const body = await res.json() as { error?: string };
+    expect(body.error).toMatch(/no reason given/i);
+  });
+
   // A reopen deletes the D1 decisions unconditionally, but clearing the relay's
   // resolution labels is best-effort. When that read fails the label survives and
   // keeps the report hidden, so the response has to say so or the UI reports a
@@ -1446,6 +1478,42 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
     const body = await res.json() as { labelsDeleted: number; labelCleanupFailed: boolean };
     expect(body.labelsDeleted).toBe(0);
     expect(body.labelCleanupFailed).toBe(true);
+  });
+
+  // An incomplete read is not an empty one. Before this PR a timeout resolved
+  // success:true with whatever had arrived, so the cleanup banned those labels;
+  // treating the read as a failure must not also throw them away, because the
+  // D1 delete below runs either way. A label received and left alive keeps the
+  // report hidden, so discarding it makes reopen strictly worse than not
+  // changing queryRelay at all.
+  it('bans the resolution labels it received even when the read did not complete', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response(JSON.stringify({ result: true }), { status: 200 })
+    ));
+
+    const resPromise = worker.fetch(
+      reopenRequest(),
+      { ...(reportsEnv as object), DB: reopenDb(), NOSTR_NSEC: TEST_NSEC } as never,
+      ctx,
+    );
+
+    // First filter delivers a label, then the socket drops before EOSE.
+    // Second filter closes empty. Neither read completed.
+    for (let i = 0; i < 2; i++) {
+      for (let t = 0; t < 100 && !FakeRelaySocket.instances[i]; t++) {
+        await new Promise((r) => setTimeout(r, 0));
+      }
+      const sock = FakeRelaySocket.instances[i];
+      expect(sock).toBeDefined();
+      if (i === 0) sock.message(['EVENT', sock.subId(), LABEL_A]);
+      sock.emit('close', {});
+    }
+
+    const res = await resPromise;
+    const body = await res.json() as { labelsDeleted: number; labelCleanupFailed: boolean };
+    expect(body.labelsDeleted).toBe(1); // the label that arrived was still removed
+    expect(body.labelCleanupFailed).toBe(true); // and the read is still reported incomplete
   });
 
   it('returns 502 when the relay closes before EOSE on resolution labels', async () => {
