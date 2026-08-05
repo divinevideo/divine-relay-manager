@@ -2153,21 +2153,20 @@ describe('handleGetAgeReviewFunnel', () => {
 });
 
 describe('ageReviewActiveGuard — non-canonical pubkey', () => {
-  // handleRelayRpc rejects these with a 400 before the guard is reached, so in
-  // practice this branch does not fire. It is kept as defence in depth for any
-  // future caller that skips that check, and tested directly because the
-  // handler now shields it from the route-level tests.
+  // Skipped in BOTH modes, deliberately. A case is keyed to a real lowercase pubkey,
+  // so a non-canonical value cannot have one to skip past -- there is nothing for the
+  // guard to protect. handleRelayRpc rejects these outright on the enforce direction;
+  // the reverse direction is allowed to carry them so a row banned with a bad value
+  // stays removable, and that only works if the guard lets it through.
   const CORS = { 'Access-Control-Allow-Origin': 'https://app.divine.video' };
   const envWithDb = { DB: { prepare: () => ({ bind: () => ({ first: async () => null }) }) } } as unknown as AgeReviewEnv;
 
-  it('refuses under failClosed, because a byte-exact lookup could never match it', async () => {
+  it('proceeds under failClosed, because no case can be keyed to it', async () => {
     const response = await ageReviewActiveGuard('NOT_CANONICAL_HEX', envWithDb, CORS, 'err', { failClosed: true });
-    expect(response?.status).toBe(503);
-    const body = await response?.json() as { code: string };
-    expect(body.code).toBe('age_review_check_failed');
+    expect(response).toBeNull();
   });
 
-  it('proceeds when not failing closed, matching every other unrunnable check', async () => {
+  it('proceeds when not failing closed', async () => {
     const response = await ageReviewActiveGuard('NOT_CANONICAL_HEX', envWithDb, CORS, 'err');
     expect(response).toBeNull();
   });

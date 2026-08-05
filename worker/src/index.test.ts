@@ -185,7 +185,9 @@ describe('notifyModerationService null token', () => {
         },
         body: JSON.stringify({
           method: 'banpubkey',
-          params: ['deadbeef', 'test reason'],
+          // A real 64-hex pubkey: banpubkey rejects a non-canonical one outright,
+          // and this test is about the DM path, not the pubkey format.
+          params: ['abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234', 'test reason'],
         }),
       }),
       testEnv,
@@ -717,23 +719,23 @@ describe('relay-rpc account-state side effects', () => {
     fetchSpy.mockRestore();
   });
 
-  it('rejects a non-canonical pubkey with a 400, before the guard runs', async () => {
-    // The guard's lookup is byte-exact, so a non-canonical pubkey cannot match a
-    // real case even when one exists -- it would report "no case" for an account
-    // that may well be under review. Answer it here rather than leaving it to
-    // the guard: this is the same 400 handleGetActiveAgeReviewCase already gives
-    // for the same regex, and a malformed pubkey never becomes valid on a retry,
-    // so the retryable 5xx class is the wrong answer for it.
+  it('rejects a non-canonical pubkey on the ENFORCE direction', async () => {
+    // A value the relay stores byte-exactly enforces on nobody, so a ban or suspend
+    // carrying one is a no-op that reports success. 400 rather than the guard's 503:
+    // this is the same answer handleGetActiveAgeReviewCase gives for the same regex,
+    // and unlike a D1 outage a malformed pubkey never becomes valid on a retry.
     const fetchSpy = makeFetchSpy();
     const waitUntil = vi.fn();
     const testCtx = { waitUntil } as unknown as ExecutionContext;
 
-    const response = await callRelayRpc(
-      'unbanpubkey', [VALID_PUBKEY.toUpperCase()], makeAccountStateEnvWithDb(null), testCtx,
-    );
-    expect(response.status).toBe(400);
-    const body = await response.json() as { error: string };
-    expect(body.error).toBe('Invalid pubkey');
+    for (const method of ['banpubkey', 'suspendpubkey']) {
+      const response = await callRelayRpc(
+        method, [VALID_PUBKEY.toUpperCase(), 'policy'], makeAccountStateEnvWithDb(null), testCtx,
+      );
+      expect(response.status, `${method} must reject a non-canonical pubkey`).toBe(400);
+      const body = await response.json() as { error: string };
+      expect(body.error).toBe('Invalid pubkey');
+    }
 
     await drain(waitUntil);
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -741,20 +743,21 @@ describe('relay-rpc account-state side effects', () => {
     fetchSpy.mockRestore();
   });
 
-  it('rejects a non-canonical pubkey on the enforce direction too', async () => {
-    // Not a fail-open/fail-closed question: the value is unusable for suspend as
-    // well, since the relay stores these bytes exactly.
+  it('lets the REVERSE direction carry a non-canonical pubkey, so a bad row stays removable', async () => {
+    // Deliberately asymmetric. banpubkey does not go through this check on main and
+    // rows written before it did still exist, stored byte-exactly. If the un-ban
+    // refused what the ban accepted, those rows could never be cleared from the UI --
+    // cleanup would be stricter than the thing that created the mess. Nothing is
+    // risked by allowing it: an age-review case is keyed to a real lowercase pubkey,
+    // so a non-canonical value cannot have one to skip.
     const fetchSpy = makeFetchSpy();
     const waitUntil = vi.fn();
     const testCtx = { waitUntil } as unknown as ExecutionContext;
 
     const response = await callRelayRpc(
-      'suspendpubkey', [VALID_PUBKEY.toUpperCase(), 'policy'], makeAccountStateEnvWithDb(null), testCtx,
+      'unbanpubkey', [VALID_PUBKEY.toUpperCase()], makeAccountStateEnvWithDb(null), testCtx,
     );
-    expect(response.status).toBe(400);
-
-    await drain(waitUntil);
-    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(response.status).toBe(200);
 
     fetchSpy.mockRestore();
   });

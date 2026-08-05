@@ -140,11 +140,10 @@ export async function getActiveAgeReviewCase(
  * and has to be fixed rather than papered over. `banpubkey` is unguarded, so
  * severe enforcement still works throughout.
  *
- * Under `failClosed` there are three ways the check "cannot happen", and all
- * three refuse identically: no DB binding, a thrown lookup, and a non-canonical
- * pubkey the byte-exact lookup could never match. The last is defence in depth
- * — relay-rpc answers a malformed pubkey with 400 before reaching here — but
- * the guard does not assume its callers validate.
+ * Under `failClosed` there are two ways the check "cannot happen", and both
+ * refuse identically: no DB binding, and a thrown lookup. A non-canonical pubkey
+ * is NOT one of them: no case can be keyed to a value the lookup could never
+ * match, so there is nothing to refuse on its behalf.
  *
  * `failClosed` is opt-in PER CALL SITE, not a property of the guard. Only
  * relay-rpc's reversals pass it today; bulk-moderate deliberately does not, for
@@ -166,25 +165,17 @@ export async function ageReviewActiveGuard(
     code: 'age_review_check_failed',
   }, 503, corsHeaders);
 
-  // A non-canonical pubkey is also "the check cannot happen": the lookup below
-  // is byte-exact, so it would miss and report "no case" for an account that may
-  // well have one. Under failClosed that refuses like any other unrunnable
-  // check.
+  // A non-canonical pubkey proceeds in both modes, and that is not the same
+  // omission the earlier version made. It skipped on the stated grounds that the
+  // caller validates, which no caller did. The reason now is that there is nothing
+  // here to protect: a case is keyed to a real lowercase pubkey, so a value that
+  // cannot match one cannot be hiding an open case either. Refusing would only
+  // block the reverse direction, which deliberately carries such values so a row
+  // banned with one stays removable (see handleRelayRpc).
   //
-  // Defence in depth, not the primary check: handleRelayRpc rejects these with a
-  // 400 before calling the guard, which is the better answer (a malformed pubkey
-  // never becomes valid on a retry). This stays because the guard must not
-  // depend on its callers validating -- the previous version did, and what
-  // actually stopped the mutation was byte-exact matching in Keycast and
-  // ClickHouse, written for other purposes and free to be relaxed without
-  // anyone connecting the change to this guard.
-  if (!/^[0-9a-f]{64}$/.test(pubkey)) {
-    if (opts.failClosed) {
-      console.error('[ageReviewActiveGuard] non-canonical pubkey; refusing (fail-closed)');
-      return cannotCheck();
-    }
-    return null;
-  }
+  // The enforce direction does not reach this: handleRelayRpc answers those with a
+  // 400 first, since a ban on a value the relay cannot match enforces on nobody.
+  if (!/^[0-9a-f]{64}$/.test(pubkey)) return null;
 
   // A missing binding is the check not happening, so it refuses under
   // failClosed exactly as a thrown lookup does. Handling only the throw would

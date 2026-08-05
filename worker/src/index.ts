@@ -1066,25 +1066,35 @@ async function handleRelayRpc(
   //
   // Age-review's own enforcement calls the nip86 helpers directly, so it does not
   // reach this guard and can still act on its own cases.
+  const target = body.params?.[0] ? String(body.params[0]) : '';
+
+  // Canonical hex is required to ENFORCE, but deliberately not to REVERSE.
+  //
+  // The relay stores and matches these bytes exactly, so a ban or suspend carrying a
+  // non-canonical pubkey enforces on nobody while reporting success. 400 rather than
+  // the guard's 503: it is the same answer handleGetActiveAgeReviewCase gives for the
+  // same regex, and unlike a D1 outage a malformed pubkey never becomes valid on a
+  // retry, so the retryable class would be a lie.
+  //
+  // The reverse direction must NOT get the same check. banpubkey did not always have
+  // one, and rows written with a non-canonical value are stored byte-exactly and are
+  // removable only by sending that same value back. Refusing it here would make
+  // cleanup stricter than the thing that created the mess, leaving those rows stuck in
+  // the ban list with no way out of the UI. Nothing is risked by allowing it: an
+  // age-review case is keyed to a real lowercase pubkey, so a non-canonical value has
+  // no case to skip past, which is why the guard also lets it through.
+  if (
+    (body.method === 'banpubkey' || body.method === 'suspendpubkey')
+    && !/^[0-9a-f]{64}$/.test(target)
+  ) {
+    return jsonResponse({ success: false, error: 'Invalid pubkey' }, 400, corsHeaders);
+  }
+
   if (
     body.method === 'suspendpubkey' ||
     body.method === 'unsuspendpubkey' ||
     body.method === 'unbanpubkey'
   ) {
-    const target = body.params?.[0] ? String(body.params[0]) : '';
-
-    // Canonical hex or nothing, decided before the guard. The guard's lookup is
-    // byte-exact, so a non-canonical pubkey could never match a real case, and
-    // the relay stores these bytes exactly, so it could never enforce either.
-    // 400 rather than the guard's 503: this is the same answer
-    // handleGetActiveAgeReviewCase gives for the same regex, and unlike a D1
-    // outage a malformed pubkey never becomes valid on a retry, so the retryable
-    // class would be a lie. The guard keeps its own check for anything that
-    // reaches it by another route.
-    if (!/^[0-9a-f]{64}$/.test(target)) {
-      return jsonResponse({ success: false, error: 'Invalid pubkey' }, 400, corsHeaders);
-    }
-
     if (env.DB) {
       // Bootstrapping is part of the check, not a precondition for it: a DDL
       // failure must reach the same fail-open/fail-closed decision as a failed
