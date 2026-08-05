@@ -974,7 +974,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="space-y-3">
+          <div className="space-y-3" data-testid="reports-loading-skeleton">
             {[...Array(5)].map((_, i) => (
               <Skeleton key={i} className="h-16 w-full" />
             ))}
