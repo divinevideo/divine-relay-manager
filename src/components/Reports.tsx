@@ -12,7 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { ResolutionUnavailablePane, ResolutionOverrideWarning } from "@/components/ResolutionStateNotice";
+import { ResolutionUnavailablePane, ResolutionOverrideWarning, StaleResolutionBanner } from "@/components/ResolutionStateNotice";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Switch } from "@/components/ui/switch";
@@ -666,6 +666,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const blockingPaused = blockingLoad.some(s => s.isPaused);
   const blockingErrors = gatingSources.filter(s => !s.hasData && s.error);
   const decisionsUnavailable = blockingErrors.some(s => s.key === 'decisions');
+  // Errored but still holding previous data: filter with the stale set, say so.
+  const staleSources = gatingSources.filter(s => s.hasData && s.error);
 
   // Get all unique categories from reports for filter chips
   const availableCategories = useMemo(() => {
@@ -1154,6 +1156,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
             <ResolutionOverrideWarning
               sources={blockingErrors.map(s => ({ key: s.key, label: s.label }))}
               decisionsUnavailable={decisionsUnavailable}
+            />
+          )}
+
+          {staleSources.length > 0 && (
+            <StaleResolutionBanner
+              sources={staleSources.map(s => ({ key: s.key, label: s.label, updatedAt: s.updatedAt }))}
             />
           )}
 

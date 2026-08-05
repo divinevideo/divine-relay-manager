@@ -394,3 +394,45 @@ describe('offline pauses resolution sources instead of failing them (#221)', () 
     expect(screen.queryByTestId('reports-loading-skeleton')).not.toBeInTheDocument();
   });
 });
+
+describe('warm failure keeps the stale filter and says so (#221)', () => {
+  // Driving the real 15s poll with fake timers (as the brief's first draft
+  // did) hung: React Query's internal retry/backoff scheduling under fake
+  // timers left the test unable to settle within the 5s test timeout, and a
+  // timed-out `vi.useFakeTimers()` test leaks fake timers into whatever runs
+  // next in the file. The brief anticipated this and names the fallback used
+  // here: seed the cache with good data via a QueryClient the test holds
+  // directly, then render with a fetch that fails for that one source. That
+  // reaches the same warm state (hasData && error) without touching the
+  // clock at all.
+  it('still hides a target resolved by a source whose refresh has started failing', async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, retryDelay: 0 }, mutations: { retry: false, retryDelay: 0 } },
+    });
+    // Past staleTime (30s) so the query refetches on mount instead of
+    // serving the seeded data forever.
+    const seededAt = Date.now() - 60_000;
+    queryClient.setQueryData(['banned-pubkeys'], [{ pubkey: REPORTED_PUBKEY }], { updatedAt: seededAt });
+
+    stubFetch({ labels: 'empty', bannedPubkeys: 'error', bannedEvents: 'empty', decisions: 'empty' });
+    renderReports(queryClient);
+
+    await waitFor(() => expect(screen.getByText(/0 pending/i)).toBeInTheDocument());
+    // The target stays hidden using the stale (seeded) banned-pubkeys data,
+    // not just because the fetch happens to still be pending.
+    expect(screen.queryByText(REPORTED_NPUB)).not.toBeInTheDocument();
+    expect(await screen.findByText(/showing resolution state from/i)).toBeInTheDocument();
+
+    // Nothing left running: the failed query has retry:false, so it settles
+    // into an error state on its own without needing a manual cleanup.
+  });
+
+  it('shows no stale banner while every source is refreshing cleanly', async () => {
+    // The negative. A banner rendered unconditionally passes the test above.
+    stubFetch({ labels: 'empty', bannedPubkeys: 'resolves', bannedEvents: 'empty', decisions: 'empty' });
+    renderReports();
+
+    await waitFor(() => expect(screen.getByText(/0 pending/i)).toBeInTheDocument());
+    expect(screen.queryByText(/showing resolution state from/i)).not.toBeInTheDocument();
+  });
+});

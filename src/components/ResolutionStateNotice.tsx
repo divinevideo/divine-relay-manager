@@ -64,6 +64,28 @@ export function ResolutionUnavailablePane({
   );
 }
 
+// A source whose refresh is failing but which still holds its last good data.
+// The filter is still correct as of that timestamp, so the queue stays up and
+// the moderator is told how old the resolution state is.
+export function StaleResolutionBanner({
+  sources,
+}: {
+  sources: Array<NoticeSource & { updatedAt: number }>;
+}) {
+  const oldest = Math.min(...sources.map(s => s.updatedAt));
+  const minutes = Math.max(0, Math.floor((Date.now() - oldest) / 60_000));
+  const age = minutes < 1 ? 'less than a minute ago' : `${minutes} minute${minutes === 1 ? '' : 's'} ago`;
+
+  return (
+    <Alert className="mt-2 py-2">
+      <AlertDescription className="text-xs">
+        {sourceList(sources)} could not refresh. Showing resolution state from {age};
+        retrying automatically.
+      </AlertDescription>
+    </Alert>
+  );
+}
+
 // Stays on screen for as long as the override is in effect. A one-off toast
 // would let a moderator forget they are looking at an unfiltered queue.
 export function ResolutionOverrideWarning({
