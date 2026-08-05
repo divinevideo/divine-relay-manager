@@ -535,11 +535,35 @@ export default {
       }
 
       if (path === '/api/resolution-labels' && request.method === 'GET') {
-        const result = await queryRelay({ kinds: [1985], '#L': ['moderation/resolution'], limit: 500 }, env.RELAY_URL);
+        // A label that ages out of this window stops hiding its target, and the
+        // queue then shows handled work as pending with nothing explaining it
+        // (#221). Say when the window is full and how far back it reaches. A
+        // corpus of exactly RESOLUTION_LABEL_LIMIT over-warns by one case, which
+        // is the safe direction to be wrong.
+        const RESOLUTION_LABEL_LIMIT = 500;
+        const result = await queryRelay(
+          { kinds: [1985], '#L': ['moderation/resolution'], limit: RESOLUTION_LABEL_LIMIT },
+          env.RELAY_URL
+        );
         if (!result.success) {
           return jsonResponse({ success: false, error: result.error }, 502, corsHeaders);
         }
-        return jsonResponse({ success: true, events: result.events }, 200, corsHeaders);
+        const events = (result.events || []) as Array<{ created_at?: number }>;
+        const timestamps = events
+          .map((e) => e.created_at)
+          .filter((t): t is number => typeof t === 'number');
+        // Not jsonResponse(): its ApiResponse type is shared across every route,
+        // and truncated/oldest_covered only apply here and on /api/decisions
+        // (which took the same approach in worker/src/index.ts around line 1381).
+        return new Response(JSON.stringify({
+          success: true,
+          events: result.events,
+          truncated: events.length >= RESOLUTION_LABEL_LIMIT,
+          oldest_covered: timestamps.length > 0 ? Math.min(...timestamps) : null,
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders },
+        });
       }
 
       // Bulk moderation (server-side iteration for batch operations)
