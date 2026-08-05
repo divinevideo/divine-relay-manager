@@ -19,9 +19,16 @@ import { useToast } from '@/hooks/useToast';
  * Returns a predicate. Call it first in a mutation's `onError`; if it returns
  * true it has already handled the error and the caller should return.
  *
- * This is shared rather than copied because it is needed at every call site of a
- * guarded RPC, and a copied block is easy to omit on a new one. It was, on the
- * `allow_user` path, which reached `unbanpubkey` and dead-ended.
+ * Shared rather than copied because extending the guard to `unbanpubkey` makes
+ * four new call sites able to receive this code — `UserActions` un-ban,
+ * `UserManagement` allow_user and un-ban, and `EventDetail` un-ban — on top of
+ * the two that already handled it. Six near-identical copies is how one gets
+ * missed, so the handling lives here and each site calls it.
+ *
+ * Not every caller of a guarded RPC needs it: `DebugPanel` issues arbitrary RPC
+ * methods and records the error into an action log rather than surfacing a
+ * moderator-facing toast, so it deliberately does not use this. The rule is
+ * whether a moderator is waiting on the outcome, not whether the RPC is guarded.
  */
 export function useAgeReviewGuardRedirect() {
   const navigate = useNavigate();
