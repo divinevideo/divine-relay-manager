@@ -18,6 +18,7 @@ import {
   handleGetAgeReviewFunnel,
   ageReviewActiveGuard,
   composeContactNotes,
+  buildParentOutreachBody,
   type AgeReviewEnv,
 } from './age-review';
 import type { AgeReviewCase } from '../../shared/age-review';
@@ -1592,7 +1593,9 @@ describe('parent contact record', () => {
     expect(payload.ticket.requester.name).toBe('parent@example.com');
     expect(payload.ticket.requester.name).not.toContain('Claimed parent');
     expect(payload.ticket.requester.name).not.toBe('Parent/Guardian');
-    expect(payload.ticket.comment.body).not.toContain('Some One');
+    // The outreach is sent as html_body; assert on the field that actually ships,
+    // or this passes vacuously against an undefined `body`.
+    expect(payload.ticket.comment.html_body).not.toContain('Some One');
   });
 
   it('writes the identity block to the contact notes', async () => {
@@ -2032,6 +2035,9 @@ describe('handleParentContact Zendesk integration', () => {
     expect(ticketPut.ticket.requester.name).toBe('parent@example.com');
     expect(ticketPut.ticket.requester.name).not.toContain('Some One');
 
+    // Nor may the message body carry it: same unverified address.
+    expect(ticketPut.ticket.comment.html_body).not.toContain('Some One');
+
     // Agent-only: the block reached the contact, with the right case.
     const contactPut = mockFetch.mock.calls.find(
       (call: unknown[]) => (call[0] as string).includes('/users/') && (call[1] as { method?: string })?.method === 'PUT',
@@ -2042,6 +2048,91 @@ describe('handleParentContact Zendesk integration', () => {
     expect(notes).toContain('Some One');
 
     vi.unstubAllGlobals();
+  });
+
+  it('sends the outreach as html_body so Zendesk renders it as rich mail', async () => {
+    const c = makeCase({ state: 'restricted_pending_user_response' });
+    const db = {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        bind: vi.fn().mockReturnValue({
+          first: vi.fn().mockResolvedValue(
+            sql.includes('WHERE id = ? AND pubkey = ?') ? c : null
+          ),
+          run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+        }),
+      })),
+    };
+
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ ticket: { id: 42 } }),
+    });
+    vi.stubGlobal('fetch', mockFetch);
+
+    const req = new Request('https://api.test/v1/minor-review-cases/case-1/parent-contact', {
+      method: 'POST',
+      body: JSON.stringify({ email: 'parent@example.com' }),
+    });
+    await handleParentContact(req, 'case-1', c.pubkey, makeEnv(db, {
+      ZENDESK_SUBDOMAIN: 'test',
+      ZENDESK_API_TOKEN: 'tok',
+      ZENDESK_EMAIL: 'agent@test.com',
+    }), corsHeaders);
+
+    const zendeskCall = mockFetch.mock.calls.find(
+      (call: unknown[]) => (call[0] as string).includes('zendesk.com/api/v2/tickets')
+    );
+    const { comment } = JSON.parse(zendeskCall![1].body).ticket;
+    // A plain `body` alongside html_body would be the one Zendesk sent, so the
+    // markup has to be the only thing supplied.
+    expect(comment.body).toBeUndefined();
+    expect(comment.html_body).toContain('<a href="https://divine.video/family">');
+
+    vi.unstubAllGlobals();
+  });
+});
+
+// -- parent outreach copy -----------------------------------------------------
+
+describe('buildParentOutreachBody', () => {
+  it('leads with what we need rather than asking who they are', () => {
+    const html = buildParentOutreachBody();
+    expect(html).toContain('reply to this email with a short private video');
+    // The message this replaces asked only for a confirmation, which parents
+    // answered with "yes" -- worthless as consent. That ask must not survive.
+    expect(html).not.toContain('confirm you are the parent or legal guardian');
+  });
+
+  it('carries no age-band label, so one template serves both bands', () => {
+    const html = buildParentOutreachBody();
+    for (const label of ['13-15', '16+ (claimed)', 'Under 13', 'age range']) {
+      expect(html).not.toContain(label);
+    }
+    expect(html).toContain('possibly belonging to someone under 16');
+  });
+
+  it('states the video requirements, the deadline, and the 16+ path', () => {
+    const html = buildParentOutreachBody();
+    expect(html).toContain('a parent or guardian speaking on camera');
+    expect(html).toContain('the country or countries where you live');
+    expect(html).toContain('Please do NOT send government IDs');
+    expect(html).toContain('Please reply within 15 days');
+    expect(html).toContain('you are 16 or older');
+  });
+
+  it('links the family and kids pages as anchors, not bare URLs', () => {
+    const html = buildParentOutreachBody();
+    expect(html).toContain('<a href="https://divine.video/family">For Families page</a>');
+    expect(html).toContain('<a href="https://divine.video/kids">how accounts work for kids on Divine</a>');
+  });
+
+  it('names no account and takes nothing that could name one', () => {
+    // #222 keeps the pre-reply message handle-free: it goes to an address the
+    // teen supplied that nobody has verified. The builder therefore takes no
+    // identity at all, so there is nothing for a caller to thread in by
+    // accident.
+    expect(buildParentOutreachBody.length).toBe(0);
+    expect(buildParentOutreachBody()).not.toContain('The account under review');
   });
 });
 

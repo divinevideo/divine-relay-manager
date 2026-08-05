@@ -867,20 +867,59 @@ async function getZendeskClientConfig(env: AgeReviewEnv): Promise<ZendeskClientC
   };
 }
 
-function buildParentOutreachBody(ageBand: AgeBand): string {
+/**
+ * The first message a parent or guardian receives. It leads with what we need
+ * from them rather than asking them to confirm who they are: a reply that only
+ * says "yes" tells us nothing, and anyone who is not the parent cannot produce
+ * the video regardless.
+ *
+ * One template covers both bands this path can reach. It carries no age-band
+ * label because the same message is sent to a 13-15 case and to someone
+ * claiming to be 16 or older, and "possibly under 16" is true of both.
+ *
+ * It names no account, for the same reason the requester carries no handle: it
+ * goes to an address the teen supplied that nobody has verified. The captured
+ * identity reaches agents through the contact notes instead.
+ *
+ * Sent as HTML: Zendesk renders `html_body` through the account's mail template
+ * and derives the plain-text alternative itself.
+ */
+export function buildParentOutreachBody(): string {
   return [
-    'Hello,',
+    '<p>Hello,</p>',
     '',
-    'We received a report that an account on Divine may belong to a minor in the ' +
-      `${BAND_DISPLAY[ageBand]} age range. As part of our safety process, we need a ` +
-      'parent or guardian to verify they are aware of and approve this account.',
+    '<p>An account on Divine was flagged as possibly belonging to someone under 16. ' +
+      'Where permitted by law, teens aged 13 to 15 can use Divine through Divine Greenlight, ' +
+      'with a parent or guardian who is aware and involved.</p>',
     '',
-    'Please reply to this email to confirm you are the parent or legal guardian of the account holder.',
+    '<p>To keep the account open, reply to this email with a short private video that shows:</p>',
     '',
-    'If you have questions, you can reply directly to this email or contact us at contact@divine.video.',
+    '<ul>',
+    '  <li>the teen</li>',
+    '  <li>a parent or guardian speaking on camera</li>',
+    '  <li>that the teen has permission to use Divine</li>',
+    '  <li>that the parent or guardian knows about the account and will supervise its use</li>',
+    '  <li>the country or countries where you live</li>',
+    '</ul>',
     '',
-    'Thank you,',
-    'Divine Trust & Safety',
+    '<p>You can attach the video or include a private link to it.</p>',
+    '',
+    '<p><strong>Please do NOT send government IDs, payment details, school or medical records, ' +
+      'or passwords.</strong> We only need the short video.</p>',
+    '',
+    '<p>Please reply within 15 days. If we do not hear from you, your child&#39;s account will be deleted.</p>',
+    '',
+    '<p>If you are the account holder and you are 16 or older, reply and tell us that. ' +
+      'No video needed, and we will take another look.</p>',
+    '',
+    '<p>If you have questions about this request, or want tips on supporting your family&#39;s ' +
+      'healthy use of social media, visit our <a href="https://divine.video/family">For Families page</a>. ' +
+      'Read <a href="https://divine.video/kids">how accounts work for kids on Divine</a>.</p>',
+    '',
+    '<p>You can also reply directly to this email with any questions.</p>',
+    '',
+    '<p>Thank you,<br>',
+    'Divine Trust &amp; Safety</p>',
   ].join('\n');
 }
 
@@ -1029,7 +1068,7 @@ async function createAgeReviewTicket(
   if (!env.DB) return;
 
   const subject = `Age review: parental verification needed [${caseId}]`;
-  const outreachBody = buildParentOutreachBody(ageBand);
+  const outreachBody = buildParentOutreachBody();
   const customFields = buildAgeReviewCustomFields(env, deadlineAt);
 
   const res = await fetch(`${zendesk.baseUrl}/tickets`, {
@@ -1041,7 +1080,7 @@ async function createAgeReviewTicket(
     body: JSON.stringify({
       ticket: {
         subject,
-        comment: { body: outreachBody, public: true },
+        comment: { html_body: outreachBody, public: true },
         // The address alone. Zendesk renders this into the To: header of every
         // outbound mail, and this ticket's first message goes to an address the
         // teen supplied that nobody has verified -- so it must not carry the
@@ -1144,7 +1183,7 @@ async function updateTicketWithParentContact(
   const zendesk = await getZendeskClientConfig(env);
   if (!zendesk) return;
 
-  const outreachBody = buildParentOutreachBody(ageBand);
+  const outreachBody = buildParentOutreachBody();
 
   const res = await fetch(`${zendesk.baseUrl}/tickets/${ticketId}`, {
     method: 'PUT',
@@ -1158,7 +1197,7 @@ async function updateTicketWithParentContact(
         // riskier still: it reassigns the requester on a ticket that already
         // exists, so the name lands on a contact an agent may already see.
         requester: { email: parentEmail, name: parentEmail },
-        comment: { body: outreachBody, public: true },
+        comment: { html_body: outreachBody, public: true },
       },
     }),
   });
