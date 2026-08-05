@@ -1018,6 +1018,19 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     );
   }
 
+  // The reports query itself failing is the more fundamental problem: if the
+  // relay read is down, resolution state is beside the point, and the
+  // resolution pane's Retry can't fix it anyway. Report this first (#221).
+  if (error) {
+    return (
+      <Alert variant="destructive">
+        <AlertDescription>
+          Failed to load reports: {error instanceof Error ? error.message : "Unknown error"}
+        </AlertDescription>
+      </Alert>
+    );
+  }
+
   // A gating source failed cold (no previous data to fall back on). Rendering
   // the queue here would present handled work as pending; the moderator gets
   // an explicit, named override instead of a silent wrong list or a hard lock-out.
@@ -1027,6 +1040,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         sources={blockingErrors.map(s => ({ key: s.key, label: s.label }))}
         decisionsUnavailable={decisionsUnavailable}
         onRetry={() => {
+          refetch();
           queryClient.invalidateQueries({ queryKey: ['resolution-labels'] });
           queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
           queryClient.invalidateQueries({ queryKey: ['banned-events'] });
@@ -1034,16 +1048,6 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         }}
         onOverride={() => setResolutionOverride(true)}
       />
-    );
-  }
-
-  if (error) {
-    return (
-      <Alert variant="destructive">
-        <AlertDescription>
-          Failed to load reports: {error instanceof Error ? error.message : "Unknown error"}
-        </AlertDescription>
-      </Alert>
     );
   }
 

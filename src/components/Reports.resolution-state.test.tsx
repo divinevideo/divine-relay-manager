@@ -53,6 +53,10 @@ function jsonResponse(body: unknown, status = 200) {
 
 // Each source can be told to succeed with data, succeed empty, or fail.
 interface SourceState {
+  // The reports query itself, distinct from the four resolution sources
+  // below (#221 fix 1: it fails BEFORE the resolution-unavailable pane gets
+  // a chance to, since it's the more fundamental failure).
+  reports?: 'ok' | 'error';
   labels?: 'resolves' | 'empty' | 'error';
   bannedPubkeys?: 'resolves' | 'empty' | 'error';
   bannedEvents?: 'resolves' | 'empty' | 'error';
@@ -71,6 +75,7 @@ function stubFetch(state: SourceState) {
     const url = String(input instanceof Request ? input.url : input);
 
     if (url.includes('/api/reports')) {
+      if (state.reports === 'error') return jsonResponse({ success: false, error: 'relay unreachable' }, 500);
       const events = state.includeEventReport ? [REPORT, EVENT_REPORT] : [REPORT];
       return jsonResponse({ success: true, events });
     }
@@ -256,6 +261,18 @@ describe('cold load does not render an unfiltered queue (#221)', () => {
 });
 
 describe('cold error blocks the queue and offers an override (#221)', () => {
+  it('reports the reports-query failure, not the resolution-unavailable pane, when both fail (#221 fix 1)', async () => {
+    // The relay read failing is the more fundamental problem: if reports
+    // itself can't load, resolution state is beside the point, and the
+    // resolution pane's Retry can't fix it (it only invalidates the four
+    // resolution queries). The moderator should see the reports failure.
+    stubFetch({ reports: 'error', labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'error' });
+    renderReports();
+
+    expect(await screen.findByText(/failed to load reports/i)).toBeInTheDocument();
+    expect(screen.queryByText(/resolution state is unavailable/i)).not.toBeInTheDocument();
+  });
+
   it('blocks rather than presenting a resolved target as pending when decisions fails cold', async () => {
     // decisions is the source that would have hidden this target.
     stubFetch({ labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'error' });
@@ -345,6 +362,26 @@ describe('offline pauses resolution sources instead of failing them (#221)', () 
     onlineManager.setOnline(true);
   });
 
+  // Going offline makes React Query defer the fetch attempt for at least one
+  // gating query (fetchStatus 'paused', asserted below), but at least one of
+  // the other RPC-backed sources still starts its queryFn -- a pre-existing
+  // race independent of #221 (this file's "cold load" describe above hardens
+  // the analogous non-offline race). That call hits a pre-existing,
+  // environment-specific quirk: fetchWithTimeout's `AbortSignal.timeout()`
+  // signal (src/lib/adminApi.ts) rejects with a TypeError in this jsdom+Node
+  // combination, which the query's catch block reports via console.warn.
+  // That specific console.warn call does not go through vi.spyOn(console,
+  // 'warn') (the file-level spy above) here -- confirmed empirically by
+  // instrumenting the catch block directly, and ruled out every interception
+  // point tried (a describe-scoped console spy, a raw process.stderr.write
+  // override, an AbortSignal.timeout stub, generous real-time and
+  // fake-timer flushes) without success, so it is left unsilenced rather
+  // than papered over with something that only looks like a fix. It is
+  // present-but-pre-existing noise, not a regression: it doesn't affect this
+  // test's assertions or pass/fail status, and disappears entirely if the
+  // three console.warn calls it comes from (Reports.tsx's bannedPubkeys /
+  // bannedEvents / decisions queryFn catches) are removed, which is how its
+  // origin was confirmed.
   it('explains the queue cannot check resolution state while offline, instead of an indefinite skeleton', async () => {
     stubFetch({ labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty' });
     // Set offline before mount: React Query only reaches fetchStatus 'paused'

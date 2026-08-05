@@ -55,8 +55,8 @@ export function ResolutionUnavailablePane({
         </div>
         {decisionsUnavailable && (
           <p className="text-xs text-muted-foreground">
-            Auto-hidden content is also included in the unfiltered queue while that source
-            is down, since it is normally kept out of this view.
+            If you continue, the unfiltered queue will also include auto-hidden content
+            that is normally kept out of this view.
           </p>
         )}
       </CardContent>
