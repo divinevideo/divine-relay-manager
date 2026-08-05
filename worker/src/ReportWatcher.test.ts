@@ -1684,19 +1684,37 @@ describe('ReportWatcher', () => {
       expect(identityBinds().capturedAt).toBeNull();
     });
 
-    it('records the captured handle on the auto-clear path too', async () => {
+    // The auto-clear branch is a second, independent copy of the capture and
+    // stamp logic. Asserting membership here would let a bind reorder or a
+    // reintroduced unconditional stamp pass unnoticed on this path while the
+    // main path stayed covered, so it gets the same positional treatment.
+    it('records the captured identity on the auto-clear path too', async () => {
       mockGetUserStatus.mockResolvedValue({
         success: true, pubkey: 'reported_identity_4', status: 'active', verified_minor: true,
       });
       vi.mocked(fetchAccountIdentity).mockResolvedValue({
         completed: true,
-        profile: { name: 'Cleared Person', nip05: undefined, isVineImport: false, vineUsername: undefined },
+        profile: { name: 'Cleared Person', nip05: 'x@y.z', isVineImport: false, vineUsername: 'ogname' },
       });
 
       await sendUnderageReport('identity_report_4', 'reported_identity_4');
 
-      const binds = bindCallsFor('INSERT INTO age_review_cases').flat();
-      expect(binds).toContain('Cleared Person');
+      const { name, nip05, vineUsername, capturedAt } = identityBinds(8);
+      expect(name).toBe('Cleared Person');
+      expect(nip05).toBe('x@y.z');
+      expect(vineUsername).toBe('ogname');
+      expect(capturedAt).toEqual(expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/));
+    });
+
+    it('leaves identity_captured_at null on the auto-clear path when the lookup never completed', async () => {
+      mockGetUserStatus.mockResolvedValue({
+        success: true, pubkey: 'reported_identity_6', status: 'active', verified_minor: true,
+      });
+      vi.mocked(fetchAccountIdentity).mockResolvedValue({ completed: false, profile: null });
+
+      await sendUnderageReport('identity_report_6', 'reported_identity_6');
+
+      expect(identityBinds(8).capturedAt).toBeNull();
     });
 
     it('should auto-clear age review case for verified minors', async () => {
