@@ -1424,6 +1424,11 @@ async function handleDeleteDecisions(
 
     for (const filter of labelFilters) {
       const queryResult = await queryRelay(filter, env.RELAY_URL);
+      if (!queryResult.success) {
+        // Best-effort cleanup: a timed-out label query means some resolution
+        // labels may survive this reopen. Log it; a later reopen retries.
+        console.warn('[reopen] resolution-label query failed, labels may remain:', queryResult.error);
+      }
       if (queryResult.success && queryResult.events && queryResult.events.length > 0) {
         for (const labelEvent of queryResult.events) {
           const eventId = (labelEvent as { id?: string }).id;
@@ -1640,12 +1645,18 @@ async function queryRelay(
       const events: object[] = [];
       const subId = `query-${Date.now()}`;
 
+      // Timeout and close-before-EOSE are failures, not results: only an
+      // EOSE-complete response may report success. A relay answering slower
+      // than this timeout must stay distinguishable from "the queue is
+      // empty", or one slow poll silently blanks the moderation queue.
+      // Known residual: a backend that kills the query but still sends an
+      // empty EOSE is indistinguishable here; that needs a relay-side error
+      // signal to fix.
       const timeout = setTimeout(() => {
         if (!resolved) {
           resolved = true;
           ws.close();
-          // Timed out without EOSE: results may be truncated, so absence is unconfirmed.
-          resolve({ success: true, events, complete: false });
+          resolve({ success: false, error: `Relay query timed out before EOSE (${events.length} events received)` });
         }
       }, 5000);
 
@@ -1682,8 +1693,8 @@ async function queryRelay(
         if (!resolved) {
           clearTimeout(timeout);
           resolved = true;
-          // Closed before EOSE: absence is unconfirmed.
-          resolve({ success: true, events, complete: false });
+          // Closed before EOSE: absence is unconfirmed, so this is a failure.
+          resolve({ success: false, error: `Relay closed before EOSE (${events.length} events received)` });
         }
       });
     } catch (error) {
