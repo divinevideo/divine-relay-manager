@@ -1575,6 +1575,44 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
     expect(JSON.parse(sock.sent[0])[2]['#p']).toEqual([ 'a'.repeat(64) ]);
   });
 
+  // The whitelist at the route is load-bearing, not defensive tidiness. An
+  // unrecognised value must fall back to both filters, because the alternative
+  // -- trusting the raw string -- indexes the tag map with a miss and builds a
+  // filter keyed "undefined". That is an UNTARGETED query: the relay ignores
+  // the unknown key and returns resolution labels for arbitrary targets, which
+  // the cleanup loop then bans. One reopen would wipe resolution labels
+  // queue-wide and still report success.
+  it('falls back to both filters when the target type is not a recognised value', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response(JSON.stringify({ result: true }), { status: 200 })
+    ));
+
+    const resPromise = worker.fetch(
+      new Request(`https://api.example/api/decisions/${'a'.repeat(64)}?targetType=EVENT`, {
+        method: 'DELETE',
+        headers: { 'X-Admin-Key': 'test-admin-key' },
+      }),
+      { ...(reportsEnv as object), DB: reopenDb(), NOSTR_NSEC: TEST_NSEC } as never,
+      ctx,
+    );
+    for (let i = 0; i < 2; i++) {
+      for (let t = 0; t < 100 && !FakeRelaySocket.instances[i]; t++) {
+        await new Promise((r) => setTimeout(r, 0));
+      }
+      const sock = FakeRelaySocket.instances[i];
+      expect(sock).toBeDefined();
+      sock.message(['EOSE', sock.subId()]);
+    }
+
+    await resPromise;
+    expect(FakeRelaySocket.instances).toHaveLength(2);
+    const filters = FakeRelaySocket.instances.map((s) => JSON.parse(s.sent[0])[2]);
+    // Every filter is anchored to the target. None may be an open query.
+    expect(filters[0]['#e']).toEqual([ 'a'.repeat(64) ]);
+    expect(filters[1]['#p']).toEqual([ 'a'.repeat(64) ]);
+    for (const f of filters) expect(Object.keys(f)).not.toContain('undefined');
+  });
+
   // Worker and Pages deploy separately, so a new worker serves an old frontend
   // that sends no targetType. It must keep checking both tags rather than
   // guessing one and silently skipping the labels that matter.
