@@ -1414,14 +1414,16 @@ async function handleGetDecisions(
 // Kind 1985 is a regular event, not replaceable, so review/reopen cycles
 // accumulate resolution labels on one target. A real target carries one or two,
 // so this is far above the expected count -- but it is NOT set by that. Every
-// label costs a sequential signed NIP-86 round-trip, so the page size is also
-// the worst-case work in one reopen, bounded by the client's 30s timeout
-// (API_TIMEOUT_MS in adminApi.ts) and by the Workers per-request subrequest
-// budget. Exceeding either would abort a reopen the worker had already
-// completed and report it as a failure. A full page is reported as an
-// incomplete cleanup rather than assumed complete, so a target somehow past
-// the cap still gets cleared over successive reopens instead of silently
-// half-cleared.
+// label costs one sequential signed NIP-86 round-trip at roughly 200-400ms, so
+// the page size is the worst-case work in one reopen: ~10-20s per filter, and
+// both filters run when the client sends no targetType, so budget 2x. The
+// binding constraint is the client's 30s abort (API_TIMEOUT_MS in adminApi.ts),
+// which a cap of 200 would have blown -- aborting a reopen the worker had
+// already completed and reporting it as a failure. Subrequests are not the
+// constraint: this is Workers Paid, so the budget is 1000/request and a reopen
+// spends ~54. A full page is reported as an incomplete cleanup rather than
+// assumed complete, so a target somehow past the cap still gets cleared over
+// successive reopens instead of silently half-cleared.
 const LABEL_CLEANUP_LIMIT = 50;
 
 async function handleDeleteDecisions(
@@ -1535,7 +1537,7 @@ async function handleDeleteDecisions(
       labelCleanupFailed,
     }, 200, corsHeaders);
   } catch (error) {
-    console.error('Delete decisions error:', error);
+    console.error('[reopen] delete decisions failed:', error);
     return jsonResponse(
       { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
       500,
@@ -1734,6 +1736,12 @@ async function queryRelay(
       });
 
       ws.addEventListener('message', (msg) => {
+        // Once the result is handed to the caller the set is final. We send REQ
+        // and never CLOSE, so the relay can still stream a newly published
+        // matching label between EOSE and the socket actually closing; counting
+        // it would ban a label this read never reported, and would move
+        // events.length after the truncation check read it.
+        if (resolved) return;
         try {
           const data = JSON.parse(msg.data as string);
           if (data[0] === 'EVENT' && data[1] === subId) {
@@ -1766,8 +1774,10 @@ async function queryRelay(
         if (!resolved) {
           clearTimeout(timeout);
           resolved = true;
-          ws.close();
+          // Resolve first: a throw from close() would otherwise leave the
+          // promise permanently pending, with the timeout already cleared.
           resolve({ success: false, events: events.slice(), error: 'WebSocket error' });
+          ws.close();
         }
       });
 

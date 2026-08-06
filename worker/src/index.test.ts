@@ -1727,6 +1727,41 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
     expect(body.labelCleanupFailed).toBe(true);
   });
 
+  // The same window exists on the success path, and it is the common one: the
+  // worker sends REQ and never CLOSE, so between EOSE and the socket actually
+  // closing the relay can stream a newly published matching label. Counting it
+  // would ban a label the read never reported.
+  it('does not ban a label that arrived after EOSE', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response(JSON.stringify({ result: true }), { status: 200 })
+    ));
+    const LATE_LABEL = { ...LABEL_A, id: 'd'.repeat(64) };
+
+    const resPromise = worker.fetch(
+      reopenRequest(),
+      { ...(reportsEnv as object), DB: reopenDb(), NOSTR_NSEC: TEST_NSEC } as never,
+      ctx,
+    );
+    for (let i = 0; i < 2; i++) {
+      for (let t = 0; t < 100 && !FakeRelaySocket.instances[i]; t++) {
+        await new Promise((r) => setTimeout(r, 0));
+      }
+      const sock = FakeRelaySocket.instances[i];
+      expect(sock).toBeDefined();
+      if (i === 0) {
+        sock.message(['EVENT', sock.subId(), LABEL_A]);
+        sock.message(['EOSE', sock.subId()]);
+        sock.message(['EVENT', sock.subId(), LATE_LABEL]); // too late to count
+      } else {
+        sock.message(['EOSE', sock.subId()]);
+      }
+    }
+
+    const res = await resPromise;
+    const body = await res.json() as { labelsDeleted: number };
+    expect(body.labelsDeleted).toBe(1);
+  });
+
   // The message listener has no resolved-guard, so a frame can still arrive
   // after a failure path has handed its events to the caller. Handing back the
   // live array would let that late frame join a set the caller is already

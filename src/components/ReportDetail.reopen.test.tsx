@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -151,7 +151,7 @@ describe('ReportDetail reopen reporting', () => {
     // The tooltip carries the ban/deletion caveat, but it is read before the
     // click. The toast is what a moderator sees after it, so it carries the
     // caveat too rather than reading as an unqualified success.
-    expect(text).toMatch(/ban|deletion|deleted/i);
+    expect(text).toMatch(/stays hidden until that is lifted/i);
   });
 
   // The label survived, so resolvedTargets still hides the target and the
@@ -171,6 +171,29 @@ describe('ReportDetail reopen reporting', () => {
     // what it was asked. Naming the relay as the culprit would send a moderator
     // chasing a relay problem that is not there.
     expect(text).not.toMatch(/the relay did not/i);
+    // The decisions ARE deleted on this path, so hasDecisions goes false and
+    // the Reopen button unmounts. Telling a moderator to retry without giving
+    // them the means is a dead end, so the retry rides on the toast.
+    expect(arg.action).toBeDefined();
+  });
+
+  it('offers a working retry from the degraded toast, since the button is gone', async () => {
+    api.deleteDecisions.mockResolvedValue({ deleted: 2, labelCleanupFailed: true });
+    renderDetail();
+    clickReopen();
+
+    await waitFor(() => expect(toast).toHaveBeenCalled());
+    const callsBefore = api.deleteDecisions.mock.calls.length;
+
+    // Render the toast's action in isolation and click it: it must re-run the
+    // reopen rather than merely dismiss. Scoped to its own container, since the
+    // panel behind it already has buttons of its own.
+    const { container } = render(toast.mock.calls[0][0].action);
+    fireEvent.click(within(container).getByRole('button'));
+
+    await waitFor(() =>
+      expect(api.deleteDecisions.mock.calls.length).toBeGreaterThan(callsBefore)
+    );
   });
 
   // An event report reopens two targets. A failure on the second must not be
