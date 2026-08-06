@@ -1414,16 +1414,25 @@ async function handleGetDecisions(
 // Kind 1985 is a regular event, not replaceable, so review/reopen cycles
 // accumulate resolution labels on one target. A real target carries one or two,
 // so this is far above the expected count -- but it is NOT set by that. Every
-// label costs one sequential signed NIP-86 round-trip at roughly 200-400ms, so
-// the page size is the worst-case work in one reopen: ~10-20s per filter, and
-// both filters run when the client sends no targetType, so budget 2x. The
-// binding constraint is the client's 30s abort (API_TIMEOUT_MS in adminApi.ts),
-// which a cap of 200 would have blown -- aborting a reopen the worker had
-// already completed and reporting it as a failure. Subrequests are not the
-// constraint: this is Workers Paid, so the budget is 1000/request and a reopen
-// spends ~54. A full page is reported as an incomplete cleanup rather than
-// assumed complete, so a target somehow past the cap still gets cleared over
-// successive reopens instead of silently half-cleared.
+// label costs one sequential signed NIP-86 round-trip at roughly 200-400ms, and
+// each filter also spends up to the 5s queryRelay cap on its read, so a full
+// page is ~15-25s of work per filter.
+//
+// The binding constraint is the client's 30s abort (API_TIMEOUT_MS in
+// adminApi.ts): blowing it aborts a reopen the worker had already completed and
+// reports it as a failure. A cap of 200 blows it outright. 50 fits the path
+// every current caller takes, which is one filter -- ReportDetail always sends
+// targetType. It does NOT fit the two-filter fallback at the top of the range;
+// that path is reachable only by a frontend older than this deploy, and only
+// against a target carrying tens of labels.
+//
+// Subrequests are not the constraint: this is Workers Paid, so the budget is
+// 1000/request and even the two-filter worst case spends ~102 (two sockets plus
+// two full pages of bans).
+//
+// A full page is reported as an incomplete cleanup rather than assumed
+// complete, so a target somehow past the cap still gets cleared over successive
+// reopens instead of silently half-cleared.
 const LABEL_CLEANUP_LIMIT = 50;
 
 async function handleDeleteDecisions(

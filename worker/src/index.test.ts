@@ -1861,9 +1861,9 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
       ctx,
     );
     for (let i = 0; i < 2; i++) {
-      // A full page means 200 sequential banevent round-trips before the second
-      // filter opens its socket, so this wait needs a far bigger budget than
-      // the single-label cases above.
+      // A full page means LABEL_CLEANUP_LIMIT sequential banevent round-trips
+      // before the second filter opens its socket, so this wait needs a far
+      // bigger budget than the single-label cases above.
       for (let t = 0; t < 5000 && !FakeRelaySocket.instances[i]; t++) {
         await new Promise((r) => setTimeout(r, 0));
       }
