@@ -99,6 +99,24 @@ describe('UserManagement age-review guard wiring', () => {
     await waitFor(() => expect(navigate).toHaveBeenCalledWith(`/age-review?pubkey=${PUBKEY}`));
   });
 
+  it('routes an unsuspend refusal to the case', async () => {
+    // The one site this change rewrote from its own inline copy into the shared
+    // hook, so the one a hoist can silently drop -- and the identifier stays in
+    // use by the other two mutations, so eslint would not notice either.
+    api.callRelayRpc.mockImplementation((method: string) => {
+      if (method === 'listsuspendedpubkeys') return Promise.resolve([{ pubkey: PUBKEY, reason: 'age review' }]);
+      return Promise.resolve([]);
+    });
+    api.unsuspendPubkey.mockRejectedValue(guardRefusal());
+
+    renderWithProvider();
+    // Radix tabs activate on mousedown, not click.
+    fireEvent.mouseDown(await screen.findByRole('tab', { name: /Suspended Users/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /^Unsuspend$/i }));
+
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith(`/age-review?pubkey=${PUBKEY}`));
+  });
+
   it('canonicalises an uppercase hex pubkey before it reaches the relay', async () => {
     // The input is validated case-insensitively, but every consumer matches
     // these bytes exactly: the relay's ban list, and the age-review guard's
