@@ -1238,6 +1238,62 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
     expect(body.error).toMatch(/timed out/i);
   });
 
+  // The deep-link path, which changed materially and lost its only coverage
+  // when isUnconfirmedTargetedMiss went. That guard 502'd a targeted lookup
+  // that came back empty AND unconfirmed; queryRelay now fails the read itself,
+  // so a targeted lookup 502s even when events DID arrive -- Reports.tsx turns
+  // that into "Relay unavailable" (retry) where it used to render "found".
+  // Deliberate: a truncated targeted read is not proof of what it found. It is
+  // also the one behavior change here a moderator sees on a deep link, so it
+  // gets pinned at the endpoint rather than only argued in the description.
+  it('returns 502 for a targeted lookup that received events and then timed out', async () => {
+    vi.useFakeTimers();
+    const resPromise = worker.fetch(
+      new Request(`https://api.example/api/reports?event=${'a'.repeat(64)}`, {
+        headers: { 'X-Admin-Key': 'test-admin-key' },
+      }),
+      reportsEnv,
+      ctx,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    const sock = FakeRelaySocket.instances[0];
+    expect(sock).toBeDefined();
+    // The filter really is the targeted one, not the bulk window.
+    expect(JSON.parse(sock.sent[0])[2]['#e']).toEqual([ 'a'.repeat(64) ]);
+    sock.message(['EVENT', sock.subId(), EVENT_A]);
+    await vi.advanceTimersByTimeAsync(5000);
+
+    const res = await resPromise;
+    expect(res.status).toBe(502);
+    const body = await res.json() as { success: boolean; events?: unknown[] };
+    expect(body.success).toBe(false);
+    // Not handed back as a find: an unconfirmed hit must not read as "found".
+    expect(body.events).toBeUndefined();
+  });
+
+  // The complement, so the 502 above is not just "targeted lookups always
+  // fail": an EOSE-confirmed targeted hit is still a find.
+  it('returns the event for a targeted lookup the relay confirmed', async () => {
+    const resPromise = worker.fetch(
+      new Request(`https://api.example/api/reports?event=${'a'.repeat(64)}`, {
+        headers: { 'X-Admin-Key': 'test-admin-key' },
+      }),
+      reportsEnv,
+      ctx,
+    );
+    await new Promise((r) => setTimeout(r, 0));
+    const sock = FakeRelaySocket.instances[0];
+    expect(sock).toBeDefined();
+    sock.message(['EVENT', sock.subId(), EVENT_A]);
+    sock.message(['EOSE', sock.subId()]);
+
+    const res = await resPromise;
+    expect(res.status).toBe(200);
+    const body = await res.json() as { success: boolean; events: unknown[] };
+    expect(body.success).toBe(true);
+    expect(body.events).toHaveLength(1);
+  });
+
   it('returns 502 when the relay closes before EOSE', async () => {
     const resPromise = worker.fetch(reportsRequest(), reportsEnv, ctx);
     await new Promise((r) => setTimeout(r, 0));
