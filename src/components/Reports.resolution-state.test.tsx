@@ -252,6 +252,23 @@ describe('cold load does not render an unfiltered queue (#221)', () => {
     expect(screen.queryByText(REPORTED_NPUB)).not.toBeInTheDocument();
   });
 
+  // The decisions descriptor is what replaced main's `decisionsLoading` guard,
+  // whose comment named its purpose: "This prevents auto-hidden CSAM from
+  // briefly appearing in default view". Without this test, setting the
+  // descriptor's `isPending` to a constant `false` leaves the whole suite
+  // green -- decisions stops gating on LOADING and, since pendingReviewTargets
+  // is derived entirely from allDecisions, auto-hidden targets paint in the
+  // default queue for the duration of the fetch.
+  it('keeps the skeleton up while moderation decisions are still loading', async () => {
+    stubFetch({ labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty', slow: ['decisions'] });
+    const queryClient = newTestQueryClient();
+    renderReports(queryClient);
+
+    await waitFor(() => expect(queryClient.getQueryState(['reports', RELAY_URL])?.status).toBe('success'));
+    expect(screen.getByTestId('reports-loading-skeleton')).toBeInTheDocument();
+    expect(screen.queryByText(REPORTED_NPUB)).not.toBeInTheDocument();
+  });
+
   it('renders once every gating source has landed', async () => {
     stubFetch({ labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty' });
     renderReports();
@@ -289,6 +306,20 @@ describe('cold error blocks the queue and offers an override (#221)', () => {
 
     expect(await screen.findByText(/resolution state is unavailable/i)).toBeInTheDocument();
     expect(screen.getByText(/banned accounts/i)).toBeInTheDocument();
+  });
+
+  // banned-events is the only one of the four sources with no gating test of
+  // its own: deleting its whole entry from `resolutionSources` leaves the
+  // suite green, which would silently drop event targets back out of the
+  // gate. Paired with the "hides a target resolved by the banned events list"
+  // control above, this measures an actual un-hide.
+  it('blocks when the banned posts list fails cold', async () => {
+    stubFetch({ labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'error', decisions: 'empty', includeEventReport: true });
+    renderReports();
+
+    expect(await screen.findByText(/resolution state is unavailable/i)).toBeInTheDocument();
+    expect(screen.getByText(/banned posts/i)).toBeInTheDocument();
+    expect(screen.queryByText(REPORTED_NOTE)).not.toBeInTheDocument();
   });
 
   it('renders the unfiltered queue with a persistent warning once the moderator overrides', async () => {
@@ -656,5 +687,38 @@ describe('truncated resolution history is stated, not silent (#221)', () => {
 
     await screen.findByText(REPORTED_NPUB);
     expect(screen.queryByText(/resolution history only reaches back to/i)).not.toBeInTheDocument();
+  });
+});
+
+describe('one retry absorbs a single transient failure (#221)', () => {
+  // `retry: 1` (up from `retry: false`) is the other half of the cold-error
+  // policy: blocking on four sources is only payable because a single
+  // transient failure no longer costs a whole 15s poll cycle. Without this
+  // test, reverting all four queries to `retry: false` leaves the suite
+  // green -- every other test either never fails a source or fails it
+  // permanently, so no assertion can tell one attempt from two.
+  //
+  // The recovery here can only come from the retry: `refetchInterval` is
+  // 15s and this test settles in milliseconds.
+  it('recovers a source that fails once, instead of blocking the queue', async () => {
+    let decisionsAttempts = 0;
+    stubFetch({ labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty' });
+    const healthy = globalThis.fetch as unknown as typeof fetch;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/decisions')) {
+        decisionsAttempts += 1;
+        if (decisionsAttempts === 1) {
+          return jsonResponse({ success: false, error: 'cold start timeout' }, 500);
+        }
+      }
+      return healthy(input, init);
+    }));
+
+    renderReports();
+
+    expect(await screen.findByText(REPORTED_NPUB)).toBeInTheDocument();
+    expect(screen.queryByText(/resolution state is unavailable/i)).not.toBeInTheDocument();
+    expect(decisionsAttempts).toBeGreaterThan(1);
   });
 });
