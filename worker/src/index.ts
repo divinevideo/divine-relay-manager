@@ -1736,9 +1736,12 @@ async function queryRelay(
       const closeQuietly = () => {
         try {
           ws.close();
-        } catch {
-          // Nothing to do: the read is already reported and the socket is going
-          // away with the request either way.
+        } catch (err) {
+          // Nothing to recover: the read is already reported and the socket
+          // goes away with the request either way. Logged only because a
+          // close() that throws says something odd about the runtime rather
+          // than about the relay, and is otherwise invisible.
+          console.warn('[queryRelay] socket close threw:', err);
         }
       };
 
@@ -1803,6 +1806,8 @@ async function queryRelay(
           clearTimeout(timeout);
           resolved = true;
           // Closed before EOSE: absence is unconfirmed, so this is a failure.
+          // The only exit that does not closeQuietly() -- the socket is
+          // already closing, which is why we are here.
           resolve({ success: false, events: events.slice(), error: `Relay closed before EOSE (${events.length} events received)` });
         }
       });

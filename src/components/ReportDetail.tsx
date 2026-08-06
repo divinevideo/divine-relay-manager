@@ -270,9 +270,10 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             variant: "destructive" as const,
             // The decisions ARE gone on this path, so hasDecisions goes false
             // and the Reopen button unmounts. Retrying is the right advice and
-            // the cleanup is idempotent, so the retry has to come with it --
-            // and it must not expire, because when it goes there is no other
-            // way back to this action short of re-resolving the report.
+            // the cleanup is idempotent, so the retry has to come with it, and
+            // it does not expire on a timer. That is not a guarantee it will
+            // still be there: TOAST_LIMIT is 1, so any later toast evicts it.
+            // The fallback is to resolve the report again and reopen.
             action: (
               <ToastAction altText="Retry the reopen" onClick={() => reopenMutation.mutate()}>
                 Try again
