@@ -1583,6 +1583,7 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
   // the cleanup loop then bans. One reopen would wipe resolution labels
   // queue-wide and still report success.
   it('falls back to both filters when the target type is not a recognised value', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.stubGlobal('fetch', vi.fn(async () =>
       new Response(JSON.stringify({ result: true }), { status: 200 })
     ));
@@ -1611,6 +1612,9 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
     expect(filters[0]['#e']).toEqual([ 'a'.repeat(64) ]);
     expect(filters[1]['#p']).toEqual([ 'a'.repeat(64) ]);
     for (const f of filters) expect(Object.keys(f)).not.toContain('undefined');
+    // Degrading safely is right, but silently would make a client-side typo
+    // invisible in production.
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('unrecognised targetType'), 'EVENT');
   });
 
   // Worker and Pages deploy separately, so a new worker serves an old frontend
@@ -1723,16 +1727,54 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
     expect(body.labelCleanupFailed).toBe(true);
   });
 
+  // The message listener has no resolved-guard, so a frame can still arrive
+  // after a failure path has handed its events to the caller. Handing back the
+  // live array would let that late frame join a set the caller is already
+  // iterating and banning -- a label the caller never saw in its own count.
+  it('does not ban a label that arrived after the read had already failed', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response(JSON.stringify({ result: true }), { status: 200 })
+    ));
+    const LATE_LABEL = { ...LABEL_A, id: 'd'.repeat(64) };
+
+    const resPromise = worker.fetch(
+      reopenRequest(),
+      { ...(reportsEnv as object), DB: reopenDb(), NOSTR_NSEC: TEST_NSEC } as never,
+      ctx,
+    );
+    for (let i = 0; i < 2; i++) {
+      for (let t = 0; t < 100 && !FakeRelaySocket.instances[i]; t++) {
+        await new Promise((r) => setTimeout(r, 0));
+      }
+      const sock = FakeRelaySocket.instances[i];
+      expect(sock).toBeDefined();
+      if (i === 0) {
+        sock.message(['EVENT', sock.subId(), LABEL_A]);
+        sock.emit('close', {});           // read fails, caller gets its events
+        sock.message(['EVENT', sock.subId(), LATE_LABEL]); // too late to count
+      } else {
+        sock.emit('close', {});
+      }
+    }
+
+    const res = await resPromise;
+    const body = await res.json() as { labelsDeleted: number };
+    expect(body.labelsDeleted).toBe(1);
+  });
+
   // A completed read that fills the page is indistinguishable from a truncated
   // one, so it must report an incomplete cleanup even though EOSE arrived. The
-  // 200 is written out rather than imported: the cap being high enough to make
-  // truncation implausible is part of what the test pins.
+  // 50 is written out rather than imported: the page size doubles as the
+  // worst-case number of sequential signed round-trips in one reopen, so it is
+  // bounded by the client's 30s timeout and the Workers subrequest budget --
+  // that bound is part of what the test pins.
   it('reports incomplete cleanup when the label read fills the page', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.stubGlobal('fetch', vi.fn(async () =>
       new Response(JSON.stringify({ result: true }), { status: 200 })
     ));
-    const fullPage = Array.from({ length: 200 }, (_, i) => ({
+    const fullPage = Array.from({ length: 50 }, (_, i) => ({
       ...LABEL_A,
       id: i.toString(16).padStart(64, '0'),
     }));
@@ -1758,11 +1800,11 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
     // The cap is what makes truncation implausible rather than merely
     // detectable, so the requested page size is pinned too: detection only
     // fires on our own limit, never on a lower one the relay imposes.
-    expect(JSON.parse(FakeRelaySocket.instances[0].sent[0])[2].limit).toBe(200);
+    expect(JSON.parse(FakeRelaySocket.instances[0].sent[0])[2].limit).toBe(50);
 
     const res = await resPromise;
     const body = await res.json() as { labelsDeleted: number; labelCleanupFailed: boolean };
-    expect(body.labelsDeleted).toBe(200); // every label on the page was removed
+    expect(body.labelsDeleted).toBe(50); // every label on the page was removed
     expect(body.labelCleanupFailed).toBe(true); // but there may be more beyond it
   });
 

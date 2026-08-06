@@ -147,8 +147,11 @@ describe('ReportDetail reopen reporting', () => {
     const arg = toast.mock.calls[0][0];
     expect(arg.variant).not.toBe('destructive');
     const text = `${arg.title} ${arg.description}`;
-    expect(text).not.toMatch(/could not|may stay hidden/i);
     expect(text).not.toMatch(/back in the pending queue/i);
+    // The tooltip carries the ban/deletion caveat, but it is read before the
+    // click. The toast is what a moderator sees after it, so it carries the
+    // caveat too rather than reading as an unqualified success.
+    expect(text).toMatch(/ban|deletion|deleted/i);
   });
 
   // The label survived, so resolvedTargets still hides the target and the
@@ -162,7 +165,12 @@ describe('ReportDetail reopen reporting', () => {
     await waitFor(() => expect(toast).toHaveBeenCalled());
     const arg = toast.mock.calls[0][0];
     expect(arg.variant).toBe('destructive');
-    expect(`${arg.title} ${arg.description}`).toMatch(/may stay hidden/i);
+    const text = `${arg.title} ${arg.description}`;
+    expect(text).toMatch(/may stay hidden/i);
+    // One of the three causes is our own page cap, where the relay did exactly
+    // what it was asked. Naming the relay as the culprit would send a moderator
+    // chasing a relay problem that is not there.
+    expect(text).not.toMatch(/the relay did not/i);
   });
 
   // An event report reopens two targets. A failure on the second must not be

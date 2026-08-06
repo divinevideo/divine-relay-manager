@@ -263,13 +263,15 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
       // ban-resolved report stays hidden even on a fully clean run.
       toast(labelCleanupFailed
         ? {
-            title: "Reopened, but resolution labels could not be cleared",
-            description: "The relay did not clear them, so this report may stay hidden. Try reopening again.",
+            // Deliberately does not name the relay: one of the causes is our
+            // own page cap, where the relay did exactly what it was asked.
+            title: "Reopened, but resolution labels could not all be cleared",
+            description: "Some may remain, so this report may stay hidden. Try reopening again.",
             variant: "destructive" as const,
           }
         : {
             title: "Report reopened",
-            description: "Moderation decisions and resolution labels were cleared",
+            description: "Moderation decisions and resolution labels were cleared. A report hidden by a relay ban or deletion stays hidden until that is lifted.",
           });
     },
     onError: (error: Error) => {

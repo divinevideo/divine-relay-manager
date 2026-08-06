@@ -491,8 +491,13 @@ export default {
       if (path.startsWith('/api/decisions/') && request.method === 'DELETE') {
         const targetId = path.replace('/api/decisions/', '');
         // Optional: an older frontend omits it, and then both tags are checked.
+        // A present-but-unrecognised value takes the same safe path, but that
+        // means a client-side typo is invisible in production, so it is logged.
         const rawType = url.searchParams.get('targetType');
         const targetType = rawType === 'event' || rawType === 'pubkey' ? rawType : undefined;
+        if (rawType !== null && targetType === undefined) {
+          console.warn('[reopen] unrecognised targetType, querying both label tags:', rawType);
+        }
         return handleDeleteDecisions(targetId, env, corsHeaders, targetType);
       }
 
@@ -1407,10 +1412,17 @@ async function handleGetDecisions(
 }
 
 // Kind 1985 is a regular event, not replaceable, so review/reopen cycles
-// accumulate resolution labels on one target. The cap is high enough that
-// hitting it means something unusual; a full page is reported as an incomplete
-// cleanup rather than assumed complete.
-const LABEL_CLEANUP_LIMIT = 200;
+// accumulate resolution labels on one target. A real target carries one or two,
+// so this is far above the expected count -- but it is NOT set by that. Every
+// label costs a sequential signed NIP-86 round-trip, so the page size is also
+// the worst-case work in one reopen, bounded by the client's 30s timeout
+// (API_TIMEOUT_MS in adminApi.ts) and by the Workers per-request subrequest
+// budget. Exceeding either would abort a reopen the worker had already
+// completed and report it as a failure. A full page is reported as an
+// incomplete cleanup rather than assumed complete, so a target somehow past
+// the cap still gets cleared over successive reopens instead of silently
+// half-cleared.
+const LABEL_CLEANUP_LIMIT = 50;
 
 async function handleDeleteDecisions(
   targetId: string,
@@ -1713,7 +1725,7 @@ async function queryRelay(
         if (!resolved) {
           resolved = true;
           ws.close();
-          resolve({ success: false, events, error: `Relay query timed out before EOSE (${events.length} events received)` });
+          resolve({ success: false, events: events.slice(), error: `Relay query timed out before EOSE (${events.length} events received)` });
         }
       }, 5000);
 
@@ -1743,7 +1755,7 @@ async function queryRelay(
             resolved = true;
             ws.close();
             const reason = typeof data[2] === 'string' && data[2] ? data[2] : 'no reason given';
-            resolve({ success: false, events, error: `Relay closed the subscription: ${reason}` });
+            resolve({ success: false, events: events.slice(), error: `Relay closed the subscription: ${reason}` });
           }
         } catch {
           // Ignore parse errors
@@ -1754,7 +1766,8 @@ async function queryRelay(
         if (!resolved) {
           clearTimeout(timeout);
           resolved = true;
-          resolve({ success: false, events, error: 'WebSocket error' });
+          ws.close();
+          resolve({ success: false, events: events.slice(), error: 'WebSocket error' });
         }
       });
 
@@ -1763,7 +1776,7 @@ async function queryRelay(
           clearTimeout(timeout);
           resolved = true;
           // Closed before EOSE: absence is unconfirmed, so this is a failure.
-          resolve({ success: false, events, error: `Relay closed before EOSE (${events.length} events received)` });
+          resolve({ success: false, events: events.slice(), error: `Relay closed before EOSE (${events.length} events received)` });
         }
       });
     } catch (error) {
