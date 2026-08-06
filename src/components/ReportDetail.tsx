@@ -280,9 +280,15 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             // The decisions ARE gone on this path, so hasDecisions goes false
             // and the Reopen button unmounts. Retrying is the right advice and
             // the cleanup is idempotent, so the retry has to come with it, and
-            // it does not expire on a timer. That is not a guarantee it will
-            // still be there: TOAST_LIMIT is 1, so any later toast evicts it.
-            // The fallback is to resolve the report again and reopen.
+            // it does not expire on a timer.
+            //
+            // It is still single-use. Radix renders ToastAction as a
+            // ToastClose, so the click that fires the retry also dismisses this
+            // toast. A retry that comes back still-degraded raises a fresh one
+            // carrying a fresh action; a retry that THROWS lands in onError,
+            // which has no action, and ends the chain. TOAST_LIMIT is 1, so any
+            // later toast evicts it too. The fallback in both cases is to
+            // resolve the report again and reopen.
             //
             // Re-sends the target this toast was raised for, not whatever is
             // selected when it is clicked -- see ReopenTarget above.

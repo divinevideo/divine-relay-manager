@@ -193,7 +193,11 @@ describe('ReportDetail reopen reporting', () => {
     // The decisions ARE deleted on this path, so hasDecisions goes false and
     // the Reopen button unmounts. Telling a moderator to retry without giving
     // them the means is a dead end, so the retry rides on the toast -- and it
-    // must not expire, since nothing else can reach this action afterwards.
+    // must not expire on a timer, since nothing else can reach this action
+    // afterwards. Single-use even so: ToastAction is a ToastClose, so the click
+    // that fires the retry also dismisses the toast, and only a retry that
+    // comes back still-degraded raises a replacement. These tests render the
+    // action outside a ToastProvider, so that dismissal does not run here.
     expect(arg.action).toBeDefined();
     expect(arg.duration).toBe(Infinity);
   });
