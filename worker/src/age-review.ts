@@ -120,29 +120,84 @@ export async function getActiveAgeReviewCase(
 
 /**
  * Refuse-and-route guard shared by the interactive enforcement endpoints
- * (relay-rpc suspend/unsuspend, bulk-moderate enqueue): if the pubkey has an
- * open (non-terminal) age-review case, returns a structured 409
+ * (relay-rpc suspend/unsuspend/unban, bulk-moderate enqueue): if the pubkey has
+ * an open (non-terminal) age-review case, returns a structured 409
  * (`age_review_active` + caseId/state) that the frontend turns into a redirect
  * to the case; returns null when nothing blocks the action.
  *
- * Fails open: the guard is a safety net (the report hand-off is the primary
- * path), so a transient D1 error must not block core moderation — log and
- * proceed. A malformed pubkey also skips the guard (no point querying; the
- * caller's own validation produces the 400). Age-review's own enforcement
- * calls the nip86 helpers / runBulkModeration directly, so it never hits the
- * guarded endpoints.
+ * Fails open by default: the guard is a safety net (the report hand-off is the
+ * primary path), so a transient D1 error must not block core moderation — log
+ * and proceed. Age-review's own enforcement calls the nip86 helpers /
+ * runBulkModeration directly, so it never hits the guarded endpoints.
+ *
+ * `failClosed` inverts that for the REVERSAL direction, where the default is
+ * the wrong trade. Failing open on a suspend over-enforces: visible, and
+ * undone by the moderator who did it. Failing open on an unsuspend or unban
+ * silently LIFTS a minor-safety hold while reporting success, so nobody learns
+ * the check never ran — and those calls now arrive from automation rather than
+ * a human who might notice. The cost is that a real outage blocks reversals
+ * entirely, which is accepted: an outage long enough to matter is not tenable
+ * and has to be fixed rather than papered over. `banpubkey` is unguarded, so
+ * severe enforcement still works throughout.
+ *
+ * Under `failClosed` there are two ways the check "cannot happen", and both
+ * refuse identically: no DB binding, and a thrown lookup. A non-canonical pubkey
+ * is NOT one of them: no case can be keyed to a value the lookup could never
+ * match, so there is nothing to refuse on its behalf.
+ *
+ * `failClosed` is opt-in PER CALL SITE, not a property of the guard. Only
+ * relay-rpc's reversals pass it today; bulk-moderate deliberately does not, for
+ * reasons recorded at its call site in index.ts.
  */
 export async function ageReviewActiveGuard(
   pubkey: string,
   env: AgeReviewEnv,
   corsHeaders: Record<string, string>,
   error: string,
+  opts: { failClosed?: boolean } = {},
 ): Promise<Response | null> {
-  if (!/^[0-9a-f]{64}$/.test(pubkey) || !env.DB) return null;
+  // 503, not 409: "could not check" is a different answer from "there is a
+  // case", and 5xx is the retryable class. No caseId/state, since neither is
+  // known.
+  const cannotCheck = () => json({
+    success: false,
+    error: 'Could not check age-review status. Try again.',
+    code: 'age_review_check_failed',
+  }, 503, corsHeaders);
+
+  // A non-canonical pubkey proceeds in both modes, and that is not the same
+  // omission the earlier version made. It skipped on the stated grounds that the
+  // caller validates, which no caller did. The reason now is that there is nothing
+  // here to protect: a case is keyed to a real lowercase pubkey, so a value that
+  // cannot match one cannot be hiding an open case either. Refusing would only
+  // block the reverse direction, which deliberately carries such values so a row
+  // banned with one stays removable (see handleRelayRpc).
+  //
+  // The enforce direction does not reach this: handleRelayRpc answers those with a
+  // 400 first, since a ban on a value the relay cannot match enforces on nobody.
+  if (!/^[0-9a-f]{64}$/.test(pubkey)) return null;
+
+  // A missing binding is the check not happening, so it refuses under
+  // failClosed exactly as a thrown lookup does. Handling only the throw would
+  // leave the PERSISTENT failure lifting holds while the transient one refused,
+  // which is the wrong way round. Every deployment binds DB (wrangler prod,
+  // staging and local), so this costs real traffic nothing.
+  if (!env.DB) {
+    if (opts.failClosed) {
+      console.error('[ageReviewActiveGuard] no DB binding; refusing (fail-closed)');
+      return cannotCheck();
+    }
+    return null;
+  }
+
   let activeCase: AgeReviewCase | null = null;
   try {
     activeCase = await getActiveAgeReviewCase(pubkey, env);
   } catch (err) {
+    if (opts.failClosed) {
+      console.error('[ageReviewActiveGuard] lookup failed; refusing (fail-closed):', err);
+      return cannotCheck();
+    }
     console.error('[ageReviewActiveGuard] lookup failed; proceeding:', err);
   }
   if (!activeCase) return null;

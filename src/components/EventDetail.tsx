@@ -10,6 +10,7 @@ import { useModerationStatus } from "@/hooks/useModerationStatus";
 import { useToast } from "@/hooks/useToast";
 import { getKindInfo, getKindCategory } from "@/lib/kindNames";
 import { useAdminApi } from "@/hooks/useAdminApi";
+import { useAgeReviewGuardRedirect } from "@/hooks/useAgeReviewGuardRedirect";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { UserIdentifier } from "@/components/UserIdentifier";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -359,6 +360,7 @@ function TagsTable({ tags }: { tags: string[][] }) {
 export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReports }: EventDetailProps) {
   const { nostr } = useNostr();
   const { toast } = useToast();
+  const redirectIfGuarded = useAgeReviewGuardRedirect();
   const { banPubkey, deleteEvent, unbanPubkey, allowEvent, verifyPubkeyBanned, verifyPubkeyUnbanned, verifyEventDeleted, logDecision } = useAdminApi();
   const { getModeratorPubkey } = useCurrentUser();
   const queryClient = useQueryClient();
@@ -559,7 +561,8 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
         setIsVerifying(false);
       }
     },
-    onError: (error: Error) => {
+    onError: (error: Error, variables: { pubkey: string }) => {
+      if (redirectIfGuarded(error, variables.pubkey)) return;
       toast({
         title: "Failed to unban user",
         description: error.message,

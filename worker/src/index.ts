@@ -558,6 +558,17 @@ export default {
         // enqueue-time only — a case opened while a chunked job is already
         // draining does not abort it (aborting mid-job would leave
         // half-applied state; the job was legitimate when it started).
+        // No `failClosed` here, deliberately, and NOT because bulk has no
+        // reversal: `un-age-restrict-all` is one, and it lifts restrictions this
+        // very case imposed. The guard's docstring argues fail-closed by
+        // direction, which taken alone would cover it. Bulk is partitioned by
+        // blast radius instead. A refused bulk job is one moderator's click
+        // failing loudly in the UI, with no automated caller behind it, so an
+        // outage that blocks all three actions stops content moderation
+        // wholesale for a human who has no other route -- whereas a refused
+        // reversal only defers restoring an account that stays held meanwhile.
+        // If bulk ever becomes reachable from automation, revisit this: the
+        // reasoning is about who is on the other end, not about the actions.
         let peeked: { pubkey?: string } | undefined;
         try {
           peeked = await request.clone().json() as { pubkey?: string };
@@ -966,6 +977,31 @@ async function handleModerate(
         });
         // Pass ctx so the unbanpubkey Keycast restore (non-critical) is kept alive.
         const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders, ctx);
+        if (!rpcResponse.ok) {
+          // Forward the inner response rather than re-wrapping at 500. The
+          // age-review guard answers a refused unban with a structured 409
+          // (code/caseId/state) that callers route on, and flattening it to 500
+          // both destroys that contract and mislabels a permanent refusal as
+          // transient, which is the shape retrying clients treat as "try again".
+          //
+          // Note this is not 409-only. Three non-ok returns are reachable from
+          // here: the guard's 409, its 503 when the case lookup cannot run
+          // under fail-closed, and a 400 when the underlying NIP-86 call fails.
+          // The canonical-hex 400 is deliberately NOT one of them: allow_pubkey
+          // issues unbanpubkey, which is exempt from that check so a row banned
+          // with a non-canonical value stays removable, so such a value is
+          // forwarded to the relay and comes back 200.
+          //
+          // So a relay-side failure surfaces here as 400 rather
+          // than 500, which makes /api/moderate consistent with /api/relay-rpc
+          // (already 400 in that case) but does flip it from retryable to
+          // terminal for an automated caller. Deliberate: consistency is worth
+          // more than an accidental 500, and no current caller consumes this
+          // path. Only allow_pubkey forwards: delete_event and ban_pubkey still
+          // flatten to 500, because neither is guarded and so neither can
+          // produce a 409/503 whose code a caller would need.
+          return rpcResponse;
+        }
         const rpcResult = await rpcResponse.json() as { success: boolean; error?: string };
         if (!rpcResult.success) {
           return jsonResponse({ success: false, error: rpcResult.error || 'unbanpubkey RPC failed' }, 500, corsHeaders);
@@ -1005,16 +1041,87 @@ async function handleRelayRpc(
     return jsonResponse({ success: false, error: 'Missing method' }, 400, corsHeaders);
   }
 
-  // Age-review guard: a bare suspend/unsuspend on a pubkey with an open
+  // Age-review guard: a bare account-state change on a pubkey with an open
   // (non-terminal) age-review case must not half-enforce (Suspend orphans the
   // case) or silently lift the hold (Unsuspend skips verification). Refuse and
   // route the moderator to the case; Restrict/Clear live in the age-review flow.
-  // Age-review's own enforcement calls the nip86 helpers directly, and internal
-  // moderation/bulk callers use ban*/unban* only, so neither reaches this guard.
-  if (body.method === 'suspendpubkey' || body.method === 'unsuspendpubkey') {
-    const target = body.params?.[0] ? String(body.params[0]) : '';
+  //
+  // unbanpubkey is included because it calls unsuspendUser, which sets Keycast
+  // status to active and so lifts a suspension as well as a ban. An unban on an
+  // account under age review therefore restores login and signing while skipping
+  // the case, which is exactly what this guard exists to prevent. Two callers
+  // outside this repo reach it: divine-moderation-service, which has mapped
+  // allow_pubkey -> unbanpubkey onto /api/relay-rpc since 2026-06-08, and the
+  // Coop enforcement adapter, whose reversal routes followed on 2026-06-17.
+  // Only the adapter surfaces the refusal; divine-moderation-service discards
+  // code/caseId/state (divinevideo/divine-moderation-service#191).
+  //
+  // banpubkey is deliberately NOT included: it is a severe-action escape hatch, so
+  // a moderator who finds something like CSAM on an account under review can act
+  // without resolving the case first. Pinned by an existing test.
+  //
+  // What makes guarding one direction but not the other coherent is mechanical,
+  // not a matter of taste. banpubkey performs a destructive content purge that
+  // unbanpubkey cannot reverse (see nip86.ts, where suspendpubkey is documented
+  // as the reversible alternative "without the destructive purge that banpubkey
+  // performs"). So guarding the unban removes no recovery path that ever existed
+  // for content; it defers only restoring login and signing, which is precisely
+  // the hold the case owns. Nor is it a one-way door: once the case reaches a
+  // terminal state getActiveAgeReviewCase returns null and the unban proceeds.
+  //
+  // Age-review's own enforcement calls the nip86 helpers directly, so it does not
+  // reach this guard and can still act on its own cases.
+  const target = body.params?.[0] ? String(body.params[0]) : '';
+
+  // Canonical hex is required to ENFORCE, but deliberately not to REVERSE.
+  //
+  // The relay stores and matches these bytes exactly, so a ban or suspend carrying a
+  // non-canonical pubkey enforces on nobody while reporting success. 400 rather than
+  // the guard's 503: it is the same answer handleGetActiveAgeReviewCase gives for the
+  // same regex, and unlike a D1 outage a malformed pubkey never becomes valid on a
+  // retry, so the retryable class would be a lie.
+  //
+  // The reverse direction must NOT get the same check. banpubkey did not always have
+  // one, and rows written with a non-canonical value are stored byte-exactly and are
+  // removable only by sending that same value back. Refusing it here would make
+  // cleanup stricter than the thing that created the mess, leaving those rows stuck in
+  // the ban list with no way out of the UI. Nothing is risked by allowing it: an
+  // age-review case is keyed to a real lowercase pubkey, so a non-canonical value has
+  // no case to skip past, which is why the guard also lets it through.
+  if (
+    (body.method === 'banpubkey' || body.method === 'suspendpubkey')
+    && !/^[0-9a-f]{64}$/.test(target)
+  ) {
+    return jsonResponse({ success: false, error: 'Invalid pubkey' }, 400, corsHeaders);
+  }
+
+  if (
+    body.method === 'suspendpubkey' ||
+    body.method === 'unsuspendpubkey' ||
+    body.method === 'unbanpubkey'
+  ) {
+    if (env.DB) {
+      // Bootstrapping is part of the check, not a precondition for it: a DDL
+      // failure must reach the same fail-open/fail-closed decision as a failed
+      // lookup rather than escape as an unhandled rejection. This route returns
+      // its promise without awaiting (see the /api/relay-rpc case above), so the
+      // top-level catch never sees a rejection from here -- it would leave the
+      // caller with no body and no CORS headers. Swallow and let the guard
+      // decide: the lookup below fails the same way, refusing a reversal and
+      // proceeding for a suspend.
+      try {
+        await ensureSchemaOnce(env.DB);
+      } catch (err) {
+        console.error('[handleRelayRpc] age-review schema bootstrap failed:', err);
+      }
+    }
+    // Reversals fail closed: if the case lookup itself fails we refuse rather
+    // than lift a hold without having checked. Suspend keeps the default,
+    // because failing open there over-enforces, which is visible and undoable.
+    const isReversal = body.method === 'unsuspendpubkey' || body.method === 'unbanpubkey';
     const guarded = await ageReviewActiveGuard(target, env, corsHeaders,
-      'This account is under age review. Restrict or clear it from the Age Review flow.');
+      'This account is under age review. Restrict or clear it from the Age Review flow.',
+      { failClosed: isReversal });
     if (guarded) return guarded;
   }
 

@@ -16,6 +16,7 @@ import {
   bucketModerationCounts,
   fetchZendeskTagCount,
   handleGetAgeReviewFunnel,
+  ageReviewActiveGuard,
   type AgeReviewEnv,
 } from './age-review';
 import type { AgeReviewCase } from '../../shared/age-review';
@@ -2148,5 +2149,25 @@ describe('handleGetAgeReviewFunnel', () => {
     for (const query of Object.values(FUNNEL_ZENDESK_QUERIES)) {
       expect(calledUrls.some((u) => u.includes(encodeURIComponent(query)))).toBe(true);
     }
+  });
+});
+
+describe('ageReviewActiveGuard — non-canonical pubkey', () => {
+  // Skipped in BOTH modes, deliberately. A case is keyed to a real lowercase pubkey,
+  // so a non-canonical value cannot have one to skip past -- there is nothing for the
+  // guard to protect. handleRelayRpc rejects these outright on the enforce direction;
+  // the reverse direction is allowed to carry them so a row banned with a bad value
+  // stays removable, and that only works if the guard lets it through.
+  const CORS = { 'Access-Control-Allow-Origin': 'https://app.divine.video' };
+  const envWithDb = { DB: { prepare: () => ({ bind: () => ({ first: async () => null }) }) } } as unknown as AgeReviewEnv;
+
+  it('proceeds under failClosed, because no case can be keyed to it', async () => {
+    const response = await ageReviewActiveGuard('NOT_CANONICAL_HEX', envWithDb, CORS, 'err', { failClosed: true });
+    expect(response).toBeNull();
+  });
+
+  it('proceeds when not failing closed', async () => {
+    const response = await ageReviewActiveGuard('NOT_CANONICAL_HEX', envWithDb, CORS, 'err');
+    expect(response).toBeNull();
   });
 });
