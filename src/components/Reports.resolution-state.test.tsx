@@ -438,6 +438,10 @@ describe('warm failure keeps the stale filter and says so (#221)', () => {
 });
 
 describe('truncated resolution history is stated, not silent (#221)', () => {
+  // Truncates /api/decisions only. `labels` is left at whatever stubFetch's
+  // default state produces (untruncated), so this covers a single-source
+  // truncation. See stubTruncatedBoth below for the two-source case that
+  // exercises the Math.max-vs-Math.min direction.
   function stubTruncated(oldestCovered: string | null, truncated: boolean) {
     stubFetch({ labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty' });
     const healthy = globalThis.fetch as unknown as typeof fetch;
@@ -450,24 +454,91 @@ describe('truncated resolution history is stated, not silent (#221)', () => {
     }));
   }
 
-  it('names the date resolution history reaches back to', async () => {
+  // Truncates BOTH /api/resolution-labels and /api/decisions independently,
+  // at different depths. The reported window can only be as deep as the
+  // MORE restrictive (later) of the two -- Math.max. A regression to
+  // Math.min would report the LESS restrictive (earlier) bound instead,
+  // falsely telling a moderator history reaches further back than it does.
+  // labels' oldest_covered is unix seconds (matches Nostr created_at);
+  // decisions' is a SQLite CURRENT_TIMESTAMP string. See adminApi.ts's
+  // fetchResolutionLabels/getAllDecisions for the two shapes.
+  function stubTruncatedBoth(
+    labels: { oldestCoveredUnixSeconds: number; truncated: boolean },
+    decisions: { oldestCovered: string; truncated: boolean }
+  ) {
+    stubFetch({ labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty' });
+    const healthy = globalThis.fetch as unknown as typeof fetch;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/decisions')) {
+        return jsonResponse({
+          success: true,
+          decisions: [],
+          truncated: decisions.truncated,
+          oldest_covered: decisions.oldestCovered,
+        });
+      }
+      if (url.includes('/api/resolution-labels')) {
+        return jsonResponse({
+          success: true,
+          events: [],
+          truncated: labels.truncated,
+          oldest_covered: labels.oldestCoveredUnixSeconds,
+        });
+      }
+      return healthy(input, init);
+    }));
+  }
+
+  // Independent of production's toLocaleDateString call: derives the
+  // expected day/month/year from the raw UTC epoch via Date's UTC getters
+  // and a hardcoded month table, rather than reusing the component's own
+  // Intl options object. A wrong CHOICE of format options in production
+  // (not just a wrong VALUE) would still be caught, since this never
+  // constructs its expectation by calling toLocaleDateString itself.
+  const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  function assertBannerShowsUtcDate(epochMs: number) {
+    const d = new Date(epochMs);
+    const day = String(d.getUTCDate());
+    const month = MONTH_ABBR[d.getUTCMonth()];
+    const year = String(d.getUTCFullYear());
+    const banner = screen.getByText(/resolution history only reaches back to/i);
+    const text = banner.textContent ?? '';
+    expect(text).toContain(day);
+    expect(text).toContain(month);
+    expect(text).toContain(year);
+    expect(text).toContain('UTC');
+  }
+
+  it('names the date resolution history reaches back to, in UTC', async () => {
     stubTruncated('2026-06-14 00:00:00', true);
     renderReports();
 
     expect(await screen.findByText(/resolution history only reaches back to/i)).toBeInTheDocument();
     // '2026-06-14 00:00:00' is UTC (matching parseOldestCovered's handling of
-    // SQLite CURRENT_TIMESTAMP) but the banner renders it in the runner's
-    // local time, so which calendar day shows depends on the runner's
-    // timezone (e.g. it lands on the 13th under America/Los_Angeles in June).
-    // Assert against the same computation the component does rather than a
-    // hardcoded day, which would be locale/timezone-flaky, or a bare /2026/,
-    // which would pass regardless of what date is actually shown.
-    const expectedDate = new Date(Date.parse('2026-06-14T00:00:00Z')).toLocaleDateString(undefined, {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-    });
-    expect(screen.getByText(new RegExp(expectedDate.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'))).toBeInTheDocument();
+    // SQLite CURRENT_TIMESTAMP). The banner now renders in UTC regardless of
+    // the runner's local timezone, so the expected date is stable rather
+    // than derived from the runner's own clock.
+    assertBannerShowsUtcDate(Date.parse('2026-06-14T00:00:00Z'));
+  });
+
+  it('shows the more restrictive of two differently-truncated sources', async () => {
+    // labels can see back to 2026-01-01 -- if the derivation regressed to
+    // Math.min, the banner would show this earlier, falsely-reassuring
+    // date. decisions only reaches 2026-06-14, the real reported boundary,
+    // and Math.max must pick it.
+    const labelsOldestCovered = Date.UTC(2026, 0, 1) / 1000;
+    stubTruncatedBoth(
+      { oldestCoveredUnixSeconds: labelsOldestCovered, truncated: true },
+      { oldestCovered: '2026-06-14 00:00:00', truncated: true }
+    );
+    renderReports();
+
+    expect(await screen.findByText(/resolution history only reaches back to/i)).toBeInTheDocument();
+    assertBannerShowsUtcDate(Date.parse('2026-06-14T00:00:00Z'));
+
+    const banner = screen.getByText(/resolution history only reaches back to/i);
+    expect(banner.textContent ?? '').not.toContain('Jan');
   });
 
   it('shows no truncation banner when the window covers everything', async () => {

@@ -91,17 +91,24 @@ export function StaleResolutionBanner({
 // signal is older than the window ages out of resolvedTargets and sits in the
 // queue forever with nothing explaining why (#221).
 export function TruncatedHistoryBanner({ oldestCovered }: { oldestCovered: number }) {
+  // oldestCovered is a UTC-anchored epoch value (see parseOldestCovered).
+  // Rendering it in the browser's local zone can shift the displayed day
+  // backward for moderators west of UTC, understating how far the gap
+  // reaches -- the falsely-reassuring direction #221 exists to remove. The
+  // boundary is a statement about the data, not the reader's calendar day,
+  // so it renders as UTC with an explicit marker.
   const date = new Date(oldestCovered).toLocaleDateString(undefined, {
     year: 'numeric',
     month: 'short',
     day: 'numeric',
+    timeZone: 'UTC',
   });
 
   return (
     <Alert className="mt-2 py-2">
       <AlertDescription className="text-xs">
-        Resolution history only reaches back to {date}. Anything resolved before then may
-        be listed as pending.
+        Resolution history only reaches back to {date} (UTC). Anything resolved before then
+        may be listed as pending.
       </AlertDescription>
     </Alert>
   );
