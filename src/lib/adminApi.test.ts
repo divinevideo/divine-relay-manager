@@ -441,12 +441,15 @@ describe('adminApi', () => {
     });
 
     it('surfaces a guard 409 as structured ApiError fields, not an opaque message', async () => {
-      // This is the only link that turns the worker's age-review 409 into
-      // something the UI can branch on. Every guarded call goes through here:
-      // unbanPubkey, suspendPubkey, unsuspendPubkey, and UserManagement's
-      // allow_user calling callRelayRpc('unbanpubkey') directly. Drop `code`
-      // and all five silently fall through to a destructive toast instead of
-      // routing to the case, with nothing else failing.
+      // Every guarded /api/relay-rpc call goes through here: unbanPubkey,
+      // suspendPubkey, unsuspendPubkey, and UserManagement's allow_user calling
+      // callRelayRpc('unbanpubkey') directly. Drop `code` and all four silently
+      // fall through to a destructive toast instead of routing to the case,
+      // with nothing else failing.
+      //
+      // Not the only such link: /api/bulk-moderate is guarded by the same
+      // predicate, but bulkModerate goes through apiRequest, which parses `code`
+      // separately (pinned above by the 409 version_conflict test).
       mockFetch.mockResolvedValueOnce({
         ok: false,
         status: 409,
