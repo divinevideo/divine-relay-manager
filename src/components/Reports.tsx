@@ -507,16 +507,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   });
   const allDecisions = decisionsResult?.items;
 
-  // The oldest point either capped source can still speak to. A target resolved
-  // before this is invisible to the filter and would sit in the queue forever
-  // with nothing explaining why.
-  const truncatedOldestCovered = useMemo(() => {
-    const bounds = [
-      labelsResult?.truncated ? labelsResult.oldestCovered : null,
-      decisionsResult?.truncated ? decisionsResult.oldestCovered : null,
-    ].filter((v): v is number => typeof v === 'number');
-    return bounds.length > 0 ? Math.max(...bounds) : null;
-  }, [labelsResult, decisionsResult]);
+  // The oldest point each capped source can still speak to, kept apart because
+  // the two are load-bearing in different views. A target resolved before a
+  // source's bound is invisible to whatever that source feeds, and would sit in
+  // the queue forever with nothing explaining why.
+  const truncationBounds = useMemo(() => ({
+    labels: labelsResult?.truncated ? labelsResult.oldestCovered : null,
+    decisions: decisionsResult?.truncated ? decisionsResult.oldestCovered : null,
+  }), [labelsResult, decisionsResult]);
 
   // Track relative time since last data update for freshness indicator
   const [lastUpdatedText, setLastUpdatedText] = useState<string>('');
@@ -757,6 +755,28 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const decisionsUnavailable = overriddenBlockedSources.some(s => s.key === 'decisions');
   // Errored but still holding previous data: filter with the stale set, say so.
   const staleSources = gatingSources.filter(s => s.hasData && s.error);
+
+  // How far back the banner can honestly claim history reaches, given which
+  // capped sources are load-bearing in the current view. Gated per source for
+  // the same reason gatesAlways exists: a truncated LABELS read only matters
+  // where resolvedTargets is being subtracted, but a truncated DECISIONS read
+  // matters everywhere, because decisions also feeds pendingReviewTargets. The
+  // pending-review queue is built ENTIRELY from decisions, and switching it on
+  // force-clears hideResolved -- so gating the whole banner on the resolved
+  // filter switched it off in the one view most exposed to the cap, exactly
+  // where an auto_hidden row aging out silently drops a target from the CSAM
+  // queue.
+  //
+  // Math.max, not Math.min: the window can only be as deep as the MORE
+  // restrictive (later) of the two bounds. Reporting the earlier one would tell
+  // a moderator history reaches further back than it does.
+  const activeTruncationBounds = [
+    resolvedFilterActive ? truncationBounds.labels : null,
+    truncationBounds.decisions,
+  ].filter((v): v is number => typeof v === 'number');
+  const truncatedOldestCovered = activeTruncationBounds.length > 0
+    ? Math.max(...activeTruncationBounds)
+    : null;
 
   // Get all unique categories from reports for filter chips
   const availableCategories = useMemo(() => {
@@ -1268,7 +1288,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
             />
           )}
 
-          {truncatedOldestCovered !== null && resolvedFilterActive && (
+          {truncatedOldestCovered !== null && (
             <TruncatedHistoryBanner oldestCovered={truncatedOldestCovered} />
           )}
 

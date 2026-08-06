@@ -768,10 +768,15 @@ describe('truncated resolution history is stated, not silent (#221)', () => {
     expect(screen.queryByText(/resolution history only reaches back to/i)).not.toBeInTheDocument();
   });
 
-  it('shows no truncation banner while hide-resolved is off', async () => {
-    // The coverage window is only relevant when resolvedTargets is actually
-    // being subtracted. No cold error here, so the switch is reachable directly.
-    stubTruncated('2026-06-14 00:00:00', true);
+  it('shows no truncation banner for a capped LABELS read while hide-resolved is off', async () => {
+    // The labels window is only relevant when resolvedTargets is actually being
+    // subtracted, which is what hide-resolved controls. Decisions is left
+    // untruncated here so this measures the labels half on its own. No cold
+    // error, so the switch is reachable directly.
+    stubTruncatedBoth(
+      { oldestCoveredUnixSeconds: Date.UTC(2026, 5, 14) / 1000, truncated: true },
+      { oldestCovered: '2026-06-14 00:00:00', truncated: false }
+    );
     const user = userEvent.setup();
     renderReports();
 
@@ -780,6 +785,61 @@ describe('truncated resolution history is stated, not silent (#221)', () => {
     await user.click(await screen.findByRole('switch', { name: /hide resolved/i }));
 
     expect(screen.queryByText(/resolution history only reaches back to/i)).not.toBeInTheDocument();
+  });
+
+  it('still shows the truncation banner for a capped DECISIONS read while hide-resolved is off', async () => {
+    // The mirror image, and the same reasoning as decisions' gatesAlways: the
+    // decisions read also feeds pendingReviewTargets, which is applied on every
+    // path, so its cap stays load-bearing after hide-resolved goes off.
+    stubTruncated('2026-06-14 00:00:00', true);
+    const user = userEvent.setup();
+    renderReports();
+
+    expect(await screen.findByText(/resolution history only reaches back to/i)).toBeInTheDocument();
+
+    await user.click(await screen.findByRole('switch', { name: /hide resolved/i }));
+
+    expect(screen.getByText(/resolution history only reaches back to/i)).toBeInTheDocument();
+  });
+
+  it('states the truncated window in the pending-review view, which is built entirely from that read', async () => {
+    // The worst case for hiding this banner. pendingReviewTargets comes 100%
+    // from the capped decisions read, and switching Pending review on
+    // force-clears hideResolved -- so gating the banner on the resolved filter
+    // switched it off in the one view with no other source to fall back on. An
+    // auto_hidden row that ages out of the cap drops its target from the CSAM
+    // queue with nothing on screen saying the window has a floor.
+    stubFetch({ labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty' });
+    const healthy = globalThis.fetch as unknown as typeof fetch;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/decisions')) {
+        return jsonResponse({
+          success: true,
+          // An auto-hidden, not-yet-confirmed target: what puts a row in the
+          // pending-review queue and makes its toggle appear at all.
+          decisions: [{
+            id: 1,
+            target_type: 'pubkey',
+            target_id: REPORTED_PUBKEY,
+            action: 'auto_hidden',
+            created_at: '2026-06-20 00:00:00',
+          }],
+          truncated: true,
+          oldest_covered: '2026-06-14 00:00:00',
+        });
+      }
+      return healthy(input, init);
+    }));
+
+    const user = userEvent.setup();
+    renderReports();
+
+    await user.click(await screen.findByRole('switch', { name: /pending review/i }));
+
+    // Precondition: this really is the pending-review view, not the default one.
+    expect(screen.getByRole('switch', { name: /hide resolved/i })).toBeDisabled();
+    expect(screen.getByText(/resolution history only reaches back to/i)).toBeInTheDocument();
   });
 
   it('shows no truncation banner against a worker that predates the field', async () => {
