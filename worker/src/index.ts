@@ -1734,11 +1734,13 @@ async function queryRelay(
       // discarding it, so the two concerns stay separate.
 
       // Closing is best-effort cleanup, so a throw from it must not escape.
-      // Before this, close() ran BEFORE resolve() on four of the five exits: a
-      // throw then stranded the promise with the timeout already cleared and
-      // nothing left to settle it, and on the two exits inside the message
-      // listener the parse-error catch swallowed it so there was not even a
-      // log. queryRelay would hang and /api/reports would never answer.
+      // Of the five exits, close() used to run BEFORE resolve() on three --
+      // timeout, EOSE and CLOSED (the error exit was reordered a commit
+      // earlier; the close exit never calls close() at all). A throw then
+      // stranded the promise with the timeout already cleared and nothing left
+      // to settle it, and on the two inside the message listener the
+      // parse-error catch swallowed it so there was not even a log. queryRelay
+      // would hang and /api/reports would never answer.
       //
       // Swallowing here is what guarantees settlement; every exit also resolves
       // before closing, which is belt-and-braces rather than load-bearing.
