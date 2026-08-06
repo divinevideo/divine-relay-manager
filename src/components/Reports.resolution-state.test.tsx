@@ -344,6 +344,51 @@ describe('cold error blocks the queue and offers an override (#221)', () => {
     expect(screen.queryByText(/some of these may already be handled/i)).not.toBeInTheDocument();
   });
 
+  it('the blocked pane warns that overriding will include auto-hidden content', async () => {
+    // Same fixture as "warns that auto-hidden content can appear..." above,
+    // but asserted BEFORE clicking the override -- the pane's own paragraph,
+    // not the post-override ResolutionOverrideWarning sentence, which the
+    // other test already covers.
+    stubFetch({ labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'error' });
+    renderReports();
+
+    expect(await screen.findByText(/resolution state is unavailable/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/if you continue, the unfiltered queue will also include auto-hidden content/i)
+    ).toBeInTheDocument();
+  });
+
+  it('the override does not show a stale banner for a source that has no data at all', async () => {
+    // decisions fails cold (no seeded data), so it belongs in blockingErrors,
+    // never in staleSources -- a stale banner for a source with no data at
+    // all would report a nonsense age (updatedAt 0).
+    stubFetch({ labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'error' });
+    const user = userEvent.setup();
+    renderReports();
+
+    await user.click(await screen.findByRole('button', { name: /show the queue without resolution filtering/i }));
+
+    expect(await screen.findByText(REPORTED_NPUB)).toBeInTheDocument();
+    expect(screen.queryByText(/showing resolution state from/i)).not.toBeInTheDocument();
+  });
+
+  it('still blocks on a cold decisions error while hide-resolved is off', async () => {
+    // Mirror image of "does not block on a cold labels error while hide-resolved
+    // is off" above: decisions carries gatesAlways because it also feeds
+    // pendingReviewTargets, which is applied on every path, so it must keep
+    // gating even once the hide-resolved toggle goes off.
+    stubFetch({ labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'error' });
+    const user = userEvent.setup();
+    renderReports();
+
+    await user.click(await screen.findByRole('button', { name: /show the queue without resolution filtering/i }));
+    await user.click(await screen.findByRole('switch', { name: /hide resolved/i }));
+
+    // Unlike the labels case, the persistent warning must still be present:
+    // decisions did not stop gating just because hide-resolved went off.
+    expect(screen.getByText(/some of these may already be handled/i)).toBeInTheDocument();
+  });
+
   it('shows no unavailable pane when every source is healthy', async () => {
     // Pinning the negative: a pane that renders unconditionally passes every
     // positive test above.
@@ -546,6 +591,20 @@ describe('truncated resolution history is stated, not silent (#221)', () => {
     renderReports();
 
     await screen.findByText(REPORTED_NPUB);
+    expect(screen.queryByText(/resolution history only reaches back to/i)).not.toBeInTheDocument();
+  });
+
+  it('shows no truncation banner while hide-resolved is off', async () => {
+    // The coverage window is only relevant when resolvedTargets is actually
+    // being subtracted. No cold error here, so the switch is reachable directly.
+    stubTruncated('2026-06-14 00:00:00', true);
+    const user = userEvent.setup();
+    renderReports();
+
+    expect(await screen.findByText(/resolution history only reaches back to/i)).toBeInTheDocument();
+
+    await user.click(await screen.findByRole('switch', { name: /hide resolved/i }));
+
     expect(screen.queryByText(/resolution history only reaches back to/i)).not.toBeInTheDocument();
   });
 

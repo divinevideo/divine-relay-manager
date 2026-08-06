@@ -1407,5 +1407,16 @@ describe('adminApi', () => {
 
       expect(result.oldestCovered).toBeNull();
     });
+
+    it('fetchResolutionLabels defaults to not-truncated when the worker predates the field', async () => {
+      // Mirrors getAllDecisions' equivalent test above: a missing field must
+      // not read as "truncated", or every load against an older worker warns.
+      mockFetchOnce({ success: true, events: [] });
+
+      const result = await fetchResolutionLabels(API_URL);
+
+      expect(result.truncated).toBe(false);
+      expect(result.oldestCovered).toBeNull();
+    });
   });
 });
