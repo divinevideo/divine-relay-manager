@@ -1450,6 +1450,30 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
     headers: { 'X-Admin-Key': 'test-admin-key' },
   });
 
+  // The positive control for the flag. Every other case below asserts it goes
+  // TRUE; without this one, flagging any reopen that touched a label at all
+  // still passes -- and that mutation puts a destructive "may stay hidden"
+  // toast on the ordinary successful reopen, which is the failure mode this
+  // flag exists to avoid in the other direction.
+  it('reports a clean reopen when the labels it found were removed', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response(JSON.stringify({ result: true }), { status: 200 })
+    ));
+
+    const resPromise = worker.fetch(
+      reopenRequest(),
+      { ...(reportsEnv as object), DB: reopenDb(), NOSTR_NSEC: TEST_NSEC } as never,
+      ctx,
+    );
+    await feedLabelToEachFilter();
+
+    const res = await resPromise;
+    const body = await res.json() as { labelsDeleted: number; labelCleanupFailed: boolean };
+    // A label was genuinely removed -- this is not the vacuous empty-read case.
+    expect(body.labelsDeleted).toBeGreaterThan(0);
+    expect(body.labelCleanupFailed).toBe(false);
+  });
+
   // The label read can succeed while the delete fails. A relay admin key
   // mismatch 403s every management command but leaves reads working, and that
   // refusal does NOT throw: the RPC comes back success:false. The label
