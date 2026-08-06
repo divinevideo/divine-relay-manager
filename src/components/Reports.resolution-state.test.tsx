@@ -567,6 +567,31 @@ describe('truncated resolution history is stated, not silent (#221)', () => {
     assertBannerShowsUtcDate(Date.parse('2026-06-14T00:00:00Z'));
   });
 
+  // The test above lands exactly on midnight UTC, which only a negative
+  // runner offset (west of UTC) shifts to the previous day -- a positive
+  // offset (east of UTC) leaves it alone. That made the `timeZone: 'UTC'`
+  // guard pass silently under TZ=UTC and every east-of-UTC zone, including
+  // conventional CI. These two fixtures straddle midnight UTC in both
+  // directions and assert the same UTC calendar date, so dropping the
+  // explicit zone is caught regardless of which side of UTC the runner sits
+  // on (the runner's own zone, offset exactly 0, still can't shift anything --
+  // that's arithmetic, not a coverage gap).
+  it('names the date resolution history reaches back to, in UTC, shortly after midnight', async () => {
+    stubTruncated('2026-06-14 00:30:00', true);
+    renderReports();
+
+    expect(await screen.findByText(/resolution history only reaches back to/i)).toBeInTheDocument();
+    assertBannerShowsUtcDate(Date.parse('2026-06-14T00:30:00Z'));
+  });
+
+  it('names the date resolution history reaches back to, in UTC, shortly before midnight', async () => {
+    stubTruncated('2026-06-14 23:30:00', true);
+    renderReports();
+
+    expect(await screen.findByText(/resolution history only reaches back to/i)).toBeInTheDocument();
+    assertBannerShowsUtcDate(Date.parse('2026-06-14T23:30:00Z'));
+  });
+
   it('shows the more restrictive of two differently-truncated sources', async () => {
     // labels can see back to 2026-01-01 -- if the derivation regressed to
     // Math.min, the banner would show this earlier, falsely-reassuring

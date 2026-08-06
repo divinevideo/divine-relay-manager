@@ -677,6 +677,13 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // true the whole time) is the only signal that a blocking source isn't
   // merely slow, so the indefinite skeleton can say why instead of just sitting there.
   const blockingPaused = blockingLoad.some(s => s.isPaused);
+  // The `s.error` term is near-unreachable today: past the cold-load gate above,
+  // every gating source with `!hasData` has already settled, and every settled
+  // non-error source yields at least `[]` (truthy), so `!hasData` alone already
+  // implies an error in practice. Kept anyway because it states the actual intent
+  // -- block on sources that ERRORED, not merely on sources that are empty -- and
+  // it would start mattering the moment a source can settle with no data and no
+  // error (e.g. a 200 with a missing field). Don't delete this as dead code.
   const blockingErrors = gatingSources.filter(s => !s.hasData && s.error);
   const decisionsUnavailable = blockingErrors.some(s => s.key === 'decisions');
   // Errored but still holding previous data: filter with the stale set, say so.

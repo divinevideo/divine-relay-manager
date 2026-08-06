@@ -1380,6 +1380,28 @@ describe('adminApi', () => {
       expect(result.oldestCovered).toBe(Date.UTC(2026, 5, 14, 0, 0, 0));
     });
 
+    // Midnight UTC only exposes the appended-Z guard under a negative runner
+    // offset (west of UTC) -- a positive offset (east of UTC), including
+    // conventional CI, leaves it silent. These two straddle midnight UTC in
+    // both directions so dropping the `Z` suffix is caught on either side
+    // (a runner sitting exactly at UTC still can't be shifted by any
+    // fixture -- that's arithmetic, not a coverage gap).
+    it('normalizes a decisions TEXT timestamp shortly after midnight UTC', async () => {
+      mockFetchOnce({ success: true, decisions: [{ id: 1 }], truncated: true, oldest_covered: '2026-06-14 00:30:00' });
+
+      const result = await getAllDecisions(API_URL);
+
+      expect(result.oldestCovered).toBe(Date.UTC(2026, 5, 14, 0, 30, 0));
+    });
+
+    it('normalizes a decisions TEXT timestamp shortly before midnight UTC', async () => {
+      mockFetchOnce({ success: true, decisions: [{ id: 1 }], truncated: true, oldest_covered: '2026-06-14 23:30:00' });
+
+      const result = await getAllDecisions(API_URL);
+
+      expect(result.oldestCovered).toBe(Date.UTC(2026, 5, 14, 23, 30, 0));
+    });
+
     it('normalizes the label unix seconds to epoch milliseconds', async () => {
       mockFetchOnce({ success: true, events: [], truncated: true, oldest_covered: 1_760_000_000 });
 
