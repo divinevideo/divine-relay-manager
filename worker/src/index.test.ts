@@ -1884,11 +1884,20 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
   });
 
   // A frame can still arrive after a failure path has handed its events to the
-  // caller: the socket is closing, not closed. The message listener's
-  // resolved-guard is what stops that late label joining a set the caller is
-  // already iterating and banning -- a label the read never reported and never
-  // counted. Pinned on the failure path as well as the success path below,
-  // because the guard is one line and covers both.
+  // caller: the socket is closing, not closed. Two independent things stop that
+  // late label joining a set the caller is already iterating and banning, and on
+  // this path either alone suffices -- the message listener's resolved-guard
+  // blocks the push, and all four socket failure exits (timeout, CLOSED, error,
+  // close) resolve with `events.slice()`, a snapshot the late frame cannot
+  // reach. The outer catch carries no events at all; it fires before the array
+  // is in scope.
+  //
+  // So this test dies only to the conjunction: drop the guard and it passes,
+  // drop the slice and it passes, drop both and it fails. The after-EOSE case
+  // ABOVE is the guard's sole-custody pin, because the success exit hands back
+  // the live `events` array and the snapshot is not there to cover it. Neither
+  // mechanism is redundant: removing the copies would leave the guard as the
+  // only thing standing between a late frame and the caller's set.
   it('does not ban a label that arrived after the read had already failed', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.stubGlobal('fetch', vi.fn(async () =>
