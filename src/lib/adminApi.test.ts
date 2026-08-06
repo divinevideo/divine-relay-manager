@@ -1402,6 +1402,19 @@ describe('adminApi', () => {
       expect(result.oldestCovered).toBe(Date.UTC(2026, 5, 14, 23, 30, 0));
     });
 
+    // Zone-less but ISO-shaped (a 'T' separator, no trailing 'Z'). Neither
+    // current endpoint emits this shape, but the zone-suffix check must key
+    // on 'Z', not 'T' -- keying on 'T' would pass this through to Date.parse
+    // as-is, which parses it as LOCAL time and reintroduces the exact UTC
+    // bug this function exists to prevent.
+    it('normalizes a zone-less ISO-style timestamp (T but no Z) as UTC', async () => {
+      mockFetchOnce({ success: true, decisions: [{ id: 1 }], truncated: true, oldest_covered: '2026-06-14T00:30:00' });
+
+      const result = await getAllDecisions(API_URL);
+
+      expect(result.oldestCovered).toBe(Date.UTC(2026, 5, 14, 0, 30, 0));
+    });
+
     it('normalizes the label unix seconds to epoch milliseconds', async () => {
       mockFetchOnce({ success: true, events: [], truncated: true, oldest_covered: 1_760_000_000 });
 

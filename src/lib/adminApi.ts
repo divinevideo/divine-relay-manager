@@ -410,10 +410,18 @@ export interface TruncatableResult<T> {
 
 // SQLite CURRENT_TIMESTAMP has no zone suffix but IS UTC; Nostr created_at is
 // unix seconds. Anything else is reported as unknown rather than NaN.
+//
+// The zone-suffix check is `endsWith('Z')`, not `includes('T')`: an
+// ISO-shaped-but-zone-less string ('2026-06-14T00:30:00') already has a 'T'
+// and would otherwise be passed to Date.parse as-is, which parses it as
+// LOCAL time -- reintroducing the exact UTC bug this function exists to
+// prevent. Neither current caller emits that shape (SQLite emits a space,
+// Nostr emits a number), but the fallback should append 'Z' for any
+// zone-less string, not only the space-separated one it happens to see today.
 export function parseOldestCovered(value: string | number | null | undefined): number | null {
   if (typeof value === 'number') return Number.isFinite(value) ? value * 1000 : null;
   if (typeof value !== 'string' || value.length === 0) return null;
-  const parsed = Date.parse(value.includes('T') ? value : `${value.replace(' ', 'T')}Z`);
+  const parsed = Date.parse(value.endsWith('Z') ? value : `${value.replace(' ', 'T')}Z`);
   return Number.isNaN(parsed) ? null : parsed;
 }
 
