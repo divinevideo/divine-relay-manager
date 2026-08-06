@@ -1,7 +1,7 @@
 // ABOUTME: resolvedTargets is subtractive, so a resolution source that is
 // ABOUTME: missing or errored un-hides handled work rather than hiding more (#221)
 
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import { QueryClient, onlineManager } from '@tanstack/react-query';
@@ -530,6 +530,108 @@ describe('the escape hatch survives the poll that follows a cold failure (#221)'
     expect(screen.queryByText(/resolution state is unavailable/i)).not.toBeInTheDocument();
     // Nothing else could have un-blocked it: the source really did re-fetch.
     expect(attempts()).toBeGreaterThan(3);
+  });
+});
+
+describe('the override is scoped to the sources it was granted for (#221)', () => {
+  // The blocked pane names the sources it is blocking on, and shows an extra
+  // consent paragraph only when DECISIONS is one of them, because proceeding
+  // without decisions also drops the exclusion that keeps auto-hidden content
+  // out of the default view. A single blanket "overridden" flag let consent
+  // given for one source stand in for consent to a different one that failed
+  // later, and the moderator never saw that paragraph.
+
+  function stubWithFailingDecisionsSwitch(base: SourceState) {
+    let decisionsHealthy = true;
+    let attempts = 0;
+    stubFetch(base);
+    const healthy = globalThis.fetch as unknown as typeof fetch;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/decisions')) {
+        attempts += 1;
+        if (!decisionsHealthy) return jsonResponse({ success: false, error: 'cold start timeout' }, 500);
+      }
+      return healthy(input, init);
+    }));
+    return {
+      breakDecisions: () => { decisionsHealthy = false; },
+      decisionsAttempts: () => attempts,
+    };
+  }
+
+  it('re-blocks when a source outside the override fails, rather than silently covering it', async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, retryDelay: 0 }, mutations: { retry: false, retryDelay: 0 } },
+    });
+    const { breakDecisions } = stubWithFailingDecisionsSwitch({
+      labels: 'empty', bannedPubkeys: 'error', bannedEvents: 'empty', decisions: 'empty',
+    });
+    const user = userEvent.setup();
+    renderReports(queryClient);
+
+    // Only banned-pubkeys is blocking, so this consent is about that list alone:
+    // the auto-hidden paragraph is not on screen to be consented to.
+    expect(await screen.findByText(/banned accounts/i)).toBeInTheDocument();
+    expect(
+      screen.queryByText(/if you continue, the unfiltered queue will also include auto-hidden content/i)
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /show the queue anyway/i }));
+    expect(await screen.findByText(REPORTED_NPUB)).toBeInTheDocument();
+
+    // decisions now fails with nothing cached to fall back on. Clearing its
+    // entry first is what makes the failure COLD rather than warm: placeholder
+    // data only fills in while a query is still pending, so a source that
+    // settles into an error with no cached data has none to show. resetQueries
+    // reproduces that (a gcTime eviction, a cache reset) without waiting out a
+    // timer.
+    breakDecisions();
+    await act(async () => {
+      await queryClient.resetQueries({ queryKey: ['decisions'] });
+    });
+
+    expect(await screen.findByText(/resolution state is unavailable/i)).toBeInTheDocument();
+    expect(screen.getByText(/moderation decisions/i)).toBeInTheDocument();
+    // The whole point: the moderator is asked about THIS source, and sees the
+    // consequence that is specific to it.
+    expect(
+      screen.getByText(/if you continue, the unfiltered queue will also include auto-hidden content/i)
+    ).toBeInTheDocument();
+  });
+
+  it('keeps covering the same source when it fails again on a later poll', async () => {
+    // The inverse, and the reason this is a Set rather than a re-prompt every
+    // cycle: re-asking about a source already acknowledged would put the
+    // moderator back on the blocked pane every 15s.
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, retryDelay: 0 }, mutations: { retry: false, retryDelay: 0 } },
+    });
+    let bannedPubkeyAttempts = 0;
+    stubFetch({ labels: 'empty', bannedPubkeys: 'error', bannedEvents: 'empty', decisions: 'empty' });
+    const healthy = globalThis.fetch as unknown as typeof fetch;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/relay-rpc') && String(init?.body ?? '').includes('listbannedpubkeys')) {
+        bannedPubkeyAttempts += 1;
+      }
+      return healthy(input, init);
+    }));
+    const user = userEvent.setup();
+    renderReports(queryClient);
+
+    await user.click(await screen.findByRole('button', { name: /show the queue anyway/i }));
+    expect(await screen.findByText(REPORTED_NPUB)).toBeInTheDocument();
+
+    const before = bannedPubkeyAttempts;
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
+    });
+    expect(bannedPubkeyAttempts).toBeGreaterThan(before);
+
+    // Same source, same failure, already acknowledged: no re-prompt.
+    expect(screen.queryByText(/resolution state is unavailable/i)).not.toBeInTheDocument();
+    expect(screen.getByText(REPORTED_NPUB)).toBeInTheDocument();
+    expect(screen.getByText(/some of these may already be handled/i)).toBeInTheDocument();
   });
 });
 

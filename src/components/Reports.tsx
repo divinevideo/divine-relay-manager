@@ -96,6 +96,10 @@ const MEDIUM_PRIORITY_CATEGORIES = ['doxxing_pii', 'malware_scam', 'illegal_good
 // these reads: one-shot moderation actions still want the generous default.
 const RESOLUTION_READ_TIMEOUT_MS = 8_000;
 
+// The four polled reads that build resolvedTargets. Named at module scope so the
+// acknowledged-override state can be keyed by it.
+type ResolutionSourceKey = 'labels' | 'banned-pubkeys' | 'banned-events' | 'decisions';
+
 // Category priority for sorting
 function getCategoryPriority(categories: string[]): number {
   if (categories.some(c => HIGH_PRIORITY_CATEGORIES.includes(c))) return 0;
@@ -381,10 +385,19 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const [sortBy, setSortBy] = useState<SortOption>('reports');
   const [filterCategory, setFilterCategory] = useState<string | null>(null);
   const [filterTargetType, setFilterTargetType] = useState<'all' | 'event' | 'pubkey'>('all');
-  // Component-local on purpose: the override survives polls within this mount so
-  // a moderator is not thrown back to the blocked pane every 15s, and resets on
-  // reload so the safe default reasserts itself.
-  const [resolutionOverride, setResolutionOverride] = useState(false);
+  // The resolution sources a moderator has explicitly chosen to proceed without.
+  // A Set rather than a boolean: the blocked pane names the sources it is
+  // blocking on, and its consent paragraph changes depending on whether
+  // DECISIONS is among them (proceeding then also exposes auto-hidden content).
+  // A blanket boolean silently carried consent given for "Banned posts" over to
+  // a later cold decisions failure, so the moderator never saw that paragraph --
+  // a consent bypass, not just staleness.
+  //
+  // Component-local on purpose: acknowledgements survive polls within this mount
+  // so a moderator is not thrown back to the blocked pane every 15s, and reset
+  // on reload so the safe default reasserts itself.
+  const [acknowledgedBlockedSources, setAcknowledgedBlockedSources] =
+    useState<ReadonlySet<ResolutionSourceKey>>(() => new Set());
   // Check for deep link params to force fresh data fetch
   const hasDeepLinkParams = !!(searchParams.get('event') || searchParams.get('pubkey'));
   // Deep-link resolution: 'resolving' while we look a target up, 'gone' when the
@@ -617,7 +630,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // guarantee the list itself stays complete: a new resolution query has to
   // be added here by hand, or it silently reintroduces #221.
   interface ResolutionSource {
-    key: 'labels' | 'banned-pubkeys' | 'banned-events' | 'decisions';
+    key: ResolutionSourceKey;
     label: string;
     hasData: boolean;
     error: unknown;
@@ -731,14 +744,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // true the whole time) is the only signal that a blocking source isn't
   // merely slow, so the block can say why instead of sitting indefinitely.
   const blockingLoadPaused = blockingLoad.filter(s => s.isPaused);
-  const blockingPaused = blockingLoadPaused.length > 0;
   // Paused never resolves on its own while offline (no timeout applies, see
-  // ResolutionUnavailablePane's offline branch below), so once the moderator
-  // overrides it, a paused source can't be allowed to keep failing the
-  // isLoading/blockingLoad gate the way a merely-slow source still should.
-  const blockingLoadStillBlocking = resolutionOverride
-    ? blockingLoad.filter(s => !s.isPaused)
-    : blockingLoad;
+  // ResolutionUnavailablePane's offline branch below), so once the moderator has
+  // acknowledged a paused source, it can't be allowed to keep failing the
+  // isLoading/blockingLoad gate the way a merely-slow source still should. Keyed
+  // per source: a paused source they have NOT acknowledged still blocks.
+  const blockingLoadStillBlocking = blockingLoad.filter(
+    s => !(s.isPaused && acknowledgedBlockedSources.has(s.key))
+  );
   // The errorUpdateCount term inside hasColdFailed is near-unreachable today:
   // past the cold-load gate above, every gating source with `!hasData` has
   // already settled, and every settled non-error source yields at least `[]`
@@ -751,8 +764,16 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // Sources an override is currently bypassing, whether by cold error or by an
   // indefinite offline pause -- combined because the override warning and the
   // decisions-unavailable copy read the same regardless of which reason applies.
-  const overriddenBlockedSources = [...blockingErrors, ...blockingLoadPaused];
-  const decisionsUnavailable = overriddenBlockedSources.some(s => s.key === 'decisions');
+  const currentlyBlockedSources = [...blockingErrors, ...blockingLoadPaused];
+  const decisionsUnavailable = currentlyBlockedSources.some(s => s.key === 'decisions');
+  // Blocked sources the moderator has already accepted. Anything blocking that
+  // is NOT acknowledged re-raises the pane, so consent given for one source
+  // cannot stand in for consent to a different one that failed later.
+  const overriddenBlockedSources = currentlyBlockedSources.filter(
+    s => acknowledgedBlockedSources.has(s.key)
+  );
+  const unacknowledgedPaused = blockingLoadPaused.filter(s => !acknowledgedBlockedSources.has(s.key));
+  const unacknowledgedErrors = blockingErrors.filter(s => !acknowledgedBlockedSources.has(s.key));
   // Errored but still holding previous data: filter with the stale set, say so.
   const staleSources = gatingSources.filter(s => s.hasData && s.error);
 
@@ -1095,6 +1116,17 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // fallback, so the two paths cannot drift.
   const dismissDetail = () => handleSelectReport(null);
 
+  // Taking the override acknowledges exactly the sources blocking at that moment,
+  // and nothing else. A source that fails later is unacknowledged, so the pane
+  // re-raises and the moderator sees that source's own consent copy.
+  const acknowledgeBlockedSources = (sources: ResolutionSource[]) => {
+    setAcknowledgedBlockedSources(prev => {
+      const next = new Set(prev);
+      for (const s of sources) next.add(s.key);
+      return next;
+    });
+  };
+
   // Shared by both the offline pane and the cold-error pane below so the two
   // retry paths cannot drift apart.
   const retryResolutionSources = () => {
@@ -1113,14 +1145,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // branch a moderator stuck behind a `navigator.onLine` false negative
   // (captive portals, some VM/Electron/Linux net stacks) has no way forward
   // at all (#221).
-  if (blockingPaused && !resolutionOverride) {
+  if (unacknowledgedPaused.length > 0) {
     return (
       <ResolutionUnavailablePane
         offline
         sources={blockingLoadPaused.map(s => ({ key: s.key, label: s.label }))}
         decisionsUnavailable={decisionsUnavailable}
         onRetry={retryResolutionSources}
-        onOverride={() => setResolutionOverride(true)}
+        onOverride={() => acknowledgeBlockedSources(blockingLoadPaused)}
       />
     );
   }
@@ -1165,13 +1197,13 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // A gating source failed cold (no previous data to fall back on). Rendering
   // the queue here would present handled work as pending; the moderator gets
   // an explicit, named override instead of a silent wrong list or a hard lock-out.
-  if (blockingErrors.length > 0 && !resolutionOverride) {
+  if (unacknowledgedErrors.length > 0) {
     return (
       <ResolutionUnavailablePane
         sources={blockingErrors.map(s => ({ key: s.key, label: s.label }))}
         decisionsUnavailable={decisionsUnavailable}
         onRetry={retryResolutionSources}
-        onOverride={() => setResolutionOverride(true)}
+        onOverride={() => acknowledgeBlockedSources(blockingErrors)}
       />
     );
   }
@@ -1275,7 +1307,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           {/* Stays up for as long as the override is in effect, not a one-off
               toast, so a moderator can't forget they are looking at an
               unfiltered queue (#221). */}
-          {resolutionOverride && overriddenBlockedSources.length > 0 && (
+          {overriddenBlockedSources.length > 0 && (
             <ResolutionOverrideWarning
               sources={overriddenBlockedSources.map(s => ({ key: s.key, label: s.label }))}
               decisionsUnavailable={decisionsUnavailable}
