@@ -231,9 +231,10 @@ describe('Reports resolution filtering', () => {
 
   // The labels read is the one polling query here that retries. queryRelay
   // gives it a hard 5s cap, so a slow relay crosses it on ordinary variance
-  // (see #185 for the production timings behind that claim), and without a
-  // retry one slow read costs a moderator their whole resolution filter until
-  // the next poll -- re-presenting handled work as pending.
+  // (#185 measured that on staging; the matching production timings are in
+  // this PR's description), and without a retry one slow read costs a
+  // moderator their whole resolution filter until the next poll --
+  // re-presenting handled work as pending.
   it('recovers the resolution filter when the labels read fails once', async () => {
     let labelCalls = 0;
     stubFetch(() => {
