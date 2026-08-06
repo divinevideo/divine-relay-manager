@@ -15,6 +15,17 @@ import type { NostrEvent } from '@nostrify/nostrify';
 const TARGET_EVENT = 'c'.repeat(64);
 const REPORTED_PUBKEY = 'd'.repeat(64);
 const MOD_PUBKEY = 'e'.repeat(64);
+// A second report, for the case where the moderator moves on while the
+// never-expiring degraded toast is still on screen.
+const OTHER_EVENT = '9'.repeat(64);
+const OTHER_PUBKEY = '8'.repeat(64);
+
+// Which target the mocked context currently resolves to. Mutable because
+// selecting another report RE-RENDERS ReportDetail rather than remounting it
+// (ErrorBoundary resetKeys clear a caught error; they do not remount children),
+// so the panel's hooks hand back a new target under the same component
+// instance. A fixed mock cannot express that.
+const ctx = vi.hoisted(() => ({ targetValue: 'c'.repeat(64), reportedPubkey: 'd'.repeat(64) }));
 
 const api = vi.hoisted(() => ({
   deleteEvent: vi.fn(),
@@ -75,10 +86,10 @@ const TARGET_EVENT_OBJ: NostrEvent = {
 };
 vi.mock('@/hooks/useReportContext', () => ({
   useReportContext: () => ({
-    target: { type: 'event', value: TARGET_EVENT },
+    target: { type: 'event', value: ctx.targetValue },
     thread: { event: TARGET_EVENT_OBJ, ancestors: [], replies: [] },
     threadLoading: false,
-    reportedUser: { profile: undefined, pubkey: REPORTED_PUBKEY, isFunnelcakeUser: false },
+    reportedUser: { profile: undefined, pubkey: ctx.reportedPubkey, isFunnelcakeUser: false },
     userStats: undefined,
     reporter: { profile: undefined, pubkey: 'a'.repeat(64), reportCount: 0, isFunnelcakeUser: false },
     isLoading: false,
@@ -115,6 +126,8 @@ const REPORT: NostrEvent = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  ctx.targetValue = TARGET_EVENT;
+  ctx.reportedPubkey = REPORTED_PUBKEY;
   api.deleteDecisions.mockResolvedValue({ deleted: 2, labelCleanupFailed: false });
 });
 
@@ -123,14 +136,17 @@ function renderDetail() {
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   const invalidate = vi.spyOn(qc, 'invalidateQueries');
-  render(
+  const tree = () => (
     <QueryClientProvider client={qc}>
       <TooltipProvider>
         <ReportDetail report={REPORT} />
       </TooltipProvider>
     </QueryClientProvider>
   );
-  return { invalidate };
+  const { rerender } = render(tree());
+  // Same component instance, fresh props/hook results -- what selecting another
+  // report does to this panel.
+  return { invalidate, rerender: () => rerender(tree()) };
 }
 
 const clickReopen = () => fireEvent.click(screen.getByRole('button', { name: /reopen/i }));
@@ -199,6 +215,35 @@ describe('ReportDetail reopen reporting', () => {
     await waitFor(() =>
       expect(api.deleteDecisions.mock.calls.length).toBeGreaterThan(callsBefore)
     );
+  });
+
+  // The degraded toast never expires and TOAST_LIMIT is 1, so it is still on
+  // screen after the moderator moves to another report. mutate() rebuilds the
+  // mutation from the observer's LATEST options, so a mutationFn that read the
+  // target off `context` instead of off its own variables would send this retry
+  // at the report now selected -- deleting the decisions of a report nobody
+  // asked to reopen, and then reporting it as a clean reopen.
+  it('retries the target it was raised for, not the report selected afterwards', async () => {
+    api.deleteDecisions.mockResolvedValue({ deleted: 2, labelCleanupFailed: true });
+    const { rerender } = renderDetail();
+    clickReopen();
+
+    await waitFor(() => expect(toast).toHaveBeenCalled());
+    const action = toast.mock.calls[0][0].action;
+
+    ctx.targetValue = OTHER_EVENT;
+    ctx.reportedPubkey = OTHER_PUBKEY;
+    rerender();
+    api.deleteDecisions.mockClear();
+
+    const { container } = render(action);
+    fireEvent.click(within(container).getByRole('button'));
+
+    await waitFor(() => expect(api.deleteDecisions).toHaveBeenCalled());
+    expect(api.deleteDecisions).toHaveBeenNthCalledWith(1, TARGET_EVENT, 'event');
+    expect(api.deleteDecisions).toHaveBeenNthCalledWith(2, REPORTED_PUBKEY, 'pubkey');
+    expect(api.deleteDecisions).not.toHaveBeenCalledWith(OTHER_EVENT, 'event');
+    expect(api.deleteDecisions).not.toHaveBeenCalledWith(OTHER_PUBKEY, 'pubkey');
   });
 
   // An event report reopens two targets. A failure on the second must not be
