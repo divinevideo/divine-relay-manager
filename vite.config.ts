@@ -27,6 +27,13 @@ export default defineConfig(() => {
     globals: true,
     environment: 'jsdom',
     setupFiles: './src/test/setup.ts',
+    // CI runners are UTC and set no TZ, which makes every UTC-anchoring guard
+    // unfalsifiable there: drop `timeZone: 'UTC'` from TruncatedHistoryBanner
+    // or the 'Z' suffix from parseOldestCovered and the suite stays green,
+    // because local time and UTC agree. Pin a west-of-UTC zone so the
+    // straddle-midnight fixtures exercise the day-shift direction those guards
+    // exist to prevent (#221).
+    env: { TZ: 'America/Los_Angeles' },
     // Extend (don't replace) Vitest's defaults — a user `exclude` overrides
     // them, and the defaults' `**/node_modules/**` is what keeps a stale git
     // worktree under `.worktrees/*/node_modules` (a full repo checkout) from

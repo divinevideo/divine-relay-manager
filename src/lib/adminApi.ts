@@ -253,18 +253,20 @@ export async function allowPubkey(apiUrl: string, pubkey: string): Promise<ApiRe
 export async function callRelayRpc<T = unknown>(
   apiUrl: string,
   method: string,
-  params: (string | number | undefined)[] = []
+  params: (string | number | undefined)[] = [],
+  opts?: { timeoutMs?: number }
 ): Promise<T> {
   if (!apiUrl) {
     throw new ApiError('No relay selected. Go to Settings to choose an environment.');
   }
   const label = `Relay RPC '${method}'`;
   const mutates = !READ_RPC_METHODS.has(method);
+  const timeoutMs = opts?.timeoutMs ?? API_TIMEOUT_MS;
   const response = await fetchWithTimeout(`${apiUrl}/api/relay-rpc`, {
     method: 'POST',
     headers: getApiHeaders(),
     body: JSON.stringify({ method, params }),
-  }, label, { mutates });
+  }, label, { mutates, timeoutMs });
 
   if (!response.ok) {
     // Parse a structured error body so callers can branch on `code`
@@ -284,7 +286,7 @@ export async function callRelayRpc<T = unknown>(
     );
   }
 
-  const data = await readJsonBounded<ApiResponse<T>>(response, label, mutates, API_TIMEOUT_MS);
+  const data = await readJsonBounded<ApiResponse<T>>(response, label, mutates, timeoutMs);
 
   if (!data.success) {
     throw new ApiError(data.error || 'RPC call failed');
@@ -321,8 +323,11 @@ export interface BannedPubkeyEntry {
 }
 
 // List banned pubkeys - normalizes response to always be BannedPubkeyEntry[]
-export async function listBannedPubkeys(apiUrl: string): Promise<BannedPubkeyEntry[]> {
-  const result = await callRelayRpc<string[] | BannedPubkeyEntry[]>(apiUrl, 'listbannedpubkeys');
+export async function listBannedPubkeys(
+  apiUrl: string,
+  opts?: { timeoutMs?: number }
+): Promise<BannedPubkeyEntry[]> {
+  const result = await callRelayRpc<string[] | BannedPubkeyEntry[]>(apiUrl, 'listbannedpubkeys', [], opts);
 
   // Normalize: if it's an array of strings, convert to objects
   return result.map(item => {
@@ -334,8 +339,11 @@ export async function listBannedPubkeys(apiUrl: string): Promise<BannedPubkeyEnt
 }
 
 // List banned events
-export async function listBannedEvents(apiUrl: string): Promise<Array<{ id: string; reason?: string }>> {
-  return callRelayRpc<Array<{ id: string; reason?: string }>>(apiUrl, 'listbannedevents');
+export async function listBannedEvents(
+  apiUrl: string,
+  opts?: { timeoutMs?: number }
+): Promise<Array<{ id: string; reason?: string }>> {
+  return callRelayRpc<Array<{ id: string; reason?: string }>>(apiUrl, 'listbannedevents', [], opts);
 }
 
 export async function suspendPubkey(apiUrl: string, pubkey: string, reason?: string): Promise<void> {
@@ -398,10 +406,49 @@ export async function fetchReportsByTarget(
   return sanitizeRelayEvents(data.events);
 }
 
+// A capped resolution read that does not say it was capped un-hides handled
+// work with nothing explaining why (#221). oldestCovered is normalized to
+// epoch milliseconds here so callers never juggle SQLite TEXT against Nostr
+// unix seconds.
+export interface TruncatableResult<T> {
+  items: T[];
+  truncated: boolean;
+  oldestCovered: number | null;
+}
+
+// SQLite CURRENT_TIMESTAMP has no zone suffix but IS UTC; Nostr created_at is
+// unix seconds. Anything else is reported as unknown rather than NaN.
+//
+// The zone-suffix check is `endsWith('Z')`, not `includes('T')`: an
+// ISO-shaped-but-zone-less string ('2026-06-14T00:30:00') already has a 'T'
+// and would otherwise be passed to Date.parse as-is, which parses it as
+// LOCAL time -- reintroducing the exact UTC bug this function exists to
+// prevent. Neither current caller emits that shape (SQLite emits a space,
+// Nostr emits a number), but the fallback should append 'Z' for any
+// zone-less string, not only the space-separated one it happens to see today.
+export function parseOldestCovered(value: string | number | null | undefined): number | null {
+  if (typeof value === 'number') return Number.isFinite(value) ? value * 1000 : null;
+  if (typeof value !== 'string' || value.length === 0) return null;
+  const parsed = Date.parse(value.endsWith('Z') ? value : `${value.replace(' ', 'T')}Z`);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
 // Fetch resolution labels via server-side relay query (replaces browser WebSocket)
-export async function fetchResolutionLabels(apiUrl: string): Promise<NostrEvent[]> {
-  const data = await apiRequest<{ success: boolean; events: NostrEvent[] }>(apiUrl, '/api/resolution-labels', 'GET');
-  return sanitizeRelayEvents(data.events);
+export async function fetchResolutionLabels(
+  apiUrl: string,
+  opts?: { timeoutMs?: number }
+): Promise<TruncatableResult<NostrEvent>> {
+  const data = await apiRequest<{
+    success: boolean;
+    events: NostrEvent[];
+    truncated?: boolean;
+    oldest_covered?: number | null;
+  }>(apiUrl, '/api/resolution-labels', 'GET', undefined, opts);
+  return {
+    items: sanitizeRelayEvents(data.events),
+    truncated: data.truncated === true,
+    oldestCovered: parseOldestCovered(data.oldest_covered),
+  };
 }
 
 // Publish a NIP-32 label (kind 1985)
@@ -556,19 +603,28 @@ export async function getDecisions(apiUrl: string, targetId: string): Promise<Mo
 }
 
 // Get all decisions (for building resolved targets list)
-export async function getAllDecisions(apiUrl: string): Promise<ModerationDecision[]> {
-  const data = await apiRequest<{ success: boolean; decisions: ModerationDecision[]; error?: string }>(
-    apiUrl,
-    '/api/decisions',
-    'GET'
-  );
+export async function getAllDecisions(
+  apiUrl: string,
+  opts?: { timeoutMs?: number }
+): Promise<TruncatableResult<ModerationDecision>> {
+  const data = await apiRequest<{
+    success: boolean;
+    decisions: ModerationDecision[];
+    truncated?: boolean;
+    oldest_covered?: string | null;
+    error?: string;
+  }>(apiUrl, '/api/decisions', 'GET', undefined, opts);
 
   if (!data.success) {
     console.error('[adminApi] getAllDecisions failed:', data.error);
     throw new ApiError(data.error || 'Failed to get decisions');
   }
 
-  return data.decisions || [];
+  return {
+    items: data.decisions || [],
+    truncated: data.truncated === true,
+    oldestCovered: parseOldestCovered(data.oldest_covered),
+  };
 }
 
 // Delete all decisions for a target (reopens the report)

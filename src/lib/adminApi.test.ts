@@ -27,6 +27,7 @@ import {
   verifyAgeRestricted,
   logDecision,
   getDecisions,
+  getAllDecisions,
   extractMediaHashes,
   isBlockedMediaAction,
   updateAgeReviewCase,
@@ -1339,7 +1340,7 @@ describe('adminApi', () => {
       });
 
       const result = await fetchResolutionLabels(API_URL);
-      expect(result[0].tags).toEqual([]);
+      expect(result.items[0].tags).toEqual([]);
     });
 
     it('should call /api/resolution-labels and return events', async () => {
@@ -1358,7 +1359,7 @@ describe('adminApi', () => {
         expect.stringContaining('/api/resolution-labels'),
         expect.objectContaining({ method: 'GET' })
       );
-      expect(result).toEqual(events);
+      expect(result.items).toEqual(events);
     });
 
     it('should return empty array when no events', async () => {
@@ -1368,7 +1369,7 @@ describe('adminApi', () => {
       });
 
       const result = await fetchResolutionLabels(API_URL);
-      expect(result).toEqual([]);
+      expect(result.items).toEqual([]);
     });
   });
 
@@ -1409,6 +1410,189 @@ describe('adminApi', () => {
       expect(mockFetch).toHaveBeenCalledWith(
         expect.stringContaining('/api/bulk-moderate/status/job-9'),
         expect.objectContaining({ method: 'GET' }),
+      );
+    });
+  });
+
+  describe('resolution source truncation reporting (#221)', () => {
+    function mockFetchOnce(body: unknown) {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => body });
+    }
+
+    it('normalizes the decisions TEXT timestamp to epoch milliseconds and carries truncated', async () => {
+      mockFetchOnce({ success: true, decisions: [{ id: 1 }], truncated: true, oldest_covered: '2026-06-14 00:00:00' });
+
+      const result = await getAllDecisions(API_URL);
+
+      expect(result.items).toHaveLength(1);
+      expect(result.truncated).toBe(true);
+      // SQLite CURRENT_TIMESTAMP is UTC with no zone suffix. Parsing it as
+      // local time would shift the reported coverage date by the TZ offset.
+      expect(result.oldestCovered).toBe(Date.UTC(2026, 5, 14, 0, 0, 0));
+    });
+
+    // Midnight UTC only exposes the appended-Z guard under a negative runner
+    // offset (west of UTC) -- a positive offset (east of UTC), including
+    // conventional CI, leaves it silent. These two straddle midnight UTC in
+    // both directions so dropping the `Z` suffix is caught on either side
+    // (a runner sitting exactly at UTC still can't be shifted by any
+    // fixture -- that's arithmetic, not a coverage gap).
+    it('normalizes a decisions TEXT timestamp shortly after midnight UTC', async () => {
+      mockFetchOnce({ success: true, decisions: [{ id: 1 }], truncated: true, oldest_covered: '2026-06-14 00:30:00' });
+
+      const result = await getAllDecisions(API_URL);
+
+      expect(result.oldestCovered).toBe(Date.UTC(2026, 5, 14, 0, 30, 0));
+    });
+
+    it('normalizes a decisions TEXT timestamp shortly before midnight UTC', async () => {
+      mockFetchOnce({ success: true, decisions: [{ id: 1 }], truncated: true, oldest_covered: '2026-06-14 23:30:00' });
+
+      const result = await getAllDecisions(API_URL);
+
+      expect(result.oldestCovered).toBe(Date.UTC(2026, 5, 14, 23, 30, 0));
+    });
+
+    // Zone-less but ISO-shaped (a 'T' separator, no trailing 'Z'). Neither
+    // current endpoint emits this shape, but the zone-suffix check must key
+    // on 'Z', not 'T' -- keying on 'T' would pass this through to Date.parse
+    // as-is, which parses it as LOCAL time and reintroduces the exact UTC
+    // bug this function exists to prevent.
+    it('normalizes a zone-less ISO-style timestamp (T but no Z) as UTC', async () => {
+      mockFetchOnce({ success: true, decisions: [{ id: 1 }], truncated: true, oldest_covered: '2026-06-14T00:30:00' });
+
+      const result = await getAllDecisions(API_URL);
+
+      expect(result.oldestCovered).toBe(Date.UTC(2026, 5, 14, 0, 30, 0));
+    });
+
+    it('normalizes the label unix seconds to epoch milliseconds', async () => {
+      mockFetchOnce({ success: true, events: [], truncated: true, oldest_covered: 1_760_000_000 });
+
+      const result = await fetchResolutionLabels(API_URL);
+
+      expect(result.truncated).toBe(true);
+      expect(result.oldestCovered).toBe(1_760_000_000_000);
+    });
+
+    it('defaults to not-truncated when the worker predates the field', async () => {
+      // Pages and the worker deploy separately, so the new frontend must not
+      // read a missing field as "truncated" and warn on every load.
+      mockFetchOnce({ success: true, decisions: [{ id: 1 }] });
+
+      const result = await getAllDecisions(API_URL);
+
+      expect(result.truncated).toBe(false);
+      expect(result.oldestCovered).toBeNull();
+    });
+
+    it('reports an unparseable oldest_covered as null instead of NaN', async () => {
+      mockFetchOnce({ success: true, decisions: [], truncated: false, oldest_covered: 'not-a-timestamp' });
+
+      const result = await getAllDecisions(API_URL);
+
+      expect(result.oldestCovered).toBeNull();
+    });
+
+    it('fetchResolutionLabels defaults to not-truncated when the worker predates the field', async () => {
+      // Mirrors getAllDecisions' equivalent test above: a missing field must
+      // not read as "truncated", or every load against an older worker warns.
+      mockFetchOnce({ success: true, events: [] });
+
+      const result = await fetchResolutionLabels(API_URL);
+
+      expect(result.truncated).toBe(false);
+      expect(result.oldestCovered).toBeNull();
+    });
+  });
+
+  describe('per-call timeout bound (#221)', () => {
+    // Reports polls the four resolution reads every 15s and blocks the queue
+    // until they land, so it passes a bound well under the 30s default: on a
+    // COLD load there is no error yet to show an escape hatch for, and a 30s
+    // timeout plus a retry strands the moderator on a bare skeleton for about a
+    // minute. The bound has to actually reach AbortSignal.timeout to do that,
+    // and it must stay OPT-IN so no existing caller silently gets a shorter
+    // deadline than it was written for.
+    function stubOk(body: unknown) {
+      mockFetch.mockResolvedValue({ ok: true, json: async () => body });
+    }
+
+    it('forwards an explicit timeout on each of the four resolution reads', async () => {
+      const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+
+      stubOk({ success: true, events: [] });
+      await fetchResolutionLabels(API_URL, { timeoutMs: 8_000 });
+      expect(timeoutSpy).toHaveBeenLastCalledWith(8_000);
+
+      stubOk({ success: true, decisions: [] });
+      await getAllDecisions(API_URL, { timeoutMs: 8_000 });
+      expect(timeoutSpy).toHaveBeenLastCalledWith(8_000);
+
+      // The two NIP-86 reads go through callRelayRpc, which took no options at
+      // all before this change.
+      stubOk({ success: true, result: [] });
+      await listBannedPubkeys(API_URL, { timeoutMs: 8_000 });
+      expect(timeoutSpy).toHaveBeenLastCalledWith(8_000);
+
+      stubOk({ success: true, result: [] });
+      await listBannedEvents(API_URL, { timeoutMs: 8_000 });
+      expect(timeoutSpy).toHaveBeenLastCalledWith(8_000);
+
+      timeoutSpy.mockRestore();
+    });
+
+    it('keeps the 30s default for those same reads when no bound is passed', async () => {
+      // The parameter is optional and changes nothing for callers that omit it
+      // (DebugPanel, useModerationStatus).
+      const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+
+      stubOk({ success: true, events: [] });
+      await fetchResolutionLabels(API_URL);
+      expect(timeoutSpy).toHaveBeenLastCalledWith(30_000);
+
+      stubOk({ success: true, decisions: [] });
+      await getAllDecisions(API_URL);
+      expect(timeoutSpy).toHaveBeenLastCalledWith(30_000);
+
+      stubOk({ success: true, result: [] });
+      await listBannedPubkeys(API_URL);
+      expect(timeoutSpy).toHaveBeenLastCalledWith(30_000);
+
+      stubOk({ success: true, result: [] });
+      await listBannedEvents(API_URL);
+      expect(timeoutSpy).toHaveBeenLastCalledWith(30_000);
+
+      timeoutSpy.mockRestore();
+    });
+
+    it('leaves every other relay RPC on the 30s default', async () => {
+      // callRelayRpc gained an options parameter; a moderation write must not
+      // inherit the resolution reads' short deadline.
+      const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+
+      stubOk({ success: true, result: null });
+      await banPubkey(API_URL, 'a'.repeat(64));
+      expect(timeoutSpy).toHaveBeenLastCalledWith(30_000);
+
+      timeoutSpy.mockRestore();
+    });
+
+    it('reports the shortened bound in the timeout message, not the default', async () => {
+      // The copy is derived from the bound actually used, so a moderator is not
+      // told a read waited 30s when it waited 8.
+      mockFetch.mockRejectedValueOnce(new DOMException('timed out', 'TimeoutError'));
+
+      await expect(getAllDecisions(API_URL, { timeoutMs: 8_000 })).rejects.toThrow(
+        /Request to \/api\/decisions timed out after 8s\. Could not reach the relay\. Try again\./,
+      );
+    });
+
+    it('reports the shortened bound for a relay RPC read too', async () => {
+      mockFetch.mockRejectedValueOnce(new DOMException('timed out', 'TimeoutError'));
+
+      await expect(listBannedEvents(API_URL, { timeoutMs: 8_000 })).rejects.toThrow(
+        /Relay RPC 'listbannedevents' timed out after 8s\. Could not reach the relay\. Try again\./,
       );
     });
   });
