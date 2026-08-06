@@ -984,14 +984,15 @@ async function handleModerate(
           // both destroys that contract and mislabels a permanent refusal as
           // transient, which is the shape retrying clients treat as "try again".
           //
-          // Note this is not 409-only. handleRelayRpc has four reachable
-          // non-ok returns: the guard's 409, its 503 when the case lookup
-          // cannot run under fail-closed, a 400 when the underlying NIP-86
-          // call fails, and a 400 for a non-canonical pubkey -- reachable from
-          // right here, since allow_pubkey checks only that body.pubkey is
-          // truthy. The two 400s are indistinguishable by status, so a caller
-          // separating malformed input from a relay failure has to read the
-          // body. So a relay-side failure now surfaces here as 400 rather
+          // Note this is not 409-only. Three non-ok returns are reachable from
+          // here: the guard's 409, its 503 when the case lookup cannot run
+          // under fail-closed, and a 400 when the underlying NIP-86 call fails.
+          // The canonical-hex 400 is deliberately NOT one of them: allow_pubkey
+          // issues unbanpubkey, which is exempt from that check so a row banned
+          // with a non-canonical value stays removable, so such a value is
+          // forwarded to the relay and comes back 200.
+          //
+          // So a relay-side failure surfaces here as 400 rather
           // than 500, which makes /api/moderate consistent with /api/relay-rpc
           // (already 400 in that case) but does flip it from retryable to
           // terminal for an automated caller. Deliberate: consistency is worth
