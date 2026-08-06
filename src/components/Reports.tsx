@@ -600,8 +600,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   }, [allDecisions]);
 
   // The four sources that build resolvedTargets, described once so the gate,
-  // the banners, and the blocked pane cannot drift apart the way the queries
-  // themselves did.
+  // the banners, and the blocked pane read from one list and cannot drift
+  // apart from EACH OTHER the way the queries themselves did. This does not
+  // guarantee the list itself stays complete: a new resolution query has to
+  // be added here by hand, or it silently reintroduces #221.
   interface ResolutionSource {
     key: 'labels' | 'banned-pubkeys' | 'banned-events' | 'decisions';
     label: string;
@@ -670,13 +672,30 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     allDecisions, decisionsError, decisionsUpdatedAt, decisionsPending, decisionsFetchStatus,
   ]);
 
+  // Models only when the LIST FILTER (the "hide resolved" toggle applied to
+  // consolidated/individual) consults resolvedTargets. Three other
+  // consumers -- the deep-link auto-deselect, the deep-link resolved
+  // branch, and the resolved-count label -- key on hideResolved alone and
+  // stay live even in the pending-review view where this is false. That is
+  // deliberate, not a gap this flag should also gate: all three fail in the
+  // show-more direction on a partially-loaded resolvedTargets, which is the
+  // safe direction for a subtractive set, and they self-correct once the
+  // source lands.
   const resolvedFilterActive = hideResolved && !showPendingReview;
   const gatingSources = resolutionSources.filter(s => s.gatesAlways || resolvedFilterActive);
   const blockingLoad = gatingSources.filter(s => !s.hasData && s.isPending);
   // Offline addition (#221): fetchStatus 'paused' (not isPending, which stays
   // true the whole time) is the only signal that a blocking source isn't
-  // merely slow, so the indefinite skeleton can say why instead of just sitting there.
-  const blockingPaused = blockingLoad.some(s => s.isPaused);
+  // merely slow, so the block can say why instead of sitting indefinitely.
+  const blockingLoadPaused = blockingLoad.filter(s => s.isPaused);
+  const blockingPaused = blockingLoadPaused.length > 0;
+  // Paused never resolves on its own while offline (no timeout applies, see
+  // ResolutionUnavailablePane's offline branch below), so once the moderator
+  // overrides it, a paused source can't be allowed to keep failing the
+  // isLoading/blockingLoad gate the way a merely-slow source still should.
+  const blockingLoadStillBlocking = resolutionOverride
+    ? blockingLoad.filter(s => !s.isPaused)
+    : blockingLoad;
   // The `s.error` term is near-unreachable today: past the cold-load gate above,
   // every gating source with `!hasData` has already settled, and every settled
   // non-error source yields at least `[]` (truthy), so `!hasData` alone already
@@ -685,7 +704,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // it would start mattering the moment a source can settle with no data and no
   // error (e.g. a 200 with a missing field). Don't delete this as dead code.
   const blockingErrors = gatingSources.filter(s => !s.hasData && s.error);
-  const decisionsUnavailable = blockingErrors.some(s => s.key === 'decisions');
+  // Sources an override is currently bypassing, whether by cold error or by an
+  // indefinite offline pause -- combined because the override warning and the
+  // decisions-unavailable copy read the same regardless of which reason applies.
+  const overriddenBlockedSources = [...blockingErrors, ...blockingLoadPaused];
+  const decisionsUnavailable = overriddenBlockedSources.some(s => s.key === 'decisions');
   // Errored but still holding previous data: filter with the stale set, say so.
   const staleSources = gatingSources.filter(s => s.hasData && s.error);
 
@@ -1006,11 +1029,41 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // fallback, so the two paths cannot drift.
   const dismissDetail = () => handleSelectReport(null);
 
+  // Shared by both the offline pane and the cold-error pane below so the two
+  // retry paths cannot drift apart.
+  const retryResolutionSources = () => {
+    refetch();
+    queryClient.invalidateQueries({ queryKey: ['resolution-labels'] });
+    queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
+    queryClient.invalidateQueries({ queryKey: ['banned-events'] });
+    queryClient.invalidateQueries({ queryKey: ['decisions'] });
+  };
+
+  // Purely offline-blocked (a gating source is paused, not merely slow) and
+  // not yet overridden: give the same Retry/override affordances as a cold
+  // error, with offline-specific copy. fetchStatus 'paused' never times out
+  // (React Query does not even issue the fetch), so unlike a cold error this
+  // state cannot convert into blockingErrors on its own -- without this
+  // branch a moderator stuck behind a `navigator.onLine` false negative
+  // (captive portals, some VM/Electron/Linux net stacks) has no way forward
+  // at all (#221).
+  if (blockingPaused && !resolutionOverride) {
+    return (
+      <ResolutionUnavailablePane
+        offline
+        sources={blockingLoadPaused.map(s => ({ key: s.key, label: s.label }))}
+        decisionsUnavailable={decisionsUnavailable}
+        onRetry={retryResolutionSources}
+        onOverride={() => setResolutionOverride(true)}
+      />
+    );
+  }
+
   // Wait for reports AND every gating resolution source. A source that has not
   // landed contributes nothing to resolvedTargets, so rendering here would show
   // handled work as pending, and would show auto-hidden content in the default
   // view (#221).
-  if (isLoading || blockingLoad.length > 0) {
+  if (isLoading || blockingLoadStillBlocking.length > 0) {
     return (
       <Card className="h-[calc(100vh-200px)]">
         <CardHeader>
@@ -1020,21 +1073,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          {blockingPaused ? (
-            // isPending stays true throughout a paused wait, so without this the
-            // moderator sees the same indefinite skeleton whether the network is
-            // merely slow or the browser has no connection at all.
-            <p className="text-sm text-muted-foreground">
-              The queue cannot check what has already been handled while offline.
-              It will resume automatically when the connection returns.
-            </p>
-          ) : (
-            <div className="space-y-3" data-testid="reports-loading-skeleton">
-              {[...Array(5)].map((_, i) => (
-                <Skeleton key={i} className="h-16 w-full" />
-              ))}
-            </div>
-          )}
+          <div className="space-y-3" data-testid="reports-loading-skeleton">
+            {[...Array(5)].map((_, i) => (
+              <Skeleton key={i} className="h-16 w-full" />
+            ))}
+          </div>
         </CardContent>
       </Card>
     );
@@ -1061,13 +1104,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       <ResolutionUnavailablePane
         sources={blockingErrors.map(s => ({ key: s.key, label: s.label }))}
         decisionsUnavailable={decisionsUnavailable}
-        onRetry={() => {
-          refetch();
-          queryClient.invalidateQueries({ queryKey: ['resolution-labels'] });
-          queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
-          queryClient.invalidateQueries({ queryKey: ['banned-events'] });
-          queryClient.invalidateQueries({ queryKey: ['decisions'] });
-        }}
+        onRetry={retryResolutionSources}
         onOverride={() => setResolutionOverride(true)}
       />
     );
@@ -1172,9 +1209,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           {/* Stays up for as long as the override is in effect, not a one-off
               toast, so a moderator can't forget they are looking at an
               unfiltered queue (#221). */}
-          {resolutionOverride && blockingErrors.length > 0 && (
+          {resolutionOverride && overriddenBlockedSources.length > 0 && (
             <ResolutionOverrideWarning
-              sources={blockingErrors.map(s => ({ key: s.key, label: s.label }))}
+              sources={overriddenBlockedSources.map(s => ({ key: s.key, label: s.label }))}
               decisionsUnavailable={decisionsUnavailable}
             />
           )}

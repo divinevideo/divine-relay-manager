@@ -20,37 +20,57 @@ function sourceList(sources: NoticeSource[]): string {
 // pending, which is the bug; rendering nothing at all would lock the moderator
 // out, which is its own failure. So: say what is missing, and let them proceed
 // deliberately.
+//
+// `offline` swaps in copy for the other way a source can arrive here: paused
+// (fetchStatus 'paused') rather than errored, because the browser thinks it
+// has no connection. That state never times out on its own -- React Query
+// never issues the fetch -- so it needs the same Retry/override affordances
+// as a cold error, worded for what actually happened rather than "failed to
+// load" (#221).
 export function ResolutionUnavailablePane({
   sources,
   decisionsUnavailable,
   onRetry,
   onOverride,
+  offline = false,
 }: {
   sources: NoticeSource[];
   decisionsUnavailable: boolean;
   onRetry: () => void;
   onOverride: () => void;
+  offline?: boolean;
 }) {
   return (
     <Card className="h-[calc(100vh-200px)]">
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <AlertTriangle className="h-5 w-5 text-amber-500" />
-          Resolution state is unavailable
+          {offline ? 'Resolution state is unavailable while offline' : 'Resolution state is unavailable'}
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
         <p className="text-sm text-muted-foreground">
-          The queue cannot tell which reports have already been handled, so it is not
-          showing the list. Unavailable: {sourceList(sources)}.
+          {offline ? (
+            <>
+              The queue cannot check what has already been handled while offline.
+              Unavailable: {sourceList(sources)}.
+            </>
+          ) : (
+            <>
+              The queue cannot tell which reports have already been handled, so it is not
+              showing the list. Unavailable: {sourceList(sources)}.
+            </>
+          )}
         </p>
         <p className="text-sm text-muted-foreground">
-          This usually clears on the next automatic refresh.
+          {offline
+            ? 'This will resume automatically when the connection returns.'
+            : 'This usually clears on the next automatic refresh.'}
         </p>
         <div className="flex flex-wrap gap-2">
           <Button onClick={onRetry}>Retry</Button>
           <Button variant="outline" onClick={onOverride}>
-            Show the queue without resolution filtering
+            Show the queue anyway
           </Button>
         </div>
         {decisionsUnavailable && (
@@ -126,7 +146,7 @@ export function ResolutionOverrideWarning({
   return (
     <Alert variant="destructive" className="mt-2 py-2">
       <AlertDescription className="text-xs">
-        Resolution filtering is off ({sourceList(sources)} unavailable), so some of these
+        Resolution state is incomplete ({sourceList(sources)} unavailable), so some of these
         may already be handled.
         {decisionsUnavailable && ' Auto-hidden content is included.'}
       </AlertDescription>

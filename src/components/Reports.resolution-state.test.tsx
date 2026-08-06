@@ -296,7 +296,7 @@ describe('cold error blocks the queue and offers an override (#221)', () => {
     const user = userEvent.setup();
     renderReports();
 
-    await user.click(await screen.findByRole('button', { name: /show the queue without resolution filtering/i }));
+    await user.click(await screen.findByRole('button', { name: /show the queue anyway/i }));
 
     expect(await screen.findByText(REPORTED_NPUB)).toBeInTheDocument();
     // The warning must persist alongside the list, not flash and vanish.
@@ -308,7 +308,7 @@ describe('cold error blocks the queue and offers an override (#221)', () => {
     const user = userEvent.setup();
     renderReports();
 
-    await user.click(await screen.findByRole('button', { name: /show the queue without resolution filtering/i }));
+    await user.click(await screen.findByRole('button', { name: /show the queue anyway/i }));
 
     expect(await screen.findByText(/auto-hidden/i)).toBeInTheDocument();
   });
@@ -326,7 +326,7 @@ describe('cold error blocks the queue and offers an override (#221)', () => {
     // skeleton does. There is no way to reach the hide-resolved switch except through the
     // override, so use it to get there, then confirm the block does not return once
     // hide-resolved is off -- that's the actual claim this test makes.
-    await user.click(await screen.findByRole('button', { name: /show the queue without resolution filtering/i }));
+    await user.click(await screen.findByRole('button', { name: /show the queue anyway/i }));
     // The "Hide resolved" control is a shadcn/Radix Switch (role="switch") with
     // an associated <Label htmlFor="hide-resolved">; verified against
     // Reports.tsx:1217-1230 and the existing selector in
@@ -366,7 +366,7 @@ describe('cold error blocks the queue and offers an override (#221)', () => {
     const user = userEvent.setup();
     renderReports();
 
-    await user.click(await screen.findByRole('button', { name: /show the queue without resolution filtering/i }));
+    await user.click(await screen.findByRole('button', { name: /show the queue anyway/i }));
 
     expect(await screen.findByText(REPORTED_NPUB)).toBeInTheDocument();
     expect(screen.queryByText(/showing resolution state from/i)).not.toBeInTheDocument();
@@ -381,7 +381,7 @@ describe('cold error blocks the queue and offers an override (#221)', () => {
     const user = userEvent.setup();
     renderReports();
 
-    await user.click(await screen.findByRole('button', { name: /show the queue without resolution filtering/i }));
+    await user.click(await screen.findByRole('button', { name: /show the queue anyway/i }));
     await user.click(await screen.findByRole('switch', { name: /hide resolved/i }));
 
     // Unlike the labels case, the persistent warning must still be present:
@@ -407,26 +407,12 @@ describe('offline pauses resolution sources instead of failing them (#221)', () 
     onlineManager.setOnline(true);
   });
 
-  // Going offline makes React Query defer the fetch attempt for at least one
-  // gating query (fetchStatus 'paused', asserted below), but at least one of
-  // the other RPC-backed sources still starts its queryFn -- a pre-existing
-  // race independent of #221 (this file's "cold load" describe above hardens
-  // the analogous non-offline race). That call hits a pre-existing,
-  // environment-specific quirk: fetchWithTimeout's `AbortSignal.timeout()`
-  // signal (src/lib/adminApi.ts) rejects with a TypeError in this jsdom+Node
-  // combination, which the query's catch block reports via console.warn.
-  // That specific console.warn call does not go through vi.spyOn(console,
-  // 'warn') (the file-level spy above) here -- confirmed empirically by
-  // instrumenting the catch block directly, and ruled out every interception
-  // point tried (a describe-scoped console spy, a raw process.stderr.write
-  // override, an AbortSignal.timeout stub, generous real-time and
-  // fake-timer flushes) without success, so it is left unsilenced rather
-  // than papered over with something that only looks like a fix. It is
-  // present-but-pre-existing noise, not a regression: it doesn't affect this
-  // test's assertions or pass/fail status, and disappears entirely if the
-  // three console.warn calls it comes from (Reports.tsx's bannedPubkeys /
-  // bannedEvents / decisions queryFn catches) are removed, which is how its
-  // origin was confirmed.
+  // This test leaks a stray console.warn: a paused query appears to resume
+  // after the test unmounts and warns past the file-level console spy and
+  // teardown. The exact mechanism was not confirmed and the interception
+  // point was not found. It doesn't affect this test's assertions or
+  // pass/fail status; flagged here so a later test's console spy silently
+  // absorbing it isn't mistaken for that test's own noise.
   it('explains the queue cannot check resolution state while offline, instead of an indefinite skeleton', async () => {
     stubFetch({ labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty' });
     // Set offline before mount: React Query only reaches fetchStatus 'paused'
@@ -437,6 +423,36 @@ describe('offline pauses resolution sources instead of failing them (#221)', () 
 
     expect(await screen.findByText(/cannot check .*while offline/i)).toBeInTheDocument();
     expect(screen.queryByTestId('reports-loading-skeleton')).not.toBeInTheDocument();
+  });
+
+  // The offline block is the one state fetchStatus 'paused' never times out
+  // of on its own -- there's no fetch in flight for the 30s AbortSignal
+  // timeout to fire on -- so unlike a cold error it can persist indefinitely.
+  // That matters because onlineManager keys on navigator.onLine, a known
+  // false-negative source (captive portals, some VM/container network
+  // stacks, some Electron/Linux setups): a moderator with working
+  // connectivity and a lying navigator.onLine needs a way out that doesn't
+  // depend on the browser's offline signal ever clearing.
+  it('offers a working override instead of a permanent lock-out when blocked offline (#221)', async () => {
+    stubFetch({ labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty' });
+    onlineManager.setOnline(false);
+    const user = userEvent.setup();
+    renderReports();
+
+    await user.click(await screen.findByRole('button', { name: /show the queue anyway/i }));
+
+    // The offline pane must not simply re-render itself: overriding has to
+    // move the moderator off the dead end.
+    expect(screen.queryByText(/resolution state is unavailable while offline/i)).not.toBeInTheDocument();
+    // The persistent warning proves the override is what let it through, the
+    // same signal the cold-error override tests above rely on.
+    expect(screen.getByText(/some of these may already be handled/i)).toBeInTheDocument();
+
+    // Proves it isn't a one-way door either: once connectivity genuinely
+    // returns, the paused sources resume and the queue reflects real data,
+    // it doesn't stay stuck on whatever the override bypassed.
+    onlineManager.setOnline(true);
+    expect(await screen.findByText(REPORTED_NPUB)).toBeInTheDocument();
   });
 });
 
