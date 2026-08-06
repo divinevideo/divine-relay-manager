@@ -246,6 +246,22 @@ describe('ReportDetail reopen reporting', () => {
     expect(api.deleteDecisions).not.toHaveBeenCalledWith(OTHER_PUBKEY, 'pubkey');
   });
 
+  // The other half of the same OR. With only the pubkey-side case below,
+  // returning `secondary.labelCleanupFailed` alone passes the whole suite --
+  // and then a failed cleanup on the event target reports a clean reopen,
+  // which is every pubkey-target report too, since those never make a second
+  // call for `secondary` to be assigned from.
+  it('reports incomplete cleanup when only the event target failed', async () => {
+    api.deleteDecisions
+      .mockResolvedValueOnce({ deleted: 1, labelCleanupFailed: true })
+      .mockResolvedValueOnce({ deleted: 1, labelCleanupFailed: false });
+    renderDetail();
+    clickReopen();
+
+    await waitFor(() => expect(toast).toHaveBeenCalled());
+    expect(toast.mock.calls[0][0].variant).toBe('destructive');
+  });
+
   // An event report reopens two targets. A failure on the second must not be
   // masked by a clean first result.
   it('reports incomplete cleanup when only the pubkey target failed', async () => {
