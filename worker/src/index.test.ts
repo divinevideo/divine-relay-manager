@@ -1304,6 +1304,47 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
     expect(body.error).not.toMatch(/timed out/i); // reported as what the relay said
   });
 
+  // Every exit clears the timeout and marks itself resolved before closing the
+  // socket, so if close() throws there is nothing left to settle the promise:
+  // queryRelay hangs forever and /api/reports never answers, stalling the
+  // moderator's poll until the client's 30s abort. Two of these exits sit
+  // inside the message listener's parse-error catch, so the throw is swallowed
+  // and there is not even a log. Resolving before closing removes the class.
+  describe('settles even when the socket refuses to close', () => {
+    const breakClose = (sock: FakeRelaySocket) => {
+      sock.close = () => { throw new Error('close failed'); };
+    };
+
+    it('on EOSE', async () => {
+      const resPromise = worker.fetch(reportsRequest(), reportsEnv, ctx);
+      await new Promise((r) => setTimeout(r, 0));
+      const sock = FakeRelaySocket.instances[0];
+      breakClose(sock);
+      sock.message(['EVENT', sock.subId(), EVENT_A]);
+      sock.message(['EOSE', sock.subId()]);
+      expect((await resPromise).status).toBe(200);
+    });
+
+    it('on CLOSED', async () => {
+      const resPromise = worker.fetch(reportsRequest(), reportsEnv, ctx);
+      await new Promise((r) => setTimeout(r, 0));
+      const sock = FakeRelaySocket.instances[0];
+      breakClose(sock);
+      sock.message(['CLOSED', sock.subId(), 'error: could not complete query']);
+      expect((await resPromise).status).toBe(502);
+    });
+
+    it('on timeout', async () => {
+      vi.useFakeTimers();
+      const resPromise = worker.fetch(reportsRequest(), reportsEnv, ctx);
+      await vi.advanceTimersByTimeAsync(0);
+      const sock = FakeRelaySocket.instances[0];
+      breakClose(sock);
+      await vi.advanceTimersByTimeAsync(5000);
+      expect((await resPromise).status).toBe(502);
+    });
+  });
+
   // The subscription id is what makes CLOSED ours. A relay multiplexes frames
   // for every open subscription down one socket, so an unmatched CLOSED must
   // not end a query that is still legitimately running.

@@ -1723,11 +1723,30 @@ async function queryRelay(
       // partial data is worthless. A caller removing what it can (reopen's
       // label cleanup) is strictly better off acting on a received event than
       // discarding it, so the two concerns stay separate.
+
+      // Closing is best-effort cleanup, so a throw from it must not escape.
+      // Before this, close() ran BEFORE resolve() on four of the five exits: a
+      // throw then stranded the promise with the timeout already cleared and
+      // nothing left to settle it, and on the two exits inside the message
+      // listener the parse-error catch swallowed it so there was not even a
+      // log. queryRelay would hang and /api/reports would never answer.
+      //
+      // Swallowing here is what guarantees settlement; every exit also resolves
+      // before closing, which is belt-and-braces rather than load-bearing.
+      const closeQuietly = () => {
+        try {
+          ws.close();
+        } catch {
+          // Nothing to do: the read is already reported and the socket is going
+          // away with the request either way.
+        }
+      };
+
       const timeout = setTimeout(() => {
         if (!resolved) {
           resolved = true;
-          ws.close();
           resolve({ success: false, events: events.slice(), error: `Relay query timed out before EOSE (${events.length} events received)` });
+          closeQuietly();
         }
       }, 5000);
 
@@ -1749,9 +1768,9 @@ async function queryRelay(
           } else if (data[0] === 'EOSE' && data[1] === subId) {
             clearTimeout(timeout);
             resolved = true;
-            ws.close();
             // EOSE = relay confirmed end of stored events, so an empty result is real.
             resolve({ success: true, events });
+            closeQuietly();
           } else if (data[0] === 'CLOSED' && data[1] === subId) {
             // NIP-01: the relay ended the subscription instead of fulfilling it,
             // with a machine-readable reason (funnelcake sends
@@ -1761,9 +1780,9 @@ async function queryRelay(
             // 5s later than it needed to be.
             clearTimeout(timeout);
             resolved = true;
-            ws.close();
             const reason = typeof data[2] === 'string' && data[2] ? data[2] : 'no reason given';
             resolve({ success: false, events: events.slice(), error: `Relay closed the subscription: ${reason}` });
+            closeQuietly();
           }
         } catch {
           // Ignore parse errors
@@ -1774,10 +1793,8 @@ async function queryRelay(
         if (!resolved) {
           clearTimeout(timeout);
           resolved = true;
-          // Resolve first: a throw from close() would otherwise leave the
-          // promise permanently pending, with the timeout already cleared.
           resolve({ success: false, events: events.slice(), error: 'WebSocket error' });
-          ws.close();
+          closeQuietly();
         }
       });
 

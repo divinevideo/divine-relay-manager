@@ -5,11 +5,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ReportDetail } from './ReportDetail';
 import type { NostrEvent } from '@nostrify/nostrify';
 
-// Reopen is the one action that asserts a queue state rather than reporting an
-// outcome: it tells the moderator the report is "back in the pending queue".
-// Whether that is true depends on relay-side resolution labels the worker may
-// have failed to clear, so the degraded branch is the whole point of the flag
-// and needs to be pinned at the hop where the moderator actually reads it.
+// Reopen used to assert a queue state rather than report an outcome: it told
+// the moderator the report was "back in the pending queue". Whether that was
+// true depended on relay-side resolution labels the worker may have failed to
+// clear, and on relay bans reopen never touches at all. These tests pin the
+// replacement copy, and the degraded branch, at the hop where a moderator
+// actually reads it.
 
 const TARGET_EVENT = 'c'.repeat(64);
 const REPORTED_PUBKEY = 'd'.repeat(64);
@@ -152,6 +153,8 @@ describe('ReportDetail reopen reporting', () => {
     // click. The toast is what a moderator sees after it, so it carries the
     // caveat too rather than reading as an unqualified success.
     expect(text).toMatch(/stays hidden until that is lifted/i);
+    // Which makes it too long for Radix's 5s default to be read in.
+    expect(arg.duration).toBeGreaterThan(5000);
   });
 
   // The label survived, so resolvedTargets still hides the target and the
@@ -173,8 +176,10 @@ describe('ReportDetail reopen reporting', () => {
     expect(text).not.toMatch(/the relay did not/i);
     // The decisions ARE deleted on this path, so hasDecisions goes false and
     // the Reopen button unmounts. Telling a moderator to retry without giving
-    // them the means is a dead end, so the retry rides on the toast.
+    // them the means is a dead end, so the retry rides on the toast -- and it
+    // must not expire, since nothing else can reach this action afterwards.
     expect(arg.action).toBeDefined();
+    expect(arg.duration).toBe(Infinity);
   });
 
   it('offers a working retry from the degraded toast, since the button is gone', async () => {
