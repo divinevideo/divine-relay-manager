@@ -1049,8 +1049,12 @@ async function handleRelayRpc(
   // unbanpubkey is included because it calls unsuspendUser, which sets Keycast
   // status to active and so lifts a suspension as well as a ban. An unban on an
   // account under age review therefore restores login and signing while skipping
-  // the case, which is exactly what this guard exists to prevent. Nothing reached
-  // it from outside until the Coop enforcement adapter made unbanpubkey callable.
+  // the case, which is exactly what this guard exists to prevent. Two callers
+  // outside this repo reach it: divine-moderation-service, which has mapped
+  // allow_pubkey -> unbanpubkey onto /api/relay-rpc since 2026-06-08, and the
+  // Coop enforcement adapter, whose reversal routes followed on 2026-06-17.
+  // Only the adapter surfaces the refusal; divine-moderation-service discards
+  // code/caseId/state (divinevideo/divine-moderation-service#191).
   //
   // banpubkey is deliberately NOT included: it is a severe-action escape hatch, so
   // a moderator who finds something like CSAM on an account under review can act
