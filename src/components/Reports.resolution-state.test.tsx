@@ -431,6 +431,34 @@ describe('cold error blocks the queue and offers an override (#221)', () => {
   });
 });
 
+describe('the cold-load wait is bounded well under the poll interval (#221)', () => {
+  // Fix 1's latch only helps once a source has FAILED. On a cold first load
+  // there is no error yet, so a source that hangs keeps the moderator on the
+  // bare skeleton with no Retry and no override, and every one of the four can
+  // cause it. The 30s API_TIMEOUT_MS plus a retry is about a minute of that;
+  // shortening the bound is the only thing that shrinks the window, and it is
+  // twice the 15s poll interval that would have recovered the read anyway.
+  //
+  // Asserted at the AbortSignal boundary because that is where the bound is
+  // actually applied; adminApi's own tests cover the plumbing beneath it.
+  it('gives the four resolution reads a shorter deadline than the rest of the app', async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+    stubFetch({ labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty' });
+    renderReports();
+
+    await screen.findByText(REPORTED_NPUB);
+
+    const bounds = timeoutSpy.mock.calls.map(([ms]) => ms);
+    // One per resolution source, all four shortened.
+    expect(bounds.filter(ms => ms === 8_000).length).toBeGreaterThanOrEqual(4);
+    // The reports query itself is untouched, so the change stays scoped to the
+    // reads that gate the queue rather than becoming an app-wide retiming.
+    expect(bounds).toContain(30_000);
+
+    timeoutSpy.mockRestore();
+  });
+});
+
 describe('the escape hatch survives the poll that follows a cold failure (#221)', () => {
   // React Query resets a data-less query to `{error: null, status: 'pending'}`
   // the moment a refetch starts (query-core's fetchState, reached from the

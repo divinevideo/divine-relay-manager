@@ -1454,4 +1454,95 @@ describe('adminApi', () => {
       expect(result.oldestCovered).toBeNull();
     });
   });
+
+  describe('per-call timeout bound (#221)', () => {
+    // Reports polls the four resolution reads every 15s and blocks the queue
+    // until they land, so it passes a bound well under the 30s default: on a
+    // COLD load there is no error yet to show an escape hatch for, and a 30s
+    // timeout plus a retry strands the moderator on a bare skeleton for about a
+    // minute. The bound has to actually reach AbortSignal.timeout to do that,
+    // and it must stay OPT-IN so no existing caller silently gets a shorter
+    // deadline than it was written for.
+    function stubOk(body: unknown) {
+      mockFetch.mockResolvedValue({ ok: true, json: async () => body });
+    }
+
+    it('forwards an explicit timeout on each of the four resolution reads', async () => {
+      const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+
+      stubOk({ success: true, events: [] });
+      await fetchResolutionLabels(API_URL, { timeoutMs: 8_000 });
+      expect(timeoutSpy).toHaveBeenLastCalledWith(8_000);
+
+      stubOk({ success: true, decisions: [] });
+      await getAllDecisions(API_URL, { timeoutMs: 8_000 });
+      expect(timeoutSpy).toHaveBeenLastCalledWith(8_000);
+
+      // The two NIP-86 reads go through callRelayRpc, which took no options at
+      // all before this change.
+      stubOk({ success: true, result: [] });
+      await listBannedPubkeys(API_URL, { timeoutMs: 8_000 });
+      expect(timeoutSpy).toHaveBeenLastCalledWith(8_000);
+
+      stubOk({ success: true, result: [] });
+      await listBannedEvents(API_URL, { timeoutMs: 8_000 });
+      expect(timeoutSpy).toHaveBeenLastCalledWith(8_000);
+
+      timeoutSpy.mockRestore();
+    });
+
+    it('keeps the 30s default for those same reads when no bound is passed', async () => {
+      // The parameter is optional and changes nothing for callers that omit it
+      // (DebugPanel, useModerationStatus).
+      const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+
+      stubOk({ success: true, events: [] });
+      await fetchResolutionLabels(API_URL);
+      expect(timeoutSpy).toHaveBeenLastCalledWith(30_000);
+
+      stubOk({ success: true, decisions: [] });
+      await getAllDecisions(API_URL);
+      expect(timeoutSpy).toHaveBeenLastCalledWith(30_000);
+
+      stubOk({ success: true, result: [] });
+      await listBannedPubkeys(API_URL);
+      expect(timeoutSpy).toHaveBeenLastCalledWith(30_000);
+
+      stubOk({ success: true, result: [] });
+      await listBannedEvents(API_URL);
+      expect(timeoutSpy).toHaveBeenLastCalledWith(30_000);
+
+      timeoutSpy.mockRestore();
+    });
+
+    it('leaves every other relay RPC on the 30s default', async () => {
+      // callRelayRpc gained an options parameter; a moderation write must not
+      // inherit the resolution reads' short deadline.
+      const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+
+      stubOk({ success: true, result: null });
+      await banPubkey(API_URL, 'a'.repeat(64));
+      expect(timeoutSpy).toHaveBeenLastCalledWith(30_000);
+
+      timeoutSpy.mockRestore();
+    });
+
+    it('reports the shortened bound in the timeout message, not the default', async () => {
+      // The copy is derived from the bound actually used, so a moderator is not
+      // told a read waited 30s when it waited 8.
+      mockFetch.mockRejectedValueOnce(new DOMException('timed out', 'TimeoutError'));
+
+      await expect(getAllDecisions(API_URL, { timeoutMs: 8_000 })).rejects.toThrow(
+        /Request to \/api\/decisions timed out after 8s\. Could not reach the relay\. Try again\./,
+      );
+    });
+
+    it('reports the shortened bound for a relay RPC read too', async () => {
+      mockFetch.mockRejectedValueOnce(new DOMException('timed out', 'TimeoutError'));
+
+      await expect(listBannedEvents(API_URL, { timeoutMs: 8_000 })).rejects.toThrow(
+        /Relay RPC 'listbannedevents' timed out after 8s\. Could not reach the relay\. Try again\./,
+      );
+    });
+  });
 });

@@ -51,10 +51,13 @@ export function useAdminApi() {
       adminApi.banPubkey(apiUrl, pubkey, reason),
     unbanPubkey: (pubkey: string) =>
       adminApi.unbanPubkey(apiUrl, pubkey),
-    listBannedPubkeys: () =>
-      adminApi.listBannedPubkeys(apiUrl),
-    listBannedEvents: () =>
-      adminApi.listBannedEvents(apiUrl),
+    // opts threads a per-call timeout through. Reports' 15s-polled resolution
+    // reads pass a shorter bound than API_TIMEOUT_MS; every other caller omits
+    // it and keeps the default (#221).
+    listBannedPubkeys: (opts?: { timeoutMs?: number }) =>
+      adminApi.listBannedPubkeys(apiUrl, opts),
+    listBannedEvents: (opts?: { timeoutMs?: number }) =>
+      adminApi.listBannedEvents(apiUrl, opts),
     suspendPubkey: (pubkey: string, reason?: string) =>
       adminApi.suspendPubkey(apiUrl, pubkey, reason),
     unsuspendPubkey: (pubkey: string) =>
@@ -67,8 +70,8 @@ export function useAdminApi() {
       adminApi.fetchReports(apiUrl),
     fetchReportsByTarget: (target: { event: string } | { pubkey: string }) =>
       adminApi.fetchReportsByTarget(apiUrl, target),
-    fetchResolutionLabels: () =>
-      adminApi.fetchResolutionLabels(apiUrl),
+    fetchResolutionLabels: (opts?: { timeoutMs?: number }) =>
+      adminApi.fetchResolutionLabels(apiUrl, opts),
 
     // Labels
     publishLabel: (params: adminApi.LabelParams) =>
@@ -95,8 +98,8 @@ export function useAdminApi() {
       adminApi.logDecision(apiUrl, params),
     getDecisions: (targetId: string) =>
       adminApi.getDecisions(apiUrl, targetId),
-    getAllDecisions: () =>
-      adminApi.getAllDecisions(apiUrl),
+    getAllDecisions: (opts?: { timeoutMs?: number }) =>
+      adminApi.getAllDecisions(apiUrl, opts),
     deleteDecisions: (targetId: string) =>
       adminApi.deleteDecisions(apiUrl, targetId),
 

@@ -86,6 +86,16 @@ const SORT_OPTIONS: { value: SortOption; label: string }[] = [
 
 const MEDIUM_PRIORITY_CATEGORIES = ['doxxing_pii', 'malware_scam', 'illegal_goods'];
 
+// Timeout for the four resolution reads that build resolvedTargets, replacing
+// adminApi's 30s API_TIMEOUT_MS for these calls only. On a COLD load there is no
+// error to latch onto yet, so every escape hatch this page offers sits behind the
+// loading skeleton: a source that times out at 30s and then retries strands the
+// moderator on a bare skeleton for a minute with nothing to click, and any of the
+// four can cause it. A 30s bound buys nothing here anyway, being twice the 15s
+// poll interval that would have recovered the read on its own (#221). Scoped to
+// these reads: one-shot moderation actions still want the generous default.
+const RESOLUTION_READ_TIMEOUT_MS = 8_000;
+
 // Category priority for sorting
 function getCategoryPriority(categories: string[]): number {
   if (categories.some(c => HIGH_PRIORITY_CATEGORIES.includes(c))) return 0;
@@ -411,7 +421,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     errorUpdateCount: labelsErrorUpdateCount,
   } = useQuery({
     queryKey: ['resolution-labels', relayUrl],
-    queryFn: fetchResolutionLabels,
+    queryFn: () => fetchResolutionLabels({ timeoutMs: RESOLUTION_READ_TIMEOUT_MS }),
     refetchInterval: 15 * 1000,
     placeholderData: (previousData) => previousData,
     retry: 1,
@@ -431,7 +441,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     queryKey: ['banned-pubkeys'],
     queryFn: async () => {
       try {
-        return await listBannedPubkeys();
+        return await listBannedPubkeys({ timeoutMs: RESOLUTION_READ_TIMEOUT_MS });
       } catch (error) {
         console.warn('NIP-86 listbannedpubkeys failed:', error);
         throw error; // let React Query handle it, but retry: 1 + placeholderData keeps UI stable
@@ -455,7 +465,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     queryKey: ['banned-events'],
     queryFn: async () => {
       try {
-        return await listBannedEvents();
+        return await listBannedEvents({ timeoutMs: RESOLUTION_READ_TIMEOUT_MS });
       } catch (error) {
         console.warn('NIP-86 listbannedevents failed:', error);
         throw error;
@@ -484,7 +494,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     queryKey: ['decisions'],
     queryFn: async () => {
       try {
-        return await getAllDecisions();
+        return await getAllDecisions({ timeoutMs: RESOLUTION_READ_TIMEOUT_MS });
       } catch (error) {
         console.warn('[Reports] Decisions query failed:', error);
         throw error;
