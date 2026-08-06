@@ -1827,10 +1827,12 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
     expect(body.labelsDeleted).toBe(1);
   });
 
-  // The message listener has no resolved-guard, so a frame can still arrive
-  // after a failure path has handed its events to the caller. Handing back the
-  // live array would let that late frame join a set the caller is already
-  // iterating and banning -- a label the caller never saw in its own count.
+  // A frame can still arrive after a failure path has handed its events to the
+  // caller: the socket is closing, not closed. The message listener's
+  // resolved-guard is what stops that late label joining a set the caller is
+  // already iterating and banning -- a label the read never reported and never
+  // counted. Pinned on the failure path as well as the success path below,
+  // because the guard is one line and covers both.
   it('does not ban a label that arrived after the read had already failed', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.stubGlobal('fetch', vi.fn(async () =>
