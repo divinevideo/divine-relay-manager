@@ -431,6 +431,80 @@ describe('cold error blocks the queue and offers an override (#221)', () => {
   });
 });
 
+describe('the escape hatch survives the poll that follows a cold failure (#221)', () => {
+  // React Query resets a data-less query to `{error: null, status: 'pending'}`
+  // the moment a refetch starts (query-core's fetchState, reached from the
+  // 'fetch' action), and refetchInterval keeps polling errored queries. Reading
+  // the live `error` alone therefore makes a CONTINUOUSLY failing source look
+  // like a first load again on every cycle. Since the cold-load skeleton is
+  // checked before the blocked pane, that would take Retry and "Show the queue
+  // anyway" off the screen for most of each cycle, out from under the cursor.
+  //
+  // Both directions matter, so both are tested: the latch has to hold across an
+  // in-flight retry, and it has to RELEASE when the source genuinely recovers,
+  // or the pane would outlive the failure it describes.
+
+  // Fails /api/decisions for the first `failures` attempts, then hands back
+  // whatever `after` produces. Everything else stays healthy.
+  function stubDecisionsFailingThen(
+    failures: number,
+    after: (healthy: typeof fetch, input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+  ) {
+    let attempts = 0;
+    stubFetch({ labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty' });
+    const healthy = globalThis.fetch as unknown as typeof fetch;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/decisions')) {
+        attempts += 1;
+        if (attempts <= failures) {
+          return jsonResponse({ success: false, error: 'cold start timeout' }, 500);
+        }
+        return after(healthy, input, init);
+      }
+      return healthy(input, init);
+    }));
+    return () => attempts;
+  }
+
+  it('holds the blocked pane while the failed source is mid-retry, instead of falling back to the skeleton', async () => {
+    // `retry: 1` means two attempts, so failing three exhausts the retry and
+    // settles into an error. The fourth attempt (driven by the Retry button)
+    // never resolves: that is exactly the window in which React Query has
+    // cleared `error` and put the query back to 'pending' with no data.
+    const never = new Promise<Response>(() => {});
+    const attempts = stubDecisionsFailingThen(3, () => never);
+    const user = userEvent.setup();
+    renderReports();
+
+    expect(await screen.findByRole('button', { name: /show the queue anyway/i })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /^retry$/i }));
+    await waitFor(() => expect(attempts()).toBeGreaterThan(3));
+
+    // The in-flight retry must not swap the pane for a bare skeleton.
+    expect(screen.queryByTestId('reports-loading-skeleton')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /show the queue anyway/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^retry$/i })).toBeInTheDocument();
+  });
+
+  it('drops the blocked pane once the failed source actually recovers', async () => {
+    // The inverse. errorUpdateCount only ever increments, so if `hasData`
+    // turning true were not the release condition, the pane would stick
+    // forever and no amount of recovery would clear it.
+    const attempts = stubDecisionsFailingThen(3, (healthy, input, init) => healthy(input, init));
+    const user = userEvent.setup();
+    renderReports();
+
+    await user.click(await screen.findByRole('button', { name: /^retry$/i }));
+
+    expect(await screen.findByText(REPORTED_NPUB)).toBeInTheDocument();
+    expect(screen.queryByText(/resolution state is unavailable/i)).not.toBeInTheDocument();
+    // Nothing else could have un-blocked it: the source really did re-fetch.
+    expect(attempts()).toBeGreaterThan(3);
+  });
+});
+
 describe('offline pauses resolution sources instead of failing them (#221)', () => {
   afterEach(() => {
     // Guard against a failing assertion above leaving the manager offline for

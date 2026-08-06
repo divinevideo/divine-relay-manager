@@ -408,6 +408,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     dataUpdatedAt: labelsUpdatedAt,
     isPending: labelsPending,
     fetchStatus: labelsFetchStatus,
+    errorUpdateCount: labelsErrorUpdateCount,
   } = useQuery({
     queryKey: ['resolution-labels', relayUrl],
     queryFn: fetchResolutionLabels,
@@ -425,6 +426,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     dataUpdatedAt: bannedPubkeysUpdatedAt,
     isPending: bannedPubkeysPending,
     fetchStatus: bannedPubkeysFetchStatus,
+    errorUpdateCount: bannedPubkeysErrorUpdateCount,
   } = useQuery({
     queryKey: ['banned-pubkeys'],
     queryFn: async () => {
@@ -448,6 +450,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     dataUpdatedAt: bannedEventsUpdatedAt,
     isPending: bannedEventsPending,
     fetchStatus: bannedEventsFetchStatus,
+    errorUpdateCount: bannedEventsErrorUpdateCount,
   } = useQuery({
     queryKey: ['banned-events'],
     queryFn: async () => {
@@ -476,6 +479,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     dataUpdatedAt: decisionsUpdatedAt,
     isPending: decisionsPending,
     fetchStatus: decisionsFetchStatus,
+    errorUpdateCount: decisionsErrorUpdateCount,
   } = useQuery({
     queryKey: ['decisions'],
     queryFn: async () => {
@@ -616,6 +620,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     // true throughout a paused wait and cannot tell "loading" from "stuck
     // offline" on its own.
     isPaused: boolean;
+    // Monotonic count of settled failures. The ONLY failure signal that survives
+    // a refetch: see hasColdFailed below.
+    errorUpdateCount: number;
     gatesAlways: boolean;
   }
 
@@ -628,6 +635,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       updatedAt: labelsUpdatedAt,
       isPending: labelsPending,
       isPaused: labelsFetchStatus === 'paused',
+      errorUpdateCount: labelsErrorUpdateCount,
       gatesAlways: false,
     },
     {
@@ -638,6 +646,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       updatedAt: bannedPubkeysUpdatedAt,
       isPending: bannedPubkeysPending,
       isPaused: bannedPubkeysFetchStatus === 'paused',
+      errorUpdateCount: bannedPubkeysErrorUpdateCount,
       gatesAlways: false,
     },
     {
@@ -648,6 +657,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       updatedAt: bannedEventsUpdatedAt,
       isPending: bannedEventsPending,
       isPaused: bannedEventsFetchStatus === 'paused',
+      errorUpdateCount: bannedEventsErrorUpdateCount,
       gatesAlways: false,
     },
     {
@@ -663,13 +673,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       updatedAt: decisionsUpdatedAt,
       isPending: decisionsPending,
       isPaused: decisionsFetchStatus === 'paused',
+      errorUpdateCount: decisionsErrorUpdateCount,
       gatesAlways: true,
     },
   ], [
-    resolutionLabels, labelsError, labelsUpdatedAt, labelsPending, labelsFetchStatus,
-    bannedPubkeys, bannedPubkeysError, bannedPubkeysUpdatedAt, bannedPubkeysPending, bannedPubkeysFetchStatus,
-    bannedEvents, bannedEventsError, bannedEventsUpdatedAt, bannedEventsPending, bannedEventsFetchStatus,
-    allDecisions, decisionsError, decisionsUpdatedAt, decisionsPending, decisionsFetchStatus,
+    resolutionLabels, labelsError, labelsUpdatedAt, labelsPending, labelsFetchStatus, labelsErrorUpdateCount,
+    bannedPubkeys, bannedPubkeysError, bannedPubkeysUpdatedAt, bannedPubkeysPending, bannedPubkeysFetchStatus, bannedPubkeysErrorUpdateCount,
+    bannedEvents, bannedEventsError, bannedEventsUpdatedAt, bannedEventsPending, bannedEventsFetchStatus, bannedEventsErrorUpdateCount,
+    allDecisions, decisionsError, decisionsUpdatedAt, decisionsPending, decisionsFetchStatus, decisionsErrorUpdateCount,
   ]);
 
   // Models only when the LIST FILTER (the "hide resolved" toggle applied to
@@ -683,7 +694,31 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // source lands.
   const resolvedFilterActive = hideResolved && !showPendingReview;
   const gatingSources = resolutionSources.filter(s => s.gatesAlways || resolvedFilterActive);
-  const blockingLoad = gatingSources.filter(s => !s.hasData && s.isPending);
+  // Has this source failed with nothing to fall back on, and stayed failed?
+  //
+  // Reading the live `error` alone is not enough to answer that. query-core's
+  // fetchState() (see the 'fetch' action in query.js) resets
+  // `{error: null, status: 'pending'}` on every refetch of a query whose data is
+  // undefined, and refetchInterval keeps firing on errored queries. So a source
+  // that is failing continuously spends each poll cycle looking like a FIRST
+  // load: blockingErrors empties, blockingLoad refills, and because the cold-load
+  // skeleton is checked before the blocked pane, the moderator gets bounced back
+  // to a bare skeleton with Retry and the override gone from under the cursor.
+  //
+  // errorUpdateCount is the counter that survives: fetchState() does not touch
+  // it, and neither does the 'success' action (unlike fetchFailureCount, which
+  // both reset). It only ever increments, so `hasData` turning true is what
+  // releases the latch -- a source that genuinely recovers stops counting as
+  // failed, and a source that fails again while HOLDING data is warm, not cold,
+  // and belongs to staleSources instead.
+  //
+  // A live `error` is subsumed: the same reducer action sets both, so
+  // errorUpdateCount > 0 whenever error is set. The isPaused exclusion keeps the
+  // offline branch's precedence: a source that failed and has since gone
+  // offline should say "offline", not re-report the earlier error.
+  const hasColdFailed = (s: ResolutionSource) =>
+    !s.hasData && !s.isPaused && s.errorUpdateCount > 0;
+  const blockingLoad = gatingSources.filter(s => !s.hasData && s.isPending && !hasColdFailed(s));
   // Offline addition (#221): fetchStatus 'paused' (not isPending, which stays
   // true the whole time) is the only signal that a blocking source isn't
   // merely slow, so the block can say why instead of sitting indefinitely.
@@ -696,14 +731,15 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const blockingLoadStillBlocking = resolutionOverride
     ? blockingLoad.filter(s => !s.isPaused)
     : blockingLoad;
-  // The `s.error` term is near-unreachable today: past the cold-load gate above,
-  // every gating source with `!hasData` has already settled, and every settled
-  // non-error source yields at least `[]` (truthy), so `!hasData` alone already
-  // implies an error in practice. Kept anyway because it states the actual intent
-  // -- block on sources that ERRORED, not merely on sources that are empty -- and
-  // it would start mattering the moment a source can settle with no data and no
-  // error (e.g. a 200 with a missing field). Don't delete this as dead code.
-  const blockingErrors = gatingSources.filter(s => !s.hasData && s.error);
+  // The errorUpdateCount term inside hasColdFailed is near-unreachable today:
+  // past the cold-load gate above, every gating source with `!hasData` has
+  // already settled, and every settled non-error source yields at least `[]`
+  // (truthy), so `!hasData` alone already implies a failure in practice. Kept
+  // anyway because it states the actual intent -- block on sources that FAILED,
+  // not merely on sources that are empty -- and it would start mattering the
+  // moment a source can settle with no data and no error (e.g. a 200 with a
+  // missing field). Don't delete this as dead code.
+  const blockingErrors = gatingSources.filter(hasColdFailed);
   // Sources an override is currently bypassing, whether by cold error or by an
   // indefinite offline pause -- combined because the override warning and the
   // decisions-unavailable copy read the same regardless of which reason applies.
