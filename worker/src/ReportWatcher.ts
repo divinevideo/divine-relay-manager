@@ -18,6 +18,7 @@ import {
   defaultResolutionForBand,
 } from '../../shared/age-review';
 import { getUserStatus, type KeycastEnv } from './keycast-client';
+import { fetchAccountIdentity } from './relay-profile';
 
 /**
  * Extended environment for ReportWatcher DO
@@ -931,11 +932,30 @@ export class ReportWatcher implements DurableObject {
       const keycastStatus = await getUserStatus(reportedPubkey, this.env);
       if (keycastStatus.success && keycastStatus.verified_minor) {
         const caseId = crypto.randomUUID();
+        // Capture here too. This case opens already cleared, so nothing hides the
+        // profile today -- but the account may be actioned later, and a cleared
+        // case is still one a moderator may need to identify after the fact.
+        const lookup = await fetchAccountIdentity(reportedPubkey, this.env.RELAY_URL)
+          .catch(() => ({ completed: false, profile: null }));
+        const identity = lookup.profile;
+        // Null unless the relay answered -- see the note on the main path.
+        const identityCapturedAt = lookup.completed ? new Date().toISOString() : null;
+
         await this.env.DB.prepare(`
           INSERT INTO age_review_cases
-          (id, pubkey, reporter_pubkey, report_id, suspected_age_band, state, allowed_resolution, resolution_note, created_via)
-          VALUES (?, ?, ?, ?, 'age_13_15', 'cleared', 'parent_video_or_email', 'Auto-cleared: previously verified minor', 'report')
-        `).bind(caseId, reportedPubkey, event.pubkey, event.id).run();
+          (id, pubkey, reporter_pubkey, report_id, suspected_age_band, state, allowed_resolution, resolution_note, created_via,
+           account_name, account_nip05, account_vine_username, identity_captured_at)
+          VALUES (?, ?, ?, ?, 'age_13_15', 'cleared', 'parent_video_or_email', 'Auto-cleared: previously verified minor', 'report', ?, ?, ?, ?)
+        `).bind(
+          caseId,
+          reportedPubkey,
+          event.pubkey,
+          event.id,
+          identity?.name ?? null,
+          identity?.nip05 ?? null,
+          identity?.vineUsername ?? null,
+          identityCapturedAt,
+        ).run();
 
         await this.logDecision({
           targetType: 'pubkey',
@@ -957,10 +977,35 @@ export class ReportWatcher implements DurableObject {
     const band = 'age_13_15' as const;
     const deadline = new Date(Date.now() + DEADLINE_DAYS * 24 * 60 * 60 * 1000).toISOString();
 
+    // Capture a readable identifier while one is still visible. The invariant
+    // is that nothing which hides a *pubkey's* profile may run first:
+    // suspendpubkey/banpubkey hide the account's content from relay queries and
+    // a later lookup returns nothing. Those run only from the case-update
+    // handler and the deadline cron, both of which act on a case that already
+    // exists and has already captured.
+    //
+    // Not the stronger claim that no enforcement at all precedes this.
+    // handleReportEvent awaits processAutoHide first, which can reach banEvent
+    // -- but that targets a single event id and leaves the author's kind-0
+    // queryable, so it does not threaten the capture.
+    //
+    // Best-effort by contract -- fetchAccountIdentity swallows its own errors,
+    // and the extra catch here covers an unexpected throw so enrichment can
+    // never be the reason a case fails to open.
+    const lookup = await fetchAccountIdentity(reportedPubkey, this.env.RELAY_URL)
+      .catch(() => ({ completed: false, profile: null }));
+    const identity = lookup.profile;
+    // Only stamp when the relay actually answered. A timeout or an unreachable
+    // relay is not evidence the account has no profile, and a stamp would
+    // exclude this case from the backfill for good -- right before enforcement
+    // hides the profile and makes the loss permanent.
+    const identityCapturedAt = lookup.completed ? new Date().toISOString() : null;
+
     await this.env.DB.prepare(`
       INSERT INTO age_review_cases
-      (id, pubkey, reporter_pubkey, report_id, suspected_age_band, state, allowed_resolution, deadline_at)
-      VALUES (?, ?, ?, ?, ?, 'open_reported', ?, ?)
+      (id, pubkey, reporter_pubkey, report_id, suspected_age_band, state, allowed_resolution, deadline_at,
+       account_name, account_nip05, account_vine_username, identity_captured_at)
+      VALUES (?, ?, ?, ?, ?, 'open_reported', ?, ?, ?, ?, ?, ?)
     `).bind(
       caseId,
       reportedPubkey,
@@ -969,6 +1014,10 @@ export class ReportWatcher implements DurableObject {
       band,
       defaultResolutionForBand(band),
       deadline,
+      identity?.name ?? null,
+      identity?.nip05 ?? null,
+      identity?.vineUsername ?? null,
+      identityCapturedAt,
     ).run();
 
     await this.logDecision({

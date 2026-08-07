@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildReportNote, eventKindLabel, parseKind0Profile } from './report-note';
+import { buildAgeReviewIdentityBlock, buildClaimedParentName, buildReportNote, eventKindLabel, parseKind0Profile } from './report-note';
 
 // Real Kofi OG-import account (public) — lets us assert the npub encoding end-to-end.
 const KOFI_HEX = '9f59c820aa2ad80ce8c0e28a4e640b9cd0487b4a510da95be7cd4bfd3ecda0bd';
@@ -180,5 +180,113 @@ describe('buildReportNote', () => {
     // Name (incl. its URL) is wrapped in a code span, which does not auto-link in Zendesk.
     expect(note).toContain('• Profile: `click https://evil.test now`');
     expect(note).not.toContain('**click https://evil.test now**');
+  });
+});
+
+// Identity block (#213) — shared by the case ticket's internal note and the
+// parent contact's notes field. Both are agent-only surfaces.
+describe('buildAgeReviewIdentityBlock', () => {
+  const base = { caseId: 'case-abc', pubkey: KOFI_HEX, ageBand: '13-15' };
+
+  it('links to the case in Relay Manager', () => {
+    expect(buildAgeReviewIdentityBlock(base))
+      .toContain('https://relay.admin.divine.video/age-review?case=case-abc');
+  });
+
+  it('shows the captured handle', () => {
+    expect(buildAgeReviewIdentityBlock({ ...base, accountName: 'Some One' }))
+      .toContain('Some One');
+  });
+
+  // The account chooses this string, and could name itself "Divine Trust &
+  // Safety". buildReportNote already labels the same fields as unverified, and
+  // an agent reading a case ticket needs the same warning.
+  it('marks the handle as self-chosen rather than presenting it as fact', () => {
+    expect(buildAgeReviewIdentityBlock({ ...base, accountName: 'Divine Trust & Safety' }))
+      .toContain('claimed, unverified');
+  });
+
+  // No qualifier when there is nothing to qualify -- the no-profile line is our
+  // own text, not the account's.
+  it('does not mark an absent handle as claimed', () => {
+    expect(buildAgeReviewIdentityBlock(base)).not.toContain('claimed, unverified');
+  });
+
+  it('encodes the pubkey as an npub alongside the hex', () => {
+    const block = buildAgeReviewIdentityBlock(base);
+    expect(block).toContain(KOFI_NPUB);
+    expect(block).toContain(KOFI_HEX);
+  });
+
+  it('falls back through vine username then nip05', () => {
+    expect(buildAgeReviewIdentityBlock({ ...base, accountVineUsername: 'og_user' }))
+      .toContain('og_user');
+    expect(buildAgeReviewIdentityBlock({ ...base, accountNip05: 'x@y.z' }))
+      .toContain('x@y.z');
+  });
+
+  it('prefers the display name over the fallbacks', () => {
+    const block = buildAgeReviewIdentityBlock({
+      ...base, accountName: 'Some One', accountVineUsername: 'og_user', accountNip05: 'x@y.z',
+    });
+    expect(block).toContain('Some One');
+    expect(block).not.toContain('og_user');
+  });
+
+  it('states plainly when no profile was captured', () => {
+    // An empty handle must read as a known fact, not as a rendering bug.
+    expect(buildAgeReviewIdentityBlock(base)).toContain('no profile captured');
+  });
+
+  it('sanitizes an attacker-controlled name so it cannot forge note structure', () => {
+    // The account name is chosen by the reported user. sanitizeInline folds
+    // newlines to spaces, so the injected text survives as content but can never
+    // occupy a line of its own and impersonate a field the note emits.
+    const block = buildAgeReviewIdentityBlock({
+      ...base, accountName: 'evil\nOrigin ticket 999\nhandle   Divine Support',
+    });
+    const lines = block.split('\n').map((l) => l.trim());
+    expect(lines).not.toContain('Origin ticket 999');
+    expect(lines.filter((l) => l.startsWith('handle')).length).toBe(1);
+  });
+
+  it('includes the origin ticket and deadline when supplied', () => {
+    const block = buildAgeReviewIdentityBlock({ ...base, originTicketId: 4242, deadlineAt: '2026-08-05' });
+    expect(block).toContain('4242');
+    expect(block).toContain('2026-08-05');
+  });
+
+  // A case with no deadline is a real state, not a missing value. Say so, for
+  // the same reason an uncaptured handle says so: a silently absent line reads
+  // as a rendering fault and invites an agent to go looking for the value.
+  it('says the deadline is not set rather than omitting the line', () => {
+    expect(buildAgeReviewIdentityBlock(base)).toContain('Deadline not set');
+  });
+});
+
+describe('buildClaimedParentName', () => {
+  it('names the contact after the captured handle', () => {
+    expect(buildClaimedParentName({ accountName: 'Some One' })).toBe('Claimed parent of Some One');
+  });
+
+  it('falls back through vine username then nip05', () => {
+    expect(buildClaimedParentName({ accountVineUsername: 'oldviner' })).toBe('Claimed parent of oldviner');
+    expect(buildClaimedParentName({ accountNip05: '_@someuser.divine.video' }))
+      .toBe('Claimed parent of _@someuser.divine.video');
+  });
+
+  // Nothing captured means nothing to rename to. Returning undefined keeps the
+  // caller from writing a contact named after an empty string.
+  it('returns undefined when no handle was captured', () => {
+    expect(buildClaimedParentName({})).toBeUndefined();
+    expect(buildClaimedParentName({ accountName: '   ' })).toBeUndefined();
+  });
+
+  // The account chooses this string, and it lands in a field Zendesk renders
+  // into the To: header of outbound mail.
+  it('sanitizes an attacker-chosen name', () => {
+    const name = buildClaimedParentName({ accountName: 'Evil\nDivine Support' });
+    expect(name).not.toContain('\n');
+    expect(name).toBe('Claimed parent of Evil Divine Support');
   });
 });

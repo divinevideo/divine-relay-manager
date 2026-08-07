@@ -68,6 +68,10 @@ function makeCase(overrides: Partial<AgeReviewCase> = {}): AgeReviewCase {
     created_via: null,
     claim_link_url: null,
     claim_link_expires_at: null,
+    account_name: null,
+    account_nip05: null,
+    account_vine_username: null,
+    identity_captured_at: null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     version: 0,
@@ -265,6 +269,10 @@ describe('AgeReviewDetail', () => {
       resolution_note: 'Approved via parental consent (minor onboarding)',
       claim_link_url: 'https://login.test/claim/xyz',
       claim_link_expires_at: null,
+      account_name: null,
+      account_nip05: null,
+      account_vine_username: null,
+      identity_captured_at: null,
     }));
 
     expect(screen.getByText('Claim Link')).toBeInTheDocument();

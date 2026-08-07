@@ -74,8 +74,18 @@ function sanitizeInline(value: string | undefined, maxLen = 80): string | undefi
 }
 
 /** Parse a raw kind-0 event into the profile facts the note needs. Never throws. */
+/**
+ * @param options.raw Return the profile's values verbatim instead of running
+ *   them through `sanitizeInline`. For callers that **persist** the result:
+ *   sanitizeInline is a display transform (strips markdown punctuation,
+ *   truncates at 80 with an ellipsis), so applying it on the way in stores a
+ *   handle the account never used — and identity capture exists precisely
+ *   because the real one is about to become unrecoverable. Raw values must
+ *   still be sanitized wherever they are rendered.
+ */
 export function parseKind0Profile(
   event: { content?: string; tags?: string[][] } | null | undefined,
+  options: { raw?: boolean } = {},
 ): ReportedProfile {
   const tags = event?.tags ?? [];
   const tagValue = (name: string): string | undefined => tags.find((t) => t[0] === name)?.[1];
@@ -100,12 +110,16 @@ export function parseKind0Profile(
     // Malformed kind-0 content: fall back to tag-derived facts (e.g. the OG-import flag).
   }
 
-  // Sanitize every attacker-controlled field before it reaches the note.
+  // Sanitize every attacker-controlled field before it reaches the note, unless
+  // the caller is storing rather than rendering (see options.raw).
+  const clean = (value: string | undefined) =>
+    options.raw ? (value || undefined) : sanitizeInline(value);
+
   return {
-    name: sanitizeInline(name),
-    nip05: sanitizeInline(nip05),
+    name: clean(name),
+    nip05: clean(nip05),
     isVineImport,
-    vineUsername: sanitizeInline(tagValue('vine_username')),
+    vineUsername: clean(tagValue('vine_username')),
   };
 }
 
@@ -185,5 +199,83 @@ export function buildReportNote(input: ReportNoteInput): string {
   }
 
   lines.push('**Filed by:** the ticket requester above.');
+  return lines.join('\n');
+}
+
+/** The captured identity fields, in the shape the renderers consume. */
+export interface AgeReviewIdentityCandidates {
+  accountName?: string | null;
+  accountNip05?: string | null;
+  accountVineUsername?: string | null;
+}
+
+export interface AgeReviewIdentityInput extends AgeReviewIdentityCandidates {
+  caseId: string;
+  pubkey: string;
+  ageBand: string;
+  originTicketId?: number | null;
+  deadlineAt?: string | null;
+}
+
+/**
+ * Identity block for an age-review case, shared by the case ticket's internal
+ * note and the parent contact's `notes` field. Both are agent-only surfaces.
+ *
+ * Every account-derived value is attacker-chosen, so all of them go through
+ * sanitizeInline: newlines fold to spaces, which keeps an injected string from
+ * occupying its own line and impersonating a field this block emits.
+ *
+ * When nothing was captured this says so outright. A blank handle has to read
+ * as a known fact -- the account may never have had a profile, or enforcement
+ * hid it -- rather than looking like a rendering failure.
+ */
+/**
+ * The single readable identifier for a captured account, in preference order.
+ * Sanitized: every candidate is chosen by the account itself.
+ */
+function resolveHandle(input: AgeReviewIdentityCandidates): string | undefined {
+  return (
+    sanitizeInline(input.accountName ?? undefined) ??
+    sanitizeInline(input.accountVineUsername ?? undefined) ??
+    sanitizeInline(input.accountNip05 ?? undefined)
+  );
+}
+
+/**
+ * Zendesk contact name for a parent who has replied about a case.
+ *
+ * "Claimed" is deliberate. Whether they are the parent is precisely what the
+ * review exists to establish, so the name must not assert it as fact.
+ *
+ * Returns undefined when nothing was captured, so a caller cannot rename a
+ * contact after an empty handle. Only ever for a contact known to be a real
+ * parent address, and only after they have replied -- Zendesk renders this
+ * into the To: header of outbound mail.
+ */
+export function buildClaimedParentName(input: AgeReviewIdentityCandidates): string | undefined {
+  const handle = resolveHandle(input);
+  return handle ? `Claimed parent of ${handle}` : undefined;
+}
+
+export function buildAgeReviewIdentityBlock(input: AgeReviewIdentityInput): string {
+  const handle = resolveHandle(input);
+
+  const lines: string[] = [
+    `Age review: ${sanitizeInline(input.ageBand) ?? 'unspecified'}, case ${input.caseId}`,
+    `${RELAY_ADMIN}/age-review?case=${input.caseId}`,
+    '',
+    'Account',
+    // Qualified for the same reason buildReportNote qualifies it: the account
+    // picks this string and can name itself after Divine staff.
+    `  handle   ${handle ? `${handle} (claimed, unverified)` : '(no profile captured - the account may have had none, or its content is hidden by enforcement)'}`,
+    `  npub     ${toNpub(input.pubkey)}`,
+    `  pubkey   ${input.pubkey}`,
+  ];
+
+  if (input.originTicketId) lines.push('', `Origin ticket ${input.originTicketId}`);
+  // Always emitted. "No deadline" is a real case state, and an absent line
+  // would read as a rendering fault rather than the fact that there is none.
+  lines.push(`Deadline ${sanitizeInline(input.deadlineAt ?? undefined) ?? 'not set'}`);
+
   return lines.join('\n');
 }
