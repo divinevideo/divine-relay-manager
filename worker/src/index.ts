@@ -9,7 +9,7 @@ import {
   type SecretStoreSecret,
 } from './nip86';
 import { ensureSchema } from './db';
-import { buildReportsFilter, isUnconfirmedTargetedMiss } from './reports-filter';
+import { buildReportsFilter } from './reports-filter';
 import { generatePreAuthToken, verifyPreAuthToken, base64UrlEncode } from './zendesk-preauth';
 import { deriveFunnelcakeApiUrl, proxyFunnelcakeRequest } from './funnelcake-proxy';
 import type { KeycastEnv } from './keycast-client';
@@ -349,6 +349,9 @@ interface ApiResponse {
   eventId?: string;
   deleted?: number;
   labelsDeleted?: number;
+  // Reopen could not clear every relay-side resolution label, so the report
+  // may stay hidden even though its decisions were deleted.
+  labelCleanupFailed?: boolean;
   // Realness proxy pass-through
   details?: string;
   // Zendesk parse-report responses
@@ -487,7 +490,15 @@ export default {
 
       if (path.startsWith('/api/decisions/') && request.method === 'DELETE') {
         const targetId = path.replace('/api/decisions/', '');
-        return handleDeleteDecisions(targetId, env, corsHeaders);
+        // Optional: an older frontend omits it, and then both tags are checked.
+        // A present-but-unrecognised value takes the same safe path, but that
+        // means a client-side typo is invisible in production, so it is logged.
+        const rawType = url.searchParams.get('targetType');
+        const targetType = rawType === 'event' || rawType === 'pubkey' ? rawType : undefined;
+        if (rawType !== null && targetType === undefined) {
+          console.warn('[reopen] unrecognised targetType, querying both label tags:', rawType);
+        }
+        return handleDeleteDecisions(targetId, env, corsHeaders, targetType);
       }
 
       if (path.startsWith('/api/check-result/') && request.method === 'GET') {
@@ -523,13 +534,12 @@ export default {
       if (path === '/api/reports' && request.method === 'GET') {
         const filter = buildReportsFilter(url.searchParams);
         const result = await queryRelay(filter, env.RELAY_URL);
+        // An unconfirmed read is now a failure inside queryRelay itself, so a
+        // targeted lookup can no longer come back empty-but-unconfirmed here:
+        // that case 502s below, and the client still shows "unavailable"
+        // rather than a false "deleted".
         if (!result.success) {
           return jsonResponse({ success: false, error: result.error }, 502, corsHeaders);
-        }
-        // A targeted lookup that came back empty but unconfirmed (relay never sent EOSE) is
-        // ambiguous — 502 so the client shows "unavailable" (retry), not a false "deleted".
-        if (isUnconfirmedTargetedMiss(url.searchParams, result)) {
-          return jsonResponse({ success: false, error: 'Relay did not confirm results (timeout)' }, 502, corsHeaders);
         }
         return jsonResponse({ success: true, events: result.events }, 200, corsHeaders);
       }
@@ -1508,10 +1518,35 @@ async function handleGetDecisions(
   }
 }
 
+// Kind 1985 is a regular event, not replaceable, so review/reopen cycles
+// accumulate resolution labels on one target. A real target carries one or two,
+// so this is far above the expected count -- but it is NOT set by that. Every
+// label costs one sequential signed NIP-86 round-trip at roughly 200-400ms, and
+// each filter also spends up to the 5s queryRelay cap on its read, so a full
+// page is ~15-25s of work per filter.
+//
+// The binding constraint is the client's 30s abort (API_TIMEOUT_MS in
+// adminApi.ts): blowing it aborts a reopen the worker had already completed and
+// reports it as a failure. A cap of 200 blows it outright. 50 fits the path
+// every current caller takes, which is one filter -- ReportDetail always sends
+// targetType. It does NOT fit the two-filter fallback at the top of the range;
+// that path is reachable only by a frontend older than this deploy, and only
+// against a target carrying tens of labels.
+//
+// Subrequests are not the constraint: this is Workers Paid, so the budget is
+// 1000/request and even the two-filter worst case spends ~102 (two sockets plus
+// two full pages of bans).
+//
+// A full page is reported as an incomplete cleanup rather than assumed
+// complete, so a target somehow past the cap still gets cleared over successive
+// reopens instead of silently half-cleared.
+const LABEL_CLEANUP_LIMIT = 50;
+
 async function handleDeleteDecisions(
   targetId: string,
   env: Env,
-  corsHeaders: Record<string, string>
+  corsHeaders: Record<string, string>,
+  targetType?: 'event' | 'pubkey'
 ): Promise<Response> {
   try {
     if (!env.DB) {
@@ -1521,17 +1556,48 @@ async function handleDeleteDecisions(
     await ensureSchemaOnce(env.DB);
 
     let labelsDeleted = 0;
+    let labelCleanupFailed = false;
 
-    // First, query for and delete any resolution labels (kind 1985) on the relay
-    // Try both 'e' tag (event target) and 'p' tag (pubkey target)
-    const labelFilters = [
-      { kinds: [1985], '#e': [targetId], '#L': ['moderation/resolution'], limit: 10 },
-      { kinds: [1985], '#p': [targetId], '#L': ['moderation/resolution'], limit: 10 },
-    ];
+    // Query for and delete any resolution labels (kind 1985) on the relay.
+    // publishLabel tags a label with 'e' for an event target or 'p' for a
+    // pubkey target, never both, so naming the type skips a query that could
+    // not have matched. Without a type (an older frontend) both are checked:
+    // guessing wrong would silently skip the labels that do exist.
+    const tagForType = { event: '#e', pubkey: '#p' } as const;
+    const labelTags = targetType ? [tagForType[targetType]] : ['#e', '#p'];
+    const labelFilters = labelTags.map((tag) => ({
+      kinds: [1985],
+      [tag]: [targetId],
+      '#L': ['moderation/resolution'],
+      limit: LABEL_CLEANUP_LIMIT,
+    }));
 
     for (const filter of labelFilters) {
       const queryResult = await queryRelay(filter, env.RELAY_URL);
-      if (queryResult.success && queryResult.events && queryResult.events.length > 0) {
+      if (!queryResult.success) {
+        // Best-effort cleanup, but the caller has to hear about it. The D1
+        // delete below is unconditional, so a surviving resolution label
+        // leaves the report hidden by resolvedTargets even though its
+        // decisions are gone. Reporting a clean reopen would tell the
+        // moderator the report is back in the queue when it is not.
+        labelCleanupFailed = true;
+        console.warn('[reopen] resolution-label query failed, labels may remain:', queryResult.error);
+      } else if ((queryResult.events?.length ?? 0) >= LABEL_CLEANUP_LIMIT) {
+        // A full page is indistinguishable from a truncated one, so any labels
+        // past the cap are invisible here and would survive silently. Same
+        // outcome as a failed read, so it reports the same way.
+        //
+        // This detects our own cap, not the relay's: a relay enforcing a lower
+        // maximum returns a short page and truncation stays invisible. Raising
+        // the cap well above any plausible label count is what makes that
+        // remote, rather than this check.
+        labelCleanupFailed = true;
+        console.warn('[reopen] resolution-label read hit the page limit, labels may remain');
+      }
+      // Deliberately not gated on success: an incomplete read still hands back
+      // the labels it did receive, and removing those is strictly progress.
+      // labelCleanupFailed above already records that the set may be partial.
+      if (queryResult.events && queryResult.events.length > 0) {
         for (const labelEvent of queryResult.events) {
           const eventId = (labelEvent as { id?: string }).id;
           if (eventId) {
@@ -1550,10 +1616,24 @@ async function handleDeleteDecisions(
               const rpcResult = await rpcResponse.json() as { success: boolean };
               if (rpcResult.success) {
                 labelsDeleted++;
+              } else {
+                // The label was found but could not be removed (a relay admin
+                // key mismatch 403s every management command while reads keep
+                // working). It survives and keeps the report hidden, so this
+                // reopen is no cleaner than a failed read.
+                labelCleanupFailed = true;
+                console.warn('[reopen] banevent failed for resolution label:', eventId);
               }
             } catch (err) {
-              console.error('Failed to delete resolution label:', eventId, err);
+              labelCleanupFailed = true;
+              console.error('[reopen] banevent threw for resolution label:', eventId, err);
             }
+          } else {
+            // Events come off the wire unvalidated, so an id-less label is
+            // possible. It cannot be banned, so it survives and keeps the
+            // report hidden: the same outcome as any other failed cleanup.
+            labelCleanupFailed = true;
+            console.warn('[reopen] resolution label has no id, cannot remove it');
           }
         }
       }
@@ -1570,9 +1650,10 @@ async function handleDeleteDecisions(
       success: true,
       deleted: result.meta.changes || 0,
       labelsDeleted,
+      labelCleanupFailed,
     }, 200, corsHeaders);
   } catch (error) {
-    console.error('Delete decisions error:', error);
+    console.error('[reopen] delete decisions failed:', error);
     return jsonResponse(
       { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
       500,
@@ -1739,7 +1820,7 @@ async function handleModerateMedia(
 async function queryRelay(
   filter: object,
   relayUrl: string
-): Promise<{ success: boolean; events?: object[]; error?: string; complete?: boolean }> {
+): Promise<{ success: boolean; events?: object[]; error?: string }> {
   return new Promise((resolve) => {
     try {
       const ws = new WebSocket(relayUrl);
@@ -1747,12 +1828,46 @@ async function queryRelay(
       const events: object[] = [];
       const subId = `query-${Date.now()}`;
 
+      // Timeout and close-before-EOSE are failures, not results: only an
+      // EOSE-complete response may report success. A relay answering slower
+      // than this timeout must stay distinguishable from "the queue is
+      // empty", or one slow poll silently blanks the moderation queue.
+      //
+      // Every outcome still carries the events that did arrive. `success`
+      // answers "did the relay confirm the end of the set?", which is the only
+      // question absence-sensitive callers may act on; it does not mean the
+      // partial data is worthless. A caller removing what it can (reopen's
+      // label cleanup) is strictly better off acting on a received event than
+      // discarding it, so the two concerns stay separate.
+
+      // Closing is best-effort cleanup, so a throw from it must not escape.
+      // Of the five exits, close() used to run BEFORE resolve() on three --
+      // timeout, EOSE and CLOSED (the error exit was reordered a commit
+      // earlier; the close exit never calls close() at all). A throw then
+      // stranded the promise with the timeout already cleared and nothing left
+      // to settle it, and on the two inside the message listener the
+      // parse-error catch swallowed it so there was not even a log. queryRelay
+      // would hang and /api/reports would never answer.
+      //
+      // Swallowing here is what guarantees settlement; every exit also resolves
+      // before closing, which is belt-and-braces rather than load-bearing.
+      const closeQuietly = () => {
+        try {
+          ws.close();
+        } catch (err) {
+          // Nothing to recover: the read is already reported and the socket
+          // goes away with the request either way. Logged only because a
+          // close() that throws says something odd about the runtime rather
+          // than about the relay, and is otherwise invisible.
+          console.warn('[queryRelay] socket close threw:', err);
+        }
+      };
+
       const timeout = setTimeout(() => {
         if (!resolved) {
           resolved = true;
-          ws.close();
-          // Timed out without EOSE: results may be truncated, so absence is unconfirmed.
-          resolve({ success: true, events, complete: false });
+          resolve({ success: false, events: events.slice(), error: `Relay query timed out before EOSE (${events.length} events received)` });
+          closeQuietly();
         }
       }, 5000);
 
@@ -1761,6 +1876,12 @@ async function queryRelay(
       });
 
       ws.addEventListener('message', (msg) => {
+        // Once the result is handed to the caller the set is final. We send REQ
+        // and never CLOSE, so the relay can still stream a newly published
+        // matching label between EOSE and the socket actually closing; counting
+        // it would ban a label this read never reported, and would move
+        // events.length after the truncation check read it.
+        if (resolved) return;
         try {
           const data = JSON.parse(msg.data as string);
           if (data[0] === 'EVENT' && data[1] === subId) {
@@ -1768,9 +1889,21 @@ async function queryRelay(
           } else if (data[0] === 'EOSE' && data[1] === subId) {
             clearTimeout(timeout);
             resolved = true;
-            ws.close();
             // EOSE = relay confirmed end of stored events, so an empty result is real.
-            resolve({ success: true, events, complete: true });
+            resolve({ success: true, events });
+            closeQuietly();
+          } else if (data[0] === 'CLOSED' && data[1] === subId) {
+            // NIP-01: the relay ended the subscription instead of fulfilling it,
+            // with a machine-readable reason (funnelcake sends
+            // "error: could not complete query" when its store fails the query).
+            // Without this branch the socket just sits until the timeout, so a
+            // failure the relay already reported gets called a timeout instead,
+            // 5s later than it needed to be.
+            clearTimeout(timeout);
+            resolved = true;
+            const reason = typeof data[2] === 'string' && data[2] ? data[2] : 'no reason given';
+            resolve({ success: false, events: events.slice(), error: `Relay closed the subscription: ${reason}` });
+            closeQuietly();
           }
         } catch {
           // Ignore parse errors
@@ -1781,7 +1914,8 @@ async function queryRelay(
         if (!resolved) {
           clearTimeout(timeout);
           resolved = true;
-          resolve({ success: false, error: 'WebSocket error' });
+          resolve({ success: false, events: events.slice(), error: 'WebSocket error' });
+          closeQuietly();
         }
       });
 
@@ -1789,8 +1923,10 @@ async function queryRelay(
         if (!resolved) {
           clearTimeout(timeout);
           resolved = true;
-          // Closed before EOSE: absence is unconfirmed.
-          resolve({ success: true, events, complete: false });
+          // Closed before EOSE: absence is unconfirmed, so this is a failure.
+          // The only exit that does not closeQuietly() -- the socket is
+          // already closing, which is why we are here.
+          resolve({ success: false, events: events.slice(), error: `Relay closed before EOSE (${events.length} events received)` });
         }
       });
     } catch (error) {

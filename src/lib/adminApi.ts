@@ -571,14 +571,27 @@ export async function getAllDecisions(apiUrl: string): Promise<ModerationDecisio
   return data.decisions || [];
 }
 
-// Delete all decisions for a target (reopens the report)
-export async function deleteDecisions(apiUrl: string, targetId: string): Promise<number> {
-  const data = await apiRequest<{ success: boolean; deleted: number }>(
+// Delete all decisions for a target (reopens the report).
+// labelCleanupFailed means the relay-side resolution labels could not be fully
+// cleared -- the read failed, the read filled its page so there may be more
+// beyond it, or a label was read but could not be removed. Any of those leaves
+// labels alive that keep the report hidden even though its decisions are gone,
+// so callers must surface it rather than reporting a clean reopen.
+// targetType lets the worker query only the label tag that can match ('e' for
+// an event, 'p' for a pubkey). Omitting it is safe: the worker then checks
+// both, which is what an older frontend gets.
+export async function deleteDecisions(
+  apiUrl: string,
+  targetId: string,
+  targetType?: 'event' | 'pubkey'
+): Promise<{ deleted: number; labelCleanupFailed: boolean }> {
+  const qs = targetType ? `?targetType=${targetType}` : '';
+  const data = await apiRequest<{ success: boolean; deleted: number; labelCleanupFailed?: boolean }>(
     apiUrl,
-    `/api/decisions/${targetId}`,
+    `/api/decisions/${targetId}${qs}`,
     'DELETE'
   );
-  return data.deleted || 0;
+  return { deleted: data.deleted || 0, labelCleanupFailed: data.labelCleanupFailed === true };
 }
 
 // Verify that a pubkey was actually banned on the relay

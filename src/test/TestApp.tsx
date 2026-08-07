@@ -12,7 +12,10 @@ interface TestAppProps {
 export function TestApp({ children }: TestAppProps) {
   const queryClient = new QueryClient({
     defaultOptions: {
-      queries: { retry: false },
+      // retryDelay too: a component that overrides `retry` reinstates the
+      // default 1000ms backoff, which pushes an error-state assertion right up
+      // against the 1000ms findBy timeout and flakes under CI load.
+      queries: { retry: false, retryDelay: 0 },
       mutations: { retry: false },
     },
   });

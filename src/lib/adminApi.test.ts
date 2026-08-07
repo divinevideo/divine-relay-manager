@@ -27,6 +27,7 @@ import {
   verifyAgeRestricted,
   logDecision,
   getDecisions,
+  deleteDecisions,
   extractMediaHashes,
   isBlockedMediaAction,
   updateAgeReviewCase,
@@ -1115,6 +1116,67 @@ describe('adminApi', () => {
       const result = await getDecisions(API_URL, 'event123');
 
       expect(result).toEqual([]);
+    });
+  });
+
+  // A reopen deletes the D1 decisions unconditionally but clears the relay's
+  // resolution labels best-effort. If this client drops the flag, the caller
+  // reports a clean reopen for a report that is still hidden.
+  describe('deleteDecisions', () => {
+    it('surfaces labelCleanupFailed so a partial reopen is not reported as clean', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, deleted: 3, labelCleanupFailed: true }),
+      });
+
+      const result = await deleteDecisions(API_URL, 'event123');
+
+      expect(result).toEqual({ deleted: 3, labelCleanupFailed: true });
+    });
+
+    it('reports a clean reopen when every label was cleared', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, deleted: 2, labelCleanupFailed: false }),
+      });
+
+      expect(await deleteDecisions(API_URL, 'event123')).toEqual({ deleted: 2, labelCleanupFailed: false });
+    });
+
+    // An older worker omits the field entirely; absence must not read as failure.
+    it('treats a missing labelCleanupFailed as no failure', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, deleted: 1 }),
+      });
+
+      expect(await deleteDecisions(API_URL, 'event123')).toEqual({ deleted: 1, labelCleanupFailed: false });
+    });
+
+    // A resolution label carries an 'e' tag or a 'p' tag, never both, so the
+    // type lets the worker skip the query that could not have matched. Without
+    // it the worker checks both, and a stall on the dead one reports a failed
+    // cleanup that no retry can fix.
+    it('names the target type so the worker skips the filter that cannot match', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, deleted: 1, labelCleanupFailed: false }),
+      });
+
+      await deleteDecisions(API_URL, 'event123', 'event');
+
+      expect(mockFetch.mock.calls[0][0]).toContain('/api/decisions/event123?targetType=event');
+    });
+
+    it('omits the target type when it is not known', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, deleted: 1, labelCleanupFailed: false }),
+      });
+
+      await deleteDecisions(API_URL, 'event123');
+
+      expect(mockFetch.mock.calls[0][0]).not.toContain('targetType');
     });
   });
 

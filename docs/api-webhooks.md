@@ -309,15 +309,36 @@ Get all decisions for a target.
 
 ### DELETE /api/decisions/:targetId
 
-Delete all decisions for a target (reopen a dismissed report).
+Delete all decisions for a target (reopen a dismissed report), and remove the
+target's relay-side resolution labels (kind 1985, `L=moderation/resolution`).
+
+**Query parameters:**
+
+| Name | Values | Default |
+|------|--------|---------|
+| `targetType` | `event` \| `pubkey` | both label tags are queried |
+
+A resolution label carries an `e` tag for an event target or a `p` tag for a
+pubkey target, never both, so naming the type skips the query that could not
+match. Any other value — absent, empty, wrong case, junk — falls back to
+querying both, which is what an older frontend gets.
 
 **Response:**
 ```json
 {
   "success": true,
-  "deleted": 2
+  "deleted": 2,
+  "labelsDeleted": 1,
+  "labelCleanupFailed": false
 }
 ```
+
+The D1 decision rows are deleted unconditionally; the relay-side label cleanup
+is best-effort. `labelCleanupFailed: true` means at least one resolution label
+may have survived — the label read failed, it filled its page so there may be
+more beyond it, or a label was read but could not be removed. A surviving label
+keeps the report hidden even though its decisions are gone, so callers must
+surface this rather than reporting a clean reopen.
 
 ---
 

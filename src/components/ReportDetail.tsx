@@ -238,26 +238,83 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     },
   });
 
+  // What a reopen acts on, captured at click time rather than read from
+  // `context` when the mutation runs. The degraded toast below outlives this
+  // panel's selection (duration Infinity, and selecting another report
+  // re-renders ReportDetail rather than remounting it), and mutate() rebuilds
+  // the mutation from the observer's LATEST options -- so a mutationFn closing
+  // over `context` would send the retry at whichever report is selected when
+  // it is clicked, deleting that report's decisions instead.
+  type ReopenTarget = { type: 'event' | 'pubkey'; value: string; reportedPubkey?: string | null };
+
   const reopenMutation = useMutation({
-    mutationFn: async () => {
-      if (!context.target) throw new Error('No target');
+    mutationFn: async (target: ReopenTarget | null) => {
+      if (!target) throw new Error('No target');
       // Delete all decisions for this target
-      await deleteDecisions(context.target.value);
+      const primary = await deleteDecisions(target.value, target.type);
       // Also delete decisions for the pubkey if this is an event report
-      if (context.target.type === 'event' && context.reportedUser.pubkey) {
-        await deleteDecisions(context.reportedUser.pubkey);
+      let secondary = { labelCleanupFailed: false };
+      if (target.type === 'event' && target.reportedPubkey) {
+        secondary = await deleteDecisions(target.reportedPubkey, 'pubkey');
       }
+      return { labelCleanupFailed: primary.labelCleanupFailed || secondary.labelCleanupFailed };
     },
-    onSuccess: () => {
+    onSuccess: ({ labelCleanupFailed }, target) => {
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      // Resolution labels also gate whether the report reappears, so a reopen
+      // that does not refresh them can leave the target hidden for a poll cycle.
+      queryClient.invalidateQueries({ queryKey: ['resolution-labels'] });
       decisionLog.refetch();
       pubkeyDecisionLog.refetch();
-      toast({
-        title: "Report reopened",
-        description: "This report is now back in the pending queue",
-      });
+      // Report what the reopen did, not where the report ends up. Whether it
+      // returns to the queue depends on resolvedTargets, which is also built
+      // from relay bans and deletions that reopen never undoes -- so a
+      // ban-resolved report stays hidden even on a fully clean run.
+      toast(labelCleanupFailed
+        ? {
+            // Deliberately does not name the relay: one of the causes is our
+            // own page cap, where the relay did exactly what it was asked.
+            title: "Reopened, but resolution labels could not all be cleared",
+            description: "Some may remain, so this report may stay hidden.",
+            variant: "destructive" as const,
+            // The decisions ARE gone on this path, so hasDecisions goes false
+            // and the Reopen button unmounts. Retrying is the right advice and
+            // the cleanup is idempotent, so the retry has to come with it, and
+            // it does not expire on a timer.
+            //
+            // It is still single-use. Radix renders ToastAction as a
+            // ToastClose, so the click that fires the retry also dismisses this
+            // toast. A retry that comes back still-degraded raises a fresh one
+            // carrying a fresh action; a retry that THROWS lands in onError,
+            // which has no action, and ends the chain. TOAST_LIMIT is 1, so any
+            // later toast evicts it too. The fallback in both cases is to
+            // resolve the report again and reopen.
+            //
+            // Re-sends the target this toast was raised for, not whatever is
+            // selected when it is clicked -- see ReopenTarget above.
+            action: (
+              <ToastAction altText="Retry the reopen" onClick={() => reopenMutation.mutate(target)}>
+                Try again
+              </ToastAction>
+            ),
+            duration: Infinity,
+          }
+        : {
+            title: "Report reopened",
+            description: "Decisions and resolution labels cleared. A report hidden by a relay ban or deletion stays hidden until that is lifted.",
+            // Longer than the 5s Radix default can be read in.
+            duration: 10000,
+          });
     },
     onError: (error: Error) => {
+      // The first delete may already have committed server-side before the
+      // second threw, so the cached decision state can be stale even though
+      // the action reports failure. Refresh it rather than leaving the panel
+      // showing decisions the server no longer has.
+      queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      queryClient.invalidateQueries({ queryKey: ['resolution-labels'] });
+      decisionLog.refetch();
+      pubkeyDecisionLog.refetch();
       toast({
         title: "Failed to reopen",
         description: error.message,
@@ -1067,7 +1124,9 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                     <Button
                       variant="outline"
                       className="border-orange-500 text-orange-600 hover:bg-orange-50"
-                      onClick={() => reopenMutation.mutate()}
+                      onClick={() => reopenMutation.mutate(
+                        context.target && { ...context.target, reportedPubkey: context.reportedUser.pubkey }
+                      )}
                       disabled={reopenMutation.isPending}
                     >
                       <History className="h-4 w-4 mr-1" />
@@ -1075,7 +1134,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent side="bottom" className="max-w-xs">
-                    <p>Reopen this report for review. Removes the dismiss decision and puts it back in the pending queue.</p>
+                    <p>Reopen this report for review. Clears its moderation decisions and resolution labels. A report hidden by a relay ban or deletion stays hidden until that is lifted.</p>
                   </TooltipContent>
                 </Tooltip>
               )}
