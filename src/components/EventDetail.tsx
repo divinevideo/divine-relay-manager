@@ -72,6 +72,10 @@ interface EventDetailProps {
   onViewReports?: (pubkey: string) => void;
 }
 
+// Shown when verification could not be completed, so neither "confirmed" nor
+// "not applied" is a statement we are entitled to make.
+const VERIFICATION_INCONCLUSIVE = 'Verification failed - could not check status';
+
 // Extract URLs from content
 function extractUrls(content: string): string[] {
   const urlRegex = /(https?:\/\/[^\s<>"{}|\\^`[\]]+)/g;
@@ -609,25 +613,29 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
         setVerificationResult({
           type: 'ban',
           success: verified === true,
-          message: verified
-            ? 'User ban verified - pubkey is in banned list'
-            : 'User is NOT in banned list',
+          message: verified === null
+            ? VERIFICATION_INCONCLUSIVE
+            : verified
+              ? 'User ban verified - pubkey is in banned list'
+              : 'User is NOT in banned list',
         });
       } else {
         const verified = await verifyEventDeleted(event.id);
         setVerificationResult({
           type: 'delete',
           success: verified === true,
-          message: verified
-            ? 'Event is deleted from relay'
-            : 'Event is still accessible on relay',
+          message: verified === null
+            ? VERIFICATION_INCONCLUSIVE
+            : verified
+              ? 'Event is deleted from relay'
+              : 'Event is still accessible on relay',
         });
       }
     } catch {
       setVerificationResult({
         type,
         success: false,
-        message: 'Verification failed - could not check status',
+        message: VERIFICATION_INCONCLUSIVE,
       });
     } finally {
       setIsVerifying(false);
