@@ -32,7 +32,7 @@ export function AttributionNotice() {
   };
 
   return (
-    <Alert className="mb-3">
+    <Alert className="mb-3 shrink-0">
       <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
         <span className="flex items-center gap-2">
           <UserX className="h-4 w-4 shrink-0" aria-hidden />

@@ -173,9 +173,13 @@ export function RelayManager() {
         </div>
       </header>
 
-      <div className="flex-1 min-h-0 overflow-hidden container mx-auto px-4 py-4">
+      {/* Column layout so anything above the tabs (the attribution notice) takes
+          its height out of the tab area instead of pushing the bottom of every
+          tab past `overflow-hidden`. `h-full` on Tabs would claim the full
+          container height regardless of the notice. */}
+      <div className="flex-1 min-h-0 overflow-hidden container mx-auto px-4 py-4 flex flex-col">
         <AttributionNotice />
-        <Tabs value={currentTab} onValueChange={handleTabChange} className="h-full flex flex-col">
+        <Tabs value={currentTab} onValueChange={handleTabChange} className="flex-1 min-h-0 flex flex-col">
           <TabsList className="shrink-0 grid w-full grid-cols-7">
             {orderedTabs.map((tab) => {
               const Icon = tab.icon;
