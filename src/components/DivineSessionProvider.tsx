@@ -13,11 +13,20 @@ const HEX_64 = /^[0-9a-f]{64}$/;
 // null. getPublicKey is cached once resolved, so this only bites in the brief
 // boot window. Never blocks the moderation action itself.
 const MOD_PUBKEY_WAIT_MS = 3000;
+// Stable "no resolved identity" record, so clearing never allocates a new object
+// and re-runs the value memo for nothing.
+const NO_IDENTITY = { token: undefined, pubkey: undefined } as const;
 
 export function DivineSessionProvider({ children }: { children: ReactNode }) {
   const [credentials, setCredentials] = useState<StoredCredentials | null>(null);
   const [credentialsResolved, setCredentialsResolved] = useState(false);
-  const [pubkey, setPubkey] = useState<string | undefined>();
+  // The resolved pubkey together with the access token it belongs to, stored as
+  // one record so the pair can never drift apart. Matched against the live token
+  // during render below.
+  const [resolvedIdentity, setResolvedIdentity] = useState<{
+    token: string | undefined;
+    pubkey: string | undefined;
+  }>({ token: undefined, pubkey: undefined });
   // The access token the pubkey-resolution attempt has settled for (success OR
   // failure). Compared against the live token during render so isResolving is
   // derived, not lagged by a post-commit effect (avoids a one-frame "Sign in"
@@ -76,6 +85,15 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
   }, [refresh]);
 
   const accessToken = credentials?.accessToken;
+  // Derived during render, like identityResolved below and for the same reason:
+  // the signer is rebuilt from the live token immediately, so an effect that
+  // cleared a stale pubkey would land one render too late, and for that render
+  // the session would hand out the previous token's pubkey paired with the new
+  // token's signer. isResolving hides that window in the header, but
+  // useCurrentUser does not expose isResolving, so a consumer reading
+  // user.pubkey (EditProfileForm loads a profile from it) would see one
+  // session's identity attached to another's.
+  const pubkey = resolvedIdentity.token === accessToken ? resolvedIdentity.pubkey : undefined;
   const signer = useMemo<NostrSigner | null>(
     () => (accessToken ? new DivineRpcSigner(() => accessToken) : null),
     [accessToken],
@@ -117,7 +135,7 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let cancelled = false;
     if (!signer) {
-      setPubkey(undefined);
+      setResolvedIdentity(NO_IDENTITY);
       // Also drop the resolved marker. Without it, a token that goes away and
       // comes back identical still matches, so the very next RENDER reads as
       // resolved-with-no-pubkey and commits the error state before the resolve
@@ -141,12 +159,14 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
         // still invalid rather than degrading silently.
         const normalized = pk.trim().toLowerCase();
         if (HEX_64.test(normalized)) {
-          setPubkey(normalized);
+          // Recorded against the token it came from, so it is handed out only
+          // while that token is still the live one.
+          setResolvedIdentity({ token: accessToken, pubkey: normalized });
         } else {
           console.warn('[divine-login] getPublicKey returned a non-canonical pubkey; attribution unavailable', pk);
           // Never carry a previous token's identity forward: a stale pubkey
           // renders as a confident moderator while attribution writes null.
-          setPubkey(undefined);
+          setResolvedIdentity(NO_IDENTITY);
         }
       })
       .catch((err) => {
@@ -154,7 +174,7 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
         // it must not look like a resolved identity, and the reason has to be
         // diagnosable when a moderator reports the banner.
         if (cancelled) return;
-        setPubkey(undefined);
+        setResolvedIdentity(NO_IDENTITY);
         console.warn('[divine-login] getPublicKey failed; attribution unavailable', err);
       })
       .finally(() => {
@@ -170,7 +190,7 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
     generationRef.current += 1;
     sdkLogout();
     setCredentials(null);
-    setPubkey(undefined);
+    setResolvedIdentity(NO_IDENTITY);
     setCredentialsResolved(true); // logout is a definitive "signed out" resolution
   }, []);
 

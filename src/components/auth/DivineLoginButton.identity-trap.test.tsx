@@ -21,6 +21,7 @@ import { useDivineSession } from '@/hooks/useDivineSession';
 import { DivineLoginButton } from './DivineLoginButton';
 
 const PUBKEY = 'a'.repeat(64);
+const OTHER_PUBKEY = 'b'.repeat(64);
 
 const session = vi.hoisted(() => ({
   getSession: vi.fn(),
@@ -64,6 +65,17 @@ function renderButton() {
 function SessionProbe() {
   const { identityUnavailable } = useDivineSession();
   return <div data-testid='probe'>{String(identityUnavailable)}</div>;
+}
+
+/**
+ * Records the pubkey the session hands out on EVERY render. The header gates on
+ * isResolving, but useCurrentUser does not expose it, so what the context VALUE
+ * carries mid-transition is the contract consumers actually get.
+ */
+function PubkeyLog({ log }: { log: Array<string | undefined> }) {
+  const { pubkey } = useDivineSession();
+  log.push(pubkey);
+  return null;
 }
 
 /**
@@ -227,6 +239,38 @@ describe('session transitions', () => {
     // Not one render may claim the identity is unavailable: this is a healthy
     // re-resolve, and the moderator would see a red alarm flash.
     expect(log.slice(before)).not.toContain(true);
+  });
+
+  it('never pairs the previous token\'s pubkey with the new token\'s signer', async () => {
+    const log: Array<string | undefined> = [];
+    session.getSession.mockResolvedValueOnce({ accessToken: 'tok-1' });
+    getPublicKey.mockResolvedValueOnce(PUBKEY);
+
+    render(
+      <DivineSessionProvider>
+        <PubkeyLog log={log} />
+      </DivineSessionProvider>,
+    );
+    await waitFor(() => expect(log.at(-1)).toBe(PUBKEY));
+
+    // Rotate to a new token whose pubkey is slow to resolve. The signer is
+    // rebuilt from the new token immediately; the pubkey must not lag behind it.
+    session.getSession.mockResolvedValue({ accessToken: 'tok-2' });
+    let resolvePubkey: (pk: string) => void = () => {};
+    getPublicKey.mockReturnValue(new Promise<string>((r) => { resolvePubkey = r; }));
+
+    const before = log.length;
+    fireEvent.focus(window);
+    await waitFor(() => expect(session.getSession).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(log.length).toBeGreaterThan(before));
+
+    // Not one render may hand out tok-1's identity while tok-2 is in flight:
+    // that is one session's pubkey attached to another session's signer, and
+    // useCurrentUser has no isResolving for a consumer to gate on.
+    expect(log.slice(before)).not.toContain(PUBKEY);
+
+    resolvePubkey(OTHER_PUBKEY);
+    await waitFor(() => expect(log.at(-1)).toBe(OTHER_PUBKEY));
   });
 
   it('a stored session with no access token is still escapable', async () => {
