@@ -125,7 +125,9 @@ describe('signed in but identity never resolves', () => {
 
   it('says the moderator is unattributed rather than failing silently', async () => {
     renderButton();
-    expect(await screen.findByText(/actions unattributed/i))
+    // The hedge is asserted, not just the noun: the label must not state as
+    // fact something the tooltip correctly calls a possibility.
+    expect(await screen.findByText(/actions may be unattributed/i))
       .toBeInTheDocument();
   });
 
@@ -305,7 +307,7 @@ describe('states that must not regress', () => {
     expect(await screen.findByRole('button', { name: /sign out/i })).toBeInTheDocument();
     expect(screen.getByTitle(PUBKEY)).toBeInTheDocument();
     // A working session is not the broken state.
-    expect(screen.queryByText(/actions unattributed/i)).toBeNull();
+    expect(screen.queryByText(/actions may be unattributed/i)).toBeNull();
   });
 
   it('a signed-out moderator still gets a plain sign-in', async () => {
@@ -315,7 +317,7 @@ describe('states that must not regress', () => {
 
     expect(await screen.findByRole('button', { name: /^sign in$/i })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /sign out/i })).toBeNull();
-    expect(screen.queryByText(/actions unattributed/i)).toBeNull();
+    expect(screen.queryByText(/actions may be unattributed/i)).toBeNull();
   });
 
   it('is not "unavailable" while the pubkey is still in flight', async () => {

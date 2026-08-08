@@ -59,7 +59,12 @@ export function DivineLoginButton() {
           title="Your moderator identity could not be loaded, so moderation actions may be recorded without attribution. Moderation itself still works. If signing out and back in does not help, this account may have no Keycast-managed key."
         >
           <AlertTriangle className="h-4 w-4 shrink-0" aria-hidden />
-          <span className="max-w-[16rem] truncate">Identity unavailable, actions unattributed</span>
+          {/* "may be", matching the title: DivineRpcSigner caches the pubkey only
+              on success, so getModeratorPubkey retries the RPC on every action.
+              After a transient failure the banner is latched for the life of the
+              token while attribution has already recovered, and a label that
+              states it as fact would be wrong for exactly that window. */}
+          <span className="max-w-[16rem] truncate">Identity unavailable, actions may be unattributed</span>
         </span>
         <Button variant="ghost" size="sm" onClick={logout} title="Sign out">
           <LogOut className="h-4 w-4" />
