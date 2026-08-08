@@ -11,6 +11,7 @@ import {
   type BulkModerateEnv,
 } from './bulk-moderate';
 import type { BulkJob, BulkJobMessage, BulkEnqueueResponse } from '../../shared/bulk-moderation';
+import { banEvent, getAdminPubkey } from './nip86';
 
 vi.mock('./nip86', () => ({
   getAdminPubkey: vi.fn().mockResolvedValue('moderator-pubkey'),
@@ -210,6 +211,8 @@ describe('runBulkModeration', () => {
 
   beforeEach(() => {
     vi.restoreAllMocks();
+    vi.mocked(getAdminPubkey).mockResolvedValue('moderator-pubkey');
+    vi.mocked(banEvent).mockResolvedValue({ success: true });
     mockUserVideos([]); // default: no videos unless a test provides them
     mockEnv = baseEnv();
   });

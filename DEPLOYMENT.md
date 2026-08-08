@@ -36,6 +36,15 @@ npm run build
 npx wrangler pages deploy dist --project-name=divine-relay-admin
 ```
 
+### Frontend artifact path
+
+Root `public/` contains Vite static source files such as `_redirects` and
+`manifest.json`. `npm run build` emits the deployable frontend artifact to
+`dist/`, and the build script copies `dist/index.html` to `dist/404.html` for
+SPA fallback routing. Cloudflare Pages deploys `dist/` per the root
+`wrangler.toml`; the API Worker serves no static assets and has no asset
+binding.
+
 ---
 
 ## Worker Deployment (Cloudflare Workers)
