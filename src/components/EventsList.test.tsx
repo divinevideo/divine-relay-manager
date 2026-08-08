@@ -54,6 +54,13 @@ vi.mock('@/hooks/useCurrentUser', () => ({
   useCurrentUser: () => ({ user: { pubkey: 'a'.repeat(64) } }),
 }));
 
+// EventsList gates its banned-event lookups on session presence, not on the
+// resolved moderator identity: those lookups go through the worker, which
+// authorizes them without a pubkey.
+vi.mock('@/hooks/useDivineSession', () => ({
+  useDivineSession: () => ({ isSignedIn: true }),
+}));
+
 // Profile loading is useAuthor's concern (tested elsewhere)
 vi.mock('@/hooks/useAuthor', () => ({
   useAuthor: () => ({ data: undefined, isLoading: false }),

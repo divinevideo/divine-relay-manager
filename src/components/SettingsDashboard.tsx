@@ -10,7 +10,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { CopyableId } from "@/components/CopyableId";
 import { useAppContext } from "@/hooks/useAppContext";
 import { useAdminApi } from "@/hooks/useAdminApi";
-import { useCurrentUser } from "@/hooks/useCurrentUser";
+import { useDivineSession } from "@/hooks/useDivineSession";
 import { getCurrentEnvironment } from "@/lib/environments";
 import {
   Globe, Shield, Clock, Zap, FileText, ExternalLink,
@@ -166,7 +166,7 @@ export function SettingsDashboard() {
   const { config } = useAppContext();
   const { relayUrl, apiUrl } = config;
   const { callRelayRpc, getWorkerInfo } = useAdminApi();
-  const { user } = useCurrentUser();
+  const { isSignedIn } = useDivineSession();
 
   const env = getCurrentEnvironment(relayUrl, apiUrl);
 
@@ -199,7 +199,7 @@ export function SettingsDashboard() {
   } = useQuery({
     queryKey: ['allowed-kinds', relayUrl],
     queryFn: () => callRelayRpc<number[]>('listallowedkinds'),
-    enabled: !!user && !!relayUrl,
+    enabled: isSignedIn && !!relayUrl,
   });
 
   const {
@@ -208,7 +208,7 @@ export function SettingsDashboard() {
   } = useQuery({
     queryKey: ['blocked-ips', relayUrl],
     queryFn: () => callRelayRpc<Array<{ ip: string; reason?: string }>>('listblockedips'),
-    enabled: !!user && !!relayUrl,
+    enabled: isSignedIn && !!relayUrl,
   });
 
   const {
@@ -217,7 +217,7 @@ export function SettingsDashboard() {
   } = useQuery({
     queryKey: ['banned-users', relayUrl],
     queryFn: () => callRelayRpc<Array<string | { pubkey: string; reason?: string }>>('listbannedpubkeys'),
-    enabled: !!user && !!relayUrl,
+    enabled: isSignedIn && !!relayUrl,
   });
 
   const {
@@ -226,7 +226,7 @@ export function SettingsDashboard() {
   } = useQuery({
     queryKey: ['allowed-users', relayUrl],
     queryFn: () => callRelayRpc<string[]>('listallowedpubkeys'),
-    enabled: !!user && !!relayUrl,
+    enabled: isSignedIn && !!relayUrl,
   });
 
   const {
@@ -235,7 +235,7 @@ export function SettingsDashboard() {
   } = useQuery({
     queryKey: ['banned-events'],
     queryFn: () => callRelayRpc<Array<{ id: string; reason?: string }>>('listbannedevents'),
-    enabled: !!user && !!relayUrl,
+    enabled: isSignedIn && !!relayUrl,
   });
 
   const {
@@ -244,7 +244,7 @@ export function SettingsDashboard() {
   } = useQuery({
     queryKey: ['events-needing-moderation', relayUrl],
     queryFn: () => callRelayRpc<unknown[]>('listeventsneedingmoderation'),
-    enabled: !!user && !!relayUrl,
+    enabled: isSignedIn && !!relayUrl,
   });
 
   const {
@@ -253,7 +253,7 @@ export function SettingsDashboard() {
   } = useQuery({
     queryKey: ['supported-methods', relayUrl],
     queryFn: () => callRelayRpc<string[]>('supportedmethods'),
-    enabled: !!user && !!relayUrl,
+    enabled: isSignedIn && !!relayUrl,
   });
 
   // ── Connection status derived from query states ──
@@ -664,7 +664,7 @@ export function SettingsDashboard() {
         ) : null}
 
         {/* ── NIP-86 Sections (auth-gated) ── */}
-        {!user ? (
+        {!isSignedIn ? (
           <Card>
             <CardContent className="py-8 text-center">
               <p className="text-muted-foreground">Log in to view relay management data</p>

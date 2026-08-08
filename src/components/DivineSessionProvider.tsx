@@ -205,12 +205,16 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
   // optional (a bunker-only session), and that shape has no signer at all, so it
   // is the same dead end. With no token, identityResolved is already true.
   const identityUnavailable = !!credentials && identityResolved && !pubkey;
+  // Session presence, independent of whether the identity resolved. Relay
+  // management is gated on this rather than on the pubkey; see the field doc.
+  const isSignedIn = !!credentials;
 
   const value = useMemo<DivineSessionValue>(
     () => ({
       credentials,
       pubkey,
       signer,
+      isSignedIn,
       isResolving,
       identityUnavailable,
       getModeratorPubkey,
@@ -218,7 +222,7 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
       logout,
       refresh,
     }),
-    [credentials, pubkey, signer, isResolving, identityUnavailable, getModeratorPubkey, logout, refresh],
+    [credentials, pubkey, signer, isSignedIn, isResolving, identityUnavailable, getModeratorPubkey, logout, refresh],
   );
 
   return <DivineSessionContext.Provider value={value}>{children}</DivineSessionContext.Provider>;
