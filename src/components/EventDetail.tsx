@@ -440,7 +440,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
         const verified = await verifyPubkeyBanned(pubkey);
         setVerificationResult({
           type: 'ban',
-          success: verified,
+          success: verified === true,
           message: verified
             ? 'User ban verified - pubkey is in banned list'
             : 'Warning: User may not be banned - not found in banned list',
@@ -490,7 +490,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
         const verified = await verifyEventDeleted(eventId);
         setVerificationResult({
           type: 'delete',
-          success: verified,
+          success: verified === true,
           message: verified
             ? 'Event deletion verified - no longer accessible on relay'
             : 'Warning: Event may still be accessible on relay',
@@ -546,7 +546,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
         const verified = await verifyPubkeyUnbanned(pubkey);
         setVerificationResult({
           type: 'ban',
-          success: verified,
+          success: verified === true,
           message: verified
             ? 'Unban verified - user is no longer in banned list'
             : 'Warning: User may still be banned',
@@ -608,7 +608,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
         const verified = await verifyPubkeyBanned(event.pubkey);
         setVerificationResult({
           type: 'ban',
-          success: verified,
+          success: verified === true,
           message: verified
             ? 'User ban verified - pubkey is in banned list'
             : 'User is NOT in banned list',
@@ -617,7 +617,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
         const verified = await verifyEventDeleted(event.id);
         setVerificationResult({
           type: 'delete',
-          success: verified,
+          success: verified === true,
           message: verified
             ? 'Event is deleted from relay'
             : 'Event is still accessible on relay',

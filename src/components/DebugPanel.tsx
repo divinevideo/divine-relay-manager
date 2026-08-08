@@ -252,7 +252,7 @@ export function DebugPanel() {
           const verified = await verifyPubkeyBanned(pubkey);
           setVerificationResult({
             type: 'ban',
-            success: verified,
+            success: verified === true,
             message: verified
               ? 'Ban verified - user is in banned list'
               : 'Warning: User may not be banned',
@@ -260,7 +260,7 @@ export function DebugPanel() {
           addActionLog({
             action: 'verifyBan',
             target: pubkey,
-            success: verified,
+            success: verified === true,
             result: { verified },
             duration: 0,
           });
@@ -353,7 +353,7 @@ export function DebugPanel() {
           const verified = await verifyPubkeyUnbanned(pubkey);
           setVerificationResult({
             type: 'unban',
-            success: verified,
+            success: verified === true,
             message: verified
               ? 'Unban verified - user removed from banned list'
               : 'Warning: User may still be banned',
@@ -361,7 +361,7 @@ export function DebugPanel() {
           addActionLog({
             action: 'verifyUnban',
             target: pubkey,
-            success: verified,
+            success: verified === true,
             result: { verified },
             duration: 0,
           });

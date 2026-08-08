@@ -594,8 +594,20 @@ export async function deleteDecisions(
   return { deleted: data.deleted || 0, labelCleanupFailed: data.labelCleanupFailed === true };
 }
 
+/**
+ * Result of checking whether a moderation action actually landed.
+ *
+ * `null` means the check could not be completed. It is deliberately distinct
+ * from `false`: an unreachable relay tells us nothing, and must never be
+ * presented to a moderator as a completed ban or deletion.
+ */
+export type VerificationOutcome = boolean | null;
+
 // Verify that a pubkey was actually banned on the relay
-export async function verifyPubkeyBanned(apiUrl: string, pubkey: string): Promise<boolean> {
+export async function verifyPubkeyBanned(
+  apiUrl: string,
+  pubkey: string
+): Promise<VerificationOutcome> {
   try {
     // Give the relay a moment to process
     await new Promise(resolve => setTimeout(resolve, 500));
@@ -603,25 +615,30 @@ export async function verifyPubkeyBanned(apiUrl: string, pubkey: string): Promis
     const bannedList = await listBannedPubkeys(apiUrl);
     return bannedList.some(entry => entry.pubkey === pubkey);
   } catch {
-    // If we can't check, assume it worked
-    return true;
+    return null;
   }
 }
 
 // Verify that a pubkey was actually unbanned on the relay
-export async function verifyPubkeyUnbanned(apiUrl: string, pubkey: string): Promise<boolean> {
+export async function verifyPubkeyUnbanned(
+  apiUrl: string,
+  pubkey: string
+): Promise<VerificationOutcome> {
   try {
     await new Promise(resolve => setTimeout(resolve, 500));
 
     const bannedList = await listBannedPubkeys(apiUrl);
     return !bannedList.some(entry => entry.pubkey === pubkey);
   } catch {
-    return true;
+    return null;
   }
 }
 
 // Verify that an event was actually deleted from the relay
-export async function verifyEventDeleted(eventId: string, relayUrl: string): Promise<boolean> {
+export async function verifyEventDeleted(
+  eventId: string,
+  relayUrl: string
+): Promise<VerificationOutcome> {
   try {
     // Give the relay a moment to process
     await new Promise(resolve => setTimeout(resolve, 1000));
@@ -632,7 +649,7 @@ export async function verifyEventDeleted(eventId: string, relayUrl: string): Pro
     return new Promise((resolve) => {
       const timeout = setTimeout(() => {
         ws.close();
-        resolve(true); // Timeout = probably deleted
+        resolve(null); // Never answered — unknown, not deleted
       }, 5000);
 
       ws.onopen = () => {
@@ -663,11 +680,11 @@ export async function verifyEventDeleted(eventId: string, relayUrl: string): Pro
       ws.onerror = () => {
         clearTimeout(timeout);
         ws.close();
-        resolve(true); // Error = assume deleted
+        resolve(null); // Could not reach the relay — unknown, not deleted
       };
     });
   } catch {
-    return true; // Error = assume deleted
+    return null; // Could not reach the relay — unknown, not deleted
   }
 }
 
@@ -701,7 +718,8 @@ export async function verifyAgeRestricted(apiUrl: string, sha256: string): Promi
 
 // Combined verification for block & delete action
 export interface VerificationResult {
-  eventDeleted: boolean;
+  /** true = confirmed gone, false = still present, null = could not confirm */
+  eventDeleted: VerificationOutcome;
   mediaBlocked: { hash: string; blocked: boolean }[];
   allSuccessful: boolean;
 }
@@ -727,7 +745,8 @@ export async function verifyModerationAction(
   return {
     eventDeleted,
     mediaBlocked,
-    allSuccessful: eventDeleted && allMediaBlocked,
+    // An unconfirmed deletion is not a successful one.
+    allSuccessful: eventDeleted === true && allMediaBlocked,
   };
 }
 
