@@ -13,7 +13,7 @@ function shortPubkey(pubkey: string): string {
 
 export function DivineLoginButton() {
   const { user, metadata } = useCurrentUser();
-  const { startLogin, logout, isResolving, identityUnavailable } = useDivineSession();
+  const { startLogin, logout, isResolving, isSignedIn, identityUnavailable } = useDivineSession();
   const { toast } = useToast();
 
   // startLogin builds the authorize URL (can reject on a network failure) before
@@ -29,7 +29,27 @@ export function DivineLoginButton() {
   };
 
   if (isResolving) {
-    return <div className="h-9 w-24 animate-pulse rounded-md bg-muted" aria-hidden />;
+    return (
+      <div className="flex items-center gap-2">
+        <div className="h-9 w-24 animate-pulse rounded-md bg-muted" aria-hidden />
+        {/* A resolve is not quickly bounded: DivineRpc.call retries 429 up to
+            four attempts and 401 once, each with its own 30s timeout and an
+            unclamped server-supplied Retry-After, so a single getPublicKey can
+            stall for minutes. Without this the moderator spends that window
+            looking at an aria-hidden placeholder with no sign-out and nothing
+            for a screen reader -- the same dead end this component exists to
+            remove, reached through a slower door. No timer and no new state:
+            the escape hatch is simply always available once a session exists.
+            Gated on isSignedIn so a signed-out visitor, who is also briefly
+            "resolving" at boot, is never offered a sign-out. */}
+        {isSignedIn && (
+          <Button variant="ghost" size="sm" onClick={logout} title="Sign out">
+            <LogOut className="h-4 w-4" />
+            <span className="sr-only">Sign out</span>
+          </Button>
+        )}
+      </div>
+    );
   }
 
   if (user) {
@@ -64,7 +84,13 @@ export function DivineLoginButton() {
               After a transient failure the banner is latched for the life of the
               token while attribution has already recovered, and a label that
               states it as fact would be wrong for exactly that window. */}
-          <span className="max-w-[16rem] truncate">Identity unavailable, actions may be unattributed</span>
+          {/* Widened with the wording: 16rem was sized for the shorter label and
+              would truncate this one mid-phrase, cutting off the consequence --
+              which is the reason the consequence was moved out of the hover
+              title and onto the label in the first place. truncate stays as the
+              narrow-viewport guard so a long label still cannot squash the
+              header. jsdom performs no layout, so no test can pin this width. */}
+          <span className="max-w-[24rem] truncate">Identity unavailable, actions may be unattributed</span>
         </span>
         <Button variant="ghost" size="sm" onClick={logout} title="Sign out">
           <LogOut className="h-4 w-4" />

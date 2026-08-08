@@ -287,6 +287,40 @@ describe('session transitions', () => {
   });
 });
 
+// A resolve that stalls rather than failing reaches the same dead end by a
+// slower route: DivineRpc.call retries 429 four times and 401 once, each with
+// its own 30s timeout and an unclamped Retry-After, so this window is minutes
+// wide, not milliseconds.
+describe('while the identity is still resolving', () => {
+  it('a signed-in moderator can still get out', async () => {
+    session.getSession.mockResolvedValue({ accessToken: 'tok-abc' });
+    getPublicKey.mockReturnValue(new Promise(() => {}));
+
+    renderButton();
+
+    // Never settles, so this is the whole experience until the moderator acts.
+    const signOut = await screen.findByRole('button', { name: /sign out/i });
+    fireEvent.click(signOut);
+    expect(session.logout).toHaveBeenCalled();
+    expect(await screen.findByRole('button', { name: /^sign in$/i })).toBeInTheDocument();
+  });
+
+  it('does not offer sign-out to a visitor who has no session', async () => {
+    // A signed-out visitor is also briefly "resolving" at boot; offering them a
+    // sign-out would be a different wrong affordance.
+    let settleSession: (v: null) => void = () => {};
+    session.getSession.mockReturnValue(new Promise<null>((r) => { settleSession = r; }));
+
+    renderButton();
+
+    await waitFor(() => expect(session.getSession).toHaveBeenCalled());
+    expect(screen.queryByRole('button', { name: /sign out/i })).toBeNull();
+
+    settleSession(null);
+    expect(await screen.findByRole('button', { name: /^sign in$/i })).toBeInTheDocument();
+  });
+});
+
 describe('states that must not regress', () => {
   it('does not render the error state while the pubkey is in flight', async () => {
     session.getSession.mockResolvedValue({ accessToken: 'tok-abc' });
