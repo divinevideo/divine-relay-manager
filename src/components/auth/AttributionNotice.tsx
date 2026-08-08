@@ -10,26 +10,16 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useDivineSession } from '@/hooks/useDivineSession';
-import { useToast } from '@/hooks/useToast';
+import { useStartSignIn } from '@/hooks/useStartSignIn';
 
 export function AttributionNotice() {
   const { user } = useCurrentUser();
-  const { isResolving, startLogin } = useDivineSession();
-  const { toast } = useToast();
+  const { isResolving } = useDivineSession();
+  const handleSignIn = useStartSignIn();
 
   // Nothing to say while the session is still resolving: an already-signed-in
   // moderator would otherwise see the warning flash on every load.
   if (isResolving || user) return null;
-
-  const handleSignIn = () => {
-    startLogin(`${window.location.pathname}${window.location.search}`).catch((e) => {
-      toast({
-        title: 'Could not start sign-in',
-        description: e instanceof Error ? e.message : 'Please try again.',
-        variant: 'destructive',
-      });
-    });
-  };
 
   return (
     <Alert className="mb-3 shrink-0">
