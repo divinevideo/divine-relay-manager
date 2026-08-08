@@ -49,9 +49,12 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
 
   // Known phase-1 limitation: getSessionWithRefresh() returns null both for "no
   // session" and "refresh transiently failed", so a network blip during a
-  // focus-triggered refresh collapses to signed-out until the next resolve.
-  // Attribution-only and self-recovering (next focus/action re-resolves), so not
-  // worth the getSession-fallback complexity here; revisit with phase-2 verify.
+  // focus-triggered refresh collapses to signed-out.
+  // Not self-recovering, despite what this comment used to say: the SDK deletes
+  // the stored session when a refresh throws, so the moderator has to sign in
+  // again rather than wait for the next focus. Attribution-only, and it only
+  // bites a token near enough to expiry to be refreshed at all, so still not
+  // worth a getSession fallback here; revisit with phase-2 verify.
   const refresh = useCallback(async () => {
     const gen = generationRef.current;
     let creds: StoredCredentials | null = null;
