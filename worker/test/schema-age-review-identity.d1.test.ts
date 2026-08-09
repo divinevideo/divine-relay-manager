@@ -9,6 +9,7 @@
 import { Miniflare } from 'miniflare';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ensureSchema } from '../src/db';
+import { parseKind0Profile } from '../src/report-note';
 
 let mf: Miniflare;
 let DB: D1Database;
@@ -99,6 +100,33 @@ describe('ensureSchema adds the age-review identity columns', () => {
 
     expect(pending.results.map((r) => r.id)).toContain('case-identity-3');
     expect(pending.results.map((r) => r.id)).not.toContain('case-identity-2');
+  });
+
+  // Real D1 is the only place this shows up: the mocked DB in the default suite
+  // accepts any bind value, so a non-string reaches production as a
+  // D1_TYPE_ERROR that throws out of the INSERT creating the case. Capture is
+  // best-effort by contract -- it must not be able to stop a case from opening,
+  // least of all at the choosing of the account being reviewed.
+  it('accepts an identity captured from a kind-0 whose fields are not strings', async () => {
+    await ensureSchema(DB);
+
+    const hostile = parseKind0Profile({
+      content: JSON.stringify({ display_name: { evil: 1 }, name: ['a'], nip05: 42 }),
+      tags: [['vine_username', ['nope'] as unknown as string]],
+    }, { raw: true });
+
+    await expect(DB.prepare(`
+      INSERT INTO age_review_cases
+      (id, pubkey, suspected_age_band, state, allowed_resolution,
+       account_name, account_nip05, account_vine_username, identity_captured_at)
+      VALUES (?, ?, 'age_13_15', 'open_reported', 'parent_video_or_email', ?, ?, ?, ?)
+    `).bind(
+      'case-identity-4', 'pk_identity_4',
+      hostile.name ?? null,
+      hostile.nip05 ?? null,
+      hostile.vineUsername ?? null,
+      '2026-07-29T00:00:00.000Z',
+    ).run()).resolves.toBeTruthy();
   });
 
   it('is idempotent: calling ensureSchema twice does not error', async () => {

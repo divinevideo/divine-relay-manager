@@ -80,6 +80,62 @@ describe('parseKind0Profile', () => {
   });
 });
 
+// raw mode exists so a captured handle is stored as the account actually wrote
+// it. What it must not do is hand a caller something other than a string: these
+// values are bound straight into the INSERT that opens an age-review case, and
+// D1 rejects a non-string bind with D1_TYPE_ERROR. The display path narrowed
+// non-strings away by accident (Array.from on a plain object yields []), so the
+// coercion has to be explicit here.
+describe('parseKind0Profile raw mode (values are persisted)', () => {
+  it('keeps punctuation and length the display path would have destroyed', () => {
+    const p = parseKind0Profile({
+      content: JSON.stringify({ display_name: '*Star*Girl*', nip05: '`x`@e.com' }),
+      tags: [['vine_username', 'a]b[c']],
+    }, { raw: true });
+    expect(p.name).toBe('*Star*Girl*');
+    expect(p.nip05).toBe('`x`@e.com');
+    expect(p.vineUsername).toBe('a]b[c');
+    expect(parseKind0Profile({
+      content: JSON.stringify({ display_name: 'A'.repeat(120) }),
+    }, { raw: true }).name).toBe('A'.repeat(120));
+  });
+
+  it.each([
+    ['an object', { evil: 1 }],
+    ['an array', ['a', 'b']],
+    ['a number', 12345],
+    ['a boolean', true],
+  ])('drops a display_name that is %s rather than passing a non-string on', (_label, value) => {
+    const p = parseKind0Profile(
+      { content: JSON.stringify({ display_name: value }) },
+      { raw: true },
+    );
+    expect(p.name).toBeUndefined();
+  });
+
+  it('drops a non-string nip05 and vine_username too', () => {
+    const p = parseKind0Profile({
+      content: JSON.stringify({ nip05: { evil: 1 } }),
+      tags: [['vine_username', ['nope'] as unknown as string]],
+    }, { raw: true });
+    expect(p.nip05).toBeUndefined();
+    expect(p.vineUsername).toBeUndefined();
+  });
+
+  it('bounds an oversized value instead of storing it whole', () => {
+    const p = parseKind0Profile(
+      { content: JSON.stringify({ display_name: 'x'.repeat(300_000) }) },
+      { raw: true },
+    );
+    expect(p.name).toBe('x'.repeat(512));
+  });
+
+  it('narrows a non-string away on the display path as well', () => {
+    const p = parseKind0Profile({ content: JSON.stringify({ display_name: { evil: 1 } }) });
+    expect(p.name).toBeUndefined();
+  });
+});
+
 describe('buildReportNote', () => {
   it('account-level report surfaces subject, identity, and the restored-OG flag', () => {
     const note = buildReportNote({

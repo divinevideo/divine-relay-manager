@@ -73,6 +73,34 @@ function sanitizeInline(value: string | undefined, maxLen = 80): string | undefi
   return cleaned.length > maxLen ? `${cleaned.slice(0, maxLen)}…` : cleaned;
 }
 
+/**
+ * Cap on a captured identity value at rest.
+ *
+ * Raw mode deliberately skips `sanitizeInline`'s 80-character display
+ * truncation, but "unsanitized" must not mean "unbounded": kind-0 content is
+ * chosen by the account under review, and the captured values are bound
+ * straight into the INSERT that opens the case. Far beyond any real handle, so
+ * nothing legitimate is touched; the render path applies its own 80-char cap.
+ */
+const CAPTURED_VALUE_MAX_LEN = 512;
+
+/**
+ * Coerce one kind-0 value for storage: verbatim, but a bounded string or nothing.
+ *
+ * `JSON.parse` yields whatever the account put in the field, and the declared
+ * `string | undefined` is a lie for `{"display_name": {}}` or `["a","b"]`.
+ * `sanitizeInline` absorbed that by accident (`Array.from` on a plain object
+ * gives `[]`, so it returned undefined); raw mode has no such accident, and a
+ * non-string reaches `.bind()` as `D1_TYPE_ERROR: Type 'object' not supported`.
+ * That throw propagates out of the case INSERT, so an account could suppress
+ * its own age-review case by publishing a kind-0 whose display_name is not a
+ * string. Capture is best-effort by contract and must never be able to do that.
+ */
+function rawForStorage(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value === '') return undefined;
+  return value.length > CAPTURED_VALUE_MAX_LEN ? value.slice(0, CAPTURED_VALUE_MAX_LEN) : value;
+}
+
 /** Parse a raw kind-0 event into the profile facts the note needs. Never throws. */
 /**
  * @param options.raw Return the profile's values verbatim instead of running
@@ -82,6 +110,10 @@ function sanitizeInline(value: string | undefined, maxLen = 80): string | undefi
  *   handle the account never used — and identity capture exists precisely
  *   because the real one is about to become unrecoverable. Raw values must
  *   still be sanitized wherever they are rendered.
+ *
+ *   Raw is not unchecked: values are still coerced to a bounded string by
+ *   `rawForStorage`, because these are persisted and a non-string would fail
+ *   the write that creates the case.
  */
 export function parseKind0Profile(
   event: { content?: string; tags?: string[][] } | null | undefined,
@@ -96,13 +128,15 @@ export function parseKind0Profile(
     tags.some((t) => t[0] === 'i' && (t[1] ?? '').startsWith('vine:')) ||
     tags.some((t) => t[0] === 'origin' && t[1] === 'vine');
 
-  let name: string | undefined;
-  let nip05: string | undefined;
+  // `unknown`, not `string`: the account writes this JSON and any field can be
+  // an object, an array or a number. Both branches of `clean` narrow it.
+  let name: unknown;
+  let nip05: unknown;
   try {
     const meta = JSON.parse(event?.content ?? '{}') as {
-      name?: string;
-      display_name?: string;
-      nip05?: string;
+      name?: unknown;
+      display_name?: unknown;
+      nip05?: unknown;
     };
     name = meta.display_name || meta.name || undefined;
     nip05 = meta.nip05 || undefined;
@@ -112,8 +146,8 @@ export function parseKind0Profile(
 
   // Sanitize every attacker-controlled field before it reaches the note, unless
   // the caller is storing rather than rendering (see options.raw).
-  const clean = (value: string | undefined) =>
-    options.raw ? (value || undefined) : sanitizeInline(value);
+  const clean = (value: unknown) =>
+    options.raw ? rawForStorage(value) : sanitizeInline(typeof value === 'string' ? value : undefined);
 
   return {
     name: clean(name),

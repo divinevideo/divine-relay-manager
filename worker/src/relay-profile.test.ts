@@ -167,6 +167,25 @@ describe('fetchAccountIdentity', () => {
     expect(profile?.name).not.toContain('…');
   });
 
+  // Every field here is bound into the INSERT that opens the case, and D1
+  // rejects a non-string bind outright. A kind-0 whose display_name is an
+  // object would therefore have thrown out of case creation -- letting the
+  // reported account suppress its own age review by editing its own profile.
+  it('yields only bindable values from a kind-0 with non-string fields', async () => {
+    mockRelay([{
+      id: 'e5', kind: 0, pubkey: 'abc123',
+      tags: [['vine_username', ['nope']]],
+      content: JSON.stringify({ display_name: { evil: 1 }, name: ['a'], nip05: 42 }),
+    }]);
+
+    const { completed, profile } = await fetchAccountIdentity('abc123', 'wss://relay.test');
+
+    expect(completed).toBe(true);
+    for (const value of [profile?.name, profile?.nip05, profile?.vineUsername]) {
+      expect(value === undefined || typeof value === 'string').toBe(true);
+    }
+  });
+
   it('never throws, whatever the socket does', async () => {
     vi.spyOn(globalThis, 'WebSocket').mockImplementation((() => {
       throw new Error('relay down');
