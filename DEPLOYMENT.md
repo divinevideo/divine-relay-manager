@@ -51,7 +51,9 @@ binding.
 
 ### Environment Variables
 
-Configure in `worker/wrangler.toml` `[vars]` section or override in Cloudflare Dashboard.
+Configure in the `[vars]` section of the per-environment `worker/wrangler.local.toml`,
+`worker/wrangler.staging.toml`, and `worker/wrangler.prod.toml`, or override in the
+Cloudflare Dashboard. There is no root `worker/wrangler.toml`.
 
 | Variable | Required | Description | Example |
 |----------|----------|-------------|---------|
