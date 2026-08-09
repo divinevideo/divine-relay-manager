@@ -2071,17 +2071,17 @@ describe('handleGetAgeReviewFunnel', () => {
     { state: 'denied_closed', created_via: 'report', c: 1 },
     { state: 'submitted_for_review', created_via: 'report', c: 4 },
   ];
-  const mockDb = {
+  const makeMockDb = () => ({
     prepare: vi.fn().mockReturnValue({
       bind: vi.fn().mockReturnValue({ all: vi.fn().mockResolvedValue({ results: groupRows }) }),
     }),
-  };
+  });
   const req = new Request('https://api.test/api/age-review/funnel?age_band=age_13_15');
 
   afterEach(() => { vi.unstubAllGlobals(); });
 
   it('returns moderation counts and nulls helpdesk when Zendesk creds are absent', async () => {
-    const env = makeEnv(mockDb); // no ZENDESK_* set
+    const env = makeEnv(makeMockDb()); // no ZENDESK_* set
     const res = await handleGetAgeReviewFunnel(req, env, cors);
     const body = await res.json() as import('../../shared/age-review').AgeReviewFunnelResponse;
 
@@ -2095,7 +2095,7 @@ describe('handleGetAgeReviewFunnel', () => {
 
   it('populates helpdesk counts when Zendesk creds resolve', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ count: 9 }) }));
-    const env = makeEnv(mockDb, {
+    const env = makeEnv(makeMockDb(), {
       ZENDESK_SUBDOMAIN: 'rabblelabs', ZENDESK_EMAIL: 'a@b.co', ZENDESK_API_TOKEN: 'tok',
     });
     const res = await handleGetAgeReviewFunnel(req, env, cors);
@@ -2108,7 +2108,7 @@ describe('handleGetAgeReviewFunnel', () => {
 
   it('keeps moderation counts and nulls helpdesk when Zendesk creds resolve but the call fails', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('zendesk down')));
-    const env = makeEnv(mockDb, {
+    const env = makeEnv(makeMockDb(), {
       ZENDESK_SUBDOMAIN: 'rabblelabs', ZENDESK_EMAIL: 'a@b.co', ZENDESK_API_TOKEN: 'tok',
     });
     const res = await handleGetAgeReviewFunnel(req, env, cors);
@@ -2121,7 +2121,7 @@ describe('handleGetAgeReviewFunnel', () => {
   });
 
   it('keeps moderation counts and nulls helpdesk when Zendesk secret resolution fails', async () => {
-    const env = makeEnv(mockDb, {
+    const env = makeEnv(makeMockDb(), {
       ZENDESK_SUBDOMAIN: { get: vi.fn().mockRejectedValue(new Error('secret store down')) },
       ZENDESK_EMAIL: 'a@b.co',
       ZENDESK_API_TOKEN: 'tok',
@@ -2138,7 +2138,7 @@ describe('handleGetAgeReviewFunnel', () => {
   it('counts each helpdesk stage with the exact shared criteria query', async () => {
     const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ count: 9 }) });
     vi.stubGlobal('fetch', mockFetch);
-    const env = makeEnv(mockDb, {
+    const env = makeEnv(makeMockDb(), {
       ZENDESK_SUBDOMAIN: 'rabblelabs', ZENDESK_EMAIL: 'a@b.co', ZENDESK_API_TOKEN: 'tok',
     });
     await handleGetAgeReviewFunnel(req, env, cors);
