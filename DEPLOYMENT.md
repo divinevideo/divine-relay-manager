@@ -78,17 +78,21 @@ Cloudflare Dashboard. There is no root `worker/wrangler.toml`.
 Set secrets via CLI:
 ```bash
 cd worker
-wrangler secret put NOSTR_NSEC
-wrangler secret put ANTHROPIC_API_KEY
+npx wrangler secret put NOSTR_NSEC --config wrangler.prod.toml
+npx wrangler secret put ANTHROPIC_API_KEY --config wrangler.prod.toml
 # ... etc
 ```
 
 ### Deploy
 
+There is no default worker config, so `--config` is required on every command.
+Never deploy with `wrangler.local.toml`.
+
 ```bash
 cd worker
 npm install
-wrangler deploy
+npx wrangler deploy --config wrangler.staging.toml   # staging
+npx wrangler deploy --config wrangler.prod.toml      # production
 ```
 
 ---
@@ -142,7 +146,7 @@ MANAGEMENT_PATH = "/"
 4. For worker development:
    ```bash
    cd worker
-   wrangler dev
+   npx wrangler dev --config wrangler.local.toml
    ```
 
 ---
