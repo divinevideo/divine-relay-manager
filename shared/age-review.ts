@@ -99,8 +99,12 @@ export interface AgeReviewCase {
    * created. Enforcement hides a suspended account's content from relay queries,
    * so these cannot be resolved on read after the fact.
    *
-   * identity_captured_at is stamped even when nothing resolved: null means the
-   * lookup never ran, not that the account has no profile.
+   * identity_captured_at is stamped whenever the lookup reached a confirmed
+   * answer, including a confirmed "this account has no profile". Null means no
+   * confirmed answer -- the lookup never ran, or it ran and timed out, errored,
+   * or found no relay configured. Either way the row is still worth re-querying,
+   * which is what the backfill keys on; null never means "looked and found
+   * nothing".
    */
   account_name: string | null;
   account_nip05: string | null;

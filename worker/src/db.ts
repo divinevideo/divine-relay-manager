@@ -115,9 +115,11 @@ export async function ensureSchema(db: D1Database): Promise<void> {
   // so a later lookup returns nothing and the name is unrecoverable -- these
   // columns preserve whatever was visible at the time.
   //
-  // identity_captured_at is stamped even when nothing resolved, so a null means
-  // "never looked" rather than "looked and found nothing". The backfill needs
-  // that distinction to know which rows are worth re-querying.
+  // identity_captured_at is stamped whenever the lookup reached a confirmed
+  // answer -- including a confirmed "this account has no profile". A null means
+  // no confirmed answer: never looked, or looked and timed out, errored, or had
+  // no relay configured. So a null is never "looked and found nothing", and the
+  // backfill uses exactly that to know which rows are worth re-querying.
   for (const column of [
     `account_name TEXT`,
     `account_nip05 TEXT`,
