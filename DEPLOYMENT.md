@@ -182,7 +182,9 @@ curl -X POST https://relay.admin.divine.video/api/relay-rpc \
 ## Troubleshooting
 
 ### "Relay error: 404" on management calls
-- Verify `MANAGEMENT_PATH` is set correctly (Funnelcake uses `/management`)
+- Verify `MANAGEMENT_PATH` is set correctly (Funnelcake serves NIP-86 at `/`,
+  which is what both deployed configs set; the worker's built-in default is
+  `/management` and will 404 against Funnelcake)
 - Check that the relay supports NIP-86
 
 ### CORS errors in browser
