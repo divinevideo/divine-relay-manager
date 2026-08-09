@@ -124,36 +124,47 @@ export async function fetchAccountIdentity(
       queryRelay({ authors: [pubkey], kinds: [0], limit: 1 }, relayUrl),
       ENRICHMENT_TIMEOUT_MS,
     );
+    // Presence first, absence second. A profile we actually received is a
+    // confirmed answer however the read ended: an event in hand cannot be made
+    // less true by the socket closing a moment later. Only *absence* needs the
+    // read to have finished cleanly before it can be believed.
+    //
+    // The order matters because of #186 (merged 2026-08-07, one commit ahead of
+    // this branch's merge base), which rewrites queryRelay so an early close or
+    // a NIP-01 CLOSED is `success: false` -- while still returning the events
+    // that did arrive. Testing `success` first would then throw away a kind-0
+    // that a relay streamed before closing without EOSE, leave
+    // identity_captured_at null, and let enforcement hide the profile before any
+    // backfill could run: precisely the permanent loss this capture exists to
+    // prevent. Under the current vendored queryRelay the two orders are
+    // equivalent -- its `success: false` path carries no events -- so this is
+    // cover for the rebase, not a behaviour change here.
+    if (res?.events?.length) {
+      return {
+        completed: true,
+        // Raw: this is persisted, and both surfaces that render it
+        // (buildAgeReviewIdentityBlock, buildClaimedParentName) sanitize on the
+        // way out. Sanitizing here instead would store a mangled handle.
+        profile: parseKind0Profile(
+          res.events[0] as { content?: string; tags?: string[][] },
+          { raw: true },
+        ),
+      };
+    }
     // A timeout resolves to null and an unreachable relay resolves to
     // { success: false }; neither is evidence the account has no profile.
     if (!res?.success) return { completed: false, profile: null };
-    if (!res.events?.length) {
-      // An empty result only means "this account has no profile" when the relay
-      // sent EOSE. queryRelay reports complete: false when it timed out or the
-      // socket closed first, and that absence is unconfirmed.
-      //
-      // Falls back to `success` because #186 (merged) folds `complete` into
-      // `success` and drops the field: under that contract `success` alone means
-      // EOSE-confirmed. Reading `res.complete === true` after this branch
-      // rebases onto #186 would be `undefined === true` -- permanently false,
-      // so nothing would ever stamp and every case would sit eligible for
-      // backfill forever, with `tsc` green because the field is optional.
-      // Equivalent today: `complete` is set explicitly on both success paths, and
-      // a `success: false` result already returned above -- so no test at this
-      // head can distinguish the two, and none pretends to. This is deliberate
-      // cover for a contract that has already landed on main.
-      return { completed: res.complete ?? res.success, profile: null };
-    }
-    return {
-      completed: true,
-      // Raw: this is persisted, and both surfaces that render it
-      // (buildAgeReviewIdentityBlock, buildClaimedParentName) sanitize on the
-      // way out. Sanitizing here instead would store a mangled handle.
-      profile: parseKind0Profile(
-        res.events[0] as { content?: string; tags?: string[][] },
-        { raw: true },
-      ),
-    };
+    // An empty result only means "this account has no profile" when the relay
+    // sent EOSE. queryRelay reports complete: false when it timed out or the
+    // socket closed first, and that absence is unconfirmed.
+    //
+    // Falls back to `success` because #186 folds `complete` into `success` and
+    // drops the field: under that contract `success` alone means EOSE-confirmed.
+    // Reading `res.complete === true` after this branch rebases would be
+    // `undefined === true` -- permanently false, so nothing would ever stamp and
+    // every case would sit eligible for backfill forever, with `tsc` green
+    // because the field is optional.
+    return { completed: res.complete ?? res.success, profile: null };
   } catch (err) {
     console.warn('[relay-profile] identity fetch failed (continuing without it):', err);
     return { completed: false, profile: null };

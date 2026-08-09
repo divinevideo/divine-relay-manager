@@ -91,6 +91,46 @@ describe('fetchAccountIdentity lookup outcome', () => {
     expect(res.profile).toBeNull();
   });
 
+  // The mirror of the case above: the socket still dies before EOSE, but this
+  // time the kind-0 already arrived. An event in hand is a confirmed answer --
+  // discarding it would leave identity_captured_at null and let enforcement hide
+  // the profile before any backfill could look again. This pins presence over
+  // absence, which is the property that has to survive the rebase onto #186:
+  // there, an early close reports success: false while still carrying the
+  // events it received, so a success-first check would throw this profile away.
+  it('captures a profile that arrived before the relay closed without EOSE', async () => {
+    vi.spyOn(globalThis, 'WebSocket').mockImplementation((function () {
+      const listeners = new Map<string, Array<(value?: unknown) => void>>();
+      let subId = 'identity-test';
+      queueMicrotask(() => {
+        listeners.get('open')?.forEach((h) => h());
+        listeners.get('message')?.forEach((h) => h({
+          data: JSON.stringify(['EVENT', subId, {
+            id: 'e6', kind: 0, pubkey: 'abc123', tags: [],
+            content: JSON.stringify({ display_name: 'Arrived First' }),
+          }]),
+        }));
+        // Drops without ever sending EOSE.
+        listeners.get('close')?.forEach((h) => h());
+      });
+      return {
+        addEventListener: (e: string, h: (value?: unknown) => void) => {
+          listeners.set(e, [...(listeners.get(e) || []), h]);
+        },
+        send: vi.fn((payload: string) => {
+          const parsed = JSON.parse(payload);
+          if (parsed[0] === 'REQ') subId = parsed[1];
+        }),
+        close: vi.fn(),
+      };
+    } as unknown as typeof WebSocket));
+
+    const res = await fetchAccountIdentity('abc123', 'wss://relay.test');
+
+    expect(res.completed).toBe(true);
+    expect(res.profile?.name).toBe('Arrived First');
+  });
+
   it('reports an incomplete lookup when the socket cannot be opened', async () => {
     vi.spyOn(globalThis, 'WebSocket').mockImplementation((() => {
       throw new Error('relay down');
