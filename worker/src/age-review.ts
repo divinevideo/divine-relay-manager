@@ -620,23 +620,33 @@ export async function handleCreateMinorAccount(
     // hides the profile.
     //
     // account_name prefers display_name, so the username would be dropped
-    // entirely whenever one is supplied. Keep it by storing the NIP-05 it
-    // implies: Divine's NIP-05 is the subdomain form `_@<username>.<domain>`,
-    // so the username stays recoverable from that value and needs no column of
-    // its own. This is derived from what the operator gave us, not read back
-    // from Keycast -- the create-minor-account response does not return a
-    // nip05 -- so it records the address the account is expected to claim.
+    // entirely whenever one is supplied. It is stored twice over, because the
+    // two places it can go fail in different environments:
     //
-    // No fallback domain on purpose. Staging accounts do not live under the
-    // production identity domain, so guessing one would write a wrong address
-    // into a record agents read to decide who a case is about. Unconfigured
-    // means we store nothing rather than something plausible and false.
+    //  - account_nip05 records the address the account is expected to claim.
+    //    Divine's NIP-05 is the subdomain form `_@<username>.<domain>`, so the
+    //    username is recoverable from it. Derived from what the operator gave
+    //    us, not read back from Keycast -- the create-minor-account response
+    //    carries no nip05. No fallback domain on purpose: staging accounts do
+    //    not live under the production identity domain, and guessing one would
+    //    write a wrong address into a record agents read to decide who a case
+    //    is about. Unconfigured stores nothing rather than something false.
+    //
+    //  - account_vine_username holds the username itself, unconditionally.
+    //    Without this, an unconfigured NIP05_DOMAIN means a case created with a
+    //    display_name keeps no trace of the username at all -- and because this
+    //    path stamps identity_captured_at, the backfill's `IS NULL` keying never
+    //    revisits the row, so the loss is permanent. That is the exact defect
+    //    the nip05 derivation was added to close; it just has to survive in the
+    //    environment shipped without the config too. The column is unused on
+    //    this path and resolveHandle already falls back to it, so it costs
+    //    nothing and reads correctly wherever the block is rendered.
     const nip05 = env.NIP05_DOMAIN ? `_@${username}.${env.NIP05_DOMAIN}` : null;
     await env.DB.prepare(`
       INSERT INTO age_review_cases
       (id, pubkey, suspected_age_band, state, allowed_resolution, resolution_note, created_via, claim_link_url, claim_link_expires_at, zendesk_ticket_id,
-       account_name, account_nip05, identity_captured_at)
-      VALUES (?, ?, 'age_13_15', 'cleared', 'parent_video_or_email', 'Approved via parental consent (minor onboarding)', 'minor_onboarding', ?, ?, ?, ?, ?, ?)
+       account_name, account_nip05, account_vine_username, identity_captured_at)
+      VALUES (?, ?, 'age_13_15', 'cleared', 'parent_video_or_email', 'Approved via parental consent (minor onboarding)', 'minor_onboarding', ?, ?, ?, ?, ?, ?, ?)
     `).bind(
       caseId,
       result.pubkey,
@@ -645,6 +655,7 @@ export async function handleCreateMinorAccount(
       body.zendesk_ticket_id ?? null,
       displayName ?? username,
       nip05,
+      username,
       new Date().toISOString(),
     ).run();
   } catch (err) {

@@ -102,7 +102,9 @@ CDN_DOMAIN = "media.divine.video"
 # Deliberately unset here: staging accounts are issued by a different Keycast
 # instance and the production domain would be wrong for them. Unset means no
 # NIP-05 is recorded on that path, which is preferable to recording a false one.
-# Set this once the staging identity domain is confirmed.
+# This is a steady state, not a pending task -- the username itself is stored in
+# account_vine_username either way, so nothing is lost by leaving it unset. Set
+# it only if staging ever gains its own identity domain.
 # Slack webhook for age review deadline alerts (add via: wrangler secret put SLACK_WEBHOOK_URL --config wrangler.staging.toml)
 # SLACK_WEBHOOK_URL — not in [vars] because it's a secret
 # Zendesk custom field IDs for auto-solve required fields

@@ -2616,7 +2616,8 @@ describe('handleCreateMinorAccount', () => {
       sql,
       accountName: binds[5],
       accountNip05: binds[6],
-      identityCapturedAt: binds[7],
+      accountVineUsername: binds[7],
+      identityCapturedAt: binds[8],
     };
   }
 
@@ -2679,6 +2680,37 @@ describe('handleCreateMinorAccount', () => {
     );
 
     expect(identityBinds(db).accountNip05).toBeNull();
+  });
+
+  // Storing the username only inside a derived NIP-05 loses it wherever
+  // NIP05_DOMAIN is unset -- which is staging, deliberately. And this path
+  // stamps identity_captured_at, so the backfill's IS NULL keying never returns
+  // to the row: the loss is permanent, in exactly the environment shipped
+  // without the config. The username has to survive on its own.
+  it('keeps the username even when the identity domain is not configured', async () => {
+    const db = makeMinorDb();
+    await handleCreateMinorAccount(
+      makeRequest({ username: 'someuser', display_name: 'Some One' }),
+      makeEnv(db), corsHeaders,
+    );
+
+    const binds = identityBinds(db);
+    expect(binds.accountNip05).toBeNull();
+    expect(binds.accountVineUsername).toBe('someuser');
+    // The display name still wins account_name; this is a second home, not a swap.
+    expect(binds.accountName).toBe('Some One');
+  });
+
+  it('keeps the username alongside the derived nip05 when the domain is configured', async () => {
+    const db = makeMinorDb();
+    await handleCreateMinorAccount(
+      makeRequest({ username: 'someuser', display_name: 'Some One' }),
+      makeEnv(db, { NIP05_DOMAIN: 'divine.video' }), corsHeaders,
+    );
+
+    const binds = identityBinds(db);
+    expect(binds.accountNip05).toBe('_@someuser.divine.video');
+    expect(binds.accountVineUsername).toBe('someuser');
   });
 
   it('falls back to the username when no display name is given', async () => {
