@@ -2207,6 +2207,55 @@ describe('contact name upgrade on parent reply', () => {
     expect(JSON.parse((put![1] as { body: string }).body).user.name).toBe('Claimed parent of Some One');
   });
 
+  // The rename swallows its own errors and the handler answers 200 either way,
+  // so Zendesk never redelivers on a failure. If the rename only ran on the
+  // delivery that won the CAS, one transient Zendesk blip would leave the
+  // Requester column showing a bare email for the life of the case. A later
+  // reply arrives with the case already advanced, so that delivery has to be
+  // able to heal it.
+  it('still renames on a later reply, after the case has already advanced', async () => {
+    const c = makeCase({
+      state: 'submitted_for_review',
+      zendesk_ticket_id: 42,
+      parent_contact_email: 'parent@example.com',
+      account_name: 'Some One',
+    });
+    const mockFetch = makeTicketFetch();
+    vi.stubGlobal('fetch', mockFetch);
+
+    const res = await handleAgeReviewReplyWebhook(replyRequest(), makeEnv(makeReplyDb(c), zendeskEnv), corsHeaders);
+
+    // The state machine still declines to advance; only the rename is retried.
+    expect(res.status).toBe(200);
+    const put = namePutFrom(mockFetch);
+    expect(put).toBeTruthy();
+    expect(JSON.parse((put![1] as { body: string }).body).user.name).toBe('Claimed parent of Some One');
+  });
+
+  it('still renames when the state advance loses to a concurrent write', async () => {
+    const c = makeCase({
+      state: 'restricted_pending_parental_consent',
+      zendesk_ticket_id: 42,
+      parent_contact_email: 'parent@example.com',
+      account_name: 'Some One',
+    });
+    // Every UPDATE reports zero rows changed: the CAS never lands.
+    const db = {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        bind: vi.fn().mockReturnValue({
+          first: vi.fn().mockResolvedValue(sql.includes('zendesk_ticket_id') ? c : c),
+          run: vi.fn().mockResolvedValue({ meta: { changes: 0 } }),
+        }),
+      })),
+    };
+    const mockFetch = makeTicketFetch();
+    vi.stubGlobal('fetch', mockFetch);
+
+    await handleAgeReviewReplyWebhook(replyRequest(), makeEnv(db, zendeskEnv), corsHeaders);
+
+    expect(namePutFrom(mockFetch)).toBeTruthy();
+  });
+
   it('leaves the contact alone when no handle was captured', async () => {
     const c = makeCase({
       state: 'restricted_pending_parental_consent',

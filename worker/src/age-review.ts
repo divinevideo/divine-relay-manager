@@ -1410,11 +1410,26 @@ export async function handleAgeReviewReplyWebhook(
   // silently overwriting the fact that the parent replied. On a CAS miss we
   // re-read once and re-apply if the case is still advanceable, so a real parent
   // reply is never dropped just because an unrelated write bumped the row.
+  //
+  // The rename is deliberately NOT tied to this delivery winning the CAS. Its
+  // only real precondition is "the parent has replied", which is what reaching
+  // this handler means at all -- the Zendesk trigger gates on an end-user public
+  // comment on an age-review ticket. Tying it to `changes === 1` made it
+  // one-shot: upgradeParentContactName swallows its errors and the handler
+  // answers 200 regardless, so Zendesk never redelivers, and the next reply
+  // returns early because the case has already advanced. A single transient
+  // Zendesk blip therefore left the Requester column showing a bare email
+  // permanently, with no path back -- and that column is the readable-queue
+  // payoff the staging exists to unlock. Renaming on every delivery is
+  // idempotent, still gated on resolveVerifiedParentContact, and self-heals.
+  let advanced: AgeReviewCase | null = null;
+  let notAdvanceable = false;
   let target: AgeReviewCase | null = activeCase;
   for (let attempt = 0; attempt < 2 && target; attempt++) {
     const allowed = VALID_TRANSITIONS[target.state as AgeReviewState];
     if (!allowed?.includes('submitted_for_review')) {
-      return json({ success: true, message: 'Case not in a state that can advance to submitted_for_review' }, 200, corsHeaders);
+      notAdvanceable = true;
+      break;
     }
 
     const now = new Date();
@@ -1438,13 +1453,25 @@ export async function handleAgeReviewReplyWebhook(
 
     if (result.meta?.changes === 1) {
       console.log(`[age-review] Parent replied on ticket #${ticketId}, case ${target.id} → submitted_for_review (clock paused)`);
-      await upgradeParentContactName(ticketId, target, env);
-      return json({ success: true, case_id: target.id, new_state: 'submitted_for_review' }, 200, corsHeaders);
+      advanced = target;
+      break;
     }
 
     // CAS miss: the row changed between our read and this write. Re-read and retry.
     target = await env.DB.prepare('SELECT * FROM age_review_cases WHERE id = ?')
       .bind(activeCase.id).first<AgeReviewCase>();
+  }
+
+  // Every exit below goes through this. The identity fields it reads are written
+  // at case creation and never change, so activeCase is as good a source as the
+  // re-read row. Still best-effort: it must not change what the webhook reports.
+  await upgradeParentContactName(ticketId, activeCase, env);
+
+  if (advanced) {
+    return json({ success: true, case_id: advanced.id, new_state: 'submitted_for_review' }, 200, corsHeaders);
+  }
+  if (notAdvanceable) {
+    return json({ success: true, message: 'Case not in a state that can advance to submitted_for_review' }, 200, corsHeaders);
   }
 
   console.log(`[age-review] Parent reply on ticket #${ticketId}, case ${activeCase.id} not advanced (changed concurrently)`);
