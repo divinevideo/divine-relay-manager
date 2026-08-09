@@ -131,7 +131,18 @@ export async function fetchAccountIdentity(
       // An empty result only means "this account has no profile" when the relay
       // sent EOSE. queryRelay reports complete: false when it timed out or the
       // socket closed first, and that absence is unconfirmed.
-      return { completed: res.complete === true, profile: null };
+      //
+      // Falls back to `success` because #186 (merged) folds `complete` into
+      // `success` and drops the field: under that contract `success` alone means
+      // EOSE-confirmed. Reading `res.complete === true` after this branch
+      // rebases onto #186 would be `undefined === true` -- permanently false,
+      // so nothing would ever stamp and every case would sit eligible for
+      // backfill forever, with `tsc` green because the field is optional.
+      // Equivalent today: `complete` is set explicitly on both success paths, and
+      // a `success: false` result already returned above -- so no test at this
+      // head can distinguish the two, and none pretends to. This is deliberate
+      // cover for a contract that has already landed on main.
+      return { completed: res.complete ?? res.success, profile: null };
     }
     return {
       completed: true,
