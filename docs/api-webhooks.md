@@ -390,13 +390,14 @@ In Zendesk Admin > Objects and rules > Business rules > Triggers:
 
 ### 4. Set Environment Variables
 
-In `worker/wrangler.toml` or Cloudflare dashboard:
+In the per-environment `worker/wrangler.{local,staging,prod}.toml` or the
+Cloudflare dashboard:
 
 ```bash
-wrangler secret put ZENDESK_WEBHOOK_SECRET
+npx wrangler secret put ZENDESK_WEBHOOK_SECRET --config wrangler.prod.toml
 # Enter the signing secret from Zendesk webhook settings
 
-wrangler secret put ZENDESK_JWT_SECRET
+npx wrangler secret put ZENDESK_JWT_SECRET --config wrangler.prod.toml
 # Enter a shared secret for JWT tokens (for sidebar app)
 ```
 
