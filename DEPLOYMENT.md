@@ -57,9 +57,9 @@ Cloudflare Dashboard. There is no root `worker/wrangler.toml`.
 
 | Variable | Required | Description | Example |
 |----------|----------|-------------|---------|
-| `RELAY_URL` | Yes | WebSocket URL of the Nostr relay | `wss://relay.dvines.org` |
-| `MANAGEMENT_PATH` | No | Path for NIP-86 management API (default: `/management`) | `/management` |
-| `MODERATION_SERVICE_URL` | No | URL for media moderation service | `https://moderation.admin.divine.video` |
+| `RELAY_URL` | Yes | WebSocket URL of the Nostr relay | `wss://relay.divine.video` |
+| `MANAGEMENT_PATH` | No | Path for NIP-86 management API (default: `/management`) | `/` |
+| `MODERATION_SERVICE_URL` | No | URL for media moderation service | `https://moderation-api.divine.video` |
 | `ALLOWED_ORIGINS` | Yes | Comma-separated allowed CORS origins | `https://relay.admin.divine.video,*.pages.dev` |
 
 ### Secrets (must be set via CLI or Dashboard)
@@ -95,32 +95,32 @@ wrangler deploy
 
 ## Environment Configurations
 
-### Production (relay.dvines.org)
-
-**Frontend (Pages):**
-```
-VITE_RELAY_URL=wss://relay.dvines.org
-```
-
-**Worker (wrangler.toml):**
-```toml
-[vars]
-RELAY_URL = "wss://relay.dvines.org"
-MANAGEMENT_PATH = "/management"
-```
-
-### Staging (relay.divine.video)
+### Production (relay.divine.video)
 
 **Frontend (Pages):**
 ```
 VITE_RELAY_URL=wss://relay.divine.video
 ```
 
-**Worker (wrangler.toml):**
+**Worker (`worker/wrangler.prod.toml`):**
 ```toml
 [vars]
 RELAY_URL = "wss://relay.divine.video"
-MANAGEMENT_PATH = "/management"
+MANAGEMENT_PATH = "/"
+```
+
+### Staging (relay.staging.divine.video)
+
+**Frontend (Pages):**
+```
+VITE_RELAY_URL=wss://relay.staging.divine.video
+```
+
+**Worker (`worker/wrangler.staging.toml`):**
+```toml
+[vars]
+RELAY_URL = "wss://relay.staging.divine.video"
+MANAGEMENT_PATH = "/"
 ```
 
 ---
@@ -161,7 +161,7 @@ Expected response:
   "success": true,
   "pubkey": "...",
   "npub": "npub1...",
-  "relay": "wss://relay.dvines.org"
+  "relay": "wss://relay.divine.video"
 }
 ```
 
