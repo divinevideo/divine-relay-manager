@@ -9,7 +9,7 @@ import { bytesToHex } from '@noble/hashes/utils';
 import { sha256 } from '@noble/hashes/sha256';
 import WebSocket from 'ws';
 
-const RELAY_URL = process.env.RELAY_URL || 'wss://relay.dvines.org';
+const RELAY_URL = process.env.RELAY_URL || 'wss://relay.divine.video';
 
 // Generate a deterministic sha256 hash from a seed string
 function makeHash(seed: string): string {

@@ -4,7 +4,7 @@
 
 The Divine Relay Manager exposes several API endpoints for integration with external systems like Zendesk (ticket report parsing, decision sync, age-review replies). Note: Zendesk does **not** execute moderation actions. Moderation is performed in Relay Manager; Zendesk only receives decision updates back. The former inbound moderation-execution path has been retired (see the note under `POST /api/zendesk/webhook`).
 
-**Base URL:** `https://api-relay.divine.video` (or `https://relay.admin.divine.video/api`)
+**Base URL:** `https://api-relay-prod.divine.video` (production) or `https://api-relay-staging.divine.video` (staging)
 
 ## Authentication
 
@@ -362,7 +362,7 @@ In Zendesk Admin > Objects and rules > Tickets > Fields:
 
 In Zendesk Admin > Apps and integrations > Webhooks:
 
-- **Endpoint URL:** `https://api-relay.divine.video/api/zendesk/webhook`
+- **Endpoint URL:** `https://api-relay-prod.divine.video/api/zendesk/webhook`
 - **Request method:** POST
 - **Request format:** JSON
 - **Authentication:** None (signature verification used instead)
@@ -425,7 +425,7 @@ Currently no rate limits are enforced, but aggressive use may trigger Cloudflare
 
 **Ban a user:**
 ```bash
-curl -X POST https://api-relay.divine.video/api/moderate \
+curl -X POST https://api-relay-prod.divine.video/api/moderate \
   -H "Content-Type: application/json" \
   -H "CF-Access-Client-Id: $CF_CLIENT_ID" \
   -H "CF-Access-Client-Secret: $CF_CLIENT_SECRET" \
@@ -434,14 +434,14 @@ curl -X POST https://api-relay.divine.video/api/moderate \
 
 **Check media status:**
 ```bash
-curl https://api-relay.divine.video/api/check-result/abc123... \
+curl https://api-relay-prod.divine.video/api/check-result/abc123... \
   -H "CF-Access-Client-Id: $CF_CLIENT_ID" \
   -H "CF-Access-Client-Secret: $CF_CLIENT_SECRET"
 ```
 
 **Delete an event:**
 ```bash
-curl -X POST https://api-relay.divine.video/api/moderate \
+curl -X POST https://api-relay-prod.divine.video/api/moderate \
   -H "Content-Type: application/json" \
   -H "CF-Access-Client-Id: $CF_CLIENT_ID" \
   -H "CF-Access-Client-Secret: $CF_CLIENT_SECRET" \

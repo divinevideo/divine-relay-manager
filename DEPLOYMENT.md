@@ -21,7 +21,7 @@ Configure these in: **Cloudflare Dashboard → Pages → [project] → Settings 
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `VITE_RELAY_URL` | WebSocket URL of the Nostr relay | `wss://relay.dvines.org` |
+| `VITE_RELAY_URL` | WebSocket URL of the Nostr relay | `wss://relay.divine.video` |
 
 You can set different values per environment:
 - **Production** (main branch): Your production relay
@@ -156,7 +156,7 @@ MANAGEMENT_PATH = "/"
 ### Check Worker Configuration
 
 ```bash
-curl https://relay.admin.divine.video/api/info
+curl https://api-relay-prod.divine.video/api/info
 ```
 
 Expected response:
@@ -172,7 +172,7 @@ Expected response:
 ### Test NIP-86 Management API
 
 ```bash
-curl -X POST https://relay.admin.divine.video/api/relay-rpc \
+curl -X POST https://api-relay-prod.divine.video/api/relay-rpc \
   -H "Content-Type: application/json" \
   -d '{"method": "supportedmethods", "params": []}'
 ```

@@ -267,7 +267,6 @@ describe('runBulkModeration', () => {
   });
 
   it('marks bulk delete as failed when relay deletion returns success false', async () => {
-    const { banEvent } = await import('./nip86');
     vi.mocked(banEvent).mockResolvedValueOnce({ success: false, error: 'relay refused' });
     mockRelay([{ id: 'e'.repeat(64), kind: 1, content: '', tags: [] }]);
 
@@ -428,7 +427,6 @@ describe('async bulk job model', () => {
   });
 
   it('delete-all transitions events -> media across messages and finishes', async () => {
-    const { banEvent } = await import('./nip86');
     vi.mocked(banEvent).mockResolvedValue({ success: true });
     mockPaginatedRelay(Array.from({ length: 30 }, (_, i) => ({ id: `e${i}`, kind: 1, content: '', tags: [] as string[][], created_at: 30 - i })));
     mockUserVideos([{ sha256: 'a'.repeat(64) }]);
@@ -465,7 +463,6 @@ describe('async bulk job model', () => {
     // 250 events all at one created_at: a chunk takes 200, the rest at that second
     // cannot be reached by an `until` cursor. The job must complete but RECORD the
     // gap, not silently report success on a partial destructive delete.
-    const { banEvent } = await import('./nip86');
     vi.mocked(banEvent).mockResolvedValue({ success: true });
     mockPaginatedRelay(Array.from({ length: 250 }, (_, i) => ({ id: `e${i}`, kind: 1, content: '', tags: [] as string[][], created_at: 1000 })));
     mockUserVideos([{ sha256: hashA }]);
@@ -527,7 +524,6 @@ describe('async bulk job model', () => {
   });
 
   it('delete-all fails closed when the videos REST call errors (no events banned)', async () => {
-    const { banEvent } = await import('./nip86');
     vi.mocked(banEvent).mockClear(); // call history accumulates across tests
     mockRelay([{ id: 'e'.repeat(64), kind: 34235, content: '', tags: [] }]);
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('err', { status: 500 }));

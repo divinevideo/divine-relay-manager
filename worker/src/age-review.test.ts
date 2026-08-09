@@ -2071,13 +2071,11 @@ describe('handleGetAgeReviewFunnel', () => {
     { state: 'denied_closed', created_via: 'report', c: 1 },
     { state: 'submitted_for_review', created_via: 'report', c: 4 },
   ];
-  const makeMockDb = () => {
-    return {
-      prepare: vi.fn().mockReturnValue({
-        bind: vi.fn().mockReturnValue({ all: vi.fn().mockResolvedValue({ results: groupRows }) }),
-      }),
-    };
-  };
+  const makeMockDb = () => ({
+    prepare: vi.fn().mockReturnValue({
+      bind: vi.fn().mockReturnValue({ all: vi.fn().mockResolvedValue({ results: groupRows }) }),
+    }),
+  });
   const req = new Request('https://api.test/api/age-review/funnel?age_band=age_13_15');
 
   afterEach(() => { vi.unstubAllGlobals(); });

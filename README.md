@@ -76,7 +76,7 @@ Worker development lives under `worker/`:
 
 ```bash
 cd worker
-npm run dev          # wrangler dev
+npm run dev          # wrangler dev --config wrangler.local.toml
 npm run test:run     # worker unit tests
 npm run typecheck    # tsc --noEmit
 ```
