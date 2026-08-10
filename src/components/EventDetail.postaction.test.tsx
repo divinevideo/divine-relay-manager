@@ -43,10 +43,11 @@ vi.mock('@/hooks/useAgeReviewGuardRedirect', () => ({
   useAgeReviewGuardRedirect: () => ({ redirectIfGuarded: () => false }),
 }));
 
-// Not banned, so the enforcement row offers "Ban User" rather than "Unban User".
+// Drives which enforcement affordance renders: "Ban User" vs "Unban User".
+const modStatus = vi.hoisted(() => ({ isUserBanned: false as boolean | null }));
 vi.mock('@/hooks/useModerationStatus', () => ({
   useModerationStatus: () => ({
-    isUserBanned: false,
+    isUserBanned: modStatus.isUserBanned,
     isUserSuspended: false,
     isEventBanned: false,
     isEventGone: false,
@@ -102,6 +103,7 @@ async function banTheUser() {
 describe('EventDetail post-ban verification', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    modStatus.isUserBanned = false;
     api.banPubkey.mockResolvedValue(undefined);
   });
 
@@ -141,5 +143,113 @@ describe('EventDetail post-ban verification', () => {
     expect(
       screen.queryByText('Warning: User may not be banned - not found in banned list'),
     ).not.toBeInTheDocument();
+  });
+});
+
+/** Open the ban-event dialog and press its action button. */
+async function banTheEvent() {
+  const trigger = await screen.findByRole('button', { name: /^Ban Event$/ });
+  await act(async () => {
+    fireEvent.click(trigger);
+  });
+  const buttons = await screen.findAllByRole('button', { name: /^Ban Event$/ });
+  await act(async () => {
+    fireEvent.click(buttons[buttons.length - 1]);
+  });
+}
+
+describe('EventDetail post-delete verification', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    modStatus.isUserBanned = false;
+    api.deleteEvent.mockResolvedValue(undefined);
+  });
+
+  it('confirms the deletion when the relay no longer serves the event', async () => {
+    api.verifyEventDeleted.mockResolvedValue(true);
+
+    renderDetail();
+    await banTheEvent();
+
+    await waitFor(() => {
+      expect(
+        screen.getByText('Event deletion verified - no longer accessible on relay'),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it('warns when the relay answered and the event is still there', async () => {
+    api.verifyEventDeleted.mockResolvedValue(false);
+
+    renderDetail();
+    await banTheEvent();
+
+    await waitFor(() => {
+      expect(screen.getByText('Warning: Event may still be accessible on relay')).toBeInTheDocument();
+    });
+  });
+
+  it('reports inconclusive when the check could not run', async () => {
+    api.verifyEventDeleted.mockResolvedValue(null);
+
+    renderDetail();
+    await banTheEvent();
+
+    await waitFor(() => {
+      expect(screen.getByText('Verification failed - could not check status')).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByText('Warning: Event may still be accessible on relay'),
+    ).not.toBeInTheDocument();
+  });
+});
+
+describe('EventDetail post-unban verification', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Banned, so the row offers "Unban User".
+    modStatus.isUserBanned = true;
+    api.unbanPubkey.mockResolvedValue(undefined);
+  });
+
+  async function unbanTheUser() {
+    const button = await screen.findByRole('button', { name: /^Unban User$/ });
+    await act(async () => {
+      fireEvent.click(button);
+    });
+  }
+
+  it('confirms the unban when the relay no longer lists the pubkey', async () => {
+    api.verifyPubkeyUnbanned.mockResolvedValue(true);
+
+    renderDetail();
+    await unbanTheUser();
+
+    await waitFor(() => {
+      expect(screen.getByText('Unban verified - user is no longer in banned list')).toBeInTheDocument();
+    });
+  });
+
+  it('warns when the relay answered and the pubkey is still listed', async () => {
+    api.verifyPubkeyUnbanned.mockResolvedValue(false);
+
+    renderDetail();
+    await unbanTheUser();
+
+    await waitFor(() => {
+      expect(screen.getByText('Warning: User may still be banned')).toBeInTheDocument();
+    });
+  });
+
+  it('reports inconclusive when the check could not run', async () => {
+    api.verifyPubkeyUnbanned.mockResolvedValue(null);
+
+    renderDetail();
+    await unbanTheUser();
+
+    await waitFor(() => {
+      expect(screen.getByText('Verification failed - could not check status')).toBeInTheDocument();
+    });
+    expect(screen.queryByText('Warning: User may still be banned')).not.toBeInTheDocument();
   });
 });
