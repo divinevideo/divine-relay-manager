@@ -303,8 +303,12 @@ export function ThreadContext({
     // Each half of the summary line is stated only for the outcomes it was
     // actually told. A check that could not answer says so rather than
     // borrowing the negative wording.
+    // `false` here is not "the normal queries missed it" — it is the direct
+    // verification REQ getting the event back (adminApi.ts resolves false only
+    // on an EVENT match). Reporting that as "not found" states the inverse of
+    // what the check observed.
     const eventLine = isEventDeleted === false
-      ? 'Event not found on relay.'
+      ? 'Event is still on the relay.'
       : isEventDeleted === null
         ? 'Could not check whether the event is on the relay.'
         : null;

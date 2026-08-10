@@ -79,10 +79,13 @@ describe('ThreadContext comments section (#164 B)', () => {
 describe('ThreadContext moderation status summary', () => {
   const CHECKED = new Date('2026-08-10T12:00:00Z');
 
-  it('states both negatives when both checks completed', () => {
+  // `isEventDeleted === false` is the verification REQ getting the event back,
+  // not a failed lookup, so this line reports it as present rather than missing.
+  it('reports the event as still present when the check found it', () => {
     renderThread({ reportedEvent: undefined, isEventDeleted: false, isUserBanned: false, checkedAt: CHECKED });
 
-    expect(screen.getByText('Event not found on relay. User is not banned.')).toBeInTheDocument();
+    expect(screen.getByText('Event is still on the relay. User is not banned.')).toBeInTheDocument();
+    expect(screen.queryByText(/Event not found on relay/)).not.toBeInTheDocument();
   });
 
   it('does not claim the user is unbanned when that check could not answer', () => {
@@ -96,7 +99,7 @@ describe('ThreadContext moderation status summary', () => {
     renderThread({ reportedEvent: undefined, isEventDeleted: null, isUserBanned: false, checkedAt: CHECKED });
 
     expect(screen.getByText(/Could not check whether the event is on the relay\./)).toBeInTheDocument();
-    expect(screen.queryByText(/Event not found on relay\./)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Event is still on the relay\./)).not.toBeInTheDocument();
   });
 
   it('still reports a confirmed ban', () => {
