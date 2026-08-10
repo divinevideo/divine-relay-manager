@@ -160,17 +160,25 @@ export function useModerationStatus(
   }, [eventId, pubkey]);
 
   return {
-    // User ban: a completed check wins over the ban list, including when it
-    // completed as "could not confirm" — that stays null rather than borrowing
-    // the list's answer.
-    isUserBanned: wsResult.userBanned === undefined ? isUserBannedFromList : wsResult.userBanned,
+    // User ban: a completed check wins over the ban list. When the check could
+    // not answer, the list may still settle it — but only positively. A list
+    // `false` is untrustworthy here, because a failed list query resolves to
+    // `[]` above and so looks identical to "not in the list". A list `true`
+    // cannot be produced that way: membership is evidence either way.
+    isUserBanned: wsResult.userBanned === undefined
+      ? isUserBannedFromList
+      : wsResult.userBanned === null && isUserBannedFromList === true
+        ? true
+        : wsResult.userBanned,
     isUserSuspended: isUserSuspendedFromList,
     // Event in ban list (separate from "gone" — banned events can be retrieved via admin API)
     isEventBanned: isEventBannedFromList,
     // Event gone from relay (WebSocket verified, or known from ban list)
     isEventGone: wsResult.eventGone === undefined
       ? (isEventBannedFromList === true ? true : null)
-      : wsResult.eventGone,
+      : wsResult.eventGone === null && isEventBannedFromList === true
+        ? true
+        : wsResult.eventGone,
     isLoading: banListsLoading,
     isChecking: wsResult.isChecking,
     checkedAt: wsResult.checkedAt,

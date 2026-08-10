@@ -113,4 +113,36 @@ describe('useModerationStatus', () => {
     await waitFor(() => expect(result.current.checkedAt).not.toBeNull());
     expect(result.current.isUserBanned).toBe(true);
   });
+
+  it('keeps a positive ban-list membership when the check could not answer', async () => {
+    // A failed list query resolves to [], so it can fabricate an absence but
+    // never a membership. A list `true` therefore still settles the question.
+    listBannedPubkeys.mockResolvedValue([{ pubkey: PUBKEY }]);
+    verifyPubkeyBanned.mockResolvedValue(null);
+
+    const { result } = renderHook(() => useModerationStatus(PUBKEY), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    await act(async () => {
+      result.current.recheck();
+    });
+
+    await waitFor(() => expect(result.current.checkedAt).not.toBeNull());
+    expect(result.current.isUserBanned).toBe(true);
+  });
+
+  it('keeps a positive banned-event membership when the check could not answer', async () => {
+    listBannedEvents.mockResolvedValue([{ id: EVENT_ID }]);
+    verifyEventDeleted.mockResolvedValue(null);
+
+    const { result } = renderHook(() => useModerationStatus(PUBKEY, EVENT_ID, true), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    await act(async () => {
+      result.current.recheck();
+    });
+
+    await waitFor(() => expect(result.current.checkedAt).not.toBeNull());
+    expect(result.current.isEventGone).toBe(true);
+  });
 });
