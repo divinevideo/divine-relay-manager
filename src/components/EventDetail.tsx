@@ -445,9 +445,11 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
         setVerificationResult({
           type: 'ban',
           success: verified === true,
-          message: verified
-            ? 'User ban verified - pubkey is in banned list'
-            : 'Warning: User may not be banned - not found in banned list',
+          message: verified === null
+            ? VERIFICATION_INCONCLUSIVE
+            : verified
+              ? 'User ban verified - pubkey is in banned list'
+              : 'Warning: User may not be banned - not found in banned list',
         });
         toast({
           title: verified ? "Ban Verified" : "Verification Warning",
@@ -495,9 +497,11 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
         setVerificationResult({
           type: 'delete',
           success: verified === true,
-          message: verified
-            ? 'Event deletion verified - no longer accessible on relay'
-            : 'Warning: Event may still be accessible on relay',
+          message: verified === null
+            ? VERIFICATION_INCONCLUSIVE
+            : verified
+              ? 'Event deletion verified - no longer accessible on relay'
+              : 'Warning: Event may still be accessible on relay',
         });
         toast({
           title: verified ? "Deletion Verified" : "Verification Warning",
@@ -551,9 +555,11 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
         setVerificationResult({
           type: 'ban',
           success: verified === true,
-          message: verified
-            ? 'Unban verified - user is no longer in banned list'
-            : 'Warning: User may still be banned',
+          message: verified === null
+            ? VERIFICATION_INCONCLUSIVE
+            : verified
+              ? 'Unban verified - user is no longer in banned list'
+              : 'Warning: User may still be banned',
         });
       } catch {
         setVerificationResult({
