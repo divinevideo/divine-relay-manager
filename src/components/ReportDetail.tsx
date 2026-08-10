@@ -764,8 +764,8 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                 targetEventId={context.target?.type === 'event' ? context.target.value : undefined}
                 replies={context.thread?.replies}
                 reportedPubkey={context.reportedUser.pubkey}
-                isEventDeleted={moderationStatus.isEventGone === true}
-                isUserBanned={moderationStatus.isUserBanned === true}
+                isEventDeleted={moderationStatus.isEventGone}
+                isUserBanned={moderationStatus.isUserBanned}
                 checkedAt={moderationStatus.checkedAt}
                 onRecheck={moderationStatus.recheck}
                 isRechecking={moderationStatus.isChecking}

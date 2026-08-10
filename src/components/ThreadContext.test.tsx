@@ -70,3 +70,39 @@ describe('ThreadContext comments section (#164 B)', () => {
     expect(screen.queryByText(/comments on this content/i)).not.toBeInTheDocument();
   });
 });
+
+// The moderation summary line used to read "Event not found on relay. User is
+// not banned." whenever both flags were falsy and a check timestamp existed.
+// ReportDetail collapsed the tri-state outcome with `=== true` on the way in,
+// so a check that could not reach the relay arrived here as `false` and was
+// stated as fact.
+describe('ThreadContext moderation status summary', () => {
+  const CHECKED = new Date('2026-08-10T12:00:00Z');
+
+  it('states both negatives when both checks completed', () => {
+    renderThread({ reportedEvent: undefined, isEventDeleted: false, isUserBanned: false, checkedAt: CHECKED });
+
+    expect(screen.getByText('Event not found on relay. User is not banned.')).toBeInTheDocument();
+  });
+
+  it('does not claim the user is unbanned when that check could not answer', () => {
+    renderThread({ reportedEvent: undefined, isEventDeleted: false, isUserBanned: null, checkedAt: CHECKED });
+
+    expect(screen.getByText(/Could not check the user's ban status\./)).toBeInTheDocument();
+    expect(screen.queryByText(/User is not banned\./)).not.toBeInTheDocument();
+  });
+
+  it('does not claim the event is absent when that check could not answer', () => {
+    renderThread({ reportedEvent: undefined, isEventDeleted: null, isUserBanned: false, checkedAt: CHECKED });
+
+    expect(screen.getByText(/Could not check whether the event is on the relay\./)).toBeInTheDocument();
+    expect(screen.queryByText(/Event not found on relay\./)).not.toBeInTheDocument();
+  });
+
+  it('still reports a confirmed ban', () => {
+    renderThread({ reportedEvent: undefined, isEventDeleted: false, isUserBanned: true, checkedAt: CHECKED });
+
+    expect(screen.getByText('User is banned on the relay')).toBeInTheDocument();
+  });
+});
+
