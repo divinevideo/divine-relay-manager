@@ -764,8 +764,8 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                 targetEventId={context.target?.type === 'event' ? context.target.value : undefined}
                 replies={context.thread?.replies}
                 reportedPubkey={context.reportedUser.pubkey}
-                isEventDeleted={moderationStatus.isEventGone === true}
-                isUserBanned={moderationStatus.isUserBanned === true}
+                isEventDeleted={moderationStatus.isEventGone}
+                isUserBanned={moderationStatus.isUserBanned}
                 checkedAt={moderationStatus.checkedAt}
                 onRecheck={moderationStatus.recheck}
                 isRechecking={moderationStatus.isChecking}
@@ -835,18 +835,27 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
           {/* User moderation status - for user reports where there's no ThreadContext to show it */}
           {context.target?.type === 'pubkey' && (moderationStatus.checkedAt || moderationStatus.isChecking) && (
             <div className="rounded-md border bg-muted/30 p-3 space-y-2">
-              {moderationStatus.isUserBanned ? (
+              {moderationStatus.isUserBanned === true ? (
                 <div className="flex items-center gap-2 p-2 rounded bg-green-100 dark:bg-green-950/50">
                   <Ban className="h-4 w-4 text-green-600 shrink-0" />
                   <span className="text-sm font-medium text-green-700 dark:text-green-400">
                     User is banned on the relay
                   </span>
                 </div>
-              ) : moderationStatus.checkedAt ? (
+              ) : moderationStatus.isUserBanned === false && moderationStatus.checkedAt ? (
                 <div className="flex items-center gap-2 p-2 rounded bg-yellow-100 dark:bg-yellow-950/50">
                   <User className="h-4 w-4 text-yellow-600 shrink-0" />
                   <span className="text-sm font-medium text-yellow-700 dark:text-yellow-400">
                     User is not banned
+                  </span>
+                </div>
+              ) : moderationStatus.checkedAt ? (
+                // The check ran and could not answer. Saying "not banned" here
+                // would state a fact nothing observed.
+                <div className="flex items-center gap-2 p-2 rounded bg-muted">
+                  <RefreshCw className="h-4 w-4 text-muted-foreground shrink-0" />
+                  <span className="text-sm font-medium text-muted-foreground">
+                    Could not check ban status
                   </span>
                 </div>
               ) : null}

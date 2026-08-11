@@ -1,7 +1,7 @@
 // ABOUTME: Tests for the Divine Relay Admin API client
-// ABOUTME: Covers signing, publishing, moderation actions, and NIP-86 RPC
+// ABOUTME: Covers signing, publishing, moderation actions, post-action verification, and NIP-86 RPC
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   getWorkerInfo,
   getAccountStatus,
@@ -25,6 +25,9 @@ import {
   markAsReviewed,
   moderateMedia,
   verifyAgeRestricted,
+  verifyPubkeyBanned,
+  verifyPubkeyUnbanned,
+  verifyEventDeleted,
   logDecision,
   getDecisions,
   deleteDecisions,
@@ -47,6 +50,23 @@ global.fetch = mockFetch;
 
 // Test API URL
 const API_URL = 'https://test-api.example.com';
+const RELAY_URL = 'wss://relay.test.example.com';
+
+/** Minimal WebSocket double whose behaviour each test drives explicitly. */
+class FakeWebSocket {
+  static instances: FakeWebSocket[] = [];
+  onopen: (() => void) | null = null;
+  onmessage: ((e: { data: string }) => void) | null = null;
+  onerror: (() => void) | null = null;
+  closed = false;
+
+  constructor(public url: string) {
+    FakeWebSocket.instances.push(this);
+  }
+
+  send() { /* the tests drive responses directly */ }
+  close() { this.closed = true; }
+}
 
 describe('adminApi', () => {
   beforeEach(() => {
@@ -960,6 +980,148 @@ describe('adminApi', () => {
         const callBody = JSON.parse(lastCall[1].body);
         expect(callBody.action).toBe(action);
       }
+    });
+  });
+
+  // The verifiers must never report success they did not observe: an
+  // unreachable relay resolves null ("could not confirm"), never true.
+  describe('verifyPubkeyBanned', () => {
+    const pubkey = 'a'.repeat(64);
+
+    it('confirms a ban that is present on the relay', async () => {
+      vi.useFakeTimers();
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, result: [pubkey] }),
+      });
+
+      const promise = verifyPubkeyBanned(API_URL, pubkey);
+      await vi.advanceTimersByTimeAsync(500);
+
+      await expect(promise).resolves.toBe(true);
+      vi.useRealTimers();
+    });
+
+    it('reports not-banned when the relay does not list the pubkey', async () => {
+      vi.useFakeTimers();
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, result: [] }),
+      });
+
+      const promise = verifyPubkeyBanned(API_URL, pubkey);
+      await vi.advanceTimersByTimeAsync(500);
+
+      await expect(promise).resolves.toBe(false);
+      vi.useRealTimers();
+    });
+
+    it('returns null instead of claiming success when the check itself fails', async () => {
+      vi.useFakeTimers();
+      mockFetch.mockRejectedValueOnce(new Error('network down'));
+
+      const promise = verifyPubkeyBanned(API_URL, pubkey);
+      await vi.advanceTimersByTimeAsync(500);
+
+      await expect(promise).resolves.toBeNull();
+      vi.useRealTimers();
+    });
+  });
+
+  describe('verifyPubkeyUnbanned', () => {
+    const pubkey = 'a'.repeat(64);
+
+    it('confirms an unban when the pubkey is absent', async () => {
+      vi.useFakeTimers();
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, result: [] }),
+      });
+
+      const promise = verifyPubkeyUnbanned(API_URL, pubkey);
+      await vi.advanceTimersByTimeAsync(500);
+
+      await expect(promise).resolves.toBe(true);
+      vi.useRealTimers();
+    });
+
+    it('returns null instead of claiming success when the check itself fails', async () => {
+      vi.useFakeTimers();
+      mockFetch.mockRejectedValueOnce(new Error('network down'));
+
+      const promise = verifyPubkeyUnbanned(API_URL, pubkey);
+      await vi.advanceTimersByTimeAsync(500);
+
+      await expect(promise).resolves.toBeNull();
+      vi.useRealTimers();
+    });
+  });
+
+  describe('verifyEventDeleted', () => {
+    const eventId = 'b'.repeat(64);
+
+    beforeEach(() => {
+      FakeWebSocket.instances = [];
+      vi.stubGlobal('WebSocket', FakeWebSocket as unknown as typeof WebSocket);
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    });
+
+    it('confirms deletion when the relay returns EOSE with no event', async () => {
+      const promise = verifyEventDeleted(eventId, RELAY_URL);
+      await vi.advanceTimersByTimeAsync(1000);
+
+      const ws = FakeWebSocket.instances[0];
+      ws.onopen?.();
+      ws.onmessage?.({ data: JSON.stringify(['EOSE', 'sub']) });
+
+      await expect(promise).resolves.toBe(true);
+    });
+
+    it('reports still-present when the relay returns the event', async () => {
+      const promise = verifyEventDeleted(eventId, RELAY_URL);
+      await vi.advanceTimersByTimeAsync(1000);
+
+      const ws = FakeWebSocket.instances[0];
+      ws.onopen?.();
+      ws.onmessage?.({ data: JSON.stringify(['EVENT', 'sub', { id: eventId }]) });
+
+      await expect(promise).resolves.toBe(false);
+    });
+
+    it('returns null when the socket errors rather than assuming deletion', async () => {
+      const promise = verifyEventDeleted(eventId, RELAY_URL);
+      await vi.advanceTimersByTimeAsync(1000);
+
+      FakeWebSocket.instances[0].onerror?.();
+
+      await expect(promise).resolves.toBeNull();
+    });
+
+    it('returns null when the relay never answers rather than assuming deletion', async () => {
+      const promise = verifyEventDeleted(eventId, RELAY_URL);
+      await vi.advanceTimersByTimeAsync(1000);
+
+      // Relay accepts the socket but never sends EOSE — the timeout path.
+      FakeWebSocket.instances[0].onopen?.();
+      await vi.advanceTimersByTimeAsync(5000);
+
+      await expect(promise).resolves.toBeNull();
+    });
+
+    it('returns null when the socket cannot be constructed at all', async () => {
+      vi.stubGlobal('WebSocket', function () {
+        throw new Error('blocked');
+      } as unknown as typeof WebSocket);
+
+      const promise = verifyEventDeleted(eventId, RELAY_URL);
+      await vi.advanceTimersByTimeAsync(1000);
+
+      await expect(promise).resolves.toBeNull();
     });
   });
 
