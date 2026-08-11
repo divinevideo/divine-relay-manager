@@ -17,6 +17,7 @@ import { Server, FileText, Users, Settings, Flag, Tag, Bug, GripVertical, Clock 
 import { useAppContext } from "@/hooks/useAppContext";
 import AdminBar from "@/components/AdminBar";
 import { DivineLoginButton } from "@/components/auth/DivineLoginButton";
+import { AttributionNotice } from "@/components/auth/AttributionNotice";
 
 // Tab definitions in default order (Reports first for moderation workflow)
 const TAB_DEFINITIONS = [
@@ -172,8 +173,13 @@ export function RelayManager() {
         </div>
       </header>
 
-      <div className="flex-1 min-h-0 overflow-hidden container mx-auto px-4 py-4">
-        <Tabs value={currentTab} onValueChange={handleTabChange} className="h-full flex flex-col">
+      {/* Column layout so anything above the tabs (the attribution notice) takes
+          its height out of the tab area instead of pushing the bottom of every
+          tab past `overflow-hidden`. `h-full` on Tabs would claim the full
+          container height regardless of the notice. */}
+      <div className="flex-1 min-h-0 overflow-hidden container mx-auto px-4 py-4 flex flex-col">
+        <AttributionNotice />
+        <Tabs value={currentTab} onValueChange={handleTabChange} className="flex-1 min-h-0 flex flex-col">
           <TabsList className="shrink-0 grid w-full grid-cols-7">
             {orderedTabs.map((tab) => {
               const Icon = tab.icon;

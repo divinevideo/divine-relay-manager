@@ -1,7 +1,7 @@
 // ABOUTME: Tests for the Divine Relay Admin API client
-// ABOUTME: Covers signing, publishing, moderation actions, and NIP-86 RPC
+// ABOUTME: Covers signing, publishing, moderation actions, post-action verification, and NIP-86 RPC
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   getWorkerInfo,
   getAccountStatus,
@@ -25,8 +25,12 @@ import {
   markAsReviewed,
   moderateMedia,
   verifyAgeRestricted,
+  verifyPubkeyBanned,
+  verifyPubkeyUnbanned,
+  verifyEventDeleted,
   logDecision,
   getDecisions,
+  deleteDecisions,
   extractMediaHashes,
   isBlockedMediaAction,
   updateAgeReviewCase,
@@ -46,6 +50,23 @@ global.fetch = mockFetch;
 
 // Test API URL
 const API_URL = 'https://test-api.example.com';
+const RELAY_URL = 'wss://relay.test.example.com';
+
+/** Minimal WebSocket double whose behaviour each test drives explicitly. */
+class FakeWebSocket {
+  static instances: FakeWebSocket[] = [];
+  onopen: (() => void) | null = null;
+  onmessage: ((e: { data: string }) => void) | null = null;
+  onerror: (() => void) | null = null;
+  closed = false;
+
+  constructor(public url: string) {
+    FakeWebSocket.instances.push(this);
+  }
+
+  send() { /* the tests drive responses directly */ }
+  close() { this.closed = true; }
+}
 
 describe('adminApi', () => {
   beforeEach(() => {
@@ -962,6 +983,148 @@ describe('adminApi', () => {
     });
   });
 
+  // The verifiers must never report success they did not observe: an
+  // unreachable relay resolves null ("could not confirm"), never true.
+  describe('verifyPubkeyBanned', () => {
+    const pubkey = 'a'.repeat(64);
+
+    it('confirms a ban that is present on the relay', async () => {
+      vi.useFakeTimers();
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, result: [pubkey] }),
+      });
+
+      const promise = verifyPubkeyBanned(API_URL, pubkey);
+      await vi.advanceTimersByTimeAsync(500);
+
+      await expect(promise).resolves.toBe(true);
+      vi.useRealTimers();
+    });
+
+    it('reports not-banned when the relay does not list the pubkey', async () => {
+      vi.useFakeTimers();
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, result: [] }),
+      });
+
+      const promise = verifyPubkeyBanned(API_URL, pubkey);
+      await vi.advanceTimersByTimeAsync(500);
+
+      await expect(promise).resolves.toBe(false);
+      vi.useRealTimers();
+    });
+
+    it('returns null instead of claiming success when the check itself fails', async () => {
+      vi.useFakeTimers();
+      mockFetch.mockRejectedValueOnce(new Error('network down'));
+
+      const promise = verifyPubkeyBanned(API_URL, pubkey);
+      await vi.advanceTimersByTimeAsync(500);
+
+      await expect(promise).resolves.toBeNull();
+      vi.useRealTimers();
+    });
+  });
+
+  describe('verifyPubkeyUnbanned', () => {
+    const pubkey = 'a'.repeat(64);
+
+    it('confirms an unban when the pubkey is absent', async () => {
+      vi.useFakeTimers();
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, result: [] }),
+      });
+
+      const promise = verifyPubkeyUnbanned(API_URL, pubkey);
+      await vi.advanceTimersByTimeAsync(500);
+
+      await expect(promise).resolves.toBe(true);
+      vi.useRealTimers();
+    });
+
+    it('returns null instead of claiming success when the check itself fails', async () => {
+      vi.useFakeTimers();
+      mockFetch.mockRejectedValueOnce(new Error('network down'));
+
+      const promise = verifyPubkeyUnbanned(API_URL, pubkey);
+      await vi.advanceTimersByTimeAsync(500);
+
+      await expect(promise).resolves.toBeNull();
+      vi.useRealTimers();
+    });
+  });
+
+  describe('verifyEventDeleted', () => {
+    const eventId = 'b'.repeat(64);
+
+    beforeEach(() => {
+      FakeWebSocket.instances = [];
+      vi.stubGlobal('WebSocket', FakeWebSocket as unknown as typeof WebSocket);
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    });
+
+    it('confirms deletion when the relay returns EOSE with no event', async () => {
+      const promise = verifyEventDeleted(eventId, RELAY_URL);
+      await vi.advanceTimersByTimeAsync(1000);
+
+      const ws = FakeWebSocket.instances[0];
+      ws.onopen?.();
+      ws.onmessage?.({ data: JSON.stringify(['EOSE', 'sub']) });
+
+      await expect(promise).resolves.toBe(true);
+    });
+
+    it('reports still-present when the relay returns the event', async () => {
+      const promise = verifyEventDeleted(eventId, RELAY_URL);
+      await vi.advanceTimersByTimeAsync(1000);
+
+      const ws = FakeWebSocket.instances[0];
+      ws.onopen?.();
+      ws.onmessage?.({ data: JSON.stringify(['EVENT', 'sub', { id: eventId }]) });
+
+      await expect(promise).resolves.toBe(false);
+    });
+
+    it('returns null when the socket errors rather than assuming deletion', async () => {
+      const promise = verifyEventDeleted(eventId, RELAY_URL);
+      await vi.advanceTimersByTimeAsync(1000);
+
+      FakeWebSocket.instances[0].onerror?.();
+
+      await expect(promise).resolves.toBeNull();
+    });
+
+    it('returns null when the relay never answers rather than assuming deletion', async () => {
+      const promise = verifyEventDeleted(eventId, RELAY_URL);
+      await vi.advanceTimersByTimeAsync(1000);
+
+      // Relay accepts the socket but never sends EOSE — the timeout path.
+      FakeWebSocket.instances[0].onopen?.();
+      await vi.advanceTimersByTimeAsync(5000);
+
+      await expect(promise).resolves.toBeNull();
+    });
+
+    it('returns null when the socket cannot be constructed at all', async () => {
+      vi.stubGlobal('WebSocket', function () {
+        throw new Error('blocked');
+      } as unknown as typeof WebSocket);
+
+      const promise = verifyEventDeleted(eventId, RELAY_URL);
+      await vi.advanceTimersByTimeAsync(1000);
+
+      await expect(promise).resolves.toBeNull();
+    });
+  });
+
   describe('verifyAgeRestricted', () => {
     it('returns true when status is AGE_RESTRICTED after delay', async () => {
       vi.useFakeTimers();
@@ -1115,6 +1278,67 @@ describe('adminApi', () => {
       const result = await getDecisions(API_URL, 'event123');
 
       expect(result).toEqual([]);
+    });
+  });
+
+  // A reopen deletes the D1 decisions unconditionally but clears the relay's
+  // resolution labels best-effort. If this client drops the flag, the caller
+  // reports a clean reopen for a report that is still hidden.
+  describe('deleteDecisions', () => {
+    it('surfaces labelCleanupFailed so a partial reopen is not reported as clean', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, deleted: 3, labelCleanupFailed: true }),
+      });
+
+      const result = await deleteDecisions(API_URL, 'event123');
+
+      expect(result).toEqual({ deleted: 3, labelCleanupFailed: true });
+    });
+
+    it('reports a clean reopen when every label was cleared', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, deleted: 2, labelCleanupFailed: false }),
+      });
+
+      expect(await deleteDecisions(API_URL, 'event123')).toEqual({ deleted: 2, labelCleanupFailed: false });
+    });
+
+    // An older worker omits the field entirely; absence must not read as failure.
+    it('treats a missing labelCleanupFailed as no failure', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, deleted: 1 }),
+      });
+
+      expect(await deleteDecisions(API_URL, 'event123')).toEqual({ deleted: 1, labelCleanupFailed: false });
+    });
+
+    // A resolution label carries an 'e' tag or a 'p' tag, never both, so the
+    // type lets the worker skip the query that could not have matched. Without
+    // it the worker checks both, and a stall on the dead one reports a failed
+    // cleanup that no retry can fix.
+    it('names the target type so the worker skips the filter that cannot match', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, deleted: 1, labelCleanupFailed: false }),
+      });
+
+      await deleteDecisions(API_URL, 'event123', 'event');
+
+      expect(mockFetch.mock.calls[0][0]).toContain('/api/decisions/event123?targetType=event');
+    });
+
+    it('omits the target type when it is not known', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, deleted: 1, labelCleanupFailed: false }),
+      });
+
+      await deleteDecisions(API_URL, 'event123');
+
+      expect(mockFetch.mock.calls[0][0]).not.toContain('targetType');
     });
   });
 

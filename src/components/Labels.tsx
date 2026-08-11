@@ -143,7 +143,7 @@ export function Labels({ relayUrl }: LabelsProps) {
         const verified = await verifyPubkeyBanned(pubkey);
         setVerificationResult({
           pubkey,
-          success: verified,
+          success: verified === true,
           message: verified
             ? 'Ban verified - user is in banned list'
             : 'Warning: User may not be banned',

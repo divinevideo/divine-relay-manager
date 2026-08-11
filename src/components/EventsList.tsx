@@ -2,7 +2,6 @@ import { useState, useEffect, useRef, useMemo } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery, useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNostr } from "@/hooks/useNostr";
-import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { useAuthor } from "@/hooks/useAuthor";
 import { useToast } from "@/hooks/useToast";
 import { nip19 } from "nostr-tools";
@@ -346,7 +345,6 @@ function EventCard({
 
 export function EventsList({ relayUrl }: EventsListProps) {
   const { nostr } = useNostr();
-  const { user } = useCurrentUser();
   const { toast } = useToast();
   const { callRelayRpc, banEvent, allowEvent, verifyEventDeleted } = useAdminApi();
   const queryClient = useQueryClient();
@@ -566,14 +564,14 @@ export function EventsList({ relayUrl }: EventsListProps) {
   const { data: bannedEvents } = useQuery({
     queryKey: ['banned-events'],
     queryFn: () => callRelayRpc<Array<{ id: string; reason?: string }>>('listbannedevents'),
-    enabled: !!relayUrl && !!user,
+    enabled: !!relayUrl,
   });
 
   // Query for events needing moderation
   const { data: eventsNeedingModeration } = useQuery({
     queryKey: ['events-needing-moderation', relayUrl],
     queryFn: () => callRelayRpc<Array<{ id: string; reason?: string }>>('listeventsneedingmoderation'),
-    enabled: !!relayUrl && !!user,
+    enabled: !!relayUrl,
   });
 
   // Query for all reports to check which users/events have been reported
@@ -658,7 +656,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
           const isDeleted = await verifyEventDeleted(eventId);
           setVerificationResult({
             eventId,
-            success: isDeleted,
+            success: isDeleted === true,
             message: isDeleted
               ? 'Event ban verified - event removed from relay'
               : 'Warning: Event may still exist on relay',

@@ -397,12 +397,18 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     retry: false,
   });
 
+  // resolvedTargets is subtractive: these labels HIDE work already handled, so
+  // a failed fetch makes the queue bigger and wrong rather than smaller and
+  // safe (#221). One retry, because a single slow relay read should not cost a
+  // moderator their whole resolution filter -- this is the only polling query
+  // here that retries, for that reason. Surfacing the incompleteness in the UI
+  // belongs to #221, which reports per-source completeness from the worker.
   const { data: resolutionLabels } = useQuery({
     queryKey: ['resolution-labels', relayUrl],
     queryFn: fetchResolutionLabels,
     refetchInterval: 15 * 1000,
     placeholderData: (previousData) => previousData,
-    retry: false,
+    retry: 1,
   });
 
   // Query banned pubkeys from relay (NIP-86 RPC)
@@ -443,8 +449,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // Query all moderation decisions from our D1 database.
   // retry: false is intentional — placeholderData keeps stale data visible on failure,
   // and refetchInterval (15s) provides automatic recovery. This avoids stacking retries
-  // on cold-start timeouts which compound latency. (Previously retry: 2, changed to
-  // match the resilience pattern across all polling queries in this component.)
+  // on cold-start timeouts which compound latency. (Previously retry: 2.) The
+  // resolution-labels query above is the one deliberate exception.
   const { data: allDecisions, isLoading: decisionsLoading } = useQuery({
     queryKey: ['decisions'],
     queryFn: async () => {
@@ -895,7 +901,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     );
   }
 
-  if (error) {
+  // Full-pane error only when there is nothing to show. When a REFRESH fails
+  // (e.g. the worker 502s on a relay timeout), the last good list stays
+  // rendered with a stale-data warning below. Replacing a populated queue
+  // with an error pane (or, before the worker fix, with silent emptiness)
+  // made one slow poll look like "no reports pending".
+  if (error && !reports) {
     return (
       <Alert variant="destructive">
         <AlertDescription>
@@ -1000,6 +1011,16 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
               </Button>
             </div>
           </div>
+
+          {/* Refresh failed but we still hold a previous list: warn instead of
+              blanking the queue. The poll keeps retrying every 15s. */}
+          {error && (
+            <Alert variant="destructive" className="mt-2 py-2">
+              <AlertDescription className="text-xs">
+                Live refresh is failing. Showing reports loaded {lastUpdatedText || 'earlier'}; retrying automatically.
+              </AlertDescription>
+            </Alert>
+          )}
 
           {/* View mode toggle */}
           <Tabs value={viewMode} onValueChange={(v) => setViewMode(v as 'consolidated' | 'individual')} className="mt-2">

@@ -3,7 +3,15 @@
 
 import { parseKind0Profile, type ReportedProfile } from './report-note';
 
-// Query relay for events matching a filter
+// Query relay for events matching a filter.
+//
+// Follows the #186 contract: `success` answers "did the relay confirm the end
+// of the set (EOSE)?" -- a timeout, an early close, or a NIP-01 CLOSED are all
+// `success: false`, so an absence-sensitive caller (/api/reports, reopen's
+// label cleanup) can never mistake an unconfirmed read for a confirmed empty
+// one. Every outcome still carries the events that did arrive. `complete` is
+// retained (optional, only set on EOSE) so callers that adopted the interim
+// flag-based contract keep type-checking; it is an alias of the confirmed path.
 export async function queryRelay(
   filter: object,
   relayUrl: string
@@ -15,12 +23,22 @@ export async function queryRelay(
       const events: object[] = [];
       const subId = `query-${Date.now()}`;
 
+      // Closing is best-effort cleanup, so a throw from it must not escape and
+      // strand the promise. Every exit resolves before closing, so swallowing
+      // here is what guarantees settlement.
+      const closeQuietly = () => {
+        try {
+          ws.close();
+        } catch (err) {
+          console.warn('[queryRelay] socket close threw:', err);
+        }
+      };
+
       const timeout = setTimeout(() => {
         if (!resolved) {
           resolved = true;
-          ws.close();
-          // Timed out without EOSE: results may be truncated, so absence is unconfirmed.
-          resolve({ success: true, events, complete: false });
+          resolve({ success: false, events: events.slice(), error: `Relay query timed out before EOSE (${events.length} events received)` });
+          closeQuietly();
         }
       }, 5000);
 
@@ -29,6 +47,7 @@ export async function queryRelay(
       });
 
       ws.addEventListener('message', (msg) => {
+        if (resolved) return;
         try {
           const data = JSON.parse(msg.data as string);
           if (data[0] === 'EVENT' && data[1] === subId) {
@@ -36,9 +55,19 @@ export async function queryRelay(
           } else if (data[0] === 'EOSE' && data[1] === subId) {
             clearTimeout(timeout);
             resolved = true;
-            ws.close();
             // EOSE = relay confirmed end of stored events, so an empty result is real.
             resolve({ success: true, events, complete: true });
+            closeQuietly();
+          } else if (data[0] === 'CLOSED' && data[1] === subId) {
+            // NIP-01: the relay ended the subscription instead of fulfilling it,
+            // with a machine-readable reason. Without this branch the socket sits
+            // until the timeout, so a failure the relay already reported gets
+            // called a timeout instead, 5s later than it needed to be.
+            clearTimeout(timeout);
+            resolved = true;
+            const reason = typeof data[2] === 'string' && data[2] ? data[2] : 'no reason given';
+            resolve({ success: false, events: events.slice(), error: `Relay closed the subscription: ${reason}` });
+            closeQuietly();
           }
         } catch {
           // Ignore parse errors
@@ -49,7 +78,8 @@ export async function queryRelay(
         if (!resolved) {
           clearTimeout(timeout);
           resolved = true;
-          resolve({ success: false, error: 'WebSocket error' });
+          resolve({ success: false, events: events.slice(), error: 'WebSocket error' });
+          closeQuietly();
         }
       });
 
@@ -57,8 +87,10 @@ export async function queryRelay(
         if (!resolved) {
           clearTimeout(timeout);
           resolved = true;
-          // Closed before EOSE: absence is unconfirmed.
-          resolve({ success: true, events, complete: false });
+          // Closed before EOSE: absence is unconfirmed, so this is a failure.
+          // The only exit that does not closeQuietly() -- the socket is already
+          // closing, which is why we are here.
+          resolve({ success: false, events: events.slice(), error: `Relay closed before EOSE (${events.length} events received)` });
         }
       });
     } catch (error) {

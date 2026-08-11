@@ -63,11 +63,12 @@ describe('fetchAccountIdentity lookup outcome', () => {
     expect(res.profile?.name).toBe('Some One');
   });
 
-  // queryRelay resolves { success: true, events: [], complete: false } when the
-  // socket closes or times out before EOSE. Only EOSE proves the relay had
-  // nothing; an unconfirmed absence must not count as a completed lookup, or a
-  // dropped connection excludes the case from backfill exactly as a hard error
-  // would have.
+  // queryRelay resolves { success: false, events } when the socket closes or
+  // times out before EOSE (the #186 contract; fetchAccountIdentity reads
+  // `complete ?? success`, so it lands on false either way). Only EOSE proves
+  // the relay had nothing; an unconfirmed absence must not count as a completed
+  // lookup, or a dropped connection excludes the case from backfill exactly as
+  // a hard error would have.
   it('reports an incomplete lookup when the relay closed before EOSE', async () => {
     vi.spyOn(globalThis, 'WebSocket').mockImplementation((function () {
       const listeners = new Map<string, Array<(value?: unknown) => void>>();

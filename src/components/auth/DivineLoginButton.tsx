@@ -5,7 +5,7 @@ import { LogIn, LogOut } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useDivineSession } from '@/hooks/useDivineSession';
-import { useToast } from '@/hooks/useToast';
+import { useStartSignIn } from '@/hooks/useStartSignIn';
 
 function shortPubkey(pubkey: string): string {
   return `${pubkey.slice(0, 8)}...${pubkey.slice(-4)}`;
@@ -13,20 +13,8 @@ function shortPubkey(pubkey: string): string {
 
 export function DivineLoginButton() {
   const { user, metadata } = useCurrentUser();
-  const { startLogin, logout, isResolving } = useDivineSession();
-  const { toast } = useToast();
-
-  // startLogin builds the authorize URL (can reject on a network failure) before
-  // redirecting; surface that instead of silently doing nothing.
-  const handleSignIn = () => {
-    startLogin(`${window.location.pathname}${window.location.search}`).catch((e) => {
-      toast({
-        title: 'Could not start sign-in',
-        description: e instanceof Error ? e.message : 'Please try again.',
-        variant: 'destructive',
-      });
-    });
-  };
+  const { logout, isResolving } = useDivineSession();
+  const handleSignIn = useStartSignIn();
 
   if (isResolving) {
     return <div className="h-9 w-24 animate-pulse rounded-md bg-muted" aria-hidden />;
