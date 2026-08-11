@@ -35,6 +35,7 @@ import { handleBulkModerateEnqueue, handleBulkJobStatus, processBulkJob } from '
 import type { BulkJobMessage } from '../../shared/bulk-moderation';
 import { ensureZendeskTable, addZendeskInternalNote, syncZendeskAfterAction } from './zendesk-sync';
 import { buildReportNote, parseKind0Profile, type ReportedProfile } from './report-note';
+import { queryRelay, withTimeout, ENRICHMENT_TIMEOUT_MS } from './relay-profile';
 
 let schemaReady = false;
 async function ensureSchemaOnce(db: D1Database): Promise<void> {
@@ -1816,125 +1817,6 @@ async function handleModerateMedia(
   }
 }
 
-// Query relay for events matching a filter
-async function queryRelay(
-  filter: object,
-  relayUrl: string
-): Promise<{ success: boolean; events?: object[]; error?: string }> {
-  return new Promise((resolve) => {
-    try {
-      const ws = new WebSocket(relayUrl);
-      let resolved = false;
-      const events: object[] = [];
-      const subId = `query-${Date.now()}`;
-
-      // Timeout and close-before-EOSE are failures, not results: only an
-      // EOSE-complete response may report success. A relay answering slower
-      // than this timeout must stay distinguishable from "the queue is
-      // empty", or one slow poll silently blanks the moderation queue.
-      //
-      // Every outcome still carries the events that did arrive. `success`
-      // answers "did the relay confirm the end of the set?", which is the only
-      // question absence-sensitive callers may act on; it does not mean the
-      // partial data is worthless. A caller removing what it can (reopen's
-      // label cleanup) is strictly better off acting on a received event than
-      // discarding it, so the two concerns stay separate.
-
-      // Closing is best-effort cleanup, so a throw from it must not escape.
-      // Of the five exits, close() used to run BEFORE resolve() on three --
-      // timeout, EOSE and CLOSED (the error exit was reordered a commit
-      // earlier; the close exit never calls close() at all). A throw then
-      // stranded the promise with the timeout already cleared and nothing left
-      // to settle it, and on the two inside the message listener the
-      // parse-error catch swallowed it so there was not even a log. queryRelay
-      // would hang and /api/reports would never answer.
-      //
-      // Swallowing here is what guarantees settlement; every exit also resolves
-      // before closing, which is belt-and-braces rather than load-bearing.
-      const closeQuietly = () => {
-        try {
-          ws.close();
-        } catch (err) {
-          // Nothing to recover: the read is already reported and the socket
-          // goes away with the request either way. Logged only because a
-          // close() that throws says something odd about the runtime rather
-          // than about the relay, and is otherwise invisible.
-          console.warn('[queryRelay] socket close threw:', err);
-        }
-      };
-
-      const timeout = setTimeout(() => {
-        if (!resolved) {
-          resolved = true;
-          resolve({ success: false, events: events.slice(), error: `Relay query timed out before EOSE (${events.length} events received)` });
-          closeQuietly();
-        }
-      }, 5000);
-
-      ws.addEventListener('open', () => {
-        ws.send(JSON.stringify(['REQ', subId, filter]));
-      });
-
-      ws.addEventListener('message', (msg) => {
-        // Once the result is handed to the caller the set is final. We send REQ
-        // and never CLOSE, so the relay can still stream a newly published
-        // matching label between EOSE and the socket actually closing; counting
-        // it would ban a label this read never reported, and would move
-        // events.length after the truncation check read it.
-        if (resolved) return;
-        try {
-          const data = JSON.parse(msg.data as string);
-          if (data[0] === 'EVENT' && data[1] === subId) {
-            events.push(data[2]);
-          } else if (data[0] === 'EOSE' && data[1] === subId) {
-            clearTimeout(timeout);
-            resolved = true;
-            // EOSE = relay confirmed end of stored events, so an empty result is real.
-            resolve({ success: true, events });
-            closeQuietly();
-          } else if (data[0] === 'CLOSED' && data[1] === subId) {
-            // NIP-01: the relay ended the subscription instead of fulfilling it,
-            // with a machine-readable reason (funnelcake sends
-            // "error: could not complete query" when its store fails the query).
-            // Without this branch the socket just sits until the timeout, so a
-            // failure the relay already reported gets called a timeout instead,
-            // 5s later than it needed to be.
-            clearTimeout(timeout);
-            resolved = true;
-            const reason = typeof data[2] === 'string' && data[2] ? data[2] : 'no reason given';
-            resolve({ success: false, events: events.slice(), error: `Relay closed the subscription: ${reason}` });
-            closeQuietly();
-          }
-        } catch {
-          // Ignore parse errors
-        }
-      });
-
-      ws.addEventListener('error', () => {
-        if (!resolved) {
-          clearTimeout(timeout);
-          resolved = true;
-          resolve({ success: false, events: events.slice(), error: 'WebSocket error' });
-          closeQuietly();
-        }
-      });
-
-      ws.addEventListener('close', () => {
-        if (!resolved) {
-          clearTimeout(timeout);
-          resolved = true;
-          // Closed before EOSE: absence is unconfirmed, so this is a failure.
-          // The only exit that does not closeQuietly() -- the socket is
-          // already closing, which is why we are here.
-          resolve({ success: false, events: events.slice(), error: `Relay closed before EOSE (${events.length} events received)` });
-        }
-      });
-    } catch (error) {
-      resolve({ success: false, error: error instanceof Error ? error.message : 'Unknown error' });
-    }
-  });
-}
-
 async function publishToRelay(
   event: object,
   relayUrl: string
@@ -2600,19 +2482,6 @@ async function handleZendeskRoutes(
   }
 
   return jsonResponse({ success: false, error: 'Not found' }, 404, corsHeaders);
-}
-
-// Cap best-effort report-note enrichment so a slow relay can't push the Zendesk webhook
-// handler toward Zendesk's delivery timeout. On timeout we post the note without enrichment.
-const ENRICHMENT_TIMEOUT_MS = 3000;
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<null>((resolve) => {
-    timer = setTimeout(() => resolve(null), ms);
-  });
-  return Promise.race([promise, timeout]).finally(() => {
-    if (timer !== undefined) clearTimeout(timer);
-  });
 }
 
 // Parse content report ticket and store mapping, add helpful links as internal note

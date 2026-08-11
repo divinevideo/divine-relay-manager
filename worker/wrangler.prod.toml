@@ -97,6 +97,10 @@ ALLOWED_ORIGINS = "https://relay.admin.divine.video,https://app.divine.video,htt
 NIP98_PUBLIC_HOST_ALLOWLIST = "api.divine.video"
 # CDN domain for media proxy (Blossom admin bypass for blocked content preview)
 CDN_DOMAIN = "media.divine.video"
+# Identity domain used to derive an account's NIP-05 from its username when a
+# moderator creates a minor account. Divine NIP-05 is the subdomain form,
+# `_@<username>.<NIP05_DOMAIN>`. Left unset, no NIP-05 is recorded on that path.
+NIP05_DOMAIN = "divine.video"
 # Slack webhook for age review deadline alerts (add via: wrangler secret put SLACK_WEBHOOK_URL --config wrangler.prod.toml)
 # SLACK_WEBHOOK_URL — not in [vars] because it's a secret
 # Zendesk custom field IDs for auto-solve required fields

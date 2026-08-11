@@ -4,6 +4,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ReportWatcher, type ReportWatcherEnv, type ReportEvent, type ReportWatcherStatus, type AutoHideConfig } from './ReportWatcher';
 
+vi.mock('./relay-profile', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./relay-profile')>();
+  return {
+    ...actual,
+    fetchAccountIdentity: vi.fn().mockResolvedValue({ completed: true, profile: null }),
+  };
+});
+
 vi.mock('./keycast-client', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./keycast-client')>();
   return {
@@ -12,6 +20,7 @@ vi.mock('./keycast-client', async (importOriginal) => {
   };
 });
 import { getUserStatus } from './keycast-client';
+import { fetchAccountIdentity } from './relay-profile';
 
 // Mock WebSocket instances created during tests
 let mockWebSockets: MockWebSocket[] = [];
@@ -1559,6 +1568,153 @@ describe('ReportWatcher', () => {
         );
         expect(insertCall).toBeDefined();
       }, { timeout: 2000 });
+    });
+
+    // Identity capture (#213). A suspended account's content is hidden from relay
+    // queries, so the readable name has to be recorded when the case opens; it
+    // cannot be resolved on read afterwards.
+    function bindCallsFor(fragment: string): unknown[][] {
+      const prepareMock = ageEnv.DB!.prepare as ReturnType<typeof vi.fn>;
+      const matched = prepareMock.mock.calls
+        .map((c, i) => ({ sql: String(c[0]), stmt: prepareMock.mock.results[i]?.value }))
+        .filter((entry) => entry.sql.includes(fragment));
+      return matched.flatMap((entry) =>
+        (entry.stmt?.bind as ReturnType<typeof vi.fn> | undefined)?.mock.calls ?? []
+      );
+    }
+
+    async function sendUnderageReport(reportId: string, reportedPubkey: string) {
+      await ageWatcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+      getLastMockWebSocket()!.simulateMessage(JSON.stringify(['EVENT', 'auto-hide-reports', {
+        id: reportId,
+        pubkey: 'reporter_pubkey',
+        kind: 1984,
+        content: 'Underage user report',
+        tags: [
+          ['p', reportedPubkey],
+          ['l', 'NS-underageUser', 'social.nos.ontology'],
+          ['client', 'diVine'],
+        ],
+        created_at: Math.floor(Date.now() / 1000),
+      }]));
+      await vi.waitFor(() => {
+        expect((ageEnv.DB!.prepare as ReturnType<typeof vi.fn>).mock.calls.some(
+          (c: unknown[]) => typeof c[0] === 'string' && c[0].includes('age_review_cases') && c[0].includes('INSERT')
+        )).toBe(true);
+      }, { timeout: 2000 });
+    }
+
+    /**
+     * Identity binds on the main INSERT, by position:
+     * 7 name, 8 nip05, 9 vine username, 10 identity_captured_at.
+     * Membership assertions cannot distinguish these -- the row already binds
+     * a deadline ISO timestamp, so a "some bind looks like a date" check passes
+     * even when identity_captured_at is dropped entirely.
+     */
+    function identityBinds(expectedArity = 11) {
+      // The SQL filter also matches the dedup SELECT and the decision log, and
+      // flattening them together silently shifts every position. Pick the bind
+      // call belonging to the INSERT itself, by its arity.
+      const call = bindCallsFor('INSERT INTO age_review_cases')
+        .find((binds: unknown[]) => binds.length === expectedArity);
+      if (!call) throw new Error(`no INSERT bind call with ${expectedArity} params`);
+      const [, , , , , , , name, nip05, vineUsername, capturedAt] = call as unknown[];
+      return expectedArity === 11
+        ? { name, nip05, vineUsername, capturedAt }
+        // Auto-clear binds fewer leading columns: id, pubkey, reporter, report, then identity.
+        : { name: call[4], nip05: call[5], vineUsername: call[6], capturedAt: call[7] };
+    }
+
+    it('records the captured handle on the case', async () => {
+      mockGetUserStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: false });
+      vi.mocked(fetchAccountIdentity).mockResolvedValue({
+        completed: true,
+        profile: { name: 'Some One', nip05: 'x@y.z', isVineImport: false, vineUsername: undefined },
+      });
+
+      await sendUnderageReport('identity_report_1', 'reported_identity_1');
+
+      expect(fetchAccountIdentity).toHaveBeenCalledWith('reported_identity_1', expect.anything());
+      const { name, nip05 } = identityBinds();
+      expect(name).toBe('Some One');
+      expect(nip05).toBe('x@y.z');
+    });
+
+    it('stamps identity_captured_at when the relay answered but had no profile', async () => {
+      mockGetUserStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: false });
+      vi.mocked(fetchAccountIdentity).mockResolvedValue({ completed: true, profile: null });
+
+      await sendUnderageReport('identity_report_2', 'reported_identity_2');
+
+      const insertSql = (ageEnv.DB!.prepare as ReturnType<typeof vi.fn>).mock.calls
+        .map((c: unknown[]) => String(c[0]))
+        .find((sql) => sql.includes('INSERT INTO age_review_cases'));
+      expect(insertSql).toContain('identity_captured_at');
+
+      // "Looked, found nothing" -- distinct from "never looked", which is what
+      // the backfill uses to decide which rows to retry.
+      const { name, capturedAt } = identityBinds();
+      expect(name).toBeNull();
+      expect(capturedAt).toEqual(expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/));
+    });
+
+    /**
+     * The case this whole column exists for. A relay that times out or refuses
+     * the socket has told us nothing about the account, so stamping would mark
+     * the row "already looked" and exclude it from the backfill permanently --
+     * just as enforcement is about to hide the profile for good.
+     */
+    it('leaves identity_captured_at null when the lookup never completed', async () => {
+      mockGetUserStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: false });
+      vi.mocked(fetchAccountIdentity).mockResolvedValue({ completed: false, profile: null });
+
+      await sendUnderageReport('identity_report_5', 'reported_identity_5');
+
+      expect(identityBinds().capturedAt).toBeNull();
+    });
+
+    it('leaves identity_captured_at null when the lookup throws', async () => {
+      mockGetUserStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: false });
+      vi.mocked(fetchAccountIdentity).mockRejectedValue(new Error('relay down'));
+
+      await sendUnderageReport('identity_report_3', 'reported_identity_3');
+
+      expect(mockDbRun).toHaveBeenCalled();
+      expect(identityBinds().capturedAt).toBeNull();
+    });
+
+    // The auto-clear branch is a second, independent copy of the capture and
+    // stamp logic. Asserting membership here would let a bind reorder or a
+    // reintroduced unconditional stamp pass unnoticed on this path while the
+    // main path stayed covered, so it gets the same positional treatment.
+    it('records the captured identity on the auto-clear path too', async () => {
+      mockGetUserStatus.mockResolvedValue({
+        success: true, pubkey: 'reported_identity_4', status: 'active', verified_minor: true,
+      });
+      vi.mocked(fetchAccountIdentity).mockResolvedValue({
+        completed: true,
+        profile: { name: 'Cleared Person', nip05: 'x@y.z', isVineImport: false, vineUsername: 'ogname' },
+      });
+
+      await sendUnderageReport('identity_report_4', 'reported_identity_4');
+
+      const { name, nip05, vineUsername, capturedAt } = identityBinds(8);
+      expect(name).toBe('Cleared Person');
+      expect(nip05).toBe('x@y.z');
+      expect(vineUsername).toBe('ogname');
+      expect(capturedAt).toEqual(expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/));
+    });
+
+    it('leaves identity_captured_at null on the auto-clear path when the lookup never completed', async () => {
+      mockGetUserStatus.mockResolvedValue({
+        success: true, pubkey: 'reported_identity_6', status: 'active', verified_minor: true,
+      });
+      vi.mocked(fetchAccountIdentity).mockResolvedValue({ completed: false, profile: null });
+
+      await sendUnderageReport('identity_report_6', 'reported_identity_6');
+
+      expect(identityBinds(8).capturedAt).toBeNull();
     });
 
     it('should auto-clear age review case for verified minors', async () => {
