@@ -12,8 +12,25 @@ export interface DivineSessionValue {
   pubkey: string | undefined;
   /** Signer bound to the current session token, or null when signed out. */
   signer: NostrSigner | null;
+  /**
+   * A session exists, whether or not its moderator identity resolved. Gate UI on
+   * this rather than on `useCurrentUser().user`, which additionally requires the
+   * pubkey: relay management authenticates through the worker (CF Access service
+   * token / X-Admin-Key), so it does not need the moderator's identity, and
+   * gating it on the pubkey locks out exactly the session `identityUnavailable`
+   * describes -- which would still be told to "log in" while already signed in.
+   */
+  isSignedIn: boolean;
   /** True until the session (and, with a token, the pubkey) has resolved. */
   isResolving: boolean;
+  /**
+   * A real session whose moderator identity could not be resolved: the login
+   * succeeded but getPublicKey did not yield a canonical pubkey (an account with
+   * no Keycast-managed key, an RPC failure, a token without signing scope).
+   * Actions still work (CF Access is the access gate) but record no attribution,
+   * so the UI must say so and offer a way out rather than rendering "Sign in".
+   */
+  identityUnavailable: boolean;
   /**
    * Snapshot the moderator pubkey for an audit write. Captures the signer at
    * call time (call at action START so a later logout/switch can't retarget a
@@ -32,7 +49,9 @@ export const DivineSessionContext = createContext<DivineSessionValue>({
   credentials: null,
   pubkey: undefined,
   signer: null,
+  isSignedIn: false,
   isResolving: false,
+  identityUnavailable: false,
   getModeratorPubkey: async () => undefined,
   startLogin: sdkStartLogin,
   logout: () => {},
