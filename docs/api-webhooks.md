@@ -4,7 +4,7 @@
 
 The Divine Relay Manager exposes several API endpoints for integration with external systems like Zendesk (ticket report parsing, decision sync, age-review replies). Note: Zendesk does **not** execute moderation actions. Moderation is performed in Relay Manager; Zendesk only receives decision updates back. The former inbound moderation-execution path has been retired (see the note under `POST /api/zendesk/webhook`).
 
-**Base URL:** `https://api-relay.divine.video` (or `https://relay.admin.divine.video/api`)
+**Base URL:** `https://api-relay-prod.divine.video` (production) or `https://api-relay-staging.divine.video` (staging)
 
 ## Authentication
 
@@ -309,15 +309,36 @@ Get all decisions for a target.
 
 ### DELETE /api/decisions/:targetId
 
-Delete all decisions for a target (reopen a dismissed report).
+Delete all decisions for a target (reopen a dismissed report), and remove the
+target's relay-side resolution labels (kind 1985, `L=moderation/resolution`).
+
+**Query parameters:**
+
+| Name | Values | Default |
+|------|--------|---------|
+| `targetType` | `event` \| `pubkey` | both label tags are queried |
+
+A resolution label carries an `e` tag for an event target or a `p` tag for a
+pubkey target, never both, so naming the type skips the query that could not
+match. Any other value — absent, empty, wrong case, junk — falls back to
+querying both, which is what an older frontend gets.
 
 **Response:**
 ```json
 {
   "success": true,
-  "deleted": 2
+  "deleted": 2,
+  "labelsDeleted": 1,
+  "labelCleanupFailed": false
 }
 ```
+
+The D1 decision rows are deleted unconditionally; the relay-side label cleanup
+is best-effort. `labelCleanupFailed: true` means at least one resolution label
+may have survived — the label read failed, it filled its page so there may be
+more beyond it, or a label was read but could not be removed. A surviving label
+keeps the report hidden even though its decisions are gone, so callers must
+surface this rather than reporting a clean reopen.
 
 ---
 
@@ -341,7 +362,7 @@ In Zendesk Admin > Objects and rules > Tickets > Fields:
 
 In Zendesk Admin > Apps and integrations > Webhooks:
 
-- **Endpoint URL:** `https://api-relay.divine.video/api/zendesk/webhook`
+- **Endpoint URL:** `https://api-relay-prod.divine.video/api/zendesk/webhook`
 - **Request method:** POST
 - **Request format:** JSON
 - **Authentication:** None (signature verification used instead)
@@ -369,13 +390,14 @@ In Zendesk Admin > Objects and rules > Business rules > Triggers:
 
 ### 4. Set Environment Variables
 
-In `worker/wrangler.toml` or Cloudflare dashboard:
+In the per-environment `worker/wrangler.{local,staging,prod}.toml` or the
+Cloudflare dashboard:
 
 ```bash
-wrangler secret put ZENDESK_WEBHOOK_SECRET
+npx wrangler secret put ZENDESK_WEBHOOK_SECRET --config wrangler.prod.toml
 # Enter the signing secret from Zendesk webhook settings
 
-wrangler secret put ZENDESK_JWT_SECRET
+npx wrangler secret put ZENDESK_JWT_SECRET --config wrangler.prod.toml
 # Enter a shared secret for JWT tokens (for sidebar app)
 ```
 
@@ -403,7 +425,7 @@ Currently no rate limits are enforced, but aggressive use may trigger Cloudflare
 
 **Ban a user:**
 ```bash
-curl -X POST https://api-relay.divine.video/api/moderate \
+curl -X POST https://api-relay-prod.divine.video/api/moderate \
   -H "Content-Type: application/json" \
   -H "CF-Access-Client-Id: $CF_CLIENT_ID" \
   -H "CF-Access-Client-Secret: $CF_CLIENT_SECRET" \
@@ -412,14 +434,14 @@ curl -X POST https://api-relay.divine.video/api/moderate \
 
 **Check media status:**
 ```bash
-curl https://api-relay.divine.video/api/check-result/abc123... \
+curl https://api-relay-prod.divine.video/api/check-result/abc123... \
   -H "CF-Access-Client-Id: $CF_CLIENT_ID" \
   -H "CF-Access-Client-Secret: $CF_CLIENT_SECRET"
 ```
 
 **Delete an event:**
 ```bash
-curl -X POST https://api-relay.divine.video/api/moderate \
+curl -X POST https://api-relay-prod.divine.video/api/moderate \
   -H "Content-Type: application/json" \
   -H "CF-Access-Client-Id: $CF_CLIENT_ID" \
   -H "CF-Access-Client-Secret: $CF_CLIENT_SECRET" \

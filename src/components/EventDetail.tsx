@@ -10,6 +10,7 @@ import { useModerationStatus } from "@/hooks/useModerationStatus";
 import { useToast } from "@/hooks/useToast";
 import { getKindInfo, getKindCategory } from "@/lib/kindNames";
 import { useAdminApi } from "@/hooks/useAdminApi";
+import { useAgeReviewGuardRedirect } from "@/hooks/useAgeReviewGuardRedirect";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { UserIdentifier } from "@/components/UserIdentifier";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -70,6 +71,10 @@ interface EventDetailProps {
   onSelectPubkey?: (pubkey: string) => void;
   onViewReports?: (pubkey: string) => void;
 }
+
+// Shown when verification could not be completed, so neither "confirmed" nor
+// "not applied" is a statement we are entitled to make.
+const VERIFICATION_INCONCLUSIVE = 'Verification failed - could not check status';
 
 // Extract URLs from content
 function extractUrls(content: string): string[] {
@@ -359,6 +364,7 @@ function TagsTable({ tags }: { tags: string[][] }) {
 export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReports }: EventDetailProps) {
   const { nostr } = useNostr();
   const { toast } = useToast();
+  const redirectIfGuarded = useAgeReviewGuardRedirect();
   const { banPubkey, deleteEvent, unbanPubkey, allowEvent, verifyPubkeyBanned, verifyPubkeyUnbanned, verifyEventDeleted, logDecision } = useAdminApi();
   const { getModeratorPubkey } = useCurrentUser();
   const queryClient = useQueryClient();
@@ -438,10 +444,12 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
         const verified = await verifyPubkeyBanned(pubkey);
         setVerificationResult({
           type: 'ban',
-          success: verified,
-          message: verified
-            ? 'User ban verified - pubkey is in banned list'
-            : 'Warning: User may not be banned - not found in banned list',
+          success: verified === true,
+          message: verified === null
+            ? VERIFICATION_INCONCLUSIVE
+            : verified
+              ? 'User ban verified - pubkey is in banned list'
+              : 'Warning: User may not be banned - not found in banned list',
         });
         toast({
           title: verified ? "Ban Verified" : "Verification Warning",
@@ -488,10 +496,12 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
         const verified = await verifyEventDeleted(eventId);
         setVerificationResult({
           type: 'delete',
-          success: verified,
-          message: verified
-            ? 'Event deletion verified - no longer accessible on relay'
-            : 'Warning: Event may still be accessible on relay',
+          success: verified === true,
+          message: verified === null
+            ? VERIFICATION_INCONCLUSIVE
+            : verified
+              ? 'Event deletion verified - no longer accessible on relay'
+              : 'Warning: Event may still be accessible on relay',
         });
         toast({
           title: verified ? "Deletion Verified" : "Verification Warning",
@@ -544,10 +554,12 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
         const verified = await verifyPubkeyUnbanned(pubkey);
         setVerificationResult({
           type: 'ban',
-          success: verified,
-          message: verified
-            ? 'Unban verified - user is no longer in banned list'
-            : 'Warning: User may still be banned',
+          success: verified === true,
+          message: verified === null
+            ? VERIFICATION_INCONCLUSIVE
+            : verified
+              ? 'Unban verified - user is no longer in banned list'
+              : 'Warning: User may still be banned',
         });
       } catch {
         setVerificationResult({
@@ -559,7 +571,8 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
         setIsVerifying(false);
       }
     },
-    onError: (error: Error) => {
+    onError: (error: Error, variables: { pubkey: string }) => {
+      if (redirectIfGuarded(error, variables.pubkey)) return;
       toast({
         title: "Failed to unban user",
         description: error.message,
@@ -605,26 +618,30 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
         const verified = await verifyPubkeyBanned(event.pubkey);
         setVerificationResult({
           type: 'ban',
-          success: verified,
-          message: verified
-            ? 'User ban verified - pubkey is in banned list'
-            : 'User is NOT in banned list',
+          success: verified === true,
+          message: verified === null
+            ? VERIFICATION_INCONCLUSIVE
+            : verified
+              ? 'User ban verified - pubkey is in banned list'
+              : 'User is NOT in banned list',
         });
       } else {
         const verified = await verifyEventDeleted(event.id);
         setVerificationResult({
           type: 'delete',
-          success: verified,
-          message: verified
-            ? 'Event is deleted from relay'
-            : 'Event is still accessible on relay',
+          success: verified === true,
+          message: verified === null
+            ? VERIFICATION_INCONCLUSIVE
+            : verified
+              ? 'Event is deleted from relay'
+              : 'Event is still accessible on relay',
         });
       }
     } catch {
       setVerificationResult({
         type,
         success: false,
-        message: 'Verification failed - could not check status',
+        message: VERIFICATION_INCONCLUSIVE,
       });
     } finally {
       setIsVerifying(false);

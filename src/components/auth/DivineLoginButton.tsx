@@ -5,7 +5,7 @@ import { AlertTriangle, LogIn, LogOut } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useDivineSession } from '@/hooks/useDivineSession';
-import { useToast } from '@/hooks/useToast';
+import { useStartSignIn } from '@/hooks/useStartSignIn';
 
 function shortPubkey(pubkey: string): string {
   return `${pubkey.slice(0, 8)}...${pubkey.slice(-4)}`;
@@ -13,20 +13,10 @@ function shortPubkey(pubkey: string): string {
 
 export function DivineLoginButton() {
   const { user, metadata } = useCurrentUser();
-  const { startLogin, logout, isResolving, isSignedIn, identityUnavailable } = useDivineSession();
-  const { toast } = useToast();
-
-  // startLogin builds the authorize URL (can reject on a network failure) before
-  // redirecting; surface that instead of silently doing nothing.
-  const handleSignIn = () => {
-    startLogin(`${window.location.pathname}${window.location.search}`).catch((e) => {
-      toast({
-        title: 'Could not start sign-in',
-        description: e instanceof Error ? e.message : 'Please try again.',
-        variant: 'destructive',
-      });
-    });
-  };
+  const { logout, isResolving, isSignedIn, identityUnavailable } = useDivineSession();
+  // Shared so the header button and the attribution notice cannot drift on how
+  // sign-in is started or how a failed start is surfaced.
+  const handleSignIn = useStartSignIn();
 
   if (isResolving) {
     return (

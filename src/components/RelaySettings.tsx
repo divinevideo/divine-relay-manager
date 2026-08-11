@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useDivineSession } from "@/hooks/useDivineSession";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -21,7 +20,6 @@ interface RelaySettingsProps {
 
 
 export function RelaySettings({ relayUrl }: RelaySettingsProps) {
-  const { isSignedIn } = useDivineSession();
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const { callRelayRpc } = useAdminApi();
@@ -41,14 +39,14 @@ export function RelaySettings({ relayUrl }: RelaySettingsProps) {
   const { data: allowedKinds, isLoading: loadingKinds, error: kindsError } = useQuery({
     queryKey: ['allowed-kinds', relayUrl],
     queryFn: () => callRelayRpc<number[]>('listallowedkinds'),
-    enabled: !!relayUrl && isSignedIn,
+    enabled: !!relayUrl,
   });
 
   // Query for blocked IPs
   const { data: blockedIps, isLoading: loadingIps, error: ipsError } = useQuery({
     queryKey: ['blocked-ips', relayUrl],
     queryFn: () => callRelayRpc<Array<{ ip: string; reason?: string }>>('listblockedips'),
-    enabled: !!relayUrl && isSignedIn,
+    enabled: !!relayUrl,
   });
 
   // Mutation for changing relay name
@@ -216,16 +214,6 @@ export function RelaySettings({ relayUrl }: RelaySettingsProps) {
     }
     blockIpMutation.mutate({ ip: newIp.trim(), reason: newIpReason.trim() || undefined });
   };
-
-  if (!isSignedIn) {
-    return (
-      <Alert>
-        <AlertDescription>
-          Please log in to manage relay settings.
-        </AlertDescription>
-      </Alert>
-    );
-  }
 
   return (
     <div className="space-y-6">

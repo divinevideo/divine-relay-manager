@@ -21,7 +21,7 @@ Configure these in: **Cloudflare Dashboard → Pages → [project] → Settings 
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `VITE_RELAY_URL` | WebSocket URL of the Nostr relay | `wss://relay.dvines.org` |
+| `VITE_RELAY_URL` | WebSocket URL of the Nostr relay | `wss://relay.divine.video` |
 
 You can set different values per environment:
 - **Production** (main branch): Your production relay
@@ -36,19 +36,30 @@ npm run build
 npx wrangler pages deploy dist --project-name=divine-relay-admin
 ```
 
+### Frontend artifact path
+
+Root `public/` contains Vite static source files such as `_redirects` and
+`manifest.json`. `npm run build` emits the deployable frontend artifact to
+`dist/`, and the build script copies `dist/index.html` to `dist/404.html` for
+SPA fallback routing. Cloudflare Pages deploys `dist/` per the root
+`wrangler.toml`; the API Worker serves no static assets and has no asset
+binding.
+
 ---
 
 ## Worker Deployment (Cloudflare Workers)
 
 ### Environment Variables
 
-Configure in `worker/wrangler.toml` `[vars]` section or override in Cloudflare Dashboard.
+Configure in the `[vars]` section of the per-environment `worker/wrangler.local.toml`,
+`worker/wrangler.staging.toml`, and `worker/wrangler.prod.toml`, or override in the
+Cloudflare Dashboard. There is no root `worker/wrangler.toml`.
 
 | Variable | Required | Description | Example |
 |----------|----------|-------------|---------|
-| `RELAY_URL` | Yes | WebSocket URL of the Nostr relay | `wss://relay.dvines.org` |
-| `MANAGEMENT_PATH` | No | Path for NIP-86 management API (default: `/management`) | `/management` |
-| `MODERATION_SERVICE_URL` | No | URL for media moderation service | `https://moderation.admin.divine.video` |
+| `RELAY_URL` | Yes | WebSocket URL of the Nostr relay | `wss://relay.divine.video` |
+| `MANAGEMENT_PATH` | No | Path for NIP-86 management API (default: `/management`) | `/` |
+| `MODERATION_SERVICE_URL` | No | URL for media moderation service | `https://moderation-api.divine.video` |
 | `ALLOWED_ORIGINS` | Yes | Comma-separated allowed CORS origins | `https://relay.admin.divine.video,*.pages.dev` |
 
 ### Secrets (must be set via CLI or Dashboard)
@@ -67,49 +78,53 @@ Configure in `worker/wrangler.toml` `[vars]` section or override in Cloudflare D
 Set secrets via CLI:
 ```bash
 cd worker
-wrangler secret put NOSTR_NSEC
-wrangler secret put ANTHROPIC_API_KEY
+npx wrangler secret put NOSTR_NSEC --config wrangler.prod.toml
+npx wrangler secret put ANTHROPIC_API_KEY --config wrangler.prod.toml
 # ... etc
 ```
 
 ### Deploy
 
+There is no default worker config, so `--config` is required on every command.
+Never deploy with `wrangler.local.toml`.
+
 ```bash
 cd worker
 npm install
-wrangler deploy
+npx wrangler deploy --config wrangler.staging.toml   # staging
+npx wrangler deploy --config wrangler.prod.toml      # production
 ```
 
 ---
 
 ## Environment Configurations
 
-### Production (relay.dvines.org)
-
-**Frontend (Pages):**
-```
-VITE_RELAY_URL=wss://relay.dvines.org
-```
-
-**Worker (wrangler.toml):**
-```toml
-[vars]
-RELAY_URL = "wss://relay.dvines.org"
-MANAGEMENT_PATH = "/management"
-```
-
-### Staging (relay.divine.video)
+### Production (relay.divine.video)
 
 **Frontend (Pages):**
 ```
 VITE_RELAY_URL=wss://relay.divine.video
 ```
 
-**Worker (wrangler.toml):**
+**Worker (`worker/wrangler.prod.toml`):**
 ```toml
 [vars]
 RELAY_URL = "wss://relay.divine.video"
-MANAGEMENT_PATH = "/management"
+MANAGEMENT_PATH = "/"
+```
+
+### Staging (relay.staging.divine.video)
+
+**Frontend (Pages):**
+```
+VITE_RELAY_URL=wss://relay.staging.divine.video
+```
+
+**Worker (`worker/wrangler.staging.toml`):**
+```toml
+[vars]
+RELAY_URL = "wss://relay.staging.divine.video"
+MANAGEMENT_PATH = "/"
 ```
 
 ---
@@ -131,7 +146,7 @@ MANAGEMENT_PATH = "/management"
 4. For worker development:
    ```bash
    cd worker
-   wrangler dev
+   npx wrangler dev --config wrangler.local.toml
    ```
 
 ---
@@ -141,7 +156,7 @@ MANAGEMENT_PATH = "/management"
 ### Check Worker Configuration
 
 ```bash
-curl https://relay.admin.divine.video/api/info
+curl https://api-relay-prod.divine.video/api/info
 ```
 
 Expected response:
@@ -150,14 +165,14 @@ Expected response:
   "success": true,
   "pubkey": "...",
   "npub": "npub1...",
-  "relay": "wss://relay.dvines.org"
+  "relay": "wss://relay.divine.video"
 }
 ```
 
 ### Test NIP-86 Management API
 
 ```bash
-curl -X POST https://relay.admin.divine.video/api/relay-rpc \
+curl -X POST https://api-relay-prod.divine.video/api/relay-rpc \
   -H "Content-Type: application/json" \
   -d '{"method": "supportedmethods", "params": []}'
 ```
@@ -167,7 +182,9 @@ curl -X POST https://relay.admin.divine.video/api/relay-rpc \
 ## Troubleshooting
 
 ### "Relay error: 404" on management calls
-- Verify `MANAGEMENT_PATH` is set correctly (Funnelcake uses `/management`)
+- Verify `MANAGEMENT_PATH` is set correctly (Funnelcake serves NIP-86 at `/`,
+  which is what both deployed configs set; the worker's built-in default is
+  `/management` and will 404 against Funnelcake)
 - Check that the relay supports NIP-86
 
 ### CORS errors in browser

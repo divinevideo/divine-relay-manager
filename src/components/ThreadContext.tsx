@@ -36,10 +36,10 @@ interface ThreadContextProps {
   replies?: NostrEvent[];
   /** The reported user's pubkey — their comment rows are flagged */
   reportedPubkey?: string | null;
-  /** True when the event is known to be deleted from the relay */
-  isEventDeleted?: boolean;
-  /** True when the user is known to be banned from the relay */
-  isUserBanned?: boolean;
+  /** True when the event is known to be deleted, false when known present, null when the check could not answer */
+  isEventDeleted?: boolean | null;
+  /** True when the user is known to be banned, false when known unbanned, null when the check could not answer */
+  isUserBanned?: boolean | null;
   /** When the moderation status was last verified */
   checkedAt?: Date | null;
   /** Callback to re-check moderation status */
@@ -300,12 +300,30 @@ export function ThreadContext({
       );
     }
 
+    // Each half of the summary line is stated only for the outcomes it was
+    // actually told. A check that could not answer says so rather than
+    // borrowing the negative wording.
+    // `false` here is not "the normal queries missed it" — it is the direct
+    // verification REQ getting the event back (adminApi.ts resolves false only
+    // on an EVENT match). Reporting that as "not found" states the inverse of
+    // what the check observed.
+    const eventLine = isEventDeleted === false
+      ? 'Event is still on the relay.'
+      : isEventDeleted === null
+        ? 'Could not check whether the event is on the relay.'
+        : null;
+    const userLine = isUserBanned === false
+      ? 'User is not banned.'
+      : isUserBanned === null
+        ? "Could not check the user's ban status."
+        : null;
+
     if (isEventDeleted || isUserBanned || checkedAt) {
       return (
         <div className="space-y-3">
           {/* Moderation status results */}
           <div className="rounded-md border bg-muted/30 p-3 space-y-2">
-            {isEventDeleted && (
+            {isEventDeleted === true && (
               <div className="flex items-center gap-2 p-2 rounded bg-green-100 dark:bg-green-950/50">
                 <ShieldX className="h-4 w-4 text-green-600 shrink-0" />
                 <span className="text-sm font-medium text-green-700 dark:text-green-400">
@@ -313,7 +331,7 @@ export function ThreadContext({
                 </span>
               </div>
             )}
-            {isUserBanned && (
+            {isUserBanned === true && (
               <div className="flex items-center gap-2 p-2 rounded bg-green-100 dark:bg-green-950/50">
                 <Ban className="h-4 w-4 text-green-600 shrink-0" />
                 <span className="text-sm font-medium text-green-700 dark:text-green-400">
@@ -321,11 +339,11 @@ export function ThreadContext({
                 </span>
               </div>
             )}
-            {checkedAt && !isEventDeleted && !isUserBanned && (
+            {checkedAt && isEventDeleted !== true && isUserBanned !== true && (eventLine || userLine) && (
               <div className="flex items-center gap-2 p-2 rounded bg-yellow-100 dark:bg-yellow-950/50">
                 <AlertTriangle className="h-4 w-4 text-yellow-600 shrink-0" />
                 <span className="text-sm font-medium text-yellow-700 dark:text-yellow-400">
-                  Event not found on relay. User is not banned.
+                  {[eventLine, userLine].filter(Boolean).join(' ')}
                 </span>
               </div>
             )}

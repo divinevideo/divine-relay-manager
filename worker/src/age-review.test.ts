@@ -16,6 +16,7 @@ import {
   bucketModerationCounts,
   fetchZendeskTagCount,
   handleGetAgeReviewFunnel,
+  ageReviewActiveGuard,
   type AgeReviewEnv,
 } from './age-review';
 import type { AgeReviewCase } from '../../shared/age-review';
@@ -2070,17 +2071,17 @@ describe('handleGetAgeReviewFunnel', () => {
     { state: 'denied_closed', created_via: 'report', c: 1 },
     { state: 'submitted_for_review', created_via: 'report', c: 4 },
   ];
-  const mockDb = {
+  const makeMockDb = () => ({
     prepare: vi.fn().mockReturnValue({
       bind: vi.fn().mockReturnValue({ all: vi.fn().mockResolvedValue({ results: groupRows }) }),
     }),
-  };
+  });
   const req = new Request('https://api.test/api/age-review/funnel?age_band=age_13_15');
 
   afterEach(() => { vi.unstubAllGlobals(); });
 
   it('returns moderation counts and nulls helpdesk when Zendesk creds are absent', async () => {
-    const env = makeEnv(mockDb); // no ZENDESK_* set
+    const env = makeEnv(makeMockDb()); // no ZENDESK_* set
     const res = await handleGetAgeReviewFunnel(req, env, cors);
     const body = await res.json() as import('../../shared/age-review').AgeReviewFunnelResponse;
 
@@ -2094,7 +2095,7 @@ describe('handleGetAgeReviewFunnel', () => {
 
   it('populates helpdesk counts when Zendesk creds resolve', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ count: 9 }) }));
-    const env = makeEnv(mockDb, {
+    const env = makeEnv(makeMockDb(), {
       ZENDESK_SUBDOMAIN: 'rabblelabs', ZENDESK_EMAIL: 'a@b.co', ZENDESK_API_TOKEN: 'tok',
     });
     const res = await handleGetAgeReviewFunnel(req, env, cors);
@@ -2107,7 +2108,7 @@ describe('handleGetAgeReviewFunnel', () => {
 
   it('keeps moderation counts and nulls helpdesk when Zendesk creds resolve but the call fails', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('zendesk down')));
-    const env = makeEnv(mockDb, {
+    const env = makeEnv(makeMockDb(), {
       ZENDESK_SUBDOMAIN: 'rabblelabs', ZENDESK_EMAIL: 'a@b.co', ZENDESK_API_TOKEN: 'tok',
     });
     const res = await handleGetAgeReviewFunnel(req, env, cors);
@@ -2120,7 +2121,7 @@ describe('handleGetAgeReviewFunnel', () => {
   });
 
   it('keeps moderation counts and nulls helpdesk when Zendesk secret resolution fails', async () => {
-    const env = makeEnv(mockDb, {
+    const env = makeEnv(makeMockDb(), {
       ZENDESK_SUBDOMAIN: { get: vi.fn().mockRejectedValue(new Error('secret store down')) },
       ZENDESK_EMAIL: 'a@b.co',
       ZENDESK_API_TOKEN: 'tok',
@@ -2137,7 +2138,7 @@ describe('handleGetAgeReviewFunnel', () => {
   it('counts each helpdesk stage with the exact shared criteria query', async () => {
     const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ count: 9 }) });
     vi.stubGlobal('fetch', mockFetch);
-    const env = makeEnv(mockDb, {
+    const env = makeEnv(makeMockDb(), {
       ZENDESK_SUBDOMAIN: 'rabblelabs', ZENDESK_EMAIL: 'a@b.co', ZENDESK_API_TOKEN: 'tok',
     });
     await handleGetAgeReviewFunnel(req, env, cors);
@@ -2148,5 +2149,25 @@ describe('handleGetAgeReviewFunnel', () => {
     for (const query of Object.values(FUNNEL_ZENDESK_QUERIES)) {
       expect(calledUrls.some((u) => u.includes(encodeURIComponent(query)))).toBe(true);
     }
+  });
+});
+
+describe('ageReviewActiveGuard — non-canonical pubkey', () => {
+  // Skipped in BOTH modes, deliberately. A case is keyed to a real lowercase pubkey,
+  // so a non-canonical value cannot have one to skip past -- there is nothing for the
+  // guard to protect. handleRelayRpc rejects these outright on the enforce direction;
+  // the reverse direction is allowed to carry them so a row banned with a bad value
+  // stays removable, and that only works if the guard lets it through.
+  const CORS = { 'Access-Control-Allow-Origin': 'https://app.divine.video' };
+  const envWithDb = { DB: { prepare: () => ({ bind: () => ({ first: async () => null }) }) } } as unknown as AgeReviewEnv;
+
+  it('proceeds under failClosed, because no case can be keyed to it', async () => {
+    const response = await ageReviewActiveGuard('NOT_CANONICAL_HEX', envWithDb, CORS, 'err', { failClosed: true });
+    expect(response).toBeNull();
+  });
+
+  it('proceeds when not failing closed', async () => {
+    const response = await ageReviewActiveGuard('NOT_CANONICAL_HEX', envWithDb, CORS, 'err');
+    expect(response).toBeNull();
   });
 });

@@ -69,14 +69,14 @@ Requires Node.js 22.
 ```bash
 npm run dev          # install deps and start the Vite dev server (http://localhost:5173)
 npm run test         # type-check, lint, run Vitest, and build
-npx tsc --noEmit     # type-check only
+npx tsc -p tsconfig.app.json --noEmit   # type-check only
 ```
 
 Worker development lives under `worker/`:
 
 ```bash
 cd worker
-npm run dev          # wrangler dev
+npm run dev          # wrangler dev --config wrangler.local.toml
 npm run test:run     # worker unit tests
 npm run typecheck    # tsc --noEmit
 ```
@@ -117,6 +117,9 @@ secrets. The wrangler configs are the authoritative list of vars and bindings pe
 The frontend deploys to Cloudflare Pages and the Worker to Cloudflare Workers. There is **no
 root worker `wrangler.toml`** — each Worker environment has its own config, and you must pass
 `--config` explicitly. The root `wrangler.toml` configures only the Pages build output.
+Root `public/` contains Vite static source files; `npm run build` emits the deployable frontend
+artifact to `dist/`, including the SPA `404.html` copy. The API Worker serves no static assets
+and has no asset binding.
 
 Deploy the Worker first, then the frontend back-to-back, because the two version independently
 and there is no version negotiation between them:

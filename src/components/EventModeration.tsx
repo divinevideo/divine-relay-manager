@@ -89,7 +89,7 @@ export function EventModeration() {
         const isDeleted = await verifyEventDeleted(eventId);
         setVerificationResult({
           eventId,
-          success: isDeleted,
+          success: isDeleted === true,
           message: isDeleted
             ? 'Event ban verified - event removed from relay'
             : 'Warning: Event may still exist on relay',

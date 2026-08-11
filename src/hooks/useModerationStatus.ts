@@ -31,12 +31,18 @@ export function useModerationStatus(
   eventNotFound?: boolean,
 ): ModerationStatus {
   const { listBannedPubkeys, listBannedEvents, listSuspendedPubkeys, verifyEventDeleted, verifyPubkeyBanned } = useAdminApi();
+  // `undefined` and `null` are different states here and the difference is the
+  // point: `undefined` means no check has run, so the ban lists are the best
+  // evidence available, while `null` means a check ran and could not answer.
+  // Falling back to the lists in the second case would turn "we could not
+  // reach the relay" into a definite "not banned", because a failed list query
+  // resolves to `[]` above.
   const [wsResult, setWsResult] = useState<{
-    userBanned: boolean | null;
-    eventGone: boolean | null;
+    userBanned: boolean | null | undefined;
+    eventGone: boolean | null | undefined;
     checkedAt: Date | null;
     isChecking: boolean;
-  }>({ userBanned: null, eventGone: null, checkedAt: null, isChecking: false });
+  }>({ userBanned: undefined, eventGone: undefined, checkedAt: null, isChecking: false });
 
   // Track which report we've auto-checked to avoid re-running on every render
   const autoCheckedRef = useRef<string | null>(null);
@@ -97,9 +103,12 @@ export function useModerationStatus(
   const runCheck = useCallback(async () => {
     setWsResult(prev => ({ ...prev, isChecking: true }));
     try {
-      const results: { userBanned: boolean | null; eventGone: boolean | null } = {
-        userBanned: null,
-        eventGone: null,
+      const results: {
+        userBanned: boolean | null | undefined;
+        eventGone: boolean | null | undefined;
+      } = {
+        userBanned: undefined,
+        eventGone: undefined,
       };
 
       if (pubkey) {
@@ -146,18 +155,30 @@ export function useModerationStatus(
 
   // Reset when report changes
   useEffect(() => {
-    setWsResult({ userBanned: null, eventGone: null, checkedAt: null, isChecking: false });
+    setWsResult({ userBanned: undefined, eventGone: undefined, checkedAt: null, isChecking: false });
     autoCheckedRef.current = null;
   }, [eventId, pubkey]);
 
   return {
-    // User ban: WebSocket check result takes precedence over ban list
-    isUserBanned: wsResult.userBanned ?? isUserBannedFromList,
+    // User ban: a completed check wins over the ban list. When the check could
+    // not answer, the list may still settle it — but only positively. A list
+    // `false` is untrustworthy here, because a failed list query resolves to
+    // `[]` above and so looks identical to "not in the list". A list `true`
+    // cannot be produced that way: membership is evidence either way.
+    isUserBanned: wsResult.userBanned === undefined
+      ? isUserBannedFromList
+      : wsResult.userBanned === null && isUserBannedFromList === true
+        ? true
+        : wsResult.userBanned,
     isUserSuspended: isUserSuspendedFromList,
     // Event in ban list (separate from "gone" — banned events can be retrieved via admin API)
     isEventBanned: isEventBannedFromList,
     // Event gone from relay (WebSocket verified, or known from ban list)
-    isEventGone: wsResult.eventGone ?? (isEventBannedFromList === true ? true : null),
+    isEventGone: wsResult.eventGone === undefined
+      ? (isEventBannedFromList === true ? true : null)
+      : wsResult.eventGone === null && isEventBannedFromList === true
+        ? true
+        : wsResult.eventGone,
     isLoading: banListsLoading,
     isChecking: wsResult.isChecking,
     checkedAt: wsResult.checkedAt,

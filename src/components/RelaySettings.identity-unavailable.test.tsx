@@ -97,12 +97,15 @@ describe('RelaySettings gate regressions', () => {
     await waitFor(() => expect(callRelayRpc).toHaveBeenCalledWith('listallowedkinds'));
   });
 
-  it('a signed-out visitor is still asked to log in and fires no relay RPC', async () => {
+  it('a signed-out visitor still gets relay management data (CF Access is the gate)', async () => {
     session.getSession.mockResolvedValue(null);
 
     renderSettings();
 
-    await waitFor(() => expect(screen.getByText(/please log in to manage relay settings/i)).toBeInTheDocument());
-    expect(callRelayRpc).not.toHaveBeenCalled();
+    // Relay management is not gated on a divine-login session at all (#218): the
+    // worker authorizes these calls via CF Access, so a signed-out visitor whom
+    // CF Access admitted still gets the data and is never walled behind "log in".
+    await waitFor(() => expect(callRelayRpc).toHaveBeenCalledWith('listallowedkinds'));
+    expect(screen.queryByText(/please log in/i)).toBeNull();
   });
 });
