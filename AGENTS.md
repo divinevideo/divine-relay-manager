@@ -252,6 +252,26 @@ This starts:
 - **Caddy HTTPS proxy** on `https://localhost:8788` (terminates TLS, forwards to worker)
 - **Vite frontend** on `https://localhost:5173`
 
+### Backing services
+
+`dev-local.sh` does **not** start these, but the worker calls them. It warns at
+startup for any that are not answering, and continues.
+
+| Service | Where | How to start |
+|---------|-------|--------------|
+| Funnelcake relay | `ws://127.0.0.1:4444` | `cd ~/code/divine-relay-test && ./scripts/relays/setup-funnelcake.sh` |
+| Funnelcake REST API | `http://127.0.0.1:3333` | Same cluster as the relay |
+| moderation-service | `http://127.0.0.1:8789` | `cd ~/code/divine-moderation-service && npx wrangler dev --port 8789 --local` |
+
+Without them, moderation actions and relay reads fail. They do **not** fall
+through to production.
+
+That is a deliberate change. `wrangler.local.toml` used to point these at the
+deployed services, so local dev appeared to work with none of the above running,
+by writing real production moderation decisions and publishing to the production
+relay. `worker/test/local-config-targets-local-stack.test.ts` now fails if any
+local URL points at deployed infrastructure.
+
 Select "Local" in the environment selector. The frontend sends `X-Admin-Key` header (from `VITE_ADMIN_API_KEY`) for admin auth since CF Access isn't available locally.
 
 ### Why HTTPS locally
