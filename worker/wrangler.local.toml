@@ -16,14 +16,31 @@ compatibility_date = "2024-12-01"
 # BLOSSOM_WEBHOOK_SECRET - set via: wrangler secret put BLOSSOM_WEBHOOK_SECRET
 
 [vars]
-RELAY_URL = "wss://relay.divine.video"
+# Everything this worker CALLS points at the local stack. Not tidiness: the
+# worker signs and publishes events to RELAY_URL and proxies moderation actions
+# to MODERATION_ADMIN_URL, so a deployed URL here means running the admin UI
+# locally and clicking a button writes to production. test/
+# local-config-targets-local-stack.test.ts enforces this.
+#
+# Local funnelcake, from divine-relay-test (scripts/relays/setup-funnelcake.sh).
+# Plain ws is correct: this is a server-side connection from the worker, so it
+# does not need the Caddy TLS proxy that the browser does.
+RELAY_URL = "ws://127.0.0.1:4444"
 AUTO_HIDE_ENABLED = "false"
 TRUSTED_CLIENTS = "diVine,divine-web,divine-mobile"
 # Path for NIP-86 management API (appended to relay URL converted to HTTPS)
 MANAGEMENT_PATH = "/"
-# URLs for divine-moderation-service (no service binding in local dev)
-MODERATION_SERVICE_URL = "https://moderation-api.divine.video"
-MODERATION_ADMIN_URL = "https://moderation-api.divine.video"
+# Local divine-moderation-service. Run it from its own checkout with:
+#   npx wrangler dev --port 8789 --local
+# 127.0.0.1 rather than localhost on purpose: localhost can resolve to ::1 first,
+# and wrangler dev binds v4 unless told otherwise.
+#
+# These were production URLs, which meant a local moderation action wrote a real
+# production decision. It only ever worked safely because the person running the
+# stack passed `--var MODERATION_ADMIN_URL:...` on the command line, which is a
+# habit, not a safeguard.
+MODERATION_SERVICE_URL = "http://127.0.0.1:8789"
+MODERATION_ADMIN_URL = "http://127.0.0.1:8789"
 REALNESS_API_URL = "https://realness.admin.divine.video"
 # Allow admin UI plus the managed web app and its preview deployments
 ALLOWED_ORIGINS = "https://relay.admin.divine.video,https://app.divine.video,https://*.openvine-app.pages.dev,*.divine-relay-manager.pages.dev,*.divine-relay-admin.pages.dev"
