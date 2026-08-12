@@ -83,12 +83,29 @@ describe('getManagementUrl', () => {
     expect(getManagementUrl(env)).toBe('https://relay.example.com/management');
   });
 
-  it('should handle WS (non-secure) URLs', () => {
+  it('should keep WS (non-secure) URLs on http, not upgrade them to https', () => {
+    // This asserted https, which contradicted its own name and made ws:// unusable:
+    // a local relay serving plain HTTP was called over TLS and every NIP-86
+    // management request failed on the handshake. ws is the insecure scheme and
+    // maps to http, exactly as deriveFunnelcakeApiUrl already does for the same
+    // input.
+    //
+    // Only local dev is affected. wrangler.staging.toml and wrangler.prod.toml
+    // both set RELAY_URL to wss://, which is unchanged.
     const env = {
       RELAY_URL: 'ws://localhost:7777',
       MANAGEMENT_PATH: '/',
     };
-    expect(getManagementUrl(env)).toBe('https://localhost:7777/');
+    expect(getManagementUrl(env)).toBe('http://localhost:7777/');
+  });
+
+  it('still upgrades WSS to HTTPS', () => {
+    // The pair to the above: the secure scheme must not be downgraded.
+    const env = {
+      RELAY_URL: 'wss://relay.example.com',
+      MANAGEMENT_PATH: '/',
+    };
+    expect(getManagementUrl(env)).toBe('https://relay.example.com/');
   });
 });
 

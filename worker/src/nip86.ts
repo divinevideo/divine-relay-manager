@@ -66,7 +66,14 @@ export function getManagementUrl(env: Pick<Nip86Env, 'RELAY_URL' | 'MANAGEMENT_P
   if (env.MANAGEMENT_URL) {
     return env.MANAGEMENT_URL;
   }
-  const baseUrl = env.RELAY_URL.replace(/^wss?:\/\//, 'https://');
+  // Map each scheme to its counterpart rather than forcing https. Collapsing both
+  // onto https made ws:// unusable: a local relay serving plain HTTP was called
+  // over TLS and every management request died on the handshake. This matches
+  // deriveFunnelcakeApiUrl, which already derives the two the same way from the
+  // same value. Deployed configs set wss:// and are unaffected.
+  const baseUrl = env.RELAY_URL
+    .replace(/^wss:\/\//, 'https://')
+    .replace(/^ws:\/\//, 'http://');
   const managementPath = env.MANAGEMENT_PATH || '/management';
   return `${baseUrl}${managementPath}`;
 }
