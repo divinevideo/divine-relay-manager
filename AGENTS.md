@@ -260,7 +260,7 @@ startup for any that are not answering, and continues.
 | Service | Where | How to start |
 |---------|-------|--------------|
 | Funnelcake relay | `ws://127.0.0.1:4444` | `cd ~/code/divine-relay-test && ./scripts/relays/setup-funnelcake.sh` |
-| Funnelcake REST API | `http://127.0.0.1:3333` | Same cluster as the relay |
+| Funnelcake REST API | `http://127.0.0.1:3000` | Same cluster as the relay. Note `setup-funnelcake.sh` prints 3333 on completion; that is stale. |
 | moderation-service | `http://127.0.0.1:8789` | `cd ~/code/divine-moderation-service && npx wrangler dev --port 8789 --local` |
 
 Without them, moderation actions and relay reads fail. They do **not** fall

@@ -29,10 +29,14 @@ compatibility_date = "2024-12-01"
 # does not need the Caddy TLS proxy that the browser does.
 RELAY_URL = "ws://127.0.0.1:4444"
 # Local funnelcake serves the relay and the REST API as two deployments on two
-# ports (relay 4444, API 3333). Production serves both from one host, so the
+# ports (relay 4444, API 3000). Production serves both from one host, so the
 # derived-from-RELAY_URL default is right there and wrong here: without this,
 # every /api/funnelcake/* read and every bulk-moderate video page 404s.
-FUNNELCAKE_API_URL = "http://127.0.0.1:3333"
+#
+# 3000 verified against the running stack, not taken from the setup script --
+# divine-relay-test/scripts/relays/setup-funnelcake.sh prints "API:
+# http://localhost:3333" on completion and that is stale. 3333 answers nothing.
+FUNNELCAKE_API_URL = "http://127.0.0.1:3000"
 AUTO_HIDE_ENABLED = "false"
 TRUSTED_CLIENTS = "diVine,divine-web,divine-mobile"
 # Path for NIP-86 management API. Appended to RELAY_URL with the scheme mapped to
