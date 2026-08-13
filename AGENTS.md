@@ -266,11 +266,16 @@ startup for any that are not answering, and continues.
 Without them, moderation actions and relay reads fail. They do **not** fall
 through to production.
 
-That is a deliberate change. `wrangler.local.toml` used to point these at the
-deployed services, so local dev appeared to work with none of the above running,
-by writing real production moderation decisions and publishing to the production
-relay. `worker/test/local-config-targets-local-stack.test.ts` now fails if any
-local URL points at deployed infrastructure.
+That is a deliberate change. The committed `wrangler.local.toml` used to name
+the deployed services. A machine with a populated `worker/.dev.vars` already
+overrode `RELAY_URL`, `FUNNELCAKE_API_URL` and `MODERATION_ADMIN_URL`, but
+`MODERATION_SERVICE_URL` was not in that file, and a fresh clone or worktree
+gets none of it. The tracked defaults are now local so that safety does not
+depend on an untracked file. `worker/test/local-config-targets-local-stack.test.ts`
+fails if any local URL points at deployed infrastructure.
+
+Do not put those outbound URLs in `worker/.dev.vars`. That file overrides
+`[vars]`; a leftover production value there would undo this fix.
 
 Select "Local" in the environment selector. The frontend sends `X-Admin-Key` header (from `VITE_ADMIN_API_KEY`) for admin auth since CF Access isn't available locally.
 

@@ -35,8 +35,9 @@ fi
 
 # Backing services the worker calls. wrangler.local.toml points at these rather
 # than at deployed infrastructure, so a missing one shows up as a failed action
-# or an empty page. Previously these URLs named production, which is why the
-# stack appeared to "work" without any of this running.
+# or an empty page. The committed file used to name production; a populated
+# worker/.dev.vars already overrode most of those URLs, but a fresh clone or
+# worktree does not, which is why the tracked defaults had to change.
 #
 # A warning rather than an error on purpose: working on the UI alone is a normal
 # thing to do, and it should not require the whole chain.

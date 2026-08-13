@@ -60,7 +60,7 @@ export async function getAdminPubkey(env: Pick<Nip86Env, 'NOSTR_NSEC'>): Promise
 /**
  * Get the NIP-86 management API URL for the configured relay.
  * If MANAGEMENT_URL is set (for local dev with HTTP), use it directly.
- * Otherwise, converts WSS relay URL to HTTPS and appends the management path.
+ * Otherwise, maps wss→https and ws→http, then appends the management path.
  */
 export function getManagementUrl(env: Pick<Nip86Env, 'RELAY_URL' | 'MANAGEMENT_PATH' | 'MANAGEMENT_URL'>): string {
   if (env.MANAGEMENT_URL) {
