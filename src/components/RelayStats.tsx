@@ -7,6 +7,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Progress } from "@/components/ui/progress";
 import { Users, FileText, Shield, Activity, Clock, Globe } from "lucide-react";
+import { normalizeAllowedKinds, type AllowedKindEntry } from "@/lib/allowedKinds";
 
 interface RelayStatsProps {
   relayUrl: string;
@@ -70,7 +71,8 @@ export function RelayStats({ relayUrl }: RelayStatsProps) {
   // Query for allowed kinds
   const { data: allowedKinds, isLoading: loadingKinds } = useQuery({
     queryKey: ['allowed-kinds', relayUrl],
-    queryFn: () => callRelayRpc<number[]>('listallowedkinds'),
+    queryFn: () => callRelayRpc<AllowedKindEntry[]>('listallowedkinds'),
+    select: normalizeAllowedKinds,
     enabled: !!relayUrl,
   });
 
