@@ -944,6 +944,11 @@ function buildAccountIdentityHtml(identity: AgeReviewCaseIdentity & { pubkey?: s
   const nip05 = identity.account_nip05 ? displayNip05(identity.account_nip05.trim()) : undefined;
 
   if (name && !looksLinkish(name)) rows.push(`Display name: ${escapeHtml(name)}`);
+  // The escape here cannot fire: displayNip05's charset already excludes every
+  // HTML-special character, so a markup-bearing value is dropped before it
+  // arrives. Kept so the row does not become the one that forgot, if that
+  // validation is ever loosened. Deliberately not covered by a test -- there is
+  // no input that would reach it.
   if (nip05) rows.push(`Username: ${escapeHtml(nip05)}`);
   if (identity.pubkey) rows.push(`ID: ${escapeHtml(toNpub(identity.pubkey))}`);
   if (rows.length === 0) return '';

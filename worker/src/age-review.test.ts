@@ -2161,16 +2161,13 @@ describe('buildParentOutreachBody', () => {
     expect(html).toContain('Username: alice@example.com');
   });
 
-  it('escapes the NIP-05 and the ID, not just the display name', () => {
-    // account_nip05 is as attacker-controlled as account_name -- both are raw
-    // kind-0 -- and toNpub hands back its input unchanged when the pubkey will
-    // not encode, so neither may reach the parent unescaped.
-    const html = buildParentOutreachBody({
-      pubkey: '<img src=x onerror=alert(1)>',
-      account_nip05: '"><script>alert(1)</script>@evil-domain.test',
-    });
-    expect(html).not.toContain('<script>');
+  it('escapes an ID that could not be encoded as an npub', () => {
+    // toNpub hands back its input unchanged rather than throwing when the
+    // pubkey will not encode, so the ID row is not automatically safe just
+    // because npubs are alphanumeric.
+    const html = buildParentOutreachBody({ pubkey: '<img src=x onerror=alert(1)>' });
     expect(html).not.toContain('<img');
+    expect(html).toContain('&lt;img src=x onerror=alert(1)&gt;');
   });
 
   it('drops a display name that is trying to look like a link', () => {
