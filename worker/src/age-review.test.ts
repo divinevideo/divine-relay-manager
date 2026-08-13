@@ -2220,16 +2220,41 @@ describe('buildParentOutreachBody', () => {
   });
 
   it('drops a NIP-05 that is not actually a NIP-05', () => {
+    // The issuing domain must be supplied, or this asserts nothing: without it
+    // displayNip05 returns early and the shape check never runs.
     const html = buildParentOutreachBody({
       pubkey: 'a'.repeat(64),
       account_nip05: 'http://not-divine.example/claim',
-    });
+    }, 'divine.video');
     expect(html).not.toContain('Username:');
     expect(html).not.toContain('not-divine.example');
   });
 
+  it('drops a NIP-05 smuggling a URL in front of a domain we do issue', () => {
+    // The host really is divine.video, so the domain gate passes it. Only the
+    // shape check stands between this and a live link to evil.example in mail
+    // sent under Divine branding.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_nip05: 'http://evil.example/claim@divine.video',
+    }, 'divine.video');
+    expect(html).not.toContain('Username:');
+    expect(html).not.toContain('evil.example');
+  });
+
+  it('drops a NIP-05 carrying markup in front of a domain we do issue', () => {
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_nip05: '<script>alert(1)</script>@divine.video',
+    }, 'divine.video');
+    expect(html).not.toContain('Username:');
+    expect(html).not.toContain('script');
+  });
+
   it('prints no empty row for a NIP-05 that is only the root prefix', () => {
-    const html = buildParentOutreachBody({ pubkey: 'a'.repeat(64), account_nip05: '_@' });
+    const html = buildParentOutreachBody(
+      { pubkey: 'a'.repeat(64), account_nip05: '_@' }, 'divine.video',
+    );
     expect(html).not.toContain('Username:');
   });
 
@@ -2251,6 +2276,16 @@ describe('buildParentOutreachBody', () => {
     });
     expect(html).toContain(`${'x'.repeat(79)}\u{1F600}\u2026`);
     expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(html)).toBe(false);
+  });
+
+  it('drops a display name carrying a bare IP address', () => {
+    // No letters after the final dot, so the hostname rule alone does not see
+    // this one.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_name: 'Star Girl go to 93.184.216.34/claim',
+    });
+    expect(html).not.toContain('Display name:');
   });
 
   it('drops a display name using a unicode dot to hide a hostname', () => {

@@ -945,7 +945,14 @@ function cleanIdentityText(value: string): string {
  */
 function looksLinkish(value: string): boolean {
   const normalized = value.normalize('NFKC').replace(/[。．｡]/g, '.');
-  return /:\/\/|\bwww\./iu.test(normalized) || /[\p{L}\p{N}-]+\.[\p{L}]{2,}/u.test(normalized);
+  return (
+    /:\/\/|\bwww\./iu.test(normalized) ||
+    /[\p{L}\p{N}-]+\.[\p{L}]{2,}/u.test(normalized) ||
+    // A bare IPv4 host has no letters after the final dot, so the rule above
+    // does not see it. Narrower than widening that suffix class, which would
+    // also drop ordinary names containing a decimal.
+    /\b\d{1,3}(\.\d{1,3}){3}\b/.test(normalized)
+  );
 }
 
 /**
