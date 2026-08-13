@@ -2146,8 +2146,19 @@ describe('buildParentOutreachBody', () => {
     });
     expect(html).toContain('The account under review:');
     expect(html).toContain('Display name: Star Girl');
-    expect(html).toContain('Username: _@stargirl.divine.video');
+    // NIP-05 root identifiers display as the bare domain, so the stored
+    // `_@stargirl.divine.video` must not reach a parent with its prefix.
+    expect(html).toContain('Username: stargirl.divine.video');
+    expect(html).not.toContain('_@');
     expect(html).toMatch(/ID: npub1[a-z0-9]+/);
+  });
+
+  it('leaves a non-root NIP-05 local part alone', () => {
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_nip05: 'alice@example.com',
+    });
+    expect(html).toContain('Username: alice@example.com');
   });
 
   it('omits the rows it has no value for rather than printing empties', () => {

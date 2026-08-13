@@ -882,6 +882,16 @@ function escapeHtml(value: string): string {
 }
 
 /**
+ * NIP-05 calls `_@domain` the "root" identifier and says to display it as the
+ * bare domain (nips/05.md, "Showing just the domain as an identifier"). Divine
+ * issues `_@<username>.divine.video`, so the prefix is noise to a parent. Any
+ * other local part is a real name and is left alone.
+ */
+function displayNip05(nip05: string): string {
+  return nip05.startsWith('_@') ? nip05.slice(2) : nip05;
+}
+
+/**
  * Tells the parent which account this is about.
  *
  * A narrower set than agents get: the contact-notes block also carries the case
@@ -898,7 +908,7 @@ function buildAccountIdentityHtml(identity: AgeReviewCaseIdentity & { pubkey?: s
   const nip05 = identity.account_nip05?.trim();
 
   if (name) rows.push(`Display name: ${escapeHtml(name)}`);
-  if (nip05) rows.push(`Username: ${escapeHtml(nip05)}`);
+  if (nip05) rows.push(`Username: ${escapeHtml(displayNip05(nip05))}`);
   if (identity.pubkey) rows.push(`ID: ${escapeHtml(toNpub(identity.pubkey))}`);
   if (rows.length === 0) return '';
 
