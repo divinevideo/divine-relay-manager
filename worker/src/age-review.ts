@@ -908,8 +908,7 @@ export function buildParentOutreachBody(): string {
     '<p><strong>Please do NOT send government IDs, payment details, school or medical records, ' +
       'or passwords.</strong> We only need the short video.</p>',
     '',
-    `<p>Please reply within ${DEADLINE_DAYS} days. If we do not hear from you, ` +
-      'your child&#39;s account will be deleted.</p>',
+    '<p>Please reply within 15 days. If we do not hear from you, your child&#39;s account will be deleted.</p>',
     '',
     '<p>If you are the account holder and you are 16 or older, reply and tell us that. ' +
       'No video needed, and we will take another look.</p>',
