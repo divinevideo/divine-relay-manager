@@ -7,10 +7,10 @@
 // clicking a button is enough to do it.
 //
 // That was the state of this file: MODERATION_SERVICE_URL, MODERATION_ADMIN_URL
-// and RELAY_URL all named production. The moderation ones were survivable only
-// because whoever ran the stack passed `--var` overrides on the command line,
-// which is a habit rather than a safeguard, and RELAY_URL was not overridden at
-// all.
+// and RELAY_URL all named production. A populated worker/.dev.vars already
+// overrode RELAY_URL and MODERATION_ADMIN_URL on a configured machine, but
+// MODERATION_SERVICE_URL was not in that file, and a fresh clone or worktree
+// gets none of it. The committed defaults were the trap.
 //
 // The check is deliberately inverted: instead of listing the variables that must
 // be local, it finds every variable whose value contains a URL and requires each
@@ -43,6 +43,10 @@ const NOT_AN_OUTBOUND_TARGET: Record<string, string> = {
   // analysis jobs on the deployed service. That is accepted risk, not an
   // absence of risk. Revisit if realness gains a local target.
   REALNESS_API_URL: 'no local equivalent; accepted risk, POST /analyze does reach the deployed service',
+  // handleMediaProxy builds https://${CDN_DOMAIN}/admin/api/blob/... and falls
+  // back to media.divine.video when unset. There is no local blossom, so this
+  // stays the deployed host. A GET with BLOSSOM_WEBHOOK_SECRET, not a write.
+  CDN_DOMAIN: 'no local blossom; accepted risk, GET /admin/api/blob reaches production media',
 };
 
 /**
@@ -56,6 +60,7 @@ const MUST_BE_SET = [
   'FUNNELCAKE_API_URL',
   'MODERATION_SERVICE_URL',
   'MODERATION_ADMIN_URL',
+  'CDN_DOMAIN',
 ];
 
 const LOCAL_HOST_RE = /^(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|[A-Za-z0-9-]+\.localhost)$/;
@@ -109,6 +114,19 @@ function urlsIn(value: string): string[] {
   return [...value.matchAll(URL_RE)].map((m) => m[0]);
 }
 
+// CDN_DOMAIN is a hostname, not a URL. handleMediaProxy still calls
+// https://${CDN_DOMAIN}/..., so a production hostname is the same hazard as a
+// production URL. A dotted host with no scheme must be judged, not skipped.
+const BARE_HOST_RE = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/;
+
+function callTargetsIn(value: string): string[] {
+  const urls = urlsIn(value);
+  if (urls.length) return urls;
+  const trimmed = value.trim();
+  if (BARE_HOST_RE.test(trimmed)) return [`https://${trimmed}`];
+  return [];
+}
+
 /** Hostname, or null when something that looks like a URL will not parse. */
 function hostnameOf(value: string): string | null {
   try {
@@ -126,7 +144,7 @@ describe('wrangler.local.toml', () => {
     const vars = localVars();
     expect(vars.length).toBeGreaterThan(5);
     // And it must be reading real URLs, not just counting lines.
-    expect(vars.flatMap((v) => urlsIn(v.value)).length).toBeGreaterThan(2);
+    expect(vars.flatMap((v) => callTargetsIn(v.value)).length).toBeGreaterThan(2);
   });
 
   it('sets every variable that would otherwise fall back to a deployed default', () => {
@@ -142,7 +160,7 @@ describe('wrangler.local.toml', () => {
   it('points every outbound URL at the local stack', () => {
     const offenders = localVars()
       .filter((v) => !Object.hasOwn(NOT_AN_OUTBOUND_TARGET, v.key))
-      .flatMap((v) => urlsIn(v.value).map((url) => ({ ...v, url })))
+      .flatMap((v) => callTargetsIn(v.value).map((url) => ({ ...v, url })))
       .filter((v) => {
         const host = hostnameOf(v.url);
         // Unparseable is suspicious, not safe: report it rather than skip it.

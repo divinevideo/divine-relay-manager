@@ -47,13 +47,18 @@ MANAGEMENT_PATH = "/"
 # 127.0.0.1 rather than localhost on purpose: localhost can resolve to ::1 first,
 # and wrangler dev binds v4 unless told otherwise.
 #
-# These were production URLs, which meant a local moderation action wrote a real
-# production decision. It only ever worked safely because the person running the
-# stack passed `--var MODERATION_ADMIN_URL:...` on the command line, which is a
-# habit, not a safeguard.
+# These were production URLs in the committed file. A populated worker/.dev.vars
+# already overrode MODERATION_ADMIN_URL (and RELAY_URL) on a configured machine,
+# but MODERATION_SERVICE_URL was not in that file, and a fresh clone or worktree
+# gets none of it. Tracked local values remove that dependence.
 MODERATION_SERVICE_URL = "http://127.0.0.1:8789"
 MODERATION_ADMIN_URL = "http://127.0.0.1:8789"
 REALNESS_API_URL = "https://realness.admin.divine.video"
+# No local blossom. handleMediaProxy GETs https://${CDN_DOMAIN}/admin/api/blob/...
+# with BLOSSOM_WEBHOOK_SECRET. Unset, the worker falls back to media.divine.video
+# anyway. Named here so the guard can see it. Accepted risk: previewing blocked
+# media locally reads production blossom.
+CDN_DOMAIN = "media.divine.video"
 # Allow admin UI plus the managed web app and its preview deployments
 ALLOWED_ORIGINS = "https://relay.admin.divine.video,https://app.divine.video,https://*.openvine-app.pages.dev,*.divine-relay-manager.pages.dev,*.divine-relay-admin.pages.dev"
 # NIP-98 public-host allowlist (#173). Empty for local dev (strict same-host).
