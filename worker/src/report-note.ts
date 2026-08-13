@@ -157,7 +157,7 @@ export function parseKind0Profile(
   };
 }
 
-function toNpub(hex: string): string {
+export function toNpub(hex: string): string {
   try {
     return nip19.npubEncode(hex);
   } catch {

@@ -1593,9 +1593,10 @@ describe('parent contact record', () => {
     expect(payload.ticket.requester.name).toBe('parent@example.com');
     expect(payload.ticket.requester.name).not.toContain('Claimed parent');
     expect(payload.ticket.requester.name).not.toBe('Parent/Guardian');
-    // The outreach ships as html_body now; asserted against `body` this errors
-    // on an undefined receiver rather than checking anything.
-    expect(payload.ticket.comment.html_body).not.toContain('Some One');
+    // The To: header stays address-only. The message body now does name the
+    // account -- a deliberate reversal of #222 for the body alone -- so this
+    // asserts the split rather than a blanket ban on the handle.
+    expect(payload.ticket.comment.html_body).toContain('Some One');
   });
 
   it('writes the identity block to the contact notes', async () => {
@@ -2035,8 +2036,10 @@ describe('handleParentContact Zendesk integration', () => {
     expect(ticketPut.ticket.requester.name).toBe('parent@example.com');
     expect(ticketPut.ticket.requester.name).not.toContain('Some One');
 
-    // Nor may the message body carry it: same unverified address.
-    expect(ticketPut.ticket.comment.html_body).not.toContain('Some One');
+    // The body does name the account, on this path too -- the parent cannot act
+    // on the review without knowing which account it is. Only the To: header is
+    // held back until a reply proves the address.
+    expect(ticketPut.ticket.comment.html_body).toContain('Some One');
 
     // Zendesk sends `body` when both are present, so a plain body reappearing
     // here would silently revert the message to text. This is the branch a
@@ -2135,13 +2138,42 @@ describe('buildParentOutreachBody', () => {
     expect(html).toContain('<a href="https://divine.video/kids">how accounts work for kids on Divine</a>');
   });
 
-  it('names no account and takes nothing that could name one', () => {
-    // #222 keeps the pre-reply message handle-free: it goes to an address the
-    // teen supplied that nobody has verified. The builder therefore takes no
-    // identity at all, so there is nothing for a caller to thread in by
-    // accident.
-    expect(buildParentOutreachBody.length).toBe(0);
-    expect(buildParentOutreachBody()).not.toContain('The account under review');
+  it('names the account so the parent knows which one this is about', () => {
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_name: 'Star Girl',
+      account_nip05: '_@stargirl.divine.video',
+    });
+    expect(html).toContain('The account under review:');
+    expect(html).toContain('Display name: Star Girl');
+    expect(html).toContain('Username: _@stargirl.divine.video');
+    expect(html).toMatch(/ID: npub1[a-z0-9]+/);
+  });
+
+  it('omits the rows it has no value for rather than printing empties', () => {
+    // Capture is best effort: an account whose profile was already hidden by
+    // enforcement yields no name and no NIP-05. The npub always resolves.
+    const html = buildParentOutreachBody({ pubkey: 'a'.repeat(64) });
+    expect(html).toContain('The account under review:');
+    expect(html).not.toContain('Display name:');
+    expect(html).not.toContain('Username:');
+    expect(html).toMatch(/ID: npub1[a-z0-9]+/);
+  });
+
+  it('drops the block entirely when nothing was captured', () => {
+    expect(buildParentOutreachBody({})).not.toContain('The account under review');
+  });
+
+  it('escapes an account-controlled display name', () => {
+    // account_name is stored raw from the account's own kind-0 (#222 stores raw
+    // on purpose, so each render surface sanitizes for its own medium). This is
+    // the only thing between it and a parent's inbox.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_name: '<script>alert(1)</script> & "friends"',
+    });
+    expect(html).not.toContain('<script>');
+    expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt; &amp; &quot;friends&quot;');
   });
 });
 

@@ -22,7 +22,7 @@ import { resolveZendeskCreds } from './zendesk-sync';
 import type { BulkAction } from '../../shared/bulk-moderation';
 import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, createMinorAccount, type KeycastEnv } from './keycast-client';
 import { suspendPubkey, unsuspendPubkey, banPubkey, type SecretStoreSecret } from './nip86';
-import { buildAgeReviewIdentityBlock, buildClaimedParentName } from './report-note';
+import { buildAgeReviewIdentityBlock, buildClaimedParentName, toNpub } from './report-note';
 
 /**
  * The identity a case captured at creation, as stored on `age_review_cases`.
@@ -868,6 +868,44 @@ async function getZendeskClientConfig(env: AgeReviewEnv): Promise<ZendeskClientC
 }
 
 /**
+ * Escape text for interpolation into the HTML outreach body. The display name
+ * and NIP-05 come from the account's own kind-0 and are stored raw, so every
+ * render surface has to neutralize them itself.
+ */
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/**
+ * Tells the parent which account this is about.
+ *
+ * A narrower set than agents get: the contact-notes block also carries the case
+ * deeplink and band, and qualifies the handle as claimed and unverified. A
+ * parent needs only enough to recognise their child's account.
+ *
+ * Every row is conditional except the npub. Capture is best effort -- an account
+ * whose profile was already hidden by enforcement yields no name and no NIP-05
+ * -- but the pubkey is on the case row and always resolves.
+ */
+function buildAccountIdentityHtml(identity: AgeReviewCaseIdentity & { pubkey?: string }): string {
+  const rows: string[] = [];
+  const name = identity.account_name?.trim();
+  const nip05 = identity.account_nip05?.trim();
+
+  if (name) rows.push(`Display name: ${escapeHtml(name)}`);
+  if (nip05) rows.push(`Username: ${escapeHtml(nip05)}`);
+  if (identity.pubkey) rows.push(`ID: ${escapeHtml(toNpub(identity.pubkey))}`);
+  if (rows.length === 0) return '';
+
+  return `<p>The account under review:<br>\n${rows.join('<br>\n')}</p>`;
+}
+
+/**
  * The first message a parent or guardian receives. It leads with what we need
  * from them rather than asking them to confirm who they are: a reply that only
  * says "yes" tells us nothing, and anyone who is not the parent cannot produce
@@ -877,20 +915,29 @@ async function getZendeskClientConfig(env: AgeReviewEnv): Promise<ZendeskClientC
  * label because the same message is sent to a 13-15 case and to someone
  * claiming to be 16 or older, and "possibly under 16" is true of both.
  *
- * It names no account, for the same reason the requester carries no handle: it
- * goes to an address the teen supplied that nobody has verified. The captured
- * identity reaches agents through the contact notes instead.
+ * It names the account. That is a deliberate reversal of the position #222 took
+ * for this message, taken by the T&S lead: a parent cannot act on a review
+ * without knowing which account it concerns. The risk #222 named is real and
+ * unchanged -- the address is supplied by the account under review and is
+ * unverified until someone replies from it -- so the requester name stays
+ * address-only and this is the only surface where the handle reaches an
+ * unverified recipient.
  *
  * Sent as HTML: Zendesk renders `html_body` through the account's mail template
  * and derives the plain-text alternative itself.
  */
-export function buildParentOutreachBody(): string {
+export function buildParentOutreachBody(
+  identity: AgeReviewCaseIdentity & { pubkey?: string } = {},
+): string {
+  const identityHtml = buildAccountIdentityHtml(identity);
+
   return [
     '<p>Hello,</p>',
     '',
     '<p>An account on Divine was flagged as possibly belonging to someone under 16. ' +
       'Where permitted by law, teens aged 13 to 15 can use Divine through Divine Greenlight, ' +
       'with a parent or guardian who is aware and involved.</p>',
+    ...(identityHtml ? ['', identityHtml] : []),
     '',
     '<p>To keep the account open, reply to this email with a short private video that shows:</p>',
     '',
@@ -1069,7 +1116,7 @@ async function createAgeReviewTicket(
   if (!env.DB) return;
 
   const subject = `Age review: parental verification needed [${caseId}]`;
-  const outreachBody = buildParentOutreachBody();
+  const outreachBody = buildParentOutreachBody(identity);
   const customFields = buildAgeReviewCustomFields(env, deadlineAt);
 
   const res = await fetch(`${zendesk.baseUrl}/tickets`, {
@@ -1184,7 +1231,7 @@ async function updateTicketWithParentContact(
   const zendesk = await getZendeskClientConfig(env);
   if (!zendesk) return;
 
-  const outreachBody = buildParentOutreachBody();
+  const outreachBody = buildParentOutreachBody(identity);
 
   const res = await fetch(`${zendesk.baseUrl}/tickets/${ticketId}`, {
     method: 'PUT',
