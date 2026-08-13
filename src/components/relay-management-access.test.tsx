@@ -143,6 +143,23 @@ describe('relay management surfaces, signed out (CF Access is the gate)', () => 
     });
   });
 
+  it('SettingsDashboard renders funnelcake object-shaped kinds without crashing', async () => {
+    rpc.fn.mockImplementation(async (method: string) => {
+      if (method === 'listallowedkinds') {
+        return [{ added_at: '2026-01-27T04:25:39.690Z', kind: 0 }];
+      }
+      return [];
+    });
+
+    render(
+      <TestApp>
+        <SettingsDashboard />
+      </TestApp>,
+    );
+
+    expect(await screen.findByText(/Kind 0 — Metadata/)).toBeInTheDocument();
+  });
+
   it('EventsList fetches the banned/needs-moderation markers', async () => {
     render(
       <TestApp>

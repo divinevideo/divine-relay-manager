@@ -26,5 +26,5 @@ export function normalizeAllowedKinds(raw: unknown): number[] {
       }
       return undefined;
     })
-    .filter((kind): kind is number => typeof kind === 'number' && Number.isFinite(kind));
+    .filter((kind): kind is number => Number.isInteger(kind));
 }

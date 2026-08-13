@@ -22,9 +22,18 @@ describe('normalizeAllowedKinds', () => {
     expect(normalizeAllowedKinds([1, { kind: 7 }])).toEqual([1, 7]);
   });
 
-  it('drops entries that carry no numeric kind rather than crashing', () => {
+  it('drops entries that carry no integer kind rather than crashing', () => {
     expect(
-      normalizeAllowedKinds([{ added_at: 'x' }, 'nope', null, { kind: 'no' }]),
+      normalizeAllowedKinds([
+        { added_at: 'x' },
+        'nope',
+        null,
+        { kind: 'no' },
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+        1.5,
+        { kind: 1.5 },
+      ]),
     ).toEqual([]);
   });
 

@@ -13,6 +13,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/useToast";
 import { Globe, FileText, Image, Plus, Trash2, Shield, Network } from "lucide-react";
+import { normalizeAllowedKinds, type AllowedKindEntry } from "@/lib/allowedKinds";
 
 interface RelaySettingsProps {
   relayUrl: string;
@@ -38,7 +39,8 @@ export function RelaySettings({ relayUrl }: RelaySettingsProps) {
   // Query for allowed kinds
   const { data: allowedKinds, isLoading: loadingKinds, error: kindsError } = useQuery({
     queryKey: ['allowed-kinds', relayUrl],
-    queryFn: () => callRelayRpc<number[]>('listallowedkinds'),
+    queryFn: () => callRelayRpc<AllowedKindEntry[]>('listallowedkinds'),
+    select: normalizeAllowedKinds,
     enabled: !!relayUrl,
   });
 
