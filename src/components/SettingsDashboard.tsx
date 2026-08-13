@@ -11,6 +11,7 @@ import { CopyableId } from "@/components/CopyableId";
 import { useAppContext } from "@/hooks/useAppContext";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { getCurrentEnvironment } from "@/lib/environments";
+import { normalizeAllowedKinds, type AllowedKindEntry } from "@/lib/allowedKinds";
 import {
   Globe, Shield, Clock, Zap, FileText, ExternalLink,
   Server, Wifi, WifiOff, List, ShieldBan, Users,
@@ -199,7 +200,10 @@ export function SettingsDashboard() {
     isLoading: kindsLoading,
   } = useQuery({
     queryKey: ['allowed-kinds', relayUrl],
-    queryFn: () => callRelayRpc<number[]>('listallowedkinds'),
+    // Funnelcake returns Array<{kind, added_at}>, not the bare number[] the
+    // render assumes; normalize both shapes so an object never reaches JSX.
+    queryFn: () => callRelayRpc<AllowedKindEntry[]>('listallowedkinds'),
+    select: normalizeAllowedKinds,
     enabled: !!relayUrl,
   });
 
