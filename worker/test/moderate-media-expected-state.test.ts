@@ -280,6 +280,10 @@ describe('/api/moderate-media expected-state check', () => {
       SHA + '/../../api/v1/decisions',
       SHA.slice(0, 63),
       SHA + 'f',
+      // RegExp.test stringifies its argument, so [SHA] looks like a hash and
+      // then body.sha256.toLowerCase throws. Must be 400, not a 500 TypeError.
+      [SHA],
+      123,
     ];
     for (const sha256 of traversals) {
       calls = [];

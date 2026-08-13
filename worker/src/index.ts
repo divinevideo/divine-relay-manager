@@ -1849,7 +1849,7 @@ async function handleModerateMedia(
       // `from` pass sha256 in a POST body, which moderation-service validates
       // itself, so widening this would change behaviour for existing callers to
       // no benefit and is left out of this change.
-      if (!/^[0-9a-f]{64}$/i.test(body.sha256)) {
+      if (typeof body.sha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(body.sha256)) {
         return jsonResponse(
           { success: false, error: '`sha256` must be a 64-character hex hash to use `from`', code: 'invalid_sha256' },
           400,
