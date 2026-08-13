@@ -51,8 +51,8 @@ check_service() {  # name, url, how-to-start
 MISSING_SERVICES=0
 check_service "funnelcake relay" "http://127.0.0.1:4444/" \
   "cd ~/code/divine-relay-test && ./scripts/relays/setup-funnelcake.sh"
-check_service "funnelcake REST API" "http://127.0.0.1:3000/api/stats" \
-  "same cluster as the relay; check the port-forward is up"
+check_service "funnelcake REST API" "http://127.0.0.1:3333/api/stats" \
+  "same kind cluster as the relay (hostPort 3333); check the port-forward is up"
 check_service "moderation-service" "http://127.0.0.1:8789/health" \
   "cd ~/code/divine-moderation-service && npx wrangler dev --port 8789 --local"
 if [[ "$MISSING_SERVICES" == "1" ]]; then
