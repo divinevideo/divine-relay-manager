@@ -2161,6 +2161,18 @@ describe('buildParentOutreachBody', () => {
     expect(html).toContain('Username: alice@divine.video');
   });
 
+  it('drops a NIP-05 whose local part is hostname-shaped, even on a domain we issue', () => {
+    // The host gate constrains only the domain. NIP-05 permits `.` in the local
+    // part, so an unverified kind-0 value can smuggle a hostname there and still
+    // pass the gate on our own domain. looksLinkish screens the local part.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_nip05: 'www.evil.example@divine.video',
+    }, 'divine.video');
+    expect(html).not.toContain('Username:');
+    expect(html).not.toContain('www.evil.example');
+  });
+
   it('drops a NIP-05 on a domain we do not issue', () => {
     // A NIP-05 is a bare hostname, so looksLinkish cannot screen it without
     // rejecting every real one. The issuing domain is the screen instead: this
@@ -2304,6 +2316,28 @@ describe('buildParentOutreachBody', () => {
       account_name: 'Star Girl evil\u200b.example',
     });
     expect(html).not.toContain('Display name:');
+  });
+
+  it('drops a name hiding a dot behind an invisible format character outside the zero-width block', () => {
+    // U+2062 (INVISIBLE TIMES) is a Cf character the enumerated strip missed:
+    // looksLinkish cannot match across it, but a mail client ignores it and
+    // parses `evil.example`.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_name: 'Star Girl evil\u2062.example',
+    });
+    expect(html).not.toContain('Display name:');
+  });
+
+  it('drops a name carrying a bidi override and never emits one into the body', () => {
+    // U+202E (RIGHT-TO-LEFT OVERRIDE), left unterminated, reorders the rest of
+    // the paragraph it lands in -- and the npub row shares that paragraph.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_name: 'Star Girl evil\u202e.example',
+    });
+    expect(html).not.toContain('Display name:');
+    expect(html).not.toContain('\u202e');
   });
 
   it('omits the rows it has no value for rather than printing empties', () => {

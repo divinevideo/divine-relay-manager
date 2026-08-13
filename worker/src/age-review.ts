@@ -898,18 +898,14 @@ const IDENTITY_MAX_LEN = 80;
  * parent as if it were whole.
  */
 function cleanIdentityText(value: string): string {
-  // Control characters and the zero-width / format range, tested by code point
-  // rather than a regex: this repo sets noInlineConfig, so a control-character
-  // class cannot be exempted from no-control-regex inline. report-note.ts walks
-  // the string the same way.
+  // Control characters, invisible/format characters, and unpaired surrogates,
+  // tested by Unicode property rather than an enumerated list: the set that can
+  // hide a hostname from `looksLinkish` while a mail client still parses one is
+  // far wider than the well-known zero-width characters, and includes the bidi
+  // controls. Property escapes do not trip no-control-regex, so noInlineConfig
+  // is not a constraint here.
   const stripped = Array.from(value)
-    .filter((ch) => {
-      const c = ch.codePointAt(0) ?? 0;
-      return !(
-        c <= 0x1f || c === 0x7f || c === 0xad ||
-        (c >= 0x200b && c <= 0x200f) || c === 0x2060 || c === 0xfeff
-      );
-    })
+    .filter((ch) => !/[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/u.test(ch))
     .join('')
     .trim();
   const points = Array.from(stripped);
@@ -977,7 +973,8 @@ function looksLinkish(value: string): boolean {
  * NIP-05 calls `_@domain` the "root" identifier and says to display it as the
  * bare domain (nips/05.md, "Showing just the domain as an identifier"). Divine
  * issues `_@<username>.<NIP05_DOMAIN>`, so the prefix is noise to a parent. Any
- * other local part is a real name and is left intact.
+ * other local part is left intact unless it is itself hostname-shaped: the host
+ * gate does not see the local part, so a `looksLinkish` one is dropped below.
  */
 function displayNip05(nip05: string, issuingDomain?: string): string | undefined {
   if (!issuingDomain) return undefined;
@@ -987,6 +984,14 @@ function displayNip05(nip05: string, issuingDomain?: string): string | undefined
   const domain = issuingDomain.toLowerCase();
   const lowerHost = host.toLowerCase();
   if (lowerHost !== domain && !lowerHost.endsWith(`.${domain}`)) return undefined;
+
+  // The gate above constrains only the host. The local part is attacker-chosen
+  // kind-0 and NIP-05 permits `.` there, so it can be hostname-shaped
+  // (`www.evil.example@divine.video`) even when the host is ours. Drop it for the
+  // same reason looksLinkish drops a display name: a mail client may parse a link
+  // out of text delivered under Divine branding. The root form `_@…` and a plain
+  // local part like `alice` survive; only a dotted, hostname-shaped one is refused.
+  if (looksLinkish(nip05.split('@')[0] ?? '')) return undefined;
 
   const display = nip05.startsWith('_@') ? nip05.slice(2) : nip05;
   return display.length > 0 && display.length <= IDENTITY_MAX_LEN ? display : undefined;
