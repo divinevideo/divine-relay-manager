@@ -2119,6 +2119,10 @@ describe('buildParentOutreachBody', () => {
   it('states the video requirements, the deadline, and the 16+ path', () => {
     const html = buildParentOutreachBody();
     expect(html).toContain('a parent or guardian speaking on camera');
+    // divine.video/kids and /age-review both require the age statement. This
+    // email is the primary instruction channel now, so dropping it here sends
+    // families back for a second video -- the round trip this copy exists to end.
+    expect(html).toContain('that the teen is between 13 and 15');
     expect(html).toContain('the country or countries where you live');
     expect(html).toContain('Please do NOT send government IDs');
     expect(html).toContain('Please reply within 15 days');

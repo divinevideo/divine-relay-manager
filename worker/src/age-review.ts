@@ -897,6 +897,7 @@ export function buildParentOutreachBody(): string {
     '<ul>',
     '  <li>the teen</li>',
     '  <li>a parent or guardian speaking on camera</li>',
+    '  <li>that the teen is between 13 and 15</li>',
     '  <li>that the teen has permission to use Divine</li>',
     '  <li>that the parent or guardian knows about the account and will supervise its use</li>',
     '  <li>the country or countries where you live</li>',
