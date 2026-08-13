@@ -212,11 +212,11 @@ describe('/api/moderate-media expected-state check', () => {
     // the check and is told it succeeded.
     //
     // Omitting the field means "no check" and stays supported.
-    // Sending it empty means the caller tried to declare a state and failed to,
-    // which is a bug in the caller and must be visible to it.
+    // Sending it empty or JSON null means the caller tried to declare a state
+    // and failed to, which is a bug in the caller and must be visible to it.
     // Whitespace-only counts as empty for the same reason: it is what a caller
     // produces by accident, never on purpose.
-    for (const empty of ['', '   ', '\t\n']) {
+    for (const empty of ['', '   ', '\t\n', null]) {
       calls = [];
       const res = await worker.fetch(
         post({ sha256: SHA, action: 'SAFE', from: empty }),

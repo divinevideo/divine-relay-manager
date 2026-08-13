@@ -129,7 +129,7 @@ validated upstream.
 
 | Status | `code` | Meaning |
 |--------|--------|---------|
-| 400 | `invalid_from` | `from` was present but empty, whitespace, or not a string. Omit it to skip the check. |
+| 400 | `invalid_from` | `from` was present but empty, whitespace, null, or not a string. Omit it to skip the check. |
 | 400 | `invalid_sha256` | `sha256` is not 64 hex characters. |
 | 409 | `state_mismatch` | Current state is not the declared one. The body carries `from` and `current`. |
 | 503 | `state_unreadable` | Current state could not be read. Retryable, and deliberately not a success. |

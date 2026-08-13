@@ -1815,7 +1815,7 @@ async function handleModerateMedia(
     // back the old unguarded behaviour AND a 200, so the caller would believe it
     // asked for the check and was told it succeeded. Refuse instead, and
     // refuse before the upstream read so a malformed request costs no call.
-    if (body.from !== undefined && body.from !== null) {
+    if (body.from !== undefined) {
       const declared = typeof body.from === 'string' ? body.from.trim() : '';
       if (!declared) {
         return jsonResponse(
