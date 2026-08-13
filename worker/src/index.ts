@@ -361,6 +361,15 @@ interface ApiResponse {
   author_pubkey?: string | null;
   violation_type?: string | null;
   skipped?: boolean;
+  // Machine-readable refusal reason, so a caller can tell one 4xx/5xx from
+  // another without parsing prose. Matches the `age_review_active` convention
+  // age-review.ts already returns.
+  code?: string;
+  // /api/moderate-media expected-state check: the state the caller declared it
+  // expected, and the one actually found. Both are returned because an operator
+  // seeing only "conflict" cannot tell this from any other refusal.
+  from?: string;
+  current?: string;
 }
 
 // Verify that the request is authorized for admin API access.
@@ -1731,11 +1740,22 @@ async function handleModerateMedia(
       sha256: string;
       action: 'SAFE' | 'REVIEW' | 'QUARANTINE' | 'AGE_RESTRICTED' | 'PERMANENT_BAN' | 'DELETE';
       reason?: string;
+      // Optional expected-state check. The state the caller believes it is changing.
+      // Typed `unknown` rather than `string` because this object is a cast over
+      // `request.json()`, so the annotation is a claim about a stranger's input,
+      // not a fact. `unknown` makes the compiler insist on the narrowing below
+      // instead of letting a declared type stand in for a check.
+      from?: unknown;
     };
 
     if (!body.sha256) {
       return jsonResponse({ success: false, error: 'Missing sha256' }, 400, corsHeaders);
     }
+
+    // The hash used for the upstream write. Left exactly as sent unless the
+    // expected-state path canonicalises it below, so callers that send no
+    // `from` see no change in what reaches moderation-service.
+    let sha256 = body.sha256;
 
     if (!body.action) {
       return jsonResponse({ success: false, error: 'Missing action' }, 400, corsHeaders);
@@ -1761,11 +1781,175 @@ async function handleModerateMedia(
       headers['CF-Access-Client-Secret'] = cfAccess.clientSecret;
     }
 
+    // The expected-state check, when the caller declares what it believes it is
+    // changing.
+    //
+    // This endpoint is a state SETTER, not a transition: `SAFE` means "make this
+    // blob Active", not "undo the age-restriction I applied". So the intent is
+    // lost, and nothing distinguishes a moderator reversing their own
+    // age-restrict from one clearing the QUARANTINE that hides a minor's content
+    // under age review (see bulk-moderate.ts, whose own comment explains why
+    // AGE_RESTRICTED must never be used for a minor). Both are the same request.
+    //
+    // ageReviewActiveGuard refuses that class of reversal for unbanpubkey and
+    // unsuspendpubkey, but it is pubkey-keyed and this endpoint is hash-keyed, so
+    // it was never wired here. `from` closes the gap for callers that opt in,
+    // without a breaking change for the ones that do not.
+    //
+    // The check and the write are two separate steps, not one. Reading the state
+    // is a request to moderation-service and changing it is another, with no lock
+    // and nothing conditional available upstream, so a change landing between them
+    // is not caught. That window is one round trip and the result is no worse than
+    // the unguarded behaviour it replaces, but do not build anything on this that
+    // needs the two to happen together.
+    //
+    // It is also a mistake-guard, not a security boundary. The caller supplies
+    // `from` and omitting it restores the old behaviour, so this protects a
+    // cooperating caller from its own bug -- which is the actual threat here,
+    // since the endpoint already sits behind admin auth.
+    //
+    // Omitting `from` means "no check" and is the supported default.
+    // Sending it present-but-unusable means the caller tried to declare a state
+    // and failed to -- an unmapped action name, a template that rendered empty,
+    // the wrong type off a JSON payload. Treating that as "absent" would hand
+    // back the old unguarded behaviour AND a 200, so the caller would believe it
+    // asked for the check and was told it succeeded. Refuse instead, and
+    // refuse before the upstream read so a malformed request costs no call.
+    if (body.from !== undefined) {
+      const declared = typeof body.from === 'string' ? body.from.trim() : '';
+      if (!declared) {
+        return jsonResponse(
+          {
+            success: false,
+            error: '`from` must be a non-empty string naming the state being changed; omit it to skip the check',
+            code: 'invalid_from',
+          },
+          400,
+          corsHeaders
+        );
+      }
+      const expected = declared.toUpperCase();
+
+      // `sha256` becomes a path segment below, and the URL constructor resolves
+      // `..` before the request goes out. Unchecked, a caller can point the state
+      // read at any path on moderation-service -- with relay-manager's service
+      // token attached -- and satisfy the comparison against the `status` of an
+      // endpoint that has nothing to do with the blob.
+      //
+      // Not a bypass: `from` is optional, so anyone wanting no check just omits
+      // it. What this actually costs is a credentialed GET to an arbitrary
+      // upstream path, and a caller that believes it verified something when it
+      // read an unrelated endpoint.
+      //
+      // Same shape as the check moderation-service applies to this value
+      // (handlePublicCheckResult, src/index.mjs:1494), so nothing that survives
+      // here is something the upstream would have rejected.
+      //
+      // Deliberately scoped to the expected-state path. Callers that send no
+      // `from` pass sha256 in a POST body, which moderation-service validates
+      // itself, so widening this would change behaviour for existing callers to
+      // no benefit and is left out of this change.
+      if (typeof body.sha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(body.sha256)) {
+        return jsonResponse(
+          { success: false, error: '`sha256` must be a 64-character hex hash to use `from`', code: 'invalid_sha256' },
+          400,
+          corsHeaders
+        );
+      }
+
+      // Canonicalise the hash so the row that is verified is the row that gets
+      // written. moderation-service lowercases before its SELECT
+      // (handlePublicCheckResult, src/index.mjs:1497) but /api/v1/moderate binds
+      // sha256 raw into `INSERT ... ON CONFLICT(sha256)`, and the column is
+      // `sha256 TEXT PRIMARY KEY` with no COLLATE NOCASE. BINARY collation makes
+      // an uppercase hash a DIFFERENT key, so unnormalised this reads dd44... and
+      // writes DD44... while reporting that it checked first.
+      //
+      // Only the expected-state path is normalised, matching how the validation
+      // above is scoped. That an uppercase hash can open a second row at all is a
+      // pre-existing hazard of this endpoint, not something introduced here, and
+      // fixing it for every caller belongs in its own change.
+      sha256 = body.sha256.toLowerCase();
+
+      // NOTE: the read goes to MODERATION_SERVICE_URL and the write below goes to
+      // MODERATION_ADMIN_URL. Today those are the same host in local, staging and
+      // prod, which is what makes comparing one against the other meaningful. If
+      // they are ever pointed at different deployments, this reads state from one
+      // service and acts on another, and the guard keeps returning 200 while
+      // checking nothing. Split them and this has to move to the admin URL.
+      //
+      // What `current` reflects is moderation-service's `moderation_results` row,
+      // which is NOT the blob's live state everywhere: Blossom's own admin UI
+      // (divine-blossom, handle_admin_moderate_action) changes blob status without
+      // calling back here, so an action taken there leaves this row stale. The
+      // age-review path that motivates this guard does go through /api/v1/moderate
+      // (bulk-moderate.ts), so it IS reflected -- but do not read this as covering
+      // every way media gets restricted.
+      let current: string;
+      try {
+        // Built inside the try on purpose: getModerationServiceUrl throws when the
+        // binding is missing, and a misconfiguration is the same "could not check"
+        // case as an upstream failure. Outside, it exited as a 500 naming an
+        // internal binding instead of the retryable 503 this block commits to.
+        const checkRequest = new Request(`${getModerationServiceUrl(env)}/check-result/${encodeURIComponent(sha256)}`, {
+          method: 'GET',
+          headers,
+        });
+        const checkResponse = env.MODERATION_API
+          ? await env.MODERATION_API.fetch(checkRequest)
+          : await fetch(checkRequest);
+        if (!checkResponse.ok) throw new Error(`check-result ${checkResponse.status}`);
+        const state = await checkResponse.json() as { status?: string; moderated?: boolean };
+        // `status` is the stored action lowercased, or the literal 'unknown' when
+        // there is no row -- handlePublicCheckResult emits one or the other on
+        // every 200 (src/index.mjs:1508, :1520). Its absence therefore does not
+        // mean the blob is in an unknown state; it means this is not a response
+        // this code understands, so the state is unreadable and belongs in the
+        // 503 class below.
+        //
+        // Defaulting it to 'unknown' instead would answer 409 "expected
+        // AGE_RESTRICTED, found UNKNOWN", asserting a fact about the blob that
+        // was never established. An explicit 'unknown' FROM the service is a real
+        // answer and still refuses; a missing field is not.
+        if (typeof state?.status !== 'string' || !state.status) {
+          throw new Error('check-result carried no status');
+        }
+        current = state.status.toUpperCase();
+      } catch (err) {
+        // 503, not 409, and never success: "could not check" is a different answer
+        // from "no conflict", and the retryable class is the honest one. Same
+        // reasoning as ageReviewActiveGuard's failClosed.
+        console.error('[handleModerateMedia] expected-state read failed:', err);
+        return jsonResponse(
+          { success: false, error: 'Could not read current media state; refusing to act', code: 'state_unreadable' },
+          503,
+          corsHeaders
+        );
+      }
+
+      if (current !== expected) {
+        // Names both states: an operator seeing only "conflict" cannot tell this
+        // from any other 409 and will retry it. Echoes the NORMALISED value, so
+        // what is reported is what was actually compared.
+        return jsonResponse(
+          {
+            success: false,
+            error: `Refusing ${body.action}: expected current state ${expected}, found ${current}`,
+            code: 'state_mismatch',
+            from: expected,
+            current,
+          },
+          409,
+          corsHeaders
+        );
+      }
+    }
+
     const moderationRequest = new Request(`${getModerationAdminUrl(env)}/api/v1/moderate`, {
       method: 'POST',
       headers,
       body: JSON.stringify({
-        sha256: body.sha256,
+        sha256,
         action: body.action,
         reason: body.reason || 'Moderated via Divine Relay Admin',
         source: 'relay-manager',

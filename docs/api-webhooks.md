@@ -100,9 +100,46 @@ Moderate media content (images/videos) by SHA-256 hash.
 {
   "sha256": "abc123...",
   "action": "SAFE" | "REVIEW" | "QUARANTINE" | "AGE_RESTRICTED" | "PERMANENT_BAN" | "DELETE",
-  "reason": "CSAM content"
+  "reason": "CSAM content",
+  "from": "AGE_RESTRICTED"
 }
 ```
+
+**`from` (optional): declare the state you expect to be changing.**
+
+This endpoint sets state; it does not describe a transition. `SAFE` means "make
+this Active", not "undo the age-restriction I applied", so a caller reversing its
+own action and a caller clearing an age-review quarantine on a minor's content
+send the identical request.
+
+`from` lets a caller declare the state it believes it is changing. The current
+state is read first and the action is refused unless it matches, so a button can
+only reverse the thing it is named for. Omit `from` and nothing changes: no
+extra read, no new failure mode.
+
+It guards a cooperating caller against its own bug. It is not a security
+boundary, since the caller supplies the value and omitting it restores the
+unguarded path.
+
+Sending `from` also requires `sha256` to be 64 hex characters, because it becomes
+part of an upstream URL. Without `from`, `sha256` is forwarded as-is and
+validated upstream.
+
+**Refusals when `from` is present:**
+
+| Status | `code` | Meaning |
+|--------|--------|---------|
+| 400 | `invalid_from` | `from` was present but empty, whitespace, null, or not a string. Omit it to skip the check. |
+| 400 | `invalid_sha256` | `sha256` is not 64 hex characters. |
+| 409 | `state_mismatch` | Current state is not the declared one. The body carries `from` and `current`. |
+| 503 | `state_unreadable` | Current state could not be read. Retryable, and deliberately not a success. |
+
+A 409 names both states because "refused" alone reads as transient and gets
+retried. `state_unreadable` is 503 rather than 409 because "could not check" is a
+different answer from "no conflict".
+
+What is compared is moderation-service's recorded result. Actions taken directly
+through Blossom's own admin UI do not write there, so they are not reflected.
 
 **Response:**
 ```json
