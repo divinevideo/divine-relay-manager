@@ -933,6 +933,11 @@ function displayNip05(nip05: string): string | undefined {
  * deeplink, the band, and the claimed-and-unverified qualifier. A parent needs
  * only enough to recognise their child's account.
  *
+ * `account_vine_username` is captured and is the agent block's third fallback,
+ * but is deliberately not shown here. It may have informed what became the
+ * Divine username, but by the time a case exists the original Vine name that
+ * happened to be carried over is not what a parent would recognise.
+ *
  * Every row is conditional except the npub. Capture is best effort -- an account
  * whose profile was already hidden by enforcement yields no name and no NIP-05
  * -- but the pubkey is on the case row and always resolves.
