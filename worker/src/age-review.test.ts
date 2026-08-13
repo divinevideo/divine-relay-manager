@@ -2161,6 +2161,57 @@ describe('buildParentOutreachBody', () => {
     expect(html).toContain('Username: alice@example.com');
   });
 
+  it('escapes the NIP-05 and the ID, not just the display name', () => {
+    // account_nip05 is as attacker-controlled as account_name -- both are raw
+    // kind-0 -- and toNpub hands back its input unchanged when the pubkey will
+    // not encode, so neither may reach the parent unescaped.
+    const html = buildParentOutreachBody({
+      pubkey: '<img src=x onerror=alert(1)>',
+      account_nip05: '"><script>alert(1)</script>@evil-domain.test',
+    });
+    expect(html).not.toContain('<script>');
+    expect(html).not.toContain('<img');
+  });
+
+  it('drops a display name that is trying to look like a link', () => {
+    // The account picks this string AND supplies the address we mail it to, so
+    // a name carrying a URL turns this message into attacker-chosen delivery.
+    // Escaping does not help: mail clients auto-link bare URLs in text.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_name: 'Star Girl verify at http://not-divine.example/claim',
+      account_nip05: '_@stargirl.divine.video',
+    });
+    expect(html).not.toContain('Display name:');
+    expect(html).not.toContain('not-divine.example');
+    // Failing safe still leaves the parent able to identify the account.
+    expect(html).toContain('Username: stargirl.divine.video');
+    expect(html).toMatch(/ID: npub1[a-z0-9]+/);
+  });
+
+  it('drops a NIP-05 that is not actually a NIP-05', () => {
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_nip05: 'http://not-divine.example/claim',
+    });
+    expect(html).not.toContain('Username:');
+    expect(html).not.toContain('not-divine.example');
+  });
+
+  it('prints no empty row for a NIP-05 that is only the root prefix', () => {
+    const html = buildParentOutreachBody({ pubkey: 'a'.repeat(64), account_nip05: '_@' });
+    expect(html).not.toContain('Username:');
+  });
+
+  it('caps an overlong display name rather than mailing it whole', () => {
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_name: 'Q'.repeat(300),
+    });
+    expect(html).toContain(`Display name: ${'Q'.repeat(80)}<`);
+    expect(html).not.toContain('Q'.repeat(81));
+  });
+
   it('omits the rows it has no value for rather than printing empties', () => {
     // Capture is best effort: an account whose profile was already hidden by
     // enforcement yields no name and no NIP-05. The npub always resolves.

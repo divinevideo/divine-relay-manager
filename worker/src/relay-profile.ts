@@ -174,9 +174,12 @@ export async function fetchAccountIdentity(
     if (res?.events?.length) {
       return {
         completed: true,
-        // Raw: this is persisted, and both surfaces that render it
-        // (buildAgeReviewIdentityBlock, buildClaimedParentName) sanitize on the
-        // way out. Sanitizing here instead would store a mangled handle.
+        // Raw: this is persisted, and every surface that renders it sanitizes
+        // on the way out for its own medium -- buildAgeReviewIdentityBlock and
+        // buildClaimedParentName for the agent-facing note, and
+        // buildAccountIdentityHtml for the parent outreach mail, which also has
+        // to defend against linkification. Sanitizing here instead would store
+        // a mangled handle. Any new render surface owns its own escaping.
         profile: parseKind0Profile(
           res.events[0] as { content?: string; tags?: string[][] },
           { raw: true },

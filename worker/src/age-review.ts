@@ -881,22 +881,57 @@ function escapeHtml(value: string): string {
     .replace(/'/g, '&#39;');
 }
 
+/** Matches the same 80 characters `sanitizeInline` allows a rendered handle. */
+const IDENTITY_MAX_LEN = 80;
+
 /**
+ * True when a display name is trying to look like a link.
+ *
+ * Escaping stops markup, not linkification: mail clients auto-link bare URLs in
+ * text, and `report-note.ts` wraps these same values in a code span for exactly
+ * this reason. That defence does not carry over here, because this render goes
+ * out as mail rather than into an agent-facing note.
+ *
+ * The threat is specific. The account under review picks its own kind-0 display
+ * name AND supplies the address this mail is sent to, so a name of
+ * "verify at http://not-divine.example/claim" would have Divine Trust & Safety
+ * deliver an attacker's link, under Divine's branding, to an address the
+ * attacker chose. Dropping the row is the safe failure: the parent still gets
+ * the username and the ID.
+ *
+ * Deliberately blunt. A dotted token with an alphabetic suffix is enough to
+ * trip it, so a legitimate name like "Anna.Marie" is dropped too. Losing a
+ * display name costs recognisability; shipping a live link costs more.
+ */
+function looksLinkish(value: string): boolean {
+  return /:\/\/|\bwww\./i.test(value) || /[a-z0-9-]+\.[a-z]{2,}/i.test(value);
+}
+
+/**
+ * The display form of a NIP-05, or undefined when the stored value is not one.
+ *
+ * A NIP-05 is inherently domain-shaped, so `looksLinkish` cannot be applied to
+ * it. Shape validation does the same job from the other direction: anything
+ * carrying a scheme, a path, whitespace or another `@` is not a NIP-05 and is
+ * not rendered.
+ *
  * NIP-05 calls `_@domain` the "root" identifier and says to display it as the
  * bare domain (nips/05.md, "Showing just the domain as an identifier"). Divine
  * issues `_@<username>.divine.video`, so the prefix is noise to a parent. Any
- * other local part is a real name and is left alone.
+ * other local part is a real name and is left intact.
  */
-function displayNip05(nip05: string): string {
-  return nip05.startsWith('_@') ? nip05.slice(2) : nip05;
+function displayNip05(nip05: string): string | undefined {
+  if (!/^[a-z0-9._-]+@[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(nip05)) return undefined;
+  const display = nip05.startsWith('_@') ? nip05.slice(2) : nip05;
+  return display.length > 0 && display.length <= IDENTITY_MAX_LEN ? display : undefined;
 }
 
 /**
  * Tells the parent which account this is about.
  *
  * A narrower set than agents get: the contact-notes block also carries the case
- * deeplink and band, and qualifies the handle as claimed and unverified. A
- * parent needs only enough to recognise their child's account.
+ * deeplink, the band, and the claimed-and-unverified qualifier. A parent needs
+ * only enough to recognise their child's account.
  *
  * Every row is conditional except the npub. Capture is best effort -- an account
  * whose profile was already hidden by enforcement yields no name and no NIP-05
@@ -904,11 +939,12 @@ function displayNip05(nip05: string): string {
  */
 function buildAccountIdentityHtml(identity: AgeReviewCaseIdentity & { pubkey?: string }): string {
   const rows: string[] = [];
-  const name = identity.account_name?.trim();
-  const nip05 = identity.account_nip05?.trim();
 
-  if (name) rows.push(`Display name: ${escapeHtml(name)}`);
-  if (nip05) rows.push(`Username: ${escapeHtml(displayNip05(nip05))}`);
+  const name = identity.account_name?.trim().slice(0, IDENTITY_MAX_LEN);
+  const nip05 = identity.account_nip05 ? displayNip05(identity.account_nip05.trim()) : undefined;
+
+  if (name && !looksLinkish(name)) rows.push(`Display name: ${escapeHtml(name)}`);
+  if (nip05) rows.push(`Username: ${escapeHtml(nip05)}`);
   if (identity.pubkey) rows.push(`ID: ${escapeHtml(toNpub(identity.pubkey))}`);
   if (rows.length === 0) return '';
 

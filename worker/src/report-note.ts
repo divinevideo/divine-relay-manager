@@ -80,7 +80,7 @@ function sanitizeInline(value: string | undefined, maxLen = 80): string | undefi
  * truncation, but "unsanitized" must not mean "unbounded": kind-0 content is
  * chosen by the account under review, and the captured values are bound
  * straight into the INSERT that opens the case. Far beyond any real handle, so
- * nothing legitimate is touched; the render path applies its own 80-char cap.
+ * nothing legitimate is touched; each render path applies its own 80-char cap.
  */
 const CAPTURED_VALUE_MAX_LEN = 512;
 
