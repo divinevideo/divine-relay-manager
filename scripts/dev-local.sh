@@ -33,6 +33,36 @@ if [[ ! -f "worker/.dev.vars" ]]; then
   echo "error: worker/.dev.vars not found. Create it with NOSTR_NSEC and ADMIN_API_KEY." >&2; exit 1
 fi
 
+# Backing services the worker calls. wrangler.local.toml points at these rather
+# than at deployed infrastructure, so a missing one shows up as a failed action
+# or an empty page. The committed file used to name production; a populated
+# worker/.dev.vars already overrode most of those URLs, but a fresh clone or
+# worktree does not, which is why the tracked defaults had to change.
+#
+# A warning rather than an error on purpose: working on the UI alone is a normal
+# thing to do, and it should not require the whole chain.
+check_service() {  # name, url, how-to-start
+  if ! curl -s -o /dev/null -m 2 "$2" 2>/dev/null; then
+    echo "warning: $1 is not answering at $2" >&2
+    echo "         $3" >&2
+    MISSING_SERVICES=1
+  fi
+}
+MISSING_SERVICES=0
+check_service "funnelcake relay" "http://127.0.0.1:4444/" \
+  "cd ~/code/divine-relay-test && ./scripts/relays/setup-funnelcake.sh"
+check_service "funnelcake REST API" "http://127.0.0.1:3333/api/stats" \
+  "same kind cluster as the relay (hostPort 3333); check the port-forward is up"
+check_service "moderation-service" "http://127.0.0.1:8789/health" \
+  "cd ~/code/divine-moderation-service && npx wrangler dev --port 8789 --local"
+if [[ "$MISSING_SERVICES" == "1" ]]; then
+  echo "" >&2
+  echo "Continuing anyway. Moderation actions and relay reads that depend on the" >&2
+  echo "services above will fail until they are running. They will NOT silently" >&2
+  echo "fall through to production." >&2
+  echo "" >&2
+fi
+
 # Generate Caddyfile with absolute paths for this machine
 REPO_ROOT="$(pwd)"
 cat > .certs/Caddyfile <<CADDY
