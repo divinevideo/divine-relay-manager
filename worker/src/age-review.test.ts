@@ -1593,8 +1593,8 @@ describe('parent contact record', () => {
     expect(payload.ticket.requester.name).toBe('parent@example.com');
     expect(payload.ticket.requester.name).not.toContain('Claimed parent');
     expect(payload.ticket.requester.name).not.toBe('Parent/Guardian');
-    // The outreach is sent as html_body; assert on the field that actually ships,
-    // or this passes vacuously against an undefined `body`.
+    // The outreach ships as html_body now; asserted against `body` this errors
+    // on an undefined receiver rather than checking anything.
     expect(payload.ticket.comment.html_body).not.toContain('Some One');
   });
 
@@ -2037,6 +2037,11 @@ describe('handleParentContact Zendesk integration', () => {
 
     // Nor may the message body carry it: same unverified address.
     expect(ticketPut.ticket.comment.html_body).not.toContain('Some One');
+
+    // Zendesk sends `body` when both are present, so a plain body reappearing
+    // here would silently revert the message to text. This is the branch a
+    // moderator-restricted case takes, so it needs the guard as much as create.
+    expect(ticketPut.ticket.comment.body).toBeUndefined();
 
     // Agent-only: the block reached the contact, with the right case.
     const contactPut = mockFetch.mock.calls.find(
