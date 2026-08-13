@@ -881,8 +881,42 @@ function escapeHtml(value: string): string {
     .replace(/'/g, '&#39;');
 }
 
-/** Matches the same 80 characters `sanitizeInline` allows a rendered handle. */
+/** The same 80 characters `sanitizeInline` allows a rendered handle. */
 const IDENTITY_MAX_LEN = 80;
+
+/**
+ * Strip what has no business in a rendered identity and truncate to the cap.
+ *
+ * Control characters and zero-width joiners are removed rather than escaped:
+ * they cannot help a parent recognise an account, and a zero-width character
+ * inside a hostname is a way to hide one from `looksLinkish` while a mail
+ * client's own parser still sees the link.
+ *
+ * Truncation is by code point, not code unit -- emoji in display names are
+ * ordinary, and slicing one in half emits a lone surrogate into the mail body.
+ * The ellipsis matches `sanitizeInline`, so a cut name is not presented to a
+ * parent as if it were whole.
+ */
+function cleanIdentityText(value: string): string {
+  // Control characters and the zero-width / format range, tested by code point
+  // rather than a regex: this repo sets noInlineConfig, so a control-character
+  // class cannot be exempted from no-control-regex inline. report-note.ts walks
+  // the string the same way.
+  const stripped = Array.from(value)
+    .filter((ch) => {
+      const c = ch.codePointAt(0) ?? 0;
+      return !(
+        c <= 0x1f || c === 0x7f || c === 0xad ||
+        (c >= 0x200b && c <= 0x200f) || c === 0x2060 || c === 0xfeff
+      );
+    })
+    .join('')
+    .trim();
+  const points = Array.from(stripped);
+  return points.length > IDENTITY_MAX_LEN
+    ? `${points.slice(0, IDENTITY_MAX_LEN).join('')}…`
+    : stripped;
+}
 
 /**
  * True when a display name is trying to look like a link.
@@ -899,29 +933,54 @@ const IDENTITY_MAX_LEN = 80;
  * attacker chose. Dropping the row is the safe failure: the parent still gets
  * the username and the ID.
  *
- * Deliberately blunt. A dotted token with an alphabetic suffix is enough to
- * trip it, so a legitimate name like "Anna.Marie" is dropped too. Losing a
- * display name costs recognisability; shipping a live link costs more.
+ * Compared on a normalized copy, because a linkifier resolves hostnames under
+ * UTS-46: U+3002, U+FF0E and U+FF61 all map to `.`, so `evil。example` is a
+ * hostname to the client and was not to an ASCII-only check. NFKC alone does
+ * not cover it -- it folds U+FF0E and leaves the other two -- so they are
+ * replaced outright.
+ *
+ * Deliberately blunt. A dotted token with a letter suffix is enough to trip it,
+ * so a legitimate name like "Anna.Marie" is dropped too. Losing a display name
+ * costs recognisability; shipping a live link costs more.
  */
 function looksLinkish(value: string): boolean {
-  return /:\/\/|\bwww\./i.test(value) || /[a-z0-9-]+\.[a-z]{2,}/i.test(value);
+  const normalized = value.normalize('NFKC').replace(/[。．｡]/g, '.');
+  return /:\/\/|\bwww\./iu.test(normalized) || /[\p{L}\p{N}-]+\.[\p{L}]{2,}/u.test(normalized);
 }
 
 /**
- * The display form of a NIP-05, or undefined when the stored value is not one.
+ * The display form of a NIP-05, or undefined when we will not vouch for it.
  *
- * A NIP-05 is inherently domain-shaped, so `looksLinkish` cannot be applied to
- * it. Shape validation does the same job from the other direction: anything
- * carrying a scheme, a path, whitespace or another `@` is not a NIP-05 and is
- * not rendered.
+ * Two gates. Shape first: anything carrying a scheme, a path, whitespace or a
+ * second `@` is not a NIP-05.
+ *
+ * Then the issuing domain, which is the gate that matters. A NIP-05 is a bare
+ * hostname by construction, so `looksLinkish` cannot be applied to it -- it
+ * would reject every legitimate value. That leaves the same hole this row was
+ * supposed to be exempt from: `account_nip05` is unverified kind-0 the account
+ * chose, so `_@claim-your-teen-account.example` would render as a clean, highly
+ * linkifiable hostname, mailed under Divine branding to an address the same
+ * account supplied. We can only vouch for domains we issue, so anything else is
+ * dropped.
+ *
+ * Unset `NIP05_DOMAIN` therefore renders no username at all. That is the same
+ * call #222 made for the capture side: staging accounts come from a different
+ * Keycast instance, and no username beats a wrong or unvouched one.
  *
  * NIP-05 calls `_@domain` the "root" identifier and says to display it as the
  * bare domain (nips/05.md, "Showing just the domain as an identifier"). Divine
- * issues `_@<username>.divine.video`, so the prefix is noise to a parent. Any
+ * issues `_@<username>.<NIP05_DOMAIN>`, so the prefix is noise to a parent. Any
  * other local part is a real name and is left intact.
  */
-function displayNip05(nip05: string): string | undefined {
+function displayNip05(nip05: string, issuingDomain?: string): string | undefined {
+  if (!issuingDomain) return undefined;
   if (!/^[a-z0-9._-]+@[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(nip05)) return undefined;
+
+  const host = nip05.split('@').pop() ?? '';
+  const domain = issuingDomain.toLowerCase();
+  const lowerHost = host.toLowerCase();
+  if (lowerHost !== domain && !lowerHost.endsWith(`.${domain}`)) return undefined;
+
   const display = nip05.startsWith('_@') ? nip05.slice(2) : nip05;
   return display.length > 0 && display.length <= IDENTITY_MAX_LEN ? display : undefined;
 }
@@ -942,11 +1001,19 @@ function displayNip05(nip05: string): string | undefined {
  * whose profile was already hidden by enforcement yields no name and no NIP-05
  * -- but the pubkey is on the case row and always resolves.
  */
-function buildAccountIdentityHtml(identity: AgeReviewCaseIdentity & { pubkey?: string }): string {
+function buildAccountIdentityHtml(
+  identity: AgeReviewCaseIdentity & { pubkey?: string },
+  issuingDomain?: string,
+): string {
   const rows: string[] = [];
 
-  const name = identity.account_name?.trim().slice(0, IDENTITY_MAX_LEN);
-  const nip05 = identity.account_nip05 ? displayNip05(identity.account_nip05.trim()) : undefined;
+  // Cleaned and capped before the link check, never after: the check has to run
+  // on exactly the string that gets rendered, or truncation could cut a URL out
+  // of view of the check while leaving one in the mail.
+  const name = identity.account_name ? cleanIdentityText(identity.account_name) : undefined;
+  const nip05 = identity.account_nip05
+    ? displayNip05(identity.account_nip05.trim(), issuingDomain)
+    : undefined;
 
   if (name && !looksLinkish(name)) rows.push(`Display name: ${escapeHtml(name)}`);
   // The escape here cannot fire: displayNip05's charset already excludes every
@@ -984,8 +1051,9 @@ function buildAccountIdentityHtml(identity: AgeReviewCaseIdentity & { pubkey?: s
  */
 export function buildParentOutreachBody(
   identity: AgeReviewCaseIdentity & { pubkey?: string } = {},
+  issuingDomain?: string,
 ): string {
-  const identityHtml = buildAccountIdentityHtml(identity);
+  const identityHtml = buildAccountIdentityHtml(identity, issuingDomain);
 
   return [
     '<p>Hello,</p>',
@@ -1172,7 +1240,7 @@ async function createAgeReviewTicket(
   if (!env.DB) return;
 
   const subject = `Age review: parental verification needed [${caseId}]`;
-  const outreachBody = buildParentOutreachBody(identity);
+  const outreachBody = buildParentOutreachBody(identity, env.NIP05_DOMAIN);
   const customFields = buildAgeReviewCustomFields(env, deadlineAt);
 
   const res = await fetch(`${zendesk.baseUrl}/tickets`, {
@@ -1287,7 +1355,7 @@ async function updateTicketWithParentContact(
   const zendesk = await getZendeskClientConfig(env);
   if (!zendesk) return;
 
-  const outreachBody = buildParentOutreachBody(identity);
+  const outreachBody = buildParentOutreachBody(identity, env.NIP05_DOMAIN);
 
   const res = await fetch(`${zendesk.baseUrl}/tickets/${ticketId}`, {
     method: 'PUT',
