@@ -582,6 +582,101 @@ describe('relay-rpc account-state side effects', () => {
     fetchSpy.mockRestore();
   });
 
+  // An env that records every SQL statement, so a test can assert the human-review
+  // marking actually ran rather than inferring it from a 200.
+  function makeSqlRecordingEnv() {
+    const sql: string[] = [];
+    const env = {
+      ALLOWED_ORIGINS: 'https://app.divine.video',
+      RELAY_URL: 'wss://relay.divine.video',
+      ADMIN_API_KEY: 'test-admin-key',
+      MODERATION_ADMIN_URL: 'https://moderation-api.divine.video',
+      SERVICE_API_TOKEN: 'test-token',
+      NOSTR_NSEC: TEST_NSEC,
+      DB: {
+        prepare: (statement: string) => {
+          sql.push(statement);
+          return {
+            bind: () => ({
+              first: async () => null,
+              run: async () => ({ success: true, meta: { changes: 1 } }),
+            }),
+            run: async () => ({ success: true, meta: { changes: 0 } }),
+          };
+        },
+      },
+    } as never;
+    return { env, sql };
+  }
+
+  const VALID_EVENT_ID = 'a'.repeat(64);
+
+  // Coop routes Hide-Content and Restore-Content through the adapter. Sending them
+  // over raw /api/relay-rpc bans/allows the event but never marks it human-reviewed,
+  // so ReportWatcher.hasHumanResolution stays false and the next immediate-tier
+  // report re-hides content a moderator deliberately restored. These two tests pin
+  // that a moderator decision is recorded, which is the whole point of routing them
+  // through /api/moderate instead.
+  it('hide_event marks the event human-reviewed so ReportWatcher stops re-hiding it', async () => {
+    const fetchSpy = makeFetchSpy();
+    const waitUntil = vi.fn();
+    const testCtx = { waitUntil } as unknown as ExecutionContext;
+    const { env, sql } = makeSqlRecordingEnv();
+
+    const response = await worker.fetch(
+      new Request('https://api-relay-prod.divine.video/api/moderate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Admin-Key': 'test-admin-key',
+          Origin: 'https://app.divine.video',
+        },
+        body: JSON.stringify({ action: 'hide_event', eventId: VALID_EVENT_ID, reason: 'COOP hide' }),
+      }),
+      env,
+      testCtx,
+    );
+
+    expect(response.status).toBe(200);
+    expect(sql.some(s => s.includes('moderation_targets'))).toBe(true);
+
+    // Hiding is not a permanent ban. delete_event DMs the creator PERMANENT_BAN, so
+    // reusing it here would tell someone their content was removed for good.
+    await drain(waitUntil);
+    expect(fetchSpy.mock.calls.some(([input]) => {
+      const url = input instanceof Request ? input.url : String(input);
+      return url.includes('/api/v1/notify');
+    })).toBe(false);
+
+    fetchSpy.mockRestore();
+  });
+
+  it('allow_event marks the event human-reviewed so a restore is not silently undone', async () => {
+    const fetchSpy = makeFetchSpy();
+    const waitUntil = vi.fn();
+    const testCtx = { waitUntil } as unknown as ExecutionContext;
+    const { env, sql } = makeSqlRecordingEnv();
+
+    const response = await worker.fetch(
+      new Request('https://api-relay-prod.divine.video/api/moderate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Admin-Key': 'test-admin-key',
+          Origin: 'https://app.divine.video',
+        },
+        body: JSON.stringify({ action: 'allow_event', eventId: VALID_EVENT_ID }),
+      }),
+      env,
+      testCtx,
+    );
+
+    expect(response.status).toBe(200);
+    expect(sql.some(s => s.includes('moderation_targets'))).toBe(true);
+
+    fetchSpy.mockRestore();
+  });
+
   it('refuses a reversal when the case lookup itself fails, rather than lifting the hold', async () => {
     // Fail closed on the reversal direction: an unchecked unban silently lifts a
     // minor-safety hold and reports success, so nobody learns the check never

@@ -949,6 +949,74 @@ async function handleModerate(
       }
     }
 
+    // hide_event / allow_event exist so a moderator's content decision is RECORDED,
+    // not merely executed. ReportWatcher.hasHumanResolution reads
+    // moderation_targets.ever_human_reviewed and skips auto-hide when it is set. A
+    // caller that reverses a hide over raw /api/relay-rpc leaves that flag unset, so
+    // the next immediate-tier report (csam is threshold 1) re-hides content a human
+    // deliberately restored, and nobody learns the decision was undone. That is the
+    // whole reason these are not just relay-rpc passthroughs.
+    //
+    // Deliberately NOT delete_event: that one DMs the creator PERMANENT_BAN, which is
+    // wrong for a reversible hide and absurd for a restore.
+    case 'hide_event':
+    case 'allow_event': {
+      const isHide = body.action === 'hide_event';
+      if (!body.eventId) {
+        return jsonResponse(
+          { success: false, error: `Missing eventId for ${body.action}` },
+          400,
+          corsHeaders,
+        );
+      }
+
+      try {
+        const rpcRequest = new Request(request.url.replace(/\/api\/moderate$/, '/api/relay-rpc'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            isHide
+              ? { method: 'banevent', params: [body.eventId, body.reason || 'Hidden by moderator'] }
+              : { method: 'allowevent', params: [body.eventId] },
+          ),
+        });
+
+        const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders);
+        const rpcResult = await rpcResponse.json() as { success: boolean; error?: string };
+
+        if (!rpcResult.success) {
+          // Forward the relay's status rather than flattening it: the reversal path
+          // inherits the age-review guard, whose 409/503 split callers route on.
+          return jsonResponse(
+            { success: false, error: rpcResult.error || `${isHide ? 'banevent' : 'allowevent'} RPC failed` },
+            rpcResponse.status === 200 ? 500 : rpcResponse.status,
+            corsHeaders,
+          );
+        }
+
+        // Only after the relay actually applied it. Marking a decision that did not
+        // take effect would suppress ReportWatcher on content that is still live.
+        if (env.DB) {
+          await markHumanReviewed(env.DB, 'event', body.eventId);
+        }
+
+        try {
+          await syncZendeskAfterAction(env, body.action, 'event', body.eventId, getPublicKey(secretKey));
+        } catch (err) {
+          console.error('[handleModerate] Zendesk sync error:', err);
+        }
+
+        return jsonResponse({ success: true, eventId: body.eventId }, 200, corsHeaders);
+      } catch (error) {
+        console.error(`[handleModerate] ${body.action} error:`, error);
+        return jsonResponse(
+          { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+          500,
+          corsHeaders,
+        );
+      }
+    }
+
     case 'ban_pubkey': {
       if (!body.pubkey) {
         return jsonResponse({ success: false, error: 'Missing pubkey for ban_pubkey' }, 400, corsHeaders);
