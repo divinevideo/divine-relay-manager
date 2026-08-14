@@ -584,9 +584,9 @@ describe('relay-rpc account-state side effects', () => {
 
   // An env that records every SQL statement, so a test can assert the human-review
   // marking actually ran rather than inferring it from a 200.
-  function makeSqlRecordingEnv() {
+  function makeSqlRecordingEnv(order?: string[]) {
     const sql: string[] = [];
-    const bindings: unknown[][] = [];
+    const bound: { statement: string; args: unknown[] }[] = [];
     const env = {
       ALLOWED_ORIGINS: 'https://app.divine.video',
       RELAY_URL: 'wss://relay.divine.video',
@@ -598,11 +598,25 @@ describe('relay-rpc account-state side effects', () => {
         prepare: (statement: string) => {
           sql.push(statement);
           return {
+            // Record the statement WITH its args as one tuple. Keeping two arrays and
+            // aligning them by index desynced the moment a statement ran without bind():
+            // ensureSchema issues ~20 such calls, so `marked()` silently returned
+            // undefined and three tests passed only because an earlier test in the file
+            // had already flipped the module-level schemaReady flag. Running them in
+            // isolation went red on correct code, and dropping the ensureSchemaOnce call
+            // survived the whole mutation battery.
             bind: (...args: unknown[]) => {
-              bindings.push(args);
+              bound.push({ statement, args });
               return {
                 first: async () => null,
-                run: async () => ({ success: true, meta: { changes: 1 } }),
+                run: async () => {
+                  // Into the SHARED log, so ordering against the relay call is a real
+                  // index comparison rather than two unrelated arrays.
+                  if (order && statement.includes('INSERT INTO moderation_targets')) {
+                    order.push('db:mark');
+                  }
+                  return { success: true, meta: { changes: 1 } };
+                },
               };
             },
             run: async () => ({ success: true, meta: { changes: 0 } }),
@@ -614,10 +628,10 @@ describe('relay-rpc account-state side effects', () => {
     // Asserting only that some SQL mentioned the table lets an implementation mark a
     // DIFFERENT id and still pass, which is the exact failure a case-mangled id causes.
     const marked = () => {
-      const i = sql.findIndex(s => s.includes('INSERT INTO moderation_targets'));
-      return i === -1 ? null : bindings[i]?.[0];
+      const row = bound.find(b => b.statement.includes('INSERT INTO moderation_targets'));
+      return row ? row.args[0] : null;
     };
-    return { env, sql, bindings, marked };
+    return { env, sql, bound, marked };
   }
 
   const VALID_EVENT_ID = 'a'.repeat(64);
@@ -670,7 +684,7 @@ describe('relay-rpc account-state side effects', () => {
     const fetchSpy = makeOrderedRelaySpy(order);
     const waitUntil = vi.fn();
     const testCtx = { waitUntil } as unknown as ExecutionContext;
-    const { env, sql, marked } = makeSqlRecordingEnv();
+    const { env, marked } = makeSqlRecordingEnv(order);
 
     const response = await postModerate(
       { action: 'hide_event', eventId: VALID_EVENT_ID, reason: 'COOP hide' }, env, testCtx);
@@ -681,9 +695,9 @@ describe('relay-rpc account-state side effects', () => {
     // Which id got marked: not merely "some SQL touched the table".
     expect(marked()).toBe(VALID_EVENT_ID);
     // Ordering: the mark must follow the relay confirming, or we suppress ReportWatcher
-    // on content that is still live.
-    expect(order.indexOf('relay:banevent'))
-      .toBeLessThan(sql.findIndex(s => s.includes('INSERT INTO moderation_targets')) === -1 ? -1 : order.length);
+    // on content that is still live. Both entries are in the same log, so this compares
+    // real positions. The previous version compared 0 to order.length and asserted 0 < 1.
+    expect(order).toEqual(['relay:banevent', 'db:mark']);
     expect(await response.json()).toMatchObject({ success: true, recorded: true });
 
     // Hiding is not a permanent ban. delete_event DMs the creator PERMANENT_BAN, so

@@ -1018,8 +1018,23 @@ async function handleModerate(
         // the relay change did land and a retry would be a second enforcement.
         let recorded = false;
         if (env.DB) {
-          await ensureSchemaOnce(env.DB);
-          recorded = await markHumanReviewed(env.DB, 'event', eventId);
+          // NOT covered by a mutation test, deliberately: `schemaReady` is a module global
+          // that earlier tests flip, so this line is a no-op in the suite and deleting it
+          // survives. That is acceptable rather than papered over — without it a missing
+          // table makes the INSERT throw, which is caught below and degrades to
+          // `recorded: false` plus the ALERT. Graceful and observable, not silent.
+          //
+          // Bootstrapping is part of the mark, not a precondition for the response. An
+          // unguarded throw here would 500 AFTER the relay change already applied — the
+          // exact contract this block exists to prevent, arrived at from the other side:
+          // same root cause (D1 unavailable), opposite answer, depending only on which
+          // statement hit it first. Same wrapper handleRelayRpc uses for the same reason.
+          try {
+            await ensureSchemaOnce(env.DB);
+            recorded = await markHumanReviewed(env.DB, 'event', eventId);
+          } catch (err) {
+            console.error(`[handleModerate] ${body.action} schema bootstrap failed:`, err);
+          }
         }
         if (!recorded) {
           console.error(
