@@ -2340,6 +2340,50 @@ describe('buildParentOutreachBody', () => {
     expect(html).not.toContain('\u202e');
   });
 
+  it('drops a name hiding a dot behind a variation selector', () => {
+    // U+FE0F is Default_Ignorable but not Cf, so the \p{Cf} half of the strip
+    // never reaches it -- and it is the ordinary emoji presentation selector, so
+    // it turns up in real display names rather than only in crafted ones. ICU
+    // resolves `evil️.example` to `evil.example`, so without
+    // \p{Default_Ignorable_Code_Point} this renders a live hostname.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_name: 'Star Girl evil️.example',
+    });
+    expect(html).not.toContain('Display name:');
+  });
+
+  it('drops a display name whose IP address is written in fullwidth digits', () => {
+    // The IPv4 rule matches ASCII \d only, and the explicit dot replacement does
+    // not touch the digits. NFKC is the only thing that folds this to
+    // `93.184.216.34` -- which is exactly what a UTS-46 resolver sees.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_name: 'Star Girl go to ９３．１８４．２１６．３４',
+    });
+    expect(html).not.toContain('Display name:');
+  });
+
+  it('drops a display name carrying a scheme even when the host has no dot', () => {
+    // The hostname rule needs a dot after the label, so an intranet or localhost
+    // target is caught by the scheme check alone.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_name: 'Star Girl go to http://localhost/claim',
+    });
+    expect(html).not.toContain('Display name:');
+  });
+
+  it('accepts a NIP-05 that arrived with surrounding whitespace', () => {
+    // Capture stores kind-0 verbatim and never trims, so a padded value reaches
+    // the anchored shape check as-is and would be dropped without the trim.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_nip05: '  _@stargirl.divine.video\n',
+    }, 'divine.video');
+    expect(html).toContain('Username: stargirl.divine.video');
+  });
+
   it('omits the rows it has no value for rather than printing empties', () => {
     // Capture is best effort: an account whose profile was already hidden by
     // enforcement yields no name and no NIP-05. The npub always resolves.
