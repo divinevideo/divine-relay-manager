@@ -962,13 +962,20 @@ async function handleModerate(
     case 'hide_event':
     case 'allow_event': {
       const isHide = body.action === 'hide_event';
-      if (!body.eventId) {
+      // Validate AND canonicalise. moderation_targets.target_id is TEXT PRIMARY KEY with
+      // BINARY collation, and ReportWatcher looks the event up by the lowercase id from
+      // the report's `e` tag. An uppercase id here would write a row nobody can read:
+      // the mark succeeds, the API says success, and the auto-hide suppression this
+      // endpoint exists to create never engages. Same trap already fixed for media
+      // hashes elsewhere in this file.
+      if (typeof body.eventId !== 'string' || !/^[a-f0-9]{64}$/i.test(body.eventId)) {
         return jsonResponse(
-          { success: false, error: `Missing eventId for ${body.action}` },
+          { success: false, error: `Missing or invalid eventId for ${body.action} (must be 64 hex chars)` },
           400,
           corsHeaders,
         );
       }
+      const eventId = body.eventId.toLowerCase();
 
       try {
         const rpcRequest = new Request(request.url.replace(/\/api\/moderate$/, '/api/relay-rpc'), {
@@ -976,8 +983,8 @@ async function handleModerate(
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(
             isHide
-              ? { method: 'banevent', params: [body.eventId, body.reason || 'Hidden by moderator'] }
-              : { method: 'allowevent', params: [body.eventId] },
+              ? { method: 'banevent', params: [eventId, body.reason || 'Hidden by moderator'] }
+              : { method: 'allowevent', params: [eventId] },
           ),
         });
 
@@ -985,28 +992,46 @@ async function handleModerate(
         const rpcResult = await rpcResponse.json() as { success: boolean; error?: string };
 
         if (!rpcResult.success) {
-          // Forward the relay's status rather than flattening it: the reversal path
-          // inherits the age-review guard, whose 409/503 split callers route on.
+          // Flatten to 500, matching delete_event and ban_pubkey. Neither banevent nor
+          // allowevent is age-review guarded (that guard covers only suspendpubkey,
+          // unsuspendpubkey and unbanpubkey), so there is no 409/503 whose code a caller
+          // would need preserved -- and forwarding would relabel a transient relay 502 as
+          // a terminal 400, which retrying clients read as "do not retry".
           return jsonResponse(
             { success: false, error: rpcResult.error || `${isHide ? 'banevent' : 'allowevent'} RPC failed` },
-            rpcResponse.status === 200 ? 500 : rpcResponse.status,
+            500,
             corsHeaders,
           );
         }
 
         // Only after the relay actually applied it. Marking a decision that did not
         // take effect would suppress ReportWatcher on content that is still live.
+        //
+        // Unlike delete_event, where the mark is bookkeeping beside the real action, the
+        // mark IS the reason these two actions exist -- the relay change was already
+        // available over /api/relay-rpc. So a failed mark must not be reported as plain
+        // success: the caller would believe the decision is protected from ReportWatcher
+        // when it is not. Surfaced as `recorded`, loudly logged, and NOT a 5xx, because
+        // the relay change did land and a retry would be a second enforcement.
+        let recorded = false;
         if (env.DB) {
-          await markHumanReviewed(env.DB, 'event', body.eventId);
+          await ensureSchemaOnce(env.DB);
+          recorded = await markHumanReviewed(env.DB, 'event', eventId);
+        }
+        if (!recorded) {
+          console.error(
+            `[handleModerate] ALERT: ${body.action} applied at the relay but NOT recorded as ` +
+            `human-reviewed for ${eventId}; ReportWatcher may undo it`,
+          );
         }
 
         try {
-          await syncZendeskAfterAction(env, body.action, 'event', body.eventId, getPublicKey(secretKey));
+          await syncZendeskAfterAction(env, body.action, 'event', eventId, getPublicKey(secretKey));
         } catch (err) {
           console.error('[handleModerate] Zendesk sync error:', err);
         }
 
-        return jsonResponse({ success: true, eventId: body.eventId }, 200, corsHeaders);
+        return jsonResponse({ success: true, eventId, recorded }, 200, corsHeaders);
       } catch (error) {
         console.error(`[handleModerate] ${body.action} error:`, error);
         return jsonResponse(
@@ -1460,15 +1485,22 @@ Respond with JSON only:
   }
 }
 
-async function markHumanReviewed(db: D1Database, targetType: string, targetId: string): Promise<void> {
+// Returns whether the mark actually landed. Callers for whom the mark is incidental
+// (delete_event, ban_pubkey) can keep ignoring it; hide_event and allow_event exist
+// ONLY to record the decision, so for those a swallowed failure reported as success is
+// the bug itself -- ReportWatcher would be free to undo a moderator mid-review while
+// the API said the decision was recorded.
+async function markHumanReviewed(db: D1Database, targetType: string, targetId: string): Promise<boolean> {
   try {
     await db.prepare(`
       INSERT INTO moderation_targets (target_id, target_type, ever_human_reviewed)
       VALUES (?, ?, 1)
       ON CONFLICT(target_id) DO UPDATE SET ever_human_reviewed = 1
     `).bind(targetId, targetType).run();
+    return true;
   } catch (error) {
     console.error('[markHumanReviewed] Failed to update moderation_targets:', error);
+    return false;
   }
 }
 
