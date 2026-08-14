@@ -348,6 +348,9 @@ interface ApiResponse {
   pubkey?: string;
   // Moderation action responses
   eventId?: string;
+  // hide_event / allow_event: whether the decision was recorded as human-reviewed, not
+  // merely applied at the relay. False means ReportWatcher is still free to undo it.
+  recorded?: boolean;
   deleted?: number;
   labelsDeleted?: number;
   // Reopen could not clear every relay-side resolution label, so the report
