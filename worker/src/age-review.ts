@@ -22,7 +22,7 @@ import { resolveZendeskCreds } from './zendesk-sync';
 import type { BulkAction } from '../../shared/bulk-moderation';
 import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, createMinorAccount, type KeycastEnv } from './keycast-client';
 import { suspendPubkey, unsuspendPubkey, banPubkey, type SecretStoreSecret } from './nip86';
-import { buildAgeReviewIdentityBlock, buildClaimedParentName } from './report-note';
+import { buildAgeReviewIdentityBlock, buildClaimedParentName, toNpub } from './report-note';
 
 /**
  * The identity a case captured at creation, as stored on `age_review_cases`.
@@ -867,20 +867,243 @@ async function getZendeskClientConfig(env: AgeReviewEnv): Promise<ZendeskClientC
   };
 }
 
-function buildParentOutreachBody(ageBand: AgeBand): string {
+/**
+ * Escape text for interpolation into the HTML outreach body. The display name
+ * and NIP-05 come from the account's own kind-0 and are stored raw, so every
+ * render surface has to neutralize them itself.
+ */
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/** The same 80 characters `sanitizeInline` allows a rendered handle. */
+const IDENTITY_MAX_LEN = 80;
+
+/**
+ * Strip what has no business in a rendered identity and truncate to the cap.
+ *
+ * Control characters and zero-width joiners are removed rather than escaped:
+ * they cannot help a parent recognise an account, and a zero-width character
+ * inside a hostname is a way to hide one from `looksLinkish` while a mail
+ * client's own parser still sees the link.
+ *
+ * Truncation is by code point, not code unit -- emoji in display names are
+ * ordinary, and slicing one in half emits a lone surrogate into the mail body.
+ * The ellipsis matches `sanitizeInline`, so a cut name is not presented to a
+ * parent as if it were whole.
+ */
+function cleanIdentityText(value: string): string {
+  // Control characters, invisible/format characters, and unpaired surrogates,
+  // tested by Unicode property rather than an enumerated list: the set that can
+  // hide a hostname from `looksLinkish` while a mail client still parses one is
+  // far wider than the well-known zero-width characters, and includes the bidi
+  // controls. Property escapes do not trip no-control-regex, so noInlineConfig
+  // is not a constraint here.
+  const stripped = Array.from(value)
+    .filter((ch) => !/[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/u.test(ch))
+    .join('')
+    .trim();
+  const points = Array.from(stripped);
+  return points.length > IDENTITY_MAX_LEN
+    ? `${points.slice(0, IDENTITY_MAX_LEN).join('')}…`
+    : stripped;
+}
+
+/**
+ * True when a display name is trying to look like a link.
+ *
+ * Escaping stops markup, not linkification: mail clients auto-link bare URLs in
+ * text, and `report-note.ts` wraps these same values in a code span for exactly
+ * this reason. That defence does not carry over here, because this render goes
+ * out as mail rather than into an agent-facing note.
+ *
+ * The threat is specific. The account under review picks its own kind-0 display
+ * name AND supplies the address this mail is sent to, so a name of
+ * "verify at http://not-divine.example/claim" would have Divine Trust & Safety
+ * deliver an attacker's link, under Divine's branding, to an address the
+ * attacker chose. Dropping the row is the safe failure: the parent still gets
+ * the username and the ID.
+ *
+ * Compared on a normalized copy, because a linkifier resolves hostnames under
+ * UTS-46: U+3002, U+FF0E and U+FF61 all map to `.`, so `evil。example` is a
+ * hostname to the client and was not to an ASCII-only check. NFKC alone does
+ * not cover it -- it folds U+FF0E and leaves the other two -- so they are
+ * replaced outright.
+ *
+ * Deliberately blunt. A dotted token with a letter suffix is enough to trip it,
+ * so a legitimate name like "Anna.Marie" is dropped too. Losing a display name
+ * costs recognisability; shipping a live link costs more.
+ */
+function looksLinkish(value: string): boolean {
+  const normalized = value.normalize('NFKC').replace(/[。．｡]/g, '.');
+  return (
+    /:\/\/|\bwww\./iu.test(normalized) ||
+    /[\p{L}\p{N}-]+\.[\p{L}]{2,}/u.test(normalized) ||
+    // A bare IPv4 host has no letters after the final dot, so the rule above
+    // does not see it. Narrower than widening that suffix class, which would
+    // also drop ordinary names containing a decimal.
+    /\b\d{1,3}(\.\d{1,3}){3}\b/.test(normalized)
+  );
+}
+
+/**
+ * The display form of a NIP-05, or undefined when we will not vouch for it.
+ *
+ * Two gates. Shape first: anything carrying a scheme, a path, whitespace or a
+ * second `@` is not a NIP-05.
+ *
+ * Then the issuing domain, which is the gate that matters. A NIP-05 is a bare
+ * hostname by construction, so `looksLinkish` cannot be applied to it -- it
+ * would reject every legitimate value. That leaves the same hole this row was
+ * supposed to be exempt from: `account_nip05` is unverified kind-0 the account
+ * chose, so `_@claim-your-teen-account.example` would render as a clean, highly
+ * linkifiable hostname, mailed under Divine branding to an address the same
+ * account supplied. We can only vouch for domains we issue, so anything else is
+ * dropped.
+ *
+ * Unset `NIP05_DOMAIN` therefore renders no username at all. That is the same
+ * call #222 made for the capture side: staging accounts come from a different
+ * Keycast instance, and no username beats a wrong or unvouched one.
+ *
+ * NIP-05 calls `_@domain` the "root" identifier and says to display it as the
+ * bare domain (nips/05.md, "Showing just the domain as an identifier"). Divine
+ * issues `_@<username>.<NIP05_DOMAIN>`, so the prefix is noise to a parent. Any
+ * other local part is left intact unless it is itself hostname-shaped: the host
+ * gate does not see the local part, so a `looksLinkish` one is dropped below.
+ */
+function displayNip05(nip05: string, issuingDomain?: string): string | undefined {
+  if (!issuingDomain) return undefined;
+  if (!/^[a-z0-9._-]+@[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(nip05)) return undefined;
+
+  const host = nip05.split('@').pop() ?? '';
+  const domain = issuingDomain.toLowerCase();
+  const lowerHost = host.toLowerCase();
+  if (lowerHost !== domain && !lowerHost.endsWith(`.${domain}`)) return undefined;
+
+  // The gate above constrains only the host. The local part is attacker-chosen
+  // kind-0 and NIP-05 permits `.` there, so it can be hostname-shaped
+  // (`www.evil.example@divine.video`) even when the host is ours. Drop it for the
+  // same reason looksLinkish drops a display name: a mail client may parse a link
+  // out of text delivered under Divine branding. The root form `_@…` and a plain
+  // local part like `alice` survive; only a dotted, hostname-shaped one is refused.
+  if (looksLinkish(nip05.split('@')[0] ?? '')) return undefined;
+
+  const display = nip05.startsWith('_@') ? nip05.slice(2) : nip05;
+  return display.length > 0 && display.length <= IDENTITY_MAX_LEN ? display : undefined;
+}
+
+/**
+ * Tells the parent which account this is about.
+ *
+ * A narrower set than agents get: the contact-notes block also carries the case
+ * deeplink, the band, and the claimed-and-unverified qualifier. A parent needs
+ * only enough to recognise their child's account.
+ *
+ * `account_vine_username` is captured and is the agent block's third fallback,
+ * but is deliberately not shown here. It may have informed what became the
+ * Divine username, but by the time a case exists the original Vine name that
+ * happened to be carried over is not what a parent would recognise.
+ *
+ * Every row is conditional except the npub. Capture is best effort -- an account
+ * whose profile was already hidden by enforcement yields no name and no NIP-05
+ * -- but the pubkey is on the case row and always resolves.
+ */
+function buildAccountIdentityHtml(
+  identity: AgeReviewCaseIdentity & { pubkey?: string },
+  issuingDomain?: string,
+): string {
+  const rows: string[] = [];
+
+  // Cleaned and capped before the link check, never after: the check has to run
+  // on exactly the string that gets rendered, or truncation could cut a URL out
+  // of view of the check while leaving one in the mail.
+  const name = identity.account_name ? cleanIdentityText(identity.account_name) : undefined;
+  const nip05 = identity.account_nip05
+    ? displayNip05(identity.account_nip05.trim(), issuingDomain)
+    : undefined;
+
+  if (name && !looksLinkish(name)) rows.push(`Display name: ${escapeHtml(name)}`);
+  // The escape here cannot fire: displayNip05's charset already excludes every
+  // HTML-special character, so a markup-bearing value is dropped before it
+  // arrives. Kept so the row does not become the one that forgot, if that
+  // validation is ever loosened. Deliberately not covered by a test -- there is
+  // no input that would reach it.
+  if (nip05) rows.push(`Username: ${escapeHtml(nip05)}`);
+  if (identity.pubkey) rows.push(`ID: ${escapeHtml(toNpub(identity.pubkey))}`);
+  if (rows.length === 0) return '';
+
+  return `<p>The account under review:<br>\n${rows.join('<br>\n')}</p>`;
+}
+
+/**
+ * The first message a parent or guardian receives. It leads with what we need
+ * from them rather than asking them to confirm who they are: a reply that only
+ * says "yes" tells us nothing, and anyone who is not the parent cannot produce
+ * the video regardless.
+ *
+ * One template covers both bands this path can reach. It carries no age-band
+ * label because the same message is sent to a 13-15 case and to someone
+ * claiming to be 16 or older, and "possibly under 16" is true of both.
+ *
+ * It names the account. That is a deliberate reversal of the position #222 took
+ * for this message, taken by the T&S lead: a parent cannot act on a review
+ * without knowing which account it concerns. The risk #222 named is real and
+ * unchanged -- the address is supplied by the account under review and is
+ * unverified until someone replies from it -- so the requester name stays
+ * address-only and this is the only surface where the handle reaches an
+ * unverified recipient.
+ *
+ * Sent as HTML: Zendesk renders `html_body` through the account's mail template
+ * and derives the plain-text alternative itself.
+ */
+export function buildParentOutreachBody(
+  identity: AgeReviewCaseIdentity & { pubkey?: string } = {},
+  issuingDomain?: string,
+): string {
+  const identityHtml = buildAccountIdentityHtml(identity, issuingDomain);
+
   return [
-    'Hello,',
+    '<p>Hello,</p>',
     '',
-    'We received a report that an account on Divine may belong to a minor in the ' +
-      `${BAND_DISPLAY[ageBand]} age range. As part of our safety process, we need a ` +
-      'parent or guardian to verify they are aware of and approve this account.',
+    '<p>An account on Divine was flagged as possibly belonging to someone under 16. ' +
+      'Where permitted by law, teens aged 13 to 15 can use Divine through Divine Greenlight, ' +
+      'with a parent or guardian who is aware and involved.</p>',
+    ...(identityHtml ? ['', identityHtml] : []),
     '',
-    'Please reply to this email to confirm you are the parent or legal guardian of the account holder.',
+    '<p>To keep the account open, reply to this email with a short private video that shows:</p>',
     '',
-    'If you have questions, you can reply directly to this email or contact us at contact@divine.video.',
+    '<ul>',
+    '  <li>the teen</li>',
+    '  <li>a parent or guardian speaking on camera</li>',
+    '  <li>that the teen is between 13 and 15</li>',
+    '  <li>that the teen has permission to use Divine</li>',
+    '  <li>that the parent or guardian knows about the account and will supervise its use</li>',
+    '  <li>the country or countries where you live</li>',
+    '</ul>',
     '',
-    'Thank you,',
-    'Divine Trust & Safety',
+    '<p>You can attach the video or include a private link to it.</p>',
+    '',
+    '<p><strong>Please do NOT send government IDs, payment details, school or medical records, ' +
+      'or passwords.</strong> We only need the short video.</p>',
+    '',
+    '<p>Please reply within 15 days. If we do not hear from you, your child&#39;s account will be deleted.</p>',
+    '',
+    '<p>If you are the account holder and you are 16 or older, reply and tell us that. ' +
+      'No video needed, and we will take another look.</p>',
+    '',
+    '<p>If you have questions about this request, or want tips on supporting your family&#39;s ' +
+      'healthy use of social media, visit our <a href="https://divine.video/family">For Families page</a>. ' +
+      'Read <a href="https://divine.video/kids">how accounts work for kids on Divine</a>.</p>',
+    '',
+    '<p>You can also reply directly to this email with any questions.</p>',
+    '',
+    '<p>Thank you,<br>',
+    'Divine Trust &amp; Safety</p>',
   ].join('\n');
 }
 
@@ -1029,7 +1252,7 @@ async function createAgeReviewTicket(
   if (!env.DB) return;
 
   const subject = `Age review: parental verification needed [${caseId}]`;
-  const outreachBody = buildParentOutreachBody(ageBand);
+  const outreachBody = buildParentOutreachBody(identity, env.NIP05_DOMAIN);
   const customFields = buildAgeReviewCustomFields(env, deadlineAt);
 
   const res = await fetch(`${zendesk.baseUrl}/tickets`, {
@@ -1041,7 +1264,7 @@ async function createAgeReviewTicket(
     body: JSON.stringify({
       ticket: {
         subject,
-        comment: { body: outreachBody, public: true },
+        comment: { html_body: outreachBody, public: true },
         // The address alone. Zendesk renders this into the To: header of every
         // outbound mail, and this ticket's first message goes to an address the
         // teen supplied that nobody has verified -- so it must not carry the
@@ -1144,7 +1367,7 @@ async function updateTicketWithParentContact(
   const zendesk = await getZendeskClientConfig(env);
   if (!zendesk) return;
 
-  const outreachBody = buildParentOutreachBody(ageBand);
+  const outreachBody = buildParentOutreachBody(identity, env.NIP05_DOMAIN);
 
   const res = await fetch(`${zendesk.baseUrl}/tickets/${ticketId}`, {
     method: 'PUT',
@@ -1158,7 +1381,7 @@ async function updateTicketWithParentContact(
         // riskier still: it reassigns the requester on a ticket that already
         // exists, so the name lands on a contact an agent may already see.
         requester: { email: parentEmail, name: parentEmail },
-        comment: { body: outreachBody, public: true },
+        comment: { html_body: outreachBody, public: true },
       },
     }),
   });

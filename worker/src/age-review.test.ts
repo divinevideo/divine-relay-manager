@@ -18,6 +18,7 @@ import {
   handleGetAgeReviewFunnel,
   ageReviewActiveGuard,
   composeContactNotes,
+  buildParentOutreachBody,
   type AgeReviewEnv,
 } from './age-review';
 import type { AgeReviewCase } from '../../shared/age-review';
@@ -1592,7 +1593,10 @@ describe('parent contact record', () => {
     expect(payload.ticket.requester.name).toBe('parent@example.com');
     expect(payload.ticket.requester.name).not.toContain('Claimed parent');
     expect(payload.ticket.requester.name).not.toBe('Parent/Guardian');
-    expect(payload.ticket.comment.body).not.toContain('Some One');
+    // The To: header stays address-only. The message body now does name the
+    // account -- a deliberate reversal of #222 for the body alone -- so this
+    // asserts the split rather than a blanket ban on the handle.
+    expect(payload.ticket.comment.html_body).toContain('Some One');
   });
 
   it('writes the identity block to the contact notes', async () => {
@@ -2032,6 +2036,16 @@ describe('handleParentContact Zendesk integration', () => {
     expect(ticketPut.ticket.requester.name).toBe('parent@example.com');
     expect(ticketPut.ticket.requester.name).not.toContain('Some One');
 
+    // The body does name the account, on this path too -- the parent cannot act
+    // on the review without knowing which account it is. Only the To: header is
+    // held back until a reply proves the address.
+    expect(ticketPut.ticket.comment.html_body).toContain('Some One');
+
+    // Zendesk sends `body` when both are present, so a plain body reappearing
+    // here would silently revert the message to text. This is the branch a
+    // moderator-restricted case takes, so it needs the guard as much as create.
+    expect(ticketPut.ticket.comment.body).toBeUndefined();
+
     // Agent-only: the block reached the contact, with the right case.
     const contactPut = mockFetch.mock.calls.find(
       (call: unknown[]) => (call[0] as string).includes('/users/') && (call[1] as { method?: string })?.method === 'PUT',
@@ -2042,6 +2056,358 @@ describe('handleParentContact Zendesk integration', () => {
     expect(notes).toContain('Some One');
 
     vi.unstubAllGlobals();
+  });
+
+  it('sends the outreach as html_body so Zendesk renders it as rich mail', async () => {
+    const c = makeCase({ state: 'restricted_pending_user_response' });
+    const db = {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        bind: vi.fn().mockReturnValue({
+          first: vi.fn().mockResolvedValue(
+            sql.includes('WHERE id = ? AND pubkey = ?') ? c : null
+          ),
+          run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+        }),
+      })),
+    };
+
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ ticket: { id: 42 } }),
+    });
+    vi.stubGlobal('fetch', mockFetch);
+
+    const req = new Request('https://api.test/v1/minor-review-cases/case-1/parent-contact', {
+      method: 'POST',
+      body: JSON.stringify({ email: 'parent@example.com' }),
+    });
+    await handleParentContact(req, 'case-1', c.pubkey, makeEnv(db, {
+      ZENDESK_SUBDOMAIN: 'test',
+      ZENDESK_API_TOKEN: 'tok',
+      ZENDESK_EMAIL: 'agent@test.com',
+    }), corsHeaders);
+
+    const zendeskCall = mockFetch.mock.calls.find(
+      (call: unknown[]) => (call[0] as string).includes('zendesk.com/api/v2/tickets')
+    );
+    const { comment } = JSON.parse(zendeskCall![1].body).ticket;
+    // A plain `body` alongside html_body would be the one Zendesk sent, so the
+    // markup has to be the only thing supplied.
+    expect(comment.body).toBeUndefined();
+    expect(comment.html_body).toContain('<a href="https://divine.video/family">');
+
+    vi.unstubAllGlobals();
+  });
+});
+
+// -- parent outreach copy -----------------------------------------------------
+
+describe('buildParentOutreachBody', () => {
+  it('leads with what we need rather than asking who they are', () => {
+    const html = buildParentOutreachBody();
+    expect(html).toContain('reply to this email with a short private video');
+    // The message this replaces asked only for a confirmation, which parents
+    // answered with "yes" -- worthless as consent. That ask must not survive.
+    expect(html).not.toContain('confirm you are the parent or legal guardian');
+  });
+
+  it('carries no age-band label, so one template serves both bands', () => {
+    const html = buildParentOutreachBody();
+    for (const label of ['13-15', '16+ (claimed)', 'Under 13', 'age range']) {
+      expect(html).not.toContain(label);
+    }
+    expect(html).toContain('possibly belonging to someone under 16');
+  });
+
+  it('states the video requirements, the deadline, and the 16+ path', () => {
+    const html = buildParentOutreachBody();
+    expect(html).toContain('a parent or guardian speaking on camera');
+    // divine.video/kids and /age-review both require the age statement. This
+    // email is the primary instruction channel now, so dropping it here sends
+    // families back for a second video -- the round trip this copy exists to end.
+    expect(html).toContain('that the teen is between 13 and 15');
+    expect(html).toContain('the country or countries where you live');
+    expect(html).toContain('Please do NOT send government IDs');
+    expect(html).toContain('Please reply within 15 days');
+    expect(html).toContain('you are 16 or older');
+  });
+
+  it('links the family and kids pages as anchors, not bare URLs', () => {
+    const html = buildParentOutreachBody();
+    expect(html).toContain('<a href="https://divine.video/family">For Families page</a>');
+    expect(html).toContain('<a href="https://divine.video/kids">how accounts work for kids on Divine</a>');
+  });
+
+  it('names the account so the parent knows which one this is about', () => {
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_name: 'Star Girl',
+      account_nip05: '_@stargirl.divine.video',
+    }, 'divine.video');
+    expect(html).toContain('The account under review:');
+    expect(html).toContain('Display name: Star Girl');
+    // NIP-05 root identifiers display as the bare domain, so the stored
+    // `_@stargirl.divine.video` must not reach a parent with its prefix.
+    expect(html).toContain('Username: stargirl.divine.video');
+    expect(html).not.toContain('_@');
+    expect(html).toMatch(/ID: npub1[a-z0-9]+/);
+  });
+
+  it('leaves a non-root NIP-05 local part alone', () => {
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_nip05: 'alice@divine.video',
+    }, 'divine.video');
+    expect(html).toContain('Username: alice@divine.video');
+  });
+
+  it('drops a NIP-05 whose local part is hostname-shaped, even on a domain we issue', () => {
+    // The host gate constrains only the domain. NIP-05 permits `.` in the local
+    // part, so an unverified kind-0 value can smuggle a hostname there and still
+    // pass the gate on our own domain. looksLinkish screens the local part.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_nip05: 'www.evil.example@divine.video',
+    }, 'divine.video');
+    expect(html).not.toContain('Username:');
+    expect(html).not.toContain('www.evil.example');
+  });
+
+  it('drops a NIP-05 on a domain we do not issue', () => {
+    // A NIP-05 is a bare hostname, so looksLinkish cannot screen it without
+    // rejecting every real one. The issuing domain is the screen instead: this
+    // value is unverified kind-0, and rendering it would mail an
+    // attacker-chosen, highly linkifiable hostname under Divine branding.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_nip05: '_@claim-your-teen-account.example',
+    }, 'divine.video');
+    expect(html).not.toContain('Username:');
+    expect(html).not.toContain('claim-your-teen-account');
+  });
+
+  it('renders no username at all when no issuing domain is configured', () => {
+    // Staging deliberately leaves NIP05_DOMAIN unset. No username beats one we
+    // cannot vouch for.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_nip05: '_@stargirl.divine.video',
+    });
+    expect(html).not.toContain('Username:');
+  });
+
+  it('accepts a subdomain of the issuing domain but not a lookalike', () => {
+    expect(buildParentOutreachBody(
+      { pubkey: 'a'.repeat(64), account_nip05: '_@kid.divine.video' }, 'divine.video',
+    )).toContain('Username: kid.divine.video');
+    // `notdivine.video` ends with the domain as a substring but is not ours.
+    expect(buildParentOutreachBody(
+      { pubkey: 'a'.repeat(64), account_nip05: '_@notdivine.video' }, 'divine.video',
+    )).not.toContain('Username:');
+  });
+
+  it('escapes an ID that could not be encoded as an npub', () => {
+    // toNpub hands back its input unchanged rather than throwing when the
+    // pubkey will not encode, so the ID row is not automatically safe just
+    // because npubs are alphanumeric.
+    const html = buildParentOutreachBody({ pubkey: '<img src=x onerror=alert(1)>' });
+    expect(html).not.toContain('<img');
+    expect(html).toContain('&lt;img src=x onerror=alert(1)&gt;');
+  });
+
+  it('drops a display name that is trying to look like a link', () => {
+    // The account picks this string AND supplies the address we mail it to, so
+    // a name carrying a URL turns this message into attacker-chosen delivery.
+    // Escaping does not help: mail clients auto-link bare URLs in text.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_name: 'Star Girl verify at http://not-divine.example/claim',
+      account_nip05: '_@stargirl.divine.video',
+    }, 'divine.video');
+    expect(html).not.toContain('Display name:');
+    expect(html).not.toContain('not-divine.example');
+    // Failing safe still leaves the parent able to identify the account.
+    expect(html).toContain('Username: stargirl.divine.video');
+    expect(html).toMatch(/ID: npub1[a-z0-9]+/);
+  });
+
+  it('drops a NIP-05 that is not actually a NIP-05', () => {
+    // The issuing domain must be supplied, or this asserts nothing: without it
+    // displayNip05 returns early and the shape check never runs.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_nip05: 'http://not-divine.example/claim',
+    }, 'divine.video');
+    expect(html).not.toContain('Username:');
+    expect(html).not.toContain('not-divine.example');
+  });
+
+  it('drops a NIP-05 smuggling a URL in front of a domain we do issue', () => {
+    // The host really is divine.video, so the domain gate passes it. Only the
+    // shape check stands between this and a live link to evil.example in mail
+    // sent under Divine branding.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_nip05: 'http://evil.example/claim@divine.video',
+    }, 'divine.video');
+    expect(html).not.toContain('Username:');
+    expect(html).not.toContain('evil.example');
+  });
+
+  it('drops a NIP-05 carrying markup in front of a domain we do issue', () => {
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_nip05: '<script>alert(1)</script>@divine.video',
+    }, 'divine.video');
+    expect(html).not.toContain('Username:');
+    expect(html).not.toContain('script');
+  });
+
+  it('prints no empty row for a NIP-05 that is only the root prefix', () => {
+    const html = buildParentOutreachBody(
+      { pubkey: 'a'.repeat(64), account_nip05: '_@' }, 'divine.video',
+    );
+    expect(html).not.toContain('Username:');
+  });
+
+  it('caps an overlong display name and marks it as cut', () => {
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_name: 'Q'.repeat(300),
+    });
+    expect(html).toContain(`Display name: ${'Q'.repeat(80)}\u2026`);
+    expect(html).not.toContain('Q'.repeat(81));
+  });
+
+  it('truncates by code point, so an emoji is never cut in half', () => {
+    // A lone surrogate in html_body is malformed and Zendesk may reject the
+    // whole comment, which would drop the outreach entirely.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_name: `${'x'.repeat(79)}\u{1F600}extra`,
+    });
+    expect(html).toContain(`${'x'.repeat(79)}\u{1F600}\u2026`);
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(html)).toBe(false);
+  });
+
+  it('drops a display name carrying a bare IP address', () => {
+    // No letters after the final dot, so the hostname rule alone does not see
+    // this one.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_name: 'Star Girl go to 93.184.216.34/claim',
+    });
+    expect(html).not.toContain('Display name:');
+  });
+
+  it('drops a display name using a unicode dot to hide a hostname', () => {
+    // UTS-46 maps U+3002 to '.', so a mail client resolves this as a hostname
+    // even though an ASCII-only check does not see one.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_name: 'Star Girl go to evil\u3002example',
+    });
+    expect(html).not.toContain('Display name:');
+  });
+
+  it('drops a display name hiding a dot behind a zero-width character', () => {
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_name: 'Star Girl evil\u200b.example',
+    });
+    expect(html).not.toContain('Display name:');
+  });
+
+  it('drops a name hiding a dot behind an invisible format character outside the zero-width block', () => {
+    // U+2062 (INVISIBLE TIMES) is a Cf character the enumerated strip missed:
+    // looksLinkish cannot match across it, but a mail client ignores it and
+    // parses `evil.example`.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_name: 'Star Girl evil\u2062.example',
+    });
+    expect(html).not.toContain('Display name:');
+  });
+
+  it('drops a name carrying a bidi override and never emits one into the body', () => {
+    // U+202E (RIGHT-TO-LEFT OVERRIDE), left unterminated, reorders the rest of
+    // the paragraph it lands in -- and the npub row shares that paragraph.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_name: 'Star Girl evil\u202e.example',
+    });
+    expect(html).not.toContain('Display name:');
+    expect(html).not.toContain('\u202e');
+  });
+
+  it('drops a name hiding a dot behind a variation selector', () => {
+    // U+FE0F is Default_Ignorable but not Cf, so the \p{Cf} half of the strip
+    // never reaches it -- and it is the ordinary emoji presentation selector, so
+    // it turns up in real display names rather than only in crafted ones. ICU
+    // resolves `evil️.example` to `evil.example`, so without
+    // \p{Default_Ignorable_Code_Point} this renders a live hostname.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_name: 'Star Girl evil️.example',
+    });
+    expect(html).not.toContain('Display name:');
+  });
+
+  it('drops a display name whose IP address is written in fullwidth digits', () => {
+    // The IPv4 rule matches ASCII \d only, and the explicit dot replacement does
+    // not touch the digits. NFKC is the only thing that folds this to
+    // `93.184.216.34` -- which is exactly what a UTS-46 resolver sees.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_name: 'Star Girl go to ９３．１８４．２１６．３４',
+    });
+    expect(html).not.toContain('Display name:');
+  });
+
+  it('drops a display name carrying a scheme even when the host has no dot', () => {
+    // The hostname rule needs a dot after the label, so an intranet or localhost
+    // target is caught by the scheme check alone.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_name: 'Star Girl go to http://localhost/claim',
+    });
+    expect(html).not.toContain('Display name:');
+  });
+
+  it('accepts a NIP-05 that arrived with surrounding whitespace', () => {
+    // Capture stores kind-0 verbatim and never trims, so a padded value reaches
+    // the anchored shape check as-is and would be dropped without the trim.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_nip05: '  _@stargirl.divine.video\n',
+    }, 'divine.video');
+    expect(html).toContain('Username: stargirl.divine.video');
+  });
+
+  it('omits the rows it has no value for rather than printing empties', () => {
+    // Capture is best effort: an account whose profile was already hidden by
+    // enforcement yields no name and no NIP-05. The npub always resolves.
+    const html = buildParentOutreachBody({ pubkey: 'a'.repeat(64) });
+    expect(html).toContain('The account under review:');
+    expect(html).not.toContain('Display name:');
+    expect(html).not.toContain('Username:');
+    expect(html).toMatch(/ID: npub1[a-z0-9]+/);
+  });
+
+  it('drops the block entirely when nothing was captured', () => {
+    expect(buildParentOutreachBody({})).not.toContain('The account under review');
+  });
+
+  it('escapes an account-controlled display name', () => {
+    // account_name is stored raw from the account's own kind-0 (#222 stores raw
+    // on purpose, so each render surface sanitizes for its own medium). This is
+    // the only thing between it and a parent's inbox.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_name: '<script>alert(1)</script> & "friends"',
+    });
+    expect(html).not.toContain('<script>');
+    expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt; &amp; &quot;friends&quot;');
   });
 });
 
