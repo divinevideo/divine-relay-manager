@@ -36,9 +36,9 @@ Execute a moderation action directly.
 **Request:**
 ```json
 {
-  "action": "ban_pubkey" | "allow_pubkey" | "delete_event",
+  "action": "ban_pubkey" | "allow_pubkey" | "delete_event" | "hide_event" | "allow_event",
   "pubkey": "hex-pubkey",      // Required for ban/allow
-  "eventId": "hex-event-id",   // Required for delete
+  "eventId": "hex-event-id",   // Required for delete/hide/allow_event; must be 64 hex chars
   "reason": "Spam account"     // Optional
 }
 ```
@@ -47,7 +47,8 @@ Execute a moderation action directly.
 ```json
 {
   "success": true,
-  "message": "Action executed successfully"
+  "message": "Action executed successfully",
+  "recorded": true             // hide_event / allow_event only — see below
 }
 ```
 
@@ -56,7 +57,26 @@ Execute a moderation action directly.
 |--------|-------------|
 | `ban_pubkey` | Ban a user from posting to the relay |
 | `allow_pubkey` | Remove a user from the ban list |
-| `delete_event` | Delete a specific event from the relay |
+| `delete_event` | Delete a specific event from the relay, and DM the creator `PERMANENT_BAN` |
+| `hide_event` | Hide an event. Same relay operation as `delete_event`, but **no DM** |
+| `allow_event` | Un-hide an event |
+
+### `recorded`, and why `hide_event` / `allow_event` exist
+
+These two do more than the relay change, which was already available over
+`/api/relay-rpc`. They also mark the event human-reviewed in `moderation_targets`.
+ReportWatcher skips auto-hide for any event carrying that mark, so **without it a
+moderator's restore is silently undone by the next report** — csam is an immediate,
+threshold-1 tier.
+
+`recorded` reports whether that mark actually landed. It is returned on a **200**, not an
+error status, because the relay change did apply and a retry would enforce twice. A caller
+seeing `recorded: false` should treat the decision as **applied but unprotected** and
+surface it: the content is hidden or restored as asked, but the automation may reverse it.
+
+`eventId` is validated as 64 hex characters and lowercased before use. `moderation_targets`
+is BINARY-collated and ReportWatcher looks the event up by its lowercase id, so an uppercase
+id would write a row nothing can read while the API reported success.
 
 ---
 
