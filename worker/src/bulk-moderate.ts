@@ -19,9 +19,9 @@ const RELAY_QUERY_PAGE_SIZE = 500;
 const RELAY_QUERY_MAX_PAGES = 100; // safety bound (~50k events); logged if hit, never silent
 const RELAY_QUERY_TIMEOUT_MS = 10000; // per-page (reset each page)
 const EVENT_CHUNK_SIZE = 200; // relay enumeration page size
-// Four five-request waves x the coordinator's 90s bound stays below the
-// Queue consumer's fixed 15-minute wall limit, including gate backlog.
-const SERIALIZED_EVENT_BATCH_SIZE = 20;
+// The singleton gate is shared with interactive moderation. One mutation per
+// Queue message plus max_concurrency=1 keeps bulk from building a gate backlog.
+const SERIALIZED_EVENT_BATCH_SIZE = 1;
 
 export interface BulkModerateEnv extends Nip86Env, ZendeskSyncEnv {
   DB?: D1Database;
@@ -183,6 +183,7 @@ export async function ensureBulkJobsTable(db: D1Database): Promise<void> {
       media_processed INTEGER NOT NULL DEFAULT 0,
       failures TEXT NOT NULL DEFAULT '[]',
       failures_dropped INTEGER NOT NULL DEFAULT 0,
+      version INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )`
@@ -190,6 +191,8 @@ export async function ensureBulkJobsTable(db: D1Database): Promise<void> {
   // Defensive add for a bulk_jobs table created before failures_dropped existed
   // (on-demand schema, no migration runner). Ignored once the column is present.
   await db.prepare('ALTER TABLE bulk_jobs ADD COLUMN failures_dropped INTEGER NOT NULL DEFAULT 0')
+    .run().catch(() => {});
+  await db.prepare('ALTER TABLE bulk_jobs ADD COLUMN version INTEGER NOT NULL DEFAULT 0')
     .run().catch(() => {});
   bulkSchemaReady = true;
 }
@@ -203,6 +206,7 @@ interface BulkJobRow {
   media_processed: number;
   failures: string;
   failures_dropped: number;
+  version: number;
   created_at: string;
   updated_at: string;
 }
@@ -277,12 +281,12 @@ export async function handleBulkModerateEnqueue(
 
   await ensureBulkJobsTable(env.DB);
   await env.DB.prepare(
-    `INSERT INTO bulk_jobs (job_id, pubkey, action, status, events_processed, media_processed, failures, failures_dropped, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).bind(jobId, body.pubkey, action, 'pending', 0, 0, '[]', 0, now, now).run();
+    `INSERT INTO bulk_jobs (job_id, pubkey, action, status, events_processed, media_processed, failures, failures_dropped, version, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(jobId, body.pubkey, action, 'pending', 0, 0, '[]', 0, 0, now, now).run();
 
   try {
-    await env.BULK_QUEUE.send({ jobId, pubkey: body.pubkey, action, reason });
+    await env.BULK_QUEUE.send({ jobId, pubkey: body.pubkey, action, reason, version: 0 });
   } catch (error) {
     // Roll back the orphaned pending row so it can't linger unprocessed.
     await env.DB.prepare('DELETE FROM bulk_jobs WHERE job_id = ?').bind(jobId).run().catch(() => {});
@@ -304,18 +308,11 @@ const STALE_JOB_MS = 30 * 60 * 1000;
 // recorded as `failed` and swallowed (not rethrown) so the queue does not retry a
 // half-applied DESTRUCTIVE job — re-running is a manual operator action.
 //
-// Idempotency: Cloudflare Queues is at-least-once. Every write to bulk_jobs.status
-// is guarded so done/failed are sticky — the running-claim and terminal writes
-// only act while the row is still non-terminal, and `next` is enqueued only when
-// the terminal write actually changed a row. So a duplicate delivery for a job
-// another chunk already finished is a no-op: it can't flap done->running, re-fire
-// the UI's onComplete, or fork a second chunk chain. What these guards do NOT cover
-// is two duplicates of the same still-running message racing the same page; there
-// is no data corruption (banevent/kind-5/moderate-media are all idempotent), only
-// count inflation and wasted compute on that rare overlap. A full atomic per-chunk
-// claim (and recovering an abandoned job's dropped continuation) is a focused
-// follow-up.
-// TODO(#async-retry): atomic per-chunk claim + continuation recovery.
+// Idempotency: Cloudflare Queues is at-least-once. Each message carries the row
+// version it expects and atomically increments it before doing work, so only one
+// delivery can own a chunk. Terminal writes also require that claimed version.
+// Recovering an abandoned job's dropped continuation remains separate work.
+// TODO(#async-retry): continuation recovery.
 const MAX_STORED_FAILURES = 50;
 
 // Merge new failures into the stored list, tracking the cumulative dropped count
@@ -356,15 +353,14 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
 
     const reason = msg.reason || `Bulk ${msg.action} by moderator`;
     const phase: BulkJobPhase = msg.phase ?? (msg.action === 'delete-all' ? 'events' : 'media');
+    const expectedVersion = msg.version ?? 0;
+    const claimedVersion = expectedVersion + 1;
 
-    // Claim the chunk: flip to running only while still non-terminal. A duplicate
-    // delivery for a job another chunk already finished changes zero rows here, so
-    // we bail rather than flap `done`/`failed` back to `running` and re-fire the
-    // UI's onComplete. (Not a full atomic claim against a concurrent same-state
-    // duplicate -- that's TODO(#async-retry); this just stops the backward flips.)
+    // Claim this exact chunk version atomically. Concurrent and delayed duplicate
+    // deliveries change zero rows and cannot repeat work or fork continuations.
     const claim = await db.prepare(
-      `UPDATE bulk_jobs SET status = ?, updated_at = ? WHERE job_id = ? AND status IN ('pending','running')`
-    ).bind('running', new Date().toISOString(), msg.jobId).run();
+      `UPDATE bulk_jobs SET status = ?, updated_at = ?, version = version + 1 WHERE version = ? AND job_id = ? AND status IN ('pending','running')`
+    ).bind('running', new Date().toISOString(), expectedVersion, msg.jobId).run();
     if (!claim.meta?.changes) return;
 
     const moderatorPubkey = await getAdminPubkey(env);
@@ -449,13 +445,14 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
     }
 
     const status = next ? 'running' : 'done';
+    if (next) next.version = claimedVersion;
     const merged = mergeFailures(parseFailuresList(row.failures), Number(row.failures_dropped) || 0, chunkFailures);
     // Guard the terminal write on the status we claimed (`running`), and only
     // enqueue the next chunk if this write actually landed. If a concurrent or
     // duplicate chunk already moved the row to a terminal state, changes is 0 and
     // we must NOT send `next` (that would fork the chunk chain).
     const wrote = await db.prepare(
-      `UPDATE bulk_jobs SET status = ?, events_processed = ?, media_processed = ?, failures = ?, failures_dropped = ?, updated_at = ? WHERE job_id = ? AND status = 'running'`
+      `UPDATE bulk_jobs SET status = ?, events_processed = ?, media_processed = ?, failures = ?, failures_dropped = ?, updated_at = ? WHERE version = ? AND job_id = ? AND status = 'running'`
     ).bind(
       status,
       job.eventsProcessed + eventsDelta,
@@ -463,6 +460,7 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
       JSON.stringify(merged.list),
       merged.dropped,
       new Date().toISOString(),
+      claimedVersion,
       msg.jobId,
     ).run();
 

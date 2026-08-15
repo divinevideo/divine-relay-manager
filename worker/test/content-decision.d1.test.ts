@@ -122,6 +122,18 @@ describe('recorded content decisions on real D1', () => {
 
     expect(await hasActiveAutoHide(DB, eventId)).toBe(true);
 
+    await DB.prepare(`
+      INSERT INTO moderation_decisions (target_type, target_id, action)
+      VALUES ('event', ?, 'auto_hide_confirmed')
+    `).bind(eventId).run();
+    expect(await hasActiveAutoHide(DB, eventId)).toBe(false);
+
+    await DB.prepare(`
+      INSERT INTO moderation_decisions (target_type, target_id, action)
+      VALUES ('event', ?, 'auto_hidden')
+    `).bind(eventId).run();
+    expect(await hasActiveAutoHide(DB, eventId)).toBe(true);
+
     await markHumanAction(DB, 'event', eventId, 'delete_event');
     expect(await hasActiveAutoHide(DB, eventId)).toBe(false);
 

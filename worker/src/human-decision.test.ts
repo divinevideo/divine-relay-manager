@@ -316,9 +316,37 @@ describe('human decision persistence', () => {
 
       expect(response.status).toBe(200);
       expect(operations).toEqual([{ eventId, relayAction: 'review', humanAction: 'dismissed' }]);
+      expect(await response.json()).toMatchObject({ success: true, recorded: true, reconciled: true });
       const upsert = sqlLog.find(entry => entry.sql.includes('INSERT INTO moderation_targets'));
       expect(upsert).toBeDefined();
       expect(upsert?.sql).not.toContain('last_human_action');
+    });
+
+    it('reports unresolved dismissal state when D1 is not configured', async () => {
+      const { db } = createMockDB();
+      const env = { ...createEnv(db), DB: undefined };
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => ['OK', 'event_id', true, ''],
+        text: async () => JSON.stringify(['OK', 'event_id', true, '']),
+      });
+
+      const response = await worker.fetch(new Request('http://localhost/api/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        body: JSON.stringify({
+          kind: 1985,
+          content: 'Dismissed',
+          tags: [
+            ['L', 'moderation/resolution'],
+            ['l', 'dismissed', 'moderation/resolution'],
+            ['e', 'ab'.repeat(32)],
+          ],
+        }),
+      }), env as never, mockCtx);
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ success: true, recorded: false, reconciled: false });
     });
   });
 

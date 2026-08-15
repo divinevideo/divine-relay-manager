@@ -51,7 +51,7 @@ export async function hasActiveAutoHide(db: D1Database, targetEventId: string): 
       (SELECT last_human_action FROM moderation_targets WHERE target_id = ?) AS last_human_action,
       (SELECT action FROM moderation_decisions
        WHERE target_type = 'event' AND target_id = ?
-         AND action IN (?, ?, ?)
+         AND action IN (?, ?, ?, ?)
        ORDER BY id DESC LIMIT 1) AS auto_hide_action
   `).bind(
     targetEventId,
@@ -59,6 +59,7 @@ export async function hasActiveAutoHide(db: D1Database, targetEventId: string): 
     AUTO_HIDE_ACTION.hidden,
     AUTO_HIDE_ACTION.reversed,
     AUTO_HIDE_ACTION.restored,
+    AUTO_HIDE_ACTION.confirmed,
   ).first<{ last_human_action: string | null; auto_hide_action: string | null }>();
 
   return row?.auto_hide_action === AUTO_HIDE_ACTION.hidden
@@ -819,7 +820,20 @@ export class ReportWatcher implements DurableObject {
       }
     }
 
-    if (await this.hasHumanResolution(targetEventId)) {
+    const humanResolution = await this.hasHumanResolution(targetEventId);
+    if (humanResolution === null) {
+      console.error(`[ALERT] [ReportWatcher] Auto-hide skipped for ${targetEventId}: human-review state unavailable`);
+      await this.logDecision({
+        targetType: 'event',
+        targetId: targetEventId,
+        action: AUTO_HIDE_ACTION.skipped,
+        reason: `${category}: human-review state unavailable`,
+        reportId: event.id,
+        reporterPubkey: event.pubkey,
+      });
+      return;
+    }
+    if (humanResolution) {
       console.log(`[ReportWatcher] Event ${targetEventId} has human resolution, skipping auto-hide`);
       return;
     }
@@ -892,7 +906,20 @@ export class ReportWatcher implements DurableObject {
     // The first check happens before tier processing. Recheck inside the same
     // gate used by human actions so an admitted auto-hide cannot pass a newer
     // review mark and mutate the relay afterwards.
-    if (await this.hasHumanResolution(targetEventId)) {
+    const humanResolution = await this.hasHumanResolution(targetEventId);
+    if (humanResolution === null) {
+      console.error(`[ALERT] [ReportWatcher] Serialized auto-hide skipped for ${targetEventId}: human-review state unavailable`);
+      await this.logDecision({
+        targetType: 'event',
+        targetId: targetEventId,
+        action: AUTO_HIDE_ACTION.skipped,
+        reason: `${category}: human-review state unavailable inside visibility gate`,
+        reportId: event.id,
+        reporterPubkey: event.pubkey,
+      });
+      return;
+    }
+    if (humanResolution) {
       console.log(`[ReportWatcher] Event ${targetEventId} received a human resolution before auto-hide execution`);
       return;
     }
@@ -994,7 +1021,7 @@ export class ReportWatcher implements DurableObject {
           AND target_id = ?
           AND action IN (?, ?)
         LIMIT 1
-      `).bind(targetEventId, AUTO_HIDE_ACTION.hidden, 'auto_hide_confirmed').first();
+      `).bind(targetEventId, AUTO_HIDE_ACTION.hidden, AUTO_HIDE_ACTION.confirmed).first();
 
       return result !== null;
     } catch (error) {
@@ -1008,9 +1035,10 @@ export class ReportWatcher implements DurableObject {
    * Check if a human moderator has already made a decision on this target.
    * Reads from moderation_targets (persistent, survives reopen).
    */
-  private async hasHumanResolution(targetEventId: string): Promise<boolean> {
+  private async hasHumanResolution(targetEventId: string): Promise<boolean | null> {
     if (!this.env.DB) {
-      return false;
+      console.error(`[ALERT] [ReportWatcher] Cannot check human resolution for ${targetEventId}: D1 is not bound`);
+      return null;
     }
 
     try {
@@ -1022,9 +1050,7 @@ export class ReportWatcher implements DurableObject {
       return result !== null;
     } catch (error) {
       console.error('[ReportWatcher] Failed to check human resolution:', error);
-      // Auto-hide is reversible and non-critical; do not risk overriding a
-      // human decision when its authoritative state cannot be read.
-      return true;
+      return null;
     }
   }
 

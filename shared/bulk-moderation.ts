@@ -43,6 +43,7 @@ export interface BulkJobMessage {
   // Event ids left from the current relay page. Carrying them in the next
   // message bounds serialized relay mutations without advancing the cursor.
   eventIds?: string[];
+  version?: number;
 }
 
 export interface BulkJob {

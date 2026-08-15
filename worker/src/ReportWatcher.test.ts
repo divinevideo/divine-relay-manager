@@ -230,6 +230,7 @@ describe('ReportWatcher', () => {
     it.each([
       ['an active auto-hide', null, 'auto_hidden', 1],
       ['a later manual delete', 'delete_event', 'auto_hidden', 0],
+      ['a confirmed auto-hide', null, 'auto_hide_confirmed', 0],
       ['an already restored auto-hide', null, 'auto_hide_restored', 0],
     ] as const)('dismisses %s without overriding a newer visibility decision', async (_case, lastHumanAction, autoHideAction, expectedAllows) => {
       const statements: string[] = [];
@@ -1287,7 +1288,7 @@ describe('ReportWatcher', () => {
       expect(await status.json()).toMatchObject({ status: { eventsAutoHidden: 1 } });
     });
 
-    it('should proceed with auto-hide when DB is unavailable (fail open)', async () => {
+    it('should skip auto-hide when DB is unavailable', async () => {
       mockEnv.DB = undefined as unknown as D1Database;
 
       await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
@@ -1310,14 +1311,14 @@ describe('ReportWatcher', () => {
       ws!.simulateMessage(JSON.stringify(['EVENT', 'auto-hide-reports', reportEvent]));
       await new Promise(resolve => setTimeout(resolve, 50));
 
-      // Should still call banevent — fail open for enforcement
-      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(mockFetch).not.toHaveBeenCalled();
     });
 
     it('should skip auto-hide when hasHumanResolution query fails', async () => {
       // Mock D1: moderation_targets query throws, moderation_decisions returns null
       mockEnv.DB = {
         prepare: vi.fn().mockImplementation((_sql: string) => ({
+          run: mockDbRun,
           bind: vi.fn().mockReturnValue({
             run: mockDbRun,
             first: vi.fn().mockImplementation(() => {
@@ -1352,6 +1353,8 @@ describe('ReportWatcher', () => {
 
       // A transient D1 failure must not override a possible human decision.
       expect(mockFetch).not.toHaveBeenCalled();
+      expect(vi.mocked(mockEnv.DB!.prepare).mock.calls.some(([sql]) =>
+        String(sql).includes('INSERT INTO moderation_decisions'))).toBe(true);
     });
 
     it('should respect custom TRUSTED_CLIENTS config', async () => {

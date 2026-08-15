@@ -29,6 +29,7 @@ const ctx = vi.hoisted(() => ({ targetValue: 'c'.repeat(64), reportedPubkey: 'd'
 
 const api = vi.hoisted(() => ({
   deleteEvent: vi.fn(),
+  hideEvent: vi.fn(),
   restoreEvent: vi.fn(),
   markAsReviewed: vi.fn(),
   logDecision: vi.fn(),
@@ -128,10 +129,12 @@ beforeEach(() => {
   vi.clearAllMocks();
   ctx.targetValue = TARGET_EVENT;
   ctx.reportedPubkey = REPORTED_PUBKEY;
+  decisionLog.isPendingReview = false;
   api.deleteDecisions.mockResolvedValue({ deleted: 2, labelCleanupFailed: false });
+  api.logDecision.mockResolvedValue(undefined);
 });
 
-function renderDetail() {
+function renderDetail(onDismiss?: () => void) {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
@@ -139,7 +142,7 @@ function renderDetail() {
   const tree = () => (
     <QueryClientProvider client={qc}>
       <TooltipProvider>
-        <ReportDetail report={REPORT} />
+        <ReportDetail report={REPORT} onDismiss={onDismiss} />
       </TooltipProvider>
     </QueryClientProvider>
   );
@@ -152,6 +155,42 @@ function renderDetail() {
 const clickReopen = () => fireEvent.click(screen.getByRole('button', { name: /reopen/i }));
 
 describe('ReportDetail reopen reporting', () => {
+  it('does not confirm an auto-hide when the coordinated hide state was not recorded', async () => {
+    decisionLog.isPendingReview = true;
+    api.hideEvent.mockResolvedValue({ success: true, recorded: false });
+    renderDetail();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm Hide' }));
+
+    await waitFor(() => expect(api.hideEvent).toHaveBeenCalled());
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'Failed to confirm auto-hide',
+      variant: 'destructive',
+    })));
+    expect(api.logDecision).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'auto_hide_confirmed' }));
+  });
+
+  it('keeps the report open and raises a persistent warning when dismissal reconciliation fails', async () => {
+    api.markAsReviewed.mockResolvedValue({
+      success: true,
+      recorded: true,
+      reconciled: false,
+      error: 'restore failed',
+    });
+    const onDismiss = vi.fn();
+    renderDetail(onDismiss);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss Report' }));
+    const dialog = await screen.findByRole('alertdialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Dismiss Report' }));
+
+    await waitFor(() => expect(api.markAsReviewed).toHaveBeenCalled());
+    const warning = toast.mock.calls.find(([arg]) => arg.title === 'Resolution saved; visibility needs attention')?.[0];
+    expect(warning).toMatchObject({ variant: 'destructive', duration: Infinity });
+    expect(warning.description).toMatch(/could not be restored/i);
+    expect(onDismiss).not.toHaveBeenCalled();
+  });
+
   // Even a fully successful reopen cannot promise the report is back in the
   // queue: resolvedTargets also hides targets via relay bans and deletions,
   // which reopen never touches, so a ban-resolved report stays hidden. Report

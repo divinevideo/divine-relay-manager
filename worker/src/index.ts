@@ -36,7 +36,7 @@ import type { BulkJobMessage } from '../../shared/bulk-moderation';
 import { ensureZendeskTable, addZendeskInternalNote, syncZendeskAfterAction } from './zendesk-sync';
 import { buildReportNote, parseKind0Profile, type ReportedProfile } from './report-note';
 import { queryRelay, withTimeout, ENRICHMENT_TIMEOUT_MS } from './relay-profile';
-import { coordinateEventVisibility } from './event-visibility';
+import { coordinateEventVisibility, type EventVisibilityResult } from './event-visibility';
 import { markHumanAction, markHumanReviewed } from './human-decision';
 
 let schemaReady = false;
@@ -798,6 +798,7 @@ async function handlePublish(
   corsHeaders: Record<string, string>
 ): Promise<Response> {
   const body = (await request.json()) as UnsignedEvent;
+  let resolutionVisibility: EventVisibilityResult | undefined;
 
   if (!body.kind || body.content === undefined) {
     return jsonResponse({ success: false, error: 'Missing required fields: kind, content' }, 400, corsHeaders);
@@ -847,17 +848,20 @@ async function handlePublish(
       console.log('[handlePublish] Resolution label details:', { status, targetType, targetId });
 
       if (status && targetType && targetId) {
-        if (env.DB) {
-          if (targetType === 'event' && ['dismissed', 'no-action', 'false-positive'].includes(status)) {
-            const result = await coordinateEventVisibility(env, {
+        if (targetType === 'event' && ['dismissed', 'no-action', 'false-positive'].includes(status)) {
+          const result = env.DB
+            ? await coordinateEventVisibility(env, {
               eventId: targetId,
               relayAction: 'review',
               humanAction: status,
-            });
-            if (!result.success || !result.recorded) {
-              console.error('[handlePublish] Resolution label was published but visibility reconciliation failed:', result.error);
-            }
-          } else if (status === 'reviewed') {
+            })
+            : { success: false, recorded: false, error: 'Moderation database is not configured' };
+          resolutionVisibility = result;
+          if (!result.success || !result.recorded) {
+            console.error('[handlePublish] Resolution label was published but visibility reconciliation failed:', result.error);
+          }
+        } else if (env.DB) {
+          if (status === 'reviewed') {
             await markHumanReviewed(env.DB, targetType, targetId);
           } else {
             await markHumanAction(env.DB, targetType, targetId, status);
@@ -885,7 +889,15 @@ async function handlePublish(
     }
   }
 
-  return jsonResponse({ success: true, event }, 200, corsHeaders);
+  return jsonResponse({
+    success: true,
+    event,
+    ...(resolutionVisibility ? {
+      recorded: resolutionVisibility.recorded,
+      reconciled: resolutionVisibility.success,
+      error: resolutionVisibility.error,
+    } : {}),
+  }, 200, corsHeaders);
 }
 
 async function handleModerate(

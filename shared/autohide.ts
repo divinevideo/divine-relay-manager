@@ -5,6 +5,7 @@ export const AUTO_HIDE_ACTION = {
   failed: 'auto_hide_failed',
   reversed: 'auto_hide_reversed',
   restored: 'auto_hide_restored',
+  confirmed: 'auto_hide_confirmed',
 } as const;
 
 export const AUTO_HIDE_ACTIONS = [
@@ -14,6 +15,7 @@ export const AUTO_HIDE_ACTIONS = [
   AUTO_HIDE_ACTION.failed,
   AUTO_HIDE_ACTION.reversed,
   AUTO_HIDE_ACTION.restored,
+  AUTO_HIDE_ACTION.confirmed,
 ] as const;
 
 export type AutoHideAction = typeof AUTO_HIDE_ACTIONS[number];

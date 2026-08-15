@@ -26,7 +26,7 @@ vi.mock('@/lib/divineSigner', () => ({
 vi.mock('@/hooks/useAuthor', () => ({ useAuthor: () => ({ data: {} }) }));
 
 const api = vi.hoisted(() => ({
-  banEvent: vi.fn(),
+  hideEvent: vi.fn(),
   restoreEvent: vi.fn(),
   deleteEvent: vi.fn(),
   moderateMedia: vi.fn(),
@@ -64,7 +64,7 @@ function renderComposed() {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  api.banEvent.mockResolvedValue({ success: true });
+  api.hideEvent.mockResolvedValue({ success: true, recorded: true });
   api.logDecision.mockResolvedValue(undefined);
   getSession.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 'tok' });
   getPublicKey.mockResolvedValue(MOD_PUBKEY);
@@ -79,7 +79,7 @@ describe('moderator attribution (composed: provider -> useCurrentUser -> moderat
 
     fireEvent.click(screen.getByRole('button', { name: /Ban Event/i }));
 
-    await waitFor(() => expect(api.banEvent).toHaveBeenCalled());
+    await waitFor(() => expect(api.hideEvent).toHaveBeenCalled());
     await waitFor(() =>
       expect(api.logDecision).toHaveBeenCalledWith(
         expect.objectContaining({ action: 'ban_event', moderatorPubkey: MOD_PUBKEY }),
@@ -99,7 +99,7 @@ describe('moderator attribution (composed: provider -> useCurrentUser -> moderat
     // Ban immediately, while the pubkey is still resolving (probe reads 'none').
     expect(screen.getByTestId('resolved-mod')).toHaveTextContent('none');
     fireEvent.click(await screen.findByRole('button', { name: /Ban Event/i }));
-    await waitFor(() => expect(api.banEvent).toHaveBeenCalled());
+    await waitFor(() => expect(api.hideEvent).toHaveBeenCalled());
     // The detached audit path waits for the in-flight identity; now it resolves.
     await act(async () => {
       releasePubkey(MOD_PUBKEY);
@@ -120,9 +120,9 @@ describe('moderator attribution (composed: provider -> useCurrentUser -> moderat
     getPublicKey.mockImplementation(async (token: string) => (token === 'tokB' ? PK_B : PK_A));
     getSession.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 'tokA' });
     let releaseBan!: () => void;
-    api.banEvent.mockReturnValue(
-      new Promise<{ success: true }>((resolve) => {
-        releaseBan = () => resolve({ success: true });
+    api.hideEvent.mockReturnValue(
+      new Promise<{ success: true; recorded: true }>((resolve) => {
+        releaseBan = () => resolve({ success: true, recorded: true });
       }),
     );
 
@@ -131,7 +131,7 @@ describe('moderator attribution (composed: provider -> useCurrentUser -> moderat
 
     // Start the ban: the mutation captures moderator A, then awaits banEvent.
     fireEvent.click(screen.getByRole('button', { name: /Ban Event/i }));
-    await waitFor(() => expect(api.banEvent).toHaveBeenCalled());
+    await waitFor(() => expect(api.hideEvent).toHaveBeenCalled());
 
     // Switch accounts WHILE banEvent is still in flight.
     getSession.mockResolvedValue({ bunkerUrl: 'bunker://y', accessToken: 'tokB' });

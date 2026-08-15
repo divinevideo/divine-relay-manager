@@ -13,8 +13,6 @@ export interface EventVisibilityResult {
   recorded?: boolean;
 }
 
-const EVENT_VISIBILITY_TIMEOUT_MS = 90_000;
-
 export interface EventVisibilityCoordinatorEnv {
   REPORT_WATCHER?: DurableObjectNamespace;
 }
@@ -33,10 +31,11 @@ export async function coordinateEventVisibility(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(operation),
-      signal: AbortSignal.timeout(EVENT_VISIBILITY_TIMEOUT_MS),
     }));
     const result = await response.json<EventVisibilityResult>();
-    return response.ok ? result : { success: false, error: result.error || `Coordinator failed (${response.status})` };
+    return response.ok
+      ? result
+      : { ...result, success: false, error: result.error || `Coordinator failed (${response.status})` };
   } catch (error) {
     return {
       success: false,

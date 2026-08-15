@@ -91,12 +91,11 @@ function makeJobDb() {
         bind(...args: unknown[]) { binds = args; return stmt; },
         async run() {
           if (/^\s*INSERT INTO bulk_jobs/i.test(sql)) {
-            const [job_id, pubkey, action, status, events_processed, media_processed, failures, failures_dropped, created_at, updated_at] = binds;
-            rows.set(job_id as string, { job_id, pubkey, action, status, events_processed, media_processed, failures, failures_dropped, created_at, updated_at });
+            const [job_id, pubkey, action, status, events_processed, media_processed, failures, failures_dropped, version, created_at, updated_at] = binds;
+            rows.set(job_id as string, { job_id, pubkey, action, status, events_processed, media_processed, failures, failures_dropped, version, created_at, updated_at });
             return { success: true, meta: { changes: 1 } };
           }
           if (/^\s*UPDATE bulk_jobs/i.test(sql)) {
-            const cols = sql.match(/SET (.+) WHERE/i)![1].split(',').map((c) => c.trim().split('=')[0].trim());
             const jobId = binds[binds.length - 1] as string;
             const row = rows.get(jobId);
             let changes = 0;
@@ -107,7 +106,19 @@ function makeJobDb() {
               let statusOk = true;
               if (inMatch) statusOk = inMatch[1].split(',').map((s) => s.trim().replace(/'/g, '')).includes(row.status as string);
               else if (eqMatch) statusOk = row.status === eqMatch[1];
-              if (statusOk) { cols.forEach((c, i) => { row[c] = binds[i]; }); changes = 1; }
+              const versionOk = !/version\s*=\s*\?/i.test(where)
+                || Number(row.version ?? 0) === Number(binds[binds.length - 2]);
+              if (statusOk && versionOk) {
+                if (/version\s*=\s*version\s*\+\s*1/i.test(sql)) {
+                  row.status = binds[0];
+                  row.updated_at = binds[1];
+                  row.version = Number(row.version ?? 0) + 1;
+                } else {
+                  const cols = sql.match(/SET (.+) WHERE/i)![1].split(',').map((c) => c.trim().split('=')[0].trim());
+                  cols.forEach((c, i) => { row[c] = binds[i]; });
+                }
+                changes = 1;
+              }
             }
             return { success: true, meta: { changes } };
           }
@@ -332,7 +343,7 @@ describe('async bulk job model', () => {
 
     expect(jobDb.rows.get(body.jobId)?.status).toBe('pending'); // row created, not yet run
     expect(sent).toHaveLength(1);
-    expect(sent[0]).toMatchObject({ jobId: body.jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all' });
+    expect(sent[0]).toMatchObject({ jobId: body.jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', version: 0 });
   });
 
   it('enqueue validates the action/pubkey and does NOT enqueue on a bad request', async () => {
@@ -436,14 +447,14 @@ describe('async bulk job model', () => {
     jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'delete-all', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', created_at: 't', updated_at: 't' });
 
     await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'delete-all' }, mockEnv);
-    expect(vi.mocked(banEvent)).toHaveBeenCalledTimes(20);
-    expect(sent[0]?.eventIds).toHaveLength(10);
+    expect(vi.mocked(banEvent)).toHaveBeenCalledTimes(1);
+    expect(sent[0]?.eventIds).toHaveLength(29);
 
     let msg: BulkJobMessage | undefined = sent[0];
     let iterations = 1;
-    while (msg && iterations++ < 10) { sent.length = 0; await processBulkJob(msg, mockEnv); msg = sent[0]; }
+    while (msg && iterations++ < 40) { sent.length = 0; await processBulkJob(msg, mockEnv); msg = sent[0]; }
 
-    expect(iterations).toBe(3); // two bounded event batches -> media chunk
+    expect(iterations).toBe(31); // thirty event messages -> media chunk
     const row = jobDb.rows.get(jobId)!;
     expect(row.status).toBe('done');
     expect(row.events_processed).toBe(30);
@@ -477,13 +488,31 @@ describe('async bulk job model', () => {
 
     let msg: BulkJobMessage | undefined = { jobId, pubkey: 'a'.repeat(64), action: 'delete-all' };
     let iterations = 0;
-    while (msg && iterations++ < 20) { sent.length = 0; await processBulkJob(msg, mockEnv); msg = sent[0]; }
+    while (msg && iterations++ < 220) { sent.length = 0; await processBulkJob(msg, mockEnv); msg = sent[0]; }
 
     const row = jobDb.rows.get(jobId)!;
     expect(row.status).toBe('done');
     expect(row.events_processed).toBe(200);                 // one chunk's worth; the rest unreachable
-    expect(iterations).toBe(12);                            // ten event batches + empty cursor check + media
+    expect(iterations).toBe(202);                           // 200 events + empty cursor check + media
     expect(JSON.parse(row.failures as string).some((f: string) => /share one timestamp/.test(f))).toBe(true);
+  });
+
+  it('claims each chunk version once so duplicate deliveries cannot fork progress', async () => {
+    vi.mocked(banEvent).mockResolvedValue({ success: true });
+    vi.mocked(banEvent).mockClear();
+    mockPaginatedRelay(Array.from({ length: 2 }, (_, i) => ({ id: `dup${i}`, kind: 1, content: '', tags: [] as string[][], created_at: 2 - i })));
+    const jobId = 'job-duplicate-chunk';
+    jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'delete-all', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, version: 0, created_at: 't', updated_at: 't' });
+    const message: BulkJobMessage = { jobId, pubkey: 'a'.repeat(64), action: 'delete-all', version: 0 };
+
+    await processBulkJob(message, mockEnv);
+    const firstContinuation = sent[0];
+    await processBulkJob(message, mockEnv);
+
+    expect(vi.mocked(banEvent)).toHaveBeenCalledTimes(1);
+    expect(sent).toEqual([firstContinuation]);
+    expect(jobDb.rows.get(jobId)?.version).toBe(1);
+    expect(firstContinuation.version).toBe(1);
   });
 
   it('media phase fails closed when the funnelcake cursor never advances (repeats)', async () => {

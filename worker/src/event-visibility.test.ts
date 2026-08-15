@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { coordinateEventVisibility } from './event-visibility';
 
 const operation = {
@@ -6,10 +6,6 @@ const operation = {
   relayAction: 'hide' as const,
   humanAction: 'hide_event',
 };
-
-afterEach(() => {
-  vi.restoreAllMocks();
-});
 
 describe('coordinateEventVisibility', () => {
   it('returns a structured error when the binding is unavailable', async () => {
@@ -36,25 +32,23 @@ describe('coordinateEventVisibility', () => {
     expect(result.error).toBeTruthy();
   });
 
-  it('bounds time waiting for the coordinator gate', async () => {
-    const signal = new AbortController().signal;
-    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(signal);
-    let requestSignal: AbortSignal | null = null;
+  it('preserves partial-success fields from coordinator errors', async () => {
     const env = {
       REPORT_WATCHER: {
         idFromName: () => 'singleton',
         get: () => ({
-          fetch: async (request: Request) => {
-            requestSignal = request.signal;
-            return Response.json({ success: true });
-          },
+          fetch: async () => Response.json(
+            { success: false, error: 'restore failed', recorded: true },
+            { status: 502 },
+          ),
         }),
       },
     } as never;
 
-    await coordinateEventVisibility(env, operation);
-
-    expect(timeoutSpy).toHaveBeenCalledWith(90_000);
-    expect(requestSignal).not.toBeNull();
+    await expect(coordinateEventVisibility(env, operation)).resolves.toEqual({
+      success: false,
+      error: 'restore failed',
+      recorded: true,
+    });
   });
 });
