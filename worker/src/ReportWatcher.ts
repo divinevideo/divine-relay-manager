@@ -23,6 +23,7 @@ import { getUserStatus, type KeycastEnv } from './keycast-client';
 import { fetchAccountIdentity } from './relay-profile';
 
 const UNRESOLVED_AUTO_HIDE_VISIBILITY = 'unresolved-hide';
+const UNRESOLVED_HUMAN_HIDE_VISIBILITY = 'hide-unresolved';
 
 /**
  * Extended environment for ReportWatcher DO
@@ -392,10 +393,24 @@ export class ReportWatcher implements DurableObject {
         let relayFailure: EventVisibilityResult | undefined;
         if (operation.relayAction === 'confirm') {
           if (!this.env.DB) return { success: false, recorded: false, error: 'Moderation database is not configured' };
-          if (['allow', 'raw-allow'].includes(
-            await this.state.storage.get<string>(this.visibilityStorageKey(operation.eventId)) || '',
-          )) {
+          const visibilityKey = this.visibilityStorageKey(operation.eventId);
+          const visibility = await this.state.storage.get<string>(visibilityKey) || '';
+          if (['allow', 'raw-allow'].includes(visibility)) {
             return { success: false, recorded: false, conflict: true, error: 'Auto-hide is no longer active' };
+          }
+          if ([UNRESOLVED_AUTO_HIDE_VISIBILITY, UNRESOLVED_HUMAN_HIDE_VISIBILITY].includes(visibility)) {
+            const humanRestore = await this.hasHumanRestore(operation.eventId);
+            if (humanRestore === null) {
+              return { success: false, recorded: false, error: 'Human restore state is unavailable' };
+            }
+            if (humanRestore) {
+              return { success: false, recorded: false, conflict: true, error: 'Auto-hide is no longer active' };
+            }
+            const recorded = await this.recordAutoHideHumanDecision(operation, AUTO_HIDE_ACTION.confirmed);
+            if (recorded) await this.state.storage.delete(visibilityKey);
+            return recorded
+              ? { success: true, recorded: true }
+              : { success: false, recorded: false, error: 'Failed to record auto-hide confirmation' };
           }
           if (!await canConfirmAutoHide(this.env.DB, operation.eventId)) {
             return { success: false, recorded: false, conflict: true, error: 'Auto-hide is no longer active' };
@@ -407,7 +422,9 @@ export class ReportWatcher implements DurableObject {
           let shouldRestoreAutoHide = false;
           const visibilityKey = this.visibilityStorageKey(operation.eventId);
           const visibility = await this.state.storage.get<string>(visibilityKey);
-          if (visibility !== 'hide' && this.env.DB) {
+          if (visibility === UNRESOLVED_AUTO_HIDE_VISIBILITY) {
+            shouldRestoreAutoHide = true;
+          } else if (!['hide', UNRESOLVED_HUMAN_HIDE_VISIBILITY].includes(visibility || '') && this.env.DB) {
             try {
               shouldRestoreAutoHide = await hasActiveAutoHide(this.env.DB, operation.eventId);
             } catch (error) {
@@ -996,7 +1013,7 @@ export class ReportWatcher implements DurableObject {
     tierName: string
   ): Promise<void> {
     const visibility = await this.state.storage.get<string>(this.visibilityStorageKey(targetEventId));
-    if (visibility === 'allow' || visibility === UNRESOLVED_AUTO_HIDE_VISIBILITY) {
+    if (['allow', UNRESOLVED_AUTO_HIDE_VISIBILITY, UNRESOLVED_HUMAN_HIDE_VISIBILITY].includes(visibility || '')) {
       const reason = visibility === 'allow'
         ? 'restored visibility was not recorded'
         : 'post-ban visibility remains unresolved';
@@ -1044,9 +1061,11 @@ export class ReportWatcher implements DurableObject {
       // for a restore; hides and deletes set the permanent reviewed bit too.
       const humanRestore = await this.hasHumanRestore(targetEventId);
       if (humanRestore === null) {
-        if (await this.state.storage.get<string>(visibilityKey) !== 'hide') {
-          await this.state.storage.put(visibilityKey, UNRESOLVED_AUTO_HIDE_VISIBILITY);
-        }
+        const visibility = await this.state.storage.get<string>(visibilityKey);
+        await this.state.storage.put(
+          visibilityKey,
+          visibility === 'hide' ? UNRESOLVED_HUMAN_HIDE_VISIBILITY : UNRESOLVED_AUTO_HIDE_VISIBILITY,
+        );
         console.error(`[ALERT] [ReportWatcher] Auto-hide outcome unresolved for ${targetEventId}: human restore state unavailable after relay ban`);
         await this.logDecision({
           targetType: 'event',

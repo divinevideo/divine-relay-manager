@@ -308,6 +308,164 @@ describe('ReportWatcher', () => {
       expect(relayFetch).not.toHaveBeenCalled();
     });
 
+    it('restores and records a review that resolves an unknown successful auto-hide', async () => {
+      const decisionActions: string[] = [];
+      const db = {
+        batch: vi.fn(async (batch: D1PreparedStatement[]) => Promise.all(batch.map(statement => statement.run()))),
+        prepare: vi.fn().mockImplementation((sql: string) => ({
+          bind: vi.fn().mockImplementation((...args: unknown[]) => {
+            if (sql.includes('INSERT INTO moderation_decisions')) decisionActions.push(String(args[1]));
+            return {
+              first: vi.fn().mockResolvedValue(null),
+              run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 1 } }),
+            };
+          }),
+          run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 0 } }),
+        })),
+      } as unknown as D1Database;
+      mockState = createMockState();
+      mockEnv = createMockEnv({ DB: db });
+      watcher = new ReportWatcher(mockState, mockEnv);
+      const relayFetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ result: true }), { status: 200 }));
+      vi.stubGlobal('fetch', relayFetch);
+      const eventId = 'a1'.repeat(32);
+      await mockState.storage.put(`event-visibility:${eventId}`, 'unresolved-hide');
+
+      const response = await watcher.fetch(new Request('https://do/event-visibility', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ eventId, relayAction: 'review', humanAction: 'false-positive' }),
+      }));
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ success: true, recorded: true });
+      expect(relayFetch).toHaveBeenCalledTimes(1);
+      expect(decisionActions).toContain('auto_hide_restored');
+      expect(await mockState.storage.get(`event-visibility:${eventId}`)).toBeUndefined();
+    });
+
+    it('retains unresolved state when review cannot restore the relay event', async () => {
+      const db = {
+        prepare: vi.fn().mockReturnValue({
+          bind: vi.fn().mockReturnValue({
+            first: vi.fn().mockResolvedValue(null),
+            run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 1 } }),
+          }),
+          run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 0 } }),
+        }),
+      } as unknown as D1Database;
+      mockState = createMockState();
+      mockEnv = createMockEnv({ DB: db });
+      watcher = new ReportWatcher(mockState, mockEnv);
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 500, statusText: 'relay unavailable' })));
+      const eventId = 'a4'.repeat(32);
+      await mockState.storage.put(`event-visibility:${eventId}`, 'unresolved-hide');
+
+      const response = await watcher.fetch(new Request('https://do/event-visibility', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ eventId, relayAction: 'review', humanAction: 'dismissed' }),
+      }));
+
+      expect(response.status).toBe(502);
+      expect(await response.json()).toMatchObject({ success: false, recorded: true });
+      expect(await mockState.storage.get(`event-visibility:${eventId}`)).toBe('unresolved-hide');
+    });
+
+    it('confirms an unresolved successful auto-hide when no restore won', async () => {
+      const decisionActions: string[] = [];
+      const db = {
+        batch: vi.fn(async (batch: D1PreparedStatement[]) => Promise.all(batch.map(statement => statement.run()))),
+        prepare: vi.fn().mockImplementation((sql: string) => ({
+          bind: vi.fn().mockImplementation((...args: unknown[]) => {
+            if (sql.includes('INSERT INTO moderation_decisions')) decisionActions.push(String(args[1]));
+            return {
+              first: vi.fn().mockResolvedValue(null),
+              run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 1 } }),
+            };
+          }),
+          run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 0 } }),
+        })),
+      } as unknown as D1Database;
+      mockState = createMockState();
+      mockEnv = createMockEnv({ DB: db });
+      watcher = new ReportWatcher(mockState, mockEnv);
+      const eventId = 'a2'.repeat(32);
+      await mockState.storage.put(`event-visibility:${eventId}`, 'unresolved-hide');
+
+      const response = await watcher.fetch(new Request('https://do/event-visibility', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ eventId, relayAction: 'confirm' }),
+      }));
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ success: true, recorded: true });
+      expect(decisionActions).toContain('auto_hide_confirmed');
+      expect(await mockState.storage.get(`event-visibility:${eventId}`)).toBeUndefined();
+    });
+
+    it('retains unresolved state when confirmation cannot read restore direction', async () => {
+      const db = {
+        batch: vi.fn(),
+        prepare: vi.fn().mockImplementation((sql: string) => ({
+          bind: vi.fn().mockReturnValue({
+            first: vi.fn().mockImplementation(() => {
+              if (sql.includes('last_human_action IN')) return Promise.reject(new Error('direction unavailable'));
+              return Promise.resolve(null);
+            }),
+            run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 1 } }),
+          }),
+          run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 0 } }),
+        })),
+      } as unknown as D1Database;
+      mockState = createMockState();
+      mockEnv = createMockEnv({ DB: db });
+      watcher = new ReportWatcher(mockState, mockEnv);
+      const eventId = 'a3'.repeat(32);
+      await mockState.storage.put(`event-visibility:${eventId}`, 'unresolved-hide');
+
+      const response = await watcher.fetch(new Request('https://do/event-visibility', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ eventId, relayAction: 'confirm' }),
+      }));
+
+      expect(response.status).toBe(502);
+      expect(await response.json()).toEqual({ success: false, recorded: false, error: 'Human restore state is unavailable' });
+      expect(db.batch).not.toHaveBeenCalled();
+      expect(await mockState.storage.get(`event-visibility:${eventId}`)).toBe('unresolved-hide');
+    });
+
+    it('keeps unresolved confirmation in conflict when a human restore won', async () => {
+      const db = {
+        batch: vi.fn(),
+        prepare: vi.fn().mockImplementation((sql: string) => ({
+          bind: vi.fn().mockReturnValue({
+            first: vi.fn().mockResolvedValue(sql.includes('last_human_action IN') ? { 1: 1 } : null),
+            run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 1 } }),
+          }),
+          run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 0 } }),
+        })),
+      } as unknown as D1Database;
+      mockState = createMockState();
+      mockEnv = createMockEnv({ DB: db });
+      watcher = new ReportWatcher(mockState, mockEnv);
+      const eventId = 'a5'.repeat(32);
+      await mockState.storage.put(`event-visibility:${eventId}`, 'unresolved-hide');
+
+      const response = await watcher.fetch(new Request('https://do/event-visibility', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ eventId, relayAction: 'confirm' }),
+      }));
+
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ success: false, recorded: false, conflict: true });
+      expect(db.batch).not.toHaveBeenCalled();
+      expect(await mockState.storage.get(`event-visibility:${eventId}`)).toBe('unresolved-hide');
+    });
+
     it.each([
       ['confirm then restore', ['confirm', 'review'], [200, 200], 0, 'auto_hide_confirmed'],
       ['restore then confirm', ['review', 'confirm'], [200, 409], 1, 'auto_hide_restored'],
@@ -1928,7 +2086,7 @@ describe('ReportWatcher', () => {
         tags: [['report', 'sexual_minors'], ['e', hiddenEventId], ['client', 'diVine']],
       });
 
-      expect(await mockState.storage.get(`event-visibility:${hiddenEventId}`)).toBe('hide');
+      expect(await mockState.storage.get(`event-visibility:${hiddenEventId}`)).toBe('hide-unresolved');
     });
 
     it('should skip auto-hide when DB is unavailable', async () => {
