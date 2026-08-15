@@ -7,6 +7,7 @@ import { useToast } from "@/hooks/useToast";
 import { nip19 } from "nostr-tools";
 import { getKindInfo, getKindCategory } from "@/lib/kindNames";
 import { useAdminApi } from "@/hooks/useAdminApi";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -347,6 +348,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
   const { nostr } = useNostr();
   const { toast } = useToast();
   const { callRelayRpc, hideEvent, restoreEvent, verifyEventDeleted } = useAdminApi();
+  const { getModeratorPubkey } = useCurrentUser();
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const [isVerifying, setIsVerifying] = useState(false);
@@ -633,7 +635,11 @@ export function EventsList({ relayUrl }: EventsListProps) {
   const moderateEventMutation = useMutation({
     mutationFn: async ({ eventId, action, reason }: { eventId: string; action: 'allow' | 'ban'; reason?: string }) => {
       if (action === 'allow') {
-        const result = await restoreEvent(eventId);
+        const result = await restoreEvent(
+          eventId,
+          await getModeratorPubkey(),
+          reason || 'Allowed from event list',
+        );
         return {
           eventId,
           action,

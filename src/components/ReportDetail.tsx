@@ -407,7 +407,8 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   // Restore auto-hidden content (reverse the auto-hide)
   const restoreAutoHideMutation = useMutation({
     mutationFn: async ({ eventId }: { eventId: string }) => {
-      return restoreEvent(eventId);
+      const moderatorPubkey = await getModeratorPubkey();
+      return restoreEvent(eventId, moderatorPubkey, 'Auto-hide reversed by moderator');
     },
     onSuccess: async (result) => {
       queryClient.invalidateQueries({ queryKey: ['reports'] });
@@ -930,7 +931,11 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                   description: "The event has been removed from the relay.",
                   action: (
                     <ToastAction altText="Undo delete" onClick={async () => {
-                      const result = await restoreEvent(eventId);
+                      const result = await restoreEvent(
+                        eventId,
+                        await moderator,
+                        'Deletion undone by moderator',
+                      );
                       handleActionComplete();
                       toast(result.recorded === true && result.reconciled !== false
                         ? { title: "Event restored" }

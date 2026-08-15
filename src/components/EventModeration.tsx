@@ -13,6 +13,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { useToast } from "@/hooks/useToast";
 import { Shield, ShieldCheck, ShieldX, Plus, AlertTriangle, CheckCircle, XCircle, Loader2 } from "lucide-react";
 import { useAdminApi } from "@/hooks/useAdminApi";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { EventActions } from "@/components/EventActions";
 
 interface EventNeedingModeration {
@@ -29,6 +30,7 @@ export function EventModeration() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const { callRelayRpc, banEvent, restoreEvent, verifyEventDeleted } = useAdminApi();
+  const { getModeratorPubkey } = useCurrentUser();
   const [newEventId, setNewEventId] = useState("");
   const [newReason, setNewReason] = useState("");
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
@@ -53,8 +55,8 @@ export function EventModeration() {
 
   // Mutation for allowing events
   const allowEventMutation = useMutation({
-    mutationFn: ({ eventId }: { eventId: string; reason?: string }) =>
-      restoreEvent(eventId),
+    mutationFn: async ({ eventId, reason }: { eventId: string; reason?: string }) =>
+      restoreEvent(eventId, await getModeratorPubkey(), reason || 'Allowed from moderation queue'),
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['events-needing-moderation'] });
       toast(result.recorded === true && result.reconciled !== false

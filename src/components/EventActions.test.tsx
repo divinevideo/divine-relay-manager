@@ -80,7 +80,11 @@ describe('EventActions', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Restore Event/i }));
 
-    await waitFor(() => expect(api.restoreEvent).toHaveBeenCalledWith('event-1'));
+    await waitFor(() => expect(api.restoreEvent).toHaveBeenCalledWith(
+      'event-1',
+      MOD_PUBKEY,
+      'Restored by moderator',
+    ));
     expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({ action: 'restore_event' }));
   });
 

@@ -276,7 +276,11 @@ describe('EventDetail restore routing', () => {
       fireEvent.click(await screen.findByRole('button', { name: /^Restore Event$/ }));
     });
 
-    await waitFor(() => expect(api.restoreEvent).toHaveBeenCalledWith(EVENT.id));
+    await waitFor(() => expect(api.restoreEvent).toHaveBeenCalledWith(
+      EVENT.id,
+      MOD_PUBKEY,
+      'Restored from event viewer',
+    ));
     expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({
       targetType: 'event',
       targetId: EVENT.id,

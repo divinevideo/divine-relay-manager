@@ -930,6 +930,7 @@ async function handleModerate(
     eventId?: string;
     pubkey?: string;
     reason?: string;
+    moderatorPubkey?: string;
   };
 
   if (!body.action) {
@@ -1021,8 +1022,9 @@ async function handleModerate(
         const result = await coordinateEventVisibility(env, {
           eventId,
           relayAction: isHide ? 'hide' : 'allow',
-          reason: isHide ? body.reason || 'Hidden by moderator' : undefined,
+          reason: body.reason || (isHide ? 'Hidden by moderator' : 'Restored by moderator'),
           humanAction: body.action,
+          moderatorPubkey: body.moderatorPubkey,
         });
         if (!result.success) {
           // Flatten to 500, matching delete_event and ban_pubkey. Neither banevent nor

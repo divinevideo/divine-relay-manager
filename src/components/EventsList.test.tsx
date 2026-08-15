@@ -56,7 +56,10 @@ vi.mock('@/hooks/useAdminApi', () => ({
 }));
 
 vi.mock('@/hooks/useCurrentUser', () => ({
-  useCurrentUser: () => ({ user: { pubkey: 'a'.repeat(64) } }),
+  useCurrentUser: () => ({
+    user: { pubkey: 'a'.repeat(64) },
+    getModeratorPubkey: async () => 'a'.repeat(64),
+  }),
 }));
 
 // EventsList gates its banned-event lookups on session presence, not on the
@@ -238,7 +241,11 @@ describe('EventsList recorded moderation', () => {
     fireEvent.click(await screen.findByRole('option', { name: 'Allow Event' }));
     fireEvent.click(await within(dialog).findByRole('button', { name: 'Allow Event' }));
 
-    await waitFor(() => expect(eventModeration.restore).toHaveBeenCalledWith(target.id));
+    await waitFor(() => expect(eventModeration.restore).toHaveBeenCalledWith(
+      target.id,
+      'a'.repeat(64),
+      'Allowed from event list',
+    ));
     expect(eventModeration.hide).not.toHaveBeenCalled();
   });
 });

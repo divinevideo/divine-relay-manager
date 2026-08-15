@@ -177,7 +177,11 @@ describe('ReportDetail reopen reporting', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Restore Content' }));
 
-    await waitFor(() => expect(api.restoreEvent).toHaveBeenCalledWith(ctx.targetValue));
+    await waitFor(() => expect(api.restoreEvent).toHaveBeenCalledWith(
+      ctx.targetValue,
+      MOD_PUBKEY,
+      'Auto-hide reversed by moderator',
+    ));
     expect(api.logDecision).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'auto_hide_restored' }));
     expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Content restored' }));
   });

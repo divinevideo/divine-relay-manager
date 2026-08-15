@@ -443,7 +443,12 @@ export class ReportWatcher implements DurableObject {
               };
             }
           }
-          if (operation.relayAction === 'allow') await this.state.storage.put(visibilityKey, 'allow');
+          // Only a human restore is authoritative over an admitted auto-hide. Raw
+          // allowevent RPCs still serialize here, but must not leave a tombstone that
+          // suppresses future report-driven enforcement.
+          if (operation.relayAction === 'allow' && operation.humanAction !== undefined) {
+            await this.state.storage.put(visibilityKey, 'allow');
+          }
           const relayResult = operation.relayAction === 'hide'
             ? await callNip86Rpc('banevent', [operation.eventId, operation.reason || 'Hidden by moderator'], this.env)
             : await callNip86Rpc('allowevent', [operation.eventId], this.env);

@@ -422,14 +422,19 @@ describe('adminApi', () => {
         json: async () => ({ success: true, recorded: true, reconciled: false }),
       });
 
-      const result = await restoreEvent(API_URL, 'event123');
+      const result = await restoreEvent(API_URL, 'event123', 'moderator123', 'Restored after review');
 
       expect(result.recorded).toBe(true);
       expect(result.reconciled).toBe(false);
       expect(mockFetch).toHaveBeenCalledWith(
         expect.stringContaining('/api/moderate'),
         expect.objectContaining({
-          body: JSON.stringify({ action: 'allow_event', eventId: 'event123' }),
+          body: JSON.stringify({
+            action: 'allow_event',
+            eventId: 'event123',
+            moderatorPubkey: 'moderator123',
+            reason: 'Restored after review',
+          }),
         }),
       );
     });

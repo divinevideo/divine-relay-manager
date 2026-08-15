@@ -584,7 +584,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
   const restoreMutation = useMutation({
     mutationFn: async ({ eventId }: { eventId: string }) => {
       const moderator = getModeratorPubkey(); // snapshot identity at action start
-      const result = await restoreEvent(eventId);
+      const result = await restoreEvent(eventId, await moderator, 'Restored from event viewer');
       let auditRecorded = true;
       try {
         await logDecision({

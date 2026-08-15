@@ -45,6 +45,7 @@ interface ModerateParams {
   eventId?: string;
   pubkey?: string;
   reason?: string;
+  moderatorPubkey?: string;
 }
 
 export interface ApiResponse<T = unknown> {
@@ -248,8 +249,13 @@ export async function hideEvent(apiUrl: string, eventId: string, reason?: string
   return moderateAction(apiUrl, { action: 'hide_event', eventId, reason });
 }
 
-export async function restoreEvent(apiUrl: string, eventId: string): Promise<ApiResponse> {
-  return moderateAction(apiUrl, { action: 'allow_event', eventId });
+export async function restoreEvent(
+  apiUrl: string,
+  eventId: string,
+  moderatorPubkey?: string,
+  reason?: string,
+): Promise<ApiResponse> {
+  return moderateAction(apiUrl, { action: 'allow_event', eventId, moderatorPubkey, reason });
 }
 
 export async function banPubkeyViaModerate(apiUrl: string, pubkey: string, reason?: string): Promise<ApiResponse> {

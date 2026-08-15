@@ -88,7 +88,7 @@ export function EventActions({
   const restoreEventMutation = useMutation({
     mutationFn: async () => {
       const moderator = getModeratorPubkey(); // capture before the authoritative request
-      const result = await api.restoreEvent(eventId);
+      const result = await api.restoreEvent(eventId, await moderator, 'Restored by moderator');
       logAudit(moderator, {
         targetType: 'event',
         targetId: eventId,

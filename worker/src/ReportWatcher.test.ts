@@ -385,16 +385,20 @@ describe('ReportWatcher', () => {
 
     it('atomically records an explicit restore of active auto-hidden content', async () => {
       const statements: string[] = [];
+      const decisionArgs: unknown[][] = [];
       const db = {
         batch: vi.fn().mockResolvedValue([]),
         prepare: vi.fn().mockImplementation((sql: string) => {
           statements.push(sql);
           return {
-            bind: vi.fn().mockReturnValue({
-              first: vi.fn().mockResolvedValue(sql.includes('AS auto_hide_action')
-                ? { last_human_action: null, auto_hide_action: 'auto_hidden' }
-                : null),
-              run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 1 } }),
+            bind: vi.fn().mockImplementation((...args: unknown[]) => {
+              if (sql.includes('INSERT INTO moderation_decisions')) decisionArgs.push(args);
+              return {
+                first: vi.fn().mockResolvedValue(sql.includes('AS auto_hide_action')
+                  ? { last_human_action: null, auto_hide_action: 'auto_hidden' }
+                  : null),
+                run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 1 } }),
+              };
             }),
             run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 0 } }),
           };
@@ -406,13 +410,59 @@ describe('ReportWatcher', () => {
       const response = await watcher.fetch(new Request('https://do/event-visibility', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ eventId: 'b0'.repeat(32), relayAction: 'allow', humanAction: 'allow_event' }),
+        body: JSON.stringify({
+          eventId: 'b0'.repeat(32),
+          relayAction: 'allow',
+          humanAction: 'allow_event',
+          reason: 'False positive',
+          moderatorPubkey: 'b'.repeat(64),
+        }),
       }));
 
       expect(response.status).toBe(200);
       expect(await response.json()).toEqual({ success: true, recorded: true });
       expect(db.batch).toHaveBeenCalledTimes(1);
       expect(statements.some(sql => sql.includes('INSERT INTO moderation_decisions'))).toBe(true);
+      expect(decisionArgs).toContainEqual([
+        'b0'.repeat(32),
+        'auto_hide_restored',
+        'False positive',
+        'b'.repeat(64),
+        '',
+        '',
+      ]);
+    });
+
+    it('does not let a raw allowevent suppress a later auto-hide', async () => {
+      const db = {
+        prepare: vi.fn().mockImplementation(() => ({
+          bind: vi.fn().mockReturnValue({
+            first: vi.fn().mockResolvedValue(null),
+            run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 1 } }),
+          }),
+          run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 0 } }),
+        })),
+      } as unknown as D1Database;
+      watcher = new ReportWatcher(createMockState(), createMockEnv({ DB: db }));
+      const relayMethods: string[] = [];
+      vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const raw = input instanceof Request ? await input.clone().text() : String(init?.body ?? '');
+        relayMethods.push((JSON.parse(raw) as { method: string }).method);
+        return new Response(JSON.stringify({ result: true }), { status: 200 });
+      }));
+      const eventId = 'b1'.repeat(32);
+
+      const allow = await watcher.fetch(new Request('https://do/event-visibility', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ eventId, relayAction: 'allow' }),
+      }));
+      await (watcher as unknown as {
+        executeAutoHide(event: ReportEvent, category: string, targetId: string, tier: string): Promise<void>;
+      }).executeAutoHide({ id: 'report', pubkey: 'reporter' } as ReportEvent, 'sexual_minors', eventId, 'Immediate');
+
+      expect(allow.status).toBe(200);
+      expect(relayMethods).toEqual(['allowevent', 'banevent']);
     });
 
     it('allows confirmation after a newer manual hide direction', async () => {
