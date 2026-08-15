@@ -79,7 +79,9 @@ export async function hasActiveAutoHide(db: D1Database, targetEventId: string): 
 
 async function canConfirmAutoHide(db: D1Database, targetEventId: string): Promise<boolean> {
   const row = await getAutoHideState(db, targetEventId);
-  return row?.auto_hide_action === AUTO_HIDE_ACTION.hidden
+  return row !== null
+    && (row.auto_hide_action === AUTO_HIDE_ACTION.hidden
+      || row.auto_hide_action === AUTO_HIDE_ACTION.unresolved)
     && (row.last_human_action === null || ['hide_event', 'delete_event'].includes(row.last_human_action));
 }
 

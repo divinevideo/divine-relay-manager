@@ -898,6 +898,31 @@ describe('ReportWatcher', () => {
       expect(await response.json()).toEqual({ success: true, recorded: true });
     });
 
+    it('confirms unresolved ledger state after a manual hide consumed its tombstone', async () => {
+      const db = {
+        batch: vi.fn(async (batch: D1PreparedStatement[]) => Promise.all(batch.map(statement => statement.run()))),
+        prepare: vi.fn().mockImplementation((sql: string) => ({
+          bind: vi.fn().mockReturnValue({
+            first: vi.fn().mockResolvedValue(sql.includes('AS auto_hide_action')
+              ? { last_human_action: 'delete_event', auto_hide_action: 'auto_hide_unresolved' }
+              : null),
+            run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 1 } }),
+          }),
+          run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 0 } }),
+        })),
+      } as unknown as D1Database;
+      watcher = new ReportWatcher(createMockState(), createMockEnv({ DB: db }));
+
+      const response = await watcher.fetch(new Request('https://do/event-visibility', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ eventId: 'b9'.repeat(32), relayAction: 'confirm' }),
+      }));
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ success: true, recorded: true });
+    });
+
     it('does not overclaim confirmation when its atomic D1 record fails', async () => {
       const db = {
         batch: vi.fn().mockRejectedValue(new Error('batch failed')),
