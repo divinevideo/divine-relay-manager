@@ -205,7 +205,13 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     mutationFn: async ({ status, comment }: { status: ResolutionStatus; comment?: string }) => {
       if (!context.target) throw new Error('No target');
       const moderator = getModeratorPubkey(); // capture before the authoritative request
-      const result = await markAsReviewed(context.target.type, context.target.value, status, comment);
+      const result = await markAsReviewed(
+        context.target.type,
+        context.target.value,
+        status,
+        comment,
+        await moderator,
+      );
       // Audit log is non-critical; markAsReviewed (the resolution label) is the
       // authoritative action, so don't let a failed decision write report failure.
       logAudit(moderator, {

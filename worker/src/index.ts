@@ -347,6 +347,8 @@ interface UnsignedEvent {
   content: string;
   tags: string[][];
   created_at?: number;
+  moderatorPubkey?: string;
+  moderationReason?: string;
 }
 
 interface ApiResponse {
@@ -815,6 +817,12 @@ async function handlePublish(
   if (!body.kind || body.content === undefined) {
     return jsonResponse({ success: false, error: 'Missing required fields: kind, content' }, 400, corsHeaders);
   }
+  if (body.moderatorPubkey !== undefined && !/^[a-f0-9]{64}$/i.test(body.moderatorPubkey)) {
+    return jsonResponse({ success: false, error: 'Invalid moderatorPubkey' }, 400, corsHeaders);
+  }
+  if (body.moderationReason !== undefined && typeof body.moderationReason !== 'string') {
+    return jsonResponse({ success: false, error: 'Invalid moderationReason' }, 400, corsHeaders);
+  }
 
   const secretKey = await getSecretKey(env);
 
@@ -866,6 +874,8 @@ async function handlePublish(
               eventId: targetId,
               relayAction: 'review',
               humanAction: status,
+              reason: body.moderationReason,
+              moderatorPubkey: body.moderatorPubkey?.toLowerCase(),
             })
             : { success: false, recorded: false, error: 'Moderation database is not configured' };
           resolutionVisibility = !result.recorded && !result.error
@@ -948,6 +958,12 @@ async function handleModerate(
         return jsonResponse({ success: false, error: 'Missing or invalid eventId for delete_event (must be 64 hex chars)' }, 400, corsHeaders);
       }
       const eventId = body.eventId.toLowerCase();
+      if (body.reason !== undefined && typeof body.reason !== 'string') {
+        return jsonResponse({ success: false, error: `Invalid reason for ${body.action}` }, 400, corsHeaders);
+      }
+      if (body.moderatorPubkey !== undefined && !/^[a-f0-9]{64}$/i.test(body.moderatorPubkey)) {
+        return jsonResponse({ success: false, error: `Invalid moderatorPubkey for ${body.action}` }, 400, corsHeaders);
+      }
 
       try {
         const result = await coordinateEventVisibility(env, {
@@ -1017,6 +1033,12 @@ async function handleModerate(
         );
       }
       const eventId = body.eventId.toLowerCase();
+      if (body.reason !== undefined && typeof body.reason !== 'string') {
+        return jsonResponse({ success: false, error: `Invalid reason for ${body.action}` }, 400, corsHeaders);
+      }
+      if (body.moderatorPubkey !== undefined && !/^[a-f0-9]{64}$/i.test(body.moderatorPubkey)) {
+        return jsonResponse({ success: false, error: `Invalid moderatorPubkey for ${body.action}` }, 400, corsHeaders);
+      }
 
       try {
         const result = await coordinateEventVisibility(env, {
@@ -1024,7 +1046,7 @@ async function handleModerate(
           relayAction: isHide ? 'hide' : 'allow',
           reason: body.reason || (isHide ? 'Hidden by moderator' : 'Restored by moderator'),
           humanAction: body.action,
-          moderatorPubkey: body.moderatorPubkey,
+          moderatorPubkey: body.moderatorPubkey?.toLowerCase(),
         });
         if (!result.success) {
           // Flatten to 500, matching delete_event and ban_pubkey. Neither banevent nor
@@ -1611,11 +1633,23 @@ async function handleConfirmAutoHide(
   if (typeof body.eventId !== 'string' || !/^[a-f0-9]{64}$/i.test(body.eventId)) {
     return jsonResponse({ success: false, error: 'Missing or invalid eventId' }, 400, corsHeaders);
   }
+  if (body.reason !== undefined && typeof body.reason !== 'string') {
+    return jsonResponse({ success: false, error: 'Invalid reason' }, 400, corsHeaders);
+  }
+  if (body.moderatorPubkey !== undefined && !/^[a-f0-9]{64}$/i.test(body.moderatorPubkey)) {
+    return jsonResponse({ success: false, error: 'Invalid moderatorPubkey' }, 400, corsHeaders);
+  }
+  if (body.reportId !== undefined && typeof body.reportId !== 'string') {
+    return jsonResponse({ success: false, error: 'Invalid reportId' }, 400, corsHeaders);
+  }
+  if (body.reporterPubkey !== undefined && typeof body.reporterPubkey !== 'string') {
+    return jsonResponse({ success: false, error: 'Invalid reporterPubkey' }, 400, corsHeaders);
+  }
   const result = await coordinateEventVisibility(env, {
     eventId: body.eventId.toLowerCase(),
     relayAction: 'confirm',
     reason: body.reason,
-    moderatorPubkey: body.moderatorPubkey,
+    moderatorPubkey: body.moderatorPubkey?.toLowerCase(),
     reportId: body.reportId,
     reporterPubkey: body.reporterPubkey,
   });

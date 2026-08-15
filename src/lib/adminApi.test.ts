@@ -943,11 +943,13 @@ describe('adminApi', () => {
         json: async () => ({ success: true }),
       });
 
-      await markAsReviewed(API_URL, 'pubkey', 'pubkey123', 'dismissed', 'False alarm');
+      await markAsReviewed(API_URL, 'pubkey', 'pubkey123', 'dismissed', 'False alarm', 'a'.repeat(64));
 
       const callBody = JSON.parse(mockFetch.mock.calls[0][1].body);
       expect(callBody.tags).toContainEqual(['l', 'dismissed', 'moderation/resolution']);
       expect(callBody.content).toBe('False alarm');
+      expect(callBody.moderatorPubkey).toBe('a'.repeat(64));
+      expect(callBody.moderationReason).toBe('False alarm');
     });
 
     it('should use default comment when not provided', async () => {

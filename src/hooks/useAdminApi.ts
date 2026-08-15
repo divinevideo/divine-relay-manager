@@ -83,8 +83,9 @@ export function useAdminApi() {
       targetType: 'event' | 'pubkey',
       targetValue: string,
       status?: adminApi.ResolutionStatus,
-      comment?: string
-    ) => adminApi.markAsReviewed(apiUrl, targetType, targetValue, status, comment),
+      comment?: string,
+      moderatorPubkey?: string,
+    ) => adminApi.markAsReviewed(apiUrl, targetType, targetValue, status, comment, moderatorPubkey),
 
     // Media moderation
     moderateMedia: (sha256: string, action: adminApi.ModerationAction, reason?: string) =>

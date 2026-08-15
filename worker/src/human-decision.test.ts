@@ -330,11 +330,19 @@ describe('human decision persistence', () => {
             ['l', 'dismissed', 'moderation/resolution'],
             ['e', eventId],
           ],
+          moderatorPubkey: 'a'.repeat(64),
+          moderationReason: 'False positive report',
         }),
       }), env as never, mockCtx);
 
       expect(response.status).toBe(200);
-      expect(operations).toEqual([{ eventId, relayAction: 'review', humanAction: 'dismissed' }]);
+      expect(operations).toEqual([{
+        eventId,
+        relayAction: 'review',
+        humanAction: 'dismissed',
+        reason: 'False positive report',
+        moderatorPubkey: 'a'.repeat(64),
+      }]);
       expect(await response.json()).toMatchObject({ success: true, recorded: true, reconciled: true });
       const upsert = sqlLog.find(entry => entry.sql.includes('INSERT INTO moderation_targets'));
       expect(upsert).toBeDefined();

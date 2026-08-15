@@ -200,7 +200,13 @@ describe('ReportDetail reopen reporting', () => {
     const dialog = await screen.findByRole('alertdialog');
     fireEvent.click(within(dialog).getByRole('button', { name: 'Dismiss Report' }));
 
-    await waitFor(() => expect(api.markAsReviewed).toHaveBeenCalled());
+    await waitFor(() => expect(api.markAsReviewed).toHaveBeenCalledWith(
+      'event',
+      ctx.targetValue,
+      'dismissed',
+      'Dismissed - no action needed',
+      MOD_PUBKEY,
+    ));
     const warning = toast.mock.calls.find(([arg]) => arg.title === 'Resolution saved; visibility needs attention')?.[0];
     expect(warning).toMatchObject({ variant: 'destructive', duration: Infinity });
     expect(warning.description).toMatch(/could not be restored/i);

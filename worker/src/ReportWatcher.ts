@@ -370,7 +370,11 @@ export class ReportWatcher implements DurableObject {
     if (
       !/^[0-9a-f]{64}$/.test(operation.eventId)
       || !['hide', 'allow', 'review', 'confirm'].includes(operation.relayAction)
+      || (operation.reason !== undefined && typeof operation.reason !== 'string')
       || (operation.humanAction !== undefined && typeof operation.humanAction !== 'string')
+      || (operation.moderatorPubkey !== undefined && !/^[0-9a-f]{64}$/.test(operation.moderatorPubkey))
+      || (operation.reportId !== undefined && typeof operation.reportId !== 'string')
+      || (operation.reporterPubkey !== undefined && typeof operation.reporterPubkey !== 'string')
       || (operation.relayAction === 'review' && !operation.humanAction)
     ) {
       return Response.json({ success: false, error: 'Invalid event visibility operation' }, { status: 400 });
@@ -446,8 +450,12 @@ export class ReportWatcher implements DurableObject {
           // Only a human restore is authoritative over an admitted auto-hide. Raw
           // allowevent RPCs still serialize here, but must not leave a tombstone that
           // suppresses future report-driven enforcement.
-          if (operation.relayAction === 'allow' && operation.humanAction !== undefined) {
-            await this.state.storage.put(visibilityKey, 'allow');
+          if (operation.relayAction === 'allow') {
+            if (operation.humanAction !== undefined) {
+              await this.state.storage.put(visibilityKey, 'allow');
+            } else if (previousVisibility === undefined) {
+              await this.state.storage.put(visibilityKey, 'raw-allow');
+            }
           }
           const relayResult = operation.relayAction === 'hide'
             ? await callNip86Rpc('banevent', [operation.eventId, operation.reason || 'Hidden by moderator'], this.env)
@@ -1104,6 +1112,9 @@ export class ReportWatcher implements DurableObject {
    * Check if an event was already auto-hidden (for deduplication)
    */
   private async isAlreadyAutoHidden(targetEventId: string): Promise<boolean> {
+    if (await this.state.storage.get<string>(this.visibilityStorageKey(targetEventId)) === 'raw-allow') {
+      return false;
+    }
     if (!this.env.DB) {
       // No D1 available - can't dedupe, allow processing
       console.warn('[ReportWatcher] D1 not available for deduplication check');

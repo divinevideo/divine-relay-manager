@@ -38,6 +38,8 @@ export interface UnsignedEvent {
   content: string;
   tags?: string[][];
   created_at?: number;
+  moderatorPubkey?: string;
+  moderationReason?: string;
 }
 
 interface ModerateParams {
@@ -72,6 +74,8 @@ export interface LabelParams {
   namespace: string;
   labels: string[];
   comment?: string;
+  moderatorPubkey?: string;
+  moderationReason?: string;
 }
 
 export class ApiError extends Error {
@@ -433,6 +437,8 @@ export async function publishLabel(apiUrl: string, params: LabelParams): Promise
     kind: 1985,
     content: params.comment || '',
     tags,
+    moderatorPubkey: params.moderatorPubkey,
+    moderationReason: params.moderationReason,
   });
 }
 
@@ -465,14 +471,18 @@ export async function markAsReviewed(
   targetType: 'event' | 'pubkey',
   targetValue: string,
   status: ResolutionStatus = 'reviewed',
-  comment?: string
+  comment?: string,
+  moderatorPubkey?: string,
 ): Promise<ApiResponse> {
+  const moderationReason = comment || `Marked as ${status} by moderator`;
   return publishLabel(apiUrl, {
     targetType,
     targetValue,
     namespace: 'moderation/resolution',
     labels: [status],
-    comment: comment || `Marked as ${status} by moderator`,
+    comment: moderationReason,
+    moderatorPubkey,
+    moderationReason,
   });
 }
 

@@ -433,17 +433,80 @@ describe('ReportWatcher', () => {
       ]);
     });
 
-    it('does not let a raw allowevent suppress a later auto-hide', async () => {
+    it('atomically records dismissal restore attribution', async () => {
+      const decisionArgs: unknown[][] = [];
       const db = {
-        prepare: vi.fn().mockImplementation(() => ({
-          bind: vi.fn().mockReturnValue({
-            first: vi.fn().mockResolvedValue(null),
-            run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 1 } }),
+        batch: vi.fn().mockResolvedValue([]),
+        prepare: vi.fn().mockImplementation((sql: string) => ({
+          bind: vi.fn().mockImplementation((...args: unknown[]) => {
+            if (sql.includes('INSERT INTO moderation_decisions')) decisionArgs.push(args);
+            return {
+              first: vi.fn().mockResolvedValue(sql.includes('AS auto_hide_action')
+                ? { last_human_action: null, auto_hide_action: 'auto_hidden' }
+                : null),
+              run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 1 } }),
+            };
           }),
           run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 0 } }),
         })),
       } as unknown as D1Database;
       watcher = new ReportWatcher(createMockState(), createMockEnv({ DB: db }));
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ result: true }), { status: 200 })));
+
+      const response = await watcher.fetch(new Request('https://do/event-visibility', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          eventId: 'b2'.repeat(32),
+          relayAction: 'review',
+          humanAction: 'false-positive',
+          reason: 'Moderator comment',
+          moderatorPubkey: 'c'.repeat(64),
+        }),
+      }));
+
+      expect(response.status).toBe(200);
+      expect(decisionArgs).toContainEqual([
+        'b2'.repeat(32),
+        'auto_hide_restored',
+        'Moderator comment',
+        'c'.repeat(64),
+        '',
+        '',
+      ]);
+    });
+
+    it('rejects malformed attribution before a coordinator relay call', async () => {
+      const relayFetch = vi.fn();
+      vi.stubGlobal('fetch', relayFetch);
+
+      const response = await watcher.fetch(new Request('https://do/event-visibility', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          eventId: 'b3'.repeat(32),
+          relayAction: 'allow',
+          humanAction: 'allow_event',
+          moderatorPubkey: ['forged'],
+        }),
+      }));
+
+      expect(response.status).toBe(400);
+      expect(relayFetch).not.toHaveBeenCalled();
+    });
+
+    it('does not let a raw allowevent bypass historical dedup for a later report', async () => {
+      const db = {
+        prepare: vi.fn().mockImplementation((sql: string) => ({
+          bind: vi.fn().mockReturnValue({
+            first: vi.fn().mockResolvedValue(sql.includes('action IN (?, ?)') ? { present: 1 } : null),
+            run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 1 } }),
+          }),
+          run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 0 } }),
+        })),
+      } as unknown as D1Database;
+      watcher = new ReportWatcher(createMockState(), createMockEnv({ DB: db, AUTO_HIDE_ENABLED: 'true' }));
+      await new Promise(resolve => setTimeout(resolve, 10));
       const relayMethods: string[] = [];
       vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
         const raw = input instanceof Request ? await input.clone().text() : String(init?.body ?? '');
@@ -458,8 +521,19 @@ describe('ReportWatcher', () => {
         body: JSON.stringify({ eventId, relayAction: 'allow' }),
       }));
       await (watcher as unknown as {
-        executeAutoHide(event: ReportEvent, category: string, targetId: string, tier: string): Promise<void>;
-      }).executeAutoHide({ id: 'report', pubkey: 'reporter' } as ReportEvent, 'sexual_minors', eventId, 'Immediate');
+        handleReportEvent(event: ReportEvent): Promise<void>;
+      }).handleReportEvent({
+        id: 'report',
+        pubkey: 'reporter',
+        kind: 1984,
+        created_at: 1,
+        content: 'report',
+        tags: [
+          ['report', 'sexual_minors'],
+          ['e', eventId],
+          ['client', 'diVine'],
+        ],
+      });
 
       expect(allow.status).toBe(200);
       expect(relayMethods).toEqual(['allowevent', 'banevent']);

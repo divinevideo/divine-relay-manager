@@ -878,6 +878,24 @@ describe('relay-rpc account-state side effects', () => {
     fetchSpy.mockRestore();
   });
 
+  it('rejects malformed restore attribution before mutating relay visibility', async () => {
+    const order: string[] = [];
+    const fetchSpy = makeOrderedRelaySpy(order);
+    const testCtx = { waitUntil: vi.fn() } as unknown as ExecutionContext;
+    const { env, visibilityOperations } = makeSqlRecordingEnv();
+
+    const response = await postModerate({
+      action: 'allow_event',
+      eventId: VALID_EVENT_ID,
+      moderatorPubkey: { forged: true },
+    }, env, testCtx);
+
+    expect(response.status).toBe(400);
+    expect(visibilityOperations).toEqual([]);
+    expect(order).toEqual([]);
+    fetchSpy.mockRestore();
+  });
+
   // The relay change is the recoverable half; the RECORD is why these actions exist. A
   // caller told plain success would believe the decision is protected from ReportWatcher
   // when it is not.
