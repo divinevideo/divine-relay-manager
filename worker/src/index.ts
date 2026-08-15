@@ -52,7 +52,7 @@ interface Env extends KeycastEnv {
   RELAY_URL: string;
   ALLOWED_ORIGINS: string;
   // Comma-separated public hostnames whose NIP-98 `u`-tag host is accepted in
-  // addition to the worker's own request host, for the two mobile endpoints only
+  // addition to the worker's own request host, for mobile-facing endpoints only
   // (divine-relay-manager#173). Non-secret. Empty/unset ⇒ strict same-host.
   NIP98_PUBLIC_HOST_ALLOWLIST?: string;
   ANTHROPIC_API_KEY?: string;
@@ -2216,7 +2216,7 @@ interface Nip98Result {
 // and its hostname is in `allowedHosts` (bare hostnames). Port and fragment are
 // intentionally not compared — this is a bare-hostname allowlist by design;
 // tightening to port would mean comparing `.host` instead of `.hostname`. Used
-// only by the two mobile endpoints (#173); strict callers pass an empty
+// only by mobile-facing endpoints; strict callers pass an empty
 // allowlist, so this can never return true for them. Malformed URLs → false.
 function hostAllowlistedUrlMatch(signedUrl: string, expectedUrl: string, allowedHosts: string[]): boolean {
   if (allowedHosts.length === 0) return false;
@@ -2808,9 +2808,14 @@ async function handleZendeskPreAuth(
     // Ensure nonce table exists
     await ensureSchemaOnce(env.DB);
 
-    // Verify NIP-98 auth. Intentionally strict: no allowedHosts passed, so this
-    // Zendesk pre-auth path stays same-host only (#173 scope — do not relax).
-    const authResult = await verifyNip98Auth(request, request.url);
+    // Mobile signs the canonical public API URL while the edge forwards to the
+    // worker host. Relax only the host via the configured allowlist; scheme,
+    // path, query, method, timestamp, and event signature remain exact.
+    const authResult = await verifyNip98Auth(
+      request,
+      request.url,
+      getNip98AllowedHosts(env),
+    );
     if (!authResult.valid) {
       return jsonResponse(
         { success: false, error: `NIP-98 auth required: ${authResult.error}` },
