@@ -373,8 +373,8 @@ export class ReportWatcher implements DurableObject {
       || (operation.reason !== undefined && typeof operation.reason !== 'string')
       || (operation.humanAction !== undefined && typeof operation.humanAction !== 'string')
       || (operation.moderatorPubkey !== undefined && !/^[0-9a-f]{64}$/.test(operation.moderatorPubkey))
-      || (operation.reportId !== undefined && typeof operation.reportId !== 'string')
-      || (operation.reporterPubkey !== undefined && typeof operation.reporterPubkey !== 'string')
+      || (operation.reportId !== undefined && !/^[0-9a-f]{64}$/.test(operation.reportId))
+      || (operation.reporterPubkey !== undefined && !/^[0-9a-f]{64}$/.test(operation.reporterPubkey))
       || (operation.relayAction === 'review' && !operation.humanAction)
     ) {
       return Response.json({ success: false, error: 'Invalid event visibility operation' }, { status: 400 });
@@ -390,7 +390,9 @@ export class ReportWatcher implements DurableObject {
         let relayFailure: EventVisibilityResult | undefined;
         if (operation.relayAction === 'confirm') {
           if (!this.env.DB) return { success: false, recorded: false, error: 'Moderation database is not configured' };
-          if (await this.state.storage.get(this.visibilityStorageKey(operation.eventId)) === 'allow') {
+          if (['allow', 'raw-allow'].includes(
+            await this.state.storage.get<string>(this.visibilityStorageKey(operation.eventId)) || '',
+          )) {
             return { success: false, recorded: false, conflict: true, error: 'Auto-hide is no longer active' };
           }
           if (!await canConfirmAutoHide(this.env.DB, operation.eventId)) {
@@ -453,7 +455,7 @@ export class ReportWatcher implements DurableObject {
           if (operation.relayAction === 'allow') {
             if (operation.humanAction !== undefined) {
               await this.state.storage.put(visibilityKey, 'allow');
-            } else if (previousVisibility === undefined) {
+            } else if (previousVisibility !== 'allow') {
               await this.state.storage.put(visibilityKey, 'raw-allow');
             }
           }
@@ -905,6 +907,9 @@ export class ReportWatcher implements DurableObject {
       }
     }
 
+    // A raw allow changes relay visibility without superseding the durable human
+    // decision. Re-admit enforcement until a successful hide consumes this marker.
+    const rawAllow = await this.state.storage.get<string>(this.visibilityStorageKey(targetEventId)) === 'raw-allow';
     const humanResolution = await this.hasHumanResolution(targetEventId);
     if (humanResolution === null) {
       console.error(`[ALERT] [ReportWatcher] Auto-hide skipped for ${targetEventId}: human-review state unavailable`);
@@ -918,7 +923,7 @@ export class ReportWatcher implements DurableObject {
       });
       return;
     }
-    if (humanResolution) {
+    if (humanResolution && !rawAllow) {
       console.log(`[ReportWatcher] Event ${targetEventId} has human resolution, skipping auto-hide`);
       return;
     }
@@ -1000,9 +1005,9 @@ export class ReportWatcher implements DurableObject {
       });
       return;
     }
-    // The first check happens before tier processing. Recheck inside the same
-    // gate used by human actions so an admitted auto-hide cannot pass a newer
-    // review mark and mutate the relay afterwards.
+    // The first check happens before tier processing. Recheck both the durable
+    // decision and raw visibility override inside the same gate used by human actions.
+    const rawAllow = await this.state.storage.get<string>(this.visibilityStorageKey(targetEventId)) === 'raw-allow';
     const humanResolution = await this.hasHumanResolution(targetEventId);
     if (humanResolution === null) {
       console.error(`[ALERT] [ReportWatcher] Serialized auto-hide skipped for ${targetEventId}: human-review state unavailable`);
@@ -1016,7 +1021,7 @@ export class ReportWatcher implements DurableObject {
       });
       return;
     }
-    if (humanResolution) {
+    if (humanResolution && !rawAllow) {
       console.log(`[ReportWatcher] Event ${targetEventId} received a human resolution before auto-hide execution`);
       return;
     }

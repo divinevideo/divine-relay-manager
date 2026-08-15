@@ -1639,10 +1639,10 @@ async function handleConfirmAutoHide(
   if (body.moderatorPubkey !== undefined && !/^[a-f0-9]{64}$/i.test(body.moderatorPubkey)) {
     return jsonResponse({ success: false, error: 'Invalid moderatorPubkey' }, 400, corsHeaders);
   }
-  if (body.reportId !== undefined && typeof body.reportId !== 'string') {
+  if (body.reportId !== undefined && !/^[a-f0-9]{64}$/i.test(body.reportId)) {
     return jsonResponse({ success: false, error: 'Invalid reportId' }, 400, corsHeaders);
   }
-  if (body.reporterPubkey !== undefined && typeof body.reporterPubkey !== 'string') {
+  if (body.reporterPubkey !== undefined && !/^[a-f0-9]{64}$/i.test(body.reporterPubkey)) {
     return jsonResponse({ success: false, error: 'Invalid reporterPubkey' }, 400, corsHeaders);
   }
   const result = await coordinateEventVisibility(env, {
@@ -1650,8 +1650,8 @@ async function handleConfirmAutoHide(
     relayAction: 'confirm',
     reason: body.reason,
     moderatorPubkey: body.moderatorPubkey?.toLowerCase(),
-    reportId: body.reportId,
-    reporterPubkey: body.reporterPubkey,
+    reportId: body.reportId?.toLowerCase(),
+    reporterPubkey: body.reporterPubkey?.toLowerCase(),
   });
   return jsonResponse(result, result.success ? 200 : result.conflict ? 409 : 500, corsHeaders);
 }

@@ -631,11 +631,14 @@ describe('relay-rpc account-state side effects', () => {
           fetch: async (request: Request) => {
             const operation = await request.json() as {
               eventId: string;
-              relayAction: 'hide' | 'allow' | 'review';
+              relayAction: 'hide' | 'allow' | 'review' | 'confirm';
               reason?: string;
               humanAction?: string;
             };
             visibilityOperations.push(operation);
+            if (operation.relayAction === 'confirm') {
+              return Response.json({ success: true, recorded: true });
+            }
             if (operation.relayAction === 'review') {
               const recorded = await db.prepare(`
                 INSERT INTO moderation_targets (target_id, target_type, ever_human_reviewed)
@@ -894,6 +897,39 @@ describe('relay-rpc account-state side effects', () => {
     expect(visibilityOperations).toEqual([]);
     expect(order).toEqual([]);
     fetchSpy.mockRestore();
+  });
+
+  it('validates and canonicalises auto-hide confirmation provenance', async () => {
+    const testCtx = { waitUntil: vi.fn() } as unknown as ExecutionContext;
+    const { env, visibilityOperations } = makeSqlRecordingEnv();
+    const request = (body: Record<string, unknown>) => worker.fetch(new Request(
+      'https://api-relay-prod.divine.video/api/confirm-auto-hide',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Admin-Key': 'test-admin-key',
+          Origin: 'https://app.divine.video',
+        },
+        body: JSON.stringify({ eventId: VALID_EVENT_ID, ...body }),
+      },
+    ), env, testCtx);
+
+    for (const body of [{ reportId: 'forged' }, { reporterPubkey: 'forged' }]) {
+      expect((await request(body)).status).toBe(400);
+    }
+    const response = await request({
+      reportId: 'B'.repeat(64),
+      reporterPubkey: 'C'.repeat(64),
+    });
+
+    expect(response.status).toBe(200);
+    expect(visibilityOperations).toEqual([{
+      eventId: VALID_EVENT_ID,
+      relayAction: 'confirm',
+      reportId: 'b'.repeat(64),
+      reporterPubkey: 'c'.repeat(64),
+    }]);
   });
 
   // The relay change is the recoverable half; the RECORD is why these actions exist. A
