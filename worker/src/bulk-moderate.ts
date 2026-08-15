@@ -92,7 +92,7 @@ async function deleteEvents(
       // kind-5 deletion: NIP-09 is author-only, so funnelcake (and any compliant relay)
       // rejects a non-author's kind-5 — an admin kind-5 always fails and propagates
       // nothing. banevent is the real removal.
-      const banResult = await banEvent(event.id, reason, env);
+      const banResult = await banEvent(event.id, reason, env, 'delete_event');
       if (!banResult.success) throw new Error(banResult.error || 'banevent failed');
       processed++;
       successfulEventIds.push(event.id);

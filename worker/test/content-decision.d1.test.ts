@@ -94,9 +94,9 @@ describe('recorded content decisions on real D1', () => {
       restore_event: true,
       auto_hide_restored: true,
       reviewed: false,
-      dismissed: true,
-      'no-action': true,
-      'false-positive': true,
+      dismissed: false,
+      'no-action': false,
+      'false-positive': false,
       hide_event: false,
       delete_event: false,
     };

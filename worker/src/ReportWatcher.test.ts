@@ -189,6 +189,44 @@ describe('ReportWatcher', () => {
   });
 
   describe('event visibility coordination', () => {
+    it('records a resolution review without mutating relay visibility or direction', async () => {
+      const statements: string[] = [];
+      const db = {
+        prepare: vi.fn().mockImplementation((sql: string) => {
+          statements.push(sql);
+          return {
+            bind: vi.fn().mockReturnValue({
+              run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 1 } }),
+              first: vi.fn().mockResolvedValue(null),
+            }),
+            run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 0 } }),
+          };
+        }),
+      } as unknown as D1Database;
+      mockState = createMockState();
+      mockEnv = createMockEnv({ DB: db });
+      watcher = new ReportWatcher(mockState, mockEnv);
+      const relayFetch = vi.fn();
+      vi.stubGlobal('fetch', relayFetch);
+
+      const response = await watcher.fetch(new Request('https://do/event-visibility', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          eventId: 'ab'.repeat(32),
+          relayAction: 'review',
+          humanAction: 'dismissed',
+        }),
+      }));
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ success: true, recorded: true });
+      expect(relayFetch).not.toHaveBeenCalled();
+      const reviewUpsert = statements.find(sql => sql.includes('INSERT INTO moderation_targets'));
+      expect(reviewUpsert).toBeDefined();
+      expect(reviewUpsert).not.toContain('last_human_action');
+    });
+
     it('serializes a newer human delete after auto-hide compensation', async () => {
       const order: string[] = [];
       const db = {
@@ -236,6 +274,64 @@ describe('ReportWatcher', () => {
         'relay:banevent',
       ]);
       expect(order[order.length - 1]).toBe('db:delete_event');
+    });
+
+    it('keeps a newer coordinated hide authoritative over an older allow and admitted auto-hide', async () => {
+      const order: string[] = [];
+      let latestHumanAction: string | null = null;
+      const db = {
+        prepare: vi.fn().mockImplementation((sql: string) => ({
+          bind: vi.fn().mockImplementation((...args: unknown[]) => ({
+            first: vi.fn().mockImplementation(async () => {
+              if (sql.includes('ever_human_reviewed')) return latestHumanAction ? { present: 1 } : null;
+              if (sql.includes('last_human_action')) {
+                return ['allow_event', 'restore_event', 'auto_hide_restored'].includes(latestHumanAction || '')
+                  ? { present: 1 }
+                  : null;
+              }
+              return null;
+            }),
+            run: vi.fn().mockImplementation(async () => {
+              if (sql.includes('INSERT INTO moderation_targets') && typeof args[2] === 'string') {
+                latestHumanAction = args[2];
+                order.push(`db:${latestHumanAction}`);
+              }
+              return { success: true, meta: { changes: 1 } };
+            }),
+          })),
+          run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 0 } }),
+        })),
+      } as unknown as D1Database;
+      mockState = createMockState();
+      mockEnv = createMockEnv({ DB: db });
+      watcher = new ReportWatcher(mockState, mockEnv);
+      vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const raw = input instanceof Request ? await input.clone().text() : String(init?.body ?? '');
+        order.push(`relay:${(JSON.parse(raw) as { method: string }).method}`);
+        return new Response(JSON.stringify({ result: true }), { status: 200 });
+      }));
+
+      const eventId = 'ef'.repeat(32);
+      const request = (relayAction: 'allow' | 'hide', humanAction: string) => watcher.fetch(new Request('https://do/event-visibility', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ eventId, relayAction, humanAction }),
+      }));
+      const allowResponse = await request('allow', 'allow_event');
+      const hideResponse = await request('hide', 'delete_event');
+      await (watcher as unknown as {
+        executeAutoHide(event: ReportEvent, category: string, targetId: string, tier: string): Promise<void>;
+      }).executeAutoHide({ id: 'report', pubkey: 'reporter' } as ReportEvent, 'sexual_minors', eventId, 'Immediate');
+
+      expect(allowResponse.status).toBe(200);
+      expect(hideResponse.status).toBe(200);
+      expect(order).toEqual([
+        'relay:allowevent',
+        'db:allow_event',
+        'relay:banevent',
+        'db:delete_event',
+      ]);
+      expect(latestHumanAction).toBe('delete_event');
     });
   });
 

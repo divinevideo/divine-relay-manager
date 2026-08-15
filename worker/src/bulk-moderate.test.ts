@@ -286,6 +286,7 @@ describe('runBulkModeration', () => {
     expect(result.eventsProcessed).toBe(1);
     expect(result.failures).toEqual([]);
     expect(result.success).toBe(true);
+    expect(vi.mocked(banEvent)).toHaveBeenCalledWith('e'.repeat(64), 'r', mockEnv, 'delete_event');
   });
 
   it('a failing decision-log batch (non-critical) does not abort an otherwise-successful delete-all', async () => {

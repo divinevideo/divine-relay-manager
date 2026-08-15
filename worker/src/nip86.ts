@@ -4,6 +4,8 @@
 import { finalizeEvent, nip19, getPublicKey } from 'nostr-tools';
 import { coordinateEventVisibility } from './event-visibility';
 
+const NIP86_RPC_TIMEOUT_MS = 15_000;
+
 /**
  * Secrets Store secret object (for account-level secrets)
  */
@@ -141,6 +143,7 @@ export async function callNip86Rpc(
     method: 'POST',
     headers,
     body: payload,
+    signal: AbortSignal.timeout(NIP86_RPC_TIMEOUT_MS),
   });
 
   if (!response.ok) {
@@ -165,10 +168,12 @@ export async function callNip86Rpc(
 export async function banEvent(
   eventId: string,
   reason: string,
-  env: Nip86Env
+  env: Nip86Env,
+  humanAction: string = 'hide_event',
 ): Promise<Nip86RpcResult> {
   if (env.REPORT_WATCHER) {
-    return coordinateEventVisibility(env, { eventId, relayAction: 'hide', reason });
+    // ReportWatcher itself must call callNip86Rpc directly while holding its gate.
+    return coordinateEventVisibility(env, { eventId, relayAction: 'hide', reason, humanAction });
   }
   return callNip86Rpc('banevent', [eventId, reason], env);
 }
@@ -181,7 +186,8 @@ export async function allowEvent(
   env: Nip86Env
 ): Promise<Nip86RpcResult> {
   if (env.REPORT_WATCHER) {
-    return coordinateEventVisibility(env, { eventId, relayAction: 'allow' });
+    // ReportWatcher itself must call callNip86Rpc directly while holding its gate.
+    return coordinateEventVisibility(env, { eventId, relayAction: 'allow', humanAction: 'allow_event' });
   }
   return callNip86Rpc('allowevent', [eventId], env);
 }

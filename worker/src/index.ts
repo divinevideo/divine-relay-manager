@@ -851,7 +851,7 @@ async function handlePublish(
           if (targetType === 'event' && ['dismissed', 'no-action', 'false-positive'].includes(status)) {
             const result = await coordinateEventVisibility(env, {
               eventId: targetId,
-              relayAction: 'allow',
+              relayAction: 'review',
               humanAction: status,
             });
             if (!result.success || !result.recorded) {
@@ -1245,11 +1245,20 @@ async function handleRelayRpc(
     : body.method === 'allowevent'
       ? 'allow'
       : null;
-  const result = eventVisibilityAction
+  if (body.method === 'banevent' && !/^[0-9a-f]{64}$/.test(target)) {
+    return jsonResponse({ success: false, error: 'Invalid event id' }, 400, corsHeaders);
+  }
+
+  // Preserve cleanup for legacy non-canonical bans by forwarding allowevent
+  // byte-for-byte. Canonical event actions use the coordinator and persist the
+  // direction that auto-hide compensation reads.
+  const shouldCoordinateEvent = eventVisibilityAction && /^[0-9a-f]{64}$/.test(target);
+  const result = shouldCoordinateEvent
     ? await coordinateEventVisibility(env, {
       eventId: target,
       relayAction: eventVisibilityAction,
       reason: body.params?.[1] ? String(body.params[1]) : undefined,
+      humanAction: eventVisibilityAction === 'hide' ? 'hide_event' : 'allow_event',
     })
     : await callNip86Rpc(body.method, body.params || [], env);
 

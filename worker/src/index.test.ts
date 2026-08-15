@@ -587,6 +587,7 @@ describe('relay-rpc account-state side effects', () => {
   function makeSqlRecordingEnv(order?: string[]) {
     const sql: string[] = [];
     const bound: { statement: string; args: unknown[] }[] = [];
+    const visibilityOperations: unknown[] = [];
     const db = {
       prepare: (statement: string) => {
         sql.push(statement);
@@ -630,10 +631,18 @@ describe('relay-rpc account-state side effects', () => {
           fetch: async (request: Request) => {
             const operation = await request.json() as {
               eventId: string;
-              relayAction: 'hide' | 'allow';
+              relayAction: 'hide' | 'allow' | 'review';
               reason?: string;
               humanAction?: string;
             };
+            visibilityOperations.push(operation);
+            if (operation.relayAction === 'review') {
+              const recorded = await db.prepare(`
+                INSERT INTO moderation_targets (target_id, target_type, ever_human_reviewed)
+                VALUES (?, ?, 1)
+              `).bind(operation.eventId, 'event').run().then(() => true);
+              return Response.json({ success: true, recorded });
+            }
             const relayResponse = await fetch('https://relay.divine.video/management', {
               method: 'POST',
               body: JSON.stringify({
@@ -668,6 +677,7 @@ describe('relay-rpc account-state side effects', () => {
       env,
       sql,
       bound,
+      visibilityOperations,
       marked: () => markedRow()?.[0] ?? null,
       markedAction: () => markedRow()?.[2] ?? null,
     };
@@ -752,6 +762,56 @@ describe('relay-rpc account-state side effects', () => {
     await drain(waitUntil);
     expect(order).not.toContain('dm');
 
+    fetchSpy.mockRestore();
+  });
+
+  it.each([
+    ['banevent', 'hide', 'hide_event'],
+    ['allowevent', 'allow', 'allow_event'],
+  ] as const)('raw %s persists its visibility direction inside the coordinator', async (method, relayAction, humanAction) => {
+    const order: string[] = [];
+    const fetchSpy = makeOrderedRelaySpy(order);
+    const { env, visibilityOperations, markedAction } = makeSqlRecordingEnv(order);
+
+    const response = await worker.fetch(new Request('https://api-relay-prod.divine.video/api/relay-rpc', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Admin-Key': 'test-admin-key',
+        Origin: 'https://app.divine.video',
+      },
+      body: JSON.stringify({ method, params: [VALID_EVENT_ID, 'manual action'] }),
+    }), env, { waitUntil: vi.fn() } as unknown as ExecutionContext);
+
+    expect(response.status).toBe(200);
+    expect(visibilityOperations).toEqual([{
+      eventId: VALID_EVENT_ID,
+      relayAction,
+      reason: 'manual action',
+      humanAction,
+    }]);
+    expect(markedAction()).toBe(humanAction);
+    fetchSpy.mockRestore();
+  });
+
+  it('forwards a legacy non-canonical allowevent without making cleanup stricter', async () => {
+    const order: string[] = [];
+    const fetchSpy = makeOrderedRelaySpy(order);
+    const { env, visibilityOperations } = makeSqlRecordingEnv(order);
+
+    const response = await worker.fetch(new Request('https://api-relay-prod.divine.video/api/relay-rpc', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Admin-Key': 'test-admin-key',
+        Origin: 'https://app.divine.video',
+      },
+      body: JSON.stringify({ method: 'allowevent', params: ['legacy-event-id'] }),
+    }), env, { waitUntil: vi.fn() } as unknown as ExecutionContext);
+
+    expect(response.status).toBe(200);
+    expect(order).toContain('relay:allowevent');
+    expect(visibilityOperations).toEqual([]);
     fetchSpy.mockRestore();
   });
 

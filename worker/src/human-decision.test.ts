@@ -3,6 +3,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import worker from './index';
+import { markHumanReviewed } from './human-decision';
 
 // Test nsec (same throwaway key as nip86.test.ts)
 const TEST_NSEC = 'nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5';
@@ -78,7 +79,7 @@ function createMockDB() {
   return { db, sqlLog };
 }
 
-function createEnv(db: unknown) {
+function createEnv(db: unknown, operations: unknown[] = []) {
   return {
     NOSTR_NSEC: TEST_NSEC,
     RELAY_URL: 'wss://relay.test.com',
@@ -87,7 +88,14 @@ function createEnv(db: unknown) {
     REPORT_WATCHER: {
       idFromName: () => 'singleton',
       get: () => ({
-        fetch: async () => Response.json({ success: true, recorded: true }),
+        fetch: async (request: Request) => {
+          const operation = await request.json() as { eventId: string; relayAction: string };
+          operations.push(operation);
+          const recorded = operation.relayAction === 'review'
+            ? await markHumanReviewed(db as D1Database, 'event', operation.eventId)
+            : true;
+          return Response.json({ success: true, recorded });
+        },
       }),
     },
   };
@@ -279,6 +287,38 @@ describe('human decision persistence', () => {
         s.sql.includes('moderation_targets') && s.sql.includes('INSERT')
       );
       expect(targetInserts.length).toBe(0);
+    });
+
+    it('serializes a dismissal mark without allowing the event or replacing hide direction', async () => {
+      const { db, sqlLog } = createMockDB();
+      const operations: unknown[] = [];
+      const env = createEnv(db, operations);
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => ['OK', 'event_id', true, ''],
+        text: async () => JSON.stringify(['OK', 'event_id', true, '']),
+      });
+      const eventId = 'ab'.repeat(32);
+
+      const response = await worker.fetch(new Request('http://localhost/api/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        body: JSON.stringify({
+          kind: 1985,
+          content: 'Dismissed',
+          tags: [
+            ['L', 'moderation/resolution'],
+            ['l', 'dismissed', 'moderation/resolution'],
+            ['e', eventId],
+          ],
+        }),
+      }), env as never, mockCtx);
+
+      expect(response.status).toBe(200);
+      expect(operations).toEqual([{ eventId, relayAction: 'review', humanAction: 'dismissed' }]);
+      const upsert = sqlLog.find(entry => entry.sql.includes('INSERT INTO moderation_targets'));
+      expect(upsert).toBeDefined();
+      expect(upsert?.sql).not.toContain('last_human_action');
     });
   });
 

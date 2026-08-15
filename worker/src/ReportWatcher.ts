@@ -4,7 +4,7 @@
 import { callNip86Rpc, type Nip86Env } from './nip86';
 import { ensureSchema } from './db';
 import type { EventVisibilityOperation, EventVisibilityResult } from './event-visibility';
-import { markHumanAction } from './human-decision';
+import { markHumanAction, markHumanReviewed } from './human-decision';
 import {
   AUTO_HIDE_ACTION,
   AUTO_HIDE_TIER_KINDS,
@@ -39,10 +39,7 @@ export async function hasLatestHumanRestore(db: D1Database, targetEventId: strin
       AND last_human_action IN (
         'allow_event',
         'restore_event',
-        'auto_hide_restored',
-        'dismissed',
-        'no-action',
-        'false-positive'
+        'auto_hide_restored'
       )
   `).bind(targetEventId).first();
   return row !== null;
@@ -339,7 +336,7 @@ export class ReportWatcher implements DurableObject {
 
     if (
       !/^[0-9a-f]{64}$/.test(operation.eventId)
-      || (operation.relayAction !== 'hide' && operation.relayAction !== 'allow')
+      || !['hide', 'allow', 'review'].includes(operation.relayAction)
       || (operation.humanAction !== undefined && typeof operation.humanAction !== 'string')
     ) {
       return Response.json({ success: false, error: 'Invalid event visibility operation' }, { status: 400 });
@@ -347,10 +344,12 @@ export class ReportWatcher implements DurableObject {
 
     const result = await this.state.blockConcurrencyWhile(async (): Promise<EventVisibilityResult> => {
       try {
-        const relayResult = operation.relayAction === 'hide'
-          ? await callNip86Rpc('banevent', [operation.eventId, operation.reason || 'Hidden by moderator'], this.env)
-          : await callNip86Rpc('allowevent', [operation.eventId], this.env);
-        if (!relayResult.success) return relayResult;
+        if (operation.relayAction !== 'review') {
+          const relayResult = operation.relayAction === 'hide'
+            ? await callNip86Rpc('banevent', [operation.eventId, operation.reason || 'Hidden by moderator'], this.env)
+            : await callNip86Rpc('allowevent', [operation.eventId], this.env);
+          if (!relayResult.success) return relayResult;
+        }
 
         if (operation.humanAction === undefined) return { success: true };
         if (!this.env.DB) return { success: true, recorded: false };
@@ -360,12 +359,9 @@ export class ReportWatcher implements DurableObject {
             await ensureSchema(this.env.DB);
             this.schemaReady = true;
           }
-          const recorded = await markHumanAction(
-            this.env.DB,
-            'event',
-            operation.eventId,
-            operation.humanAction,
-          );
+          const recorded = operation.relayAction === 'review'
+            ? await markHumanReviewed(this.env.DB, 'event', operation.eventId)
+            : await markHumanAction(this.env.DB, 'event', operation.eventId, operation.humanAction);
           return { success: true, recorded };
         } catch (error) {
           console.error('[ReportWatcher] Event visibility mark failed:', error);
@@ -841,6 +837,14 @@ export class ReportWatcher implements DurableObject {
     targetEventId: string,
     tierName: string
   ): Promise<void> {
+    // The first check happens before tier processing. Recheck inside the same
+    // gate used by human actions so an admitted auto-hide cannot pass a newer
+    // review mark and mutate the relay afterwards.
+    if (await this.hasHumanResolution(targetEventId)) {
+      console.log(`[ReportWatcher] Event ${targetEventId} received a human resolution before auto-hide execution`);
+      return;
+    }
+
     console.log(`[ReportWatcher] Auto-hiding event ${targetEventId} (tier: ${tierName})`);
 
     const reason = `Auto-hidden: ${category} report (tier: ${tierName}, report_id: ${event.id})`;
