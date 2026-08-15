@@ -21,7 +21,7 @@ const api = vi.hoisted(() => ({
   banPubkey: vi.fn(),
   deleteEvent: vi.fn(),
   unbanPubkey: vi.fn(),
-  allowEvent: vi.fn(),
+  restoreEvent: vi.fn(),
   verifyPubkeyBanned: vi.fn(),
   verifyPubkeyUnbanned: vi.fn(),
   verifyEventDeleted: vi.fn(),
@@ -44,13 +44,16 @@ vi.mock('@/hooks/useAgeReviewGuardRedirect', () => ({
 }));
 
 // Drives which enforcement affordance renders: "Ban User" vs "Unban User".
-const modStatus = vi.hoisted(() => ({ isUserBanned: false as boolean | null }));
+const modStatus = vi.hoisted(() => ({
+  isUserBanned: false as boolean | null,
+  isEventGone: false,
+}));
 vi.mock('@/hooks/useModerationStatus', () => ({
   useModerationStatus: () => ({
     isUserBanned: modStatus.isUserBanned,
     isUserSuspended: false,
     isEventBanned: false,
-    isEventGone: false,
+    isEventGone: modStatus.isEventGone,
     isLoading: false,
     isChecking: false,
     checkedAt: null,
@@ -104,6 +107,7 @@ describe('EventDetail post-ban verification', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     modStatus.isUserBanned = false;
+    modStatus.isEventGone = false;
     api.banPubkey.mockResolvedValue(undefined);
   });
 
@@ -162,6 +166,7 @@ describe('EventDetail post-delete verification', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     modStatus.isUserBanned = false;
+    modStatus.isEventGone = false;
     api.deleteEvent.mockResolvedValue(undefined);
   });
 
@@ -209,6 +214,7 @@ describe('EventDetail post-unban verification', () => {
     vi.clearAllMocks();
     // Banned, so the row offers "Unban User".
     modStatus.isUserBanned = true;
+    modStatus.isEventGone = false;
     api.unbanPubkey.mockResolvedValue(undefined);
   });
 
@@ -251,5 +257,30 @@ describe('EventDetail post-unban verification', () => {
       expect(screen.getByText('Verification failed - could not check status')).toBeInTheDocument();
     });
     expect(screen.queryByText('Warning: User may still be banned')).not.toBeInTheDocument();
+  });
+});
+
+describe('EventDetail restore routing', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    modStatus.isUserBanned = false;
+    modStatus.isEventGone = true;
+    api.restoreEvent.mockResolvedValue({ success: true, recorded: true, reconciled: true });
+    api.logDecision.mockResolvedValue(undefined);
+  });
+
+  it('uses the recorded restore endpoint before writing the audit entry', async () => {
+    renderDetail();
+
+    await act(async () => {
+      fireEvent.click(await screen.findByRole('button', { name: /^Restore Event$/ }));
+    });
+
+    await waitFor(() => expect(api.restoreEvent).toHaveBeenCalledWith(EVENT.id));
+    expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({
+      targetType: 'event',
+      targetId: EVENT.id,
+      action: 'restore_event',
+    }));
   });
 });

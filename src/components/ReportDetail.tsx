@@ -87,13 +87,13 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const {
-    deleteEvent, allowEvent, markAsReviewed, logDecision, deleteDecisions,
+    deleteEvent, restoreEvent, markAsReviewed, logDecision, deleteDecisions,
   } = useAdminApi();
   const { getModeratorPubkey } = useCurrentUser();
 
   // Audit logging is a non-critical side effect. Fire-and-forget so a failing
   // /api/decisions write can't make an action whose authoritative step already
-  // SUCCEEDED (markAsReviewed label publish, allowEvent) report failure. On a
+  // SUCCEEDED (markAsReviewed label publish, restoreEvent) report failure. On a
   // successful write, re-invalidate the decision log; on failure, a non-blocking
   // toast. Mirrors UserActions.logAudit. (confirmAutoHide keeps an awaited
   // logDecision: there the decision write IS the action.)
@@ -387,7 +387,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   const restoreAutoHideMutation = useMutation({
     mutationFn: async ({ eventId }: { eventId: string }) => {
       const moderator = getModeratorPubkey(); // capture before the authoritative request
-      await allowEvent(eventId);
+      const result = await restoreEvent(eventId);
       logAudit(moderator, {
         targetType: 'event',
         targetId: eventId,
@@ -395,16 +395,23 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
         reason: 'Auto-hide reversed by moderator',
         reportId: report?.id,
       });
-      return eventId;
+      return result;
     },
-    onSuccess: async () => {
+    onSuccess: async (result) => {
       queryClient.invalidateQueries({ queryKey: ['reports'] });
       queryClient.invalidateQueries({ queryKey: ['banned-events'] });
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
 
       moderationStatus.recheck();
       decisionLog.refetch();
-      toast({ title: "Content restored", description: "Auto-hide has been reversed" });
+      toast(result.recorded === true && result.reconciled !== false
+        ? { title: "Content restored", description: "Auto-hide has been reversed" }
+        : {
+            title: result.recorded === true
+              ? "Restore recorded; final relay state uncertain"
+              : "Restore applied but not recorded",
+            variant: "destructive",
+          });
     },
     onError: (error: Error) => {
       toast({
@@ -911,9 +918,16 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                   description: "The event has been removed from the relay.",
                   action: (
                     <ToastAction altText="Undo delete" onClick={async () => {
-                      await allowEvent(eventId);
+                      const result = await restoreEvent(eventId);
                       handleActionComplete();
-                      toast({ title: "Event restored" });
+                      toast(result.recorded === true && result.reconciled !== false
+                        ? { title: "Event restored" }
+                        : {
+                            title: result.recorded === true
+                              ? "Restore recorded; final relay state uncertain"
+                              : "Restore applied but not recorded",
+                            variant: "destructive",
+                          });
                     }}>
                       Undo
                     </ToastAction>

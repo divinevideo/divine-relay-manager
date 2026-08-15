@@ -986,21 +986,20 @@ describe('ReportWatcher', () => {
     });
 
     it('reverses an auto-hide when a human-review mark appears during the relay call', async () => {
-      let humanResolutionReads = 0;
-      mockEnv.DB = {
-        prepare: vi.fn().mockImplementation((sql: string) => ({
-          bind: vi.fn().mockReturnValue({
-            run: mockDbRun,
-            first: vi.fn().mockImplementation(() => {
-              if (sql.includes('SELECT 1 FROM moderation_targets')) {
-                humanResolutionReads++;
-                return Promise.resolve(humanResolutionReads === 1 ? null : { 1: 1 });
-              }
-              return Promise.resolve(null);
-            }),
-          }),
+      const prepare = vi.fn().mockImplementation((sql: string) => ({
+        bind: vi.fn().mockReturnValue({
           run: mockDbRun,
-        })),
+          first: vi.fn().mockImplementation(() => {
+            if (sql.includes('SELECT 1 FROM moderation_targets')) {
+              return Promise.resolve(sql.includes('last_human_action') ? { 1: 1 } : null);
+            }
+            return Promise.resolve(null);
+          }),
+        }),
+        run: mockDbRun,
+      }));
+      mockEnv.DB = {
+        prepare,
       } as unknown as D1Database;
 
       await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
@@ -1022,8 +1021,50 @@ describe('ReportWatcher', () => {
 
       const methods = mockFetch.mock.calls.map(([, options]) => JSON.parse(options.body).method);
       expect(methods).toEqual(['banevent', 'allowevent']);
+      expect(prepare.mock.calls.some(([sql]) => sql.includes('INSERT INTO moderation_decisions'))).toBe(true);
       const status = await watcher.fetch(new Request('https://do/status'));
       expect(await status.json()).toMatchObject({ status: { eventsAutoHidden: 0 } });
+    });
+
+    it.each(['hide_event', 'delete_event'])('does not reverse an auto-hide raced by %s', async (action) => {
+      mockEnv.DB = {
+        prepare: vi.fn().mockImplementation((sql: string) => ({
+          bind: vi.fn().mockReturnValue({
+            run: mockDbRun,
+            // The generic pre-check saw no row. The post-ban direction query also
+            // returns no row because its SQL accepts restore actions only.
+            first: vi.fn().mockImplementation(() => {
+              if (sql.includes('last_human_action')) {
+                expect(sql).not.toContain(`'${action}'`);
+              }
+              return Promise.resolve(null);
+            }),
+          }),
+          run: mockDbRun,
+        })),
+      } as unknown as D1Database;
+
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      getLastMockWebSocket()!.simulateMessage(JSON.stringify(['EVENT', 'auto-hide-reports', {
+        id: 'report_raced_hide',
+        pubkey: 'reporter',
+        kind: 1984,
+        content: 'CSAM report racing a hide',
+        tags: [
+          ['e', 'hidden_during_auto_hide'],
+          ['report', 'sexual_minors'],
+          ['client', 'diVine'],
+        ],
+        created_at: Math.floor(Date.now() / 1000),
+      } satisfies ReportEvent]));
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      const methods = mockFetch.mock.calls.map(([, options]) => JSON.parse(options.body).method);
+      expect(methods).toEqual(['banevent']);
+      const status = await watcher.fetch(new Request('https://do/status'));
+      expect(await status.json()).toMatchObject({ status: { eventsAutoHidden: 1 } });
     });
 
     it('should proceed with auto-hide when DB is unavailable (fail open)', async () => {

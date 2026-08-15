@@ -634,24 +634,33 @@ export function EventsList({ relayUrl }: EventsListProps) {
     mutationFn: async ({ eventId, action, reason }: { eventId: string; action: 'allow' | 'ban'; reason?: string }) => {
       if (action === 'allow') {
         const result = await restoreEvent(eventId);
-        return { eventId, action, recorded: result.recorded === true };
+        return {
+          eventId,
+          action,
+          recorded: result.recorded === true,
+          reconciled: result.reconciled !== false,
+        };
       } else {
         const result = await hideEvent(eventId, reason);
-        return { eventId, action, recorded: result.recorded === true };
+        return { eventId, action, recorded: result.recorded === true, reconciled: true };
       }
     },
-    onSuccess: async ({ eventId, action, recorded }) => {
+    onSuccess: async ({ eventId, action, recorded, reconciled }) => {
       queryClient.invalidateQueries({ queryKey: ['banned-events'] });
       queryClient.invalidateQueries({ queryKey: ['events-needing-moderation', relayUrl] });
       queryClient.invalidateQueries({ queryKey: ['relay-events', relayUrl] });
       toast({
-        title: recorded
+        title: recorded && reconciled
           ? `Event ${action === 'allow' ? 'approved' : 'banned'}`
-          : 'Action applied; human-review mark not recorded',
-        description: recorded
+          : recorded
+            ? 'Restore recorded; final relay state uncertain'
+            : 'Action applied; human-review mark not recorded',
+        description: recorded && reconciled
           ? (action === 'ban' ? "Verifying..." : `Event ${eventId.slice(0, 8)}... has been approved.`)
-          : 'ReportWatcher may still reverse this decision.',
-        variant: recorded ? 'default' : 'destructive',
+          : recorded
+            ? 'The final restore reconciliation failed. Verify the event state before retrying.'
+            : 'ReportWatcher may still reverse this decision.',
+        variant: recorded && reconciled ? 'default' : 'destructive',
       });
 
       // Only verify for ban actions

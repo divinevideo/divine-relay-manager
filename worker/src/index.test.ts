@@ -627,11 +627,17 @@ describe('relay-rpc account-state side effects', () => {
     // `marked` reads the bound id off the moderation_targets upsert specifically.
     // Asserting only that some SQL mentioned the table lets an implementation mark a
     // DIFFERENT id and still pass, which is the exact failure a case-mangled id causes.
-    const marked = () => {
+    const markedRow = () => {
       const row = bound.find(b => b.statement.includes('INSERT INTO moderation_targets'));
-      return row ? row.args[0] : null;
+      return row?.args ?? null;
     };
-    return { env, sql, bound, marked };
+    return {
+      env,
+      sql,
+      bound,
+      marked: () => markedRow()?.[0] ?? null,
+      markedAction: () => markedRow()?.[2] ?? null,
+    };
   }
 
   const VALID_EVENT_ID = 'a'.repeat(64);
@@ -646,7 +652,11 @@ describe('relay-rpc account-state side effects', () => {
   // test can pin which relay call was issued and that the human-review mark happened
   // AFTER it. Without this, an implementation that marks first, or that hides when asked
   // to restore, passes a "some SQL mentioned moderation_targets" assertion.
-  function makeOrderedRelaySpy(order: string[], opts: { relayFails?: boolean } = {}) {
+  function makeOrderedRelaySpy(
+    order: string[],
+    opts: { relayFails?: boolean; failRelayCall?: number } = {},
+  ) {
+    let relayCalls = 0;
     return vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = input instanceof Request ? input.url : String(input);
       if (url.includes('/api/v1/notify')) {
@@ -658,7 +668,10 @@ describe('relay-rpc account-state side effects', () => {
       let method = 'unknown';
       try { method = (JSON.parse(raw) as { method?: string }).method ?? 'unknown'; } catch { /* not NIP-86 */ }
       order.push(`relay:${method}`);
-      if (opts.relayFails) return new Response(JSON.stringify({ error: 'relay exploded' }), { status: 502 });
+      relayCalls++;
+      if (opts.relayFails || opts.failRelayCall === relayCalls) {
+        return new Response(JSON.stringify({ error: 'relay exploded' }), { status: 502 });
+      }
       return new Response(JSON.stringify({ result: true }), { status: 200 });
     });
   }
@@ -684,7 +697,7 @@ describe('relay-rpc account-state side effects', () => {
     const fetchSpy = makeOrderedRelaySpy(order);
     const waitUntil = vi.fn();
     const testCtx = { waitUntil } as unknown as ExecutionContext;
-    const { env, marked } = makeSqlRecordingEnv(order);
+    const { env, marked, markedAction } = makeSqlRecordingEnv(order);
 
     const response = await postModerate(
       { action: 'hide_event', eventId: VALID_EVENT_ID, reason: 'COOP hide' }, env, testCtx);
@@ -694,6 +707,7 @@ describe('relay-rpc account-state side effects', () => {
     expect(order.filter(o => o.startsWith('relay:'))).toEqual(['relay:banevent']);
     // Which id got marked: not merely "some SQL touched the table".
     expect(marked()).toBe(VALID_EVENT_ID);
+    expect(markedAction()).toBe('hide_event');
     // Ordering: the mark must follow the relay confirming, or we suppress ReportWatcher
     // on content that is still live. Both entries are in the same log, so this compares
     // real positions. The previous version compared 0 to order.length and asserted 0 < 1.
@@ -713,14 +727,15 @@ describe('relay-rpc account-state side effects', () => {
     const fetchSpy = makeOrderedRelaySpy(order);
     const waitUntil = vi.fn();
     const testCtx = { waitUntil } as unknown as ExecutionContext;
-    const { env, marked } = makeSqlRecordingEnv(order);
+    const { env, marked, markedAction } = makeSqlRecordingEnv(order);
 
     const response = await postModerate({ action: 'allow_event', eventId: VALID_EVENT_ID }, env, testCtx);
 
     expect(response.status).toBe(200);
     expect(order).toEqual(['relay:allowevent', 'db:mark', 'relay:allowevent']);
     expect(marked()).toBe(VALID_EVENT_ID);
-    expect(await response.json()).toMatchObject({ success: true, recorded: true });
+    expect(markedAction()).toBe('allow_event');
+    expect(await response.json()).toMatchObject({ success: true, recorded: true, reconciled: true });
 
     fetchSpy.mockRestore();
   });
@@ -790,7 +805,23 @@ describe('relay-rpc account-state side effects', () => {
 
     expect(response.status).toBe(200);
     expect(order.filter(o => o.startsWith('relay:'))).toEqual(['relay:allowevent']);
-    expect(await response.json()).toMatchObject({ success: true, recorded: false });
+    expect(await response.json()).toMatchObject({ success: true, recorded: false, reconciled: false });
+
+    fetchSpy.mockRestore();
+  });
+
+  it('reports partial success and still syncs Zendesk when allow reconciliation fails', async () => {
+    const order: string[] = [];
+    const fetchSpy = makeOrderedRelaySpy(order, { failRelayCall: 2 });
+    const testCtx = { waitUntil: vi.fn() } as unknown as ExecutionContext;
+    const { env, sql } = makeSqlRecordingEnv(order);
+
+    const response = await postModerate({ action: 'allow_event', eventId: VALID_EVENT_ID }, env, testCtx);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ success: true, recorded: true, reconciled: false });
+    expect(order).toEqual(['relay:allowevent', 'db:mark', 'relay:allowevent']);
+    expect(sql.some(statement => statement.includes('FROM zendesk_tickets'))).toBe(true);
 
     fetchSpy.mockRestore();
   });

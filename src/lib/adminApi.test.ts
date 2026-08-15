@@ -416,12 +416,16 @@ describe('adminApi', () => {
       );
     });
 
-    it('routes restore through allow_event and preserves recorded', async () => {
-      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, recorded: true }) });
+    it('routes restore through allow_event and preserves partial-success fields', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, recorded: true, reconciled: false }),
+      });
 
       const result = await restoreEvent(API_URL, 'event123');
 
       expect(result.recorded).toBe(true);
+      expect(result.reconciled).toBe(false);
       expect(mockFetch).toHaveBeenCalledWith(
         expect.stringContaining('/api/moderate'),
         expect.objectContaining({

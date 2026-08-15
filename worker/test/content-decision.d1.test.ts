@@ -63,10 +63,15 @@ describe('recorded content decisions on real D1', () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ success: true, eventId, recorded: true });
     const row = await DB.prepare(`
-      SELECT target_id, target_type, ever_human_reviewed
+      SELECT target_id, target_type, ever_human_reviewed, last_human_action
       FROM moderation_targets
       WHERE target_id = ? AND ever_human_reviewed = 1
     `).bind(eventId).first();
-    expect(row).toEqual({ target_id: eventId, target_type: 'event', ever_human_reviewed: 1 });
+    expect(row).toEqual({
+      target_id: eventId,
+      target_type: 'event',
+      ever_human_reviewed: 1,
+      last_human_action: 'allow_event',
+    });
   });
 });

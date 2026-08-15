@@ -29,7 +29,7 @@ const ctx = vi.hoisted(() => ({ targetValue: 'c'.repeat(64), reportedPubkey: 'd'
 
 const api = vi.hoisted(() => ({
   deleteEvent: vi.fn(),
-  allowEvent: vi.fn(),
+  restoreEvent: vi.fn(),
   markAsReviewed: vi.fn(),
   logDecision: vi.fn(),
   deleteDecisions: vi.fn(),

@@ -28,7 +28,7 @@ interface BannedEvent {
 export function EventModeration() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const { callRelayRpc, banEvent, allowEvent, verifyEventDeleted } = useAdminApi();
+  const { callRelayRpc, banEvent, restoreEvent, verifyEventDeleted } = useAdminApi();
   const [newEventId, setNewEventId] = useState("");
   const [newReason, setNewReason] = useState("");
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
@@ -54,10 +54,17 @@ export function EventModeration() {
   // Mutation for allowing events
   const allowEventMutation = useMutation({
     mutationFn: ({ eventId }: { eventId: string; reason?: string }) =>
-      allowEvent(eventId),
-    onSuccess: () => {
+      restoreEvent(eventId),
+    onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['events-needing-moderation'] });
-      toast({ title: "Event approved successfully" });
+      toast(result.recorded === true && result.reconciled !== false
+        ? { title: "Event approved successfully" }
+        : {
+            title: result.recorded === true
+              ? "Restore recorded; final relay state uncertain"
+              : "Restore applied but not recorded",
+            variant: "destructive",
+          });
     },
     onError: (error: Error) => {
       toast({

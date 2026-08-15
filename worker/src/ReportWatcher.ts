@@ -759,13 +759,20 @@ export class ReportWatcher implements DurableObject {
 
     if (result.success) {
       // A restore can race this pass after its first hasHumanResolution check.
-      // Recheck after the ban and compensate if the human-review mark appeared;
-      // allow_event also reapplies its restore after writing the mark, so either
-      // ordering converges on the human-requested visible state.
-      if (await this.hasHumanResolution(targetEventId)) {
+      // Recheck the direction-bearing action after the ban and compensate only
+      // for a restore; hides and deletes set the permanent reviewed bit too.
+      if (await this.hasHumanRestore(targetEventId)) {
         const restore = await allowEvent(targetEventId, this.env);
         if (restore.success) {
           console.log(`[ReportWatcher] Reversed raced auto-hide for human-reviewed event ${targetEventId}`);
+          await this.logDecision({
+            targetType: 'event',
+            targetId: targetEventId,
+            action: AUTO_HIDE_ACTION.skipped,
+            reason: `${category}: raced human restore took precedence`,
+            reportId: event.id,
+            reporterPubkey: event.pubkey,
+          });
           return;
         }
         console.error(`[ReportWatcher] Failed to reverse raced auto-hide: ${restore.error}`);
@@ -871,6 +878,27 @@ export class ReportWatcher implements DurableObject {
     } catch (error) {
       console.error('[ReportWatcher] Failed to check human resolution:', error);
       // On error, allow processing (fail open for enforcement)
+      return false;
+    }
+  }
+
+  /**
+   * Whether the latest human decision specifically restores this event.
+   * The permanent reviewed bit alone is direction-free: hides and deletes set it too.
+   */
+  private async hasHumanRestore(targetEventId: string): Promise<boolean> {
+    if (!this.env.DB) return false;
+
+    try {
+      const row = await this.env.DB.prepare(`
+        SELECT 1 FROM moderation_targets
+        WHERE target_id = ?
+          AND ever_human_reviewed = 1
+          AND last_human_action IN ('allow_event', 'restore_event', 'auto_hide_restored')
+      `).bind(targetEventId).first();
+      return row !== null;
+    } catch (error) {
+      console.error('[ReportWatcher] Failed to check latest human action:', error);
       return false;
     }
   }

@@ -846,7 +846,7 @@ async function handlePublish(
 
       if (status && targetType && targetId) {
         if (env.DB) {
-          await markHumanReviewed(env.DB, targetType, targetId);
+          await markHumanReviewed(env.DB, targetType, targetId, status);
         }
 
         // Use waitUntil to ensure sync completes even after response is sent
@@ -919,7 +919,7 @@ async function handleModerate(
         }
 
         if (env.DB) {
-          await markHumanReviewed(env.DB, 'event', body.eventId);
+          await markHumanReviewed(env.DB, 'event', body.eventId, body.action);
         }
 
         // Sync any linked Zendesk tickets
@@ -1034,7 +1034,7 @@ async function handleModerate(
           // statement hit it first. Same wrapper handleRelayRpc uses for the same reason.
           try {
             await ensureSchemaOnce(env.DB);
-            recorded = await markHumanReviewed(env.DB, 'event', eventId);
+            recorded = await markHumanReviewed(env.DB, 'event', eventId, body.action);
           } catch (err) {
             console.error(`[handleModerate] ${body.action} schema bootstrap failed:`, err);
           }
@@ -1049,15 +1049,16 @@ async function handleModerate(
         // A ReportWatcher pass can read "not reviewed" before the mark and ban after
         // the first allow. Re-applying the idempotent allow after the mark, paired with
         // ReportWatcher's post-ban recheck, makes whichever relay call lands last honor
-        // the human decision. A failed reconciliation is retryable because allowevent
-        // and the D1 upsert are both idempotent.
+        // the human decision. The first restore and mark have already landed if this
+        // final reconciliation fails, so preserve that partial success in the response.
+        let reconciled = false;
         if (recorded && !isHide) {
           const reconciliation = await applyRelayAction();
-          if (!reconciliation.success) {
-            return jsonResponse(
-              { success: false, error: reconciliation.error || 'allowevent reconciliation failed' },
-              500,
-              corsHeaders,
+          reconciled = reconciliation.success;
+          if (!reconciled) {
+            console.error(
+              `[handleModerate] allow_event was applied and recorded but reconciliation failed for ${eventId}: ` +
+              (reconciliation.error || 'allowevent reconciliation failed'),
             );
           }
         }
@@ -1068,7 +1069,7 @@ async function handleModerate(
           console.error('[handleModerate] Zendesk sync error:', err);
         }
 
-        return jsonResponse({ success: true, eventId, recorded }, 200, corsHeaders);
+        return jsonResponse({ success: true, eventId, recorded, ...(!isHide && { reconciled }) }, 200, corsHeaders);
       } catch (error) {
         console.error(`[handleModerate] ${body.action} error:`, error);
         return jsonResponse(
@@ -1098,7 +1099,7 @@ async function handleModerate(
           return jsonResponse({ success: false, error: rpcResult.error || 'banpubkey RPC failed' }, 500, corsHeaders);
         }
         if (env.DB) {
-          await markHumanReviewed(env.DB, 'pubkey', body.pubkey);
+          await markHumanReviewed(env.DB, 'pubkey', body.pubkey, body.action);
         }
         try {
           await syncZendeskAfterAction(env, body.action, 'pubkey', body.pubkey, getPublicKey(secretKey));
@@ -1157,7 +1158,7 @@ async function handleModerate(
           return jsonResponse({ success: false, error: rpcResult.error || 'unbanpubkey RPC failed' }, 500, corsHeaders);
         }
         if (env.DB) {
-          await markHumanReviewed(env.DB, 'pubkey', body.pubkey);
+          await markHumanReviewed(env.DB, 'pubkey', body.pubkey, body.action);
         }
         try {
           await syncZendeskAfterAction(env, body.action, 'pubkey', body.pubkey, getPublicKey(secretKey));
@@ -1527,13 +1528,20 @@ Respond with JSON only:
 // ONLY to record the decision, so for those a swallowed failure reported as success is
 // the bug itself -- ReportWatcher would be free to undo a moderator mid-review while
 // the API said the decision was recorded.
-async function markHumanReviewed(db: D1Database, targetType: string, targetId: string): Promise<boolean> {
+async function markHumanReviewed(
+  db: D1Database,
+  targetType: string,
+  targetId: string,
+  action: string,
+): Promise<boolean> {
   try {
     await db.prepare(`
-      INSERT INTO moderation_targets (target_id, target_type, ever_human_reviewed)
-      VALUES (?, ?, 1)
-      ON CONFLICT(target_id) DO UPDATE SET ever_human_reviewed = 1
-    `).bind(targetId, targetType).run();
+      INSERT INTO moderation_targets (target_id, target_type, ever_human_reviewed, last_human_action)
+      VALUES (?, ?, 1, ?)
+      ON CONFLICT(target_id) DO UPDATE SET
+        ever_human_reviewed = 1,
+        last_human_action = excluded.last_human_action
+    `).bind(targetId, targetType, action).run();
     return true;
   } catch (error) {
     console.error('[markHumanReviewed] Failed to update moderation_targets:', error);
@@ -1578,7 +1586,7 @@ async function handleLogDecision(
       body.reportId || null
     ).run();
 
-    await markHumanReviewed(env.DB, body.targetType, body.targetId);
+    await markHumanReviewed(env.DB, body.targetType, body.targetId, body.action);
 
     return new Response(JSON.stringify({ success: true }), {
       status: 200,

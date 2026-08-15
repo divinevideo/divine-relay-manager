@@ -85,16 +85,24 @@ export function EventActions({
   const restoreEventMutation = useMutation({
     mutationFn: async () => {
       const moderator = getModeratorPubkey(); // capture before the authoritative request
-      await api.allowEvent(eventId);
+      const result = await api.restoreEvent(eventId);
       logAudit(moderator, {
         targetType: 'event',
         targetId: eventId,
         action: 'restore_event',
         reason: 'Restored by moderator',
       });
+      return result;
     },
-    onSuccess: () => {
-      toast({ title: 'Event restored' });
+    onSuccess: (result) => {
+      toast(result.recorded === true && result.reconciled !== false
+        ? { title: 'Event restored' }
+        : {
+            title: result.recorded === true
+              ? 'Restore recorded; final relay state uncertain'
+              : 'Restore applied but not recorded',
+            variant: 'destructive',
+          });
       onActionComplete?.();
     },
     onError: (error: Error) => {

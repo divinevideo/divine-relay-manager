@@ -27,7 +27,7 @@ vi.mock('@/hooks/useAuthor', () => ({ useAuthor: () => ({ data: {} }) }));
 
 const api = vi.hoisted(() => ({
   banEvent: vi.fn(),
-  allowEvent: vi.fn(),
+  restoreEvent: vi.fn(),
   deleteEvent: vi.fn(),
   moderateMedia: vi.fn(),
   deleteMedia: vi.fn(),

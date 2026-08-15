@@ -53,6 +53,7 @@ export interface ApiResponse<T = unknown> {
   result?: T;
   error?: string;
   recorded?: boolean;
+  reconciled?: boolean;
 }
 
 interface InfoResponse {

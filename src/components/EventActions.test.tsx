@@ -7,7 +7,7 @@ import { EventActions } from './EventActions';
 // Stable mocks so failure-path tests can control the audit log and assert on toasts.
 const api = vi.hoisted(() => ({
   banEvent: vi.fn(),
-  allowEvent: vi.fn(),
+  restoreEvent: vi.fn(),
   deleteEvent: vi.fn(),
   moderateMedia: vi.fn(),
   deleteMedia: vi.fn(),
@@ -27,7 +27,7 @@ vi.mock('@/hooks/useCurrentUser', () => ({
 beforeEach(() => {
   vi.clearAllMocks();
   api.banEvent.mockResolvedValue({ success: true });
-  api.allowEvent.mockResolvedValue({ success: true });
+  api.restoreEvent.mockResolvedValue({ success: true, recorded: true, reconciled: true });
   api.deleteEvent.mockResolvedValue({ success: true });
   api.moderateMedia.mockResolvedValue({ success: true });
   api.deleteMedia.mockResolvedValue({ success: true });
@@ -71,6 +71,17 @@ describe('EventActions', () => {
     expect(screen.getByRole('button', { name: /Restore Event/i })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Ban Event/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Delete Event$/i })).not.toBeInTheDocument();
+  });
+
+  it('routes restore through the recorded moderation endpoint', async () => {
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={'a'.repeat(64)} isEventBanned={true} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /Restore Event/i }));
+
+    await waitFor(() => expect(api.restoreEvent).toHaveBeenCalledWith('event-1'));
+    expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({ action: 'restore_event' }));
   });
 
   it('renders unblock when media is blocked', () => {
