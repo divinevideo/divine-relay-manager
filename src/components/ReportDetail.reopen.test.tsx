@@ -63,7 +63,7 @@ const decisionLog = vi.hoisted(() => ({
 }));
 vi.mock('@/hooks/useDecisionLog', () => ({ useDecisionLog: () => decisionLog }));
 vi.mock('@/hooks/useModerationStatus', () => ({
-  useModerationStatus: () => ({ isUserBanned: false, isEventGone: false }),
+  useModerationStatus: () => ({ isUserBanned: false, isEventGone: false, recheck: vi.fn() }),
 }));
 vi.mock('@/hooks/useBannedEvent', () => ({
   useBannedEvent: () => ({ data: null, isLoading: false }),
@@ -168,6 +168,18 @@ describe('ReportDetail reopen reporting', () => {
     })));
     expect(api.logDecision).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'auto_hide_confirmed' }));
     expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Auto-hide confirmed' }));
+  });
+
+  it('restores an auto-hide without writing detached state', async () => {
+    decisionLog.isPendingReview = true;
+    api.restoreEvent.mockResolvedValue({ success: true, recorded: true, reconciled: true });
+    renderDetail();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Restore Content' }));
+
+    await waitFor(() => expect(api.restoreEvent).toHaveBeenCalledWith(ctx.targetValue));
+    expect(api.logDecision).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'auto_hide_restored' }));
+    expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Content restored' }));
   });
 
   it('keeps the report open and raises a persistent warning when dismissal reconciliation fails', async () => {

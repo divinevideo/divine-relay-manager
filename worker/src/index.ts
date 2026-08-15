@@ -38,6 +38,14 @@ import { buildReportNote, parseKind0Profile, type ReportedProfile } from './repo
 import { queryRelay, withTimeout, ENRICHMENT_TIMEOUT_MS } from './relay-profile';
 import { coordinateEventVisibility, type EventVisibilityResult } from './event-visibility';
 import { markHumanAction, markHumanReviewed } from './human-decision';
+import { AUTO_HIDE_ACTION } from '../../shared/autohide';
+
+const COORDINATED_AUTO_HIDE_ACTIONS = new Set<string>([
+  AUTO_HIDE_ACTION.hidden,
+  AUTO_HIDE_ACTION.reversed,
+  AUTO_HIDE_ACTION.restored,
+  AUTO_HIDE_ACTION.confirmed,
+]);
 
 let schemaReady = false;
 async function ensureSchemaOnce(db: D1Database): Promise<void> {
@@ -1549,6 +1557,9 @@ async function handleLogDecision(
 
     if (!body.targetType || !body.targetId || !body.action) {
       return jsonResponse({ success: false, error: 'Missing required fields' }, 400, corsHeaders);
+    }
+    if (body.targetType === 'event' && COORDINATED_AUTO_HIDE_ACTIONS.has(body.action)) {
+      return jsonResponse({ success: false, error: 'Event auto-hide state must use its coordinated endpoint' }, 400, corsHeaders);
     }
 
     await ensureSchemaOnce(env.DB);

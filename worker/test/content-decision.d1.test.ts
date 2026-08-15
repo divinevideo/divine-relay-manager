@@ -183,6 +183,39 @@ describe('recorded content decisions on real D1', () => {
     expect(row).toEqual({ ever_human_reviewed: 1, last_human_action: 'delete_event' });
   });
 
+  it('rejects delayed generic writes that would redefine event auto-hide state', async () => {
+    const eventId = 'f0'.repeat(32);
+    await DB.prepare(`DELETE FROM moderation_decisions WHERE target_id = ?`).bind(eventId).run();
+    await DB.prepare(`DELETE FROM moderation_targets WHERE target_id = ?`).bind(eventId).run();
+    await DB.prepare(`
+      INSERT INTO moderation_decisions (target_type, target_id, action)
+      VALUES ('event', ?, 'auto_hidden')
+    `).bind(eventId).run();
+
+    for (const action of ['auto_hide_confirmed', 'auto_hide_restored']) {
+      const response = await worker.fetch(
+        new Request('https://api-relay-prod.divine.video/api/decisions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Admin-Key': 'test-admin-key',
+          },
+          body: JSON.stringify({ targetType: 'event', targetId: eventId, action }),
+        }),
+        {
+          NOSTR_NSEC: TEST_NSEC,
+          ALLOWED_ORIGINS: '',
+          ADMIN_API_KEY: 'test-admin-key',
+          DB,
+        } as never,
+        { waitUntil: vi.fn() } as unknown as ExecutionContext,
+      );
+
+      expect(response.status, action).toBe(400);
+      expect(await hasActiveAutoHide(DB, eventId), action).toBe(true);
+    }
+  });
+
   it('adds last_human_action to a pre-upgrade moderation_targets table', async () => {
     const legacyMf = new Miniflare({
       modules: true,

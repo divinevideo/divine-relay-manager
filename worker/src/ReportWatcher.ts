@@ -397,7 +397,9 @@ export class ReportWatcher implements DurableObject {
           return { success: true, recorded: true };
         } else if (operation.relayAction === 'review') {
           let shouldRestoreAutoHide = false;
-          if (this.env.DB) {
+          const visibilityKey = this.visibilityStorageKey(operation.eventId);
+          const visibility = await this.state.storage.get<string>(visibilityKey);
+          if (visibility !== 'hide' && this.env.DB) {
             try {
               shouldRestoreAutoHide = await hasActiveAutoHide(this.env.DB, operation.eventId);
             } catch (error) {
@@ -408,8 +410,7 @@ export class ReportWatcher implements DurableObject {
             }
           }
           if (shouldRestoreAutoHide) {
-            const visibilityKey = this.visibilityStorageKey(operation.eventId);
-            const previousVisibility = await this.state.storage.get<string>(visibilityKey);
+            const previousVisibility = visibility;
             await this.state.storage.put(visibilityKey, 'allow');
             const relayResult = await callNip86Rpc('allowevent', [operation.eventId], this.env);
             if (relayResult.success) {
@@ -444,7 +445,12 @@ export class ReportWatcher implements DurableObject {
         }
 
         if (operation.humanAction === undefined) return { success: true };
-        if (!this.env.DB) return { success: true, recorded: false };
+        if (!this.env.DB) {
+          if (operation.relayAction === 'hide') {
+            await this.state.storage.put(this.visibilityStorageKey(operation.eventId), 'hide');
+          }
+          return { success: true, recorded: false };
+        }
 
         try {
           const recorded = operation.relayAction === 'review'
@@ -452,12 +458,17 @@ export class ReportWatcher implements DurableObject {
             : await markHumanAction(this.env.DB, 'event', operation.eventId, operation.humanAction);
           if (recorded && operation.relayAction === 'allow') {
             await this.state.storage.delete(this.visibilityStorageKey(operation.eventId));
+          } else if (!recorded && operation.relayAction === 'hide') {
+            await this.state.storage.put(this.visibilityStorageKey(operation.eventId), 'hide');
           }
           return relayFailure
             ? { ...relayFailure, recorded }
             : { success: true, recorded };
         } catch (error) {
           console.error('[ReportWatcher] Event visibility mark failed:', error);
+          if (operation.relayAction === 'hide') {
+            await this.state.storage.put(this.visibilityStorageKey(operation.eventId), 'hide');
+          }
           return { success: true, recorded: false };
         }
       } catch (error) {
@@ -971,7 +982,9 @@ export class ReportWatcher implements DurableObject {
 
     if (result.success) {
       const visibilityKey = this.visibilityStorageKey(targetEventId);
-      await this.state.storage.delete(visibilityKey);
+      if (await this.state.storage.get<string>(visibilityKey) !== 'hide') {
+        await this.state.storage.delete(visibilityKey);
+      }
       // A restore can race this pass after its first hasHumanResolution check.
       // Recheck the direction-bearing action after the ban and compensate only
       // for a restore; hides and deletes set the permanent reviewed bit too.

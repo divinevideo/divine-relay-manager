@@ -407,16 +407,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   // Restore auto-hidden content (reverse the auto-hide)
   const restoreAutoHideMutation = useMutation({
     mutationFn: async ({ eventId }: { eventId: string }) => {
-      const moderator = getModeratorPubkey(); // capture before the authoritative request
-      const result = await restoreEvent(eventId);
-      logAudit(moderator, {
-        targetType: 'event',
-        targetId: eventId,
-        action: 'auto_hide_restored',
-        reason: 'Auto-hide reversed by moderator',
-        reportId: report?.id,
-      });
-      return result;
+      return restoreEvent(eventId);
     },
     onSuccess: async (result) => {
       queryClient.invalidateQueries({ queryKey: ['reports'] });

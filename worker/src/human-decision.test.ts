@@ -120,7 +120,7 @@ describe('human decision persistence', () => {
   });
 
   describe('POST /api/decisions (handleLogDecision)', () => {
-    it('should call markHumanReviewed when logging a decision', async () => {
+    it('should call markHumanReviewed when logging a generic decision', async () => {
       const { db, sqlLog } = createMockDB();
       const env = createEnv(db);
 
@@ -130,8 +130,8 @@ describe('human decision persistence', () => {
         body: JSON.stringify({
           targetType: 'event',
           targetId: 'event_abc123',
-          action: 'auto_hide_confirmed',
-          reason: 'Confirmed by moderator',
+          action: 'reviewed',
+          reason: 'Reviewed by moderator',
         }),
       });
 
@@ -149,10 +149,29 @@ describe('human decision persistence', () => {
       expect(upsert!.sql).not.toContain('last_human_action');
     });
 
+    it.each([
+      'auto_hidden',
+      'auto_hide_reversed',
+      'auto_hide_restored',
+      'auto_hide_confirmed',
+    ])('rejects coordinated event state action %s', async (action) => {
+      const { db, sqlLog } = createMockDB();
+      const env = createEnv(db);
+
+      const response = await worker.fetch(new Request('http://localhost/api/decisions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        body: JSON.stringify({ targetType: 'event', targetId: 'event_abc123', action }),
+      }), env as never, mockCtx);
+
+      expect(response.status).toBe(400);
+      expect(sqlLog.some(({ sql }) => sql.includes('INSERT INTO moderation_decisions'))).toBe(false);
+    });
+
     it('should mark human reviewed for all moderator action types', async () => {
       const actions = [
-        'auto_hide_confirmed',
-        'auto_hide_restored',
+        'reviewed',
+        'restore_event',
         'ban_user',
         'delete_event',
         'block_media',

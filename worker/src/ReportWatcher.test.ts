@@ -429,6 +429,44 @@ describe('ReportWatcher', () => {
       expect(await response.json()).toMatchObject({ success: false, recorded: false });
     });
 
+    it('does not restore after a coordinated hide whose direction failed to record', async () => {
+      let failDirection = true;
+      const db = {
+        prepare: vi.fn().mockImplementation((sql: string) => ({
+          bind: vi.fn().mockReturnValue({
+            first: vi.fn().mockResolvedValue(sql.includes('AS auto_hide_action')
+              ? { last_human_action: null, auto_hide_action: 'auto_hidden' }
+              : null),
+            run: vi.fn().mockImplementation(async () => {
+              if (failDirection && sql.includes('INSERT INTO moderation_targets')) throw new Error('direction failed');
+              return { success: true, meta: { changes: 1 } };
+            }),
+          }),
+          run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 0 } }),
+        })),
+      } as unknown as D1Database;
+      watcher = new ReportWatcher(createMockState(), createMockEnv({ DB: db }));
+      const relayFetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ result: true }), { status: 200 }));
+      vi.stubGlobal('fetch', relayFetch);
+      const eventId = 'bc'.repeat(32);
+      const send = (relayAction: 'hide' | 'review', humanAction: string) => watcher.fetch(new Request('https://do/event-visibility', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ eventId, relayAction, humanAction }),
+      }));
+
+      const hide = await send('hide', 'delete_event');
+      failDirection = false;
+      await (watcher as unknown as {
+        executeAutoHide(event: ReportEvent, category: string, targetId: string, tier: string): Promise<void>;
+      }).executeAutoHide({ id: 'report', pubkey: 'reporter' } as ReportEvent, 'sexual_minors', eventId, 'Immediate');
+      const dismiss = await send('review', 'dismissed');
+
+      expect(await hide.json()).toMatchObject({ success: true, recorded: false });
+      expect(await dismiss.json()).toMatchObject({ success: true, recorded: true });
+      expect(relayFetch).toHaveBeenCalledTimes(2);
+    });
+
     it('serializes a newer human delete after auto-hide compensation', async () => {
       const order: string[] = [];
       const db = {
