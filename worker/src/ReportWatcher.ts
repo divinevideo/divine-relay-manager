@@ -57,12 +57,14 @@ async function getAutoHideState(db: D1Database, targetEventId: string): Promise<
       (SELECT last_human_action FROM moderation_targets WHERE target_id = ?) AS last_human_action,
       (SELECT action FROM moderation_decisions
        WHERE target_type = 'event' AND target_id = ?
-         AND action IN (?, ?, ?, ?)
+          AND action IN (?, ?, ?, ?, ?, ?)
        ORDER BY id DESC LIMIT 1) AS auto_hide_action
   `).bind(
     targetEventId,
     targetEventId,
     AUTO_HIDE_ACTION.hidden,
+    AUTO_HIDE_ACTION.unresolved,
+    AUTO_HIDE_ACTION.restoreFailed,
     AUTO_HIDE_ACTION.reversed,
     AUTO_HIDE_ACTION.restored,
     AUTO_HIDE_ACTION.confirmed,
@@ -460,7 +462,11 @@ export class ReportWatcher implements DurableObject {
           let recordsAutoHideRestore = false;
           if (operation.relayAction === 'allow' && operation.humanAction !== undefined && this.env.DB) {
             try {
-              recordsAutoHideRestore = await hasActiveAutoHide(this.env.DB, operation.eventId);
+              const state = await getAutoHideState(this.env.DB, operation.eventId);
+              recordsAutoHideRestore = state?.auto_hide_action === AUTO_HIDE_ACTION.hidden
+                ? state.last_human_action === null
+                : state?.auto_hide_action === AUTO_HIDE_ACTION.unresolved
+                  || state?.auto_hide_action === AUTO_HIDE_ACTION.restoreFailed;
             } catch (error) {
               relayFailure = {
                 success: false,

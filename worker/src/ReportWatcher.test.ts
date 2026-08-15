@@ -1913,11 +1913,18 @@ describe('ReportWatcher', () => {
 
     it('retains unresolved restore state when post-ban compensation fails', async () => {
       const decisions: string[] = [];
+      let retrySettled = false;
       const eventId = 'e1'.repeat(32);
       mockFetch
         .mockResolvedValueOnce({ ok: true, json: async () => ({ result: true }) })
-        .mockResolvedValueOnce({ ok: false, status: 500, statusText: 'Internal Server Error' });
+        .mockResolvedValueOnce({ ok: false, status: 500, statusText: 'Internal Server Error' })
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ result: true }) });
       mockEnv.DB = {
+        batch: vi.fn().mockImplementation(async () => {
+          decisions.push('auto_hide_restored');
+          retrySettled = true;
+          return [{ success: true }, { success: true }];
+        }),
         prepare: vi.fn().mockImplementation((sql: string) => ({
           bind: vi.fn().mockImplementation((...args: unknown[]) => ({
             run: vi.fn().mockImplementation(async () => {
@@ -1925,8 +1932,14 @@ describe('ReportWatcher', () => {
               return { success: true };
             }),
             first: vi.fn().mockImplementation(() => {
+              if (sql.includes('SELECT action FROM moderation_decisions')) {
+                return Promise.resolve({
+                  last_human_action: 'allow_event',
+                  auto_hide_action: 'auto_hide_restore_failed',
+                });
+              }
               if (sql.includes('SELECT 1 FROM moderation_targets')) {
-                return Promise.resolve(sql.includes('last_human_action') ? { 1: 1 } : null);
+                return Promise.resolve(sql.includes('last_human_action') || retrySettled ? { 1: 1 } : null);
               }
               return Promise.resolve(null);
             }),
@@ -1960,11 +1973,14 @@ describe('ReportWatcher', () => {
       const status = await watcher.fetch(new Request('https://do/status'));
       expect(await status.json()).toMatchObject({ status: { eventsAutoHidden: 0 } });
 
-      await watcher.fetch(new Request('https://do/event-visibility', {
+      const retry = await watcher.fetch(new Request('https://do/event-visibility', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ eventId, relayAction: 'allow' }),
+        body: JSON.stringify({ eventId, relayAction: 'allow', humanAction: 'allow_event' }),
       }));
+      expect(await retry.json()).toMatchObject({ success: true, recorded: true });
+      expect(decisions).toContain('auto_hide_restored');
+      expect(await mockState.storage.get(`event-visibility:${eventId}`)).toBeUndefined();
       await (watcher as unknown as { handleReportEvent(event: ReportEvent): Promise<void> }).handleReportEvent({
         id: 'later_report_after_failed_compensation',
         pubkey: 'reporter',
@@ -1976,7 +1992,7 @@ describe('ReportWatcher', () => {
 
       expect(mockFetch.mock.calls.map(([, options]) => JSON.parse(options.body).method))
         .toEqual(['banevent', 'allowevent', 'allowevent']);
-      expect(await mockState.storage.get(`event-visibility:${eventId}`)).toBe('allow');
+      expect(await mockState.storage.get(`event-visibility:${eventId}`)).toBeUndefined();
     });
 
     it('does not reverse an auto-hide when the latest human action is not a restore', async () => {
