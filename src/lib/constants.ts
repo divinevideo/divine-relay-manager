@@ -1,6 +1,12 @@
 import { getEnvironmentByApiUrl } from "@/lib/environments";
 import { VIDEO_KINDS } from "@/lib/kindNames";
-export { AUTO_HIDE_ACTION, AUTO_HIDE_ACTIONS, type AutoHideAction } from "../../shared/autohide";
+export {
+  AUTO_HIDE_ACTION,
+  AUTO_HIDE_ACTIONS,
+  AUTO_HIDE_STATE_ACTIONS,
+  getLatestAutoHideState,
+  type AutoHideAction,
+} from "../../shared/autohide";
 
 // ABOUTME: Shared constants for moderation categories and labels
 // ABOUTME: DTSP (Digital Trust & Safety Partnership) category mappings

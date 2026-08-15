@@ -3,7 +3,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { useAdminApi } from "@/hooks/useAdminApi";
-import { AUTO_HIDE_ACTION } from "@/lib/constants";
+import { AUTO_HIDE_ACTION, getLatestAutoHideState } from "@/lib/constants";
 
 export function useDecisionLog(targetId: string | null | undefined) {
   const { getDecisions } = useAdminApi();
@@ -32,13 +32,7 @@ export function useDecisionLog(targetId: string | null | undefined) {
   const isFalsePositive = data?.some(d => d.action === 'false_positive' || d.action === 'false-positive');
 
   // Auto-hide specific checks
-  const latestAutoHideAction = data?.find(d => ([
-    AUTO_HIDE_ACTION.hidden,
-    AUTO_HIDE_ACTION.unresolved,
-    AUTO_HIDE_ACTION.confirmed,
-    AUTO_HIDE_ACTION.restored,
-    AUTO_HIDE_ACTION.reversed,
-  ] as readonly string[]).includes(d.action))?.action;
+  const latestAutoHideAction = getLatestAutoHideState(data?.map(d => d.action) ?? []);
   const isAutoHidden = latestAutoHideAction === AUTO_HIDE_ACTION.hidden || latestAutoHideAction === AUTO_HIDE_ACTION.unresolved;
   const isAutoHideConfirmed = latestAutoHideAction === AUTO_HIDE_ACTION.confirmed;
   const isAutoHideRestored = latestAutoHideAction === AUTO_HIDE_ACTION.restored || latestAutoHideAction === AUTO_HIDE_ACTION.reversed;

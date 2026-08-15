@@ -47,7 +47,7 @@ import { ReportDetailErrorFallback } from "@/components/ReportDetailErrorFallbac
 import { DeepLinkFallback } from "@/components/DeepLinkFallback";
 import { classifyTargetedFetch, decisionsForTarget, reportsMatchingTarget, type DeepLinkStatus } from "@/lib/deepLinkResolution";
 import { useAdminApi } from "@/hooks/useAdminApi";
-import { AUTO_HIDE_ACTIONS, CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, getReportCategory } from "@/lib/constants";
+import { AUTO_HIDE_ACTION, AUTO_HIDE_ACTIONS, CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, getLatestAutoHideState, getReportCategory } from "@/lib/constants";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
 import type { NostrEvent } from "@nostrify/nostrify";
@@ -548,12 +548,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       targetDecisions.get(key)!.push(decision.action);
     }
 
-    // Target is pending review if auto_hidden but not confirmed/restored
+    // Decisions arrive newest first, so the first state transition is authoritative.
     for (const [key, actions] of targetDecisions) {
-      const isAutoHidden = actions.includes('auto_hidden');
-      const isConfirmed = actions.includes('auto_hide_confirmed');
-      const isRestored = actions.includes('auto_hide_restored');
-      if (isAutoHidden && !isConfirmed && !isRestored) {
+      const latestAction = getLatestAutoHideState(actions);
+      if (latestAction === AUTO_HIDE_ACTION.hidden || latestAction === AUTO_HIDE_ACTION.unresolved) {
         pending.add(key);
       }
     }

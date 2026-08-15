@@ -1671,7 +1671,7 @@ async function handleGetAllDecisions(
     // Get all decisions, ordered by most recent first
     const decisions = await env.DB.prepare(`
       SELECT * FROM moderation_decisions
-      ORDER BY created_at DESC
+      ORDER BY created_at DESC, id DESC
       LIMIT 1000
     `).all();
 
@@ -1708,7 +1708,7 @@ async function handleGetDecisions(
     const decisions = await env.DB.prepare(`
       SELECT * FROM moderation_decisions
       WHERE target_id = ?
-      ORDER BY created_at DESC
+      ORDER BY created_at DESC, id DESC
     `).bind(targetId).all();
 
     return new Response(JSON.stringify({

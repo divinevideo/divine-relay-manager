@@ -216,6 +216,43 @@ describe('recorded content decisions on real D1', () => {
     }
   });
 
+  it('returns same-second decisions in append order for list and target reads', async () => {
+    const eventId = 'f1'.repeat(32);
+    await DB.prepare(`DELETE FROM moderation_decisions WHERE target_id = ?`).bind(eventId).run();
+    for (const action of ['auto_hide_unresolved', 'auto_hide_restored']) {
+      await DB.prepare(`
+        INSERT INTO moderation_decisions (target_type, target_id, action, created_at)
+        VALUES ('event', ?, ?, '2026-08-15 00:00:00')
+      `).bind(eventId, action).run();
+    }
+
+    const env = {
+      ALLOWED_ORIGINS: '',
+      ADMIN_API_KEY: 'test-admin-key',
+      DB,
+    } as never;
+    const context = { waitUntil: vi.fn() } as unknown as ExecutionContext;
+    const request = (path: string) => new Request(`https://api-relay-prod.divine.video${path}`, {
+      headers: { 'X-Admin-Key': 'test-admin-key' },
+    });
+
+    const targetResponse = await worker.fetch(request(`/api/decisions/${eventId}`), env, context);
+    const targetBody = await targetResponse.json() as { decisions: Array<{ action: string }> };
+    expect(targetBody.decisions.map(decision => decision.action)).toEqual([
+      'auto_hide_restored',
+      'auto_hide_unresolved',
+    ]);
+
+    const allResponse = await worker.fetch(request('/api/decisions'), env, context);
+    const allBody = await allResponse.json() as { decisions: Array<{ target_id: string; action: string }> };
+    expect(allBody.decisions
+      .filter(decision => decision.target_id === eventId)
+      .map(decision => decision.action)).toEqual([
+      'auto_hide_restored',
+      'auto_hide_unresolved',
+    ]);
+  });
+
   it('adds last_human_action to a pre-upgrade moderation_targets table', async () => {
     const legacyMf = new Miniflare({
       modules: true,
