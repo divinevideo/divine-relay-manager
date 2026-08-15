@@ -192,6 +192,7 @@ describe('ReportWatcher', () => {
     it('records a resolution review without mutating relay visibility or direction', async () => {
       const statements: string[] = [];
       const db = {
+        batch: vi.fn(async (statements: D1PreparedStatement[]) => Promise.all(statements.map(statement => statement.run()))),
         prepare: vi.fn().mockImplementation((sql: string) => {
           statements.push(sql);
           return {
@@ -235,6 +236,7 @@ describe('ReportWatcher', () => {
     ] as const)('dismisses %s without overriding a newer visibility decision', async (_case, lastHumanAction, autoHideAction, expectedAllows) => {
       const statements: string[] = [];
       const db = {
+        batch: vi.fn(async (batch: D1PreparedStatement[]) => Promise.all(batch.map(statement => statement.run()))),
         prepare: vi.fn().mockImplementation((sql: string) => {
           statements.push(sql);
           return {
@@ -273,6 +275,7 @@ describe('ReportWatcher', () => {
 
     it('still records the review when active auto-hide state cannot be read', async () => {
       const db = {
+        batch: vi.fn(async (statements: D1PreparedStatement[]) => Promise.all(statements.map(statement => statement.run()))),
         prepare: vi.fn().mockImplementation((sql: string) => ({
           bind: vi.fn().mockReturnValue({
             first: vi.fn().mockImplementation(async () => {
@@ -311,13 +314,14 @@ describe('ReportWatcher', () => {
     ] as const)('serializes %s without confirming visible content', async (_case, operations, statuses, expectedAllows, finalAction) => {
       let autoHideAction = 'auto_hidden';
       const db = {
+        batch: vi.fn(async (batch: D1PreparedStatement[]) => Promise.all(batch.map(statement => statement.run()))),
         prepare: vi.fn().mockImplementation((sql: string) => ({
           bind: vi.fn().mockImplementation((...args: unknown[]) => ({
             first: vi.fn().mockResolvedValue(sql.includes('AS auto_hide_action')
               ? { last_human_action: null, auto_hide_action: autoHideAction }
               : null),
             run: vi.fn().mockImplementation(async () => {
-              if (sql.includes('INSERT INTO moderation_decisions')) autoHideAction = String(args[2]);
+              if (sql.includes('INSERT INTO moderation_decisions')) autoHideAction = String(args[1]);
               return { success: true, meta: { changes: 1 } };
             }),
           })),
@@ -341,6 +345,88 @@ describe('ReportWatcher', () => {
       expect(responses.map(response => response.status)).toEqual(statuses);
       expect(relayFetch).toHaveBeenCalledTimes(expectedAllows);
       expect(autoHideAction).toBe(finalAction);
+    });
+
+    it('rejects confirmation after the relay restored even when the atomic D1 record failed', async () => {
+      const db = {
+        batch: vi.fn().mockRejectedValue(new Error('restore record failed')),
+        prepare: vi.fn().mockImplementation((sql: string) => ({
+          bind: vi.fn().mockReturnValue({
+            first: vi.fn().mockResolvedValue(sql.includes('AS auto_hide_action')
+              ? { last_human_action: null, auto_hide_action: 'auto_hidden' }
+              : null),
+            run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 1 } }),
+          }),
+          run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 0 } }),
+        })),
+      } as unknown as D1Database;
+      mockState = createMockState();
+      watcher = new ReportWatcher(mockState, createMockEnv({ DB: db }));
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ result: true }), { status: 200 })));
+      const eventId = 'af'.repeat(32);
+      const send = (relayAction: 'review' | 'confirm') => watcher.fetch(new Request('https://do/event-visibility', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ eventId, relayAction, humanAction: relayAction === 'review' ? 'dismissed' : undefined }),
+      }));
+
+      const restore = await send('review');
+      const confirm = await send('confirm');
+
+      expect(restore.status).toBe(502);
+      expect(await restore.json()).toMatchObject({ success: false, recorded: false });
+      expect(confirm.status).toBe(409);
+      expect(db.batch).toHaveBeenCalledTimes(1);
+    });
+
+    it('allows confirmation after a newer manual hide direction', async () => {
+      const db = {
+        batch: vi.fn(async (batch: D1PreparedStatement[]) => Promise.all(batch.map(statement => statement.run()))),
+        prepare: vi.fn().mockImplementation((sql: string) => ({
+          bind: vi.fn().mockReturnValue({
+            first: vi.fn().mockResolvedValue(sql.includes('AS auto_hide_action')
+              ? { last_human_action: 'hide_event', auto_hide_action: 'auto_hidden' }
+              : null),
+            run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 1 } }),
+          }),
+          run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 0 } }),
+        })),
+      } as unknown as D1Database;
+      watcher = new ReportWatcher(createMockState(), createMockEnv({ DB: db }));
+
+      const response = await watcher.fetch(new Request('https://do/event-visibility', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ eventId: 'ba'.repeat(32), relayAction: 'confirm' }),
+      }));
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ success: true, recorded: true });
+    });
+
+    it('does not overclaim confirmation when its atomic D1 record fails', async () => {
+      const db = {
+        batch: vi.fn().mockRejectedValue(new Error('batch failed')),
+        prepare: vi.fn().mockImplementation((sql: string) => ({
+          bind: vi.fn().mockReturnValue({
+            first: vi.fn().mockResolvedValue(sql.includes('AS auto_hide_action')
+              ? { last_human_action: null, auto_hide_action: 'auto_hidden' }
+              : null),
+            run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 1 } }),
+          }),
+          run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 0 } }),
+        })),
+      } as unknown as D1Database;
+      watcher = new ReportWatcher(createMockState(), createMockEnv({ DB: db }));
+
+      const response = await watcher.fetch(new Request('https://do/event-visibility', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ eventId: 'bb'.repeat(32), relayAction: 'confirm' }),
+      }));
+
+      expect(response.status).toBe(502);
+      expect(await response.json()).toMatchObject({ success: false, recorded: false });
     });
 
     it('serializes a newer human delete after auto-hide compensation', async () => {

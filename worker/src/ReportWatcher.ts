@@ -45,8 +45,11 @@ export async function hasLatestHumanRestore(db: D1Database, targetEventId: strin
   return row !== null;
 }
 
-export async function hasActiveAutoHide(db: D1Database, targetEventId: string): Promise<boolean> {
-  const row = await db.prepare(`
+async function getAutoHideState(db: D1Database, targetEventId: string): Promise<{
+  last_human_action: string | null;
+  auto_hide_action: string | null;
+} | null> {
+  return db.prepare(`
     SELECT
       (SELECT last_human_action FROM moderation_targets WHERE target_id = ?) AS last_human_action,
       (SELECT action FROM moderation_decisions
@@ -61,9 +64,18 @@ export async function hasActiveAutoHide(db: D1Database, targetEventId: string): 
     AUTO_HIDE_ACTION.restored,
     AUTO_HIDE_ACTION.confirmed,
   ).first<{ last_human_action: string | null; auto_hide_action: string | null }>();
+}
 
+export async function hasActiveAutoHide(db: D1Database, targetEventId: string): Promise<boolean> {
+  const row = await getAutoHideState(db, targetEventId);
   return row?.auto_hide_action === AUTO_HIDE_ACTION.hidden
     && row.last_human_action === null;
+}
+
+async function canConfirmAutoHide(db: D1Database, targetEventId: string): Promise<boolean> {
+  const row = await getAutoHideState(db, targetEventId);
+  return row?.auto_hide_action === AUTO_HIDE_ACTION.hidden
+    && (row.last_human_action === null || ['hide_event', 'delete_event'].includes(row.last_human_action));
 }
 
 /**
@@ -374,20 +386,14 @@ export class ReportWatcher implements DurableObject {
         let relayFailure: EventVisibilityResult | undefined;
         if (operation.relayAction === 'confirm') {
           if (!this.env.DB) return { success: false, recorded: false, error: 'Moderation database is not configured' };
-          if (!await hasActiveAutoHide(this.env.DB, operation.eventId)) {
+          if (await this.state.storage.get(this.visibilityStorageKey(operation.eventId)) === 'allow') {
             return { success: false, recorded: false, conflict: true, error: 'Auto-hide is no longer active' };
           }
-          const recorded = await this.logDecision({
-            targetType: 'event',
-            targetId: operation.eventId,
-            action: AUTO_HIDE_ACTION.confirmed,
-            reason: operation.reason || 'Auto-hide confirmed by moderator',
-            reportId: operation.reportId || '',
-            reporterPubkey: operation.reporterPubkey || '',
-            moderatorPubkey: operation.moderatorPubkey,
-          });
+          if (!await canConfirmAutoHide(this.env.DB, operation.eventId)) {
+            return { success: false, recorded: false, conflict: true, error: 'Auto-hide is no longer active' };
+          }
+          const recorded = await this.recordAutoHideHumanDecision(operation, AUTO_HIDE_ACTION.confirmed);
           if (!recorded) return { success: false, recorded: false, error: 'Failed to record auto-hide confirmation' };
-          await markHumanReviewed(this.env.DB, 'event', operation.eventId);
           return { success: true, recorded: true };
         } else if (operation.relayAction === 'review') {
           let shouldRestoreAutoHide = false;
@@ -402,25 +408,39 @@ export class ReportWatcher implements DurableObject {
             }
           }
           if (shouldRestoreAutoHide) {
+            const visibilityKey = this.visibilityStorageKey(operation.eventId);
+            const previousVisibility = await this.state.storage.get<string>(visibilityKey);
+            await this.state.storage.put(visibilityKey, 'allow');
             const relayResult = await callNip86Rpc('allowevent', [operation.eventId], this.env);
             if (relayResult.success) {
-              await this.logDecision({
-                targetType: 'event',
-                targetId: operation.eventId,
-                action: AUTO_HIDE_ACTION.restored,
-                reason: operation.humanAction || 'human review',
-                reportId: '',
-                reporterPubkey: '',
-              });
+              const recorded = await this.recordAutoHideHumanDecision(
+                operation,
+                AUTO_HIDE_ACTION.restored,
+                AUTO_HIDE_ACTION.restored,
+              );
+              if (recorded) await this.state.storage.delete(visibilityKey);
+              return recorded
+                ? { success: true, recorded: true }
+                : { success: false, recorded: false, error: 'Content was restored but its review state was not recorded' };
             } else {
+              if (previousVisibility === undefined) await this.state.storage.delete(visibilityKey);
+              else await this.state.storage.put(visibilityKey, previousVisibility);
               relayFailure = relayResult;
             }
           }
         } else {
+          const visibilityKey = this.visibilityStorageKey(operation.eventId);
+          const previousVisibility = await this.state.storage.get<string>(visibilityKey);
+          if (operation.relayAction === 'hide') await this.state.storage.delete(visibilityKey);
+          else await this.state.storage.put(visibilityKey, 'allow');
           const relayResult = operation.relayAction === 'hide'
             ? await callNip86Rpc('banevent', [operation.eventId, operation.reason || 'Hidden by moderator'], this.env)
             : await callNip86Rpc('allowevent', [operation.eventId], this.env);
-          if (!relayResult.success) return relayResult;
+          if (!relayResult.success) {
+            if (previousVisibility === undefined) await this.state.storage.delete(visibilityKey);
+            else await this.state.storage.put(visibilityKey, previousVisibility);
+            return relayResult;
+          }
         }
 
         if (operation.humanAction === undefined) return { success: true };
@@ -430,6 +450,9 @@ export class ReportWatcher implements DurableObject {
           const recorded = operation.relayAction === 'review'
             ? await markHumanReviewed(this.env.DB, 'event', operation.eventId)
             : await markHumanAction(this.env.DB, 'event', operation.eventId, operation.humanAction);
+          if (recorded && operation.relayAction === 'allow') {
+            await this.state.storage.delete(this.visibilityStorageKey(operation.eventId));
+          }
           return relayFailure
             ? { ...relayFailure, recorded }
             : { success: true, recorded };
@@ -947,12 +970,16 @@ export class ReportWatcher implements DurableObject {
     const result = await callNip86Rpc('banevent', [targetEventId, reason], this.env);
 
     if (result.success) {
+      const visibilityKey = this.visibilityStorageKey(targetEventId);
+      await this.state.storage.delete(visibilityKey);
       // A restore can race this pass after its first hasHumanResolution check.
       // Recheck the direction-bearing action after the ban and compensate only
       // for a restore; hides and deletes set the permanent reviewed bit too.
       if (await this.hasHumanRestore(targetEventId)) {
+        await this.state.storage.put(visibilityKey, 'allow');
         const restore = await callNip86Rpc('allowevent', [targetEventId], this.env);
         if (restore.success) {
+          await this.state.storage.delete(visibilityKey);
           console.log(`[ReportWatcher] Reversed raced auto-hide for human-reviewed event ${targetEventId}`);
           await this.logDecision({
             targetType: 'event',
@@ -964,6 +991,7 @@ export class ReportWatcher implements DurableObject {
           });
           return;
         }
+        await this.state.storage.delete(visibilityKey);
         console.error(`[ReportWatcher] Failed to reverse raced auto-hide: ${restore.error}`);
       }
 
@@ -1124,6 +1152,52 @@ export class ReportWatcher implements DurableObject {
       console.error('[ReportWatcher] Failed to log decision:', error);
       return false;
     }
+  }
+
+  private async recordAutoHideHumanDecision(
+    operation: EventVisibilityOperation,
+    action: string,
+    lastHumanAction?: string,
+  ): Promise<boolean> {
+    if (!this.env.DB) return false;
+    const targetStatement = lastHumanAction
+      ? this.env.DB.prepare(`
+          INSERT INTO moderation_targets (target_id, target_type, ever_human_reviewed, last_human_action)
+          VALUES (?, 'event', 1, ?)
+          ON CONFLICT(target_id) DO UPDATE SET
+            ever_human_reviewed = 1,
+            last_human_action = excluded.last_human_action
+        `).bind(operation.eventId, lastHumanAction)
+      : this.env.DB.prepare(`
+          INSERT INTO moderation_targets (target_id, target_type, ever_human_reviewed)
+          VALUES (?, 'event', 1)
+          ON CONFLICT(target_id) DO UPDATE SET ever_human_reviewed = 1
+        `).bind(operation.eventId);
+    try {
+      await this.env.DB.batch([
+        this.env.DB.prepare(`
+          INSERT INTO moderation_decisions
+          (target_type, target_id, action, reason, moderator_pubkey, report_id, reporter_pubkey, created_at)
+          VALUES ('event', ?, ?, ?, ?, ?, ?, datetime('now'))
+        `).bind(
+          operation.eventId,
+          action,
+          operation.reason || operation.humanAction || 'human review',
+          operation.moderatorPubkey || 'auto',
+          operation.reportId || '',
+          operation.reporterPubkey || '',
+        ),
+        targetStatement,
+      ]);
+      return true;
+    } catch (error) {
+      console.error(`[ReportWatcher] Failed to record ${action}:`, error);
+      return false;
+    }
+  }
+
+  private visibilityStorageKey(eventId: string): string {
+    return `event-visibility:${eventId}`;
   }
 
   private async createAgeReviewCase(event: ReportEvent, reportedPubkey: string): Promise<void> {
