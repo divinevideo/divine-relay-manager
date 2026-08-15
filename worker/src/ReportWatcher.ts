@@ -432,8 +432,18 @@ export class ReportWatcher implements DurableObject {
         } else {
           const visibilityKey = this.visibilityStorageKey(operation.eventId);
           const previousVisibility = await this.state.storage.get<string>(visibilityKey);
-          if (operation.relayAction === 'hide') await this.state.storage.delete(visibilityKey);
-          else await this.state.storage.put(visibilityKey, 'allow');
+          let recordsAutoHideRestore = false;
+          if (operation.relayAction === 'allow' && operation.humanAction !== undefined && this.env.DB) {
+            try {
+              recordsAutoHideRestore = await hasActiveAutoHide(this.env.DB, operation.eventId);
+            } catch (error) {
+              relayFailure = {
+                success: false,
+                error: error instanceof Error ? error.message : 'Failed to read auto-hide state',
+              };
+            }
+          }
+          if (operation.relayAction === 'allow') await this.state.storage.put(visibilityKey, 'allow');
           const relayResult = operation.relayAction === 'hide'
             ? await callNip86Rpc('banevent', [operation.eventId, operation.reason || 'Hidden by moderator'], this.env)
             : await callNip86Rpc('allowevent', [operation.eventId], this.env);
@@ -441,6 +451,17 @@ export class ReportWatcher implements DurableObject {
             if (previousVisibility === undefined) await this.state.storage.delete(visibilityKey);
             else await this.state.storage.put(visibilityKey, previousVisibility);
             return relayResult;
+          }
+          if (recordsAutoHideRestore) {
+            const recorded = await this.recordAutoHideHumanDecision(
+              operation,
+              AUTO_HIDE_ACTION.restored,
+              AUTO_HIDE_ACTION.restored,
+            );
+            if (recorded) await this.state.storage.delete(visibilityKey);
+            return recorded
+              ? { success: true, recorded: true }
+              : { success: false, recorded: false, error: 'Content was restored but its review state was not recorded' };
           }
         }
 
@@ -456,7 +477,7 @@ export class ReportWatcher implements DurableObject {
           const recorded = operation.relayAction === 'review'
             ? await markHumanReviewed(this.env.DB, 'event', operation.eventId)
             : await markHumanAction(this.env.DB, 'event', operation.eventId, operation.humanAction);
-          if (recorded && operation.relayAction === 'allow') {
+          if (recorded && ['allow', 'hide'].includes(operation.relayAction)) {
             await this.state.storage.delete(this.visibilityStorageKey(operation.eventId));
           } else if (!recorded && operation.relayAction === 'hide') {
             await this.state.storage.put(this.visibilityStorageKey(operation.eventId), 'hide');
@@ -954,6 +975,18 @@ export class ReportWatcher implements DurableObject {
     targetEventId: string,
     tierName: string
   ): Promise<void> {
+    if (await this.state.storage.get<string>(this.visibilityStorageKey(targetEventId)) === 'allow') {
+      console.error(`[ALERT] [ReportWatcher] Serialized auto-hide skipped for ${targetEventId}: restored visibility was not recorded`);
+      await this.logDecision({
+        targetType: 'event',
+        targetId: targetEventId,
+        action: AUTO_HIDE_ACTION.skipped,
+        reason: `${category}: restored visibility was not recorded`,
+        reportId: event.id,
+        reporterPubkey: event.pubkey,
+      });
+      return;
+    }
     // The first check happens before tier processing. Recheck inside the same
     // gate used by human actions so an admitted auto-hide cannot pass a newer
     // review mark and mutate the relay afterwards.
