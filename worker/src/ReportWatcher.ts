@@ -1,8 +1,10 @@
 // ABOUTME: Durable Object for watching NIP-56 content reports (kind 1984)
 // ABOUTME: Maintains persistent WebSocket to relay for auto-hide functionality
 
-import { type Nip86Env, allowEvent, banEvent } from './nip86';
+import { callNip86Rpc, type Nip86Env } from './nip86';
 import { ensureSchema } from './db';
+import type { EventVisibilityOperation, EventVisibilityResult } from './event-visibility';
+import { markHumanAction } from './human-decision';
 import {
   AUTO_HIDE_ACTION,
   AUTO_HIDE_TIER_KINDS,
@@ -38,7 +40,6 @@ export async function hasLatestHumanRestore(db: D1Database, targetEventId: strin
         'allow_event',
         'restore_event',
         'auto_hide_restored',
-        'reviewed',
         'dismissed',
         'no-action',
         'false-positive'
@@ -183,6 +184,10 @@ export class ReportWatcher implements DurableObject {
         return this.handlePutConfig(request);
       }
 
+      if (path === '/event-visibility' && request.method === 'POST') {
+        return this.handleEventVisibility(request);
+      }
+
       return new Response(JSON.stringify({ error: 'Not found' }), {
         status: 404,
         headers: { 'Content-Type': 'application/json' },
@@ -322,6 +327,57 @@ export class ReportWatcher implements DurableObject {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     });
+  }
+
+  private async handleEventVisibility(request: Request): Promise<Response> {
+    let operation: EventVisibilityOperation;
+    try {
+      operation = await request.json<EventVisibilityOperation>();
+    } catch {
+      return Response.json({ success: false, error: 'Invalid JSON body' }, { status: 400 });
+    }
+
+    if (
+      !/^[0-9a-f]{64}$/.test(operation.eventId)
+      || (operation.relayAction !== 'hide' && operation.relayAction !== 'allow')
+      || (operation.humanAction !== undefined && typeof operation.humanAction !== 'string')
+    ) {
+      return Response.json({ success: false, error: 'Invalid event visibility operation' }, { status: 400 });
+    }
+
+    const result = await this.state.blockConcurrencyWhile(async (): Promise<EventVisibilityResult> => {
+      try {
+        const relayResult = operation.relayAction === 'hide'
+          ? await callNip86Rpc('banevent', [operation.eventId, operation.reason || 'Hidden by moderator'], this.env)
+          : await callNip86Rpc('allowevent', [operation.eventId], this.env);
+        if (!relayResult.success) return relayResult;
+
+        if (operation.humanAction === undefined) return { success: true };
+        if (!this.env.DB) return { success: true, recorded: false };
+
+        try {
+          if (!this.schemaReady) {
+            await ensureSchema(this.env.DB);
+            this.schemaReady = true;
+          }
+          const recorded = await markHumanAction(
+            this.env.DB,
+            'event',
+            operation.eventId,
+            operation.humanAction,
+          );
+          return { success: true, recorded };
+        } catch (error) {
+          console.error('[ReportWatcher] Event visibility mark failed:', error);
+          return { success: true, recorded: false };
+        }
+      } catch (error) {
+        console.error('[ReportWatcher] Event visibility operation failed:', error);
+        return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+      }
+    });
+
+    return Response.json(result, { status: result.success ? 200 : 502 });
   }
 
   private validateConfig(config: AutoHideConfig): string | null {
@@ -770,17 +826,32 @@ export class ReportWatcher implements DurableObject {
     targetEventId: string,
     tierName: string
   ): Promise<void> {
+    await this.state.blockConcurrencyWhile(async () => {
+      try {
+        await this.executeAutoHideSerialized(event, category, targetEventId, tierName);
+      } catch (error) {
+        console.error('[ReportWatcher] Serialized auto-hide failed:', error);
+      }
+    });
+  }
+
+  private async executeAutoHideSerialized(
+    event: ReportEvent,
+    category: string,
+    targetEventId: string,
+    tierName: string
+  ): Promise<void> {
     console.log(`[ReportWatcher] Auto-hiding event ${targetEventId} (tier: ${tierName})`);
 
     const reason = `Auto-hidden: ${category} report (tier: ${tierName}, report_id: ${event.id})`;
-    const result = await banEvent(targetEventId, reason, this.env);
+    const result = await callNip86Rpc('banevent', [targetEventId, reason], this.env);
 
     if (result.success) {
       // A restore can race this pass after its first hasHumanResolution check.
       // Recheck the direction-bearing action after the ban and compensate only
       // for a restore; hides and deletes set the permanent reviewed bit too.
       if (await this.hasHumanRestore(targetEventId)) {
-        const restore = await allowEvent(targetEventId, this.env);
+        const restore = await callNip86Rpc('allowevent', [targetEventId], this.env);
         if (restore.success) {
           console.log(`[ReportWatcher] Reversed raced auto-hide for human-reviewed event ${targetEventId}`);
           await this.logDecision({

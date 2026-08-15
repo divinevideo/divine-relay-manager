@@ -587,6 +587,35 @@ describe('relay-rpc account-state side effects', () => {
   function makeSqlRecordingEnv(order?: string[]) {
     const sql: string[] = [];
     const bound: { statement: string; args: unknown[] }[] = [];
+    const db = {
+      prepare: (statement: string) => {
+        sql.push(statement);
+        return {
+          // Record the statement WITH its args as one tuple. Keeping two arrays and
+          // aligning them by index desynced the moment a statement ran without bind():
+          // ensureSchema issues ~20 such calls, so `marked()` silently returned
+          // undefined and three tests passed only because an earlier test in the file
+          // had already flipped the module-level schemaReady flag. Running them in
+          // isolation went red on correct code, and dropping the ensureSchemaOnce call
+          // survived the whole mutation battery.
+          bind: (...args: unknown[]) => {
+            bound.push({ statement, args });
+            return {
+              first: async () => null,
+              run: async () => {
+                // Into the SHARED log, so ordering against the relay call is a real
+                // index comparison rather than two unrelated arrays.
+                if (order && statement.includes('INSERT INTO moderation_targets')) {
+                  order.push('db:mark');
+                }
+                return { success: true, meta: { changes: 1 } };
+              },
+            };
+          },
+          run: async () => ({ success: true, meta: { changes: 0 } }),
+        };
+      },
+    };
     const env = {
       ALLOWED_ORIGINS: 'https://app.divine.video',
       RELAY_URL: 'wss://relay.divine.video',
@@ -594,34 +623,38 @@ describe('relay-rpc account-state side effects', () => {
       MODERATION_ADMIN_URL: 'https://moderation-api.divine.video',
       SERVICE_API_TOKEN: 'test-token',
       NOSTR_NSEC: TEST_NSEC,
-      DB: {
-        prepare: (statement: string) => {
-          sql.push(statement);
-          return {
-            // Record the statement WITH its args as one tuple. Keeping two arrays and
-            // aligning them by index desynced the moment a statement ran without bind():
-            // ensureSchema issues ~20 such calls, so `marked()` silently returned
-            // undefined and three tests passed only because an earlier test in the file
-            // had already flipped the module-level schemaReady flag. Running them in
-            // isolation went red on correct code, and dropping the ensureSchemaOnce call
-            // survived the whole mutation battery.
-            bind: (...args: unknown[]) => {
-              bound.push({ statement, args });
-              return {
-                first: async () => null,
-                run: async () => {
-                  // Into the SHARED log, so ordering against the relay call is a real
-                  // index comparison rather than two unrelated arrays.
-                  if (order && statement.includes('INSERT INTO moderation_targets')) {
-                    order.push('db:mark');
-                  }
-                  return { success: true, meta: { changes: 1 } };
-                },
-              };
-            },
-            run: async () => ({ success: true, meta: { changes: 0 } }),
-          };
-        },
+      DB: db,
+      REPORT_WATCHER: {
+        idFromName: () => 'singleton',
+        get: () => ({
+          fetch: async (request: Request) => {
+            const operation = await request.json() as {
+              eventId: string;
+              relayAction: 'hide' | 'allow';
+              reason?: string;
+              humanAction?: string;
+            };
+            const relayResponse = await fetch('https://relay.divine.video/management', {
+              method: 'POST',
+              body: JSON.stringify({
+                method: operation.relayAction === 'hide' ? 'banevent' : 'allowevent',
+                params: operation.relayAction === 'hide'
+                  ? [operation.eventId, operation.reason]
+                  : [operation.eventId],
+              }),
+            });
+            if (!relayResponse.ok) {
+              return Response.json({ success: false, error: 'relay exploded' }, { status: 502 });
+            }
+            const recorded = operation.humanAction
+              ? await db.prepare(`
+                INSERT INTO moderation_targets (target_id, target_type, ever_human_reviewed, last_human_action)
+                VALUES (?, ?, 1, ?)
+              `).bind(operation.eventId, 'event', operation.humanAction).run().then(() => true)
+              : undefined;
+            return Response.json({ success: true, recorded });
+          },
+        }),
       },
     } as never;
     // `marked` reads the bound id off the moderation_targets upsert specifically.
@@ -722,7 +755,7 @@ describe('relay-rpc account-state side effects', () => {
     fetchSpy.mockRestore();
   });
 
-  it('allow_event allows, marks THAT id, then reconciles after the mark', async () => {
+  it('allow_event allows and marks THAT id inside one coordinated operation', async () => {
     const order: string[] = [];
     const fetchSpy = makeOrderedRelaySpy(order);
     const waitUntil = vi.fn();
@@ -732,7 +765,7 @@ describe('relay-rpc account-state side effects', () => {
     const response = await postModerate({ action: 'allow_event', eventId: VALID_EVENT_ID }, env, testCtx);
 
     expect(response.status).toBe(200);
-    expect(order).toEqual(['relay:allowevent', 'db:mark', 'relay:allowevent']);
+    expect(order).toEqual(['relay:allowevent', 'db:mark']);
     expect(marked()).toBe(VALID_EVENT_ID);
     expect(markedAction()).toBe('allow_event');
     expect(await response.json()).toMatchObject({ success: true, recorded: true, reconciled: true });
@@ -799,6 +832,18 @@ describe('relay-rpc account-state side effects', () => {
           run: async () => ({ success: true, meta: { changes: 0 } }),
         }),
       },
+      REPORT_WATCHER: {
+        idFromName: () => 'singleton',
+        get: () => ({
+          fetch: async () => {
+            await fetch('https://relay.divine.video/management', {
+              method: 'POST',
+              body: JSON.stringify({ method: 'allowevent' }),
+            });
+            return Response.json({ success: true, recorded: false });
+          },
+        }),
+      },
     } as never;
 
     const response = await postModerate({ action: 'allow_event', eventId: VALID_EVENT_ID }, env, testCtx);
@@ -810,17 +855,17 @@ describe('relay-rpc account-state side effects', () => {
     fetchSpy.mockRestore();
   });
 
-  it('reports partial success and still syncs Zendesk when allow reconciliation fails', async () => {
+  it('does not issue a stale second allow and still syncs Zendesk', async () => {
     const order: string[] = [];
-    const fetchSpy = makeOrderedRelaySpy(order, { failRelayCall: 2 });
+    const fetchSpy = makeOrderedRelaySpy(order);
     const testCtx = { waitUntil: vi.fn() } as unknown as ExecutionContext;
     const { env, sql } = makeSqlRecordingEnv(order);
 
     const response = await postModerate({ action: 'allow_event', eventId: VALID_EVENT_ID }, env, testCtx);
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ success: true, recorded: true, reconciled: false });
-    expect(order).toEqual(['relay:allowevent', 'db:mark', 'relay:allowevent']);
+    expect(await response.json()).toMatchObject({ success: true, recorded: true, reconciled: true });
+    expect(order).toEqual(['relay:allowevent', 'db:mark']);
     expect(sql.some(statement => statement.includes('FROM zendesk_tickets'))).toBe(true);
 
     fetchSpy.mockRestore();
@@ -1840,6 +1885,38 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
     ALLOWED_ORIGINS: 'https://app.divine.video',
     RELAY_URL: 'wss://relay.example',
     ADMIN_API_KEY: 'test-admin-key',
+    REPORT_WATCHER: {
+      idFromName: () => 'singleton',
+      get: () => ({
+        fetch: async (request: Request) => {
+          const operation = await request.json() as {
+            eventId: string;
+            relayAction: 'hide' | 'allow';
+            reason?: string;
+          };
+          try {
+            const response = await fetch('https://relay.example/management', {
+              method: 'POST',
+              body: JSON.stringify({
+                method: operation.relayAction === 'hide' ? 'banevent' : 'allowevent',
+                params: operation.relayAction === 'hide'
+                  ? [operation.eventId, operation.reason]
+                  : [operation.eventId],
+              }),
+            });
+            if (!response.ok) {
+              return Response.json({ success: false, error: 'relay refused' }, { status: 502 });
+            }
+            return Response.json({ success: true });
+          } catch (error) {
+            return Response.json({
+              success: false,
+              error: error instanceof Error ? error.message : 'relay failed',
+            }, { status: 502 });
+          }
+        },
+      }),
+    },
   } as never;
 
   const reportsRequest = () => new Request('https://api.example/api/reports', {

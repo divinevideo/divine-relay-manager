@@ -36,6 +36,8 @@ import type { BulkJobMessage } from '../../shared/bulk-moderation';
 import { ensureZendeskTable, addZendeskInternalNote, syncZendeskAfterAction } from './zendesk-sync';
 import { buildReportNote, parseKind0Profile, type ReportedProfile } from './report-note';
 import { queryRelay, withTimeout, ENRICHMENT_TIMEOUT_MS } from './relay-profile';
+import { coordinateEventVisibility } from './event-visibility';
+import { markHumanAction, markHumanReviewed } from './human-decision';
 
 let schemaReady = false;
 async function ensureSchemaOnce(db: D1Database): Promise<void> {
@@ -846,7 +848,20 @@ async function handlePublish(
 
       if (status && targetType && targetId) {
         if (env.DB) {
-          await markHumanAction(env.DB, targetType, targetId, status);
+          if (targetType === 'event' && ['dismissed', 'no-action', 'false-positive'].includes(status)) {
+            const result = await coordinateEventVisibility(env, {
+              eventId: targetId,
+              relayAction: 'allow',
+              humanAction: status,
+            });
+            if (!result.success || !result.recorded) {
+              console.error('[handlePublish] Resolution label was published but visibility reconciliation failed:', result.error);
+            }
+          } else if (status === 'reviewed') {
+            await markHumanReviewed(env.DB, targetType, targetId);
+          } else {
+            await markHumanAction(env.DB, targetType, targetId, status);
+          }
         }
 
         // Use waitUntil to ensure sync completes even after response is sent
@@ -894,32 +909,23 @@ async function handleModerate(
 
   switch (body.action) {
     case 'delete_event': {
-      // Use banevent RPC directly instead of publishing kind 5 events.
+      // Use coordinated banevent RPC instead of publishing kind 5 events.
       // NIP-09 kind 5 deletion only allows authors to delete their own events.
       // Admin moderation requires NIP-86 banevent RPC method instead.
-      if (!body.eventId) {
-        return jsonResponse({ success: false, error: 'Missing eventId for delete_event' }, 400, corsHeaders);
+      if (typeof body.eventId !== 'string' || !/^[a-f0-9]{64}$/i.test(body.eventId)) {
+        return jsonResponse({ success: false, error: 'Missing or invalid eventId for delete_event (must be 64 hex chars)' }, 400, corsHeaders);
       }
+      const eventId = body.eventId.toLowerCase();
 
       try {
-        const rpcRequest = new Request(request.url.replace(/\/api\/moderate$/, '/api/relay-rpc'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            method: 'banevent',
-            params: [body.eventId, body.reason || 'Deleted by relay admin'],
-          }),
+        const result = await coordinateEventVisibility(env, {
+          eventId,
+          relayAction: 'hide',
+          reason: body.reason || 'Deleted by relay admin',
+          humanAction: body.action,
         });
-
-        const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders);
-        const rpcResult = await rpcResponse.json() as { success: boolean; error?: string };
-
-        if (!rpcResult.success) {
-          return jsonResponse({ success: false, error: rpcResult.error || 'banevent RPC failed' }, 500, corsHeaders);
-        }
-
-        if (env.DB) {
-          await markHumanAction(env.DB, 'event', body.eventId, body.action);
+        if (!result.success) {
+          return jsonResponse({ success: false, error: result.error || 'banevent RPC failed' }, 500, corsHeaders);
         }
 
         // Sync any linked Zendesk tickets
@@ -928,7 +934,7 @@ async function handleModerate(
             env,
             body.action,
             'event',
-            body.eventId,
+            eventId,
             getPublicKey(secretKey)
           );
         } catch (err) {
@@ -940,12 +946,12 @@ async function handleModerate(
         // notice (PERMANENT_BAN, with eventId), not an account-state change, so it
         // does not fit the account-state helper's action union or signature.
         if (body.pubkey) {
-          const dmPromise = notifyModerationService(env, body.pubkey, 'PERMANENT_BAN', body.reason || 'Content removed by moderator', undefined, body.eventId)
+          const dmPromise = notifyModerationService(env, body.pubkey, 'PERMANENT_BAN', body.reason || 'Content removed by moderator', undefined, eventId)
             .catch(err => console.error('[handleModerate] DM notification error:', err));
           if (ctx) ctx.waitUntil(dmPromise);
         }
 
-        return jsonResponse({ success: true, eventId: body.eventId }, 200, corsHeaders);
+        return jsonResponse({ success: true, eventId, recorded: result.recorded === true }, 200, corsHeaders);
       } catch (error) {
         console.error('[handleModerate] delete_event error:', error);
         return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Unknown error' }, 500, corsHeaders);
@@ -981,30 +987,20 @@ async function handleModerate(
       const eventId = body.eventId.toLowerCase();
 
       try {
-        const applyRelayAction = async () => {
-          const rpcRequest = new Request(request.url.replace(/\/api\/moderate$/, '/api/relay-rpc'), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(
-              isHide
-                ? { method: 'banevent', params: [eventId, body.reason || 'Hidden by moderator'] }
-                : { method: 'allowevent', params: [eventId] },
-            ),
-          });
-          const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders);
-          return rpcResponse.json() as Promise<{ success: boolean; error?: string }>;
-        };
-
-        const rpcResult = await applyRelayAction();
-
-        if (!rpcResult.success) {
+        const result = await coordinateEventVisibility(env, {
+          eventId,
+          relayAction: isHide ? 'hide' : 'allow',
+          reason: isHide ? body.reason || 'Hidden by moderator' : undefined,
+          humanAction: body.action,
+        });
+        if (!result.success) {
           // Flatten to 500, matching delete_event and ban_pubkey. Neither banevent nor
           // allowevent is age-review guarded (that guard covers only suspendpubkey,
           // unsuspendpubkey and unbanpubkey), so there is no 409/503 whose code a caller
           // would need preserved -- and forwarding would relabel a transient relay 502 as
           // a terminal 400, which retrying clients read as "do not retry".
           return jsonResponse(
-            { success: false, error: rpcResult.error || `${isHide ? 'banevent' : 'allowevent'} RPC failed` },
+            { success: false, error: result.error || `${isHide ? 'banevent' : 'allowevent'} RPC failed` },
             500,
             corsHeaders,
           );
@@ -1019,26 +1015,7 @@ async function handleModerate(
         // success: the caller would believe the decision is protected from ReportWatcher
         // when it is not. Surfaced as `recorded`, loudly logged, and NOT a 5xx, because
         // the relay change did land and a retry would be a second enforcement.
-        let recorded = false;
-        if (env.DB) {
-          // NOT covered by a mutation test, deliberately: `schemaReady` is a module global
-          // that earlier tests flip, so this line is a no-op in the suite and deleting it
-          // survives. That is acceptable rather than papered over — without it a missing
-          // table makes the INSERT throw, which is caught below and degrades to
-          // `recorded: false` plus the ALERT. Graceful and observable, not silent.
-          //
-          // Bootstrapping is part of the mark, not a precondition for the response. An
-          // unguarded throw here would 500 AFTER the relay change already applied — the
-          // exact contract this block exists to prevent, arrived at from the other side:
-          // same root cause (D1 unavailable), opposite answer, depending only on which
-          // statement hit it first. Same wrapper handleRelayRpc uses for the same reason.
-          try {
-            await ensureSchemaOnce(env.DB);
-            recorded = await markHumanAction(env.DB, 'event', eventId, body.action);
-          } catch (err) {
-            console.error(`[handleModerate] ${body.action} schema bootstrap failed:`, err);
-          }
-        }
+        const recorded = result.recorded === true;
         if (!recorded) {
           console.error(
             `[handleModerate] ALERT: ${body.action} applied at the relay but NOT recorded as ` +
@@ -1046,22 +1023,9 @@ async function handleModerate(
           );
         }
 
-        // A ReportWatcher pass can read "not reviewed" before the mark and ban after
-        // the first allow. Re-applying the idempotent allow after the mark, paired with
-        // ReportWatcher's post-ban recheck, makes whichever relay call lands last honor
-        // the human decision. The first restore and mark have already landed if this
-        // final reconciliation fails, so preserve that partial success in the response.
-        let reconciled = false;
-        if (recorded && !isHide) {
-          const reconciliation = await applyRelayAction();
-          reconciled = reconciliation.success;
-          if (!reconciled) {
-            console.error(
-              `[handleModerate] allow_event was applied and recorded but reconciliation failed for ${eventId}: ` +
-              (reconciliation.error || 'allowevent reconciliation failed'),
-            );
-          }
-        }
+        // The coordinator serializes this relay mutation and direction write with
+        // ReportWatcher auto-hide, so no stale second allow is needed.
+        const reconciled = !isHide && recorded;
 
         try {
           await syncZendeskAfterAction(env, body.action, 'event', eventId, getPublicKey(secretKey));
@@ -1276,8 +1240,18 @@ async function handleRelayRpc(
     if (guarded) return guarded;
   }
 
-  // Use shared NIP-86 RPC utility
-  const result = await callNip86Rpc(body.method, body.params || [], env);
+  const eventVisibilityAction = body.method === 'banevent'
+    ? 'hide'
+    : body.method === 'allowevent'
+      ? 'allow'
+      : null;
+  const result = eventVisibilityAction
+    ? await coordinateEventVisibility(env, {
+      eventId: target,
+      relayAction: eventVisibilityAction,
+      reason: body.params?.[1] ? String(body.params[1]) : undefined,
+    })
+    : await callNip86Rpc(body.method, body.params || [], env);
 
   if (!result.success) {
     return jsonResponse({ success: false, error: result.error }, 400, corsHeaders);
@@ -1314,7 +1288,7 @@ async function handleRelayRpc(
     }
   }
 
-  return new Response(JSON.stringify({ success: true, result: result.result }), {
+  return new Response(JSON.stringify({ success: true, result: 'result' in result ? result.result : true }), {
     status: 200,
     headers: { 'Content-Type': 'application/json', ...corsHeaders },
   });
@@ -1520,46 +1494,6 @@ Respond with JSON only:
       status: 200, // Return 200 with fallback to not break UI
       headers: { 'Content-Type': 'application/json', ...corsHeaders },
     });
-  }
-}
-
-// Returns whether the mark actually landed. Callers for whom the mark is incidental
-// (delete_event, ban_pubkey) can keep ignoring it; hide_event and allow_event exist
-// ONLY to record the decision, so for those a swallowed failure reported as success is
-// the bug itself -- ReportWatcher would be free to undo a moderator mid-review while
-// the API said the decision was recorded.
-async function markHumanAction(
-  db: D1Database,
-  targetType: string,
-  targetId: string,
-  action: string,
-): Promise<boolean> {
-  try {
-    await db.prepare(`
-      INSERT INTO moderation_targets (target_id, target_type, ever_human_reviewed, last_human_action)
-      VALUES (?, ?, 1, ?)
-      ON CONFLICT(target_id) DO UPDATE SET
-        ever_human_reviewed = 1,
-        last_human_action = excluded.last_human_action
-    `).bind(targetId, targetType, action).run();
-    return true;
-  } catch (error) {
-    console.error('[markHumanAction] Failed to update moderation_targets:', error);
-    return false;
-  }
-}
-
-async function markHumanReviewed(db: D1Database, targetType: string, targetId: string): Promise<boolean> {
-  try {
-    await db.prepare(`
-      INSERT INTO moderation_targets (target_id, target_type, ever_human_reviewed)
-      VALUES (?, ?, 1)
-      ON CONFLICT(target_id) DO UPDATE SET ever_human_reviewed = 1
-    `).bind(targetId, targetType).run();
-    return true;
-  } catch (error) {
-    console.error('[markHumanReviewed] Failed to update moderation_targets:', error);
-    return false;
   }
 }
 

@@ -84,6 +84,12 @@ function createEnv(db: unknown) {
     RELAY_URL: 'wss://relay.test.com',
     ALLOWED_ORIGINS: 'http://localhost:5173',
     DB: db,
+    REPORT_WATCHER: {
+      idFromName: () => 'singleton',
+      get: () => ({
+        fetch: async () => Response.json({ success: true, recorded: true }),
+      }),
+    },
   };
 }
 
@@ -333,7 +339,7 @@ describe('human decision persistence', () => {
         headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
         body: JSON.stringify({
           action: 'delete_event',
-          eventId: 'event_abc123',
+          eventId: 'ab'.repeat(32),
           pubkey: 'abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234',
           reason: 'Content violation',
         }),

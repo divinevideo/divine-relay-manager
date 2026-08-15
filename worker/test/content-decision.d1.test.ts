@@ -6,6 +6,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import worker from '../src/index';
 import { ensureSchema } from '../src/db';
 import { hasLatestHumanRestore } from '../src/ReportWatcher';
+import { markHumanAction } from '../src/human-decision';
 
 const TEST_NSEC = 'nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5';
 
@@ -57,6 +58,16 @@ describe('recorded content decisions on real D1', () => {
         ALLOWED_ORIGINS: '',
         ADMIN_API_KEY: 'test-admin-key',
         DB,
+        REPORT_WATCHER: {
+          idFromName: () => 'singleton',
+          get: () => ({
+            fetch: async (request: Request) => {
+              const operation = await request.json() as { eventId: string; humanAction: string };
+              const recorded = await markHumanAction(DB, 'event', operation.eventId, operation.humanAction);
+              return Response.json({ success: true, recorded });
+            },
+          }),
+        },
       } as never,
       { waitUntil: vi.fn() } as unknown as ExecutionContext,
     );
@@ -82,7 +93,7 @@ describe('recorded content decisions on real D1', () => {
       allow_event: true,
       restore_event: true,
       auto_hide_restored: true,
-      reviewed: true,
+      reviewed: false,
       dismissed: true,
       'no-action': true,
       'false-positive': true,

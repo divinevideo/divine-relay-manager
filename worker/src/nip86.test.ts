@@ -215,6 +215,34 @@ describe('convenience methods', () => {
     expect(body.params).toEqual(['event123']);
   });
 
+  it.each([
+    ['hide', banEvent, 'spam'],
+    ['allow', allowEvent, undefined],
+  ] as const)('routes %s event visibility through ReportWatcher when configured', async (relayAction, action, reason) => {
+    const eventId = 'ab'.repeat(32);
+    const coordinatorFetch = vi.fn(async (_request: Request) => Response.json({ success: true }));
+    const env = {
+      ...mockEnv,
+      REPORT_WATCHER: {
+        idFromName: vi.fn(() => 'singleton'),
+        get: vi.fn(() => ({ fetch: coordinatorFetch })),
+      },
+    } as never;
+
+    const result = reason
+      ? await action(eventId, reason, env)
+      : await action(eventId, env);
+
+    expect(result.success).toBe(true);
+    expect(mockFetch).not.toHaveBeenCalled();
+    const request = coordinatorFetch.mock.calls[0][0];
+    expect(await request.json()).toEqual({
+      eventId,
+      relayAction,
+      ...(reason ? { reason } : {}),
+    });
+  });
+
   it('banPubkey should call banpubkey RPC', async () => {
     const result = await banPubkey('pubkey123', 'abuse', mockEnv);
     expect(result.success).toBe(true);

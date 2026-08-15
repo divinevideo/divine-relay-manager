@@ -74,16 +74,17 @@ error status, because the relay change did apply and a retry would enforce twice
 seeing `recorded: false` should treat the decision as **applied but unprotected** and
 surface it: the content is hidden or restored as asked, but the automation may reverse it.
 
-For `allow_event`, the worker reapplies the idempotent relay restore after the mark is
-visible. ReportWatcher also rechecks the latest direction-bearing human action after a
-successful auto-hide and reverses a raced ban only when that action was a restore. Together
-these checks preserve the moderator's restored state when a report and restore overlap
-without undoing a human hide or delete.
+Event visibility changes and their direction-bearing human marks are serialized through the
+ReportWatcher Durable Object. Auto-hide uses the same coordination gate and rechecks the
+latest action after banning. Explicit restores plus the resolution statuses `dismissed`,
+`no-action`, and `false-positive` are allow-direction; the generic `reviewed` status is not.
+This preserves whichever coordinated action ran last without letting an older restore undo a
+newer human hide or delete.
 
-An `allow_event` response also carries `reconciled`. If it is `false`, the first restore and
-human-review mark both succeeded, but the final idempotent restore failed, so callers should
-surface that the relay's final visible state is uncertain. Zendesk still receives the final
-human decision in this case.
+An `allow_event` response also carries `reconciled`. It is true when the coordinated restore
+and human-review mark completed. If it is false, callers should surface the same degraded
+state as `recorded: false`: the relay restore landed, but automation protection did not.
+Zendesk still receives the final human decision in this case.
 
 Both actions are final human decisions for linked Zendesk reports, so they add an internal
 note and resolve the open ticket.

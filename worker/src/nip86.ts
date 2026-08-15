@@ -2,6 +2,7 @@
 // ABOUTME: Handles NIP-98 auth signing and relay RPC calls
 
 import { finalizeEvent, nip19, getPublicKey } from 'nostr-tools';
+import { coordinateEventVisibility } from './event-visibility';
 
 /**
  * Secrets Store secret object (for account-level secrets)
@@ -18,6 +19,7 @@ export interface Nip86Env {
   RELAY_URL: string;
   MANAGEMENT_PATH?: string;
   MANAGEMENT_URL?: string;
+  REPORT_WATCHER?: DurableObjectNamespace;
 }
 
 /**
@@ -165,6 +167,9 @@ export async function banEvent(
   reason: string,
   env: Nip86Env
 ): Promise<Nip86RpcResult> {
+  if (env.REPORT_WATCHER) {
+    return coordinateEventVisibility(env, { eventId, relayAction: 'hide', reason });
+  }
   return callNip86Rpc('banevent', [eventId, reason], env);
 }
 
@@ -175,6 +180,9 @@ export async function allowEvent(
   eventId: string,
   env: Nip86Env
 ): Promise<Nip86RpcResult> {
+  if (env.REPORT_WATCHER) {
+    return coordinateEventVisibility(env, { eventId, relayAction: 'allow' });
+  }
   return callNip86Rpc('allowevent', [eventId], env);
 }
 

@@ -86,6 +86,7 @@ class MockWebSocket {
 function createMockState() {
   const storage = new Map<string, unknown>();
   let alarmTime: number | null = null;
+  let concurrencyGate: Promise<unknown> = Promise.resolve();
 
   return {
     id: { toString: () => 'test-id' },
@@ -104,8 +105,10 @@ function createMockState() {
         alarmTime = null;
       }),
     },
-    blockConcurrencyWhile: vi.fn(async (fn: () => Promise<void>) => {
-      await fn();
+    blockConcurrencyWhile: vi.fn(<T>(fn: () => Promise<T>): Promise<T> => {
+      const result = concurrencyGate.then(fn);
+      concurrencyGate = result.catch(() => undefined);
+      return result;
     }),
     waitUntil: vi.fn(),
   } as unknown as DurableObjectState;
@@ -182,6 +185,57 @@ describe('ReportWatcher', () => {
       const body = await response.json() as { status: { autoHideEnabled: boolean } };
 
       expect(body.status.autoHideEnabled).toBe(true);
+    });
+  });
+
+  describe('event visibility coordination', () => {
+    it('serializes a newer human delete after auto-hide compensation', async () => {
+      const order: string[] = [];
+      const db = {
+        prepare: vi.fn().mockImplementation((sql: string) => ({
+          bind: vi.fn().mockImplementation((...args: unknown[]) => ({
+            first: vi.fn().mockResolvedValue(sql.includes('last_human_action') ? { present: 1 } : null),
+            run: vi.fn().mockImplementation(async () => {
+              if (sql.includes('INSERT INTO moderation_targets')) order.push(`db:${String(args[2])}`);
+              return { success: true, meta: { changes: 1 } };
+            }),
+          })),
+          run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 0 } }),
+        })),
+      } as unknown as D1Database;
+      mockState = createMockState();
+      mockEnv = createMockEnv({ DB: db });
+      watcher = new ReportWatcher(mockState, mockEnv);
+      vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const raw = input instanceof Request ? await input.clone().text() : String(init?.body ?? '');
+        const method = (JSON.parse(raw) as { method: string }).method;
+        order.push(`relay:${method}`);
+        return new Response(JSON.stringify({ result: true }), { status: 200 });
+      }));
+
+      const eventId = 'cd'.repeat(32);
+      const autoHide = (watcher as unknown as {
+        executeAutoHide(event: ReportEvent, category: string, targetId: string, tier: string): Promise<void>;
+      }).executeAutoHide({ id: 'report', pubkey: 'reporter' } as ReportEvent, 'sexual_minors', eventId, 'Immediate');
+      const humanDelete = watcher.fetch(new Request('https://do/event-visibility', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          eventId,
+          relayAction: 'hide',
+          reason: 'Deleted by moderator',
+          humanAction: 'delete_event',
+        }),
+      }));
+
+      const [, deleteResponse] = await Promise.all([autoHide, humanDelete]);
+      expect(deleteResponse.status).toBe(200);
+      expect(order.filter(entry => entry.startsWith('relay:'))).toEqual([
+        'relay:banevent',
+        'relay:allowevent',
+        'relay:banevent',
+      ]);
+      expect(order[order.length - 1]).toBe('db:delete_event');
     });
   });
 
