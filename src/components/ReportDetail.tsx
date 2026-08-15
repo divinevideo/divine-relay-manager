@@ -87,7 +87,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const {
-    deleteEvent, restoreEvent, markAsReviewed, logDecision, deleteDecisions,
+    deleteEvent, restoreEvent, markAsReviewed, logDecision, confirmAutoHide, deleteDecisions,
   } = useAdminApi();
   const { getModeratorPubkey } = useCurrentUser();
 
@@ -369,14 +369,24 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   const confirmAutoHideMutation = useMutation({
     mutationFn: async ({ targetId, targetType }: { targetId: string; targetType: 'event' | 'pubkey' }) => {
       const moderator = getModeratorPubkey(); // snapshot identity at action start
-      await logDecision({
-        targetType,
-        targetId,
-        action: 'auto_hide_confirmed',
-        reason: 'Auto-hide confirmed by moderator',
-        reportId: report?.id,
-        moderatorPubkey: await moderator,
-      });
+      if (targetType === 'event') {
+        await confirmAutoHide({
+          eventId: targetId,
+          reason: 'Auto-hide confirmed by moderator',
+          reportId: report?.id,
+          reporterPubkey: report?.pubkey,
+          moderatorPubkey: await moderator,
+        });
+      } else {
+        await logDecision({
+          targetType,
+          targetId,
+          action: 'auto_hide_confirmed',
+          reason: 'Auto-hide confirmed by moderator',
+          reportId: report?.id,
+          moderatorPubkey: await moderator,
+        });
+      }
       return targetId;
     },
     onSuccess: async () => {

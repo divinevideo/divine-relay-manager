@@ -461,6 +461,29 @@ describe('async bulk job model', () => {
     expect(row.media_processed).toBe(1);
   });
 
+  it('stops between concurrency waves when the event budget is exhausted', async () => {
+    let now = 1_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    vi.mocked(banEvent).mockImplementation(async () => {
+      now += 5 * 60 * 1000;
+      return { success: true };
+    });
+    vi.mocked(banEvent).mockClear();
+    mockPaginatedRelay(Array.from({ length: 30 }, (_, i) => ({ id: `budget-${i}`, kind: 1, content: '', tags: [] as string[][], created_at: 30 - i })));
+    const jobId = 'job-event-budget';
+    jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'delete-all', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, version: 0, created_at: 't', updated_at: 't' });
+
+    try {
+      await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'delete-all' }, mockEnv);
+    } finally {
+      nowSpy.mockRestore();
+    }
+
+    expect(vi.mocked(banEvent)).toHaveBeenCalledTimes(5);
+    expect(sent[0]?.eventIds).toHaveLength(25);
+    expect(jobDb.rows.get(jobId)?.events_processed).toBe(5);
+  });
+
   it('processBulkJob runs the work and writes status=done with counts', async () => {
     const jobId = 'job-done-1';
     jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', created_at: 't', updated_at: 't' });

@@ -305,6 +305,44 @@ describe('ReportWatcher', () => {
       expect(relayFetch).not.toHaveBeenCalled();
     });
 
+    it.each([
+      ['confirm then restore', ['confirm', 'review'], [200, 200], 0, 'auto_hide_confirmed'],
+      ['restore then confirm', ['review', 'confirm'], [200, 409], 1, 'auto_hide_restored'],
+    ] as const)('serializes %s without confirming visible content', async (_case, operations, statuses, expectedAllows, finalAction) => {
+      let autoHideAction = 'auto_hidden';
+      const db = {
+        prepare: vi.fn().mockImplementation((sql: string) => ({
+          bind: vi.fn().mockImplementation((...args: unknown[]) => ({
+            first: vi.fn().mockResolvedValue(sql.includes('AS auto_hide_action')
+              ? { last_human_action: null, auto_hide_action: autoHideAction }
+              : null),
+            run: vi.fn().mockImplementation(async () => {
+              if (sql.includes('INSERT INTO moderation_decisions')) autoHideAction = String(args[2]);
+              return { success: true, meta: { changes: 1 } };
+            }),
+          })),
+          run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 0 } }),
+        })),
+      } as unknown as D1Database;
+      mockState = createMockState();
+      mockEnv = createMockEnv({ DB: db });
+      watcher = new ReportWatcher(mockState, mockEnv);
+      const relayFetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ result: true }), { status: 200 }));
+      vi.stubGlobal('fetch', relayFetch);
+      const eventId = 'ae'.repeat(32);
+      const request = (relayAction: 'confirm' | 'review') => watcher.fetch(new Request('https://do/event-visibility', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ eventId, relayAction, humanAction: relayAction === 'review' ? 'dismissed' : undefined }),
+      }));
+
+      const responses = await Promise.all(operations.map(request));
+
+      expect(responses.map(response => response.status)).toEqual(statuses);
+      expect(relayFetch).toHaveBeenCalledTimes(expectedAllows);
+      expect(autoHideAction).toBe(finalAction);
+    });
+
     it('serializes a newer human delete after auto-hide compensation', async () => {
       const order: string[] = [];
       const db = {

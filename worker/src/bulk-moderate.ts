@@ -19,6 +19,7 @@ const RELAY_QUERY_PAGE_SIZE = 500;
 const RELAY_QUERY_MAX_PAGES = 100; // safety bound (~50k events); logged if hit, never silent
 const RELAY_QUERY_TIMEOUT_MS = 10000; // per-page (reset each page)
 const EVENT_CHUNK_SIZE = 200; // relay enumeration page size
+const EVENT_BATCH_BUDGET_MS = 4 * 60 * 1000;
 // max_concurrency=1 prevents multiple bulk consumers from building a gate
 // backlog; bounded batches reduce continuation loss and Queue overhead.
 const SERIALIZED_EVENT_BATCH_SIZE = 20;
@@ -382,9 +383,20 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
           saturated: false,
         }
         : await queryRelayEventsPage(msg.pubkey, env, until);
-      const eventBatch = page.events.slice(0, SERIALIZED_EVENT_BATCH_SIZE);
-      const remainingEventIds = page.events.slice(SERIALIZED_EVENT_BATCH_SIZE).map(event => event.id);
-      const ev = await deleteEvents(env, eventBatch, reason, moderatorPubkey);
+      const startedAt = Date.now();
+      const candidates = page.events.slice(0, SERIALIZED_EVENT_BATCH_SIZE);
+      const ev = { processed: 0, successfulEventIds: [] as string[], failures: [] as string[] };
+      let attempted = 0;
+      while (attempted < candidates.length) {
+        if (attempted > 0 && Date.now() - startedAt >= EVENT_BATCH_BUDGET_MS) break;
+        const wave = candidates.slice(attempted, attempted + BULK_ACTION_CONCURRENCY);
+        const waveResult = await deleteEvents(env, wave, reason, moderatorPubkey);
+        ev.processed += waveResult.processed;
+        ev.successfulEventIds.push(...waveResult.successfulEventIds);
+        ev.failures.push(...waveResult.failures);
+        attempted += wave.length;
+      }
+      const remainingEventIds = page.events.slice(attempted).map(event => event.id);
       eventsDelta = ev.processed;
       chunkFailures.push(...ev.failures);
       if (page.saturated) {

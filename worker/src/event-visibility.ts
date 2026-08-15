@@ -1,16 +1,20 @@
-export type EventVisibilityAction = 'hide' | 'allow' | 'review';
+export type EventVisibilityAction = 'hide' | 'allow' | 'review' | 'confirm';
 
 export interface EventVisibilityOperation {
   eventId: string;
   relayAction: EventVisibilityAction;
   reason?: string;
   humanAction?: string;
+  reportId?: string;
+  reporterPubkey?: string;
+  moderatorPubkey?: string;
 }
 
 export interface EventVisibilityResult {
   success: boolean;
   error?: string;
   recorded?: boolean;
+  conflict?: boolean;
 }
 
 export interface EventVisibilityCoordinatorEnv {

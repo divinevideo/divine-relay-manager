@@ -556,6 +556,16 @@ export async function logDecision(apiUrl: string, params: {
   await apiRequest<ApiResponse>(apiUrl, '/api/decisions', 'POST', params);
 }
 
+export async function confirmAutoHide(apiUrl: string, params: {
+  eventId: string;
+  reason?: string;
+  moderatorPubkey?: string;
+  reportId?: string;
+  reporterPubkey?: string;
+}): Promise<ApiResponse> {
+  return apiRequest<ApiResponse>(apiUrl, '/api/confirm-auto-hide', 'POST', params);
+}
+
 // Get decisions for a target
 export async function getDecisions(apiUrl: string, targetId: string): Promise<ModerationDecision[]> {
   const data = await apiRequest<{ success: boolean; decisions: ModerationDecision[] }>(

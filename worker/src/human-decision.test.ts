@@ -390,6 +390,33 @@ describe('human decision persistence', () => {
         reconciliationError: 'Human-review state was not recorded',
       });
     });
+
+    it('returns explicit recording status for a pubkey dismissal', async () => {
+      const { db } = createMockDB();
+      const env = createEnv(db);
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => ['OK', 'event_id', true, ''],
+        text: async () => JSON.stringify(['OK', 'event_id', true, '']),
+      });
+
+      const response = await worker.fetch(new Request('http://localhost/api/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        body: JSON.stringify({
+          kind: 1985,
+          content: 'Dismissed',
+          tags: [
+            ['L', 'moderation/resolution'],
+            ['l', 'dismissed', 'moderation/resolution'],
+            ['p', 'ef'.repeat(32)],
+          ],
+        }),
+      }), env as never, mockCtx);
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ success: true, recorded: true, reconciled: true });
+    });
   });
 
   describe('DM notification failure isolation', () => {

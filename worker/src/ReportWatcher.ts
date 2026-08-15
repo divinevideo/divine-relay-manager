@@ -357,7 +357,7 @@ export class ReportWatcher implements DurableObject {
 
     if (
       !/^[0-9a-f]{64}$/.test(operation.eventId)
-      || !['hide', 'allow', 'review'].includes(operation.relayAction)
+      || !['hide', 'allow', 'review', 'confirm'].includes(operation.relayAction)
       || (operation.humanAction !== undefined && typeof operation.humanAction !== 'string')
       || (operation.relayAction === 'review' && !operation.humanAction)
     ) {
@@ -372,7 +372,24 @@ export class ReportWatcher implements DurableObject {
         }
 
         let relayFailure: EventVisibilityResult | undefined;
-        if (operation.relayAction === 'review') {
+        if (operation.relayAction === 'confirm') {
+          if (!this.env.DB) return { success: false, recorded: false, error: 'Moderation database is not configured' };
+          if (!await hasActiveAutoHide(this.env.DB, operation.eventId)) {
+            return { success: false, recorded: false, conflict: true, error: 'Auto-hide is no longer active' };
+          }
+          const recorded = await this.logDecision({
+            targetType: 'event',
+            targetId: operation.eventId,
+            action: AUTO_HIDE_ACTION.confirmed,
+            reason: operation.reason || 'Auto-hide confirmed by moderator',
+            reportId: operation.reportId || '',
+            reporterPubkey: operation.reporterPubkey || '',
+            moderatorPubkey: operation.moderatorPubkey,
+          });
+          if (!recorded) return { success: false, recorded: false, error: 'Failed to record auto-hide confirmation' };
+          await markHumanReviewed(this.env.DB, 'event', operation.eventId);
+          return { success: true, recorded: true };
+        } else if (operation.relayAction === 'review') {
           let shouldRestoreAutoHide = false;
           if (this.env.DB) {
             try {
@@ -426,7 +443,7 @@ export class ReportWatcher implements DurableObject {
       }
     });
 
-    return Response.json(result, { status: result.success ? 200 : 502 });
+    return Response.json(result, { status: result.success ? 200 : result.conflict ? 409 : 502 });
   }
 
   private validateConfig(config: AutoHideConfig): string | null {
@@ -1079,10 +1096,11 @@ export class ReportWatcher implements DurableObject {
     reason: string;
     reportId: string;
     reporterPubkey: string;
-  }): Promise<void> {
+    moderatorPubkey?: string;
+  }): Promise<boolean> {
     if (!this.env.DB) {
       console.warn('[ReportWatcher] D1 database not available, skipping log');
-      return;
+      return false;
     }
 
     try {
@@ -1095,14 +1113,16 @@ export class ReportWatcher implements DurableObject {
         decision.targetId,
         decision.action,
         decision.reason,
-        'auto', // moderator_pubkey = 'auto' for automated decisions
+        decision.moderatorPubkey || 'auto',
         decision.reportId,
         decision.reporterPubkey
       ).run();
 
       console.log(`[ReportWatcher] Logged decision: ${decision.action} for ${decision.targetId}`);
+      return true;
     } catch (error) {
       console.error('[ReportWatcher] Failed to log decision:', error);
+      return false;
     }
   }
 

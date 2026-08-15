@@ -494,6 +494,10 @@ export default {
         return handleLogDecision(request, env, corsHeaders);
       }
 
+      if (path === '/api/confirm-auto-hide' && request.method === 'POST') {
+        return handleConfirmAutoHide(request, env, corsHeaders);
+      }
+
       if (path === '/api/decisions' && request.method === 'GET') {
         return handleGetAllDecisions(env, corsHeaders);
       }
@@ -863,11 +867,16 @@ async function handlePublish(
             console.error('[handlePublish] Resolution label was published but visibility reconciliation failed:', resolutionVisibility.error);
           }
         } else if (env.DB) {
-          if (status === 'reviewed') {
-            await markHumanReviewed(env.DB, targetType, targetId);
-          } else {
-            await markHumanAction(env.DB, targetType, targetId, status);
-          }
+          const recorded = status === 'reviewed'
+            ? await markHumanReviewed(env.DB, targetType, targetId)
+            : await markHumanAction(env.DB, targetType, targetId, status);
+          resolutionVisibility = {
+            success: true,
+            recorded,
+            ...(!recorded ? { error: 'Human-review state was not recorded' } : {}),
+          };
+        } else {
+          resolutionVisibility = { success: false, recorded: false, error: 'Moderation database is not configured' };
         }
 
         // Use waitUntil to ensure sync completes even after response is sent
@@ -1572,6 +1581,32 @@ async function handleLogDecision(
       corsHeaders
     );
   }
+}
+
+async function handleConfirmAutoHide(
+  request: Request,
+  env: Env,
+  corsHeaders: Record<string, string>,
+): Promise<Response> {
+  const body = await request.json() as {
+    eventId?: string;
+    reason?: string;
+    moderatorPubkey?: string;
+    reportId?: string;
+    reporterPubkey?: string;
+  };
+  if (typeof body.eventId !== 'string' || !/^[a-f0-9]{64}$/i.test(body.eventId)) {
+    return jsonResponse({ success: false, error: 'Missing or invalid eventId' }, 400, corsHeaders);
+  }
+  const result = await coordinateEventVisibility(env, {
+    eventId: body.eventId.toLowerCase(),
+    relayAction: 'confirm',
+    reason: body.reason,
+    moderatorPubkey: body.moderatorPubkey,
+    reportId: body.reportId,
+    reporterPubkey: body.reporterPubkey,
+  });
+  return jsonResponse(result, result.success ? 200 : result.conflict ? 409 : 500, corsHeaders);
 }
 
 async function handleGetAllDecisions(

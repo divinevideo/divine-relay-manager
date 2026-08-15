@@ -97,6 +97,8 @@ export function useAdminApi() {
     // Decision log
     logDecision: (params: Parameters<typeof adminApi.logDecision>[1]) =>
       adminApi.logDecision(apiUrl, params),
+    confirmAutoHide: (params: Parameters<typeof adminApi.confirmAutoHide>[1]) =>
+      adminApi.confirmAutoHide(apiUrl, params),
     getDecisions: (targetId: string) =>
       adminApi.getDecisions(apiUrl, targetId),
     getAllDecisions: () =>
