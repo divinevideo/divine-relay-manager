@@ -1026,19 +1026,12 @@ describe('ReportWatcher', () => {
       expect(await status.json()).toMatchObject({ status: { eventsAutoHidden: 0 } });
     });
 
-    it.each(['hide_event', 'delete_event'])('does not reverse an auto-hide raced by %s', async (action) => {
+    it('does not reverse an auto-hide when the latest human action is not a restore', async () => {
       mockEnv.DB = {
-        prepare: vi.fn().mockImplementation((sql: string) => ({
+        prepare: vi.fn().mockImplementation((_sql: string) => ({
           bind: vi.fn().mockReturnValue({
             run: mockDbRun,
-            // The generic pre-check saw no row. The post-ban direction query also
-            // returns no row because its SQL accepts restore actions only.
-            first: vi.fn().mockImplementation(() => {
-              if (sql.includes('last_human_action')) {
-                expect(sql).not.toContain(`'${action}'`);
-              }
-              return Promise.resolve(null);
-            }),
+            first: vi.fn().mockResolvedValue(null),
           }),
           run: mockDbRun,
         })),

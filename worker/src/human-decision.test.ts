@@ -132,6 +132,7 @@ describe('human decision persistence', () => {
       expect(upsert).toBeDefined();
       expect(upsert!.bindings).toContain('event_abc123');
       expect(upsert!.bindings).toContain('event');
+      expect(upsert!.sql).not.toContain('last_human_action');
     });
 
     it('should mark human reviewed for all moderator action types', async () => {

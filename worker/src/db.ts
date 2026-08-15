@@ -24,8 +24,8 @@ export async function ensureSchema(db: D1Database): Promise<void> {
   // Add reporter_pubkey to existing tables that were created without it
   try {
     await db.prepare(`ALTER TABLE moderation_decisions ADD COLUMN reporter_pubkey TEXT`).run();
-  } catch {
-    // Column already exists
+  } catch (error) {
+    if (!String(error).includes('duplicate column name')) throw error;
   }
 
   try {
@@ -55,8 +55,8 @@ export async function ensureSchema(db: D1Database): Promise<void> {
 
   try {
     await db.prepare(`ALTER TABLE moderation_targets ADD COLUMN last_human_action TEXT`).run();
-  } catch {
-    // Column already exists
+  } catch (error) {
+    if (!String(error).includes('duplicate column name')) throw error;
   }
 
   await db.prepare(`

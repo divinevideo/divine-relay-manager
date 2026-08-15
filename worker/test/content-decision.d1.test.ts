@@ -5,6 +5,7 @@ import { Miniflare } from 'miniflare';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import worker from '../src/index';
 import { ensureSchema } from '../src/db';
+import { hasLatestHumanRestore } from '../src/ReportWatcher';
 
 const TEST_NSEC = 'nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5';
 
@@ -73,5 +74,99 @@ describe('recorded content decisions on real D1', () => {
       ever_human_reviewed: 1,
       last_human_action: 'allow_event',
     });
+  });
+
+  it('compensates allow-direction actions but not hides or deletes', async () => {
+    const eventId = 'cd'.repeat(32);
+    const expected: Record<string, boolean> = {
+      allow_event: true,
+      restore_event: true,
+      auto_hide_restored: true,
+      reviewed: true,
+      dismissed: true,
+      'no-action': true,
+      'false-positive': true,
+      hide_event: false,
+      delete_event: false,
+    };
+
+    for (const [action, restores] of Object.entries(expected)) {
+      await DB.prepare(`
+        INSERT INTO moderation_targets (target_id, target_type, ever_human_reviewed, last_human_action)
+        VALUES (?, 'event', 1, ?)
+        ON CONFLICT(target_id) DO UPDATE SET last_human_action = excluded.last_human_action
+      `).bind(eventId, action).run();
+      expect(await hasLatestHumanRestore(DB, eventId), action).toBe(restores);
+    }
+  });
+
+  it('does not let a delayed audit write overwrite authoritative visibility intent', async () => {
+    const eventId = 'ef'.repeat(32);
+    await DB.prepare(`
+      INSERT INTO moderation_targets (target_id, target_type, ever_human_reviewed, last_human_action)
+      VALUES (?, 'event', 1, 'delete_event')
+    `).bind(eventId).run();
+
+    const response = await worker.fetch(
+      new Request('https://api-relay-prod.divine.video/api/decisions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Admin-Key': 'test-admin-key',
+        },
+        body: JSON.stringify({
+          targetType: 'event',
+          targetId: eventId,
+          action: 'restore_event',
+        }),
+      }),
+      {
+        NOSTR_NSEC: TEST_NSEC,
+        ALLOWED_ORIGINS: '',
+        ADMIN_API_KEY: 'test-admin-key',
+        DB,
+      } as never,
+      { waitUntil: vi.fn() } as unknown as ExecutionContext,
+    );
+
+    expect(response.status).toBe(200);
+    const row = await DB.prepare(`
+      SELECT ever_human_reviewed, last_human_action
+      FROM moderation_targets
+      WHERE target_id = ?
+    `).bind(eventId).first();
+    expect(row).toEqual({ ever_human_reviewed: 1, last_human_action: 'delete_event' });
+  });
+
+  it('adds last_human_action to a pre-upgrade moderation_targets table', async () => {
+    const legacyMf = new Miniflare({
+      modules: true,
+      script: 'export default { fetch() { return new Response("ok"); } };',
+      compatibilityDate: '2024-12-01',
+      compatibilityFlags: ['nodejs_compat'],
+      d1Databases: ['DB'],
+    });
+
+    try {
+      const legacyDb = (await legacyMf.getD1Database('DB')) as unknown as D1Database;
+      await legacyDb.prepare(`
+        CREATE TABLE moderation_targets (
+          target_id TEXT PRIMARY KEY,
+          target_type TEXT NOT NULL,
+          ever_human_reviewed INTEGER DEFAULT 0
+        )
+      `).run();
+
+      await ensureSchema(legacyDb);
+      const columns = await legacyDb.prepare(`PRAGMA table_info(moderation_targets)`).all<{ name: string }>();
+      expect(columns.results.map(column => column.name)).toContain('last_human_action');
+      await legacyDb.prepare(`
+        INSERT INTO moderation_targets (target_id, target_type, ever_human_reviewed, last_human_action)
+        VALUES ('legacy-event', 'event', 1, 'allow_event')
+      `).run();
+      expect(await hasLatestHumanRestore(legacyDb, 'legacy-event')).toBe(true);
+    } finally {
+      await legacyMf.dispose();
+    }
   });
 });

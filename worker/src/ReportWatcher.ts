@@ -29,6 +29,24 @@ export interface ReportWatcherEnv extends Nip86Env, KeycastEnv {
   TRUSTED_CLIENTS?: string;
 }
 
+export async function hasLatestHumanRestore(db: D1Database, targetEventId: string): Promise<boolean> {
+  const row = await db.prepare(`
+    SELECT 1 FROM moderation_targets
+    WHERE target_id = ?
+      AND ever_human_reviewed = 1
+      AND last_human_action IN (
+        'allow_event',
+        'restore_event',
+        'auto_hide_restored',
+        'reviewed',
+        'dismissed',
+        'no-action',
+        'false-positive'
+      )
+  `).bind(targetEventId).first();
+  return row !== null;
+}
+
 /**
  * Status of the ReportWatcher
  */
@@ -768,7 +786,7 @@ export class ReportWatcher implements DurableObject {
           await this.logDecision({
             targetType: 'event',
             targetId: targetEventId,
-            action: AUTO_HIDE_ACTION.skipped,
+            action: AUTO_HIDE_ACTION.reversed,
             reason: `${category}: raced human restore took precedence`,
             reportId: event.id,
             reporterPubkey: event.pubkey,
@@ -890,13 +908,7 @@ export class ReportWatcher implements DurableObject {
     if (!this.env.DB) return false;
 
     try {
-      const row = await this.env.DB.prepare(`
-        SELECT 1 FROM moderation_targets
-        WHERE target_id = ?
-          AND ever_human_reviewed = 1
-          AND last_human_action IN ('allow_event', 'restore_event', 'auto_hide_restored')
-      `).bind(targetEventId).first();
-      return row !== null;
+      return await hasLatestHumanRestore(this.env.DB, targetEventId);
     } catch (error) {
       console.error('[ReportWatcher] Failed to check latest human action:', error);
       return false;

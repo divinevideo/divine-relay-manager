@@ -846,7 +846,7 @@ async function handlePublish(
 
       if (status && targetType && targetId) {
         if (env.DB) {
-          await markHumanReviewed(env.DB, targetType, targetId, status);
+          await markHumanAction(env.DB, targetType, targetId, status);
         }
 
         // Use waitUntil to ensure sync completes even after response is sent
@@ -919,7 +919,7 @@ async function handleModerate(
         }
 
         if (env.DB) {
-          await markHumanReviewed(env.DB, 'event', body.eventId, body.action);
+          await markHumanAction(env.DB, 'event', body.eventId, body.action);
         }
 
         // Sync any linked Zendesk tickets
@@ -1034,7 +1034,7 @@ async function handleModerate(
           // statement hit it first. Same wrapper handleRelayRpc uses for the same reason.
           try {
             await ensureSchemaOnce(env.DB);
-            recorded = await markHumanReviewed(env.DB, 'event', eventId, body.action);
+            recorded = await markHumanAction(env.DB, 'event', eventId, body.action);
           } catch (err) {
             console.error(`[handleModerate] ${body.action} schema bootstrap failed:`, err);
           }
@@ -1099,7 +1099,7 @@ async function handleModerate(
           return jsonResponse({ success: false, error: rpcResult.error || 'banpubkey RPC failed' }, 500, corsHeaders);
         }
         if (env.DB) {
-          await markHumanReviewed(env.DB, 'pubkey', body.pubkey, body.action);
+          await markHumanAction(env.DB, 'pubkey', body.pubkey, body.action);
         }
         try {
           await syncZendeskAfterAction(env, body.action, 'pubkey', body.pubkey, getPublicKey(secretKey));
@@ -1158,7 +1158,7 @@ async function handleModerate(
           return jsonResponse({ success: false, error: rpcResult.error || 'unbanpubkey RPC failed' }, 500, corsHeaders);
         }
         if (env.DB) {
-          await markHumanReviewed(env.DB, 'pubkey', body.pubkey, body.action);
+          await markHumanAction(env.DB, 'pubkey', body.pubkey, body.action);
         }
         try {
           await syncZendeskAfterAction(env, body.action, 'pubkey', body.pubkey, getPublicKey(secretKey));
@@ -1528,7 +1528,7 @@ Respond with JSON only:
 // ONLY to record the decision, so for those a swallowed failure reported as success is
 // the bug itself -- ReportWatcher would be free to undo a moderator mid-review while
 // the API said the decision was recorded.
-async function markHumanReviewed(
+async function markHumanAction(
   db: D1Database,
   targetType: string,
   targetId: string,
@@ -1542,6 +1542,20 @@ async function markHumanReviewed(
         ever_human_reviewed = 1,
         last_human_action = excluded.last_human_action
     `).bind(targetId, targetType, action).run();
+    return true;
+  } catch (error) {
+    console.error('[markHumanAction] Failed to update moderation_targets:', error);
+    return false;
+  }
+}
+
+async function markHumanReviewed(db: D1Database, targetType: string, targetId: string): Promise<boolean> {
+  try {
+    await db.prepare(`
+      INSERT INTO moderation_targets (target_id, target_type, ever_human_reviewed)
+      VALUES (?, ?, 1)
+      ON CONFLICT(target_id) DO UPDATE SET ever_human_reviewed = 1
+    `).bind(targetId, targetType).run();
     return true;
   } catch (error) {
     console.error('[markHumanReviewed] Failed to update moderation_targets:', error);
@@ -1586,7 +1600,9 @@ async function handleLogDecision(
       body.reportId || null
     ).run();
 
-    await markHumanReviewed(env.DB, body.targetType, body.targetId, body.action);
+    // This endpoint is an append-only audit write. Detached clients can deliver it
+    // after a newer enforcement action, so it must not redefine visibility intent.
+    await markHumanReviewed(env.DB, body.targetType, body.targetId);
 
     return new Response(JSON.stringify({ success: true }), {
       status: 200,
