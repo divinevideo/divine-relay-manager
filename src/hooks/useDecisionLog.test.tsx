@@ -48,4 +48,14 @@ describe('useDecisionLog auto-hide state', () => {
     expect(result.current.isPendingReview).toBe(false);
     expect(result.current.isAutoHideRestored).toBe(true);
   });
+
+  it('keeps failed restore compensation pending without permitting confirmation', async () => {
+    getDecisions.mockResolvedValue([{ action: 'auto_hide_restore_failed' }]);
+
+    const { result } = renderHook(() => useDecisionLog('event-id'), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    expect(result.current.isPendingReview).toBe(true);
+    expect(result.current.isAutoHideRestoreFailed).toBe(true);
+  });
 });

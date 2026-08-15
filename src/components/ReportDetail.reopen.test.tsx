@@ -57,6 +57,7 @@ const decisionLog = vi.hoisted(() => ({
   isDeleted: false,
   isAutoHidden: false,
   isAutoHideRestored: false,
+  isAutoHideRestoreFailed: false,
   decisions: [],
   latestDecision: null,
   refetch: vi.fn(),
@@ -131,6 +132,7 @@ beforeEach(() => {
   ctx.targetType = 'event';
   ctx.reportedPubkey = REPORTED_PUBKEY;
   decisionLog.isPendingReview = false;
+  decisionLog.isAutoHideRestoreFailed = false;
   api.deleteDecisions.mockResolvedValue({ deleted: 2, labelCleanupFailed: false });
   api.logDecision.mockResolvedValue(undefined);
 });
@@ -184,6 +186,16 @@ describe('ReportDetail reopen reporting', () => {
     ));
     expect(api.logDecision).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'auto_hide_restored' }));
     expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Content restored' }));
+  });
+
+  it('offers only restore when automatic restore compensation failed', () => {
+    decisionLog.isPendingReview = true;
+    decisionLog.isAutoHideRestoreFailed = true;
+    renderDetail();
+
+    expect(screen.getByRole('button', { name: 'Restore Content' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Confirm Hide' })).not.toBeInTheDocument();
+    expect(screen.getByText(/automatic restore failed/i)).toBeInTheDocument();
   });
 
   it('keeps the report open and raises a persistent warning when dismissal reconciliation fails', async () => {

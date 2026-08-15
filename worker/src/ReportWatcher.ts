@@ -1097,7 +1097,7 @@ export class ReportWatcher implements DurableObject {
         await this.logDecision({
           targetType: 'event',
           targetId: targetEventId,
-          action: AUTO_HIDE_ACTION.failed,
+          action: AUTO_HIDE_ACTION.restoreFailed,
           reason: `${category}: failed to reverse raced human restore: ${restore.error}`,
           reportId: event.id,
           reporterPubkey: event.pubkey,

@@ -551,7 +551,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     // Decisions arrive newest first, so the first state transition is authoritative.
     for (const [key, actions] of targetDecisions) {
       const latestAction = getLatestAutoHideState(actions);
-      if (latestAction === AUTO_HIDE_ACTION.hidden || latestAction === AUTO_HIDE_ACTION.unresolved) {
+      if (latestAction === AUTO_HIDE_ACTION.hidden
+        || latestAction === AUTO_HIDE_ACTION.unresolved
+        || latestAction === AUTO_HIDE_ACTION.restoreFailed) {
         pending.add(key);
       }
     }

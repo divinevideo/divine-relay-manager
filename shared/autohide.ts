@@ -4,6 +4,7 @@ export const AUTO_HIDE_ACTION = {
   skipped: 'auto_hide_skipped',
   failed: 'auto_hide_failed',
   unresolved: 'auto_hide_unresolved',
+  restoreFailed: 'auto_hide_restore_failed',
   reversed: 'auto_hide_reversed',
   restored: 'auto_hide_restored',
   confirmed: 'auto_hide_confirmed',
@@ -15,6 +16,7 @@ export const AUTO_HIDE_ACTIONS = [
   AUTO_HIDE_ACTION.skipped,
   AUTO_HIDE_ACTION.failed,
   AUTO_HIDE_ACTION.unresolved,
+  AUTO_HIDE_ACTION.restoreFailed,
   AUTO_HIDE_ACTION.reversed,
   AUTO_HIDE_ACTION.restored,
   AUTO_HIDE_ACTION.confirmed,
@@ -25,6 +27,7 @@ export type AutoHideAction = typeof AUTO_HIDE_ACTIONS[number];
 export const AUTO_HIDE_STATE_ACTIONS = [
   AUTO_HIDE_ACTION.hidden,
   AUTO_HIDE_ACTION.unresolved,
+  AUTO_HIDE_ACTION.restoreFailed,
   AUTO_HIDE_ACTION.confirmed,
   AUTO_HIDE_ACTION.restored,
   AUTO_HIDE_ACTION.reversed,

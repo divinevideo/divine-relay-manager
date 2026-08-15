@@ -33,7 +33,10 @@ export function useDecisionLog(targetId: string | null | undefined) {
 
   // Auto-hide specific checks
   const latestAutoHideAction = getLatestAutoHideState(data?.map(d => d.action) ?? []);
-  const isAutoHidden = latestAutoHideAction === AUTO_HIDE_ACTION.hidden || latestAutoHideAction === AUTO_HIDE_ACTION.unresolved;
+  const isAutoHideRestoreFailed = latestAutoHideAction === AUTO_HIDE_ACTION.restoreFailed;
+  const isAutoHidden = latestAutoHideAction === AUTO_HIDE_ACTION.hidden
+    || latestAutoHideAction === AUTO_HIDE_ACTION.unresolved
+    || isAutoHideRestoreFailed;
   const isAutoHideConfirmed = latestAutoHideAction === AUTO_HIDE_ACTION.confirmed;
   const isAutoHideRestored = latestAutoHideAction === AUTO_HIDE_ACTION.restored || latestAutoHideAction === AUTO_HIDE_ACTION.reversed;
   const isPendingReview = isAutoHidden;
@@ -50,6 +53,7 @@ export function useDecisionLog(targetId: string | null | undefined) {
     isAutoHidden,
     isAutoHideConfirmed,
     isAutoHideRestored,
+    isAutoHideRestoreFailed,
     isPendingReview,
     isLoading,
     error,

@@ -536,12 +536,14 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                     Auto-Hidden — Pending Review
                   </p>
                   <p className="text-sm text-orange-600 dark:text-orange-400">
-                    This content was automatically hidden based on a report. Please review and confirm or restore.
+                    {decisionLog.isAutoHideRestoreFailed
+                      ? 'An automatic restore failed. Retry restoring this content.'
+                      : 'This content was automatically hidden based on a report. Please review and confirm or restore.'}
                   </p>
                 </div>
               </div>
               <div className="flex gap-2">
-                <Tooltip>
+                {!decisionLog.isAutoHideRestoreFailed && <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
                       variant="default"
@@ -563,7 +565,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                   <TooltipContent side="bottom" className="max-w-xs">
                     <p>Confirm this auto-hide decision. The content will remain hidden.</p>
                   </TooltipContent>
-                </Tooltip>
+                </Tooltip>}
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
