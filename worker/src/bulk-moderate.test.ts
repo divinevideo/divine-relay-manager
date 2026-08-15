@@ -447,14 +447,14 @@ describe('async bulk job model', () => {
     jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'delete-all', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', created_at: 't', updated_at: 't' });
 
     await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'delete-all' }, mockEnv);
-    expect(vi.mocked(banEvent)).toHaveBeenCalledTimes(1);
-    expect(sent[0]?.eventIds).toHaveLength(29);
+    expect(vi.mocked(banEvent)).toHaveBeenCalledTimes(20);
+    expect(sent[0]?.eventIds).toHaveLength(10);
 
     let msg: BulkJobMessage | undefined = sent[0];
     let iterations = 1;
-    while (msg && iterations++ < 40) { sent.length = 0; await processBulkJob(msg, mockEnv); msg = sent[0]; }
+    while (msg && iterations++ < 10) { sent.length = 0; await processBulkJob(msg, mockEnv); msg = sent[0]; }
 
-    expect(iterations).toBe(31); // thirty event messages -> media chunk
+    expect(iterations).toBe(3); // two bounded event batches -> media chunk
     const row = jobDb.rows.get(jobId)!;
     expect(row.status).toBe('done');
     expect(row.events_processed).toBe(30);
@@ -488,12 +488,12 @@ describe('async bulk job model', () => {
 
     let msg: BulkJobMessage | undefined = { jobId, pubkey: 'a'.repeat(64), action: 'delete-all' };
     let iterations = 0;
-    while (msg && iterations++ < 220) { sent.length = 0; await processBulkJob(msg, mockEnv); msg = sent[0]; }
+    while (msg && iterations++ < 20) { sent.length = 0; await processBulkJob(msg, mockEnv); msg = sent[0]; }
 
     const row = jobDb.rows.get(jobId)!;
     expect(row.status).toBe('done');
     expect(row.events_processed).toBe(200);                 // one chunk's worth; the rest unreachable
-    expect(iterations).toBe(202);                           // 200 events + empty cursor check + media
+    expect(iterations).toBe(12);                            // ten event batches + empty cursor check + media
     expect(JSON.parse(row.failures as string).some((f: string) => /share one timestamp/.test(f))).toBe(true);
   });
 
@@ -509,10 +509,39 @@ describe('async bulk job model', () => {
     const firstContinuation = sent[0];
     await processBulkJob(message, mockEnv);
 
-    expect(vi.mocked(banEvent)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(banEvent)).toHaveBeenCalledTimes(2);
     expect(sent).toEqual([firstContinuation]);
     expect(jobDb.rows.get(jobId)?.version).toBe(1);
     expect(firstContinuation.version).toBe(1);
+  });
+
+  it('does not fail a job when the delivery never acquired its version claim', async () => {
+    const jobId = 'job-unclaimed-error';
+    jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'delete-all', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, version: 0, created_at: 't', updated_at: 't' });
+    const prepare = jobDb.db.prepare.bind(jobDb.db);
+    const db = {
+      prepare(sql: string) {
+        const statement = prepare(sql);
+        if (/UPDATE bulk_jobs SET status = \?, updated_at = \?, version = version \+ 1/i.test(sql)) {
+          return {
+            bind: (..._args: unknown[]) => ({
+              run: async () => { throw new Error('claim transport failed'); },
+            }),
+          };
+        }
+        return statement;
+      },
+    } as unknown as D1Database;
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await processBulkJob(
+      { jobId, pubkey: 'a'.repeat(64), action: 'delete-all', version: 0 },
+      { ...mockEnv, DB: db },
+    );
+
+    expect(jobDb.rows.get(jobId)?.status).toBe('pending');
+    expect(jobDb.rows.get(jobId)?.version).toBe(0);
+    expect(errorSpy).toHaveBeenCalledWith('[bulk-job] failed before claiming chunk', jobId, expect.any(Error));
   });
 
   it('media phase fails closed when the funnelcake cursor never advances (repeats)', async () => {

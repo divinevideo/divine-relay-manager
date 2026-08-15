@@ -87,7 +87,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const {
-    deleteEvent, hideEvent, restoreEvent, markAsReviewed, logDecision, deleteDecisions,
+    deleteEvent, restoreEvent, markAsReviewed, logDecision, deleteDecisions,
   } = useAdminApi();
   const { getModeratorPubkey } = useCurrentUser();
 
@@ -223,7 +223,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
       queryClient.invalidateQueries({ queryKey: ['resolution-labels'] });
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
       decisionLog.refetch();
-      if (result.reconciled === false) {
+      if (result.recorded !== true || result.reconciled === false) {
         toast({
           title: 'Resolution saved; visibility needs attention',
           description: result.recorded
@@ -369,14 +369,6 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   const confirmAutoHideMutation = useMutation({
     mutationFn: async ({ targetId, targetType }: { targetId: string; targetType: 'event' | 'pubkey' }) => {
       const moderator = getModeratorPubkey(); // snapshot identity at action start
-      if (targetType === 'event') {
-        // Persist hide direction through the visibility coordinator before the
-        // confirmation audit, so a later dismissal cannot restore this event.
-        const result = await hideEvent(targetId, 'Auto-hide confirmed by moderator');
-        if (result.recorded !== true) {
-          throw new Error('Content remains hidden, but its confirmed visibility state was not recorded. Retry this action.');
-        }
-      }
       await logDecision({
         targetType,
         targetId,

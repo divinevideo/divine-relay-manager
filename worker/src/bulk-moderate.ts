@@ -19,9 +19,9 @@ const RELAY_QUERY_PAGE_SIZE = 500;
 const RELAY_QUERY_MAX_PAGES = 100; // safety bound (~50k events); logged if hit, never silent
 const RELAY_QUERY_TIMEOUT_MS = 10000; // per-page (reset each page)
 const EVENT_CHUNK_SIZE = 200; // relay enumeration page size
-// The singleton gate is shared with interactive moderation. One mutation per
-// Queue message plus max_concurrency=1 keeps bulk from building a gate backlog.
-const SERIALIZED_EVENT_BATCH_SIZE = 1;
+// max_concurrency=1 prevents multiple bulk consumers from building a gate
+// backlog; bounded batches reduce continuation loss and Queue overhead.
+const SERIALIZED_EVENT_BATCH_SIZE = 20;
 
 export interface BulkModerateEnv extends Nip86Env, ZendeskSyncEnv {
   DB?: D1Database;
@@ -344,6 +344,7 @@ function mergeFailures(
 export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv): Promise<void> {
   if (!env.DB) throw new Error('bulk_jobs storage (D1) is not bound');
   const db = env.DB;
+  let ownedVersion: number | undefined;
   try {
     await ensureBulkJobsTable(db);
     const row = await db.prepare('SELECT * FROM bulk_jobs WHERE job_id = ?').bind(msg.jobId).first<BulkJobRow>();
@@ -362,6 +363,7 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
       `UPDATE bulk_jobs SET status = ?, updated_at = ?, version = version + 1 WHERE version = ? AND job_id = ? AND status IN ('pending','running')`
     ).bind('running', new Date().toISOString(), expectedVersion, msg.jobId).run();
     if (!claim.meta?.changes) return;
+    ownedVersion = claimedVersion;
 
     const moderatorPubkey = await getAdminPubkey(env);
 
@@ -476,8 +478,12 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
         cur ? Number(cur.failures_dropped) || 0 : 0,
         [`job:${formatError(error)}`],
       );
-      await db.prepare(`UPDATE bulk_jobs SET status = ?, failures = ?, failures_dropped = ?, updated_at = ? WHERE job_id = ? AND status IN ('pending','running')`)
-        .bind('failed', JSON.stringify(merged.list), merged.dropped, new Date().toISOString(), msg.jobId).run();
+      if (ownedVersion === undefined) {
+        console.error('[bulk-job] failed before claiming chunk', msg.jobId, error);
+        return;
+      }
+      await db.prepare(`UPDATE bulk_jobs SET status = ?, failures = ?, failures_dropped = ?, updated_at = ? WHERE version = ? AND job_id = ? AND status = 'running'`)
+        .bind('failed', JSON.stringify(merged.list), merged.dropped, new Date().toISOString(), ownedVersion, msg.jobId).run();
     } catch (writeErr) {
       console.error('[bulk-job] failed to record terminal state for', msg.jobId, writeErr);
     }

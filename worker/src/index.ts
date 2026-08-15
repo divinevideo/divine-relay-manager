@@ -856,9 +856,11 @@ async function handlePublish(
               humanAction: status,
             })
             : { success: false, recorded: false, error: 'Moderation database is not configured' };
-          resolutionVisibility = result;
+          resolutionVisibility = !result.recorded && !result.error
+            ? { ...result, error: 'Human-review state was not recorded' }
+            : result;
           if (!result.success || !result.recorded) {
-            console.error('[handlePublish] Resolution label was published but visibility reconciliation failed:', result.error);
+            console.error('[handlePublish] Resolution label was published but visibility reconciliation failed:', resolutionVisibility.error);
           }
         } else if (env.DB) {
           if (status === 'reviewed') {
@@ -894,8 +896,8 @@ async function handlePublish(
     event,
     ...(resolutionVisibility ? {
       recorded: resolutionVisibility.recorded,
-      reconciled: resolutionVisibility.success,
-      error: resolutionVisibility.error,
+      reconciled: resolutionVisibility.success && resolutionVisibility.recorded === true,
+      reconciliationError: resolutionVisibility.error,
     } : {}),
   }, 200, corsHeaders);
 }

@@ -29,7 +29,6 @@ const ctx = vi.hoisted(() => ({ targetValue: 'c'.repeat(64), reportedPubkey: 'd'
 
 const api = vi.hoisted(() => ({
   deleteEvent: vi.fn(),
-  hideEvent: vi.fn(),
   restoreEvent: vi.fn(),
   markAsReviewed: vi.fn(),
   logDecision: vi.fn(),
@@ -155,19 +154,16 @@ function renderDetail(onDismiss?: () => void) {
 const clickReopen = () => fireEvent.click(screen.getByRole('button', { name: /reopen/i }));
 
 describe('ReportDetail reopen reporting', () => {
-  it('does not confirm an auto-hide when the coordinated hide state was not recorded', async () => {
+  it('confirms an auto-hide without repeating the relay mutation', async () => {
     decisionLog.isPendingReview = true;
-    api.hideEvent.mockResolvedValue({ success: true, recorded: false });
     renderDetail();
 
     fireEvent.click(screen.getByRole('button', { name: 'Confirm Hide' }));
 
-    await waitFor(() => expect(api.hideEvent).toHaveBeenCalled());
-    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({
-      title: 'Failed to confirm auto-hide',
-      variant: 'destructive',
+    await waitFor(() => expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'auto_hide_confirmed',
     })));
-    expect(api.logDecision).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'auto_hide_confirmed' }));
+    expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Auto-hide confirmed' }));
   });
 
   it('keeps the report open and raises a persistent warning when dismissal reconciliation fails', async () => {
@@ -188,6 +184,27 @@ describe('ReportDetail reopen reporting', () => {
     const warning = toast.mock.calls.find(([arg]) => arg.title === 'Resolution saved; visibility needs attention')?.[0];
     expect(warning).toMatchObject({ variant: 'destructive', duration: Infinity });
     expect(warning.description).toMatch(/could not be restored/i);
+    expect(onDismiss).not.toHaveBeenCalled();
+  });
+
+  it('keeps the report open when visibility changed but the human-review mark failed', async () => {
+    api.markAsReviewed.mockResolvedValue({
+      success: true,
+      recorded: false,
+      reconciled: true,
+    });
+    const onDismiss = vi.fn();
+    renderDetail(onDismiss);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss Report' }));
+    const dialog = await screen.findByRole('alertdialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Dismiss Report' }));
+
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'Resolution saved; visibility needs attention',
+      variant: 'destructive',
+      duration: Infinity,
+    })));
     expect(onDismiss).not.toHaveBeenCalled();
   });
 
