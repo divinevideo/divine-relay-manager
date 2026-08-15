@@ -83,13 +83,14 @@ describe('verifyNip98Auth host allowlist', () => {
     expect(res.valid).toBe(false);
   });
 
-  it('SCOPE BOUNDARY: a Zendesk-style call (no allowedHosts) rejects the public host', async () => {
-    // Mirrors the Zendesk pre-auth call site (index.ts:2442), which passes NO third arg.
+  it('default empty allowlist rejects the public host', async () => {
+    // Omitting the third arg keeps verifyNip98Auth strict unless a caller opts
+    // into host relaxation with an explicit allowlist.
     const evt = signEvent({ u: PUBLIC, method: 'GET' });
     const res = await verifyNip98Auth(reqAtOwnHost(toHeader(evt)), OWN);
     expect(res.valid).toBe(false);
     // Mutation check: temporarily pass [PUBLIC_HOST] as the 3rd arg here and this
-    // assertion flips to valid — proving the test detects the scope boundary.
+    // assertion flips to valid, proving the default behavior stays strict.
   });
 
   it('empty/unset allowlist ⇒ own host still valid, public host rejected', async () => {

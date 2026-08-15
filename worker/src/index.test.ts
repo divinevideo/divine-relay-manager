@@ -1795,13 +1795,12 @@ describe('mobile NIP-98 endpoint host allowlist (#173)', () => {
   });
 });
 
-describe('zendesk pre-auth NIP-98 scope boundary (#173)', () => {
+describe('zendesk pre-auth canonical public host', () => {
   const OWN_HOST_PREAUTH_URL = 'https://api-relay-prod.divine.video/api/zendesk/pre-auth';
   const PUBLIC_HOST_PREAUTH_URL = 'https://api.divine.video/api/zendesk/pre-auth';
 
-  // Tolerates ensureSchemaOnce's DDL (db.ts: a sequence of `.prepare(sql).run()`
-  // calls, no `.bind()`/`.first()` needed for schema setup) as async no-ops. The
-  // pre-auth nonce INSERT is never reached in this test — auth fails first.
+  // Tolerates ensureSchemaOnce's DDL and the pre-auth nonce INSERT as async
+  // no-ops; the response proves canonical-host auth reached token issuance.
   function makeZendeskDb() {
     const statement = (): { bind: () => unknown; run: () => Promise<{ success: boolean }>; first: () => Promise<null> } => ({
       bind: () => statement(),
@@ -1811,24 +1810,26 @@ describe('zendesk pre-auth NIP-98 scope boundary (#173)', () => {
     return { prepare: statement };
   }
 
-  // Proves the Zendesk pre-auth route stays same-host-only even with the mobile
-  // allowlist configured (Global Constraint 4: Zendesk is out of #173's scope).
-  it('rejects a public-host-signed request even when the mobile allowlist is configured (scope boundary)', async () => {
+  function preAuthRequest(signedUrl: string): Request {
     const sk = generateSecretKey();
     const evt = finalizeEvent(
       {
         kind: 27235,
         content: '',
-        tags: [['u', PUBLIC_HOST_PREAUTH_URL], ['method', 'POST']],
+        tags: [['u', signedUrl], ['method', 'POST']],
         created_at: Math.floor(Date.now() / 1000),
       },
       sk,
     );
+    return new Request(OWN_HOST_PREAUTH_URL, {
+      method: 'POST',
+      headers: { Authorization: 'Nostr ' + btoa(JSON.stringify(evt)) },
+    });
+  }
+
+  it('accepts a public-host-signed request when the host is allowlisted', async () => {
     const res = await worker.fetch(
-      new Request(OWN_HOST_PREAUTH_URL, {
-        method: 'POST',
-        headers: { Authorization: 'Nostr ' + btoa(JSON.stringify(evt)) },
-      }),
+      preAuthRequest(PUBLIC_HOST_PREAUTH_URL),
       {
         ZENDESK_PREAUTH_SECRET: 'test-secret',
         DB: makeZendeskDb(),
@@ -1836,7 +1837,37 @@ describe('zendesk pre-auth NIP-98 scope boundary (#173)', () => {
       } as never,
       ctx,
     );
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({
+      success: true,
+      token: expect.any(String),
+    });
+  });
+
+  it('rejects a public-host-signed request when the host is not allowlisted', async () => {
+    const res = await worker.fetch(
+      preAuthRequest(PUBLIC_HOST_PREAUTH_URL),
+      {
+        ZENDESK_PREAUTH_SECRET: 'test-secret',
+        DB: makeZendeskDb(),
+      } as never,
+      ctx,
+    );
+
     expect(res.status).toBe(401);
+  });
+
+  it('keeps accepting an own-host-signed request without an allowlist', async () => {
+    const res = await worker.fetch(
+      preAuthRequest(OWN_HOST_PREAUTH_URL),
+      {
+        ZENDESK_PREAUTH_SECRET: 'test-secret',
+        DB: makeZendeskDb(),
+      } as never,
+      ctx,
+    );
+
+    expect(res.status).toBe(200);
   });
 });
 
