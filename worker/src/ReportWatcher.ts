@@ -1070,7 +1070,7 @@ export class ReportWatcher implements DurableObject {
         await this.logDecision({
           targetType: 'event',
           targetId: targetEventId,
-          action: AUTO_HIDE_ACTION.failed,
+          action: AUTO_HIDE_ACTION.unresolved,
           reason: `${category}: human restore state unavailable after relay ban`,
           reportId: event.id,
           reporterPubkey: event.pubkey,

@@ -2051,7 +2051,7 @@ describe('ReportWatcher', () => {
 
       const methods = mockFetch.mock.calls.map(([, options]) => JSON.parse(options.body).method);
       expect(methods).toEqual(['banevent']);
-      expect(decisions).toContain('auto_hide_failed');
+      expect(decisions).toContain('auto_hide_unresolved');
       expect(decisions).not.toContain('auto_hidden');
       expect(await mockState.storage.get(`event-visibility:${eventId}`)).toBe('unresolved-hide');
       const status = await watcher.fetch(new Request('https://do/status'));

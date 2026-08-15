@@ -3,6 +3,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { useAdminApi } from "@/hooks/useAdminApi";
+import { AUTO_HIDE_ACTION } from "@/lib/constants";
 
 export function useDecisionLog(targetId: string | null | undefined) {
   const { getDecisions } = useAdminApi();
@@ -31,11 +32,17 @@ export function useDecisionLog(targetId: string | null | undefined) {
   const isFalsePositive = data?.some(d => d.action === 'false_positive' || d.action === 'false-positive');
 
   // Auto-hide specific checks
-  const isAutoHidden = data?.some(d => d.action === 'auto_hidden');
-  const isAutoHideConfirmed = data?.some(d => d.action === 'auto_hide_confirmed');
-  const isAutoHideRestored = data?.some(d => d.action === 'auto_hide_restored');
-  // Pending review = auto-hidden but not yet confirmed or restored
-  const isPendingReview = isAutoHidden && !isAutoHideConfirmed && !isAutoHideRestored;
+  const latestAutoHideAction = data?.find(d => ([
+    AUTO_HIDE_ACTION.hidden,
+    AUTO_HIDE_ACTION.unresolved,
+    AUTO_HIDE_ACTION.confirmed,
+    AUTO_HIDE_ACTION.restored,
+    AUTO_HIDE_ACTION.reversed,
+  ] as readonly string[]).includes(d.action))?.action;
+  const isAutoHidden = latestAutoHideAction === AUTO_HIDE_ACTION.hidden || latestAutoHideAction === AUTO_HIDE_ACTION.unresolved;
+  const isAutoHideConfirmed = latestAutoHideAction === AUTO_HIDE_ACTION.confirmed;
+  const isAutoHideRestored = latestAutoHideAction === AUTO_HIDE_ACTION.restored || latestAutoHideAction === AUTO_HIDE_ACTION.reversed;
+  const isPendingReview = isAutoHidden;
 
   return {
     decisions: data || [],

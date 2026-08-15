@@ -42,6 +42,7 @@ import { AUTO_HIDE_ACTION } from '../../shared/autohide';
 
 const COORDINATED_AUTO_HIDE_ACTIONS = new Set<string>([
   AUTO_HIDE_ACTION.hidden,
+  AUTO_HIDE_ACTION.unresolved,
   AUTO_HIDE_ACTION.reversed,
   AUTO_HIDE_ACTION.restored,
   AUTO_HIDE_ACTION.confirmed,
