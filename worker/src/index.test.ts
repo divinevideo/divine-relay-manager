@@ -766,9 +766,9 @@ describe('relay-rpc account-state side effects', () => {
   });
 
   it.each([
-    ['banevent', 'hide', 'hide_event'],
-    ['allowevent', 'allow', 'allow_event'],
-  ] as const)('raw %s persists its visibility direction inside the coordinator', async (method, relayAction, humanAction) => {
+    ['banevent', 'hide'],
+    ['allowevent', 'allow'],
+  ] as const)('raw %s coordinates visibility without asserting human review', async (method, relayAction) => {
     const order: string[] = [];
     const fetchSpy = makeOrderedRelaySpy(order);
     const { env, visibilityOperations, markedAction } = makeSqlRecordingEnv(order);
@@ -788,9 +788,8 @@ describe('relay-rpc account-state side effects', () => {
       eventId: VALID_EVENT_ID,
       relayAction,
       reason: 'manual action',
-      humanAction,
     }]);
-    expect(markedAction()).toBe(humanAction);
+    expect(markedAction()).toBeNull();
     fetchSpy.mockRestore();
   });
 

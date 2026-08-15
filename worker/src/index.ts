@@ -1258,7 +1258,6 @@ async function handleRelayRpc(
       eventId: target,
       relayAction: eventVisibilityAction,
       reason: body.params?.[1] ? String(body.params[1]) : undefined,
-      humanAction: eventVisibilityAction === 'hide' ? 'hide_event' : 'allow_event',
     })
     : await callNip86Rpc(body.method, body.params || [], env);
 

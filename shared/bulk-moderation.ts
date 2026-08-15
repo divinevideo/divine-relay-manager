@@ -40,6 +40,9 @@ export interface BulkJobMessage {
   phase?: BulkJobPhase;
   cursor?: string;
   mediaPage?: number;
+  // Event ids left from the current relay page. Carrying them in the next
+  // message bounds serialized relay mutations without advancing the cursor.
+  eventIds?: string[];
 }
 
 export interface BulkJob {

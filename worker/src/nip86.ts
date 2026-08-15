@@ -139,12 +139,20 @@ export async function callNip86Rpc(
   }
 
   // Call relay RPC
-  const response = await fetch(httpUrl, {
-    method: 'POST',
-    headers,
-    body: payload,
-    signal: AbortSignal.timeout(NIP86_RPC_TIMEOUT_MS),
-  });
+  let response: Response;
+  try {
+    response = await fetch(httpUrl, {
+      method: 'POST',
+      headers,
+      body: payload,
+      signal: AbortSignal.timeout(NIP86_RPC_TIMEOUT_MS),
+    });
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Relay request failed',
+    };
+  }
 
   if (!response.ok) {
     return {

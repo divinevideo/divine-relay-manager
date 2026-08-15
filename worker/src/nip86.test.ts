@@ -198,6 +198,15 @@ describe('callNip86Rpc', () => {
     expect(timeoutSpy).toHaveBeenCalledWith(15_000);
     expect(mockFetch.mock.calls[0][1].signal).toBe(signal);
   });
+
+  it('returns a structured failure when the relay request rejects', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new DOMException('timed out', 'TimeoutError')));
+
+    await expect(callNip86Rpc('listbannedevents', [], mockEnv)).resolves.toEqual({
+      success: false,
+      error: 'timed out',
+    });
+  });
 });
 
 describe('convenience methods', () => {

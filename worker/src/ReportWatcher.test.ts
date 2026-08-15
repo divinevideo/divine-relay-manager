@@ -227,6 +227,83 @@ describe('ReportWatcher', () => {
       expect(reviewUpsert).not.toContain('last_human_action');
     });
 
+    it.each([
+      ['an active auto-hide', null, 'auto_hidden', 1],
+      ['a later manual delete', 'delete_event', 'auto_hidden', 0],
+      ['an already restored auto-hide', null, 'auto_hide_restored', 0],
+    ] as const)('dismisses %s without overriding a newer visibility decision', async (_case, lastHumanAction, autoHideAction, expectedAllows) => {
+      const statements: string[] = [];
+      const db = {
+        prepare: vi.fn().mockImplementation((sql: string) => {
+          statements.push(sql);
+          return {
+            bind: vi.fn().mockReturnValue({
+              first: vi.fn().mockResolvedValue(sql.includes('AS auto_hide_action')
+                ? { last_human_action: lastHumanAction, auto_hide_action: autoHideAction }
+                : null),
+              run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 1 } }),
+            }),
+            run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 0 } }),
+          };
+        }),
+      } as unknown as D1Database;
+      mockState = createMockState();
+      mockEnv = createMockEnv({ DB: db });
+      watcher = new ReportWatcher(mockState, mockEnv);
+      const relayFetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ result: true }), { status: 200 }));
+      vi.stubGlobal('fetch', relayFetch);
+
+      const response = await watcher.fetch(new Request('https://do/event-visibility', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          eventId: 'ac'.repeat(32),
+          relayAction: 'review',
+          humanAction: 'false-positive',
+        }),
+      }));
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ success: true, recorded: true });
+      expect(relayFetch).toHaveBeenCalledTimes(expectedAllows);
+      expect(statements.some(sql => sql.includes('auto_hide_action'))).toBe(true);
+      expect(statements.filter(sql => sql.includes('INSERT INTO moderation_decisions'))).toHaveLength(expectedAllows);
+    });
+
+    it('still records the review when active auto-hide state cannot be read', async () => {
+      const db = {
+        prepare: vi.fn().mockImplementation((sql: string) => ({
+          bind: vi.fn().mockReturnValue({
+            first: vi.fn().mockImplementation(async () => {
+              if (sql.includes('AS auto_hide_action')) throw new Error('state read failed');
+              return null;
+            }),
+            run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 1 } }),
+          }),
+          run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 0 } }),
+        })),
+      } as unknown as D1Database;
+      mockState = createMockState();
+      mockEnv = createMockEnv({ DB: db });
+      watcher = new ReportWatcher(mockState, mockEnv);
+      const relayFetch = vi.fn();
+      vi.stubGlobal('fetch', relayFetch);
+
+      const response = await watcher.fetch(new Request('https://do/event-visibility', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          eventId: 'ad'.repeat(32),
+          relayAction: 'review',
+          humanAction: 'dismissed',
+        }),
+      }));
+
+      expect(response.status).toBe(502);
+      expect(await response.json()).toEqual({ success: false, error: 'state read failed', recorded: true });
+      expect(relayFetch).not.toHaveBeenCalled();
+    });
+
     it('serializes a newer human delete after auto-hide compensation', async () => {
       const order: string[] = [];
       const db = {
@@ -1237,7 +1314,7 @@ describe('ReportWatcher', () => {
       expect(mockFetch).toHaveBeenCalledTimes(1);
     });
 
-    it('should proceed with auto-hide when hasHumanResolution query fails (fail open)', async () => {
+    it('should skip auto-hide when hasHumanResolution query fails', async () => {
       // Mock D1: moderation_targets query throws, moderation_decisions returns null
       mockEnv.DB = {
         prepare: vi.fn().mockImplementation((_sql: string) => ({
@@ -1273,8 +1350,8 @@ describe('ReportWatcher', () => {
       ws!.simulateMessage(JSON.stringify(['EVENT', 'auto-hide-reports', reportEvent]));
       await new Promise(resolve => setTimeout(resolve, 50));
 
-      // Should still call banevent — fail open for enforcement
-      expect(mockFetch).toHaveBeenCalledTimes(1);
+      // A transient D1 failure must not override a possible human decision.
+      expect(mockFetch).not.toHaveBeenCalled();
     });
 
     it('should respect custom TRUSTED_CLIENTS config', async () => {

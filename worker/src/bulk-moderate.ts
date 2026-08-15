@@ -18,7 +18,10 @@ const BULK_ACTION_CONCURRENCY = 5;
 const RELAY_QUERY_PAGE_SIZE = 500;
 const RELAY_QUERY_MAX_PAGES = 100; // safety bound (~50k events); logged if hit, never silent
 const RELAY_QUERY_TIMEOUT_MS = 10000; // per-page (reset each page)
-const EVENT_CHUNK_SIZE = 200; // chunked consumer: ~200 subrequests/chunk (banevent per event)
+const EVENT_CHUNK_SIZE = 200; // relay enumeration page size
+// Four five-request waves x the coordinator's 90s bound stays below the
+// Queue consumer's fixed 15-minute wall limit, including gate backlog.
+const SERIALIZED_EVENT_BATCH_SIZE = 20;
 
 export interface BulkModerateEnv extends Nip86Env, ZendeskSyncEnv {
   DB?: D1Database;
@@ -373,8 +376,17 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
 
     if (phase === 'events') {
       const until = msg.cursor ? Number(msg.cursor) : undefined;
-      const page = await queryRelayEventsPage(msg.pubkey, env, until);
-      const ev = await deleteEvents(env, page.events, reason, moderatorPubkey);
+      const page = msg.eventIds
+        ? {
+          events: msg.eventIds.map(id => ({ id, kind: 0, content: '', tags: [] })),
+          nextUntil: until ?? null,
+          complete: until === undefined,
+          saturated: false,
+        }
+        : await queryRelayEventsPage(msg.pubkey, env, until);
+      const eventBatch = page.events.slice(0, SERIALIZED_EVENT_BATCH_SIZE);
+      const remainingEventIds = page.events.slice(SERIALIZED_EVENT_BATCH_SIZE).map(event => event.id);
+      const ev = await deleteEvents(env, eventBatch, reason, moderatorPubkey);
       eventsDelta = ev.processed;
       chunkFailures.push(...ev.failures);
       if (page.saturated) {
@@ -385,7 +397,17 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
       if (!page.complete && page.nextUntil === null) {
         chunkFailures.push(`enumeration:${msg.pubkey}:relay could not be fully paginated; some events may be unprocessed`);
       }
-      if (page.complete || page.nextUntil === null) {
+      if (remainingEventIds.length > 0) {
+        next = {
+          jobId: msg.jobId,
+          pubkey: msg.pubkey,
+          action: msg.action,
+          reason,
+          phase: 'events',
+          cursor: page.nextUntil === null ? undefined : String(page.nextUntil),
+          eventIds: remainingEventIds,
+        };
+      } else if (page.complete || page.nextUntil === null) {
         // Events done: one pubkey-level zendesk sync (gated on the job's CUMULATIVE
         // successes, not just this final chunk's -- the last chunk is often an empty
         // short page), then move to the media phase.

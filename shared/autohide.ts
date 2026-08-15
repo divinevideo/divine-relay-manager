@@ -4,6 +4,7 @@ export const AUTO_HIDE_ACTION = {
   skipped: 'auto_hide_skipped',
   failed: 'auto_hide_failed',
   reversed: 'auto_hide_reversed',
+  restored: 'auto_hide_restored',
 } as const;
 
 export const AUTO_HIDE_ACTIONS = [
@@ -12,6 +13,7 @@ export const AUTO_HIDE_ACTIONS = [
   AUTO_HIDE_ACTION.skipped,
   AUTO_HIDE_ACTION.failed,
   AUTO_HIDE_ACTION.reversed,
+  AUTO_HIDE_ACTION.restored,
 ] as const;
 
 export type AutoHideAction = typeof AUTO_HIDE_ACTIONS[number];

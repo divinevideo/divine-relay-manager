@@ -45,6 +45,26 @@ export async function hasLatestHumanRestore(db: D1Database, targetEventId: strin
   return row !== null;
 }
 
+export async function hasActiveAutoHide(db: D1Database, targetEventId: string): Promise<boolean> {
+  const row = await db.prepare(`
+    SELECT
+      (SELECT last_human_action FROM moderation_targets WHERE target_id = ?) AS last_human_action,
+      (SELECT action FROM moderation_decisions
+       WHERE target_type = 'event' AND target_id = ?
+         AND action IN (?, ?, ?)
+       ORDER BY id DESC LIMIT 1) AS auto_hide_action
+  `).bind(
+    targetEventId,
+    targetEventId,
+    AUTO_HIDE_ACTION.hidden,
+    AUTO_HIDE_ACTION.reversed,
+    AUTO_HIDE_ACTION.restored,
+  ).first<{ last_human_action: string | null; auto_hide_action: string | null }>();
+
+  return row?.auto_hide_action === AUTO_HIDE_ACTION.hidden
+    && row.last_human_action === null;
+}
+
 /**
  * Status of the ReportWatcher
  */
@@ -338,13 +358,47 @@ export class ReportWatcher implements DurableObject {
       !/^[0-9a-f]{64}$/.test(operation.eventId)
       || !['hide', 'allow', 'review'].includes(operation.relayAction)
       || (operation.humanAction !== undefined && typeof operation.humanAction !== 'string')
+      || (operation.relayAction === 'review' && !operation.humanAction)
     ) {
       return Response.json({ success: false, error: 'Invalid event visibility operation' }, { status: 400 });
     }
 
     const result = await this.state.blockConcurrencyWhile(async (): Promise<EventVisibilityResult> => {
       try {
-        if (operation.relayAction !== 'review') {
+        if (this.env.DB && !this.schemaReady) {
+          await ensureSchema(this.env.DB);
+          this.schemaReady = true;
+        }
+
+        let relayFailure: EventVisibilityResult | undefined;
+        if (operation.relayAction === 'review') {
+          let shouldRestoreAutoHide = false;
+          if (this.env.DB) {
+            try {
+              shouldRestoreAutoHide = await hasActiveAutoHide(this.env.DB, operation.eventId);
+            } catch (error) {
+              relayFailure = {
+                success: false,
+                error: error instanceof Error ? error.message : 'Failed to read auto-hide state',
+              };
+            }
+          }
+          if (shouldRestoreAutoHide) {
+            const relayResult = await callNip86Rpc('allowevent', [operation.eventId], this.env);
+            if (relayResult.success) {
+              await this.logDecision({
+                targetType: 'event',
+                targetId: operation.eventId,
+                action: AUTO_HIDE_ACTION.restored,
+                reason: operation.humanAction || 'human review',
+                reportId: '',
+                reporterPubkey: '',
+              });
+            } else {
+              relayFailure = relayResult;
+            }
+          }
+        } else {
           const relayResult = operation.relayAction === 'hide'
             ? await callNip86Rpc('banevent', [operation.eventId, operation.reason || 'Hidden by moderator'], this.env)
             : await callNip86Rpc('allowevent', [operation.eventId], this.env);
@@ -355,14 +409,12 @@ export class ReportWatcher implements DurableObject {
         if (!this.env.DB) return { success: true, recorded: false };
 
         try {
-          if (!this.schemaReady) {
-            await ensureSchema(this.env.DB);
-            this.schemaReady = true;
-          }
           const recorded = operation.relayAction === 'review'
             ? await markHumanReviewed(this.env.DB, 'event', operation.eventId)
             : await markHumanAction(this.env.DB, 'event', operation.eventId, operation.humanAction);
-          return { success: true, recorded };
+          return relayFailure
+            ? { ...relayFailure, recorded }
+            : { success: true, recorded };
         } catch (error) {
           console.error('[ReportWatcher] Event visibility mark failed:', error);
           return { success: true, recorded: false };
@@ -970,8 +1022,9 @@ export class ReportWatcher implements DurableObject {
       return result !== null;
     } catch (error) {
       console.error('[ReportWatcher] Failed to check human resolution:', error);
-      // On error, allow processing (fail open for enforcement)
-      return false;
+      // Auto-hide is reversible and non-critical; do not risk overriding a
+      // human decision when its authoritative state cannot be read.
+      return true;
     }
   }
 

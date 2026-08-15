@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { coordinateEventVisibility } from './event-visibility';
 
 const operation = {
@@ -6,6 +6,10 @@ const operation = {
   relayAction: 'hide' as const,
   humanAction: 'hide_event',
 };
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe('coordinateEventVisibility', () => {
   it('returns a structured error when the binding is unavailable', async () => {
@@ -30,5 +34,27 @@ describe('coordinateEventVisibility', () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toBeTruthy();
+  });
+
+  it('bounds time waiting for the coordinator gate', async () => {
+    const signal = new AbortController().signal;
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(signal);
+    let requestSignal: AbortSignal | null = null;
+    const env = {
+      REPORT_WATCHER: {
+        idFromName: () => 'singleton',
+        get: () => ({
+          fetch: async (request: Request) => {
+            requestSignal = request.signal;
+            return Response.json({ success: true });
+          },
+        }),
+      },
+    } as never;
+
+    await coordinateEventVisibility(env, operation);
+
+    expect(timeoutSpy).toHaveBeenCalledWith(90_000);
+    expect(requestSignal).not.toBeNull();
   });
 });

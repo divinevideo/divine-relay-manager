@@ -429,16 +429,21 @@ describe('async bulk job model', () => {
 
   it('delete-all transitions events -> media across messages and finishes', async () => {
     vi.mocked(banEvent).mockResolvedValue({ success: true });
+    vi.mocked(banEvent).mockClear();
     mockPaginatedRelay(Array.from({ length: 30 }, (_, i) => ({ id: `e${i}`, kind: 1, content: '', tags: [] as string[][], created_at: 30 - i })));
     mockUserVideos([{ sha256: 'a'.repeat(64) }]);
     const jobId = 'job-del-1';
     jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'delete-all', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', created_at: 't', updated_at: 't' });
 
-    let msg: BulkJobMessage | undefined = { jobId, pubkey: 'a'.repeat(64), action: 'delete-all' };
-    let iterations = 0;
+    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'delete-all' }, mockEnv);
+    expect(vi.mocked(banEvent)).toHaveBeenCalledTimes(20);
+    expect(sent[0]?.eventIds).toHaveLength(10);
+
+    let msg: BulkJobMessage | undefined = sent[0];
+    let iterations = 1;
     while (msg && iterations++ < 10) { sent.length = 0; await processBulkJob(msg, mockEnv); msg = sent[0]; }
 
-    expect(iterations).toBe(2); // events chunk -> media chunk
+    expect(iterations).toBe(3); // two bounded event batches -> media chunk
     const row = jobDb.rows.get(jobId)!;
     expect(row.status).toBe('done');
     expect(row.events_processed).toBe(30);
@@ -472,11 +477,12 @@ describe('async bulk job model', () => {
 
     let msg: BulkJobMessage | undefined = { jobId, pubkey: 'a'.repeat(64), action: 'delete-all' };
     let iterations = 0;
-    while (msg && iterations++ < 10) { sent.length = 0; await processBulkJob(msg, mockEnv); msg = sent[0]; }
+    while (msg && iterations++ < 20) { sent.length = 0; await processBulkJob(msg, mockEnv); msg = sent[0]; }
 
     const row = jobDb.rows.get(jobId)!;
     expect(row.status).toBe('done');
     expect(row.events_processed).toBe(200);                 // one chunk's worth; the rest unreachable
+    expect(iterations).toBe(12);                            // ten event batches + empty cursor check + media
     expect(JSON.parse(row.failures as string).some((f: string) => /share one timestamp/.test(f))).toBe(true);
   });
 

@@ -78,8 +78,9 @@ Event visibility changes and their direction-bearing human marks are serialized 
 ReportWatcher Durable Object. Auto-hide uses the same coordination gate, rechecks human-review
 state before mutating the relay, and rechecks explicit restore direction after banning.
 Resolution statuses such as `dismissed`, `no-action`, and `false-positive` set the human-review
-bit through that gate but do not call `allowevent` or overwrite a prior hide/delete direction.
-This prevents dismissing a later report from restoring content that a moderator already hid.
+bit through that gate. They restore an active auto-hide so the content stays up as promised by
+the review UI, but do not restore content with a later manual hide/delete direction. The restore
+is recorded as `auto_hide_restored` without overwriting that human direction.
 
 An `allow_event` response also carries `reconciled`. It is true when the coordinated restore
 and human-review mark completed. If it is false, callers should surface the same degraded

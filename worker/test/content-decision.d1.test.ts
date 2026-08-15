@@ -5,7 +5,7 @@ import { Miniflare } from 'miniflare';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import worker from '../src/index';
 import { ensureSchema } from '../src/db';
-import { hasLatestHumanRestore } from '../src/ReportWatcher';
+import { hasActiveAutoHide, hasLatestHumanRestore } from '../src/ReportWatcher';
 import { markHumanAction } from '../src/human-decision';
 
 const TEST_NSEC = 'nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5';
@@ -109,6 +109,28 @@ describe('recorded content decisions on real D1', () => {
       `).bind(eventId, action).run();
       expect(await hasLatestHumanRestore(DB, eventId), action).toBe(restores);
     }
+  });
+
+  it('restores only an active auto-hide without a later manual hide', async () => {
+    const eventId = 'ce'.repeat(32);
+    await DB.prepare(`DELETE FROM moderation_decisions WHERE target_id = ?`).bind(eventId).run();
+    await DB.prepare(`DELETE FROM moderation_targets WHERE target_id = ?`).bind(eventId).run();
+    await DB.prepare(`
+      INSERT INTO moderation_decisions (target_type, target_id, action)
+      VALUES ('event', ?, 'auto_hidden')
+    `).bind(eventId).run();
+
+    expect(await hasActiveAutoHide(DB, eventId)).toBe(true);
+
+    await markHumanAction(DB, 'event', eventId, 'delete_event');
+    expect(await hasActiveAutoHide(DB, eventId)).toBe(false);
+
+    await DB.prepare(`DELETE FROM moderation_targets WHERE target_id = ?`).bind(eventId).run();
+    await DB.prepare(`
+      INSERT INTO moderation_decisions (target_type, target_id, action)
+      VALUES ('event', ?, 'auto_hide_restored')
+    `).bind(eventId).run();
+    expect(await hasActiveAutoHide(DB, eventId)).toBe(false);
   });
 
   it('does not let a delayed audit write overwrite authoritative visibility intent', async () => {
