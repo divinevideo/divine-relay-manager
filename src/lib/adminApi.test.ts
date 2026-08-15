@@ -8,6 +8,8 @@ import {
   publishEvent,
   moderateAction,
   deleteEvent,
+  hideEvent,
+  restoreEvent,
   banPubkeyViaModerate,
   allowPubkey,
   callRelayRpc,
@@ -396,6 +398,35 @@ describe('adminApi', () => {
             reason: 'Inappropriate content',
           }),
         })
+      );
+    });
+  });
+
+  describe('recorded event moderation', () => {
+    it('routes hide through hide_event', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, recorded: true }) });
+
+      await hideEvent(API_URL, 'event123', 'Policy violation');
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/moderate'),
+        expect.objectContaining({
+          body: JSON.stringify({ action: 'hide_event', eventId: 'event123', reason: 'Policy violation' }),
+        }),
+      );
+    });
+
+    it('routes restore through allow_event and preserves recorded', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, recorded: true }) });
+
+      const result = await restoreEvent(API_URL, 'event123');
+
+      expect(result.recorded).toBe(true);
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/moderate'),
+        expect.objectContaining({
+          body: JSON.stringify({ action: 'allow_event', eventId: 'event123' }),
+        }),
       );
     });
   });

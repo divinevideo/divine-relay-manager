@@ -3,6 +3,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import worker from './index';
+import { syncZendeskAfterAction } from './zendesk-sync';
 
 const WEBHOOK_SECRET = 'test-parse-report-secret';
 const TEST_NSEC = 'nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5';
@@ -284,5 +285,24 @@ describe('addZendeskInternalNote solve payload', () => {
     const resolvedUpdate = sqlLog.find(entry => entry.sql.includes('UPDATE zendesk_tickets'));
     expect(resolvedUpdate).toBeDefined();
     expect(resolvedUpdate?.bindings).toEqual(['reviewed', expect.any(String), LINKED_TICKET_ID]);
+  });
+
+  it.each(['hide_event', 'allow_event'])('resolves a linked ticket for final human action %s', async (action) => {
+    const { db, sqlLog } = createMockDB();
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true, text: async () => '' });
+    vi.stubGlobal('fetch', mockFetch);
+
+    await syncZendeskAfterAction(
+      makeEnv({ DB: db, ZENDESK_GROUP_ID: '15225535020687' }),
+      action,
+      'event',
+      'ab13eb2c66bea4cd8f538798054d23a02d5dca879401be5045b8482590e2482c',
+      '7e7e9c42a91bfef19fa929e5fda1b72e0ebc1a4c1141673e2794234d86addf4e',
+    );
+
+    const payload = JSON.parse(mockFetch.mock.calls[0][1].body as string);
+    expect(payload.ticket.status).toBe('solved');
+    const resolvedUpdate = sqlLog.find(entry => entry.sql.includes('UPDATE zendesk_tickets'));
+    expect(resolvedUpdate?.bindings).toEqual([action, expect.any(String), LINKED_TICKET_ID]);
   });
 });

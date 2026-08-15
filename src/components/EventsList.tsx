@@ -174,7 +174,7 @@ function EventCard({
             )}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="sm" onClick={(e) => e.stopPropagation()}>
+                <Button aria-label="Event actions" variant="ghost" size="sm" onClick={(e) => e.stopPropagation()}>
                   <MoreVertical className="h-4 w-4" />
                 </Button>
               </DropdownMenuTrigger>
@@ -346,7 +346,7 @@ function EventCard({
 export function EventsList({ relayUrl }: EventsListProps) {
   const { nostr } = useNostr();
   const { toast } = useToast();
-  const { callRelayRpc, banEvent, allowEvent, verifyEventDeleted } = useAdminApi();
+  const { callRelayRpc, hideEvent, restoreEvent, verifyEventDeleted } = useAdminApi();
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const [isVerifying, setIsVerifying] = useState(false);
@@ -633,19 +633,25 @@ export function EventsList({ relayUrl }: EventsListProps) {
   const moderateEventMutation = useMutation({
     mutationFn: async ({ eventId, action, reason }: { eventId: string; action: 'allow' | 'ban'; reason?: string }) => {
       if (action === 'allow') {
-        await allowEvent(eventId);
+        const result = await restoreEvent(eventId);
+        return { eventId, action, recorded: result.recorded === true };
       } else {
-        await banEvent(eventId, reason);
+        const result = await hideEvent(eventId, reason);
+        return { eventId, action, recorded: result.recorded === true };
       }
-      return { eventId, action };
     },
-    onSuccess: async ({ eventId, action }) => {
+    onSuccess: async ({ eventId, action, recorded }) => {
       queryClient.invalidateQueries({ queryKey: ['banned-events'] });
       queryClient.invalidateQueries({ queryKey: ['events-needing-moderation', relayUrl] });
       queryClient.invalidateQueries({ queryKey: ['relay-events', relayUrl] });
       toast({
-        title: `Event ${action === 'allow' ? 'approved' : 'banned'}`,
-        description: action === 'ban' ? "Verifying..." : `Event ${eventId.slice(0, 8)}... has been approved.`
+        title: recorded
+          ? `Event ${action === 'allow' ? 'approved' : 'banned'}`
+          : 'Action applied; human-review mark not recorded',
+        description: recorded
+          ? (action === 'ban' ? "Verifying..." : `Event ${eventId.slice(0, 8)}... has been approved.`)
+          : 'ReportWatcher may still reverse this decision.',
+        variant: recorded ? 'default' : 'destructive',
       });
 
       // Only verify for ban actions

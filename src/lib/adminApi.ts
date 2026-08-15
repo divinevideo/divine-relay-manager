@@ -41,7 +41,7 @@ export interface UnsignedEvent {
 }
 
 interface ModerateParams {
-  action: 'delete_event' | 'ban_pubkey' | 'allow_pubkey';
+  action: 'delete_event' | 'hide_event' | 'allow_event' | 'ban_pubkey' | 'allow_pubkey';
   eventId?: string;
   pubkey?: string;
   reason?: string;
@@ -52,6 +52,7 @@ export interface ApiResponse<T = unknown> {
   event?: T;
   result?: T;
   error?: string;
+  recorded?: boolean;
 }
 
 interface InfoResponse {
@@ -239,6 +240,14 @@ export async function moderateAction(apiUrl: string, params: ModerateParams): Pr
 
 export async function deleteEvent(apiUrl: string, eventId: string, reason?: string, pubkey?: string): Promise<ApiResponse> {
   return moderateAction(apiUrl, { action: 'delete_event', eventId, reason, pubkey });
+}
+
+export async function hideEvent(apiUrl: string, eventId: string, reason?: string): Promise<ApiResponse> {
+  return moderateAction(apiUrl, { action: 'hide_event', eventId, reason });
+}
+
+export async function restoreEvent(apiUrl: string, eventId: string): Promise<ApiResponse> {
+  return moderateAction(apiUrl, { action: 'allow_event', eventId });
 }
 
 export async function banPubkeyViaModerate(apiUrl: string, pubkey: string, reason?: string): Promise<ApiResponse> {

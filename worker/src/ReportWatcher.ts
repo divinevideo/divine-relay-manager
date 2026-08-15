@@ -1,7 +1,7 @@
 // ABOUTME: Durable Object for watching NIP-56 content reports (kind 1984)
 // ABOUTME: Maintains persistent WebSocket to relay for auto-hide functionality
 
-import { type Nip86Env, banEvent } from './nip86';
+import { type Nip86Env, allowEvent, banEvent } from './nip86';
 import { ensureSchema } from './db';
 import {
   AUTO_HIDE_ACTION,
@@ -758,6 +758,19 @@ export class ReportWatcher implements DurableObject {
     const result = await banEvent(targetEventId, reason, this.env);
 
     if (result.success) {
+      // A restore can race this pass after its first hasHumanResolution check.
+      // Recheck after the ban and compensate if the human-review mark appeared;
+      // allow_event also reapplies its restore after writing the mark, so either
+      // ordering converges on the human-requested visible state.
+      if (await this.hasHumanResolution(targetEventId)) {
+        const restore = await allowEvent(targetEventId, this.env);
+        if (restore.success) {
+          console.log(`[ReportWatcher] Reversed raced auto-hide for human-reviewed event ${targetEventId}`);
+          return;
+        }
+        console.error(`[ReportWatcher] Failed to reverse raced auto-hide: ${restore.error}`);
+      }
+
       console.log(`[ReportWatcher] Successfully auto-hidden event ${targetEventId}`);
       this.eventsAutoHidden++;
       await this.persistState();

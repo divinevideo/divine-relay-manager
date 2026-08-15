@@ -981,18 +981,21 @@ async function handleModerate(
       const eventId = body.eventId.toLowerCase();
 
       try {
-        const rpcRequest = new Request(request.url.replace(/\/api\/moderate$/, '/api/relay-rpc'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(
-            isHide
-              ? { method: 'banevent', params: [eventId, body.reason || 'Hidden by moderator'] }
-              : { method: 'allowevent', params: [eventId] },
-          ),
-        });
+        const applyRelayAction = async () => {
+          const rpcRequest = new Request(request.url.replace(/\/api\/moderate$/, '/api/relay-rpc'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(
+              isHide
+                ? { method: 'banevent', params: [eventId, body.reason || 'Hidden by moderator'] }
+                : { method: 'allowevent', params: [eventId] },
+            ),
+          });
+          const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders);
+          return rpcResponse.json() as Promise<{ success: boolean; error?: string }>;
+        };
 
-        const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders);
-        const rpcResult = await rpcResponse.json() as { success: boolean; error?: string };
+        const rpcResult = await applyRelayAction();
 
         if (!rpcResult.success) {
           // Flatten to 500, matching delete_event and ban_pubkey. Neither banevent nor
@@ -1041,6 +1044,22 @@ async function handleModerate(
             `[handleModerate] ALERT: ${body.action} applied at the relay but NOT recorded as ` +
             `human-reviewed for ${eventId}; ReportWatcher may undo it`,
           );
+        }
+
+        // A ReportWatcher pass can read "not reviewed" before the mark and ban after
+        // the first allow. Re-applying the idempotent allow after the mark, paired with
+        // ReportWatcher's post-ban recheck, makes whichever relay call lands last honor
+        // the human decision. A failed reconciliation is retryable because allowevent
+        // and the D1 upsert are both idempotent.
+        if (recorded && !isHide) {
+          const reconciliation = await applyRelayAction();
+          if (!reconciliation.success) {
+            return jsonResponse(
+              { success: false, error: reconciliation.error || 'allowevent reconciliation failed' },
+              500,
+              corsHeaders,
+            );
+          }
         }
 
         try {

@@ -74,6 +74,14 @@ error status, because the relay change did apply and a retry would enforce twice
 seeing `recorded: false` should treat the decision as **applied but unprotected** and
 surface it: the content is hidden or restored as asked, but the automation may reverse it.
 
+For `allow_event`, the worker reapplies the idempotent relay restore after the mark is
+visible. ReportWatcher also rechecks the mark after a successful auto-hide and reverses a
+raced ban. Together these checks preserve the moderator's restored state when a report and
+restore overlap. A failed reconciliation returns 500 and is safe to retry.
+
+Both actions are final human decisions for linked Zendesk reports, so they add an internal
+note and resolve the open ticket.
+
 `eventId` is validated as 64 hex characters and lowercased before use. `moderation_targets`
 is BINARY-collated and ReportWatcher looks the event up by its lowercase id, so an uppercase
 id would write a row nothing can read while the API reported success.

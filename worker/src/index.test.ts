@@ -708,17 +708,17 @@ describe('relay-rpc account-state side effects', () => {
     fetchSpy.mockRestore();
   });
 
-  it('allow_event allows the event, then marks THAT id human-reviewed', async () => {
+  it('allow_event allows, marks THAT id, then reconciles after the mark', async () => {
     const order: string[] = [];
     const fetchSpy = makeOrderedRelaySpy(order);
     const waitUntil = vi.fn();
     const testCtx = { waitUntil } as unknown as ExecutionContext;
-    const { env, marked } = makeSqlRecordingEnv();
+    const { env, marked } = makeSqlRecordingEnv(order);
 
     const response = await postModerate({ action: 'allow_event', eventId: VALID_EVENT_ID }, env, testCtx);
 
     expect(response.status).toBe(200);
-    expect(order.filter(o => o.startsWith('relay:'))).toEqual(['relay:allowevent']);
+    expect(order).toEqual(['relay:allowevent', 'db:mark', 'relay:allowevent']);
     expect(marked()).toBe(VALID_EVENT_ID);
     expect(await response.json()).toMatchObject({ success: true, recorded: true });
 

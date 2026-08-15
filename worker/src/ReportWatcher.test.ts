@@ -985,6 +985,47 @@ describe('ReportWatcher', () => {
       expect(mockFetch).toHaveBeenCalledTimes(1);
     });
 
+    it('reverses an auto-hide when a human-review mark appears during the relay call', async () => {
+      let humanResolutionReads = 0;
+      mockEnv.DB = {
+        prepare: vi.fn().mockImplementation((sql: string) => ({
+          bind: vi.fn().mockReturnValue({
+            run: mockDbRun,
+            first: vi.fn().mockImplementation(() => {
+              if (sql.includes('SELECT 1 FROM moderation_targets')) {
+                humanResolutionReads++;
+                return Promise.resolve(humanResolutionReads === 1 ? null : { 1: 1 });
+              }
+              return Promise.resolve(null);
+            }),
+          }),
+          run: mockDbRun,
+        })),
+      } as unknown as D1Database;
+
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      getLastMockWebSocket()!.simulateMessage(JSON.stringify(['EVENT', 'auto-hide-reports', {
+        id: 'report_raced_restore',
+        pubkey: 'reporter',
+        kind: 1984,
+        content: 'CSAM report racing a restore',
+        tags: [
+          ['e', 'restored_during_auto_hide'],
+          ['report', 'sexual_minors'],
+          ['client', 'diVine'],
+        ],
+        created_at: Math.floor(Date.now() / 1000),
+      } satisfies ReportEvent]));
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      const methods = mockFetch.mock.calls.map(([, options]) => JSON.parse(options.body).method);
+      expect(methods).toEqual(['banevent', 'allowevent']);
+      const status = await watcher.fetch(new Request('https://do/status'));
+      expect(await status.json()).toMatchObject({ status: { eventsAutoHidden: 0 } });
+    });
+
     it('should proceed with auto-hide when DB is unavailable (fail open)', async () => {
       mockEnv.DB = undefined as unknown as D1Database;
 
