@@ -6,8 +6,8 @@ import { EventActions } from './EventActions';
 
 // Stable mocks so failure-path tests can control the audit log and assert on toasts.
 const api = vi.hoisted(() => ({
-  banEvent: vi.fn(),
-  allowEvent: vi.fn(),
+  hideEvent: vi.fn(),
+  restoreEvent: vi.fn(),
   deleteEvent: vi.fn(),
   moderateMedia: vi.fn(),
   deleteMedia: vi.fn(),
@@ -26,8 +26,8 @@ vi.mock('@/hooks/useCurrentUser', () => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
-  api.banEvent.mockResolvedValue({ success: true });
-  api.allowEvent.mockResolvedValue({ success: true });
+  api.hideEvent.mockResolvedValue({ success: true, recorded: true });
+  api.restoreEvent.mockResolvedValue({ success: true, recorded: true, reconciled: true });
   api.deleteEvent.mockResolvedValue({ success: true });
   api.moderateMedia.mockResolvedValue({ success: true });
   api.deleteMedia.mockResolvedValue({ success: true });
@@ -73,6 +73,21 @@ describe('EventActions', () => {
     expect(screen.queryByRole('button', { name: /Delete Event$/i })).not.toBeInTheDocument();
   });
 
+  it('routes restore through the recorded moderation endpoint', async () => {
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={'a'.repeat(64)} isEventBanned={true} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /Restore Event/i }));
+
+    await waitFor(() => expect(api.restoreEvent).toHaveBeenCalledWith(
+      'event-1',
+      MOD_PUBKEY,
+      'Restored by moderator',
+    ));
+    expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({ action: 'restore_event' }));
+  });
+
   it('renders unblock when media is blocked', () => {
     renderWithProvider(
       <EventActions eventId="event-1" pubkey={'a'.repeat(64)} mediaHashes={['abc']} hasBlockedMedia={true} />
@@ -98,7 +113,7 @@ describe('EventActions', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Ban Event/i }));
 
-    await waitFor(() => expect(api.banEvent).toHaveBeenCalledWith('event-1', 'Banned by moderator'));
+    await waitFor(() => expect(api.hideEvent).toHaveBeenCalledWith('event-1', 'Banned by moderator'));
     // #178: the audit write is attributed to the logged-in moderator.
     await waitFor(() =>
       expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({ moderatorPubkey: MOD_PUBKEY })),
@@ -115,6 +130,18 @@ describe('EventActions', () => {
     );
   });
 
+  it('warns when Ban Event lands at the relay but its review state is not recorded', async () => {
+    api.hideEvent.mockResolvedValue({ success: true, recorded: false });
+    renderWithProvider(<EventActions eventId="event-1" pubkey={'a'.repeat(64)} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Ban Event/i }));
+
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'Event banned; review state not recorded',
+      variant: 'destructive',
+    })));
+  });
+
   it('does not fire-and-forget when the audit write never settles — ban still reports success', async () => {
     // A hung /api/decisions write must not stall or fail the action.
     api.logDecision.mockReturnValue(new Promise(() => {})); // never settles
@@ -125,6 +152,6 @@ describe('EventActions', () => {
     await waitFor(() =>
       expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Event banned from relay' })),
     );
-    expect(api.banEvent).toHaveBeenCalledTimes(1);
+    expect(api.hideEvent).toHaveBeenCalledTimes(1);
   });
 });

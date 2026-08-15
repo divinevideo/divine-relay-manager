@@ -65,16 +65,19 @@ export function EventActions({
   const banEventMutation = useMutation({
     mutationFn: async () => {
       const moderator = getModeratorPubkey(); // capture before the authoritative request
-      await api.banEvent(eventId, 'Banned by moderator');
+      const result = await api.hideEvent(eventId, 'Banned by moderator');
       logAudit(moderator, {
         targetType: 'event',
         targetId: eventId,
         action: 'ban_event',
         reason: 'Banned by moderator',
       });
+      return result;
     },
-    onSuccess: () => {
-      toast({ title: 'Event banned from relay' });
+    onSuccess: (result) => {
+      toast(result.recorded === true
+        ? { title: 'Event banned from relay' }
+        : { title: 'Event banned; review state not recorded', variant: 'destructive' });
       onActionComplete?.();
     },
     onError: (error: Error) => {
@@ -85,16 +88,24 @@ export function EventActions({
   const restoreEventMutation = useMutation({
     mutationFn: async () => {
       const moderator = getModeratorPubkey(); // capture before the authoritative request
-      await api.allowEvent(eventId);
+      const result = await api.restoreEvent(eventId, await moderator, 'Restored by moderator');
       logAudit(moderator, {
         targetType: 'event',
         targetId: eventId,
         action: 'restore_event',
         reason: 'Restored by moderator',
       });
+      return result;
     },
-    onSuccess: () => {
-      toast({ title: 'Event restored' });
+    onSuccess: (result) => {
+      toast(result.recorded === true && result.reconciled !== false
+        ? { title: 'Event restored' }
+        : {
+            title: result.recorded === true
+              ? 'Restore recorded; final relay state uncertain'
+              : 'Restore applied but not recorded',
+            variant: 'destructive',
+          });
       onActionComplete?.();
     },
     onError: (error: Error) => {

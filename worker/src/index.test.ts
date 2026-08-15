@@ -582,6 +582,437 @@ describe('relay-rpc account-state side effects', () => {
     fetchSpy.mockRestore();
   });
 
+  // An env that records every SQL statement, so a test can assert the human-review
+  // marking actually ran rather than inferring it from a 200.
+  function makeSqlRecordingEnv(order?: string[]) {
+    const sql: string[] = [];
+    const bound: { statement: string; args: unknown[] }[] = [];
+    const visibilityOperations: unknown[] = [];
+    const db = {
+      prepare: (statement: string) => {
+        sql.push(statement);
+        return {
+          // Record the statement WITH its args as one tuple. Keeping two arrays and
+          // aligning them by index desynced the moment a statement ran without bind():
+          // ensureSchema issues ~20 such calls, so `marked()` silently returned
+          // undefined and three tests passed only because an earlier test in the file
+          // had already flipped the module-level schemaReady flag. Running them in
+          // isolation went red on correct code, and dropping the ensureSchemaOnce call
+          // survived the whole mutation battery.
+          bind: (...args: unknown[]) => {
+            bound.push({ statement, args });
+            return {
+              first: async () => null,
+              run: async () => {
+                // Into the SHARED log, so ordering against the relay call is a real
+                // index comparison rather than two unrelated arrays.
+                if (order && statement.includes('INSERT INTO moderation_targets')) {
+                  order.push('db:mark');
+                }
+                return { success: true, meta: { changes: 1 } };
+              },
+            };
+          },
+          run: async () => ({ success: true, meta: { changes: 0 } }),
+        };
+      },
+    };
+    const env = {
+      ALLOWED_ORIGINS: 'https://app.divine.video',
+      RELAY_URL: 'wss://relay.divine.video',
+      ADMIN_API_KEY: 'test-admin-key',
+      MODERATION_ADMIN_URL: 'https://moderation-api.divine.video',
+      SERVICE_API_TOKEN: 'test-token',
+      NOSTR_NSEC: TEST_NSEC,
+      DB: db,
+      REPORT_WATCHER: {
+        idFromName: () => 'singleton',
+        get: () => ({
+          fetch: async (request: Request) => {
+            const operation = await request.json() as {
+              eventId: string;
+              relayAction: 'hide' | 'allow' | 'review' | 'confirm';
+              reason?: string;
+              humanAction?: string;
+            };
+            visibilityOperations.push(operation);
+            if (operation.relayAction === 'confirm') {
+              return Response.json({ success: true, recorded: true });
+            }
+            if (operation.relayAction === 'review') {
+              const recorded = await db.prepare(`
+                INSERT INTO moderation_targets (target_id, target_type, ever_human_reviewed)
+                VALUES (?, ?, 1)
+              `).bind(operation.eventId, 'event').run().then(() => true);
+              return Response.json({ success: true, recorded });
+            }
+            const relayResponse = await fetch('https://relay.divine.video/management', {
+              method: 'POST',
+              body: JSON.stringify({
+                method: operation.relayAction === 'hide' ? 'banevent' : 'allowevent',
+                params: operation.relayAction === 'hide'
+                  ? [operation.eventId, operation.reason]
+                  : [operation.eventId],
+              }),
+            });
+            if (!relayResponse.ok) {
+              return Response.json({ success: false, error: 'relay exploded' }, { status: 502 });
+            }
+            const recorded = operation.humanAction
+              ? await db.prepare(`
+                INSERT INTO moderation_targets (target_id, target_type, ever_human_reviewed, last_human_action)
+                VALUES (?, ?, 1, ?)
+              `).bind(operation.eventId, 'event', operation.humanAction).run().then(() => true)
+              : undefined;
+            return Response.json({ success: true, recorded });
+          },
+        }),
+      },
+    } as never;
+    // `marked` reads the bound id off the moderation_targets upsert specifically.
+    // Asserting only that some SQL mentioned the table lets an implementation mark a
+    // DIFFERENT id and still pass, which is the exact failure a case-mangled id causes.
+    const markedRow = () => {
+      const row = bound.find(b => b.statement.includes('INSERT INTO moderation_targets'));
+      return row?.args ?? null;
+    };
+    return {
+      env,
+      sql,
+      bound,
+      visibilityOperations,
+      marked: () => markedRow()?.[0] ?? null,
+      markedAction: () => markedRow()?.[2] ?? null,
+    };
+  }
+
+  const VALID_EVENT_ID = 'a'.repeat(64);
+
+  // Coop routes Hide-Content and Restore-Content through the adapter. Sending them
+  // over raw /api/relay-rpc bans/allows the event but never marks it human-reviewed,
+  // so ReportWatcher.hasHumanResolution stays false and the next immediate-tier
+  // report re-hides content a moderator deliberately restored. These two tests pin
+  // that a moderator decision is recorded, which is the whole point of routing them
+  // through /api/moderate instead.
+  // Records the NIP-86 method AND interleaves relay/DB calls into one ordered log, so a
+  // test can pin which relay call was issued and that the human-review mark happened
+  // AFTER it. Without this, an implementation that marks first, or that hides when asked
+  // to restore, passes a "some SQL mentioned moderation_targets" assertion.
+  function makeOrderedRelaySpy(
+    order: string[],
+    opts: { relayFails?: boolean; failRelayCall?: number } = {},
+  ) {
+    let relayCalls = 0;
+    return vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url.includes('/api/v1/notify')) {
+        order.push('dm');
+        return new Response(JSON.stringify({ dm_sent: true }), { status: 200 });
+      }
+      if (url.includes('/api/admin/users/')) return new Response('', { status: 200 });
+      const raw = input instanceof Request ? await input.clone().text() : String(init?.body ?? '');
+      let method = 'unknown';
+      try { method = (JSON.parse(raw) as { method?: string }).method ?? 'unknown'; } catch { /* not NIP-86 */ }
+      order.push(`relay:${method}`);
+      relayCalls++;
+      if (opts.relayFails || opts.failRelayCall === relayCalls) {
+        return new Response(JSON.stringify({ error: 'relay exploded' }), { status: 502 });
+      }
+      return new Response(JSON.stringify({ result: true }), { status: 200 });
+    });
+  }
+
+  async function postModerate(body: unknown, env: never, testCtx: ExecutionContext) {
+    return worker.fetch(
+      new Request('https://api-relay-prod.divine.video/api/moderate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Admin-Key': 'test-admin-key',
+          Origin: 'https://app.divine.video',
+        },
+        body: JSON.stringify(body),
+      }),
+      env,
+      testCtx,
+    );
+  }
+
+  it('hide_event bans the event, then marks THAT id human-reviewed, and sends no DM', async () => {
+    const order: string[] = [];
+    const fetchSpy = makeOrderedRelaySpy(order);
+    const waitUntil = vi.fn();
+    const testCtx = { waitUntil } as unknown as ExecutionContext;
+    const { env, marked, markedAction } = makeSqlRecordingEnv(order);
+
+    const response = await postModerate(
+      { action: 'hide_event', eventId: VALID_EVENT_ID, reason: 'COOP hide' }, env, testCtx);
+
+    expect(response.status).toBe(200);
+    // Which relay call: a hide must ban, never allow. Pins an inverted implementation.
+    expect(order.filter(o => o.startsWith('relay:'))).toEqual(['relay:banevent']);
+    // Which id got marked: not merely "some SQL touched the table".
+    expect(marked()).toBe(VALID_EVENT_ID);
+    expect(markedAction()).toBe('hide_event');
+    // Ordering: the mark must follow the relay confirming, or we suppress ReportWatcher
+    // on content that is still live. Both entries are in the same log, so this compares
+    // real positions. The previous version compared 0 to order.length and asserted 0 < 1.
+    expect(order).toEqual(['relay:banevent', 'db:mark']);
+    expect(await response.json()).toMatchObject({ success: true, recorded: true });
+
+    // Hiding is not a permanent ban. delete_event DMs the creator PERMANENT_BAN, so
+    // reusing it here would tell someone their content was removed for good.
+    await drain(waitUntil);
+    expect(order).not.toContain('dm');
+
+    fetchSpy.mockRestore();
+  });
+
+  it.each([
+    ['banevent', 'hide'],
+    ['allowevent', 'allow'],
+  ] as const)('raw %s coordinates visibility without asserting human review', async (method, relayAction) => {
+    const order: string[] = [];
+    const fetchSpy = makeOrderedRelaySpy(order);
+    const { env, visibilityOperations, markedAction } = makeSqlRecordingEnv(order);
+
+    const response = await worker.fetch(new Request('https://api-relay-prod.divine.video/api/relay-rpc', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Admin-Key': 'test-admin-key',
+        Origin: 'https://app.divine.video',
+      },
+      body: JSON.stringify({ method, params: [VALID_EVENT_ID, 'manual action'] }),
+    }), env, { waitUntil: vi.fn() } as unknown as ExecutionContext);
+
+    expect(response.status).toBe(200);
+    expect(visibilityOperations).toEqual([{
+      eventId: VALID_EVENT_ID,
+      relayAction,
+      reason: 'manual action',
+    }]);
+    expect(markedAction()).toBeNull();
+    fetchSpy.mockRestore();
+  });
+
+  it('forwards a legacy non-canonical allowevent without making cleanup stricter', async () => {
+    const order: string[] = [];
+    const fetchSpy = makeOrderedRelaySpy(order);
+    const { env, visibilityOperations } = makeSqlRecordingEnv(order);
+
+    const response = await worker.fetch(new Request('https://api-relay-prod.divine.video/api/relay-rpc', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Admin-Key': 'test-admin-key',
+        Origin: 'https://app.divine.video',
+      },
+      body: JSON.stringify({ method: 'allowevent', params: ['legacy-event-id'] }),
+    }), env, { waitUntil: vi.fn() } as unknown as ExecutionContext);
+
+    expect(response.status).toBe(200);
+    expect(order).toContain('relay:allowevent');
+    expect(visibilityOperations).toEqual([]);
+    fetchSpy.mockRestore();
+  });
+
+  it('allow_event allows and marks THAT id inside one coordinated operation', async () => {
+    const order: string[] = [];
+    const fetchSpy = makeOrderedRelaySpy(order);
+    const waitUntil = vi.fn();
+    const testCtx = { waitUntil } as unknown as ExecutionContext;
+    const { env, marked, markedAction, visibilityOperations } = makeSqlRecordingEnv(order);
+
+    const response = await postModerate({
+      action: 'allow_event',
+      eventId: VALID_EVENT_ID,
+      reason: 'False positive',
+      moderatorPubkey: 'b'.repeat(64),
+    }, env, testCtx);
+
+    expect(response.status).toBe(200);
+    expect(order).toEqual(['relay:allowevent', 'db:mark']);
+    expect(marked()).toBe(VALID_EVENT_ID);
+    expect(markedAction()).toBe('allow_event');
+    expect(visibilityOperations).toEqual([{
+      eventId: VALID_EVENT_ID,
+      relayAction: 'allow',
+      reason: 'False positive',
+      humanAction: 'allow_event',
+      moderatorPubkey: 'b'.repeat(64),
+    }]);
+    expect(await response.json()).toMatchObject({ success: true, recorded: true, reconciled: true });
+
+    fetchSpy.mockRestore();
+  });
+
+  // moderation_targets.target_id is BINARY-collated and ReportWatcher reads the lowercase
+  // id off the report's `e` tag. An uppercase id marked verbatim writes a row nobody can
+  // read: success is reported and the suppression never engages.
+  it('hide_event canonicalises the event id, so the mark is readable by ReportWatcher', async () => {
+    const order: string[] = [];
+    const fetchSpy = makeOrderedRelaySpy(order);
+    const testCtx = { waitUntil: vi.fn() } as unknown as ExecutionContext;
+    const { env, marked } = makeSqlRecordingEnv();
+
+    const response = await postModerate(
+      { action: 'hide_event', eventId: VALID_EVENT_ID.toUpperCase() }, env, testCtx);
+
+    expect(response.status).toBe(200);
+    expect(marked()).toBe(VALID_EVENT_ID);
+    fetchSpy.mockRestore();
+  });
+
+  it('rejects an event id that is not 64 hex, instead of banning whatever it was given', async () => {
+    const order: string[] = [];
+    const fetchSpy = makeOrderedRelaySpy(order);
+    const testCtx = { waitUntil: vi.fn() } as unknown as ExecutionContext;
+    const { env, sql } = makeSqlRecordingEnv();
+
+    for (const bad of ['not-hex', '', 'a'.repeat(63), { $ne: 1 }]) {
+      const response = await postModerate({ action: 'allow_event', eventId: bad }, env, testCtx);
+      expect(response.status).toBe(400);
+    }
+    // Nothing may reach the relay or the ledger on a malformed id.
+    expect(order.filter(o => o.startsWith('relay:'))).toEqual([]);
+    expect(sql.some(s => s.includes('INSERT INTO moderation_targets'))).toBe(false);
+
+    fetchSpy.mockRestore();
+  });
+
+  it('rejects malformed restore attribution before mutating relay visibility', async () => {
+    const order: string[] = [];
+    const fetchSpy = makeOrderedRelaySpy(order);
+    const testCtx = { waitUntil: vi.fn() } as unknown as ExecutionContext;
+    const { env, visibilityOperations } = makeSqlRecordingEnv();
+
+    const response = await postModerate({
+      action: 'allow_event',
+      eventId: VALID_EVENT_ID,
+      moderatorPubkey: { forged: true },
+    }, env, testCtx);
+
+    expect(response.status).toBe(400);
+    expect(visibilityOperations).toEqual([]);
+    expect(order).toEqual([]);
+    fetchSpy.mockRestore();
+  });
+
+  it('validates and canonicalises auto-hide confirmation provenance', async () => {
+    const testCtx = { waitUntil: vi.fn() } as unknown as ExecutionContext;
+    const { env, visibilityOperations } = makeSqlRecordingEnv();
+    const request = (body: Record<string, unknown>) => worker.fetch(new Request(
+      'https://api-relay-prod.divine.video/api/confirm-auto-hide',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Admin-Key': 'test-admin-key',
+          Origin: 'https://app.divine.video',
+        },
+        body: JSON.stringify({ eventId: VALID_EVENT_ID, ...body }),
+      },
+    ), env, testCtx);
+
+    for (const body of [{ reportId: 'forged' }, { reporterPubkey: 'forged' }]) {
+      expect((await request(body)).status).toBe(400);
+    }
+    const response = await request({
+      reportId: 'B'.repeat(64),
+      reporterPubkey: 'C'.repeat(64),
+    });
+
+    expect(response.status).toBe(200);
+    expect(visibilityOperations).toEqual([{
+      eventId: VALID_EVENT_ID,
+      relayAction: 'confirm',
+      reportId: 'b'.repeat(64),
+      reporterPubkey: 'c'.repeat(64),
+    }]);
+  });
+
+  // The relay change is the recoverable half; the RECORD is why these actions exist. A
+  // caller told plain success would believe the decision is protected from ReportWatcher
+  // when it is not.
+  it('reports recorded:false when the relay change lands but the mark does not', async () => {
+    const order: string[] = [];
+    const fetchSpy = makeOrderedRelaySpy(order);
+    const testCtx = { waitUntil: vi.fn() } as unknown as ExecutionContext;
+    const env = {
+      ALLOWED_ORIGINS: 'https://app.divine.video',
+      RELAY_URL: 'wss://relay.divine.video',
+      ADMIN_API_KEY: 'test-admin-key',
+      SERVICE_API_TOKEN: 'test-token',
+      NOSTR_NSEC: TEST_NSEC,
+      DB: {
+        prepare: (statement: string) => ({
+          bind: () => ({
+            first: async () => null,
+            run: async () => {
+              if (statement.includes('moderation_targets')) throw new Error('no such table');
+              return { success: true, meta: { changes: 1 } };
+            },
+          }),
+          run: async () => ({ success: true, meta: { changes: 0 } }),
+        }),
+      },
+      REPORT_WATCHER: {
+        idFromName: () => 'singleton',
+        get: () => ({
+          fetch: async () => {
+            await fetch('https://relay.divine.video/management', {
+              method: 'POST',
+              body: JSON.stringify({ method: 'allowevent' }),
+            });
+            return Response.json({ success: true, recorded: false });
+          },
+        }),
+      },
+    } as never;
+
+    const response = await postModerate({ action: 'allow_event', eventId: VALID_EVENT_ID }, env, testCtx);
+
+    expect(response.status).toBe(200);
+    expect(order.filter(o => o.startsWith('relay:'))).toEqual(['relay:allowevent']);
+    expect(await response.json()).toMatchObject({ success: true, recorded: false, reconciled: false });
+
+    fetchSpy.mockRestore();
+  });
+
+  it('does not issue a stale second allow and still syncs Zendesk', async () => {
+    const order: string[] = [];
+    const fetchSpy = makeOrderedRelaySpy(order);
+    const testCtx = { waitUntil: vi.fn() } as unknown as ExecutionContext;
+    const { env, sql } = makeSqlRecordingEnv(order);
+
+    const response = await postModerate({ action: 'allow_event', eventId: VALID_EVENT_ID }, env, testCtx);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ success: true, recorded: true, reconciled: true });
+    expect(order).toEqual(['relay:allowevent', 'db:mark']);
+    expect(sql.some(statement => statement.includes('FROM zendesk_tickets'))).toBe(true);
+
+    fetchSpy.mockRestore();
+  });
+
+  // A transient relay fault must stay retryable. Forwarding the relay's 400 would tell an
+  // automated caller "do not retry" for what is an upstream outage.
+  it('a relay failure flattens to 500, not a terminal 400', async () => {
+    const order: string[] = [];
+    const fetchSpy = makeOrderedRelaySpy(order, { relayFails: true });
+    const testCtx = { waitUntil: vi.fn() } as unknown as ExecutionContext;
+    const { env, sql } = makeSqlRecordingEnv();
+
+    const response = await postModerate({ action: 'hide_event', eventId: VALID_EVENT_ID }, env, testCtx);
+
+    expect(response.status).toBe(500);
+    // And nothing may be recorded for an enforcement that did not happen.
+    expect(sql.some(s => s.includes('INSERT INTO moderation_targets'))).toBe(false);
+
+    fetchSpy.mockRestore();
+  });
+
   it('refuses a reversal when the case lookup itself fails, rather than lifting the hold', async () => {
     // Fail closed on the reversal direction: an unchecked unban silently lifts a
     // minor-safety hold and reports success, so nobody learns the check never
@@ -1579,6 +2010,38 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
     ALLOWED_ORIGINS: 'https://app.divine.video',
     RELAY_URL: 'wss://relay.example',
     ADMIN_API_KEY: 'test-admin-key',
+    REPORT_WATCHER: {
+      idFromName: () => 'singleton',
+      get: () => ({
+        fetch: async (request: Request) => {
+          const operation = await request.json() as {
+            eventId: string;
+            relayAction: 'hide' | 'allow';
+            reason?: string;
+          };
+          try {
+            const response = await fetch('https://relay.example/management', {
+              method: 'POST',
+              body: JSON.stringify({
+                method: operation.relayAction === 'hide' ? 'banevent' : 'allowevent',
+                params: operation.relayAction === 'hide'
+                  ? [operation.eventId, operation.reason]
+                  : [operation.eventId],
+              }),
+            });
+            if (!response.ok) {
+              return Response.json({ success: false, error: 'relay refused' }, { status: 502 });
+            }
+            return Response.json({ success: true });
+          } catch (error) {
+            return Response.json({
+              success: false,
+              error: error instanceof Error ? error.message : 'relay failed',
+            }, { status: 502 });
+          }
+        },
+      }),
+    },
   } as never;
 
   const reportsRequest = () => new Request('https://api.example/api/reports', {

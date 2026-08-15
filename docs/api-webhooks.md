@@ -36,9 +36,9 @@ Execute a moderation action directly.
 **Request:**
 ```json
 {
-  "action": "ban_pubkey" | "allow_pubkey" | "delete_event",
+  "action": "ban_pubkey" | "allow_pubkey" | "delete_event" | "hide_event" | "allow_event",
   "pubkey": "hex-pubkey",      // Required for ban/allow
-  "eventId": "hex-event-id",   // Required for delete
+  "eventId": "hex-event-id",   // Required for delete/hide/allow_event; must be 64 hex chars
   "reason": "Spam account"     // Optional
 }
 ```
@@ -47,7 +47,8 @@ Execute a moderation action directly.
 ```json
 {
   "success": true,
-  "message": "Action executed successfully"
+  "message": "Action executed successfully",
+  "recorded": true             // hide_event / allow_event only — see below
 }
 ```
 
@@ -56,7 +57,42 @@ Execute a moderation action directly.
 |--------|-------------|
 | `ban_pubkey` | Ban a user from posting to the relay |
 | `allow_pubkey` | Remove a user from the ban list |
-| `delete_event` | Delete a specific event from the relay |
+| `delete_event` | Delete a specific event from the relay, and DM the creator `PERMANENT_BAN` |
+| `hide_event` | Hide an event. Same relay operation as `delete_event`, but **no DM** |
+| `allow_event` | Un-hide an event |
+
+### `recorded`, and why `hide_event` / `allow_event` exist
+
+These two do more than the relay change, which was already available over
+`/api/relay-rpc`. They also mark the event human-reviewed in `moderation_targets`.
+ReportWatcher skips auto-hide for any event carrying that mark, so **without it a
+moderator's restore is silently undone by the next report** — csam is an immediate,
+threshold-1 tier.
+
+`recorded` reports whether that mark actually landed. It is returned on a **200**, not an
+error status, because the relay change did apply and a retry would enforce twice. A caller
+seeing `recorded: false` should treat the decision as **applied but unprotected** and
+surface it: the content is hidden or restored as asked, but the automation may reverse it.
+
+Event visibility changes and their direction-bearing human marks are serialized through the
+ReportWatcher Durable Object. Auto-hide uses the same coordination gate, rechecks human-review
+state before mutating the relay, and rechecks explicit restore direction after banning.
+Resolution statuses such as `dismissed`, `no-action`, and `false-positive` set the human-review
+bit through that gate. They restore an active auto-hide so the content stays up as promised by
+the review UI, but do not restore content with a later manual hide/delete direction. The restore
+is recorded as `auto_hide_restored` without overwriting that human direction.
+
+An `allow_event` response also carries `reconciled`. It is true when the coordinated restore
+and human-review mark completed. If it is false, callers should surface the same degraded
+state as `recorded: false`: the relay restore landed, but automation protection did not.
+Zendesk still receives the final human decision in this case.
+
+Both actions are final human decisions for linked Zendesk reports, so they add an internal
+note and resolve the open ticket.
+
+`eventId` is validated as 64 hex characters and lowercased before use. `moderation_targets`
+is BINARY-collated and ReportWatcher looks the event up by its lowercase id, so an uppercase
+id would write a row nothing can read while the API reported success.
 
 ---
 

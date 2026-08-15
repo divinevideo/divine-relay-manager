@@ -365,7 +365,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
   const { nostr } = useNostr();
   const { toast } = useToast();
   const redirectIfGuarded = useAgeReviewGuardRedirect();
-  const { banPubkey, deleteEvent, unbanPubkey, allowEvent, verifyPubkeyBanned, verifyPubkeyUnbanned, verifyEventDeleted, logDecision } = useAdminApi();
+  const { banPubkey, deleteEvent, unbanPubkey, restoreEvent, verifyPubkeyBanned, verifyPubkeyUnbanned, verifyEventDeleted, logDecision } = useAdminApi();
   const { getModeratorPubkey } = useCurrentUser();
   const queryClient = useQueryClient();
 
@@ -584,21 +584,40 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
   const restoreMutation = useMutation({
     mutationFn: async ({ eventId }: { eventId: string }) => {
       const moderator = getModeratorPubkey(); // snapshot identity at action start
-      await allowEvent(eventId);
-      await logDecision({
-        targetType: 'event',
-        targetId: eventId,
-        action: 'restore_event',
-        reason: 'Restored from event viewer',
-        moderatorPubkey: await moderator,
-      });
-      return eventId;
+      const result = await restoreEvent(eventId, await moderator, 'Restored from event viewer');
+      let auditRecorded = true;
+      try {
+        await logDecision({
+          targetType: 'event',
+          targetId: eventId,
+          action: 'restore_event',
+          reason: 'Restored from event viewer',
+          moderatorPubkey: await moderator,
+        });
+      } catch (error) {
+        auditRecorded = false;
+        console.warn('[EventDetail] restore audit log failed', error);
+      }
+      return {
+        eventId,
+        recorded: result.recorded === true,
+        reconciled: result.reconciled !== false,
+        auditRecorded,
+      };
     },
-    onSuccess: async () => {
+    onSuccess: async ({ recorded, reconciled, auditRecorded }) => {
       queryClient.invalidateQueries({ queryKey: ['relay-events'] });
       queryClient.invalidateQueries({ queryKey: ['banned-events'] });
       moderationStatus.recheck();
-      toast({ title: "Event restored" });
+      toast(recorded && reconciled
+        ? { title: auditRecorded ? "Event restored" : "Event restored; audit log not recorded" }
+        : {
+            title: recorded ? "Restore recorded; final relay state uncertain" : "Restore applied but not recorded",
+            description: recorded
+              ? "Verify the event state before retrying."
+              : "ReportWatcher may reverse this decision.",
+            variant: "destructive",
+          });
     },
     onError: (error: Error) => {
       toast({

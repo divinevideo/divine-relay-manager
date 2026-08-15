@@ -2,6 +2,9 @@
 // ABOUTME: Handles NIP-98 auth signing and relay RPC calls
 
 import { finalizeEvent, nip19, getPublicKey } from 'nostr-tools';
+import { coordinateEventVisibility } from './event-visibility';
+
+const NIP86_RPC_TIMEOUT_MS = 15_000;
 
 /**
  * Secrets Store secret object (for account-level secrets)
@@ -18,6 +21,7 @@ export interface Nip86Env {
   RELAY_URL: string;
   MANAGEMENT_PATH?: string;
   MANAGEMENT_URL?: string;
+  REPORT_WATCHER?: DurableObjectNamespace;
 }
 
 /**
@@ -135,11 +139,20 @@ export async function callNip86Rpc(
   }
 
   // Call relay RPC
-  const response = await fetch(httpUrl, {
-    method: 'POST',
-    headers,
-    body: payload,
-  });
+  let response: Response;
+  try {
+    response = await fetch(httpUrl, {
+      method: 'POST',
+      headers,
+      body: payload,
+      signal: AbortSignal.timeout(NIP86_RPC_TIMEOUT_MS),
+    });
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Relay request failed',
+    };
+  }
 
   if (!response.ok) {
     return {
@@ -163,8 +176,13 @@ export async function callNip86Rpc(
 export async function banEvent(
   eventId: string,
   reason: string,
-  env: Nip86Env
+  env: Nip86Env,
+  humanAction: string = 'hide_event',
 ): Promise<Nip86RpcResult> {
+  if (env.REPORT_WATCHER) {
+    // ReportWatcher itself must call callNip86Rpc directly while holding its gate.
+    return coordinateEventVisibility(env, { eventId, relayAction: 'hide', reason, humanAction });
+  }
   return callNip86Rpc('banevent', [eventId, reason], env);
 }
 
@@ -175,6 +193,10 @@ export async function allowEvent(
   eventId: string,
   env: Nip86Env
 ): Promise<Nip86RpcResult> {
+  if (env.REPORT_WATCHER) {
+    // ReportWatcher itself must call callNip86Rpc directly while holding its gate.
+    return coordinateEventVisibility(env, { eventId, relayAction: 'allow', humanAction: 'allow_event' });
+  }
   return callNip86Rpc('allowevent', [eventId], env);
 }
 

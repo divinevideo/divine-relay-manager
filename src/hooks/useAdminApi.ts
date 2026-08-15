@@ -35,6 +35,10 @@ export function useAdminApi() {
       adminApi.moderateAction(apiUrl, params),
     deleteEvent: (eventId: string, reason?: string, pubkey?: string) =>
       adminApi.deleteEvent(apiUrl, eventId, reason, pubkey),
+    hideEvent: (eventId: string, reason?: string) =>
+      adminApi.hideEvent(apiUrl, eventId, reason),
+    restoreEvent: (eventId: string, moderatorPubkey?: string, reason?: string) =>
+      adminApi.restoreEvent(apiUrl, eventId, moderatorPubkey, reason),
     banPubkeyViaModerate: (pubkey: string, reason?: string) =>
       adminApi.banPubkeyViaModerate(apiUrl, pubkey, reason),
     allowPubkey: (pubkey: string) =>
@@ -79,8 +83,9 @@ export function useAdminApi() {
       targetType: 'event' | 'pubkey',
       targetValue: string,
       status?: adminApi.ResolutionStatus,
-      comment?: string
-    ) => adminApi.markAsReviewed(apiUrl, targetType, targetValue, status, comment),
+      comment?: string,
+      moderatorPubkey?: string,
+    ) => adminApi.markAsReviewed(apiUrl, targetType, targetValue, status, comment, moderatorPubkey),
 
     // Media moderation
     moderateMedia: (sha256: string, action: adminApi.ModerationAction, reason?: string) =>
@@ -93,6 +98,8 @@ export function useAdminApi() {
     // Decision log
     logDecision: (params: Parameters<typeof adminApi.logDecision>[1]) =>
       adminApi.logDecision(apiUrl, params),
+    confirmAutoHide: (params: Parameters<typeof adminApi.confirmAutoHide>[1]) =>
+      adminApi.confirmAutoHide(apiUrl, params),
     getDecisions: (targetId: string) =>
       adminApi.getDecisions(apiUrl, targetId),
     getAllDecisions: () =>

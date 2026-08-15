@@ -8,6 +8,8 @@ import {
   publishEvent,
   moderateAction,
   deleteEvent,
+  hideEvent,
+  restoreEvent,
   banPubkeyViaModerate,
   allowPubkey,
   callRelayRpc,
@@ -396,6 +398,44 @@ describe('adminApi', () => {
             reason: 'Inappropriate content',
           }),
         })
+      );
+    });
+  });
+
+  describe('recorded event moderation', () => {
+    it('routes hide through hide_event', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, recorded: true }) });
+
+      await hideEvent(API_URL, 'event123', 'Policy violation');
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/moderate'),
+        expect.objectContaining({
+          body: JSON.stringify({ action: 'hide_event', eventId: 'event123', reason: 'Policy violation' }),
+        }),
+      );
+    });
+
+    it('routes restore through allow_event and preserves partial-success fields', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, recorded: true, reconciled: false }),
+      });
+
+      const result = await restoreEvent(API_URL, 'event123', 'moderator123', 'Restored after review');
+
+      expect(result.recorded).toBe(true);
+      expect(result.reconciled).toBe(false);
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/moderate'),
+        expect.objectContaining({
+          body: JSON.stringify({
+            action: 'allow_event',
+            eventId: 'event123',
+            moderatorPubkey: 'moderator123',
+            reason: 'Restored after review',
+          }),
+        }),
       );
     });
   });
@@ -903,11 +943,13 @@ describe('adminApi', () => {
         json: async () => ({ success: true }),
       });
 
-      await markAsReviewed(API_URL, 'pubkey', 'pubkey123', 'dismissed', 'False alarm');
+      await markAsReviewed(API_URL, 'pubkey', 'pubkey123', 'dismissed', 'False alarm', 'a'.repeat(64));
 
       const callBody = JSON.parse(mockFetch.mock.calls[0][1].body);
       expect(callBody.tags).toContainEqual(['l', 'dismissed', 'moderation/resolution']);
       expect(callBody.content).toBe('False alarm');
+      expect(callBody.moderatorPubkey).toBe('a'.repeat(64));
+      expect(callBody.moderationReason).toBe('False alarm');
     });
 
     it('should use default comment when not provided', async () => {

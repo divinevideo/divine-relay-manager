@@ -19,7 +19,7 @@ const api = vi.hoisted(() => ({
   banPubkey: vi.fn(),
   deleteEvent: vi.fn(),
   unbanPubkey: vi.fn(),
-  allowEvent: vi.fn(),
+  restoreEvent: vi.fn(),
   verifyPubkeyBanned: vi.fn(),
   verifyPubkeyUnbanned: vi.fn(),
   verifyEventDeleted: vi.fn(),

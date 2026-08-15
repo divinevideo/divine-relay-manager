@@ -87,16 +87,15 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const {
-    deleteEvent, allowEvent, markAsReviewed, logDecision, deleteDecisions,
+    deleteEvent, restoreEvent, markAsReviewed, logDecision, confirmAutoHide, deleteDecisions,
   } = useAdminApi();
   const { getModeratorPubkey } = useCurrentUser();
 
   // Audit logging is a non-critical side effect. Fire-and-forget so a failing
   // /api/decisions write can't make an action whose authoritative step already
-  // SUCCEEDED (markAsReviewed label publish, allowEvent) report failure. On a
+  // SUCCEEDED (markAsReviewed label publish, restoreEvent) report failure. On a
   // successful write, re-invalidate the decision log; on failure, a non-blocking
-  // toast. Mirrors UserActions.logAudit. (confirmAutoHide keeps an awaited
-  // logDecision: there the decision write IS the action.)
+  // toast. Mirrors UserActions.logAudit.
   // Detached audit write. `moderator` is captured by the caller BEFORE the
   // authoritative request (so a logout/switch mid-request can't retarget it) and
   // reused across every write in the action. Waits for the in-flight identity,
@@ -206,7 +205,13 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     mutationFn: async ({ status, comment }: { status: ResolutionStatus; comment?: string }) => {
       if (!context.target) throw new Error('No target');
       const moderator = getModeratorPubkey(); // capture before the authoritative request
-      await markAsReviewed(context.target.type, context.target.value, status, comment);
+      const result = await markAsReviewed(
+        context.target.type,
+        context.target.value,
+        status,
+        comment,
+        await moderator,
+      );
       // Audit log is non-critical; markAsReviewed (the resolution label) is the
       // authoritative action, so don't let a failed decision write report failure.
       logAudit(moderator, {
@@ -216,13 +221,25 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
         reason: comment,
         reportId: report?.id,
       });
+      return result;
     },
-    onSuccess: (_, variables) => {
+    onSuccess: (result, variables) => {
       queryClient.invalidateQueries({ queryKey: ['reports'] });
       queryClient.invalidateQueries({ queryKey: ['labels'] });
       queryClient.invalidateQueries({ queryKey: ['resolution-labels'] });
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
       decisionLog.refetch();
+      if (result.recorded !== true || result.reconciled === false) {
+        toast({
+          title: 'Resolution saved; visibility needs attention',
+          description: result.recorded
+            ? 'The review was recorded, but auto-hidden content could not be restored. Use Restore content before closing this report.'
+            : 'The resolution label was published, but visibility and review state could not be reconciled.',
+          variant: 'destructive',
+          duration: Infinity,
+        });
+        return;
+      }
       toast({
         title: variables.status === 'reviewed' ? "Marked as reviewed" : "Marked as false positive",
         description: "A resolution label has been created",
@@ -358,14 +375,24 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   const confirmAutoHideMutation = useMutation({
     mutationFn: async ({ targetId, targetType }: { targetId: string; targetType: 'event' | 'pubkey' }) => {
       const moderator = getModeratorPubkey(); // snapshot identity at action start
-      await logDecision({
-        targetType,
-        targetId,
-        action: 'auto_hide_confirmed',
-        reason: 'Auto-hide confirmed by moderator',
-        reportId: report?.id,
-        moderatorPubkey: await moderator,
-      });
+      if (targetType === 'event') {
+        await confirmAutoHide({
+          eventId: targetId,
+          reason: 'Auto-hide confirmed by moderator',
+          reportId: report?.id,
+          reporterPubkey: report?.pubkey,
+          moderatorPubkey: await moderator,
+        });
+      } else {
+        await logDecision({
+          targetType,
+          targetId,
+          action: 'auto_hide_confirmed',
+          reason: 'Auto-hide confirmed by moderator',
+          reportId: report?.id,
+          moderatorPubkey: await moderator,
+        });
+      }
       return targetId;
     },
     onSuccess: async () => {
@@ -386,25 +413,24 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   // Restore auto-hidden content (reverse the auto-hide)
   const restoreAutoHideMutation = useMutation({
     mutationFn: async ({ eventId }: { eventId: string }) => {
-      const moderator = getModeratorPubkey(); // capture before the authoritative request
-      await allowEvent(eventId);
-      logAudit(moderator, {
-        targetType: 'event',
-        targetId: eventId,
-        action: 'auto_hide_restored',
-        reason: 'Auto-hide reversed by moderator',
-        reportId: report?.id,
-      });
-      return eventId;
+      const moderatorPubkey = await getModeratorPubkey();
+      return restoreEvent(eventId, moderatorPubkey, 'Auto-hide reversed by moderator');
     },
-    onSuccess: async () => {
+    onSuccess: async (result) => {
       queryClient.invalidateQueries({ queryKey: ['reports'] });
       queryClient.invalidateQueries({ queryKey: ['banned-events'] });
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
 
       moderationStatus.recheck();
       decisionLog.refetch();
-      toast({ title: "Content restored", description: "Auto-hide has been reversed" });
+      toast(result.recorded === true && result.reconciled !== false
+        ? { title: "Content restored", description: "Auto-hide has been reversed" }
+        : {
+            title: result.recorded === true
+              ? "Restore recorded; final relay state uncertain"
+              : "Restore applied but not recorded",
+            variant: "destructive",
+          });
     },
     onError: (error: Error) => {
       toast({
@@ -510,12 +536,14 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                     Auto-Hidden — Pending Review
                   </p>
                   <p className="text-sm text-orange-600 dark:text-orange-400">
-                    This content was automatically hidden based on a report. Please review and confirm or restore.
+                    {decisionLog.isAutoHideRestoreFailed
+                      ? 'An automatic restore failed. Retry restoring this content.'
+                      : 'This content was automatically hidden based on a report. Please review and confirm or restore.'}
                   </p>
                 </div>
               </div>
               <div className="flex gap-2">
-                <Tooltip>
+                {!decisionLog.isAutoHideRestoreFailed && <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
                       variant="default"
@@ -537,7 +565,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                   <TooltipContent side="bottom" className="max-w-xs">
                     <p>Confirm this auto-hide decision. The content will remain hidden.</p>
                   </TooltipContent>
-                </Tooltip>
+                </Tooltip>}
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
@@ -911,9 +939,20 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                   description: "The event has been removed from the relay.",
                   action: (
                     <ToastAction altText="Undo delete" onClick={async () => {
-                      await allowEvent(eventId);
+                      const result = await restoreEvent(
+                        eventId,
+                        await moderator,
+                        'Deletion undone by moderator',
+                      );
                       handleActionComplete();
-                      toast({ title: "Event restored" });
+                      toast(result.recorded === true && result.reconciled !== false
+                        ? { title: "Event restored" }
+                        : {
+                            title: result.recorded === true
+                              ? "Restore recorded; final relay state uncertain"
+                              : "Restore applied but not recorded",
+                            variant: "destructive",
+                          });
                     }}>
                       Undo
                     </ToastAction>

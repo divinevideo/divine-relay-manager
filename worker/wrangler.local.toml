@@ -83,6 +83,7 @@ queue = "bulk-moderate-jobs-local"
 queue = "bulk-moderate-jobs-local"
 max_batch_size = 1
 max_retries = 0
+max_concurrency = 1
 
 # Service binding to divine-realness worker (bypasses CF Access 522 issue)
 [[services]]

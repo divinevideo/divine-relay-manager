@@ -2,7 +2,7 @@
 // ABOUTME: ?event= internal nav, naddr lookup, banned id-fallback, parent links
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { nip19 } from 'nostr-tools';
@@ -41,17 +41,25 @@ vi.mock('@/hooks/useNostr', () => ({
 }));
 
 const rpc = vi.hoisted(() => ({ fn: vi.fn() }));
+const eventModeration = vi.hoisted(() => ({
+  hide: vi.fn(),
+  restore: vi.fn(),
+  verifyDeleted: vi.fn(),
+}));
 vi.mock('@/hooks/useAdminApi', () => ({
   useAdminApi: () => ({
     callRelayRpc: rpc.fn,
-    banEvent: vi.fn(),
-    allowEvent: vi.fn(),
-    verifyEventDeleted: vi.fn(),
+    hideEvent: eventModeration.hide,
+    restoreEvent: eventModeration.restore,
+    verifyEventDeleted: eventModeration.verifyDeleted,
   }),
 }));
 
 vi.mock('@/hooks/useCurrentUser', () => ({
-  useCurrentUser: () => ({ user: { pubkey: 'a'.repeat(64) } }),
+  useCurrentUser: () => ({
+    user: { pubkey: 'a'.repeat(64) },
+    getModeratorPubkey: async () => 'a'.repeat(64),
+  }),
 }));
 
 // EventsList gates its banned-event lookups on session presence, not on the
@@ -128,9 +136,15 @@ function renderEvents(initialEntry: string) {
 }
 
 beforeEach(() => {
+  window.HTMLElement.prototype.scrollIntoView = vi.fn();
   relayQuery.fn.mockReset();
   rpc.fn.mockReset();
   rpc.fn.mockResolvedValue([]);
+  eventModeration.hide.mockReset();
+  eventModeration.hide.mockResolvedValue({ success: true, recorded: true });
+  eventModeration.restore.mockReset();
+  eventModeration.restore.mockResolvedValue({ success: true, recorded: true });
+  eventModeration.verifyDeleted.mockReset();
   titleCalls.targets.length = 0;
   setRelay({});
 });
@@ -207,5 +221,31 @@ describe('EventsList internal navigation (#164 A)', () => {
     await waitFor(() => {
       expect(titleCalls.targets.at(-1)).toEqual([shownTarget]);
     });
+  });
+});
+
+describe('EventsList recorded moderation', () => {
+  it('routes an approved event through allow_event instead of raw relay RPC', async () => {
+    const target = event({ id: 'd'.repeat(64), content: 'review me' });
+    setRelay({ list: [target] });
+    renderEvents('/events');
+
+    await screen.findByText('review me');
+    const actions = screen.getByRole('button', { name: 'Event actions' });
+    actions.focus();
+    fireEvent.keyDown(actions, { key: 'Enter', code: 'Enter' });
+    fireEvent.click(await screen.findByText('Moderate Event'));
+
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('combobox'));
+    fireEvent.click(await screen.findByRole('option', { name: 'Allow Event' }));
+    fireEvent.click(await within(dialog).findByRole('button', { name: 'Allow Event' }));
+
+    await waitFor(() => expect(eventModeration.restore).toHaveBeenCalledWith(
+      target.id,
+      'a'.repeat(64),
+      'Allowed from event list',
+    ));
+    expect(eventModeration.hide).not.toHaveBeenCalled();
   });
 });

@@ -168,6 +168,39 @@ describe('Reports stale-data resilience', () => {
   });
 });
 
+describe('Reports unresolved auto-hide filtering', () => {
+  it('keeps a newer unresolved hide in the opt-in pending-review queue', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/reports')) return jsonResponse({ success: true, events: [REPORT] });
+      if (url.includes('/api/resolution-labels')) return jsonResponse({ success: true, events: [] });
+      if (url.includes('/api/decisions')) {
+        return jsonResponse({
+          success: true,
+          decisions: [
+            { target_type: 'event', target_id: 'c'.repeat(64), action: 'auto_hide_unresolved' },
+            { target_type: 'event', target_id: 'c'.repeat(64), action: 'auto_hide_restored' },
+          ],
+        });
+      }
+      if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
+      return jsonResponse({ success: true });
+    }));
+
+    render(
+      <TestApp>
+        <Reports relayUrl="wss://relay.example" />
+      </TestApp>
+    );
+
+    const pendingToggle = await screen.findByLabelText(/pending review/i);
+    expect(screen.queryByText(/1 report$/)).not.toBeInTheDocument();
+
+    fireEvent.click(pendingToggle);
+    expect(await screen.findByText(/1 report$/)).toBeInTheDocument();
+  });
+});
+
 // resolvedTargets is subtractive: it hides work a moderator already handled, so
 // a failed source makes the queue bigger and wrong rather than smaller and safe
 // (#221). Surfacing that incompleteness in the UI is #221's job, not this PR's

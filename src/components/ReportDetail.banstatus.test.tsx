@@ -38,7 +38,7 @@ vi.mock('react-router-dom', async (orig) => ({
 vi.mock('@/hooks/useAdminApi', () => ({
   useAdminApi: () => ({
     deleteEvent: vi.fn(),
-    allowEvent: vi.fn(),
+    restoreEvent: vi.fn(),
     markAsReviewed: vi.fn(),
     logDecision: vi.fn(),
     deleteDecisions: vi.fn(),

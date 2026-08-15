@@ -3,6 +3,11 @@ export const AUTO_HIDE_ACTION = {
   pending: 'auto_hide_pending',
   skipped: 'auto_hide_skipped',
   failed: 'auto_hide_failed',
+  unresolved: 'auto_hide_unresolved',
+  restoreFailed: 'auto_hide_restore_failed',
+  reversed: 'auto_hide_reversed',
+  restored: 'auto_hide_restored',
+  confirmed: 'auto_hide_confirmed',
 } as const;
 
 export const AUTO_HIDE_ACTIONS = [
@@ -10,9 +15,28 @@ export const AUTO_HIDE_ACTIONS = [
   AUTO_HIDE_ACTION.pending,
   AUTO_HIDE_ACTION.skipped,
   AUTO_HIDE_ACTION.failed,
+  AUTO_HIDE_ACTION.unresolved,
+  AUTO_HIDE_ACTION.restoreFailed,
+  AUTO_HIDE_ACTION.reversed,
+  AUTO_HIDE_ACTION.restored,
+  AUTO_HIDE_ACTION.confirmed,
 ] as const;
 
 export type AutoHideAction = typeof AUTO_HIDE_ACTIONS[number];
+
+export const AUTO_HIDE_STATE_ACTIONS = [
+  AUTO_HIDE_ACTION.hidden,
+  AUTO_HIDE_ACTION.unresolved,
+  AUTO_HIDE_ACTION.restoreFailed,
+  AUTO_HIDE_ACTION.confirmed,
+  AUTO_HIDE_ACTION.restored,
+  AUTO_HIDE_ACTION.reversed,
+] as const;
+
+export function getLatestAutoHideState(actions: readonly string[]): string | undefined {
+  const stateActions: readonly string[] = AUTO_HIDE_STATE_ACTIONS;
+  return actions.find(action => stateActions.includes(action));
+}
 
 export const AUTO_HIDE_TIER_KINDS = ['immediate', 'threshold'] as const;
 export type AutoHideTierKind = typeof AUTO_HIDE_TIER_KINDS[number];

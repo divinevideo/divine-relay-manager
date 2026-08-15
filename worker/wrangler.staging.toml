@@ -130,6 +130,7 @@ queue = "bulk-moderate-jobs-staging"
 queue = "bulk-moderate-jobs-staging"
 max_batch_size = 1
 max_retries = 0
+max_concurrency = 1
 
 # Service binding to divine-realness worker (bypasses CF Access 522 issue)
 [[services]]

@@ -1,8 +1,10 @@
 // ABOUTME: Durable Object for watching NIP-56 content reports (kind 1984)
 // ABOUTME: Maintains persistent WebSocket to relay for auto-hide functionality
 
-import { type Nip86Env, banEvent } from './nip86';
+import { callNip86Rpc, type Nip86Env } from './nip86';
 import { ensureSchema } from './db';
+import type { EventVisibilityOperation, EventVisibilityResult } from './event-visibility';
+import { markHumanAction, markHumanReviewed } from './human-decision';
 import {
   AUTO_HIDE_ACTION,
   AUTO_HIDE_TIER_KINDS,
@@ -20,6 +22,9 @@ import {
 import { getUserStatus, type KeycastEnv } from './keycast-client';
 import { fetchAccountIdentity } from './relay-profile';
 
+const UNRESOLVED_AUTO_HIDE_VISIBILITY = 'unresolved-hide';
+const UNRESOLVED_HUMAN_HIDE_VISIBILITY = 'hide-unresolved';
+
 /**
  * Extended environment for ReportWatcher DO
  */
@@ -27,6 +32,57 @@ export interface ReportWatcherEnv extends Nip86Env, KeycastEnv {
   DB?: D1Database;
   AUTO_HIDE_ENABLED?: string;
   TRUSTED_CLIENTS?: string;
+}
+
+export async function hasLatestHumanRestore(db: D1Database, targetEventId: string): Promise<boolean> {
+  const row = await db.prepare(`
+    SELECT 1 FROM moderation_targets
+    WHERE target_id = ?
+      AND ever_human_reviewed = 1
+      AND last_human_action IN (
+        'allow_event',
+        'restore_event',
+        'auto_hide_restored'
+      )
+  `).bind(targetEventId).first();
+  return row !== null;
+}
+
+async function getAutoHideState(db: D1Database, targetEventId: string): Promise<{
+  last_human_action: string | null;
+  auto_hide_action: string | null;
+} | null> {
+  return db.prepare(`
+    SELECT
+      (SELECT last_human_action FROM moderation_targets WHERE target_id = ?) AS last_human_action,
+      (SELECT action FROM moderation_decisions
+       WHERE target_type = 'event' AND target_id = ?
+          AND action IN (?, ?, ?, ?, ?, ?)
+       ORDER BY id DESC LIMIT 1) AS auto_hide_action
+  `).bind(
+    targetEventId,
+    targetEventId,
+    AUTO_HIDE_ACTION.hidden,
+    AUTO_HIDE_ACTION.unresolved,
+    AUTO_HIDE_ACTION.restoreFailed,
+    AUTO_HIDE_ACTION.reversed,
+    AUTO_HIDE_ACTION.restored,
+    AUTO_HIDE_ACTION.confirmed,
+  ).first<{ last_human_action: string | null; auto_hide_action: string | null }>();
+}
+
+export async function hasActiveAutoHide(db: D1Database, targetEventId: string): Promise<boolean> {
+  const row = await getAutoHideState(db, targetEventId);
+  return row?.auto_hide_action === AUTO_HIDE_ACTION.hidden
+    && row.last_human_action === null;
+}
+
+async function canConfirmAutoHide(db: D1Database, targetEventId: string): Promise<boolean> {
+  const row = await getAutoHideState(db, targetEventId);
+  return row !== null
+    && (row.auto_hide_action === AUTO_HIDE_ACTION.hidden
+      || row.auto_hide_action === AUTO_HIDE_ACTION.unresolved)
+    && (row.last_human_action === null || ['hide_event', 'delete_event'].includes(row.last_human_action));
 }
 
 /**
@@ -163,6 +219,10 @@ export class ReportWatcher implements DurableObject {
 
       if (path === '/config' && request.method === 'PUT') {
         return this.handlePutConfig(request);
+      }
+
+      if (path === '/event-visibility' && request.method === 'POST') {
+        return this.handleEventVisibility(request);
       }
 
       return new Response(JSON.stringify({ error: 'Not found' }), {
@@ -304,6 +364,183 @@ export class ReportWatcher implements DurableObject {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     });
+  }
+
+  private async handleEventVisibility(request: Request): Promise<Response> {
+    let operation: EventVisibilityOperation;
+    try {
+      operation = await request.json<EventVisibilityOperation>();
+    } catch {
+      return Response.json({ success: false, error: 'Invalid JSON body' }, { status: 400 });
+    }
+
+    if (
+      !/^[0-9a-f]{64}$/.test(operation.eventId)
+      || !['hide', 'allow', 'review', 'confirm'].includes(operation.relayAction)
+      || (operation.reason !== undefined && typeof operation.reason !== 'string')
+      || (operation.humanAction !== undefined && typeof operation.humanAction !== 'string')
+      || (operation.moderatorPubkey !== undefined && !/^[0-9a-f]{64}$/.test(operation.moderatorPubkey))
+      || (operation.reportId !== undefined && !/^[0-9a-f]{64}$/.test(operation.reportId))
+      || (operation.reporterPubkey !== undefined && !/^[0-9a-f]{64}$/.test(operation.reporterPubkey))
+      || (operation.relayAction === 'review' && !operation.humanAction)
+    ) {
+      return Response.json({ success: false, error: 'Invalid event visibility operation' }, { status: 400 });
+    }
+
+    const result = await this.state.blockConcurrencyWhile(async (): Promise<EventVisibilityResult> => {
+      try {
+        if (this.env.DB && !this.schemaReady) {
+          await ensureSchema(this.env.DB);
+          this.schemaReady = true;
+        }
+
+        let relayFailure: EventVisibilityResult | undefined;
+        if (operation.relayAction === 'confirm') {
+          if (!this.env.DB) return { success: false, recorded: false, error: 'Moderation database is not configured' };
+          const visibilityKey = this.visibilityStorageKey(operation.eventId);
+          const visibility = await this.state.storage.get<string>(visibilityKey) || '';
+          if (['allow', 'raw-allow'].includes(visibility)) {
+            return { success: false, recorded: false, conflict: true, error: 'Auto-hide is no longer active' };
+          }
+          if ([UNRESOLVED_AUTO_HIDE_VISIBILITY, UNRESOLVED_HUMAN_HIDE_VISIBILITY].includes(visibility)) {
+            const humanRestore = await this.hasHumanRestore(operation.eventId);
+            if (humanRestore === null) {
+              return { success: false, recorded: false, error: 'Human restore state is unavailable' };
+            }
+            if (humanRestore) {
+              return { success: false, recorded: false, conflict: true, error: 'Auto-hide is no longer active' };
+            }
+            const recorded = await this.recordAutoHideHumanDecision(operation, AUTO_HIDE_ACTION.confirmed);
+            if (recorded) await this.state.storage.delete(visibilityKey);
+            return recorded
+              ? { success: true, recorded: true }
+              : { success: false, recorded: false, error: 'Failed to record auto-hide confirmation' };
+          }
+          if (!await canConfirmAutoHide(this.env.DB, operation.eventId)) {
+            return { success: false, recorded: false, conflict: true, error: 'Auto-hide is no longer active' };
+          }
+          const recorded = await this.recordAutoHideHumanDecision(operation, AUTO_HIDE_ACTION.confirmed);
+          if (!recorded) return { success: false, recorded: false, error: 'Failed to record auto-hide confirmation' };
+          return { success: true, recorded: true };
+        } else if (operation.relayAction === 'review') {
+          let shouldRestoreAutoHide = false;
+          const visibilityKey = this.visibilityStorageKey(operation.eventId);
+          const visibility = await this.state.storage.get<string>(visibilityKey);
+          if (visibility === UNRESOLVED_AUTO_HIDE_VISIBILITY) {
+            shouldRestoreAutoHide = true;
+          } else if (!['hide', UNRESOLVED_HUMAN_HIDE_VISIBILITY].includes(visibility || '') && this.env.DB) {
+            try {
+              shouldRestoreAutoHide = await hasActiveAutoHide(this.env.DB, operation.eventId);
+            } catch (error) {
+              relayFailure = {
+                success: false,
+                error: error instanceof Error ? error.message : 'Failed to read auto-hide state',
+              };
+            }
+          }
+          if (shouldRestoreAutoHide) {
+            const previousVisibility = visibility;
+            await this.state.storage.put(visibilityKey, 'allow');
+            const relayResult = await callNip86Rpc('allowevent', [operation.eventId], this.env);
+            if (relayResult.success) {
+              const recorded = await this.recordAutoHideHumanDecision(
+                operation,
+                AUTO_HIDE_ACTION.restored,
+                AUTO_HIDE_ACTION.restored,
+              );
+              if (recorded) await this.state.storage.delete(visibilityKey);
+              return recorded
+                ? { success: true, recorded: true }
+                : { success: false, recorded: false, error: 'Content was restored but its review state was not recorded' };
+            } else {
+              if (previousVisibility === undefined) await this.state.storage.delete(visibilityKey);
+              else await this.state.storage.put(visibilityKey, previousVisibility);
+              relayFailure = relayResult;
+            }
+          }
+        } else {
+          const visibilityKey = this.visibilityStorageKey(operation.eventId);
+          const previousVisibility = await this.state.storage.get<string>(visibilityKey);
+          let recordsAutoHideRestore = false;
+          if (operation.relayAction === 'allow' && operation.humanAction !== undefined && this.env.DB) {
+            try {
+              const state = await getAutoHideState(this.env.DB, operation.eventId);
+              recordsAutoHideRestore = state?.auto_hide_action === AUTO_HIDE_ACTION.hidden
+                ? state.last_human_action === null
+                : state?.auto_hide_action === AUTO_HIDE_ACTION.unresolved
+                  || state?.auto_hide_action === AUTO_HIDE_ACTION.restoreFailed;
+            } catch (error) {
+              relayFailure = {
+                success: false,
+                error: error instanceof Error ? error.message : 'Failed to read auto-hide state',
+              };
+            }
+          }
+          // Only a human restore is authoritative over an admitted auto-hide. Raw
+          // allowevent RPCs still serialize here, but must not leave a tombstone that
+          // suppresses future report-driven enforcement.
+          if (operation.relayAction === 'allow') {
+            if (operation.humanAction !== undefined) {
+              await this.state.storage.put(visibilityKey, 'allow');
+            } else if (previousVisibility !== 'allow') {
+              await this.state.storage.put(visibilityKey, 'raw-allow');
+            }
+          }
+          const relayResult = operation.relayAction === 'hide'
+            ? await callNip86Rpc('banevent', [operation.eventId, operation.reason || 'Hidden by moderator'], this.env)
+            : await callNip86Rpc('allowevent', [operation.eventId], this.env);
+          if (!relayResult.success) {
+            if (previousVisibility === undefined) await this.state.storage.delete(visibilityKey);
+            else await this.state.storage.put(visibilityKey, previousVisibility);
+            return relayResult;
+          }
+          if (recordsAutoHideRestore) {
+            const recorded = await this.recordAutoHideHumanDecision(
+              operation,
+              AUTO_HIDE_ACTION.restored,
+              AUTO_HIDE_ACTION.restored,
+            );
+            if (recorded) await this.state.storage.delete(visibilityKey);
+            return recorded
+              ? { success: true, recorded: true }
+              : { success: false, recorded: false, error: 'Content was restored but its review state was not recorded' };
+          }
+        }
+
+        if (operation.humanAction === undefined) return { success: true };
+        if (!this.env.DB) {
+          if (operation.relayAction === 'hide') {
+            await this.state.storage.put(this.visibilityStorageKey(operation.eventId), 'hide');
+          }
+          return { success: true, recorded: false };
+        }
+
+        try {
+          const recorded = operation.relayAction === 'review'
+            ? await markHumanReviewed(this.env.DB, 'event', operation.eventId)
+            : await markHumanAction(this.env.DB, 'event', operation.eventId, operation.humanAction);
+          if (recorded && ['allow', 'hide'].includes(operation.relayAction)) {
+            await this.state.storage.delete(this.visibilityStorageKey(operation.eventId));
+          } else if (!recorded && operation.relayAction === 'hide') {
+            await this.state.storage.put(this.visibilityStorageKey(operation.eventId), 'hide');
+          }
+          return relayFailure
+            ? { ...relayFailure, recorded }
+            : { success: true, recorded };
+        } catch (error) {
+          console.error('[ReportWatcher] Event visibility mark failed:', error);
+          if (operation.relayAction === 'hide') {
+            await this.state.storage.put(this.visibilityStorageKey(operation.eventId), 'hide');
+          }
+          return { success: true, recorded: false };
+        }
+      } catch (error) {
+        console.error('[ReportWatcher] Event visibility operation failed:', error);
+        return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+      }
+    });
+
+    return Response.json(result, { status: result.success ? 200 : result.conflict ? 409 : 502 });
   }
 
   private validateConfig(config: AutoHideConfig): string | null {
@@ -697,7 +934,23 @@ export class ReportWatcher implements DurableObject {
       }
     }
 
-    if (await this.hasHumanResolution(targetEventId)) {
+    // A raw allow changes relay visibility without superseding the durable human
+    // decision. Re-admit enforcement until a successful hide consumes this marker.
+    const rawAllow = await this.state.storage.get<string>(this.visibilityStorageKey(targetEventId)) === 'raw-allow';
+    const blockingHumanResolution = await this.hasBlockingHumanResolution(targetEventId, rawAllow);
+    if (blockingHumanResolution === null) {
+      console.error(`[ALERT] [ReportWatcher] Auto-hide skipped for ${targetEventId}: human-review state unavailable`);
+      await this.logDecision({
+        targetType: 'event',
+        targetId: targetEventId,
+        action: AUTO_HIDE_ACTION.skipped,
+        reason: `${category}: human-review state unavailable`,
+        reportId: event.id,
+        reporterPubkey: event.pubkey,
+      });
+      return;
+    }
+    if (blockingHumanResolution) {
       console.log(`[ReportWatcher] Event ${targetEventId} has human resolution, skipping auto-hide`);
       return;
     }
@@ -752,12 +1005,118 @@ export class ReportWatcher implements DurableObject {
     targetEventId: string,
     tierName: string
   ): Promise<void> {
+    await this.state.blockConcurrencyWhile(async () => {
+      try {
+        await this.executeAutoHideSerialized(event, category, targetEventId, tierName);
+      } catch (error) {
+        console.error('[ReportWatcher] Serialized auto-hide failed:', error);
+      }
+    });
+  }
+
+  private async executeAutoHideSerialized(
+    event: ReportEvent,
+    category: string,
+    targetEventId: string,
+    tierName: string
+  ): Promise<void> {
+    const visibility = await this.state.storage.get<string>(this.visibilityStorageKey(targetEventId));
+    if (['allow', UNRESOLVED_AUTO_HIDE_VISIBILITY, UNRESOLVED_HUMAN_HIDE_VISIBILITY].includes(visibility || '')) {
+      const reason = visibility === 'allow'
+        ? 'restored visibility was not recorded'
+        : 'post-ban visibility remains unresolved';
+      console.error(`[ALERT] [ReportWatcher] Serialized auto-hide skipped for ${targetEventId}: ${reason}`);
+      await this.logDecision({
+        targetType: 'event',
+        targetId: targetEventId,
+        action: AUTO_HIDE_ACTION.skipped,
+        reason: `${category}: ${reason}`,
+        reportId: event.id,
+        reporterPubkey: event.pubkey,
+      });
+      return;
+    }
+    // The first check happens before tier processing. Recheck both the durable
+    // decision and raw visibility override inside the same gate used by human actions.
+    const rawAllow = await this.state.storage.get<string>(this.visibilityStorageKey(targetEventId)) === 'raw-allow';
+    const blockingHumanResolution = await this.hasBlockingHumanResolution(targetEventId, rawAllow);
+    if (blockingHumanResolution === null) {
+      console.error(`[ALERT] [ReportWatcher] Serialized auto-hide skipped for ${targetEventId}: human-review state unavailable`);
+      await this.logDecision({
+        targetType: 'event',
+        targetId: targetEventId,
+        action: AUTO_HIDE_ACTION.skipped,
+        reason: `${category}: human-review state unavailable inside visibility gate`,
+        reportId: event.id,
+        reporterPubkey: event.pubkey,
+      });
+      return;
+    }
+    if (blockingHumanResolution) {
+      console.log(`[ReportWatcher] Event ${targetEventId} received a human resolution before auto-hide execution`);
+      return;
+    }
+
     console.log(`[ReportWatcher] Auto-hiding event ${targetEventId} (tier: ${tierName})`);
 
     const reason = `Auto-hidden: ${category} report (tier: ${tierName}, report_id: ${event.id})`;
-    const result = await banEvent(targetEventId, reason, this.env);
+    const result = await callNip86Rpc('banevent', [targetEventId, reason], this.env);
 
     if (result.success) {
+      const visibilityKey = this.visibilityStorageKey(targetEventId);
+      // A restore can race this pass after its first hasHumanResolution check.
+      // Recheck the direction-bearing action after the ban and compensate only
+      // for a restore; hides and deletes set the permanent reviewed bit too.
+      const humanRestore = await this.hasHumanRestore(targetEventId);
+      if (humanRestore === null) {
+        const visibility = await this.state.storage.get<string>(visibilityKey);
+        await this.state.storage.put(
+          visibilityKey,
+          visibility === 'hide' ? UNRESOLVED_HUMAN_HIDE_VISIBILITY : UNRESOLVED_AUTO_HIDE_VISIBILITY,
+        );
+        console.error(`[ALERT] [ReportWatcher] Auto-hide outcome unresolved for ${targetEventId}: human restore state unavailable after relay ban`);
+        await this.logDecision({
+          targetType: 'event',
+          targetId: targetEventId,
+          action: AUTO_HIDE_ACTION.unresolved,
+          reason: `${category}: human restore state unavailable after relay ban`,
+          reportId: event.id,
+          reporterPubkey: event.pubkey,
+        });
+        return;
+      }
+      if (humanRestore) {
+        await this.state.storage.put(visibilityKey, 'allow');
+        const restore = await callNip86Rpc('allowevent', [targetEventId], this.env);
+        if (restore.success) {
+          await this.state.storage.delete(visibilityKey);
+          console.log(`[ReportWatcher] Reversed raced auto-hide for human-reviewed event ${targetEventId}`);
+          await this.logDecision({
+            targetType: 'event',
+            targetId: targetEventId,
+            action: AUTO_HIDE_ACTION.reversed,
+            reason: `${category}: raced human restore took precedence`,
+            reportId: event.id,
+            reporterPubkey: event.pubkey,
+          });
+          return;
+        }
+        console.error(`[ReportWatcher] Failed to reverse raced auto-hide: ${restore.error}`);
+        await this.logDecision({
+          targetType: 'event',
+          targetId: targetEventId,
+          action: AUTO_HIDE_ACTION.restoreFailed,
+          reason: `${category}: failed to reverse raced human restore: ${restore.error}`,
+          reportId: event.id,
+          reporterPubkey: event.pubkey,
+        });
+        return;
+      }
+
+      if (await this.state.storage.get<string>(visibilityKey) !== 'hide') {
+        await this.state.storage.delete(visibilityKey);
+      }
+
       console.log(`[ReportWatcher] Successfully auto-hidden event ${targetEventId}`);
       this.eventsAutoHidden++;
       await this.persistState();
@@ -816,6 +1175,9 @@ export class ReportWatcher implements DurableObject {
    * Check if an event was already auto-hidden (for deduplication)
    */
   private async isAlreadyAutoHidden(targetEventId: string): Promise<boolean> {
+    if (await this.state.storage.get<string>(this.visibilityStorageKey(targetEventId)) === 'raw-allow') {
+      return false;
+    }
     if (!this.env.DB) {
       // No D1 available - can't dedupe, allow processing
       console.warn('[ReportWatcher] D1 not available for deduplication check');
@@ -829,7 +1191,7 @@ export class ReportWatcher implements DurableObject {
           AND target_id = ?
           AND action IN (?, ?)
         LIMIT 1
-      `).bind(targetEventId, AUTO_HIDE_ACTION.hidden, 'auto_hide_confirmed').first();
+      `).bind(targetEventId, AUTO_HIDE_ACTION.hidden, AUTO_HIDE_ACTION.confirmed).first();
 
       return result !== null;
     } catch (error) {
@@ -843,9 +1205,10 @@ export class ReportWatcher implements DurableObject {
    * Check if a human moderator has already made a decision on this target.
    * Reads from moderation_targets (persistent, survives reopen).
    */
-  private async hasHumanResolution(targetEventId: string): Promise<boolean> {
+  private async hasHumanResolution(targetEventId: string): Promise<boolean | null> {
     if (!this.env.DB) {
-      return false;
+      console.error(`[ALERT] [ReportWatcher] Cannot check human resolution for ${targetEventId}: D1 is not bound`);
+      return null;
     }
 
     try {
@@ -857,8 +1220,31 @@ export class ReportWatcher implements DurableObject {
       return result !== null;
     } catch (error) {
       console.error('[ReportWatcher] Failed to check human resolution:', error);
-      // On error, allow processing (fail open for enforcement)
-      return false;
+      return null;
+    }
+  }
+
+  private async hasBlockingHumanResolution(targetEventId: string, rawAllow: boolean): Promise<boolean | null> {
+    const humanResolution = await this.hasHumanResolution(targetEventId);
+    if (humanResolution !== true || !rawAllow) return humanResolution;
+
+    // A raw visibility override supersedes a prior hide/confirmation for report
+    // admission, but it must never supersede an explicit human restore.
+    return this.hasHumanRestore(targetEventId);
+  }
+
+  /**
+   * Whether the latest human decision specifically restores this event.
+   * The permanent reviewed bit alone is direction-free: hides and deletes set it too.
+   */
+  private async hasHumanRestore(targetEventId: string): Promise<boolean | null> {
+    if (!this.env.DB) return false;
+
+    try {
+      return await hasLatestHumanRestore(this.env.DB, targetEventId);
+    } catch (error) {
+      console.error('[ReportWatcher] Failed to check latest human action:', error);
+      return null;
     }
   }
 
@@ -872,10 +1258,11 @@ export class ReportWatcher implements DurableObject {
     reason: string;
     reportId: string;
     reporterPubkey: string;
-  }): Promise<void> {
+    moderatorPubkey?: string;
+  }): Promise<boolean> {
     if (!this.env.DB) {
       console.warn('[ReportWatcher] D1 database not available, skipping log');
-      return;
+      return false;
     }
 
     try {
@@ -888,15 +1275,63 @@ export class ReportWatcher implements DurableObject {
         decision.targetId,
         decision.action,
         decision.reason,
-        'auto', // moderator_pubkey = 'auto' for automated decisions
+        decision.moderatorPubkey || 'auto',
         decision.reportId,
         decision.reporterPubkey
       ).run();
 
       console.log(`[ReportWatcher] Logged decision: ${decision.action} for ${decision.targetId}`);
+      return true;
     } catch (error) {
       console.error('[ReportWatcher] Failed to log decision:', error);
+      return false;
     }
+  }
+
+  private async recordAutoHideHumanDecision(
+    operation: EventVisibilityOperation,
+    action: string,
+    lastHumanAction?: string,
+  ): Promise<boolean> {
+    if (!this.env.DB) return false;
+    const targetStatement = lastHumanAction
+      ? this.env.DB.prepare(`
+          INSERT INTO moderation_targets (target_id, target_type, ever_human_reviewed, last_human_action)
+          VALUES (?, 'event', 1, ?)
+          ON CONFLICT(target_id) DO UPDATE SET
+            ever_human_reviewed = 1,
+            last_human_action = excluded.last_human_action
+        `).bind(operation.eventId, lastHumanAction)
+      : this.env.DB.prepare(`
+          INSERT INTO moderation_targets (target_id, target_type, ever_human_reviewed)
+          VALUES (?, 'event', 1)
+          ON CONFLICT(target_id) DO UPDATE SET ever_human_reviewed = 1
+        `).bind(operation.eventId);
+    try {
+      await this.env.DB.batch([
+        this.env.DB.prepare(`
+          INSERT INTO moderation_decisions
+          (target_type, target_id, action, reason, moderator_pubkey, report_id, reporter_pubkey, created_at)
+          VALUES ('event', ?, ?, ?, ?, ?, ?, datetime('now'))
+        `).bind(
+          operation.eventId,
+          action,
+          operation.reason || operation.humanAction || 'human review',
+          operation.moderatorPubkey || 'auto',
+          operation.reportId || '',
+          operation.reporterPubkey || '',
+        ),
+        targetStatement,
+      ]);
+      return true;
+    } catch (error) {
+      console.error(`[ReportWatcher] Failed to record ${action}:`, error);
+      return false;
+    }
+  }
+
+  private visibilityStorageKey(eventId: string): string {
+    return `event-visibility:${eventId}`;
   }
 
   private async createAgeReviewCase(event: ReportEvent, reportedPubkey: string): Promise<void> {

@@ -1,7 +1,7 @@
 // ABOUTME: Tests for NIP-86 RPC utilities
 // ABOUTME: Uses vitest with mocked fetch for relay calls
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   getSecretKey,
   getAdminPubkey,
@@ -20,6 +20,11 @@ import {
 const TEST_NSEC = 'nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5';
 // Pubkey derived from TEST_NSEC
 const TEST_PUBKEY = '7e7e9c42a91bfef19fa929e5fda1b72e0ebc1a4c1141673e2794234d86addf4e';
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 describe('getSecretKey', () => {
   it('should decode nsec string', async () => {
@@ -178,6 +183,30 @@ describe('callNip86Rpc', () => {
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
     expect(body.params).toEqual(['abc123', 'reason']);
   });
+
+  it('bounds relay calls below the Durable Object gate timeout', async () => {
+    const signal = new AbortController().signal;
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(signal);
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ result: true }),
+    });
+    vi.stubGlobal('fetch', mockFetch);
+
+    await callNip86Rpc('banevent', ['abc123'], mockEnv);
+
+    expect(timeoutSpy).toHaveBeenCalledWith(15_000);
+    expect(mockFetch.mock.calls[0][1].signal).toBe(signal);
+  });
+
+  it('returns a structured failure when the relay request rejects', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new DOMException('timed out', 'TimeoutError')));
+
+    await expect(callNip86Rpc('listbannedevents', [], mockEnv)).resolves.toEqual({
+      success: false,
+      error: 'timed out',
+    });
+  });
 });
 
 describe('convenience methods', () => {
@@ -213,6 +242,35 @@ describe('convenience methods', () => {
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
     expect(body.method).toBe('allowevent');
     expect(body.params).toEqual(['event123']);
+  });
+
+  it.each([
+    ['hide', banEvent, 'spam', 'hide_event'],
+    ['allow', allowEvent, undefined, 'allow_event'],
+  ] as const)('routes %s event visibility through ReportWatcher when configured', async (relayAction, action, reason, humanAction) => {
+    const eventId = 'ab'.repeat(32);
+    const coordinatorFetch = vi.fn(async (_request: Request) => Response.json({ success: true }));
+    const env = {
+      ...mockEnv,
+      REPORT_WATCHER: {
+        idFromName: vi.fn(() => 'singleton'),
+        get: vi.fn(() => ({ fetch: coordinatorFetch })),
+      },
+    } as never;
+
+    const result = reason
+      ? await action(eventId, reason, env)
+      : await action(eventId, env);
+
+    expect(result.success).toBe(true);
+    expect(mockFetch).not.toHaveBeenCalled();
+    const request = coordinatorFetch.mock.calls[0][0];
+    expect(await request.json()).toEqual({
+      eventId,
+      relayAction,
+      humanAction,
+      ...(reason ? { reason } : {}),
+    });
   });
 
   it('banPubkey should call banpubkey RPC', async () => {

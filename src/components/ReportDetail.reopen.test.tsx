@@ -25,13 +25,14 @@ const OTHER_PUBKEY = '8'.repeat(64);
 // (ErrorBoundary resetKeys clear a caught error; they do not remount children),
 // so the panel's hooks hand back a new target under the same component
 // instance. A fixed mock cannot express that.
-const ctx = vi.hoisted(() => ({ targetValue: 'c'.repeat(64), reportedPubkey: 'd'.repeat(64) }));
+const ctx = vi.hoisted(() => ({ targetType: 'event' as 'event' | 'pubkey', targetValue: 'c'.repeat(64), reportedPubkey: 'd'.repeat(64) }));
 
 const api = vi.hoisted(() => ({
   deleteEvent: vi.fn(),
-  allowEvent: vi.fn(),
+  restoreEvent: vi.fn(),
   markAsReviewed: vi.fn(),
   logDecision: vi.fn(),
+  confirmAutoHide: vi.fn(),
   deleteDecisions: vi.fn(),
 }));
 const toast = vi.hoisted(() => vi.fn());
@@ -56,13 +57,14 @@ const decisionLog = vi.hoisted(() => ({
   isDeleted: false,
   isAutoHidden: false,
   isAutoHideRestored: false,
+  isAutoHideRestoreFailed: false,
   decisions: [],
   latestDecision: null,
   refetch: vi.fn(),
 }));
 vi.mock('@/hooks/useDecisionLog', () => ({ useDecisionLog: () => decisionLog }));
 vi.mock('@/hooks/useModerationStatus', () => ({
-  useModerationStatus: () => ({ isUserBanned: false, isEventGone: false }),
+  useModerationStatus: () => ({ isUserBanned: false, isEventGone: false, recheck: vi.fn() }),
 }));
 vi.mock('@/hooks/useBannedEvent', () => ({
   useBannedEvent: () => ({ data: null, isLoading: false }),
@@ -86,7 +88,7 @@ const TARGET_EVENT_OBJ: NostrEvent = {
 };
 vi.mock('@/hooks/useReportContext', () => ({
   useReportContext: () => ({
-    target: { type: 'event', value: ctx.targetValue },
+    target: { type: ctx.targetType, value: ctx.targetValue },
     thread: { event: TARGET_EVENT_OBJ, ancestors: [], replies: [] },
     threadLoading: false,
     reportedUser: { profile: undefined, pubkey: ctx.reportedPubkey, isFunnelcakeUser: false },
@@ -127,11 +129,15 @@ const REPORT: NostrEvent = {
 beforeEach(() => {
   vi.clearAllMocks();
   ctx.targetValue = TARGET_EVENT;
+  ctx.targetType = 'event';
   ctx.reportedPubkey = REPORTED_PUBKEY;
+  decisionLog.isPendingReview = false;
+  decisionLog.isAutoHideRestoreFailed = false;
   api.deleteDecisions.mockResolvedValue({ deleted: 2, labelCleanupFailed: false });
+  api.logDecision.mockResolvedValue(undefined);
 });
 
-function renderDetail() {
+function renderDetail(onDismiss?: () => void) {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
@@ -139,7 +145,7 @@ function renderDetail() {
   const tree = () => (
     <QueryClientProvider client={qc}>
       <TooltipProvider>
-        <ReportDetail report={REPORT} />
+        <ReportDetail report={REPORT} onDismiss={onDismiss} />
       </TooltipProvider>
     </QueryClientProvider>
   );
@@ -152,6 +158,109 @@ function renderDetail() {
 const clickReopen = () => fireEvent.click(screen.getByRole('button', { name: /reopen/i }));
 
 describe('ReportDetail reopen reporting', () => {
+  it('confirms an auto-hide without repeating the relay mutation', async () => {
+    decisionLog.isPendingReview = true;
+    api.confirmAutoHide.mockResolvedValue({ success: true, recorded: true });
+    renderDetail();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm Hide' }));
+
+    await waitFor(() => expect(api.confirmAutoHide).toHaveBeenCalledWith(expect.objectContaining({
+      eventId: ctx.targetValue,
+    })));
+    expect(api.logDecision).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'auto_hide_confirmed' }));
+    expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Auto-hide confirmed' }));
+  });
+
+  it('restores an auto-hide without writing detached state', async () => {
+    decisionLog.isPendingReview = true;
+    api.restoreEvent.mockResolvedValue({ success: true, recorded: true, reconciled: true });
+    renderDetail();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Restore Content' }));
+
+    await waitFor(() => expect(api.restoreEvent).toHaveBeenCalledWith(
+      ctx.targetValue,
+      MOD_PUBKEY,
+      'Auto-hide reversed by moderator',
+    ));
+    expect(api.logDecision).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'auto_hide_restored' }));
+    expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Content restored' }));
+  });
+
+  it('offers only restore when automatic restore compensation failed', () => {
+    decisionLog.isPendingReview = true;
+    decisionLog.isAutoHideRestoreFailed = true;
+    renderDetail();
+
+    expect(screen.getByRole('button', { name: 'Restore Content' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Confirm Hide' })).not.toBeInTheDocument();
+    expect(screen.getByText(/automatic restore failed/i)).toBeInTheDocument();
+  });
+
+  it('keeps the report open and raises a persistent warning when dismissal reconciliation fails', async () => {
+    api.markAsReviewed.mockResolvedValue({
+      success: true,
+      recorded: true,
+      reconciled: false,
+      error: 'restore failed',
+    });
+    const onDismiss = vi.fn();
+    renderDetail(onDismiss);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss Report' }));
+    const dialog = await screen.findByRole('alertdialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Dismiss Report' }));
+
+    await waitFor(() => expect(api.markAsReviewed).toHaveBeenCalledWith(
+      'event',
+      ctx.targetValue,
+      'dismissed',
+      'Dismissed - no action needed',
+      MOD_PUBKEY,
+    ));
+    const warning = toast.mock.calls.find(([arg]) => arg.title === 'Resolution saved; visibility needs attention')?.[0];
+    expect(warning).toMatchObject({ variant: 'destructive', duration: Infinity });
+    expect(warning.description).toMatch(/could not be restored/i);
+    expect(onDismiss).not.toHaveBeenCalled();
+  });
+
+  it('keeps the report open when visibility changed but the human-review mark failed', async () => {
+    api.markAsReviewed.mockResolvedValue({
+      success: true,
+      recorded: false,
+      reconciled: true,
+    });
+    const onDismiss = vi.fn();
+    renderDetail(onDismiss);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss Report' }));
+    const dialog = await screen.findByRole('alertdialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Dismiss Report' }));
+
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'Resolution saved; visibility needs attention',
+      variant: 'destructive',
+      duration: Infinity,
+    })));
+    expect(onDismiss).not.toHaveBeenCalled();
+  });
+
+  it('closes a successfully dismissed pubkey report', async () => {
+    ctx.targetType = 'pubkey';
+    ctx.targetValue = REPORTED_PUBKEY;
+    api.markAsReviewed.mockResolvedValue({ success: true, recorded: true, reconciled: true });
+    const onDismiss = vi.fn();
+    renderDetail(onDismiss);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss Report' }));
+    const dialog = await screen.findByRole('alertdialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Dismiss Report' }));
+
+    await waitFor(() => expect(onDismiss).toHaveBeenCalledOnce());
+    expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Marked as false positive' }));
+  });
+
   // Even a fully successful reopen cannot promise the report is back in the
   // queue: resolvedTargets also hides targets via relay bans and deletions,
   // which reopen never touches, so a ban-resolved report stays hidden. Report

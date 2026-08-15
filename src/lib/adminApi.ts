@@ -38,13 +38,16 @@ export interface UnsignedEvent {
   content: string;
   tags?: string[][];
   created_at?: number;
+  moderatorPubkey?: string;
+  moderationReason?: string;
 }
 
 interface ModerateParams {
-  action: 'delete_event' | 'ban_pubkey' | 'allow_pubkey';
+  action: 'delete_event' | 'hide_event' | 'allow_event' | 'ban_pubkey' | 'allow_pubkey';
   eventId?: string;
   pubkey?: string;
   reason?: string;
+  moderatorPubkey?: string;
 }
 
 export interface ApiResponse<T = unknown> {
@@ -52,6 +55,9 @@ export interface ApiResponse<T = unknown> {
   event?: T;
   result?: T;
   error?: string;
+  recorded?: boolean;
+  reconciled?: boolean;
+  reconciliationError?: string;
 }
 
 interface InfoResponse {
@@ -68,6 +74,8 @@ export interface LabelParams {
   namespace: string;
   labels: string[];
   comment?: string;
+  moderatorPubkey?: string;
+  moderationReason?: string;
 }
 
 export class ApiError extends Error {
@@ -239,6 +247,19 @@ export async function moderateAction(apiUrl: string, params: ModerateParams): Pr
 
 export async function deleteEvent(apiUrl: string, eventId: string, reason?: string, pubkey?: string): Promise<ApiResponse> {
   return moderateAction(apiUrl, { action: 'delete_event', eventId, reason, pubkey });
+}
+
+export async function hideEvent(apiUrl: string, eventId: string, reason?: string): Promise<ApiResponse> {
+  return moderateAction(apiUrl, { action: 'hide_event', eventId, reason });
+}
+
+export async function restoreEvent(
+  apiUrl: string,
+  eventId: string,
+  moderatorPubkey?: string,
+  reason?: string,
+): Promise<ApiResponse> {
+  return moderateAction(apiUrl, { action: 'allow_event', eventId, moderatorPubkey, reason });
 }
 
 export async function banPubkeyViaModerate(apiUrl: string, pubkey: string, reason?: string): Promise<ApiResponse> {
@@ -416,6 +437,8 @@ export async function publishLabel(apiUrl: string, params: LabelParams): Promise
     kind: 1985,
     content: params.comment || '',
     tags,
+    moderatorPubkey: params.moderatorPubkey,
+    moderationReason: params.moderationReason,
   });
 }
 
@@ -448,14 +471,18 @@ export async function markAsReviewed(
   targetType: 'event' | 'pubkey',
   targetValue: string,
   status: ResolutionStatus = 'reviewed',
-  comment?: string
+  comment?: string,
+  moderatorPubkey?: string,
 ): Promise<ApiResponse> {
+  const moderationReason = comment || `Marked as ${status} by moderator`;
   return publishLabel(apiUrl, {
     targetType,
     targetValue,
     namespace: 'moderation/resolution',
     labels: [status],
-    comment: comment || `Marked as ${status} by moderator`,
+    comment: moderationReason,
+    moderatorPubkey,
+    moderationReason,
   });
 }
 
@@ -543,6 +570,16 @@ export async function logDecision(apiUrl: string, params: {
   reportId?: string;
 }): Promise<void> {
   await apiRequest<ApiResponse>(apiUrl, '/api/decisions', 'POST', params);
+}
+
+export async function confirmAutoHide(apiUrl: string, params: {
+  eventId: string;
+  reason?: string;
+  moderatorPubkey?: string;
+  reportId?: string;
+  reporterPubkey?: string;
+}): Promise<ApiResponse> {
+  return apiRequest<ApiResponse>(apiUrl, '/api/confirm-auto-hide', 'POST', params);
 }
 
 // Get decisions for a target

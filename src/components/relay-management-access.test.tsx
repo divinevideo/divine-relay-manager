@@ -42,7 +42,7 @@ vi.mock('@/hooks/useAdminApi', () => ({
     callRelayRpc: rpc.fn,
     getWorkerInfo: workerInfo.fn,
     banEvent: vi.fn(),
-    allowEvent: vi.fn(),
+    restoreEvent: vi.fn(),
     verifyEventDeleted: vi.fn(),
   }),
   useApiUrl: () => 'https://api.example.test',

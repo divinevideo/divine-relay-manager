@@ -36,6 +36,11 @@ import type { BulkJobMessage } from '../../shared/bulk-moderation';
 import { ensureZendeskTable, addZendeskInternalNote, syncZendeskAfterAction } from './zendesk-sync';
 import { buildReportNote, parseKind0Profile, type ReportedProfile } from './report-note';
 import { queryRelay, withTimeout, ENRICHMENT_TIMEOUT_MS } from './relay-profile';
+import { coordinateEventVisibility, type EventVisibilityResult } from './event-visibility';
+import { markHumanAction, markHumanReviewed } from './human-decision';
+import { AUTO_HIDE_STATE_ACTIONS } from '../../shared/autohide';
+
+const COORDINATED_AUTO_HIDE_ACTIONS = new Set<string>(AUTO_HIDE_STATE_ACTIONS);
 
 let schemaReady = false;
 async function ensureSchemaOnce(db: D1Database): Promise<void> {
@@ -337,6 +342,8 @@ interface UnsignedEvent {
   content: string;
   tags: string[][];
   created_at?: number;
+  moderatorPubkey?: string;
+  moderationReason?: string;
 }
 
 interface ApiResponse {
@@ -348,6 +355,9 @@ interface ApiResponse {
   pubkey?: string;
   // Moderation action responses
   eventId?: string;
+  // hide_event / allow_event: whether the decision was recorded as human-reviewed, not
+  // merely applied at the relay. False means ReportWatcher is still free to undo it.
+  recorded?: boolean;
   deleted?: number;
   labelsDeleted?: number;
   // Reopen could not clear every relay-side resolution label, so the report
@@ -487,6 +497,10 @@ export default {
 
       if (path === '/api/decisions' && request.method === 'POST') {
         return handleLogDecision(request, env, corsHeaders);
+      }
+
+      if (path === '/api/confirm-auto-hide' && request.method === 'POST') {
+        return handleConfirmAutoHide(request, env, corsHeaders);
       }
 
       if (path === '/api/decisions' && request.method === 'GET') {
@@ -793,9 +807,16 @@ async function handlePublish(
   corsHeaders: Record<string, string>
 ): Promise<Response> {
   const body = (await request.json()) as UnsignedEvent;
+  let resolutionVisibility: EventVisibilityResult | undefined;
 
   if (!body.kind || body.content === undefined) {
     return jsonResponse({ success: false, error: 'Missing required fields: kind, content' }, 400, corsHeaders);
+  }
+  if (body.moderatorPubkey !== undefined && !/^[a-f0-9]{64}$/i.test(body.moderatorPubkey)) {
+    return jsonResponse({ success: false, error: 'Invalid moderatorPubkey' }, 400, corsHeaders);
+  }
+  if (body.moderationReason !== undefined && typeof body.moderationReason !== 'string') {
+    return jsonResponse({ success: false, error: 'Invalid moderationReason' }, 400, corsHeaders);
   }
 
   const secretKey = await getSecretKey(env);
@@ -842,8 +863,33 @@ async function handlePublish(
       console.log('[handlePublish] Resolution label details:', { status, targetType, targetId });
 
       if (status && targetType && targetId) {
-        if (env.DB) {
-          await markHumanReviewed(env.DB, targetType, targetId);
+        if (targetType === 'event' && ['dismissed', 'no-action', 'false-positive'].includes(status)) {
+          const result = env.DB
+            ? await coordinateEventVisibility(env, {
+              eventId: targetId,
+              relayAction: 'review',
+              humanAction: status,
+              reason: body.moderationReason,
+              moderatorPubkey: body.moderatorPubkey?.toLowerCase(),
+            })
+            : { success: false, recorded: false, error: 'Moderation database is not configured' };
+          resolutionVisibility = !result.recorded && !result.error
+            ? { ...result, error: 'Human-review state was not recorded' }
+            : result;
+          if (!result.success || !result.recorded) {
+            console.error('[handlePublish] Resolution label was published but visibility reconciliation failed:', resolutionVisibility.error);
+          }
+        } else if (env.DB) {
+          const recorded = status === 'reviewed'
+            ? await markHumanReviewed(env.DB, targetType, targetId)
+            : await markHumanAction(env.DB, targetType, targetId, status);
+          resolutionVisibility = {
+            success: true,
+            recorded,
+            ...(!recorded ? { error: 'Human-review state was not recorded' } : {}),
+          };
+        } else {
+          resolutionVisibility = { success: false, recorded: false, error: 'Moderation database is not configured' };
         }
 
         // Use waitUntil to ensure sync completes even after response is sent
@@ -867,7 +913,15 @@ async function handlePublish(
     }
   }
 
-  return jsonResponse({ success: true, event }, 200, corsHeaders);
+  return jsonResponse({
+    success: true,
+    event,
+    ...(resolutionVisibility ? {
+      recorded: resolutionVisibility.recorded,
+      reconciled: resolutionVisibility.success && resolutionVisibility.recorded === true,
+      reconciliationError: resolutionVisibility.error,
+    } : {}),
+  }, 200, corsHeaders);
 }
 
 async function handleModerate(
@@ -881,6 +935,7 @@ async function handleModerate(
     eventId?: string;
     pubkey?: string;
     reason?: string;
+    moderatorPubkey?: string;
   };
 
   if (!body.action) {
@@ -891,32 +946,29 @@ async function handleModerate(
 
   switch (body.action) {
     case 'delete_event': {
-      // Use banevent RPC directly instead of publishing kind 5 events.
+      // Use coordinated banevent RPC instead of publishing kind 5 events.
       // NIP-09 kind 5 deletion only allows authors to delete their own events.
       // Admin moderation requires NIP-86 banevent RPC method instead.
-      if (!body.eventId) {
-        return jsonResponse({ success: false, error: 'Missing eventId for delete_event' }, 400, corsHeaders);
+      if (typeof body.eventId !== 'string' || !/^[a-f0-9]{64}$/i.test(body.eventId)) {
+        return jsonResponse({ success: false, error: 'Missing or invalid eventId for delete_event (must be 64 hex chars)' }, 400, corsHeaders);
+      }
+      const eventId = body.eventId.toLowerCase();
+      if (body.reason !== undefined && typeof body.reason !== 'string') {
+        return jsonResponse({ success: false, error: `Invalid reason for ${body.action}` }, 400, corsHeaders);
+      }
+      if (body.moderatorPubkey !== undefined && !/^[a-f0-9]{64}$/i.test(body.moderatorPubkey)) {
+        return jsonResponse({ success: false, error: `Invalid moderatorPubkey for ${body.action}` }, 400, corsHeaders);
       }
 
       try {
-        const rpcRequest = new Request(request.url.replace(/\/api\/moderate$/, '/api/relay-rpc'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            method: 'banevent',
-            params: [body.eventId, body.reason || 'Deleted by relay admin'],
-          }),
+        const result = await coordinateEventVisibility(env, {
+          eventId,
+          relayAction: 'hide',
+          reason: body.reason || 'Deleted by relay admin',
+          humanAction: body.action,
         });
-
-        const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders);
-        const rpcResult = await rpcResponse.json() as { success: boolean; error?: string };
-
-        if (!rpcResult.success) {
-          return jsonResponse({ success: false, error: rpcResult.error || 'banevent RPC failed' }, 500, corsHeaders);
-        }
-
-        if (env.DB) {
-          await markHumanReviewed(env.DB, 'event', body.eventId);
+        if (!result.success) {
+          return jsonResponse({ success: false, error: result.error || 'banevent RPC failed' }, 500, corsHeaders);
         }
 
         // Sync any linked Zendesk tickets
@@ -925,7 +977,7 @@ async function handleModerate(
             env,
             body.action,
             'event',
-            body.eventId,
+            eventId,
             getPublicKey(secretKey)
           );
         } catch (err) {
@@ -937,15 +989,108 @@ async function handleModerate(
         // notice (PERMANENT_BAN, with eventId), not an account-state change, so it
         // does not fit the account-state helper's action union or signature.
         if (body.pubkey) {
-          const dmPromise = notifyModerationService(env, body.pubkey, 'PERMANENT_BAN', body.reason || 'Content removed by moderator', undefined, body.eventId)
+          const dmPromise = notifyModerationService(env, body.pubkey, 'PERMANENT_BAN', body.reason || 'Content removed by moderator', undefined, eventId)
             .catch(err => console.error('[handleModerate] DM notification error:', err));
           if (ctx) ctx.waitUntil(dmPromise);
         }
 
-        return jsonResponse({ success: true, eventId: body.eventId }, 200, corsHeaders);
+        return jsonResponse({ success: true, eventId, recorded: result.recorded === true }, 200, corsHeaders);
       } catch (error) {
         console.error('[handleModerate] delete_event error:', error);
         return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Unknown error' }, 500, corsHeaders);
+      }
+    }
+
+    // hide_event / allow_event exist so a moderator's content decision is RECORDED,
+    // not merely executed. ReportWatcher.hasHumanResolution reads
+    // moderation_targets.ever_human_reviewed and skips auto-hide when it is set. A
+    // caller that reverses a hide over raw /api/relay-rpc leaves that flag unset, so
+    // the next immediate-tier report (csam is threshold 1) re-hides content a human
+    // deliberately restored, and nobody learns the decision was undone. That is the
+    // whole reason these are not just relay-rpc passthroughs.
+    //
+    // Deliberately NOT delete_event: that one DMs the creator PERMANENT_BAN, which is
+    // wrong for a reversible hide and absurd for a restore.
+    case 'hide_event':
+    case 'allow_event': {
+      const isHide = body.action === 'hide_event';
+      // Validate AND canonicalise. moderation_targets.target_id is TEXT PRIMARY KEY with
+      // BINARY collation, and ReportWatcher looks the event up by the lowercase id from
+      // the report's `e` tag. An uppercase id here would write a row nobody can read:
+      // the mark succeeds, the API says success, and the auto-hide suppression this
+      // endpoint exists to create never engages. Same trap already fixed for media
+      // hashes elsewhere in this file.
+      if (typeof body.eventId !== 'string' || !/^[a-f0-9]{64}$/i.test(body.eventId)) {
+        return jsonResponse(
+          { success: false, error: `Missing or invalid eventId for ${body.action} (must be 64 hex chars)` },
+          400,
+          corsHeaders,
+        );
+      }
+      const eventId = body.eventId.toLowerCase();
+      if (body.reason !== undefined && typeof body.reason !== 'string') {
+        return jsonResponse({ success: false, error: `Invalid reason for ${body.action}` }, 400, corsHeaders);
+      }
+      if (body.moderatorPubkey !== undefined && !/^[a-f0-9]{64}$/i.test(body.moderatorPubkey)) {
+        return jsonResponse({ success: false, error: `Invalid moderatorPubkey for ${body.action}` }, 400, corsHeaders);
+      }
+
+      try {
+        const result = await coordinateEventVisibility(env, {
+          eventId,
+          relayAction: isHide ? 'hide' : 'allow',
+          reason: body.reason || (isHide ? 'Hidden by moderator' : 'Restored by moderator'),
+          humanAction: body.action,
+          moderatorPubkey: body.moderatorPubkey?.toLowerCase(),
+        });
+        if (!result.success) {
+          // Flatten to 500, matching delete_event and ban_pubkey. Neither banevent nor
+          // allowevent is age-review guarded (that guard covers only suspendpubkey,
+          // unsuspendpubkey and unbanpubkey), so there is no 409/503 whose code a caller
+          // would need preserved -- and forwarding would relabel a transient relay 502 as
+          // a terminal 400, which retrying clients read as "do not retry".
+          return jsonResponse(
+            { success: false, error: result.error || `${isHide ? 'banevent' : 'allowevent'} RPC failed` },
+            500,
+            corsHeaders,
+          );
+        }
+
+        // Only after the relay actually applied it. Marking a decision that did not
+        // take effect would suppress ReportWatcher on content that is still live.
+        //
+        // Unlike delete_event, where the mark is bookkeeping beside the real action, the
+        // mark IS the reason these two actions exist -- the relay change was already
+        // available over /api/relay-rpc. So a failed mark must not be reported as plain
+        // success: the caller would believe the decision is protected from ReportWatcher
+        // when it is not. Surfaced as `recorded`, loudly logged, and NOT a 5xx, because
+        // the relay change did land and a retry would be a second enforcement.
+        const recorded = result.recorded === true;
+        if (!recorded) {
+          console.error(
+            `[handleModerate] ALERT: ${body.action} applied at the relay but NOT recorded as ` +
+            `human-reviewed for ${eventId}; ReportWatcher may undo it`,
+          );
+        }
+
+        // The coordinator serializes this relay mutation and direction write with
+        // ReportWatcher auto-hide, so no stale second allow is needed.
+        const reconciled = !isHide && recorded;
+
+        try {
+          await syncZendeskAfterAction(env, body.action, 'event', eventId, getPublicKey(secretKey));
+        } catch (err) {
+          console.error('[handleModerate] Zendesk sync error:', err);
+        }
+
+        return jsonResponse({ success: true, eventId, recorded, ...(!isHide && { reconciled }) }, 200, corsHeaders);
+      } catch (error) {
+        console.error(`[handleModerate] ${body.action} error:`, error);
+        return jsonResponse(
+          { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+          500,
+          corsHeaders,
+        );
       }
     }
 
@@ -968,7 +1113,7 @@ async function handleModerate(
           return jsonResponse({ success: false, error: rpcResult.error || 'banpubkey RPC failed' }, 500, corsHeaders);
         }
         if (env.DB) {
-          await markHumanReviewed(env.DB, 'pubkey', body.pubkey);
+          await markHumanAction(env.DB, 'pubkey', body.pubkey, body.action);
         }
         try {
           await syncZendeskAfterAction(env, body.action, 'pubkey', body.pubkey, getPublicKey(secretKey));
@@ -1027,7 +1172,7 @@ async function handleModerate(
           return jsonResponse({ success: false, error: rpcResult.error || 'unbanpubkey RPC failed' }, 500, corsHeaders);
         }
         if (env.DB) {
-          await markHumanReviewed(env.DB, 'pubkey', body.pubkey);
+          await markHumanAction(env.DB, 'pubkey', body.pubkey, body.action);
         }
         try {
           await syncZendeskAfterAction(env, body.action, 'pubkey', body.pubkey, getPublicKey(secretKey));
@@ -1145,8 +1290,26 @@ async function handleRelayRpc(
     if (guarded) return guarded;
   }
 
-  // Use shared NIP-86 RPC utility
-  const result = await callNip86Rpc(body.method, body.params || [], env);
+  const eventVisibilityAction = body.method === 'banevent'
+    ? 'hide'
+    : body.method === 'allowevent'
+      ? 'allow'
+      : null;
+  if (body.method === 'banevent' && !/^[0-9a-f]{64}$/.test(target)) {
+    return jsonResponse({ success: false, error: 'Invalid event id' }, 400, corsHeaders);
+  }
+
+  // Preserve cleanup for legacy non-canonical bans by forwarding allowevent
+  // byte-for-byte. Canonical event actions use the coordinator and persist the
+  // direction that auto-hide compensation reads.
+  const shouldCoordinateEvent = eventVisibilityAction && /^[0-9a-f]{64}$/.test(target);
+  const result = shouldCoordinateEvent
+    ? await coordinateEventVisibility(env, {
+      eventId: target,
+      relayAction: eventVisibilityAction,
+      reason: body.params?.[1] ? String(body.params[1]) : undefined,
+    })
+    : await callNip86Rpc(body.method, body.params || [], env);
 
   if (!result.success) {
     return jsonResponse({ success: false, error: result.error }, 400, corsHeaders);
@@ -1183,7 +1346,7 @@ async function handleRelayRpc(
     }
   }
 
-  return new Response(JSON.stringify({ success: true, result: result.result }), {
+  return new Response(JSON.stringify({ success: true, result: 'result' in result ? result.result : true }), {
     status: 200,
     headers: { 'Content-Type': 'application/json', ...corsHeaders },
   });
@@ -1392,18 +1555,6 @@ Respond with JSON only:
   }
 }
 
-async function markHumanReviewed(db: D1Database, targetType: string, targetId: string): Promise<void> {
-  try {
-    await db.prepare(`
-      INSERT INTO moderation_targets (target_id, target_type, ever_human_reviewed)
-      VALUES (?, ?, 1)
-      ON CONFLICT(target_id) DO UPDATE SET ever_human_reviewed = 1
-    `).bind(targetId, targetType).run();
-  } catch (error) {
-    console.error('[markHumanReviewed] Failed to update moderation_targets:', error);
-  }
-}
-
 async function handleLogDecision(
   request: Request,
   env: Env,
@@ -1426,6 +1577,9 @@ async function handleLogDecision(
     if (!body.targetType || !body.targetId || !body.action) {
       return jsonResponse({ success: false, error: 'Missing required fields' }, 400, corsHeaders);
     }
+    if (body.targetType === 'event' && COORDINATED_AUTO_HIDE_ACTIONS.has(body.action)) {
+      return jsonResponse({ success: false, error: 'Event auto-hide state must use its coordinated endpoint' }, 400, corsHeaders);
+    }
 
     await ensureSchemaOnce(env.DB);
 
@@ -1441,6 +1595,8 @@ async function handleLogDecision(
       body.reportId || null
     ).run();
 
+    // This endpoint is an append-only audit write. Detached clients can deliver it
+    // after a newer enforcement action, so it must not redefine visibility intent.
     await markHumanReviewed(env.DB, body.targetType, body.targetId);
 
     return new Response(JSON.stringify({ success: true }), {
@@ -1457,6 +1613,44 @@ async function handleLogDecision(
   }
 }
 
+async function handleConfirmAutoHide(
+  request: Request,
+  env: Env,
+  corsHeaders: Record<string, string>,
+): Promise<Response> {
+  const body = await request.json() as {
+    eventId?: string;
+    reason?: string;
+    moderatorPubkey?: string;
+    reportId?: string;
+    reporterPubkey?: string;
+  };
+  if (typeof body.eventId !== 'string' || !/^[a-f0-9]{64}$/i.test(body.eventId)) {
+    return jsonResponse({ success: false, error: 'Missing or invalid eventId' }, 400, corsHeaders);
+  }
+  if (body.reason !== undefined && typeof body.reason !== 'string') {
+    return jsonResponse({ success: false, error: 'Invalid reason' }, 400, corsHeaders);
+  }
+  if (body.moderatorPubkey !== undefined && !/^[a-f0-9]{64}$/i.test(body.moderatorPubkey)) {
+    return jsonResponse({ success: false, error: 'Invalid moderatorPubkey' }, 400, corsHeaders);
+  }
+  if (body.reportId !== undefined && !/^[a-f0-9]{64}$/i.test(body.reportId)) {
+    return jsonResponse({ success: false, error: 'Invalid reportId' }, 400, corsHeaders);
+  }
+  if (body.reporterPubkey !== undefined && !/^[a-f0-9]{64}$/i.test(body.reporterPubkey)) {
+    return jsonResponse({ success: false, error: 'Invalid reporterPubkey' }, 400, corsHeaders);
+  }
+  const result = await coordinateEventVisibility(env, {
+    eventId: body.eventId.toLowerCase(),
+    relayAction: 'confirm',
+    reason: body.reason,
+    moderatorPubkey: body.moderatorPubkey?.toLowerCase(),
+    reportId: body.reportId?.toLowerCase(),
+    reporterPubkey: body.reporterPubkey?.toLowerCase(),
+  });
+  return jsonResponse(result, result.success ? 200 : result.conflict ? 409 : 500, corsHeaders);
+}
+
 async function handleGetAllDecisions(
   env: Env,
   corsHeaders: Record<string, string>
@@ -1471,7 +1665,7 @@ async function handleGetAllDecisions(
     // Get all decisions, ordered by most recent first
     const decisions = await env.DB.prepare(`
       SELECT * FROM moderation_decisions
-      ORDER BY created_at DESC
+      ORDER BY created_at DESC, id DESC
       LIMIT 1000
     `).all();
 
@@ -1508,7 +1702,7 @@ async function handleGetDecisions(
     const decisions = await env.DB.prepare(`
       SELECT * FROM moderation_decisions
       WHERE target_id = ?
-      ORDER BY created_at DESC
+      ORDER BY created_at DESC, id DESC
     `).bind(targetId).all();
 
     return new Response(JSON.stringify({
