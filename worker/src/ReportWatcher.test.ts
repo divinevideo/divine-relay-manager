@@ -597,6 +597,47 @@ describe('ReportWatcher', () => {
       expect(relayMethods).toEqual(['allowevent', 'banevent']);
     });
 
+    it('does not re-hide an explicitly restored event after a redundant raw allow', async () => {
+      const db = {
+        prepare: vi.fn().mockImplementation((sql: string) => ({
+          bind: vi.fn().mockReturnValue({
+            first: vi.fn().mockResolvedValue(
+              sql.includes('ever_human_reviewed') || sql.includes('last_human_action IN')
+                ? { present: 1 }
+                : null,
+            ),
+            run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 1 } }),
+          }),
+          run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 0 } }),
+        })),
+      } as unknown as D1Database;
+      watcher = new ReportWatcher(createMockState(), createMockEnv({ DB: db, AUTO_HIDE_ENABLED: 'true' }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+      const relayMethods: string[] = [];
+      vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const raw = input instanceof Request ? await input.clone().text() : String(init?.body ?? '');
+        relayMethods.push((JSON.parse(raw) as { method: string }).method);
+        return new Response(JSON.stringify({ result: true }), { status: 200 });
+      }));
+      const eventId = 'b7'.repeat(32);
+
+      await watcher.fetch(new Request('https://do/event-visibility', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ eventId, relayAction: 'allow' }),
+      }));
+      await (watcher as unknown as { handleReportEvent(event: ReportEvent): Promise<void> }).handleReportEvent({
+        id: 'd5'.repeat(32),
+        pubkey: 'd6'.repeat(32),
+        kind: 1984,
+        created_at: 1,
+        content: 'report',
+        tags: [['report', 'sexual_minors'], ['e', eventId], ['client', 'diVine']],
+      });
+
+      expect(relayMethods).toEqual(['allowevent']);
+    });
+
     it('rejects confirmation while a raw allow is visible', async () => {
       const db = {
         prepare: vi.fn().mockImplementation((sql: string) => ({

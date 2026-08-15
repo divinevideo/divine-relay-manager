@@ -910,8 +910,8 @@ export class ReportWatcher implements DurableObject {
     // A raw allow changes relay visibility without superseding the durable human
     // decision. Re-admit enforcement until a successful hide consumes this marker.
     const rawAllow = await this.state.storage.get<string>(this.visibilityStorageKey(targetEventId)) === 'raw-allow';
-    const humanResolution = await this.hasHumanResolution(targetEventId);
-    if (humanResolution === null) {
+    const blockingHumanResolution = await this.hasBlockingHumanResolution(targetEventId, rawAllow);
+    if (blockingHumanResolution === null) {
       console.error(`[ALERT] [ReportWatcher] Auto-hide skipped for ${targetEventId}: human-review state unavailable`);
       await this.logDecision({
         targetType: 'event',
@@ -923,7 +923,7 @@ export class ReportWatcher implements DurableObject {
       });
       return;
     }
-    if (humanResolution && !rawAllow) {
+    if (blockingHumanResolution) {
       console.log(`[ReportWatcher] Event ${targetEventId} has human resolution, skipping auto-hide`);
       return;
     }
@@ -1008,8 +1008,8 @@ export class ReportWatcher implements DurableObject {
     // The first check happens before tier processing. Recheck both the durable
     // decision and raw visibility override inside the same gate used by human actions.
     const rawAllow = await this.state.storage.get<string>(this.visibilityStorageKey(targetEventId)) === 'raw-allow';
-    const humanResolution = await this.hasHumanResolution(targetEventId);
-    if (humanResolution === null) {
+    const blockingHumanResolution = await this.hasBlockingHumanResolution(targetEventId, rawAllow);
+    if (blockingHumanResolution === null) {
       console.error(`[ALERT] [ReportWatcher] Serialized auto-hide skipped for ${targetEventId}: human-review state unavailable`);
       await this.logDecision({
         targetType: 'event',
@@ -1021,7 +1021,7 @@ export class ReportWatcher implements DurableObject {
       });
       return;
     }
-    if (humanResolution && !rawAllow) {
+    if (blockingHumanResolution) {
       console.log(`[ReportWatcher] Event ${targetEventId} received a human resolution before auto-hide execution`);
       return;
     }
@@ -1166,18 +1166,27 @@ export class ReportWatcher implements DurableObject {
     }
   }
 
+  private async hasBlockingHumanResolution(targetEventId: string, rawAllow: boolean): Promise<boolean | null> {
+    const humanResolution = await this.hasHumanResolution(targetEventId);
+    if (humanResolution !== true || !rawAllow) return humanResolution;
+
+    // A raw visibility override supersedes a prior hide/confirmation for report
+    // admission, but it must never supersede an explicit human restore.
+    return this.hasHumanRestore(targetEventId);
+  }
+
   /**
    * Whether the latest human decision specifically restores this event.
    * The permanent reviewed bit alone is direction-free: hides and deletes set it too.
    */
-  private async hasHumanRestore(targetEventId: string): Promise<boolean> {
+  private async hasHumanRestore(targetEventId: string): Promise<boolean | null> {
     if (!this.env.DB) return false;
 
     try {
       return await hasLatestHumanRestore(this.env.DB, targetEventId);
     } catch (error) {
       console.error('[ReportWatcher] Failed to check latest human action:', error);
-      return false;
+      return null;
     }
   }
 
