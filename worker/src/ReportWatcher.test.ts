@@ -1755,6 +1755,7 @@ describe('ReportWatcher', () => {
 
     it('retains unresolved restore state when post-ban compensation fails', async () => {
       const decisions: string[] = [];
+      const eventId = 'e1'.repeat(32);
       mockFetch
         .mockResolvedValueOnce({ ok: true, json: async () => ({ result: true }) })
         .mockResolvedValueOnce({ ok: false, status: 500, statusText: 'Internal Server Error' });
@@ -1785,7 +1786,7 @@ describe('ReportWatcher', () => {
         kind: 1984,
         content: 'CSAM report racing a restore whose compensation fails',
         tags: [
-          ['e', 'failed_restore_compensation'],
+          ['e', eventId],
           ['report', 'sexual_minors'],
           ['client', 'diVine'],
         ],
@@ -1797,9 +1798,27 @@ describe('ReportWatcher', () => {
       expect(methods).toEqual(['banevent', 'allowevent']);
       expect(decisions).toContain('auto_hide_failed');
       expect(decisions).not.toContain('auto_hidden');
-      expect(await mockState.storage.get('event-visibility:failed_restore_compensation')).toBe('allow');
+      expect(await mockState.storage.get(`event-visibility:${eventId}`)).toBe('allow');
       const status = await watcher.fetch(new Request('https://do/status'));
       expect(await status.json()).toMatchObject({ status: { eventsAutoHidden: 0 } });
+
+      await watcher.fetch(new Request('https://do/event-visibility', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ eventId, relayAction: 'allow' }),
+      }));
+      await (watcher as unknown as { handleReportEvent(event: ReportEvent): Promise<void> }).handleReportEvent({
+        id: 'later_report_after_failed_compensation',
+        pubkey: 'reporter',
+        kind: 1984,
+        created_at: 1,
+        content: 'later report',
+        tags: [['report', 'sexual_minors'], ['e', eventId], ['client', 'diVine']],
+      });
+
+      expect(mockFetch.mock.calls.map(([, options]) => JSON.parse(options.body).method))
+        .toEqual(['banevent', 'allowevent', 'allowevent']);
+      expect(await mockState.storage.get(`event-visibility:${eventId}`)).toBe('allow');
     });
 
     it('does not reverse an auto-hide when the latest human action is not a restore', async () => {
@@ -1838,6 +1857,7 @@ describe('ReportWatcher', () => {
 
     it('does not report a successful auto-hide when the post-ban restore read fails', async () => {
       const decisions: string[] = [];
+      const eventId = 'e2'.repeat(32);
       mockEnv.DB = {
         prepare: vi.fn().mockImplementation((sql: string) => ({
           bind: vi.fn().mockImplementation((...args: unknown[]) => ({
@@ -1863,7 +1883,7 @@ describe('ReportWatcher', () => {
         kind: 1984,
         content: 'CSAM report racing an unavailable restore read',
         tags: [
-          ['e', 'unknown_restore_during_auto_hide'],
+          ['e', eventId],
           ['report', 'sexual_minors'],
           ['client', 'diVine'],
         ],
@@ -1875,9 +1895,40 @@ describe('ReportWatcher', () => {
       expect(methods).toEqual(['banevent']);
       expect(decisions).toContain('auto_hide_failed');
       expect(decisions).not.toContain('auto_hidden');
-      expect(await mockState.storage.get('event-visibility:unknown_restore_during_auto_hide')).toBe('allow');
+      expect(await mockState.storage.get(`event-visibility:${eventId}`)).toBe('unresolved-hide');
       const status = await watcher.fetch(new Request('https://do/status'));
       expect(await status.json()).toMatchObject({ status: { eventsAutoHidden: 0 } });
+
+      await watcher.fetch(new Request('https://do/event-visibility', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ eventId, relayAction: 'allow' }),
+      }));
+      await (watcher as unknown as { handleReportEvent(event: ReportEvent): Promise<void> }).handleReportEvent({
+        id: 'later_report_after_unknown_restore',
+        pubkey: 'reporter',
+        kind: 1984,
+        created_at: 1,
+        content: 'later report',
+        tags: [['report', 'sexual_minors'], ['e', eventId], ['client', 'diVine']],
+      });
+
+      expect(mockFetch.mock.calls.map(([, options]) => JSON.parse(options.body).method))
+        .toEqual(['banevent', 'allowevent', 'banevent']);
+      expect(await mockState.storage.get(`event-visibility:${eventId}`)).toBe('unresolved-hide');
+
+      const hiddenEventId = 'e3'.repeat(32);
+      await mockState.storage.put(`event-visibility:${hiddenEventId}`, 'hide');
+      await (watcher as unknown as { handleReportEvent(event: ReportEvent): Promise<void> }).handleReportEvent({
+        id: 'report_preserving_hide_after_unknown',
+        pubkey: 'reporter',
+        kind: 1984,
+        created_at: 1,
+        content: 'report with an existing hide tombstone',
+        tags: [['report', 'sexual_minors'], ['e', hiddenEventId], ['client', 'diVine']],
+      });
+
+      expect(await mockState.storage.get(`event-visibility:${hiddenEventId}`)).toBe('hide');
     });
 
     it('should skip auto-hide when DB is unavailable', async () => {

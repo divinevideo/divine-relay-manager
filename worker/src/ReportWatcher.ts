@@ -22,6 +22,8 @@ import {
 import { getUserStatus, type KeycastEnv } from './keycast-client';
 import { fetchAccountIdentity } from './relay-profile';
 
+const UNRESOLVED_AUTO_HIDE_VISIBILITY = 'unresolved-hide';
+
 /**
  * Extended environment for ReportWatcher DO
  */
@@ -993,13 +995,17 @@ export class ReportWatcher implements DurableObject {
     targetEventId: string,
     tierName: string
   ): Promise<void> {
-    if (await this.state.storage.get<string>(this.visibilityStorageKey(targetEventId)) === 'allow') {
-      console.error(`[ALERT] [ReportWatcher] Serialized auto-hide skipped for ${targetEventId}: restored visibility was not recorded`);
+    const visibility = await this.state.storage.get<string>(this.visibilityStorageKey(targetEventId));
+    if (visibility === 'allow' || visibility === UNRESOLVED_AUTO_HIDE_VISIBILITY) {
+      const reason = visibility === 'allow'
+        ? 'restored visibility was not recorded'
+        : 'post-ban visibility remains unresolved';
+      console.error(`[ALERT] [ReportWatcher] Serialized auto-hide skipped for ${targetEventId}: ${reason}`);
       await this.logDecision({
         targetType: 'event',
         targetId: targetEventId,
         action: AUTO_HIDE_ACTION.skipped,
-        reason: `${category}: restored visibility was not recorded`,
+        reason: `${category}: ${reason}`,
         reportId: event.id,
         reporterPubkey: event.pubkey,
       });
@@ -1038,7 +1044,9 @@ export class ReportWatcher implements DurableObject {
       // for a restore; hides and deletes set the permanent reviewed bit too.
       const humanRestore = await this.hasHumanRestore(targetEventId);
       if (humanRestore === null) {
-        await this.state.storage.put(visibilityKey, 'allow');
+        if (await this.state.storage.get<string>(visibilityKey) !== 'hide') {
+          await this.state.storage.put(visibilityKey, UNRESOLVED_AUTO_HIDE_VISIBILITY);
+        }
         console.error(`[ALERT] [ReportWatcher] Auto-hide outcome unresolved for ${targetEventId}: human restore state unavailable after relay ban`);
         await this.logDecision({
           targetType: 'event',
