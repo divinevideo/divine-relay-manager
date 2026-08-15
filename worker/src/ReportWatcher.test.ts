@@ -1753,6 +1753,55 @@ describe('ReportWatcher', () => {
       expect(await status.json()).toMatchObject({ status: { eventsAutoHidden: 0 } });
     });
 
+    it('retains unresolved restore state when post-ban compensation fails', async () => {
+      const decisions: string[] = [];
+      mockFetch
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ result: true }) })
+        .mockResolvedValueOnce({ ok: false, status: 500, statusText: 'Internal Server Error' });
+      mockEnv.DB = {
+        prepare: vi.fn().mockImplementation((sql: string) => ({
+          bind: vi.fn().mockImplementation((...args: unknown[]) => ({
+            run: vi.fn().mockImplementation(async () => {
+              if (sql.includes('INSERT INTO moderation_decisions')) decisions.push(args[2] as string);
+              return { success: true };
+            }),
+            first: vi.fn().mockImplementation(() => {
+              if (sql.includes('SELECT 1 FROM moderation_targets')) {
+                return Promise.resolve(sql.includes('last_human_action') ? { 1: 1 } : null);
+              }
+              return Promise.resolve(null);
+            }),
+          })),
+          run: mockDbRun,
+        })),
+      } as unknown as D1Database;
+
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      getLastMockWebSocket()!.simulateMessage(JSON.stringify(['EVENT', 'auto-hide-reports', {
+        id: 'report_failed_restore_compensation',
+        pubkey: 'reporter',
+        kind: 1984,
+        content: 'CSAM report racing a restore whose compensation fails',
+        tags: [
+          ['e', 'failed_restore_compensation'],
+          ['report', 'sexual_minors'],
+          ['client', 'diVine'],
+        ],
+        created_at: Math.floor(Date.now() / 1000),
+      } satisfies ReportEvent]));
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      const methods = mockFetch.mock.calls.map(([, options]) => JSON.parse(options.body).method);
+      expect(methods).toEqual(['banevent', 'allowevent']);
+      expect(decisions).toContain('auto_hide_failed');
+      expect(decisions).not.toContain('auto_hidden');
+      expect(await mockState.storage.get('event-visibility:failed_restore_compensation')).toBe('allow');
+      const status = await watcher.fetch(new Request('https://do/status'));
+      expect(await status.json()).toMatchObject({ status: { eventsAutoHidden: 0 } });
+    });
+
     it('does not reverse an auto-hide when the latest human action is not a restore', async () => {
       mockEnv.DB = {
         prepare: vi.fn().mockImplementation((_sql: string) => ({
@@ -1785,6 +1834,50 @@ describe('ReportWatcher', () => {
       expect(methods).toEqual(['banevent']);
       const status = await watcher.fetch(new Request('https://do/status'));
       expect(await status.json()).toMatchObject({ status: { eventsAutoHidden: 1 } });
+    });
+
+    it('does not report a successful auto-hide when the post-ban restore read fails', async () => {
+      const decisions: string[] = [];
+      mockEnv.DB = {
+        prepare: vi.fn().mockImplementation((sql: string) => ({
+          bind: vi.fn().mockImplementation((...args: unknown[]) => ({
+            run: vi.fn().mockImplementation(async () => {
+              if (sql.includes('INSERT INTO moderation_decisions')) decisions.push(args[2] as string);
+              return { success: true };
+            }),
+            first: vi.fn().mockImplementation(() => {
+              if (sql.includes('last_human_action')) return Promise.reject(new Error('D1 direction read failed'));
+              return Promise.resolve(null);
+            }),
+          })),
+          run: mockDbRun,
+        })),
+      } as unknown as D1Database;
+
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      getLastMockWebSocket()!.simulateMessage(JSON.stringify(['EVENT', 'auto-hide-reports', {
+        id: 'report_unknown_raced_restore',
+        pubkey: 'reporter',
+        kind: 1984,
+        content: 'CSAM report racing an unavailable restore read',
+        tags: [
+          ['e', 'unknown_restore_during_auto_hide'],
+          ['report', 'sexual_minors'],
+          ['client', 'diVine'],
+        ],
+        created_at: Math.floor(Date.now() / 1000),
+      } satisfies ReportEvent]));
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      const methods = mockFetch.mock.calls.map(([, options]) => JSON.parse(options.body).method);
+      expect(methods).toEqual(['banevent']);
+      expect(decisions).toContain('auto_hide_failed');
+      expect(decisions).not.toContain('auto_hidden');
+      expect(await mockState.storage.get('event-visibility:unknown_restore_during_auto_hide')).toBe('allow');
+      const status = await watcher.fetch(new Request('https://do/status'));
+      expect(await status.json()).toMatchObject({ status: { eventsAutoHidden: 0 } });
     });
 
     it('should skip auto-hide when DB is unavailable', async () => {

@@ -1033,13 +1033,24 @@ export class ReportWatcher implements DurableObject {
 
     if (result.success) {
       const visibilityKey = this.visibilityStorageKey(targetEventId);
-      if (await this.state.storage.get<string>(visibilityKey) !== 'hide') {
-        await this.state.storage.delete(visibilityKey);
-      }
       // A restore can race this pass after its first hasHumanResolution check.
       // Recheck the direction-bearing action after the ban and compensate only
       // for a restore; hides and deletes set the permanent reviewed bit too.
-      if (await this.hasHumanRestore(targetEventId)) {
+      const humanRestore = await this.hasHumanRestore(targetEventId);
+      if (humanRestore === null) {
+        await this.state.storage.put(visibilityKey, 'allow');
+        console.error(`[ALERT] [ReportWatcher] Auto-hide outcome unresolved for ${targetEventId}: human restore state unavailable after relay ban`);
+        await this.logDecision({
+          targetType: 'event',
+          targetId: targetEventId,
+          action: AUTO_HIDE_ACTION.failed,
+          reason: `${category}: human restore state unavailable after relay ban`,
+          reportId: event.id,
+          reporterPubkey: event.pubkey,
+        });
+        return;
+      }
+      if (humanRestore) {
         await this.state.storage.put(visibilityKey, 'allow');
         const restore = await callNip86Rpc('allowevent', [targetEventId], this.env);
         if (restore.success) {
@@ -1055,8 +1066,20 @@ export class ReportWatcher implements DurableObject {
           });
           return;
         }
-        await this.state.storage.delete(visibilityKey);
         console.error(`[ReportWatcher] Failed to reverse raced auto-hide: ${restore.error}`);
+        await this.logDecision({
+          targetType: 'event',
+          targetId: targetEventId,
+          action: AUTO_HIDE_ACTION.failed,
+          reason: `${category}: failed to reverse raced human restore: ${restore.error}`,
+          reportId: event.id,
+          reporterPubkey: event.pubkey,
+        });
+        return;
+      }
+
+      if (await this.state.storage.get<string>(visibilityKey) !== 'hide') {
+        await this.state.storage.delete(visibilityKey);
       }
 
       console.log(`[ReportWatcher] Successfully auto-hidden event ${targetEventId}`);
