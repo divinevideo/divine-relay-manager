@@ -12,6 +12,7 @@ import { ensureSchema } from './db';
 import { buildReportsFilter } from './reports-filter';
 import { generatePreAuthToken, verifyPreAuthToken, base64UrlEncode } from './zendesk-preauth';
 import { deriveFunnelcakeApiUrl, proxyFunnelcakeRequest } from './funnelcake-proxy';
+import { renderMediaPage } from './media-page';
 import type { KeycastEnv } from './keycast-client';
 import { suspendUser, unsuspendUser, banUser } from './keycast-client';
 import {
@@ -467,6 +468,19 @@ export default {
       });
       if (adminAuthError) {
         return jsonResponse({ success: false, error: adminAuthError }, 401, corsHeaders);
+      }
+
+      // Standalone media viewer, linked from a Coop review card. Behind the same
+      // CF Access + verifyAdminAccess gate as everything above, so only an
+      // authenticated moderator reaches it. Serves a minimal self-contained page,
+      // NOT the relay-manager SPA, and streams the blob via /api/media-proxy.
+      if (path.startsWith('/media/') && request.method === 'GET') {
+        const raw = path.slice('/media/'.length).replace(/\.[^./]+$/, '').toLowerCase();
+        const valid = /^[a-f0-9]{64}$/.test(raw);
+        return new Response(renderMediaPage(raw), {
+          status: valid ? 200 : 400,
+          headers: { 'content-type': 'text/html; charset=utf-8', ...corsHeaders },
+        });
       }
 
       // Moderator-facing account status (surfaces keycast verified_minor for the age-review view).
