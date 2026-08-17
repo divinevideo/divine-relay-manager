@@ -59,11 +59,12 @@ describe('GET /media/:sha256', () => {
     expect(res.status).toBe(400);
   });
 
-  it('tolerates a file extension on the path (…/media/<sha>.mp4)', async () => {
+  it('tolerates a file extension on the path (…/media/<sha>.mp4) and passes it as a type hint', async () => {
     const res = await get(`/media/${SHA}.mp4`, AUTH);
     expect(res.status).toBe(200);
     const body = await res.text();
     expect(body).toContain(`/api/media-proxy/${SHA}`);
+    expect(body).toContain('var ext = "mp4"');
   });
 
   it('normalises an uppercase sha in the path to lowercase (the form that ships)', async () => {
@@ -100,6 +101,11 @@ describe('GET /api/media-proxy/:sha256 (the viewer page\'s media source)', () =>
       const cacheControl = res.headers.get('cache-control') || '';
       expect(cacheControl).toContain('no-store');
       expect(cacheControl).not.toContain('no-cache');
+      // Stored-as-uploaded Content-Type means a text/html blob would otherwise
+      // run script on the admin origin if navigated to directly; sandbox plus
+      // nosniff closes that. The fetch-into-Blob consumers are unaffected.
+      expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+      expect(res.headers.get('content-security-policy')).toBe('sandbox');
     } finally {
       globalThis.fetch = originalFetch;
     }

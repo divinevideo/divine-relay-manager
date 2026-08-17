@@ -475,8 +475,14 @@ export default {
       // authenticated moderator reaches it. Serves a minimal self-contained page,
       // NOT the relay-manager SPA, and streams the blob via /api/media-proxy.
       if (path.startsWith('/media/') && request.method === 'GET') {
-        const raw = path.slice('/media/'.length).replace(/\.[^./]+$/, '');
-        const { status, html } = renderMediaPage(raw);
+        // Keep the (optional) extension as a type hint: the page branches on the
+        // proxy's Content-Type, and falls back to this when that type is
+        // unhelpful (e.g. application/octet-stream), mirroring how the SPA's
+        // MediaPreview treats the URL as a signal alongside the MIME type.
+        const rest = path.slice('/media/'.length);
+        const extMatch = rest.match(/\.([^.\/]+)$/);
+        const raw = extMatch ? rest.slice(0, extMatch.index) : rest;
+        const { status, html } = renderMediaPage(raw, extMatch?.[1]);
         return new Response(html, {
           status,
           headers: {
@@ -2573,6 +2579,14 @@ async function handleMediaProxy(
       // a Blob URL, so nothing re-reads the HTTP cache anyway.
       'Cache-Control': 'private, no-store',
       'X-Admin-Proxy': 'blossom-admin',
+      // The upstream Content-Type is stored as-uploaded and is not validated, so
+      // a text/html blob navigated to directly would run script on this origin,
+      // which holds the moderator's CF Access session. nosniff alone does not
+      // stop a declared text/html from rendering; sandbox neutralizes it (unique
+      // origin, no script). Blob-fetch consumers are unaffected: a CSP response
+      // header applies to document loads, not to fetch()-into-Blob pipelines.
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy': 'sandbox',
     };
 
     // Pass through relevant headers from upstream
