@@ -87,10 +87,12 @@ export function renderMediaPage(sha256: string): { status: number; html: string 
     } else if (b.type.indexOf('image') === 0) {
       el = document.createElement('img'); el.src = obj;
     } else {
-      el = document.createElement('a');
-      el.href = obj; el.download = ${JSON.stringify(id)};
-      el.textContent = 'Download (' + (b.type || 'unknown type') + ')';
-      el.style.color = '#8cf';
+      // Never write unknown bytes to the moderator's disk: this may be CSAM, which
+      // is one-way and NCMEC-bound. Show the type and send them back to Coop rather
+      // than offering a download.
+      el = document.createElement('p');
+      el.className = 'status';
+      el.textContent = 'Unsupported type (' + (b.type || 'unknown') + '). Act in Coop.';
     }
     stage.innerHTML = ''; stage.appendChild(el);
   }).catch(function (e) {

@@ -29,6 +29,15 @@ describe('renderMediaPage', () => {
     expect(html).not.toMatch(/<script[^>]+src=/i); // no external app bundle
   });
 
+  it('does not offer a download for unknown blob types; sends the moderator back to Coop', () => {
+    // Writing unknown bytes to the moderator's disk is a CSAM footgun (one-way,
+    // NCMEC-bound). The unknown-type branch must show the type, not download it.
+    const { html } = renderMediaPage(VALID);
+    expect(html).not.toMatch(/\.download\s*=/);
+    expect(html).not.toMatch(/createElement\(['"]a['"]\)/);
+    expect(html).toContain('Unsupported type (');
+  });
+
   it('refuses a non-hex sha with 400 and never reflects it into the page (no XSS)', () => {
     const evil = '"><script>alert(1)</script>';
     const { status, html } = renderMediaPage(evil);
