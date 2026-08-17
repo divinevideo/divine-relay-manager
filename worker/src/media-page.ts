@@ -10,28 +10,34 @@
 
 const HEX64 = /^[a-f0-9]{64}$/;
 
+const ERROR_PAGE = [
+  '<!doctype html>',
+  '<html lang="en"><head><meta charset="utf-8">',
+  '<meta name="robots" content="noindex, nofollow">',
+  '<title>Media viewer</title></head>',
+  '<body style="font-family:system-ui,sans-serif;padding:16px">',
+  '<p>Invalid content id.</p>',
+  '</body></html>',
+].join('\n');
+
 /**
- * Render the standalone media-viewer HTML for a content hash.
+ * Render the standalone media-viewer page for a content hash.
  *
- * `sha256` is validated here rather than trusted: a non-hex value returns an
- * error page and is never reflected into the document, so a crafted id cannot
- * inject markup. A valid hash is safe to interpolate because it is hex only.
+ * Returns the HTTP status alongside the HTML so a single validity check drives
+ * both: the route never has to re-decide whether the sha is valid, so the two
+ * cannot drift out of agreement. The sha is normalised to lowercase once and
+ * that normalised value is the only thing interpolated into the document, so a
+ * crafted id cannot inject markup (a non-hex value returns the static error page
+ * and is never reflected).
  */
-export function renderMediaPage(sha256: string): string {
-  if (!HEX64.test(sha256.toLowerCase())) {
-    return [
-      '<!doctype html>',
-      '<html lang="en"><head><meta charset="utf-8">',
-      '<meta name="robots" content="noindex, nofollow">',
-      '<title>Media viewer</title></head>',
-      '<body style="font-family:system-ui,sans-serif;padding:16px">',
-      '<p>Invalid content id.</p>',
-      '</body></html>',
-    ].join('\n');
+export function renderMediaPage(sha256: string): { status: number; html: string } {
+  const id = sha256.toLowerCase();
+  if (!HEX64.test(id)) {
+    return { status: 400, html: ERROR_PAGE };
   }
 
-  const proxy = `/api/media-proxy/${sha256}`;
-  return `<!doctype html>
+  const proxy = `/api/media-proxy/${id}`;
+  const html = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -49,18 +55,31 @@ export function renderMediaPage(sha256: string): string {
 </head>
 <body>
 <div class="banner">Restricted content, admin view. Shown here because moderation has hidden it from the public. Check it, then act in Coop.</div>
-<div class="sha">sha256: ${sha256}</div>
+<div class="sha">sha256: ${id}</div>
 <div class="stage" id="stage"><p class="status" id="status">Loading media...</p></div>
 <script>
 (function () {
   var url = ${JSON.stringify(proxy)};
   var stage = document.getElementById('stage');
-  var status = document.getElementById('status');
+  function fail(message) {
+    // Rebuild from the stage so an error still shows even if it is thrown after
+    // the loading placeholder has been cleared (a detached node swallows writes).
+    stage.innerHTML = '';
+    var p = document.createElement('p');
+    p.className = 'status';
+    p.textContent = 'Could not load media: ' + message;
+    stage.appendChild(p);
+  }
   fetch(url, { credentials: 'include' }).then(function (r) {
     if (!r.ok) throw new Error('HTTP ' + r.status);
     return r.blob();
   }).then(function (b) {
     var obj = URL.createObjectURL(b);
+    // The blob URL must outlive playback (video seeks re-read it), so release it
+    // on unload rather than on load.
+    window.addEventListener('pagehide', function () {
+      try { URL.revokeObjectURL(obj); } catch (e) { /* already gone */ }
+    });
     var el;
     if (b.type.indexOf('video') === 0) {
       el = document.createElement('video');
@@ -69,16 +88,17 @@ export function renderMediaPage(sha256: string): string {
       el = document.createElement('img'); el.src = obj;
     } else {
       el = document.createElement('a');
-      el.href = obj; el.download = ${JSON.stringify(sha256)};
+      el.href = obj; el.download = ${JSON.stringify(id)};
       el.textContent = 'Download (' + (b.type || 'unknown type') + ')';
       el.style.color = '#8cf';
     }
     stage.innerHTML = ''; stage.appendChild(el);
   }).catch(function (e) {
-    status.textContent = 'Could not load media: ' + e.message;
+    fail(e.message);
   });
 })();
 </script>
 </body>
 </html>`;
+  return { status: 200, html };
 }

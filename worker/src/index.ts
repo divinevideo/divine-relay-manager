@@ -475,11 +475,25 @@ export default {
       // authenticated moderator reaches it. Serves a minimal self-contained page,
       // NOT the relay-manager SPA, and streams the blob via /api/media-proxy.
       if (path.startsWith('/media/') && request.method === 'GET') {
-        const raw = path.slice('/media/'.length).replace(/\.[^./]+$/, '').toLowerCase();
-        const valid = /^[a-f0-9]{64}$/.test(raw);
-        return new Response(renderMediaPage(raw), {
-          status: valid ? 200 : 400,
-          headers: { 'content-type': 'text/html; charset=utf-8', ...corsHeaders },
+        const raw = path.slice('/media/'.length).replace(/\.[^./]+$/, '');
+        const { status, html } = renderMediaPage(raw);
+        return new Response(html, {
+          status,
+          headers: {
+            ...corsHeaders,
+            'content-type': 'text/html; charset=utf-8',
+            // The URL and body name a content hash (potentially CSAM); keep it off disk.
+            'cache-control': 'no-store',
+            // Locks the page to exactly what it needs: same-origin fetch to the proxy,
+            // its own inline script/style, blob: media. Also makes the inline-script
+            // dependency explicit rather than resting on no CSP ever being added here.
+            'content-security-policy':
+              "default-src 'none'; script-src 'unsafe-inline'; connect-src 'self'; " +
+              "img-src blob:; media-src blob:; style-src 'unsafe-inline'; " +
+              "frame-ancestors 'none'; base-uri 'none'",
+            'x-content-type-options': 'nosniff',
+            'referrer-policy': 'no-referrer',
+          },
         });
       }
 

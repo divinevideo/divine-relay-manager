@@ -9,6 +9,7 @@ const env = {
 } as never;
 
 const SHA = 'a'.repeat(64);
+const AUTH = { 'X-Admin-Key': 'test-admin-key' };
 
 function get(path: string, headers: Record<string, string> = {}) {
   return worker.fetch(
@@ -27,7 +28,7 @@ describe('GET /media/:sha256', () => {
   });
 
   it('serves the standalone page to an authenticated moderator', async () => {
-    const res = await get(`/media/${SHA}`, { 'X-Admin-Key': 'test-admin-key' });
+    const res = await get(`/media/${SHA}`, AUTH);
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toContain('text/html');
     const body = await res.text();
@@ -36,15 +37,37 @@ describe('GET /media/:sha256', () => {
     expect(body.toLowerCase()).toContain('restricted');
   });
 
+  it('sends document security headers so the CSAM hash stays off disk and the page is locked down', async () => {
+    const res = await get(`/media/${SHA}`, AUTH);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(res.headers.get('referrer-policy')).toBe('no-referrer');
+    const csp = res.headers.get('content-security-policy') || '';
+    expect(csp).toContain("default-src 'none'");
+    expect(csp).toContain("connect-src 'self'"); // the proxy fetch must be allowed
+  });
+
   it('400s a non-hex sha rather than serving anything reflective', async () => {
-    const res = await get('/media/not-a-real-hash', { 'X-Admin-Key': 'test-admin-key' });
+    const res = await get('/media/not-a-real-hash', AUTH);
     expect(res.status).toBe(400);
     const body = await res.text();
     expect(body).not.toContain('not-a-real-hash');
   });
 
+  it('400s an empty id', async () => {
+    const res = await get('/media/', AUTH);
+    expect(res.status).toBe(400);
+  });
+
   it('tolerates a file extension on the path (…/media/<sha>.mp4)', async () => {
-    const res = await get(`/media/${SHA}.mp4`, { 'X-Admin-Key': 'test-admin-key' });
+    const res = await get(`/media/${SHA}.mp4`, AUTH);
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain(`/api/media-proxy/${SHA}`);
+  });
+
+  it('normalises an uppercase sha in the path to lowercase (the form that ships)', async () => {
+    const res = await get(`/media/${'A'.repeat(64)}`, AUTH);
     expect(res.status).toBe(200);
     const body = await res.text();
     expect(body).toContain(`/api/media-proxy/${SHA}`);
