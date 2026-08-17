@@ -38,6 +38,16 @@ describe('renderMediaPage', () => {
     expect(html).toContain('Unsupported type (');
   });
 
+  it('suppresses the video controls\' download, PiP, and Cast affordances', () => {
+    // The browser\'s default video chrome offers a download menu item and a Cast
+    // target; the page\'s own rule is that these bytes are never offered as a
+    // download and stay off external displays.
+    const { html } = renderMediaPage(VALID);
+    expect(html).toContain("controlsList', 'nodownload'");
+    expect(html).toContain('disablePictureInPicture');
+    expect(html).toContain('disableRemotePlayback');
+  });
+
   it('refuses a non-hex sha with 400 and never reflects it into the page (no XSS)', () => {
     const evil = '"><script>alert(1)</script>';
     const { status, html } = renderMediaPage(evil);
@@ -57,5 +67,17 @@ describe('renderMediaPage', () => {
     expect(status).toBe(200);
     expect(html).toContain(`/api/media-proxy/${'a'.repeat(64)}`);
     expect(html).not.toContain('A'.repeat(64));
+  });
+
+  it('embeds the URL extension as a fallback type hint when given one', () => {
+    // Used only when the proxy Content-Type is not image/* or video/*, so an
+    // octet-stream blob whose URL says .mp4 still renders instead of showing
+    // "Unsupported type" for viewable media.
+    const { html } = renderMediaPage(VALID, 'mp4');
+    expect(html).toContain('var ext = "mp4"');
+  });
+
+  it('embeds an empty hint when the URL has no extension', () => {
+    expect(renderMediaPage(VALID).html).toContain('var ext = ""');
   });
 });

@@ -30,13 +30,17 @@ const ERROR_PAGE = [
  * crafted id cannot inject markup (a non-hex value returns the static error page
  * and is never reflected).
  */
-export function renderMediaPage(sha256: string): { status: number; html: string } {
+export function renderMediaPage(sha256: string, extHint?: string): { status: number; html: string } {
   const id = sha256.toLowerCase();
   if (!HEX64.test(id)) {
     return { status: 400, html: ERROR_PAGE };
   }
 
   const proxy = `/api/media-proxy/${id}`;
+  // Optional extension from the /media/<sha>.<ext> URL, used only when the
+  // proxy's Content-Type is not an image/* or video/* (e.g. octet-stream).
+  // Lists mirror the SPA's MediaPreview URL-hint lists.
+  const ext = (extHint || '').toLowerCase();
   const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -60,6 +64,9 @@ export function renderMediaPage(sha256: string): { status: number; html: string 
 <script>
 (function () {
   var url = ${JSON.stringify(proxy)};
+  var ext = ${JSON.stringify(ext)};
+  var VIDEO_EXTS = ${JSON.stringify(['mp4', 'webm', 'mov', 'm4v', 'avi', 'mkv'])};
+  var IMAGE_EXTS = ${JSON.stringify(['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'])};
   var stage = document.getElementById('stage');
   function fail(message) {
     // Rebuild from the stage so an error still shows even if it is thrown after
@@ -84,7 +91,24 @@ export function renderMediaPage(sha256: string): { status: number; html: string 
     if (b.type.indexOf('video') === 0) {
       el = document.createElement('video');
       el.controls = true; el.src = obj;
+      // The unknown-type branch refuses downloads; keep the video branch from
+      // re-offering one through browser chrome, and keep restricted media off
+      // Cast/external displays and Picture-in-Picture. (Right-click save remains
+      // possible; this narrows the offered paths, it does not close them.)
+      el.setAttribute('controlsList', 'nodownload');
+      el.disablePictureInPicture = true;
+      el.disableRemotePlayback = true;
     } else if (b.type.indexOf('image') === 0) {
+      el = document.createElement('img'); el.src = obj;
+    } else if (ext && VIDEO_EXTS.indexOf(ext) !== -1) {
+      // The proxy stored the blob's type as something unhelpful (octet-stream
+      // and the like); the URL extension says it is still viewable media.
+      el = document.createElement('video');
+      el.controls = true; el.src = obj;
+      el.setAttribute('controlsList', 'nodownload');
+      el.disablePictureInPicture = true;
+      el.disableRemotePlayback = true;
+    } else if (ext && IMAGE_EXTS.indexOf(ext) !== -1) {
       el = document.createElement('img'); el.src = obj;
     } else {
       // Never write unknown bytes to the moderator's disk: this may be CSAM, which
