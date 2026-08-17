@@ -480,7 +480,7 @@ export default {
         // unhelpful (e.g. application/octet-stream), mirroring how the SPA's
         // MediaPreview treats the URL as a signal alongside the MIME type.
         const rest = path.slice('/media/'.length);
-        const extMatch = rest.match(/\.([^.\/]+)$/);
+        const extMatch = rest.match(/\.([^./]+)$/);
         const raw = extMatch ? rest.slice(0, extMatch.index) : rest;
         const { status, html } = renderMediaPage(raw, extMatch?.[1]);
         return new Response(html, {
