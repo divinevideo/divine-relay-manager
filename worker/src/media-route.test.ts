@@ -73,3 +73,35 @@ describe('GET /media/:sha256', () => {
     expect(body).toContain(`/api/media-proxy/${SHA}`);
   });
 });
+
+describe('GET /api/media-proxy/:sha256 (the viewer page\'s media source)', () => {
+  it('serves restricted bytes with no-store so they never reach the browser HTTP disk cache', async () => {
+    // no-cache permits disk-cache storage subject to revalidation; the bytes this
+    // route serves can be CSAM, so they must not be stored at all.
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response('bytes', { status: 200, headers: { 'content-type': 'image/jpeg' } })) as typeof fetch;
+    try {
+      const proxyEnv = {
+        ALLOWED_ORIGINS: 'https://relay.admin.divine.video',
+        RELAY_URL: 'wss://relay.divine.video',
+        ADMIN_API_KEY: 'test-admin-key',
+        BLOSSOM_WEBHOOK_SECRET: 'test-blossom-secret',
+      } as never;
+      const res = await worker.fetch(
+        new Request(`https://api-relay-staging.divine.video/api/media-proxy/${SHA}`, {
+          method: 'GET',
+          headers: AUTH,
+        }),
+        proxyEnv,
+        ctx,
+      );
+      expect(res.status).toBe(200);
+      const cacheControl = res.headers.get('cache-control') || '';
+      expect(cacheControl).toContain('no-store');
+      expect(cacheControl).not.toContain('no-cache');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});

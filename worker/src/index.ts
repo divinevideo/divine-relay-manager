@@ -2567,7 +2567,11 @@ async function handleMediaProxy(
     // Stream response body through without buffering
     const responseHeaders: Record<string, string> = {
       ...corsHeaders,
-      'Cache-Control': 'private, no-cache',
+      // no-store, not no-cache: these bytes can be CSAM, and no-cache still lets
+      // the browser write them to its HTTP disk cache (revalidated on reuse).
+      // Both consumers (SPA MediaPreview and the /media/ viewer) fetch once into
+      // a Blob URL, so nothing re-reads the HTTP cache anyway.
+      'Cache-Control': 'private, no-store',
       'X-Admin-Proxy': 'blossom-admin',
     };
 
