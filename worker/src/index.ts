@@ -12,6 +12,7 @@ import { ensureSchema } from './db';
 import { buildReportsFilter } from './reports-filter';
 import { generatePreAuthToken, verifyPreAuthToken, base64UrlEncode } from './zendesk-preauth';
 import { deriveFunnelcakeApiUrl, proxyFunnelcakeRequest } from './funnelcake-proxy';
+import { renderMediaPage } from './media-page';
 import type { KeycastEnv } from './keycast-client';
 import { suspendUser, unsuspendUser, banUser } from './keycast-client';
 import {
@@ -467,6 +468,39 @@ export default {
       });
       if (adminAuthError) {
         return jsonResponse({ success: false, error: adminAuthError }, 401, corsHeaders);
+      }
+
+      // Standalone media viewer, linked from a Coop review card. Behind the same
+      // CF Access + verifyAdminAccess gate as everything above, so only an
+      // authenticated moderator reaches it. Serves a minimal self-contained page,
+      // NOT the relay-manager SPA, and streams the blob via /api/media-proxy.
+      if (path.startsWith('/media/') && request.method === 'GET') {
+        // Keep the (optional) extension as a type hint: the page branches on the
+        // proxy's Content-Type, and falls back to this when that type is
+        // unhelpful (e.g. application/octet-stream), mirroring how the SPA's
+        // MediaPreview treats the URL as a signal alongside the MIME type.
+        const rest = path.slice('/media/'.length);
+        const extMatch = rest.match(/\.([^./]+)$/);
+        const raw = extMatch ? rest.slice(0, extMatch.index) : rest;
+        const { status, html } = renderMediaPage(raw, extMatch?.[1]);
+        return new Response(html, {
+          status,
+          headers: {
+            ...corsHeaders,
+            'content-type': 'text/html; charset=utf-8',
+            // The URL and body name a content hash (potentially CSAM); keep it off disk.
+            'cache-control': 'no-store',
+            // Locks the page to exactly what it needs: same-origin fetch to the proxy,
+            // its own inline script/style, blob: media. Also makes the inline-script
+            // dependency explicit rather than resting on no CSP ever being added here.
+            'content-security-policy':
+              "default-src 'none'; script-src 'unsafe-inline'; connect-src 'self'; " +
+              "img-src blob:; media-src blob:; style-src 'unsafe-inline'; " +
+              "frame-ancestors 'none'; base-uri 'none'",
+            'x-content-type-options': 'nosniff',
+            'referrer-policy': 'no-referrer',
+          },
+        });
       }
 
       // Moderator-facing account status (surfaces keycast verified_minor for the age-review view).
@@ -2539,8 +2573,20 @@ async function handleMediaProxy(
     // Stream response body through without buffering
     const responseHeaders: Record<string, string> = {
       ...corsHeaders,
-      'Cache-Control': 'private, no-cache',
+      // no-store, not no-cache: these bytes can be CSAM, and no-cache still lets
+      // the browser write them to its HTTP disk cache (revalidated on reuse).
+      // Both consumers (SPA MediaPreview and the /media/ viewer) fetch once into
+      // a Blob URL, so nothing re-reads the HTTP cache anyway.
+      'Cache-Control': 'private, no-store',
       'X-Admin-Proxy': 'blossom-admin',
+      // The upstream Content-Type is stored as-uploaded and is not validated, so
+      // a text/html blob navigated to directly would run script on this origin,
+      // which holds the moderator's CF Access session. nosniff alone does not
+      // stop a declared text/html from rendering; sandbox neutralizes it (unique
+      // origin, no script). Blob-fetch consumers are unaffected: a CSP response
+      // header applies to document loads, not to fetch()-into-Blob pipelines.
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy': 'sandbox',
     };
 
     // Pass through relevant headers from upstream
