@@ -25,10 +25,11 @@ const ERROR_PAGE = [
  *
  * Returns the HTTP status alongside the HTML so a single validity check drives
  * both: the route never has to re-decide whether the sha is valid, so the two
- * cannot drift out of agreement. The sha is normalised to lowercase once and
- * that normalised value is the only thing interpolated into the document, so a
- * crafted id cannot inject markup (a non-hex value returns the static error page
- * and is never reflected).
+ * cannot drift out of agreement. The sha is normalised to lowercase once and,
+ * with the strictly-validated extension hint, is the only value interpolated
+ * into the document, so a crafted id cannot inject markup (a non-hex value
+ * returns the static error page and is never reflected; a non-alphanumeric
+ * extension hint is dropped, since JSON.stringify does not escape "<" or "/").
  */
 export function renderMediaPage(sha256: string, extHint?: string): { status: number; html: string } {
   const id = sha256.toLowerCase();
@@ -39,8 +40,11 @@ export function renderMediaPage(sha256: string, extHint?: string): { status: num
   const proxy = `/api/media-proxy/${id}`;
   // Optional extension from the /media/<sha>.<ext> URL, used only when the
   // proxy's Content-Type is not an image/* or video/* (e.g. octet-stream).
-  // Lists mirror the SPA's MediaPreview URL-hint lists.
-  const ext = (extHint || '').toLowerCase();
+  // Lists mirror the SPA's MediaPreview URL-hint lists. Strictly validated
+  // because it is interpolated into the document: JSON.stringify escapes
+  // quotes but not "<" or "/", so only a short alphanumeric token may pass.
+  const rawExt = (extHint || '').toLowerCase();
+  const ext = /^[a-z0-9]{1,5}$/.test(rawExt) ? rawExt : '';
   const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -77,6 +81,19 @@ export function renderMediaPage(sha256: string, extHint?: string): { status: num
     p.textContent = 'Could not load media: ' + message;
     stage.appendChild(p);
   }
+  function makeVideo(obj) {
+    var el = document.createElement('video');
+    el.controls = true; el.src = obj;
+    // The unknown-type branch refuses downloads; keep the video branch from
+    // re-offering one through browser chrome, and keep restricted media off
+    // Cast/external displays and Picture-in-Picture. (Right-click save remains
+    // possible; this narrows the offered paths, it does not close them.)
+    el.setAttribute('controlsList', 'nodownload');
+    el.disablePictureInPicture = true;
+    el.disableRemotePlayback = true;
+    el.onerror = function () { fail('could not decode the video'); };
+    return el;
+  }
   fetch(url, { credentials: 'include' }).then(function (r) {
     if (!r.ok) throw new Error('HTTP ' + r.status);
     return r.blob();
@@ -89,27 +106,17 @@ export function renderMediaPage(sha256: string, extHint?: string): { status: num
     });
     var el;
     if (b.type.indexOf('video') === 0) {
-      el = document.createElement('video');
-      el.controls = true; el.src = obj;
-      // The unknown-type branch refuses downloads; keep the video branch from
-      // re-offering one through browser chrome, and keep restricted media off
-      // Cast/external displays and Picture-in-Picture. (Right-click save remains
-      // possible; this narrows the offered paths, it does not close them.)
-      el.setAttribute('controlsList', 'nodownload');
-      el.disablePictureInPicture = true;
-      el.disableRemotePlayback = true;
+      el = makeVideo(obj);
     } else if (b.type.indexOf('image') === 0) {
       el = document.createElement('img'); el.src = obj;
+      el.onerror = function () { fail('could not decode the image'); };
     } else if (ext && VIDEO_EXTS.indexOf(ext) !== -1) {
       // The proxy stored the blob's type as something unhelpful (octet-stream
       // and the like); the URL extension says it is still viewable media.
-      el = document.createElement('video');
-      el.controls = true; el.src = obj;
-      el.setAttribute('controlsList', 'nodownload');
-      el.disablePictureInPicture = true;
-      el.disableRemotePlayback = true;
+      el = makeVideo(obj);
     } else if (ext && IMAGE_EXTS.indexOf(ext) !== -1) {
       el = document.createElement('img'); el.src = obj;
+      el.onerror = function () { fail('could not decode the image'); };
     } else {
       // Never write unknown bytes to the moderator's disk: this may be CSAM, which
       // is one-way and NCMEC-bound. Show the type and send them back to Coop rather

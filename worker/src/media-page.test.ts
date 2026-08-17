@@ -80,4 +80,31 @@ describe('renderMediaPage', () => {
   it('embeds an empty hint when the URL has no extension', () => {
     expect(renderMediaPage(VALID).html).toContain('var ext = ""');
   });
+
+  it('drops an extension hint that is not a short alphanumeric token', () => {
+    // The hint is interpolated into the document, and JSON.stringify does not
+    // escape "<" or "/", so anything that could close the script element (or is
+    // merely garbage) must never be embedded. The URL parser blocks such values
+    // today; this makes the guarantee independent of the caller.
+    const { html } = renderMediaPage(VALID, '</script><script>alert(1)</script>');
+    expect(html).toContain('var ext = ""');
+    expect(html).not.toContain('</script><script>');
+    expect(renderMediaPage(VALID, 'not a token!').html).toContain('var ext = ""');
+  });
+
+  it('lowercases the extension hint before embedding it', () => {
+    expect(renderMediaPage(VALID, 'MP4').html).toContain('var ext = "mp4"');
+  });
+
+  it('builds both video paths through one hardened constructor with decode errors surfaced', () => {
+    // Both the content-type branch and the extension-fallback branch must share
+    // makeVideo, so a future hardening cannot apply to one and not the other.
+    const { html } = renderMediaPage(VALID, 'mp4');
+    expect(html).toContain('function makeVideo(');
+    expect(html).toContain('could not decode the video');
+    expect(html).toContain('could not decode the image');
+    // Exactly one constructor for exactly two video call sites.
+    expect(html.match(/createElement\('video'\)/g)).toEqual(['createElement(\'video\')']);
+    expect(html.match(/= makeVideo\(obj\)/g)?.length).toBe(2);
+  });
 });
