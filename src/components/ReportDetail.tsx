@@ -8,7 +8,6 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -469,8 +468,14 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   const categoryLabel = CATEGORY_LABELS[category] || category;
   const isHighPriorityCategory = HIGH_PRIORITY_CATEGORIES.includes(category);
 
+  // Scroll the whole pane, not just an inner region. On a short viewport the
+  // tall action footer used to starve the content area (it was a shrink-0 block
+  // outside the scroll), squeezing the report context to a sliver and making it
+  // unreachable. Scrolling the pane keeps the footer pinned to the bottom when
+  // it fits (tall screens) and lets the content + footer scroll together when it
+  // does not (short laptops).
   return (
-    <div className="h-full flex flex-col overflow-hidden">
+    <div className="h-full flex flex-col overflow-y-auto">
       {/* Dialogs - rendered as portals, don't affect flex layout */}
       {/* Ban Confirmation Dialog */}
       {/* Dismiss Report Dialog */}
@@ -523,8 +528,9 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
         />
       )}
 
-      {/* Scrollable content area */}
-      <ScrollArea className="flex-1 min-h-0 [&>div>div]:!block">
+      {/* Content area. flex-1 without min-h-0: it keeps its natural height and the
+          pane above scrolls, instead of collapsing to a sliver under the footer. */}
+      <div className="flex-1">
         <div className="p-4 space-y-4 overflow-x-hidden max-w-full">
           {/* Pending Review Banner - for auto-hidden items awaiting human review */}
           {isPendingReview && (
@@ -1159,9 +1165,10 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
 
 
         </div>
-      </ScrollArea>
+      </div>
 
-      {/* Action Buttons - fixed at bottom */}
+      {/* Action buttons. Pinned to the bottom when the pane fits; scrolls into
+          view with the content above on short viewports. */}
       <div className="border-t bg-background p-4 space-y-3 shrink-0">
             {/* Resolution actions - dismiss or reopen */}
             <div className="flex flex-wrap gap-2">
