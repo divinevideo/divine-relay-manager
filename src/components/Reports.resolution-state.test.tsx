@@ -689,6 +689,34 @@ describe('offline pauses resolution sources instead of failing them (#221)', () 
     onlineManager.setOnline(true);
     expect(await screen.findByText(REPORTED_NPUB)).toBeInTheDocument();
   });
+
+  // The one route into 'paused' that starts from a SETTLED error rather than a
+  // first load, and the only thing the `!isPaused` term in hasColdFailed is
+  // for. errorUpdateCount only ever increments, so without that term a source
+  // that failed cold stays latched in blockingErrors even after the browser
+  // goes offline: blockingLoadPaused is empty, the offline branch is never
+  // reached, and the moderator is told the block "usually clears on the next
+  // automatic refresh" -- false while there is no connection, and it withholds
+  // the one diagnosis that explains why Retry does nothing.
+  it('re-reports an already-failed source as offline once connectivity drops', async () => {
+    stubFetch({ labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'error' });
+    const user = userEvent.setup();
+    renderReports();
+
+    // Precondition: blocked by a settled cold error, not by offline.
+    expect(
+      await screen.findByText(/the queue cannot tell which reports have already been handled/i)
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/while offline/i)).not.toBeInTheDocument();
+
+    onlineManager.setOnline(false);
+    // Re-entering fetch while the manager reports offline is the only way a
+    // query reaches fetchStatus 'paused'; the 15s poll would do it too, and
+    // Retry does it deterministically.
+    await user.click(screen.getByRole('button', { name: /^retry$/i }));
+
+    expect(await screen.findByText(/cannot check .*while offline/i)).toBeInTheDocument();
+  });
 });
 
 describe('warm failure keeps the stale filter and says so (#221)', () => {
