@@ -181,6 +181,8 @@ export function AgeReviewDetail({ caseData: c }: Props) {
         if (enforcement?.relay === 'failed') failed.push('relay (existing posts and feed)');
         if (enforcement?.bulk === 'failed') failed.push('media and content');
         if (enforcement?.keycast === 'failed') failed.push('account sign-in');
+        if (enforcement?.subjectClear === 'failed') failed.push('protected-minor registry');
+        if (enforcement?.keycastMinorClear === 'failed') failed.push('protected-minor account projection');
         toast({
           title: 'Enforcement incomplete',
           description: `Case updated, but these did not apply: ${failed.join(', ') || 'one or more enforcement steps'}. The user's content or account may still be reachable. Retry the action or escalate.`,

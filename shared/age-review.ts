@@ -132,6 +132,9 @@ export interface AgeReviewEnforcement {
    * payloads from an older worker still type-check. */
   keycastMinorClear?: EnforcementLegStatus;
   keycastMinorClearError?: string;
+  /** Durable protected-subject clear. It precedes the Keycast projection clear. */
+  subjectClear?: EnforcementLegStatus;
+  subjectClearError?: string;
 }
 
 // Response body for a case GET/PATCH. On a partial-enforcement PATCH the worker
