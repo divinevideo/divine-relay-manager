@@ -48,7 +48,7 @@ import { ReportDetailErrorFallback } from "@/components/ReportDetailErrorFallbac
 import { DeepLinkFallback } from "@/components/DeepLinkFallback";
 import { classifyTargetedFetch, decisionsForTarget, reportsMatchingTarget, type DeepLinkStatus } from "@/lib/deepLinkResolution";
 import { useAdminApi } from "@/hooks/useAdminApi";
-import { AUTO_HIDE_ACTIONS, CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, getReportCategory } from "@/lib/constants";
+import { AUTO_HIDE_ACTION, AUTO_HIDE_ACTIONS, CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, getLatestAutoHideState, getReportCategory } from "@/lib/constants";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
 import type { NostrEvent } from "@nostrify/nostrify";
@@ -425,6 +425,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     retry: false,
   });
 
+  // resolvedTargets is subtractive: these labels HIDE work already handled, so
+  // a failed fetch makes the queue bigger and wrong rather than smaller and
+  // safe (#221). One retry, because a single slow relay read should not cost a
+  // moderator their whole resolution filter -- this is the only polling query
+  // here that retries, for that reason.
   const {
     data: labelsResult,
     error: labelsError,
@@ -610,12 +615,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       targetDecisions.get(key)!.push(decision.action);
     }
 
-    // Target is pending review if auto_hidden but not confirmed/restored
+    // Decisions arrive newest first, so the first state transition is authoritative.
     for (const [key, actions] of targetDecisions) {
-      const isAutoHidden = actions.includes('auto_hidden');
-      const isConfirmed = actions.includes('auto_hide_confirmed');
-      const isRestored = actions.includes('auto_hide_restored');
-      if (isAutoHidden && !isConfirmed && !isRestored) {
+      const latestAction = getLatestAutoHideState(actions);
+      if (latestAction === AUTO_HIDE_ACTION.hidden
+        || latestAction === AUTO_HIDE_ACTION.unresolved
+        || latestAction === AUTO_HIDE_ACTION.restoreFailed) {
         pending.add(key);
       }
     }
@@ -1183,8 +1188,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
   // The reports query itself failing is the more fundamental problem: if the
   // relay read is down, resolution state is beside the point, and the
-  // resolution pane's Retry can't fix it anyway. Report this first (#221).
-  if (error) {
+  // resolution pane's Retry can't fix it anyway. Report this first (#221) --
+  // but only full-pane when there is nothing to show. When a REFRESH fails
+  // (e.g. the worker 502s on a relay timeout), the last good list stays
+  // rendered with a stale-data warning below, so one slow poll does not look
+  // like "no reports pending".
+  if (error && !reports) {
     return (
       <Alert variant="destructive">
         <AlertDescription>
@@ -1322,6 +1331,16 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
           {truncatedOldestCovered !== null && (
             <TruncatedHistoryBanner oldestCovered={truncatedOldestCovered} />
+          )}
+
+          {/* Refresh failed but we still hold a previous list: warn instead of
+              blanking the queue. The poll keeps retrying every 15s. */}
+          {error && (
+            <Alert variant="destructive" className="mt-2 py-2">
+              <AlertDescription className="text-xs">
+                Live refresh is failing. Showing reports loaded {lastUpdatedText || 'earlier'}; retrying automatically.
+              </AlertDescription>
+            </Alert>
           )}
 
           {/* View mode toggle */}

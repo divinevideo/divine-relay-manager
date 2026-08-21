@@ -186,6 +186,8 @@ export async function syncZendeskAfterAction(
       'no-action',
       'false-positive',
       'delete_event',
+      'hide_event',
+      'allow_event',
       'ban_pubkey',
       'ban_user',
       'auto_hide_confirmed',

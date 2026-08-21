@@ -3,6 +3,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import worker from './index';
+import { markHumanReviewed } from './human-decision';
 
 // Test nsec (same throwaway key as nip86.test.ts)
 const TEST_NSEC = 'nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5';
@@ -78,12 +79,25 @@ function createMockDB() {
   return { db, sqlLog };
 }
 
-function createEnv(db: unknown) {
+function createEnv(db: unknown, operations: unknown[] = []) {
   return {
     NOSTR_NSEC: TEST_NSEC,
     RELAY_URL: 'wss://relay.test.com',
     ALLOWED_ORIGINS: 'http://localhost:5173',
     DB: db,
+    REPORT_WATCHER: {
+      idFromName: () => 'singleton',
+      get: () => ({
+        fetch: async (request: Request) => {
+          const operation = await request.json() as { eventId: string; relayAction: string };
+          operations.push(operation);
+          const recorded = operation.relayAction === 'review'
+            ? await markHumanReviewed(db as D1Database, 'event', operation.eventId)
+            : true;
+          return Response.json({ success: true, recorded });
+        },
+      }),
+    },
   };
 }
 
@@ -106,7 +120,7 @@ describe('human decision persistence', () => {
   });
 
   describe('POST /api/decisions (handleLogDecision)', () => {
-    it('should call markHumanReviewed when logging a decision', async () => {
+    it('should call markHumanReviewed when logging a generic decision', async () => {
       const { db, sqlLog } = createMockDB();
       const env = createEnv(db);
 
@@ -116,8 +130,8 @@ describe('human decision persistence', () => {
         body: JSON.stringify({
           targetType: 'event',
           targetId: 'event_abc123',
-          action: 'auto_hide_confirmed',
-          reason: 'Confirmed by moderator',
+          action: 'reviewed',
+          reason: 'Reviewed by moderator',
         }),
       });
 
@@ -132,12 +146,32 @@ describe('human decision persistence', () => {
       expect(upsert).toBeDefined();
       expect(upsert!.bindings).toContain('event_abc123');
       expect(upsert!.bindings).toContain('event');
+      expect(upsert!.sql).not.toContain('last_human_action');
+    });
+
+    it.each([
+      'auto_hidden',
+      'auto_hide_reversed',
+      'auto_hide_restored',
+      'auto_hide_confirmed',
+    ])('rejects coordinated event state action %s', async (action) => {
+      const { db, sqlLog } = createMockDB();
+      const env = createEnv(db);
+
+      const response = await worker.fetch(new Request('http://localhost/api/decisions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        body: JSON.stringify({ targetType: 'event', targetId: 'event_abc123', action }),
+      }), env as never, mockCtx);
+
+      expect(response.status).toBe(400);
+      expect(sqlLog.some(({ sql }) => sql.includes('INSERT INTO moderation_decisions'))).toBe(false);
     });
 
     it('should mark human reviewed for all moderator action types', async () => {
       const actions = [
-        'auto_hide_confirmed',
-        'auto_hide_restored',
+        'reviewed',
+        'restore_event',
         'ban_user',
         'delete_event',
         'block_media',
@@ -273,6 +307,143 @@ describe('human decision persistence', () => {
       );
       expect(targetInserts.length).toBe(0);
     });
+
+    it('serializes a dismissal mark without allowing the event or replacing hide direction', async () => {
+      const { db, sqlLog } = createMockDB();
+      const operations: unknown[] = [];
+      const env = createEnv(db, operations);
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => ['OK', 'event_id', true, ''],
+        text: async () => JSON.stringify(['OK', 'event_id', true, '']),
+      });
+      const eventId = 'ab'.repeat(32);
+
+      const response = await worker.fetch(new Request('http://localhost/api/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        body: JSON.stringify({
+          kind: 1985,
+          content: 'Dismissed',
+          tags: [
+            ['L', 'moderation/resolution'],
+            ['l', 'dismissed', 'moderation/resolution'],
+            ['e', eventId],
+          ],
+          moderatorPubkey: 'a'.repeat(64),
+          moderationReason: 'False positive report',
+        }),
+      }), env as never, mockCtx);
+
+      expect(response.status).toBe(200);
+      expect(operations).toEqual([{
+        eventId,
+        relayAction: 'review',
+        humanAction: 'dismissed',
+        reason: 'False positive report',
+        moderatorPubkey: 'a'.repeat(64),
+      }]);
+      expect(await response.json()).toMatchObject({ success: true, recorded: true, reconciled: true });
+      const upsert = sqlLog.find(entry => entry.sql.includes('INSERT INTO moderation_targets'));
+      expect(upsert).toBeDefined();
+      expect(upsert?.sql).not.toContain('last_human_action');
+    });
+
+    it('reports unresolved dismissal state when D1 is not configured', async () => {
+      const { db } = createMockDB();
+      const env = { ...createEnv(db), DB: undefined };
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => ['OK', 'event_id', true, ''],
+        text: async () => JSON.stringify(['OK', 'event_id', true, '']),
+      });
+
+      const response = await worker.fetch(new Request('http://localhost/api/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        body: JSON.stringify({
+          kind: 1985,
+          content: 'Dismissed',
+          tags: [
+            ['L', 'moderation/resolution'],
+            ['l', 'dismissed', 'moderation/resolution'],
+            ['e', 'ab'.repeat(32)],
+          ],
+        }),
+      }), env as never, mockCtx);
+
+      expect(response.status).toBe(200);
+      const body = await response.json() as Record<string, unknown>;
+      expect(body).toMatchObject({
+        success: true,
+        recorded: false,
+        reconciled: false,
+        reconciliationError: 'Moderation database is not configured',
+      });
+      expect(body).not.toHaveProperty('error');
+    });
+
+    it('reports reconciliation false when restore succeeds but the human mark fails', async () => {
+      const { db } = createMockDB();
+      const env = createEnv(db);
+      env.REPORT_WATCHER.get = () => ({
+        fetch: async () => Response.json({ success: true, recorded: false }),
+      });
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => ['OK', 'event_id', true, ''],
+        text: async () => JSON.stringify(['OK', 'event_id', true, '']),
+      });
+
+      const response = await worker.fetch(new Request('http://localhost/api/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        body: JSON.stringify({
+          kind: 1985,
+          content: 'Dismissed',
+          tags: [
+            ['L', 'moderation/resolution'],
+            ['l', 'dismissed', 'moderation/resolution'],
+            ['e', 'cd'.repeat(32)],
+          ],
+        }),
+      }), env as never, mockCtx);
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        success: true,
+        recorded: false,
+        reconciled: false,
+        reconciliationError: 'Human-review state was not recorded',
+      });
+    });
+
+    it('returns explicit recording status for a pubkey dismissal', async () => {
+      const { db } = createMockDB();
+      const env = createEnv(db);
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => ['OK', 'event_id', true, ''],
+        text: async () => JSON.stringify(['OK', 'event_id', true, '']),
+      });
+
+      const response = await worker.fetch(new Request('http://localhost/api/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        body: JSON.stringify({
+          kind: 1985,
+          content: 'Dismissed',
+          tags: [
+            ['L', 'moderation/resolution'],
+            ['l', 'dismissed', 'moderation/resolution'],
+            ['p', 'ef'.repeat(32)],
+          ],
+        }),
+      }), env as never, mockCtx);
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ success: true, recorded: true, reconciled: true });
+    });
   });
 
   describe('DM notification failure isolation', () => {
@@ -332,7 +503,7 @@ describe('human decision persistence', () => {
         headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
         body: JSON.stringify({
           action: 'delete_event',
-          eventId: 'event_abc123',
+          eventId: 'ab'.repeat(32),
           pubkey: 'abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234',
           reason: 'Content violation',
         }),

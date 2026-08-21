@@ -16,6 +16,9 @@ import {
   bucketModerationCounts,
   fetchZendeskTagCount,
   handleGetAgeReviewFunnel,
+  ageReviewActiveGuard,
+  composeContactNotes,
+  buildParentOutreachBody,
   type AgeReviewEnv,
 } from './age-review';
 import type { AgeReviewCase } from '../../shared/age-review';
@@ -80,6 +83,10 @@ function makeCase(overrides: Partial<AgeReviewCase> = {}): AgeReviewCase {
     created_via: null,
     claim_link_url: null,
     claim_link_expires_at: null,
+    account_name: null,
+    account_nip05: null,
+    account_vine_username: null,
+    identity_captured_at: null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     version: 0,
@@ -411,6 +418,59 @@ describe('handleUpdateAgeReviewCase', () => {
       (call) => call.sql.includes('SET zendesk_ticket_id = ?') && call.params[0] === 321 && call.params[1] === 'case-1'
     );
     expect(ticketStoreCall).toBeTruthy();
+
+    vi.unstubAllGlobals();
+  });
+
+  // Identity capture (#213). The note previously carried a bare pubkey and no
+  // way to reach the case it described, so an agent reading the ticket could
+  // not tell which account it concerned or open the review.
+  it('puts the case deeplink and captured identity in the internal ticket note', async () => {
+    const reviewCase = makeCase({
+      state: 'under_moderator_review',
+      account_name: 'Some One',
+      account_nip05: '_@someuser.divine.video',
+    });
+    const updatedCase = { ...reviewCase, state: 'restricted_pending_support_email' };
+
+    let selectCount = 0;
+    const db = {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        bind: vi.fn().mockImplementation(() => ({
+          first: vi.fn().mockImplementation(async () => {
+            if (sql === 'SELECT * FROM age_review_cases WHERE id = ?') {
+              selectCount += 1;
+              return selectCount === 1 ? reviewCase : updatedCase;
+            }
+            return null;
+          }),
+          run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+        })),
+      })),
+    };
+
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ ticket: { id: 322 } }),
+    });
+    vi.stubGlobal('fetch', mockFetch);
+
+    const req = new Request('https://api.test/api/age-review/cases/case-1', {
+      method: 'PATCH',
+      body: JSON.stringify({ state: 'restricted_pending_support_email' }),
+    });
+    await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db, {
+      ZENDESK_SUBDOMAIN: 'test',
+      ZENDESK_API_TOKEN: 'tok',
+      ZENDESK_EMAIL: 'agent@test.com',
+    }), corsHeaders);
+
+    const payload = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(payload.ticket.comment.body).toContain('/age-review?case=case-1');
+    expect(payload.ticket.comment.body).toContain('Some One');
+    expect(payload.ticket.comment.body).toContain('a'.repeat(64));
+    // Agent-only: this block carries the pubkey and must never go public.
+    expect(payload.ticket.comment.public).toBe(false);
 
     vi.unstubAllGlobals();
   });
@@ -1410,6 +1470,361 @@ describe('checkAgeReviewDeadlines', () => {
   });
 });
 
+// -- Contact notes composition (#213) -----------------------------------------
+
+describe('composeContactNotes', () => {
+  const BLOCK = 'Age review: 13-15, case case-1';
+  const START = '--- [Divine age review] ---';
+  const END = '--- [end Divine age review] ---';
+
+  it('appends the block when the contact has no notes', () => {
+    expect(composeContactNotes('', BLOCK)).toBe([START, BLOCK, END].join('\n'));
+  });
+
+  it('keeps text an agent wrote above the block', () => {
+    const out = composeContactNotes('Spoke by phone.', BLOCK);
+    expect(out).toContain('Spoke by phone.');
+    expect(out.indexOf('Spoke by phone.')).toBeLessThan(out.indexOf(START));
+  });
+
+  // The bottom of the field is where an agent naturally adds a line, and it is
+  // exactly what a head-only splice would drop.
+  it('keeps text an agent wrote below the block', () => {
+    const existing = [START, 'stale block', END, 'Consent confirmed by phone.'].join('\n');
+    const out = composeContactNotes(existing, BLOCK);
+    expect(out).toContain('Consent confirmed by phone.');
+    expect(out).not.toContain('stale block');
+  });
+
+  // A re-submitted parent address, or two cases sharing one address, writes to
+  // the same contact more than once.
+  it('replaces a previous block rather than stacking another copy', () => {
+    const existing = [START, 'stale block', END].join('\n');
+    const out = composeContactNotes(existing, BLOCK);
+    expect(out.split(START).length - 1).toBe(1);
+    expect(out.split(END).length - 1).toBe(1);
+    expect(out).not.toContain('stale block');
+  });
+
+  it('preserves both sides at once', () => {
+    const existing = ['Above.', START, 'stale', END, 'Below.'].join('\n');
+    const out = composeContactNotes(existing, BLOCK);
+    expect(out).toBe(['Above.', START, BLOCK, END, 'Below.'].join('\n'));
+  });
+
+  // A start marker with no end marker means we cannot tell where our block
+  // stopped and an agent's text began -- an older write, or an agent who
+  // edited or part-copied a marker. Keep the remainder: a visible duplicate is
+  // recoverable by the agent who owns this field, silent deletion is not.
+  it('keeps text after a start marker that has no end marker', () => {
+    const out = composeContactNotes(['Above.', START, 'AGENT TEXT'].join('\n'), BLOCK);
+    expect(out).toContain('Above.');
+    expect(out).toContain('AGENT TEXT');
+  });
+
+  it('keeps text after a marker an agent pasted mid-line', () => {
+    expect(composeContactNotes(`agent said ${START} inline`, BLOCK)).toContain('inline');
+  });
+});
+
+// -- Parent contact record (#213) ---------------------------------------------
+
+describe('parent contact record', () => {
+  /** Routes Zendesk calls by URL and method so a contact write can be observed. */
+  function makeZendeskFetch(existingNotes: string | null = null) {
+    return vi.fn().mockImplementation((url: string, init?: { method?: string }) => {
+      if (url.includes('/users/') && (init?.method ?? 'GET') === 'GET') {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            user: { id: 77, role: 'end-user', email: 'parent@example.com', notes: existingNotes },
+          }),
+        });
+      }
+      if (url.includes('/users/')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ user: { id: 77 } }) });
+      }
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ ticket: { id: 42, requester_id: 77 } }),
+      });
+    });
+  }
+
+  function makeParentDb(c: AgeReviewCase) {
+    return {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        bind: vi.fn().mockReturnValue({
+          first: vi.fn().mockResolvedValue(sql.includes('WHERE id = ? AND pubkey = ?') ? c : null),
+          run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+        }),
+      })),
+    };
+  }
+
+  const zendeskEnv = {
+    ZENDESK_SUBDOMAIN: 'test',
+    ZENDESK_API_TOKEN: 'tok',
+    ZENDESK_EMAIL: 'agent@test.com',
+  };
+
+  function parentRequest() {
+    return new Request('https://api.test/v1/minor-review-cases/case-1/parent-contact', {
+      method: 'POST',
+      body: JSON.stringify({ email: 'parent@example.com' }),
+    });
+  }
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  // The outreach goes to an address the teen supplied and nobody has verified,
+  // and Zendesk renders the stored contact name into the To: header. The
+  // address is the join key and is safe there; the handle is not, until the
+  // parent has replied.
+  it('names the contact by address alone at attach time, never by handle', async () => {
+    const c = makeCase({ state: 'restricted_pending_user_response', account_name: 'Some One' });
+    const mockFetch = makeZendeskFetch();
+    vi.stubGlobal('fetch', mockFetch);
+
+    await handleParentContact(parentRequest(), 'case-1', c.pubkey, makeEnv(makeParentDb(c), zendeskEnv), corsHeaders);
+
+    const ticketCall = mockFetch.mock.calls.find((call: unknown[]) => /\/tickets(\/|$|\?)/.test(call[0] as string));
+    const payload = JSON.parse((ticketCall![1] as { body: string }).body);
+    expect(payload.ticket.requester.name).toBe('parent@example.com');
+    expect(payload.ticket.requester.name).not.toContain('Claimed parent');
+    expect(payload.ticket.requester.name).not.toBe('Parent/Guardian');
+    // The To: header stays address-only. The message body now does name the
+    // account -- a deliberate reversal of #222 for the body alone -- so this
+    // asserts the split rather than a blanket ban on the handle.
+    expect(payload.ticket.comment.html_body).toContain('Some One');
+  });
+
+  it('writes the identity block to the contact notes', async () => {
+    const c = makeCase({ state: 'restricted_pending_user_response', account_name: 'Some One' });
+    const mockFetch = makeZendeskFetch();
+    vi.stubGlobal('fetch', mockFetch);
+
+    await handleParentContact(parentRequest(), 'case-1', c.pubkey, makeEnv(makeParentDb(c), zendeskEnv), corsHeaders);
+
+    const put = mockFetch.mock.calls.find(
+      (call: unknown[]) => (call[0] as string).includes('/users/') && (call[1] as { method?: string })?.method === 'PUT',
+    );
+    expect(put).toBeTruthy();
+    const notes = JSON.parse((put![1] as { body: string }).body).user.notes;
+    expect(notes).toContain('/age-review?case=case-1');
+    expect(notes).toContain('Some One');
+  });
+
+  // notes is a single free-text field an agent may already have written in.
+  it('appends to existing contact notes rather than clobbering them', async () => {
+    const c = makeCase({ state: 'restricted_pending_user_response', account_name: 'Some One' });
+    const mockFetch = makeZendeskFetch('Spoke to this parent on the phone 2026-08-01.');
+    vi.stubGlobal('fetch', mockFetch);
+
+    await handleParentContact(parentRequest(), 'case-1', c.pubkey, makeEnv(makeParentDb(c), zendeskEnv), corsHeaders);
+
+    const put = mockFetch.mock.calls.find(
+      (call: unknown[]) => (call[0] as string).includes('/users/') && (call[1] as { method?: string })?.method === 'PUT',
+    );
+    const notes = JSON.parse((put![1] as { body: string }).body).user.notes;
+    expect(notes).toContain('Spoke to this parent on the phone 2026-08-01.');
+    expect(notes).toContain('/age-review?case=case-1');
+  });
+
+  // Enrichment must never cost the parent their outreach. Asserting only on the
+  // 200 would prove nothing -- handleParentContact already swallows everything
+  // this function throws -- so assert the failure was contained at the contact
+  // write itself, and that the ticket the parent was mailed still got recorded.
+  it('contains a contact-write failure without disturbing the outreach', async () => {
+    const c = makeCase({ state: 'restricted_pending_user_response', account_name: 'Some One' });
+    const db = makeParentDb(c);
+    const mockFetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/users/')) return Promise.reject(new Error('Zendesk user API down'));
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ ticket: { id: 42, requester_id: 77 } }) });
+    });
+    vi.stubGlobal('fetch', mockFetch);
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const res = await handleParentContact(parentRequest(), 'case-1', c.pubkey, makeEnv(db, zendeskEnv), corsHeaders);
+    expect(res.status).toBe(200);
+
+    // Handled at the contact write, not bubbled up to the generic ticket handler.
+    const messages = errorLog.mock.calls.map((call) => String(call[0]));
+    expect(messages).toContain('[age-review] Failed to write parent contact notes:');
+    expect(messages).not.toContain('[age-review] Failed to create Zendesk ticket:');
+
+    // The parent was mailed, so the ticket must still be linked to the case.
+    const storeCall = db.prepare.mock.calls.find((call: string[]) => call[0]?.includes('zendesk_ticket_id'));
+    expect(storeCall).toBeTruthy();
+
+    errorLog.mockRestore();
+  });
+
+  // The address is supplied by the teen under review and validated only as
+  // email-shaped. Zendesk resolves an existing user by email and allows agents
+  // to be requesters, so a teen naming a Divine staff address makes that staff
+  // member the requester. A Zendesk display name is global, so renaming them
+  // would put a minor's handle in the header of every mail they later send.
+  // A 403/404 from Zendesk is the realistic failure here, and it returns a
+  // Response rather than rejecting -- so a network-error test does not
+  // exercise it. Both !ok branches must surface, not return quietly.
+  it.each([
+    ['contact read', 'GET'],
+    ['contact write', 'PUT'],
+  ])('surfaces a rejected %s rather than failing silently', async (_label, failingMethod) => {
+    const c = makeCase({ state: 'restricted_pending_user_response', account_name: 'Some One' });
+    const mockFetch = vi.fn().mockImplementation((url: string, init?: { method?: string }) => {
+      const method = init?.method ?? 'GET';
+      if (url.includes('/users/') && method === failingMethod) {
+        // json() is supplied deliberately, and returns a body that would
+        // otherwise sail through verification. Without it, deleting the guard
+        // would throw a TypeError that lands in the same catch and emits the
+        // same log -- so the test would pass whether the guard exists or not.
+        return Promise.resolve({
+          ok: false,
+          status: 403,
+          text: () => Promise.resolve('Forbidden'),
+          json: () => Promise.resolve({ user: { id: 77, role: 'end-user', email: 'parent@example.com', notes: '' } }),
+        });
+      }
+      if (url.includes('/users/') && method === 'GET') {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ user: { id: 77, role: 'end-user', email: 'parent@example.com', notes: '' } }),
+        });
+      }
+      if (url.includes('/users/')) return Promise.resolve({ ok: true, json: () => Promise.resolve({ user: { id: 77 } }) });
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ ticket: { id: 42, requester_id: 77 } }) });
+    });
+    vi.stubGlobal('fetch', mockFetch);
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const res = await handleParentContact(parentRequest(), 'case-1', c.pubkey, makeEnv(makeParentDb(c), zendeskEnv), corsHeaders);
+
+    expect(res.status).toBe(200);
+    expect(errorLog.mock.calls.map((call) => String(call[0])))
+      .toContain('[age-review] Failed to write parent contact notes:');
+    errorLog.mockRestore();
+  });
+
+  // The early-return guard on the attach path. Each clause stops a distinct way
+  // of writing a useless or misleading block onto a real parent's contact: no
+  // requester means no contact to write to, and a missing pubkey or case id
+  // would render an identity block that identifies nothing and a deeplink that
+  // goes nowhere. Without a parent address there is nothing to verify against.
+  it.each([
+    ['no requester id on the ticket', { ticket: { id: 42 } }],
+    ['no requester id at all', { ticket: { id: 42, requester_id: null } }],
+  ])('writes no contact notes when the ticket yields %s', async (_label, ticketBody) => {
+    const c = makeCase({ state: 'restricted_pending_user_response', account_name: 'Some One' });
+    const mockFetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/users/')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ user: { id: 77, role: 'end-user', email: 'parent@example.com', notes: '' } }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(ticketBody) });
+    });
+    vi.stubGlobal('fetch', mockFetch);
+
+    await handleParentContact(parentRequest(), 'case-1', c.pubkey, makeEnv(makeParentDb(c), zendeskEnv), corsHeaders);
+
+    // The guard returns before Zendesk's user API is touched at all.
+    expect(mockFetch.mock.calls.filter((call: unknown[]) => (call[0] as string).includes('/users/'))).toEqual([]);
+  });
+
+  it('writes no contact notes when the case has no pubkey to identify', async () => {
+    const c = makeCase({ state: 'restricted_pending_user_response', account_name: 'Some One', pubkey: '' });
+    const mockFetch = makeZendeskFetch();
+    vi.stubGlobal('fetch', mockFetch);
+
+    await handleParentContact(parentRequest(), 'case-1', '', makeEnv(makeParentDb(c), zendeskEnv), corsHeaders);
+
+    expect(mockFetch.mock.calls.filter((call: unknown[]) => (call[0] as string).includes('/users/'))).toEqual([]);
+  });
+
+  it('refuses to write to a contact that is not an end user', async () => {
+    const c = makeCase({ state: 'restricted_pending_user_response', account_name: 'Some One' });
+    const mockFetch = vi.fn().mockImplementation((url: string, init?: { method?: string }) => {
+      if (url.includes('/users/') && (init?.method ?? 'GET') === 'GET') {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ user: { id: 77, role: 'admin', email: 'parent@example.com', notes: '' } }),
+        });
+      }
+      if (url.includes('/users/')) return Promise.resolve({ ok: true, json: () => Promise.resolve({ user: { id: 77 } }) });
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ ticket: { id: 42, requester_id: 77 } }) });
+    });
+    vi.stubGlobal('fetch', mockFetch);
+
+    await handleParentContact(parentRequest(), 'case-1', c.pubkey, makeEnv(makeParentDb(c), zendeskEnv), corsHeaders);
+
+    const put = mockFetch.mock.calls.find(
+      (call: unknown[]) => (call[0] as string).includes('/users/') && (call[1] as { method?: string })?.method === 'PUT',
+    );
+    expect(put).toBeUndefined();
+  });
+
+  // Belt and braces on the same attack: even an end user must be the address we
+  // were actually given, or the ticket's requester is not who we think.
+  it('refuses to write to a contact whose email is not the parent address', async () => {
+    const c = makeCase({ state: 'restricted_pending_user_response', account_name: 'Some One' });
+    const mockFetch = vi.fn().mockImplementation((url: string, init?: { method?: string }) => {
+      if (url.includes('/users/') && (init?.method ?? 'GET') === 'GET') {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ user: { id: 77, role: 'end-user', email: 'someone.else@example.com', notes: '' } }),
+        });
+      }
+      if (url.includes('/users/')) return Promise.resolve({ ok: true, json: () => Promise.resolve({ user: { id: 77 } }) });
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ ticket: { id: 42, requester_id: 77 } }) });
+    });
+    vi.stubGlobal('fetch', mockFetch);
+
+    await handleParentContact(parentRequest(), 'case-1', c.pubkey, makeEnv(makeParentDb(c), zendeskEnv), corsHeaders);
+
+    const put = mockFetch.mock.calls.find(
+      (call: unknown[]) => (call[0] as string).includes('/users/') && (call[1] as { method?: string })?.method === 'PUT',
+    );
+    expect(put).toBeUndefined();
+  });
+
+  // Structural, not a guard: createAgeReviewInternalTicket sets no requester and
+  // never reaches the contact write, so the admin-requester case cannot arise on
+  // that path. This pins that structure against a future call being added.
+  it('touches no contact record when the case has no parent email', async () => {
+    const reviewCase = makeCase({ state: 'under_moderator_review', account_name: 'Some One' });
+    const updatedCase = { ...reviewCase, state: 'restricted_pending_support_email' };
+    let selectCount = 0;
+    const db = {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        bind: vi.fn().mockReturnValue({
+          first: vi.fn().mockImplementation(async () => {
+            if (sql === 'SELECT * FROM age_review_cases WHERE id = ?') {
+              selectCount += 1;
+              return selectCount === 1 ? reviewCase : updatedCase;
+            }
+            return null;
+          }),
+          run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+        }),
+      })),
+    };
+    const mockFetch = makeZendeskFetch();
+    vi.stubGlobal('fetch', mockFetch);
+
+    const req = new Request('https://api.test/api/age-review/cases/case-1', {
+      method: 'PATCH',
+      body: JSON.stringify({ state: 'restricted_pending_support_email' }),
+    });
+    await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db, zendeskEnv), corsHeaders);
+
+    const userCalls = mockFetch.mock.calls.filter((call: unknown[]) => (call[0] as string).includes('/users/'));
+    expect(userCalls).toEqual([]);
+  });
+});
+
 // -- handleParentContact + Zendesk ticket creation ----------------------------
 
 describe('handleParentContact Zendesk integration', () => {
@@ -1540,7 +1955,19 @@ describe('handleParentContact Zendesk integration', () => {
       })),
     };
 
-    const mockFetch = vi.fn().mockResolvedValue({ ok: true });
+    // Must supply json(): the ticket PUT's response is read to resolve the
+    // requester, and a bare { ok: true } throws a TypeError that this handler
+    // swallows -- which would silently skip everything after the PUT while the
+    // test still went green.
+    const mockFetch = vi.fn().mockImplementation((url: string, init?: { method?: string }) => {
+      if (url.includes('/users/') && (init?.method ?? 'GET') === 'GET') {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ user: { id: 77, role: 'end-user', email: 'parent@example.com', notes: '' } }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ ticket: { id: 99, requester_id: 77 } }) });
+    });
     vi.stubGlobal('fetch', mockFetch);
 
     const req = new Request('https://api.test/v1/minor-review-cases/case-1/parent-contact', {
@@ -1554,7 +1981,6 @@ describe('handleParentContact Zendesk integration', () => {
     }), corsHeaders);
 
     expect(res.status).toBe(200);
-    expect(mockFetch).toHaveBeenCalledOnce();
     const [url, opts] = mockFetch.mock.calls[0];
     expect(url).toBe('https://test.zendesk.com/api/v2/tickets/99');
     expect(opts.method).toBe('PUT');
@@ -1563,6 +1989,425 @@ describe('handleParentContact Zendesk integration', () => {
     expect(payload.ticket.comment.public).toBe(true);
 
     vi.unstubAllGlobals();
+  });
+
+  // The attach-to-existing-ticket branch. Its requester write is the riskier of
+  // the two -- it reassigns the requester on a ticket that already exists -- and
+  // it was previously reachable only through a test whose mock aborted it.
+  it('attaches identity on the existing-ticket branch without leaking a handle', async () => {
+    const c = makeCase({
+      state: 'restricted_pending_user_response',
+      zendesk_ticket_id: 99,
+      account_name: 'Some One',
+    });
+    const db = {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        bind: vi.fn().mockReturnValue({
+          first: vi.fn().mockResolvedValue(sql.includes('WHERE id = ? AND pubkey = ?') ? c : null),
+          run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+        }),
+      })),
+    };
+
+    const mockFetch = vi.fn().mockImplementation((url: string, init?: { method?: string }) => {
+      if (url.includes('/users/') && (init?.method ?? 'GET') === 'GET') {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ user: { id: 77, role: 'end-user', email: 'parent@example.com', notes: '' } }),
+        });
+      }
+      if (url.includes('/users/')) return Promise.resolve({ ok: true, json: () => Promise.resolve({ user: { id: 77 } }) });
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ ticket: { id: 99, requester_id: 77 } }) });
+    });
+    vi.stubGlobal('fetch', mockFetch);
+
+    const req = new Request('https://api.test/v1/minor-review-cases/case-1/parent-contact', {
+      method: 'POST',
+      body: JSON.stringify({ email: 'parent@example.com' }),
+    });
+    await handleParentContact(req, 'case-1', c.pubkey, makeEnv(db, {
+      ZENDESK_SUBDOMAIN: 'test',
+      ZENDESK_API_TOKEN: 'tok',
+      ZENDESK_EMAIL: 'agent@test.com',
+    }), corsHeaders);
+
+    // Requester-visible: address only, no handle.
+    const ticketPut = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(ticketPut.ticket.requester.name).toBe('parent@example.com');
+    expect(ticketPut.ticket.requester.name).not.toContain('Some One');
+
+    // The body does name the account, on this path too -- the parent cannot act
+    // on the review without knowing which account it is. Only the To: header is
+    // held back until a reply proves the address.
+    expect(ticketPut.ticket.comment.html_body).toContain('Some One');
+
+    // Zendesk sends `body` when both are present, so a plain body reappearing
+    // here would silently revert the message to text. This is the branch a
+    // moderator-restricted case takes, so it needs the guard as much as create.
+    expect(ticketPut.ticket.comment.body).toBeUndefined();
+
+    // Agent-only: the block reached the contact, with the right case.
+    const contactPut = mockFetch.mock.calls.find(
+      (call: unknown[]) => (call[0] as string).includes('/users/') && (call[1] as { method?: string })?.method === 'PUT',
+    );
+    expect(contactPut).toBeTruthy();
+    const notes = JSON.parse((contactPut![1] as { body: string }).body).user.notes;
+    expect(notes).toContain('/age-review?case=case-1');
+    expect(notes).toContain('Some One');
+
+    vi.unstubAllGlobals();
+  });
+
+  it('sends the outreach as html_body so Zendesk renders it as rich mail', async () => {
+    const c = makeCase({ state: 'restricted_pending_user_response' });
+    const db = {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        bind: vi.fn().mockReturnValue({
+          first: vi.fn().mockResolvedValue(
+            sql.includes('WHERE id = ? AND pubkey = ?') ? c : null
+          ),
+          run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+        }),
+      })),
+    };
+
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ ticket: { id: 42 } }),
+    });
+    vi.stubGlobal('fetch', mockFetch);
+
+    const req = new Request('https://api.test/v1/minor-review-cases/case-1/parent-contact', {
+      method: 'POST',
+      body: JSON.stringify({ email: 'parent@example.com' }),
+    });
+    await handleParentContact(req, 'case-1', c.pubkey, makeEnv(db, {
+      ZENDESK_SUBDOMAIN: 'test',
+      ZENDESK_API_TOKEN: 'tok',
+      ZENDESK_EMAIL: 'agent@test.com',
+    }), corsHeaders);
+
+    const zendeskCall = mockFetch.mock.calls.find(
+      (call: unknown[]) => (call[0] as string).includes('zendesk.com/api/v2/tickets')
+    );
+    const { comment } = JSON.parse(zendeskCall![1].body).ticket;
+    // A plain `body` alongside html_body would be the one Zendesk sent, so the
+    // markup has to be the only thing supplied.
+    expect(comment.body).toBeUndefined();
+    expect(comment.html_body).toContain('<a href="https://divine.video/family">');
+
+    vi.unstubAllGlobals();
+  });
+});
+
+// -- parent outreach copy -----------------------------------------------------
+
+describe('buildParentOutreachBody', () => {
+  it('leads with what we need rather than asking who they are', () => {
+    const html = buildParentOutreachBody();
+    expect(html).toContain('reply to this email with a short private video');
+    // The message this replaces asked only for a confirmation, which parents
+    // answered with "yes" -- worthless as consent. That ask must not survive.
+    expect(html).not.toContain('confirm you are the parent or legal guardian');
+  });
+
+  it('carries no age-band label, so one template serves both bands', () => {
+    const html = buildParentOutreachBody();
+    for (const label of ['13-15', '16+ (claimed)', 'Under 13', 'age range']) {
+      expect(html).not.toContain(label);
+    }
+    expect(html).toContain('possibly belonging to someone under 16');
+  });
+
+  it('states the video requirements, the deadline, and the 16+ path', () => {
+    const html = buildParentOutreachBody();
+    expect(html).toContain('a parent or guardian speaking on camera');
+    // divine.video/kids and /age-review both require the age statement. This
+    // email is the primary instruction channel now, so dropping it here sends
+    // families back for a second video -- the round trip this copy exists to end.
+    expect(html).toContain('that the teen is between 13 and 15');
+    expect(html).toContain('the country or countries where you live');
+    expect(html).toContain('Please do NOT send government IDs');
+    expect(html).toContain('Please reply within 15 days');
+    expect(html).toContain('you are 16 or older');
+  });
+
+  it('links the family and kids pages as anchors, not bare URLs', () => {
+    const html = buildParentOutreachBody();
+    expect(html).toContain('<a href="https://divine.video/family">For Families page</a>');
+    expect(html).toContain('<a href="https://divine.video/kids">how accounts work for kids on Divine</a>');
+  });
+
+  it('names the account so the parent knows which one this is about', () => {
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_name: 'Star Girl',
+      account_nip05: '_@stargirl.divine.video',
+    }, 'divine.video');
+    expect(html).toContain('The account under review:');
+    expect(html).toContain('Display name: Star Girl');
+    // NIP-05 root identifiers display as the bare domain, so the stored
+    // `_@stargirl.divine.video` must not reach a parent with its prefix.
+    expect(html).toContain('Username: stargirl.divine.video');
+    expect(html).not.toContain('_@');
+    expect(html).toMatch(/ID: npub1[a-z0-9]+/);
+  });
+
+  it('leaves a non-root NIP-05 local part alone', () => {
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_nip05: 'alice@divine.video',
+    }, 'divine.video');
+    expect(html).toContain('Username: alice@divine.video');
+  });
+
+  it('drops a NIP-05 whose local part is hostname-shaped, even on a domain we issue', () => {
+    // The host gate constrains only the domain. NIP-05 permits `.` in the local
+    // part, so an unverified kind-0 value can smuggle a hostname there and still
+    // pass the gate on our own domain. looksLinkish screens the local part.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_nip05: 'www.evil.example@divine.video',
+    }, 'divine.video');
+    expect(html).not.toContain('Username:');
+    expect(html).not.toContain('www.evil.example');
+  });
+
+  it('drops a NIP-05 on a domain we do not issue', () => {
+    // A NIP-05 is a bare hostname, so looksLinkish cannot screen it without
+    // rejecting every real one. The issuing domain is the screen instead: this
+    // value is unverified kind-0, and rendering it would mail an
+    // attacker-chosen, highly linkifiable hostname under Divine branding.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_nip05: '_@claim-your-teen-account.example',
+    }, 'divine.video');
+    expect(html).not.toContain('Username:');
+    expect(html).not.toContain('claim-your-teen-account');
+  });
+
+  it('renders no username at all when no issuing domain is configured', () => {
+    // Staging deliberately leaves NIP05_DOMAIN unset. No username beats one we
+    // cannot vouch for.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_nip05: '_@stargirl.divine.video',
+    });
+    expect(html).not.toContain('Username:');
+  });
+
+  it('accepts a subdomain of the issuing domain but not a lookalike', () => {
+    expect(buildParentOutreachBody(
+      { pubkey: 'a'.repeat(64), account_nip05: '_@kid.divine.video' }, 'divine.video',
+    )).toContain('Username: kid.divine.video');
+    // `notdivine.video` ends with the domain as a substring but is not ours.
+    expect(buildParentOutreachBody(
+      { pubkey: 'a'.repeat(64), account_nip05: '_@notdivine.video' }, 'divine.video',
+    )).not.toContain('Username:');
+  });
+
+  it('escapes an ID that could not be encoded as an npub', () => {
+    // toNpub hands back its input unchanged rather than throwing when the
+    // pubkey will not encode, so the ID row is not automatically safe just
+    // because npubs are alphanumeric.
+    const html = buildParentOutreachBody({ pubkey: '<img src=x onerror=alert(1)>' });
+    expect(html).not.toContain('<img');
+    expect(html).toContain('&lt;img src=x onerror=alert(1)&gt;');
+  });
+
+  it('drops a display name that is trying to look like a link', () => {
+    // The account picks this string AND supplies the address we mail it to, so
+    // a name carrying a URL turns this message into attacker-chosen delivery.
+    // Escaping does not help: mail clients auto-link bare URLs in text.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_name: 'Star Girl verify at http://not-divine.example/claim',
+      account_nip05: '_@stargirl.divine.video',
+    }, 'divine.video');
+    expect(html).not.toContain('Display name:');
+    expect(html).not.toContain('not-divine.example');
+    // Failing safe still leaves the parent able to identify the account.
+    expect(html).toContain('Username: stargirl.divine.video');
+    expect(html).toMatch(/ID: npub1[a-z0-9]+/);
+  });
+
+  it('drops a NIP-05 that is not actually a NIP-05', () => {
+    // The issuing domain must be supplied, or this asserts nothing: without it
+    // displayNip05 returns early and the shape check never runs.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_nip05: 'http://not-divine.example/claim',
+    }, 'divine.video');
+    expect(html).not.toContain('Username:');
+    expect(html).not.toContain('not-divine.example');
+  });
+
+  it('drops a NIP-05 smuggling a URL in front of a domain we do issue', () => {
+    // The host really is divine.video, so the domain gate passes it. Only the
+    // shape check stands between this and a live link to evil.example in mail
+    // sent under Divine branding.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_nip05: 'http://evil.example/claim@divine.video',
+    }, 'divine.video');
+    expect(html).not.toContain('Username:');
+    expect(html).not.toContain('evil.example');
+  });
+
+  it('drops a NIP-05 carrying markup in front of a domain we do issue', () => {
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_nip05: '<script>alert(1)</script>@divine.video',
+    }, 'divine.video');
+    expect(html).not.toContain('Username:');
+    expect(html).not.toContain('script');
+  });
+
+  it('prints no empty row for a NIP-05 that is only the root prefix', () => {
+    const html = buildParentOutreachBody(
+      { pubkey: 'a'.repeat(64), account_nip05: '_@' }, 'divine.video',
+    );
+    expect(html).not.toContain('Username:');
+  });
+
+  it('caps an overlong display name and marks it as cut', () => {
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_name: 'Q'.repeat(300),
+    });
+    expect(html).toContain(`Display name: ${'Q'.repeat(80)}\u2026`);
+    expect(html).not.toContain('Q'.repeat(81));
+  });
+
+  it('truncates by code point, so an emoji is never cut in half', () => {
+    // A lone surrogate in html_body is malformed and Zendesk may reject the
+    // whole comment, which would drop the outreach entirely.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_name: `${'x'.repeat(79)}\u{1F600}extra`,
+    });
+    expect(html).toContain(`${'x'.repeat(79)}\u{1F600}\u2026`);
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(html)).toBe(false);
+  });
+
+  it('drops a display name carrying a bare IP address', () => {
+    // No letters after the final dot, so the hostname rule alone does not see
+    // this one.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_name: 'Star Girl go to 93.184.216.34/claim',
+    });
+    expect(html).not.toContain('Display name:');
+  });
+
+  it('drops a display name using a unicode dot to hide a hostname', () => {
+    // UTS-46 maps U+3002 to '.', so a mail client resolves this as a hostname
+    // even though an ASCII-only check does not see one.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_name: 'Star Girl go to evil\u3002example',
+    });
+    expect(html).not.toContain('Display name:');
+  });
+
+  it('drops a display name hiding a dot behind a zero-width character', () => {
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_name: 'Star Girl evil\u200b.example',
+    });
+    expect(html).not.toContain('Display name:');
+  });
+
+  it('drops a name hiding a dot behind an invisible format character outside the zero-width block', () => {
+    // U+2062 (INVISIBLE TIMES) is a Cf character the enumerated strip missed:
+    // looksLinkish cannot match across it, but a mail client ignores it and
+    // parses `evil.example`.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_name: 'Star Girl evil\u2062.example',
+    });
+    expect(html).not.toContain('Display name:');
+  });
+
+  it('drops a name carrying a bidi override and never emits one into the body', () => {
+    // U+202E (RIGHT-TO-LEFT OVERRIDE), left unterminated, reorders the rest of
+    // the paragraph it lands in -- and the npub row shares that paragraph.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_name: 'Star Girl evil\u202e.example',
+    });
+    expect(html).not.toContain('Display name:');
+    expect(html).not.toContain('\u202e');
+  });
+
+  it('drops a name hiding a dot behind a variation selector', () => {
+    // U+FE0F is Default_Ignorable but not Cf, so the \p{Cf} half of the strip
+    // never reaches it -- and it is the ordinary emoji presentation selector, so
+    // it turns up in real display names rather than only in crafted ones. ICU
+    // resolves `evil️.example` to `evil.example`, so without
+    // \p{Default_Ignorable_Code_Point} this renders a live hostname.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_name: 'Star Girl evil️.example',
+    });
+    expect(html).not.toContain('Display name:');
+  });
+
+  it('drops a display name whose IP address is written in fullwidth digits', () => {
+    // The IPv4 rule matches ASCII \d only, and the explicit dot replacement does
+    // not touch the digits. NFKC is the only thing that folds this to
+    // `93.184.216.34` -- which is exactly what a UTS-46 resolver sees.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_name: 'Star Girl go to ９３．１８４．２１６．３４',
+    });
+    expect(html).not.toContain('Display name:');
+  });
+
+  it('drops a display name carrying a scheme even when the host has no dot', () => {
+    // The hostname rule needs a dot after the label, so an intranet or localhost
+    // target is caught by the scheme check alone.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_name: 'Star Girl go to http://localhost/claim',
+    });
+    expect(html).not.toContain('Display name:');
+  });
+
+  it('accepts a NIP-05 that arrived with surrounding whitespace', () => {
+    // Capture stores kind-0 verbatim and never trims, so a padded value reaches
+    // the anchored shape check as-is and would be dropped without the trim.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_nip05: '  _@stargirl.divine.video\n',
+    }, 'divine.video');
+    expect(html).toContain('Username: stargirl.divine.video');
+  });
+
+  it('omits the rows it has no value for rather than printing empties', () => {
+    // Capture is best effort: an account whose profile was already hidden by
+    // enforcement yields no name and no NIP-05. The npub always resolves.
+    const html = buildParentOutreachBody({ pubkey: 'a'.repeat(64) });
+    expect(html).toContain('The account under review:');
+    expect(html).not.toContain('Display name:');
+    expect(html).not.toContain('Username:');
+    expect(html).toMatch(/ID: npub1[a-z0-9]+/);
+  });
+
+  it('drops the block entirely when nothing was captured', () => {
+    expect(buildParentOutreachBody({})).not.toContain('The account under review');
+  });
+
+  it('escapes an account-controlled display name', () => {
+    // account_name is stored raw from the account's own kind-0 (#222 stores raw
+    // on purpose, so each render surface sanitizes for its own medium). This is
+    // the only thing between it and a parent's inbox.
+    const html = buildParentOutreachBody({
+      pubkey: 'a'.repeat(64),
+      account_name: '<script>alert(1)</script> & "friends"',
+    });
+    expect(html).not.toContain('<script>');
+    expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt; &amp; &quot;friends&quot;');
   });
 });
 
@@ -1651,6 +2496,260 @@ describe('syncAgeReviewTicketResolution', () => {
 });
 
 // -- handleAgeReviewReplyWebhook ------------------------------------------------
+
+// -- Contact name upgrade on parent reply (#213) ------------------------------
+
+describe('contact name upgrade on parent reply', () => {
+  function makeReplyDb(c: AgeReviewCase) {
+    return {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        bind: vi.fn().mockReturnValue({
+          first: vi.fn().mockResolvedValue(sql.includes('zendesk_ticket_id') ? c : null),
+          run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+        }),
+      })),
+    };
+  }
+
+  function makeTicketFetch() {
+    return vi.fn().mockImplementation((url: string, init?: { method?: string }) => {
+      if (url.includes('/users/') && init?.method === 'PUT') {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ user: { id: 77 } }) });
+      }
+      if (url.includes('/users/')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ user: { id: 77, role: 'end-user', email: 'parent@example.com' } }),
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ ticket: { id: 42, requester_id: 77 } }),
+      });
+    });
+  }
+
+  const zendeskEnv = {
+    ZENDESK_SUBDOMAIN: 'test',
+    ZENDESK_API_TOKEN: 'tok',
+    ZENDESK_EMAIL: 'agent@test.com',
+  };
+
+  function replyRequest() {
+    return new Request('https://api.test/api/zendesk/age-review-reply', {
+      method: 'POST',
+      body: JSON.stringify({ ticket_id: 42 }),
+    });
+  }
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  function namePutFrom(mockFetch: ReturnType<typeof vi.fn>) {
+    return mockFetch.mock.calls.find(
+      (call: unknown[]) => (call[0] as string).includes('/users/') && (call[1] as { method?: string })?.method === 'PUT',
+    );
+  }
+
+  // By the time the parent has replied the address is demonstrably live and
+  // held by someone engaging with the review, so the handle can go in the name
+  // that Zendesk renders into the To: header. This is what makes the agent
+  // queue readable: the Requester column shows the name and nothing else.
+  it('renames the contact to claim the handle once the parent replies', async () => {
+    const c = makeCase({
+      state: 'restricted_pending_parental_consent',
+      zendesk_ticket_id: 42,
+      parent_contact_email: 'parent@example.com',
+      account_name: 'Some One',
+    });
+    const mockFetch = makeTicketFetch();
+    vi.stubGlobal('fetch', mockFetch);
+
+    await handleAgeReviewReplyWebhook(replyRequest(), makeEnv(makeReplyDb(c), zendeskEnv), corsHeaders);
+
+    const put = namePutFrom(mockFetch);
+    expect(put).toBeTruthy();
+    // "Claimed" is deliberate: whether they are the parent is exactly what the
+    // review exists to establish, so the name must not assert it as fact.
+    expect(JSON.parse((put![1] as { body: string }).body).user.name).toBe('Claimed parent of Some One');
+  });
+
+  // The rename swallows its own errors and the handler answers 200 either way,
+  // so Zendesk never redelivers on a failure. If the rename only ran on the
+  // delivery that won the CAS, one transient Zendesk blip would leave the
+  // Requester column showing a bare email for the life of the case. A later
+  // reply arrives with the case already advanced, so that delivery has to be
+  // able to heal it.
+  it('still renames on a later reply, after the case has already advanced', async () => {
+    const c = makeCase({
+      state: 'submitted_for_review',
+      zendesk_ticket_id: 42,
+      parent_contact_email: 'parent@example.com',
+      account_name: 'Some One',
+    });
+    const mockFetch = makeTicketFetch();
+    vi.stubGlobal('fetch', mockFetch);
+
+    const res = await handleAgeReviewReplyWebhook(replyRequest(), makeEnv(makeReplyDb(c), zendeskEnv), corsHeaders);
+
+    // The state machine still declines to advance; only the rename is retried.
+    expect(res.status).toBe(200);
+    const put = namePutFrom(mockFetch);
+    expect(put).toBeTruthy();
+    expect(JSON.parse((put![1] as { body: string }).body).user.name).toBe('Claimed parent of Some One');
+  });
+
+  it('still renames when the state advance loses to a concurrent write', async () => {
+    const c = makeCase({
+      state: 'restricted_pending_parental_consent',
+      zendesk_ticket_id: 42,
+      parent_contact_email: 'parent@example.com',
+      account_name: 'Some One',
+    });
+    // Every UPDATE reports zero rows changed: the CAS never lands.
+    const db = {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        bind: vi.fn().mockReturnValue({
+          first: vi.fn().mockResolvedValue(sql.includes('zendesk_ticket_id') ? c : c),
+          run: vi.fn().mockResolvedValue({ meta: { changes: 0 } }),
+        }),
+      })),
+    };
+    const mockFetch = makeTicketFetch();
+    vi.stubGlobal('fetch', mockFetch);
+
+    await handleAgeReviewReplyWebhook(replyRequest(), makeEnv(db, zendeskEnv), corsHeaders);
+
+    expect(namePutFrom(mockFetch)).toBeTruthy();
+  });
+
+  it('leaves the contact alone when no handle was captured', async () => {
+    const c = makeCase({
+      state: 'restricted_pending_parental_consent',
+      zendesk_ticket_id: 42,
+      parent_contact_email: 'parent@example.com',
+      account_name: null,
+      account_nip05: null,
+      account_vine_username: null,
+    });
+    const mockFetch = makeTicketFetch();
+    vi.stubGlobal('fetch', mockFetch);
+
+    await handleAgeReviewReplyWebhook(replyRequest(), makeEnv(makeReplyDb(c), zendeskEnv), corsHeaders);
+
+    expect(namePutFrom(mockFetch)).toBeUndefined();
+  });
+
+  // No parent address means the requester is the API caller -- an admin. A
+  // rename would retitle a live staff profile after a teenager's account.
+  it('leaves the contact alone when the case has no parent email', async () => {
+    const c = makeCase({
+      state: 'restricted_pending_parental_consent',
+      zendesk_ticket_id: 42,
+      parent_contact_email: null,
+      account_name: 'Some One',
+    });
+    const mockFetch = makeTicketFetch();
+    vi.stubGlobal('fetch', mockFetch);
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await handleAgeReviewReplyWebhook(replyRequest(), makeEnv(makeReplyDb(c), zendeskEnv), corsHeaders);
+
+    // Asserting only on the absent PUT would prove nothing: with the guard
+    // removed, the flow still writes nothing because it crashes comparing a
+    // null address and the crash is swallowed. So assert on what the guard
+    // uniquely achieves -- returning before Zendesk is touched at all, and
+    // without an error being logged.
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(errorLog).not.toHaveBeenCalled();
+    errorLog.mockRestore();
+  });
+
+  // A Zendesk display name is global. Renaming a staff member would put a
+  // minor's handle in the header of every mail they subsequently send, on any
+  // ticket. The case row saying a parent exists does not prove the ticket's
+  // requester is that parent: the row is written before the Zendesk call, and
+  // that call's failure is swallowed.
+  it('refuses to rename a contact that is not an end user', async () => {
+    const c = makeCase({
+      state: 'restricted_pending_parental_consent',
+      zendesk_ticket_id: 42,
+      parent_contact_email: 'parent@example.com',
+      account_name: 'Some One',
+    });
+    const mockFetch = vi.fn().mockImplementation((url: string, init?: { method?: string }) => {
+      if (url.includes('/users/') && (init?.method ?? 'GET') === 'GET') {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ user: { id: 77, role: 'admin', email: 'parent@example.com' } }),
+        });
+      }
+      if (url.includes('/users/')) return Promise.resolve({ ok: true, json: () => Promise.resolve({ user: { id: 77 } }) });
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ ticket: { id: 42, requester_id: 77 } }) });
+    });
+    vi.stubGlobal('fetch', mockFetch);
+
+    await handleAgeReviewReplyWebhook(replyRequest(), makeEnv(makeReplyDb(c), zendeskEnv), corsHeaders);
+
+    expect(namePutFrom(mockFetch)).toBeUndefined();
+  });
+
+  it('refuses to rename a contact whose email is not the parent address', async () => {
+    const c = makeCase({
+      state: 'restricted_pending_parental_consent',
+      zendesk_ticket_id: 42,
+      parent_contact_email: 'parent@example.com',
+      account_name: 'Some One',
+    });
+    const mockFetch = vi.fn().mockImplementation((url: string, init?: { method?: string }) => {
+      if (url.includes('/users/') && (init?.method ?? 'GET') === 'GET') {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ user: { id: 77, role: 'end-user', email: 'admin@divine.video' } }),
+        });
+      }
+      if (url.includes('/users/')) return Promise.resolve({ ok: true, json: () => Promise.resolve({ user: { id: 77 } }) });
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ ticket: { id: 42, requester_id: 77 } }) });
+    });
+    vi.stubGlobal('fetch', mockFetch);
+
+    await handleAgeReviewReplyWebhook(replyRequest(), makeEnv(makeReplyDb(c), zendeskEnv), corsHeaders);
+
+    expect(namePutFrom(mockFetch)).toBeUndefined();
+  });
+
+  it('still advances the case when the rename fails', async () => {
+    const c = makeCase({
+      state: 'restricted_pending_parental_consent',
+      zendesk_ticket_id: 42,
+      parent_contact_email: 'parent@example.com',
+      account_name: 'Some One',
+    });
+    const mockFetch = vi.fn().mockRejectedValue(new Error('Zendesk down'));
+    vi.stubGlobal('fetch', mockFetch);
+
+    const res = await handleAgeReviewReplyWebhook(replyRequest(), makeEnv(makeReplyDb(c), zendeskEnv), corsHeaders);
+    const body = await res.json() as { success: boolean; new_state: string };
+
+    expect(res.status).toBe(200);
+    expect(body.new_state).toBe('submitted_for_review');
+  });
+
+  it('sanitizes an attacker-chosen account name before it reaches the contact', async () => {
+    const c = makeCase({
+      state: 'restricted_pending_parental_consent',
+      zendesk_ticket_id: 42,
+      parent_contact_email: 'parent@example.com',
+      account_name: 'Evil\nDivine Support',
+    });
+    const mockFetch = makeTicketFetch();
+    vi.stubGlobal('fetch', mockFetch);
+
+    await handleAgeReviewReplyWebhook(replyRequest(), makeEnv(makeReplyDb(c), zendeskEnv), corsHeaders);
+
+    const name = JSON.parse((namePutFrom(mockFetch)![1] as { body: string }).body).user.name;
+    expect(name).not.toContain('\n');
+  });
+});
 
 describe('handleAgeReviewReplyWebhook', () => {
   it('transitions pending case to submitted_for_review', async () => {
@@ -1864,6 +2963,129 @@ describe('handleCreateMinorAccount', () => {
     expect(body.case_id).toBeDefined();
   });
 
+  // Identity capture (#213). This path is handed the username and display name
+  // directly, so unlike the report paths it needs no relay lookup -- it just has
+  // to store what it already knows.
+  /**
+   * The identity binds, by position. Membership assertions cannot tell
+   * account_name from account_nip05, so a swap between the two columns would
+   * pass while writing each value into the other's column.
+   */
+  function identityBinds(db: { prepare: unknown }) {
+    const prepareMock = db.prepare as ReturnType<typeof vi.fn>;
+    const insertIdx = prepareMock.mock.calls.findIndex(
+      (c: unknown[]) => String(c[0]).includes('INSERT INTO age_review_cases'),
+    );
+    const sql = String(prepareMock.mock.calls[insertIdx][0]);
+    const binds = prepareMock.mock.results[insertIdx].value.bind.mock.calls.flat();
+    return {
+      sql,
+      accountName: binds[5],
+      accountNip05: binds[6],
+      accountVineUsername: binds[7],
+      identityCapturedAt: binds[8],
+    };
+  }
+
+  it('records the supplied display name as the account identity', async () => {
+    const db = makeMinorDb();
+    await handleCreateMinorAccount(
+      makeRequest({ username: 'someuser', display_name: 'Some One' }),
+      makeEnv(db), corsHeaders,
+    );
+
+    const { sql, accountName } = identityBinds(db);
+    expect(sql).toContain('account_name');
+    expect(accountName).toBe('Some One');
+  });
+
+  // The backfill treats a null identity_captured_at as "never looked", so a row
+  // that skipped this stamp would be re-queried forever -- and one that stamps
+  // it without meaning to would be excluded from recovery permanently.
+  it('stamps identity_captured_at so the row is not re-queried by a backfill', async () => {
+    const db = makeMinorDb();
+    await handleCreateMinorAccount(
+      makeRequest({ username: 'someuser', display_name: 'Some One' }),
+      makeEnv(db), corsHeaders,
+    );
+
+    const { sql, identityCapturedAt } = identityBinds(db);
+    expect(sql).toContain('identity_captured_at');
+    expect(identityCapturedAt).toEqual(expect.any(String));
+    expect(new Date(identityCapturedAt as string).toString()).not.toBe('Invalid Date');
+  });
+
+  // account_name prefers display_name, so without this the operator-supplied
+  // username is dropped whenever a display name is present -- and these rows
+  // stamp identity_captured_at, which excludes them from any backfill keyed on
+  // IS NULL. Divine's NIP-05 is the subdomain form, so the username survives
+  // inside it and stays recoverable.
+  it('derives the account nip05 from the username so it is not discarded', async () => {
+    const db = makeMinorDb();
+    await handleCreateMinorAccount(
+      makeRequest({ username: 'someuser', display_name: 'Some One' }),
+      makeEnv(db, { NIP05_DOMAIN: 'divine.video' }), corsHeaders,
+    );
+
+    const { sql, accountName, accountNip05 } = identityBinds(db);
+    expect(sql).toContain('account_nip05');
+    // Positional: the display name and the derived NIP-05 must land in their
+    // own columns, not each other's.
+    expect(accountName).toBe('Some One');
+    expect(accountNip05).toBe('_@someuser.divine.video');
+  });
+
+  // Staging accounts do not live under the production identity domain, so a
+  // hardcoded fallback would write a wrong address into an agent-facing record.
+  // Storing nothing is the honest outcome when the domain is not configured.
+  it('stores no nip05 when the identity domain is not configured', async () => {
+    const db = makeMinorDb();
+    await handleCreateMinorAccount(
+      makeRequest({ username: 'someuser', display_name: 'Some One' }),
+      makeEnv(db), corsHeaders,
+    );
+
+    expect(identityBinds(db).accountNip05).toBeNull();
+  });
+
+  // Storing the username only inside a derived NIP-05 loses it wherever
+  // NIP05_DOMAIN is unset -- which is staging, deliberately. And this path
+  // stamps identity_captured_at, so the backfill's IS NULL keying never returns
+  // to the row: the loss is permanent, in exactly the environment shipped
+  // without the config. The username has to survive on its own.
+  it('keeps the username even when the identity domain is not configured', async () => {
+    const db = makeMinorDb();
+    await handleCreateMinorAccount(
+      makeRequest({ username: 'someuser', display_name: 'Some One' }),
+      makeEnv(db), corsHeaders,
+    );
+
+    const binds = identityBinds(db);
+    expect(binds.accountNip05).toBeNull();
+    expect(binds.accountVineUsername).toBe('someuser');
+    // The display name still wins account_name; this is a second home, not a swap.
+    expect(binds.accountName).toBe('Some One');
+  });
+
+  it('keeps the username alongside the derived nip05 when the domain is configured', async () => {
+    const db = makeMinorDb();
+    await handleCreateMinorAccount(
+      makeRequest({ username: 'someuser', display_name: 'Some One' }),
+      makeEnv(db, { NIP05_DOMAIN: 'divine.video' }), corsHeaders,
+    );
+
+    const binds = identityBinds(db);
+    expect(binds.accountNip05).toBe('_@someuser.divine.video');
+    expect(binds.accountVineUsername).toBe('someuser');
+  });
+
+  it('falls back to the username when no display name is given', async () => {
+    const db = makeMinorDb();
+    await handleCreateMinorAccount(makeRequest({ username: 'someuser' }), makeEnv(db), corsHeaders);
+
+    expect(identityBinds(db).accountName).toBe('someuser');
+  });
+
   it('rejects missing username', async () => {
     const db = makeMinorDb();
     const res = await handleCreateMinorAccount(makeRequest({}), makeEnv(db), corsHeaders);
@@ -2070,17 +3292,17 @@ describe('handleGetAgeReviewFunnel', () => {
     { state: 'denied_closed', created_via: 'report', c: 1 },
     { state: 'submitted_for_review', created_via: 'report', c: 4 },
   ];
-  const mockDb = {
+  const makeMockDb = () => ({
     prepare: vi.fn().mockReturnValue({
       bind: vi.fn().mockReturnValue({ all: vi.fn().mockResolvedValue({ results: groupRows }) }),
     }),
-  };
+  });
   const req = new Request('https://api.test/api/age-review/funnel?age_band=age_13_15');
 
   afterEach(() => { vi.unstubAllGlobals(); });
 
   it('returns moderation counts and nulls helpdesk when Zendesk creds are absent', async () => {
-    const env = makeEnv(mockDb); // no ZENDESK_* set
+    const env = makeEnv(makeMockDb()); // no ZENDESK_* set
     const res = await handleGetAgeReviewFunnel(req, env, cors);
     const body = await res.json() as import('../../shared/age-review').AgeReviewFunnelResponse;
 
@@ -2094,7 +3316,7 @@ describe('handleGetAgeReviewFunnel', () => {
 
   it('populates helpdesk counts when Zendesk creds resolve', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ count: 9 }) }));
-    const env = makeEnv(mockDb, {
+    const env = makeEnv(makeMockDb(), {
       ZENDESK_SUBDOMAIN: 'rabblelabs', ZENDESK_EMAIL: 'a@b.co', ZENDESK_API_TOKEN: 'tok',
     });
     const res = await handleGetAgeReviewFunnel(req, env, cors);
@@ -2107,7 +3329,7 @@ describe('handleGetAgeReviewFunnel', () => {
 
   it('keeps moderation counts and nulls helpdesk when Zendesk creds resolve but the call fails', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('zendesk down')));
-    const env = makeEnv(mockDb, {
+    const env = makeEnv(makeMockDb(), {
       ZENDESK_SUBDOMAIN: 'rabblelabs', ZENDESK_EMAIL: 'a@b.co', ZENDESK_API_TOKEN: 'tok',
     });
     const res = await handleGetAgeReviewFunnel(req, env, cors);
@@ -2120,7 +3342,7 @@ describe('handleGetAgeReviewFunnel', () => {
   });
 
   it('keeps moderation counts and nulls helpdesk when Zendesk secret resolution fails', async () => {
-    const env = makeEnv(mockDb, {
+    const env = makeEnv(makeMockDb(), {
       ZENDESK_SUBDOMAIN: { get: vi.fn().mockRejectedValue(new Error('secret store down')) },
       ZENDESK_EMAIL: 'a@b.co',
       ZENDESK_API_TOKEN: 'tok',
@@ -2137,7 +3359,7 @@ describe('handleGetAgeReviewFunnel', () => {
   it('counts each helpdesk stage with the exact shared criteria query', async () => {
     const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ count: 9 }) });
     vi.stubGlobal('fetch', mockFetch);
-    const env = makeEnv(mockDb, {
+    const env = makeEnv(makeMockDb(), {
       ZENDESK_SUBDOMAIN: 'rabblelabs', ZENDESK_EMAIL: 'a@b.co', ZENDESK_API_TOKEN: 'tok',
     });
     await handleGetAgeReviewFunnel(req, env, cors);
@@ -2148,5 +3370,25 @@ describe('handleGetAgeReviewFunnel', () => {
     for (const query of Object.values(FUNNEL_ZENDESK_QUERIES)) {
       expect(calledUrls.some((u) => u.includes(encodeURIComponent(query)))).toBe(true);
     }
+  });
+});
+
+describe('ageReviewActiveGuard — non-canonical pubkey', () => {
+  // Skipped in BOTH modes, deliberately. A case is keyed to a real lowercase pubkey,
+  // so a non-canonical value cannot have one to skip past -- there is nothing for the
+  // guard to protect. handleRelayRpc rejects these outright on the enforce direction;
+  // the reverse direction is allowed to carry them so a row banned with a bad value
+  // stays removable, and that only works if the guard lets it through.
+  const CORS = { 'Access-Control-Allow-Origin': 'https://app.divine.video' };
+  const envWithDb = { DB: { prepare: () => ({ bind: () => ({ first: async () => null }) }) } } as unknown as AgeReviewEnv;
+
+  it('proceeds under failClosed, because no case can be keyed to it', async () => {
+    const response = await ageReviewActiveGuard('NOT_CANONICAL_HEX', envWithDb, CORS, 'err', { failClosed: true });
+    expect(response).toBeNull();
+  });
+
+  it('proceeds when not failing closed', async () => {
+    const response = await ageReviewActiveGuard('NOT_CANONICAL_HEX', envWithDb, CORS, 'err');
+    expect(response).toBeNull();
   });
 });

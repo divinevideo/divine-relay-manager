@@ -2,6 +2,9 @@
 // ABOUTME: Handles NIP-98 auth signing and relay RPC calls
 
 import { finalizeEvent, nip19, getPublicKey } from 'nostr-tools';
+import { coordinateEventVisibility } from './event-visibility';
+
+const NIP86_RPC_TIMEOUT_MS = 15_000;
 
 /**
  * Secrets Store secret object (for account-level secrets)
@@ -18,6 +21,7 @@ export interface Nip86Env {
   RELAY_URL: string;
   MANAGEMENT_PATH?: string;
   MANAGEMENT_URL?: string;
+  REPORT_WATCHER?: DurableObjectNamespace;
 }
 
 /**
@@ -60,13 +64,20 @@ export async function getAdminPubkey(env: Pick<Nip86Env, 'NOSTR_NSEC'>): Promise
 /**
  * Get the NIP-86 management API URL for the configured relay.
  * If MANAGEMENT_URL is set (for local dev with HTTP), use it directly.
- * Otherwise, converts WSS relay URL to HTTPS and appends the management path.
+ * Otherwise, maps wss→https and ws→http, then appends the management path.
  */
 export function getManagementUrl(env: Pick<Nip86Env, 'RELAY_URL' | 'MANAGEMENT_PATH' | 'MANAGEMENT_URL'>): string {
   if (env.MANAGEMENT_URL) {
     return env.MANAGEMENT_URL;
   }
-  const baseUrl = env.RELAY_URL.replace(/^wss?:\/\//, 'https://');
+  // Map each scheme to its counterpart rather than forcing https. Collapsing both
+  // onto https made ws:// unusable: a local relay serving plain HTTP was called
+  // over TLS and every management request died on the handshake. This matches
+  // deriveFunnelcakeApiUrl, which already derives the two the same way from the
+  // same value. Deployed configs set wss:// and are unaffected.
+  const baseUrl = env.RELAY_URL
+    .replace(/^wss:\/\//, 'https://')
+    .replace(/^ws:\/\//, 'http://');
   const managementPath = env.MANAGEMENT_PATH || '/management';
   return `${baseUrl}${managementPath}`;
 }
@@ -128,11 +139,20 @@ export async function callNip86Rpc(
   }
 
   // Call relay RPC
-  const response = await fetch(httpUrl, {
-    method: 'POST',
-    headers,
-    body: payload,
-  });
+  let response: Response;
+  try {
+    response = await fetch(httpUrl, {
+      method: 'POST',
+      headers,
+      body: payload,
+      signal: AbortSignal.timeout(NIP86_RPC_TIMEOUT_MS),
+    });
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Relay request failed',
+    };
+  }
 
   if (!response.ok) {
     return {
@@ -156,8 +176,13 @@ export async function callNip86Rpc(
 export async function banEvent(
   eventId: string,
   reason: string,
-  env: Nip86Env
+  env: Nip86Env,
+  humanAction: string = 'hide_event',
 ): Promise<Nip86RpcResult> {
+  if (env.REPORT_WATCHER) {
+    // ReportWatcher itself must call callNip86Rpc directly while holding its gate.
+    return coordinateEventVisibility(env, { eventId, relayAction: 'hide', reason, humanAction });
+  }
   return callNip86Rpc('banevent', [eventId, reason], env);
 }
 
@@ -168,6 +193,10 @@ export async function allowEvent(
   eventId: string,
   env: Nip86Env
 ): Promise<Nip86RpcResult> {
+  if (env.REPORT_WATCHER) {
+    // ReportWatcher itself must call callNip86Rpc directly while holding its gate.
+    return coordinateEventVisibility(env, { eventId, relayAction: 'allow', humanAction: 'allow_event' });
+  }
   return callNip86Rpc('allowevent', [eventId], env);
 }
 

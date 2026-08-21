@@ -24,8 +24,8 @@ export async function ensureSchema(db: D1Database): Promise<void> {
   // Add reporter_pubkey to existing tables that were created without it
   try {
     await db.prepare(`ALTER TABLE moderation_decisions ADD COLUMN reporter_pubkey TEXT`).run();
-  } catch {
-    // Column already exists
+  } catch (error) {
+    if (!String(error).includes('duplicate column name')) throw error;
   }
 
   try {
@@ -48,9 +48,16 @@ export async function ensureSchema(db: D1Database): Promise<void> {
     CREATE TABLE IF NOT EXISTS moderation_targets (
       target_id TEXT PRIMARY KEY,
       target_type TEXT NOT NULL,
-      ever_human_reviewed INTEGER DEFAULT 0
+      ever_human_reviewed INTEGER DEFAULT 0,
+      last_human_action TEXT
     )
   `).run();
+
+  try {
+    await db.prepare(`ALTER TABLE moderation_targets ADD COLUMN last_human_action TEXT`).run();
+  } catch (error) {
+    if (!String(error).includes('duplicate column name')) throw error;
+  }
 
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS age_review_cases (
@@ -108,6 +115,29 @@ export async function ensureSchema(db: D1Database): Promise<void> {
     await db.prepare(`ALTER TABLE age_review_cases ADD COLUMN version INTEGER NOT NULL DEFAULT 0`).run();
   } catch {
     // Column already exists
+  }
+
+  // Human-readable identity for the reported account, captured when the case is
+  // created. Enforcement hides a suspended account's content from relay queries,
+  // so a later lookup returns nothing and the name is unrecoverable -- these
+  // columns preserve whatever was visible at the time.
+  //
+  // identity_captured_at is stamped whenever the lookup reached a confirmed
+  // answer -- including a confirmed "this account has no profile". A null means
+  // no confirmed answer: never looked, or looked and timed out, errored, or had
+  // no relay configured. So a null is never "looked and found nothing", and the
+  // backfill uses exactly that to know which rows are worth re-querying.
+  for (const column of [
+    `account_name TEXT`,
+    `account_nip05 TEXT`,
+    `account_vine_username TEXT`,
+    `identity_captured_at TEXT`,
+  ]) {
+    try {
+      await db.prepare(`ALTER TABLE age_review_cases ADD COLUMN ${column}`).run();
+    } catch {
+      // Column already exists
+    }
   }
 
   try {

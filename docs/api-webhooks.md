@@ -4,7 +4,7 @@
 
 The Divine Relay Manager exposes several API endpoints for integration with external systems like Zendesk (ticket report parsing, decision sync, age-review replies). Note: Zendesk does **not** execute moderation actions. Moderation is performed in Relay Manager; Zendesk only receives decision updates back. The former inbound moderation-execution path has been retired (see the note under `POST /api/zendesk/webhook`).
 
-**Base URL:** `https://api-relay.divine.video` (or `https://relay.admin.divine.video/api`)
+**Base URL:** `https://api-relay-prod.divine.video` (production) or `https://api-relay-staging.divine.video` (staging)
 
 ## Authentication
 
@@ -36,9 +36,9 @@ Execute a moderation action directly.
 **Request:**
 ```json
 {
-  "action": "ban_pubkey" | "allow_pubkey" | "delete_event",
+  "action": "ban_pubkey" | "allow_pubkey" | "delete_event" | "hide_event" | "allow_event",
   "pubkey": "hex-pubkey",      // Required for ban/allow
-  "eventId": "hex-event-id",   // Required for delete
+  "eventId": "hex-event-id",   // Required for delete/hide/allow_event; must be 64 hex chars
   "reason": "Spam account"     // Optional
 }
 ```
@@ -47,7 +47,8 @@ Execute a moderation action directly.
 ```json
 {
   "success": true,
-  "message": "Action executed successfully"
+  "message": "Action executed successfully",
+  "recorded": true             // hide_event / allow_event only — see below
 }
 ```
 
@@ -56,7 +57,42 @@ Execute a moderation action directly.
 |--------|-------------|
 | `ban_pubkey` | Ban a user from posting to the relay |
 | `allow_pubkey` | Remove a user from the ban list |
-| `delete_event` | Delete a specific event from the relay |
+| `delete_event` | Delete a specific event from the relay, and DM the creator `PERMANENT_BAN` |
+| `hide_event` | Hide an event. Same relay operation as `delete_event`, but **no DM** |
+| `allow_event` | Un-hide an event |
+
+### `recorded`, and why `hide_event` / `allow_event` exist
+
+These two do more than the relay change, which was already available over
+`/api/relay-rpc`. They also mark the event human-reviewed in `moderation_targets`.
+ReportWatcher skips auto-hide for any event carrying that mark, so **without it a
+moderator's restore is silently undone by the next report** — csam is an immediate,
+threshold-1 tier.
+
+`recorded` reports whether that mark actually landed. It is returned on a **200**, not an
+error status, because the relay change did apply and a retry would enforce twice. A caller
+seeing `recorded: false` should treat the decision as **applied but unprotected** and
+surface it: the content is hidden or restored as asked, but the automation may reverse it.
+
+Event visibility changes and their direction-bearing human marks are serialized through the
+ReportWatcher Durable Object. Auto-hide uses the same coordination gate, rechecks human-review
+state before mutating the relay, and rechecks explicit restore direction after banning.
+Resolution statuses such as `dismissed`, `no-action`, and `false-positive` set the human-review
+bit through that gate. They restore an active auto-hide so the content stays up as promised by
+the review UI, but do not restore content with a later manual hide/delete direction. The restore
+is recorded as `auto_hide_restored` without overwriting that human direction.
+
+An `allow_event` response also carries `reconciled`. It is true when the coordinated restore
+and human-review mark completed. If it is false, callers should surface the same degraded
+state as `recorded: false`: the relay restore landed, but automation protection did not.
+Zendesk still receives the final human decision in this case.
+
+Both actions are final human decisions for linked Zendesk reports, so they add an internal
+note and resolve the open ticket.
+
+`eventId` is validated as 64 hex characters and lowercased before use. `moderation_targets`
+is BINARY-collated and ReportWatcher looks the event up by its lowercase id, so an uppercase
+id would write a row nothing can read while the API reported success.
 
 ---
 
@@ -100,9 +136,46 @@ Moderate media content (images/videos) by SHA-256 hash.
 {
   "sha256": "abc123...",
   "action": "SAFE" | "REVIEW" | "QUARANTINE" | "AGE_RESTRICTED" | "PERMANENT_BAN" | "DELETE",
-  "reason": "CSAM content"
+  "reason": "CSAM content",
+  "from": "AGE_RESTRICTED"
 }
 ```
+
+**`from` (optional): declare the state you expect to be changing.**
+
+This endpoint sets state; it does not describe a transition. `SAFE` means "make
+this Active", not "undo the age-restriction I applied", so a caller reversing its
+own action and a caller clearing an age-review quarantine on a minor's content
+send the identical request.
+
+`from` lets a caller declare the state it believes it is changing. The current
+state is read first and the action is refused unless it matches, so a button can
+only reverse the thing it is named for. Omit `from` and nothing changes: no
+extra read, no new failure mode.
+
+It guards a cooperating caller against its own bug. It is not a security
+boundary, since the caller supplies the value and omitting it restores the
+unguarded path.
+
+Sending `from` also requires `sha256` to be 64 hex characters, because it becomes
+part of an upstream URL. Without `from`, `sha256` is forwarded as-is and
+validated upstream.
+
+**Refusals when `from` is present:**
+
+| Status | `code` | Meaning |
+|--------|--------|---------|
+| 400 | `invalid_from` | `from` was present but empty, whitespace, null, or not a string. Omit it to skip the check. |
+| 400 | `invalid_sha256` | `sha256` is not 64 hex characters. |
+| 409 | `state_mismatch` | Current state is not the declared one. The body carries `from` and `current`. |
+| 503 | `state_unreadable` | Current state could not be read. Retryable, and deliberately not a success. |
+
+A 409 names both states because "refused" alone reads as transient and gets
+retried. `state_unreadable` is 503 rather than 409 because "could not check" is a
+different answer from "no conflict".
+
+What is compared is moderation-service's recorded result. Actions taken directly
+through Blossom's own admin UI do not write there, so they are not reflected.
 
 **Response:**
 ```json
@@ -309,15 +382,36 @@ Get all decisions for a target.
 
 ### DELETE /api/decisions/:targetId
 
-Delete all decisions for a target (reopen a dismissed report).
+Delete all decisions for a target (reopen a dismissed report), and remove the
+target's relay-side resolution labels (kind 1985, `L=moderation/resolution`).
+
+**Query parameters:**
+
+| Name | Values | Default |
+|------|--------|---------|
+| `targetType` | `event` \| `pubkey` | both label tags are queried |
+
+A resolution label carries an `e` tag for an event target or a `p` tag for a
+pubkey target, never both, so naming the type skips the query that could not
+match. Any other value — absent, empty, wrong case, junk — falls back to
+querying both, which is what an older frontend gets.
 
 **Response:**
 ```json
 {
   "success": true,
-  "deleted": 2
+  "deleted": 2,
+  "labelsDeleted": 1,
+  "labelCleanupFailed": false
 }
 ```
+
+The D1 decision rows are deleted unconditionally; the relay-side label cleanup
+is best-effort. `labelCleanupFailed: true` means at least one resolution label
+may have survived — the label read failed, it filled its page so there may be
+more beyond it, or a label was read but could not be removed. A surviving label
+keeps the report hidden even though its decisions are gone, so callers must
+surface this rather than reporting a clean reopen.
 
 ---
 
@@ -341,7 +435,7 @@ In Zendesk Admin > Objects and rules > Tickets > Fields:
 
 In Zendesk Admin > Apps and integrations > Webhooks:
 
-- **Endpoint URL:** `https://api-relay.divine.video/api/zendesk/webhook`
+- **Endpoint URL:** `https://api-relay-prod.divine.video/api/zendesk/webhook`
 - **Request method:** POST
 - **Request format:** JSON
 - **Authentication:** None (signature verification used instead)
@@ -369,13 +463,14 @@ In Zendesk Admin > Objects and rules > Business rules > Triggers:
 
 ### 4. Set Environment Variables
 
-In `worker/wrangler.toml` or Cloudflare dashboard:
+In the per-environment `worker/wrangler.{local,staging,prod}.toml` or the
+Cloudflare dashboard:
 
 ```bash
-wrangler secret put ZENDESK_WEBHOOK_SECRET
+npx wrangler secret put ZENDESK_WEBHOOK_SECRET --config wrangler.prod.toml
 # Enter the signing secret from Zendesk webhook settings
 
-wrangler secret put ZENDESK_JWT_SECRET
+npx wrangler secret put ZENDESK_JWT_SECRET --config wrangler.prod.toml
 # Enter a shared secret for JWT tokens (for sidebar app)
 ```
 
@@ -403,7 +498,7 @@ Currently no rate limits are enforced, but aggressive use may trigger Cloudflare
 
 **Ban a user:**
 ```bash
-curl -X POST https://api-relay.divine.video/api/moderate \
+curl -X POST https://api-relay-prod.divine.video/api/moderate \
   -H "Content-Type: application/json" \
   -H "CF-Access-Client-Id: $CF_CLIENT_ID" \
   -H "CF-Access-Client-Secret: $CF_CLIENT_SECRET" \
@@ -412,14 +507,14 @@ curl -X POST https://api-relay.divine.video/api/moderate \
 
 **Check media status:**
 ```bash
-curl https://api-relay.divine.video/api/check-result/abc123... \
+curl https://api-relay-prod.divine.video/api/check-result/abc123... \
   -H "CF-Access-Client-Id: $CF_CLIENT_ID" \
   -H "CF-Access-Client-Secret: $CF_CLIENT_SECRET"
 ```
 
 **Delete an event:**
 ```bash
-curl -X POST https://api-relay.divine.video/api/moderate \
+curl -X POST https://api-relay-prod.divine.video/api/moderate \
   -H "Content-Type: application/json" \
   -H "CF-Access-Client-Id: $CF_CLIENT_ID" \
   -H "CF-Access-Client-Secret: $CF_CLIENT_SECRET" \

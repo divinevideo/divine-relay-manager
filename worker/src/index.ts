@@ -9,9 +9,10 @@ import {
   type SecretStoreSecret,
 } from './nip86';
 import { ensureSchema } from './db';
-import { buildReportsFilter, isUnconfirmedTargetedMiss } from './reports-filter';
+import { buildReportsFilter } from './reports-filter';
 import { generatePreAuthToken, verifyPreAuthToken, base64UrlEncode } from './zendesk-preauth';
 import { deriveFunnelcakeApiUrl, proxyFunnelcakeRequest } from './funnelcake-proxy';
+import { renderMediaPage } from './media-page';
 import type { KeycastEnv } from './keycast-client';
 import { suspendUser, unsuspendUser, banUser } from './keycast-client';
 import {
@@ -35,6 +36,12 @@ import { handleBulkModerateEnqueue, handleBulkJobStatus, processBulkJob } from '
 import type { BulkJobMessage } from '../../shared/bulk-moderation';
 import { ensureZendeskTable, addZendeskInternalNote, syncZendeskAfterAction } from './zendesk-sync';
 import { buildReportNote, parseKind0Profile, type ReportedProfile } from './report-note';
+import { queryRelay, withTimeout, ENRICHMENT_TIMEOUT_MS } from './relay-profile';
+import { coordinateEventVisibility, type EventVisibilityResult } from './event-visibility';
+import { markHumanAction, markHumanReviewed } from './human-decision';
+import { AUTO_HIDE_STATE_ACTIONS } from '../../shared/autohide';
+
+const COORDINATED_AUTO_HIDE_ACTIONS = new Set<string>(AUTO_HIDE_STATE_ACTIONS);
 
 let schemaReady = false;
 async function ensureSchemaOnce(db: D1Database): Promise<void> {
@@ -51,7 +58,7 @@ interface Env extends KeycastEnv {
   RELAY_URL: string;
   ALLOWED_ORIGINS: string;
   // Comma-separated public hostnames whose NIP-98 `u`-tag host is accepted in
-  // addition to the worker's own request host, for the two mobile endpoints only
+  // addition to the worker's own request host, for mobile-facing endpoints only
   // (divine-relay-manager#173). Non-secret. Empty/unset ⇒ strict same-host.
   NIP98_PUBLIC_HOST_ALLOWLIST?: string;
   ANTHROPIC_API_KEY?: string;
@@ -336,6 +343,8 @@ interface UnsignedEvent {
   content: string;
   tags: string[][];
   created_at?: number;
+  moderatorPubkey?: string;
+  moderationReason?: string;
 }
 
 interface ApiResponse {
@@ -347,8 +356,14 @@ interface ApiResponse {
   pubkey?: string;
   // Moderation action responses
   eventId?: string;
+  // hide_event / allow_event: whether the decision was recorded as human-reviewed, not
+  // merely applied at the relay. False means ReportWatcher is still free to undo it.
+  recorded?: boolean;
   deleted?: number;
   labelsDeleted?: number;
+  // Reopen could not clear every relay-side resolution label, so the report
+  // may stay hidden even though its decisions were deleted.
+  labelCleanupFailed?: boolean;
   // Realness proxy pass-through
   details?: string;
   // Zendesk parse-report responses
@@ -357,6 +372,15 @@ interface ApiResponse {
   author_pubkey?: string | null;
   violation_type?: string | null;
   skipped?: boolean;
+  // Machine-readable refusal reason, so a caller can tell one 4xx/5xx from
+  // another without parsing prose. Matches the `age_review_active` convention
+  // age-review.ts already returns.
+  code?: string;
+  // /api/moderate-media expected-state check: the state the caller declared it
+  // expected, and the one actually found. Both are returned because an operator
+  // seeing only "conflict" cannot tell this from any other refusal.
+  from?: string;
+  current?: string;
 }
 
 // Verify that the request is authorized for admin API access.
@@ -446,6 +470,39 @@ export default {
         return jsonResponse({ success: false, error: adminAuthError }, 401, corsHeaders);
       }
 
+      // Standalone media viewer, linked from a Coop review card. Behind the same
+      // CF Access + verifyAdminAccess gate as everything above, so only an
+      // authenticated moderator reaches it. Serves a minimal self-contained page,
+      // NOT the relay-manager SPA, and streams the blob via /api/media-proxy.
+      if (path.startsWith('/media/') && request.method === 'GET') {
+        // Keep the (optional) extension as a type hint: the page branches on the
+        // proxy's Content-Type, and falls back to this when that type is
+        // unhelpful (e.g. application/octet-stream), mirroring how the SPA's
+        // MediaPreview treats the URL as a signal alongside the MIME type.
+        const rest = path.slice('/media/'.length);
+        const extMatch = rest.match(/\.([^./]+)$/);
+        const raw = extMatch ? rest.slice(0, extMatch.index) : rest;
+        const { status, html } = renderMediaPage(raw, extMatch?.[1]);
+        return new Response(html, {
+          status,
+          headers: {
+            ...corsHeaders,
+            'content-type': 'text/html; charset=utf-8',
+            // The URL and body name a content hash (potentially CSAM); keep it off disk.
+            'cache-control': 'no-store',
+            // Locks the page to exactly what it needs: same-origin fetch to the proxy,
+            // its own inline script/style, blob: media. Also makes the inline-script
+            // dependency explicit rather than resting on no CSP ever being added here.
+            'content-security-policy':
+              "default-src 'none'; script-src 'unsafe-inline'; connect-src 'self'; " +
+              "img-src blob:; media-src blob:; style-src 'unsafe-inline'; " +
+              "frame-ancestors 'none'; base-uri 'none'",
+            'x-content-type-options': 'nosniff',
+            'referrer-policy': 'no-referrer',
+          },
+        });
+      }
+
       // Moderator-facing account status (surfaces keycast verified_minor for the age-review view).
       if (path.startsWith('/api/account-status/') && request.method === 'GET') {
         const targetPubkey = path.replace('/api/account-status/', '');
@@ -476,6 +533,10 @@ export default {
         return handleLogDecision(request, env, corsHeaders);
       }
 
+      if (path === '/api/confirm-auto-hide' && request.method === 'POST') {
+        return handleConfirmAutoHide(request, env, corsHeaders);
+      }
+
       if (path === '/api/decisions' && request.method === 'GET') {
         return handleGetAllDecisions(env, corsHeaders);
       }
@@ -487,7 +548,15 @@ export default {
 
       if (path.startsWith('/api/decisions/') && request.method === 'DELETE') {
         const targetId = path.replace('/api/decisions/', '');
-        return handleDeleteDecisions(targetId, env, corsHeaders);
+        // Optional: an older frontend omits it, and then both tags are checked.
+        // A present-but-unrecognised value takes the same safe path, but that
+        // means a client-side typo is invisible in production, so it is logged.
+        const rawType = url.searchParams.get('targetType');
+        const targetType = rawType === 'event' || rawType === 'pubkey' ? rawType : undefined;
+        if (rawType !== null && targetType === undefined) {
+          console.warn('[reopen] unrecognised targetType, querying both label tags:', rawType);
+        }
+        return handleDeleteDecisions(targetId, env, corsHeaders, targetType);
       }
 
       if (path.startsWith('/api/check-result/') && request.method === 'GET') {
@@ -523,13 +592,12 @@ export default {
       if (path === '/api/reports' && request.method === 'GET') {
         const filter = buildReportsFilter(url.searchParams);
         const result = await queryRelay(filter, env.RELAY_URL);
+        // An unconfirmed read is now a failure inside queryRelay itself, so a
+        // targeted lookup can no longer come back empty-but-unconfirmed here:
+        // that case 502s below, and the client still shows "unavailable"
+        // rather than a false "deleted".
         if (!result.success) {
           return jsonResponse({ success: false, error: result.error }, 502, corsHeaders);
-        }
-        // A targeted lookup that came back empty but unconfirmed (relay never sent EOSE) is
-        // ambiguous — 502 so the client shows "unavailable" (retry), not a false "deleted".
-        if (isUnconfirmedTargetedMiss(url.searchParams, result)) {
-          return jsonResponse({ success: false, error: 'Relay did not confirm results (timeout)' }, 502, corsHeaders);
         }
         return jsonResponse({ success: true, events: result.events }, 200, corsHeaders);
       }
@@ -580,6 +648,17 @@ export default {
         // enqueue-time only — a case opened while a chunked job is already
         // draining does not abort it (aborting mid-job would leave
         // half-applied state; the job was legitimate when it started).
+        // No `failClosed` here, deliberately, and NOT because bulk has no
+        // reversal: `un-age-restrict-all` is one, and it lifts restrictions this
+        // very case imposed. The guard's docstring argues fail-closed by
+        // direction, which taken alone would cover it. Bulk is partitioned by
+        // blast radius instead. A refused bulk job is one moderator's click
+        // failing loudly in the UI, with no automated caller behind it, so an
+        // outage that blocks all three actions stops content moderation
+        // wholesale for a human who has no other route -- whereas a refused
+        // reversal only defers restoring an account that stays held meanwhile.
+        // If bulk ever becomes reachable from automation, revisit this: the
+        // reasoning is about who is on the other end, not about the actions.
         let peeked: { pubkey?: string } | undefined;
         try {
           peeked = await request.clone().json() as { pubkey?: string };
@@ -784,9 +863,16 @@ async function handlePublish(
   corsHeaders: Record<string, string>
 ): Promise<Response> {
   const body = (await request.json()) as UnsignedEvent;
+  let resolutionVisibility: EventVisibilityResult | undefined;
 
   if (!body.kind || body.content === undefined) {
     return jsonResponse({ success: false, error: 'Missing required fields: kind, content' }, 400, corsHeaders);
+  }
+  if (body.moderatorPubkey !== undefined && !/^[a-f0-9]{64}$/i.test(body.moderatorPubkey)) {
+    return jsonResponse({ success: false, error: 'Invalid moderatorPubkey' }, 400, corsHeaders);
+  }
+  if (body.moderationReason !== undefined && typeof body.moderationReason !== 'string') {
+    return jsonResponse({ success: false, error: 'Invalid moderationReason' }, 400, corsHeaders);
   }
 
   const secretKey = await getSecretKey(env);
@@ -833,8 +919,33 @@ async function handlePublish(
       console.log('[handlePublish] Resolution label details:', { status, targetType, targetId });
 
       if (status && targetType && targetId) {
-        if (env.DB) {
-          await markHumanReviewed(env.DB, targetType, targetId);
+        if (targetType === 'event' && ['dismissed', 'no-action', 'false-positive'].includes(status)) {
+          const result = env.DB
+            ? await coordinateEventVisibility(env, {
+              eventId: targetId,
+              relayAction: 'review',
+              humanAction: status,
+              reason: body.moderationReason,
+              moderatorPubkey: body.moderatorPubkey?.toLowerCase(),
+            })
+            : { success: false, recorded: false, error: 'Moderation database is not configured' };
+          resolutionVisibility = !result.recorded && !result.error
+            ? { ...result, error: 'Human-review state was not recorded' }
+            : result;
+          if (!result.success || !result.recorded) {
+            console.error('[handlePublish] Resolution label was published but visibility reconciliation failed:', resolutionVisibility.error);
+          }
+        } else if (env.DB) {
+          const recorded = status === 'reviewed'
+            ? await markHumanReviewed(env.DB, targetType, targetId)
+            : await markHumanAction(env.DB, targetType, targetId, status);
+          resolutionVisibility = {
+            success: true,
+            recorded,
+            ...(!recorded ? { error: 'Human-review state was not recorded' } : {}),
+          };
+        } else {
+          resolutionVisibility = { success: false, recorded: false, error: 'Moderation database is not configured' };
         }
 
         // Use waitUntil to ensure sync completes even after response is sent
@@ -858,7 +969,15 @@ async function handlePublish(
     }
   }
 
-  return jsonResponse({ success: true, event }, 200, corsHeaders);
+  return jsonResponse({
+    success: true,
+    event,
+    ...(resolutionVisibility ? {
+      recorded: resolutionVisibility.recorded,
+      reconciled: resolutionVisibility.success && resolutionVisibility.recorded === true,
+      reconciliationError: resolutionVisibility.error,
+    } : {}),
+  }, 200, corsHeaders);
 }
 
 async function handleModerate(
@@ -872,6 +991,7 @@ async function handleModerate(
     eventId?: string;
     pubkey?: string;
     reason?: string;
+    moderatorPubkey?: string;
   };
 
   if (!body.action) {
@@ -882,32 +1002,29 @@ async function handleModerate(
 
   switch (body.action) {
     case 'delete_event': {
-      // Use banevent RPC directly instead of publishing kind 5 events.
+      // Use coordinated banevent RPC instead of publishing kind 5 events.
       // NIP-09 kind 5 deletion only allows authors to delete their own events.
       // Admin moderation requires NIP-86 banevent RPC method instead.
-      if (!body.eventId) {
-        return jsonResponse({ success: false, error: 'Missing eventId for delete_event' }, 400, corsHeaders);
+      if (typeof body.eventId !== 'string' || !/^[a-f0-9]{64}$/i.test(body.eventId)) {
+        return jsonResponse({ success: false, error: 'Missing or invalid eventId for delete_event (must be 64 hex chars)' }, 400, corsHeaders);
+      }
+      const eventId = body.eventId.toLowerCase();
+      if (body.reason !== undefined && typeof body.reason !== 'string') {
+        return jsonResponse({ success: false, error: `Invalid reason for ${body.action}` }, 400, corsHeaders);
+      }
+      if (body.moderatorPubkey !== undefined && !/^[a-f0-9]{64}$/i.test(body.moderatorPubkey)) {
+        return jsonResponse({ success: false, error: `Invalid moderatorPubkey for ${body.action}` }, 400, corsHeaders);
       }
 
       try {
-        const rpcRequest = new Request(request.url.replace(/\/api\/moderate$/, '/api/relay-rpc'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            method: 'banevent',
-            params: [body.eventId, body.reason || 'Deleted by relay admin'],
-          }),
+        const result = await coordinateEventVisibility(env, {
+          eventId,
+          relayAction: 'hide',
+          reason: body.reason || 'Deleted by relay admin',
+          humanAction: body.action,
         });
-
-        const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders);
-        const rpcResult = await rpcResponse.json() as { success: boolean; error?: string };
-
-        if (!rpcResult.success) {
-          return jsonResponse({ success: false, error: rpcResult.error || 'banevent RPC failed' }, 500, corsHeaders);
-        }
-
-        if (env.DB) {
-          await markHumanReviewed(env.DB, 'event', body.eventId);
+        if (!result.success) {
+          return jsonResponse({ success: false, error: result.error || 'banevent RPC failed' }, 500, corsHeaders);
         }
 
         // Sync any linked Zendesk tickets
@@ -916,7 +1033,7 @@ async function handleModerate(
             env,
             body.action,
             'event',
-            body.eventId,
+            eventId,
             getPublicKey(secretKey)
           );
         } catch (err) {
@@ -928,15 +1045,108 @@ async function handleModerate(
         // notice (PERMANENT_BAN, with eventId), not an account-state change, so it
         // does not fit the account-state helper's action union or signature.
         if (body.pubkey) {
-          const dmPromise = notifyModerationService(env, body.pubkey, 'PERMANENT_BAN', body.reason || 'Content removed by moderator', undefined, body.eventId)
+          const dmPromise = notifyModerationService(env, body.pubkey, 'PERMANENT_BAN', body.reason || 'Content removed by moderator', undefined, eventId)
             .catch(err => console.error('[handleModerate] DM notification error:', err));
           if (ctx) ctx.waitUntil(dmPromise);
         }
 
-        return jsonResponse({ success: true, eventId: body.eventId }, 200, corsHeaders);
+        return jsonResponse({ success: true, eventId, recorded: result.recorded === true }, 200, corsHeaders);
       } catch (error) {
         console.error('[handleModerate] delete_event error:', error);
         return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Unknown error' }, 500, corsHeaders);
+      }
+    }
+
+    // hide_event / allow_event exist so a moderator's content decision is RECORDED,
+    // not merely executed. ReportWatcher.hasHumanResolution reads
+    // moderation_targets.ever_human_reviewed and skips auto-hide when it is set. A
+    // caller that reverses a hide over raw /api/relay-rpc leaves that flag unset, so
+    // the next immediate-tier report (csam is threshold 1) re-hides content a human
+    // deliberately restored, and nobody learns the decision was undone. That is the
+    // whole reason these are not just relay-rpc passthroughs.
+    //
+    // Deliberately NOT delete_event: that one DMs the creator PERMANENT_BAN, which is
+    // wrong for a reversible hide and absurd for a restore.
+    case 'hide_event':
+    case 'allow_event': {
+      const isHide = body.action === 'hide_event';
+      // Validate AND canonicalise. moderation_targets.target_id is TEXT PRIMARY KEY with
+      // BINARY collation, and ReportWatcher looks the event up by the lowercase id from
+      // the report's `e` tag. An uppercase id here would write a row nobody can read:
+      // the mark succeeds, the API says success, and the auto-hide suppression this
+      // endpoint exists to create never engages. Same trap already fixed for media
+      // hashes elsewhere in this file.
+      if (typeof body.eventId !== 'string' || !/^[a-f0-9]{64}$/i.test(body.eventId)) {
+        return jsonResponse(
+          { success: false, error: `Missing or invalid eventId for ${body.action} (must be 64 hex chars)` },
+          400,
+          corsHeaders,
+        );
+      }
+      const eventId = body.eventId.toLowerCase();
+      if (body.reason !== undefined && typeof body.reason !== 'string') {
+        return jsonResponse({ success: false, error: `Invalid reason for ${body.action}` }, 400, corsHeaders);
+      }
+      if (body.moderatorPubkey !== undefined && !/^[a-f0-9]{64}$/i.test(body.moderatorPubkey)) {
+        return jsonResponse({ success: false, error: `Invalid moderatorPubkey for ${body.action}` }, 400, corsHeaders);
+      }
+
+      try {
+        const result = await coordinateEventVisibility(env, {
+          eventId,
+          relayAction: isHide ? 'hide' : 'allow',
+          reason: body.reason || (isHide ? 'Hidden by moderator' : 'Restored by moderator'),
+          humanAction: body.action,
+          moderatorPubkey: body.moderatorPubkey?.toLowerCase(),
+        });
+        if (!result.success) {
+          // Flatten to 500, matching delete_event and ban_pubkey. Neither banevent nor
+          // allowevent is age-review guarded (that guard covers only suspendpubkey,
+          // unsuspendpubkey and unbanpubkey), so there is no 409/503 whose code a caller
+          // would need preserved -- and forwarding would relabel a transient relay 502 as
+          // a terminal 400, which retrying clients read as "do not retry".
+          return jsonResponse(
+            { success: false, error: result.error || `${isHide ? 'banevent' : 'allowevent'} RPC failed` },
+            500,
+            corsHeaders,
+          );
+        }
+
+        // Only after the relay actually applied it. Marking a decision that did not
+        // take effect would suppress ReportWatcher on content that is still live.
+        //
+        // Unlike delete_event, where the mark is bookkeeping beside the real action, the
+        // mark IS the reason these two actions exist -- the relay change was already
+        // available over /api/relay-rpc. So a failed mark must not be reported as plain
+        // success: the caller would believe the decision is protected from ReportWatcher
+        // when it is not. Surfaced as `recorded`, loudly logged, and NOT a 5xx, because
+        // the relay change did land and a retry would be a second enforcement.
+        const recorded = result.recorded === true;
+        if (!recorded) {
+          console.error(
+            `[handleModerate] ALERT: ${body.action} applied at the relay but NOT recorded as ` +
+            `human-reviewed for ${eventId}; ReportWatcher may undo it`,
+          );
+        }
+
+        // The coordinator serializes this relay mutation and direction write with
+        // ReportWatcher auto-hide, so no stale second allow is needed.
+        const reconciled = !isHide && recorded;
+
+        try {
+          await syncZendeskAfterAction(env, body.action, 'event', eventId, getPublicKey(secretKey));
+        } catch (err) {
+          console.error('[handleModerate] Zendesk sync error:', err);
+        }
+
+        return jsonResponse({ success: true, eventId, recorded, ...(!isHide && { reconciled }) }, 200, corsHeaders);
+      } catch (error) {
+        console.error(`[handleModerate] ${body.action} error:`, error);
+        return jsonResponse(
+          { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+          500,
+          corsHeaders,
+        );
       }
     }
 
@@ -959,7 +1169,7 @@ async function handleModerate(
           return jsonResponse({ success: false, error: rpcResult.error || 'banpubkey RPC failed' }, 500, corsHeaders);
         }
         if (env.DB) {
-          await markHumanReviewed(env.DB, 'pubkey', body.pubkey);
+          await markHumanAction(env.DB, 'pubkey', body.pubkey, body.action);
         }
         try {
           await syncZendeskAfterAction(env, body.action, 'pubkey', body.pubkey, getPublicKey(secretKey));
@@ -988,12 +1198,37 @@ async function handleModerate(
         });
         // Pass ctx so the unbanpubkey Keycast restore (non-critical) is kept alive.
         const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders, ctx);
+        if (!rpcResponse.ok) {
+          // Forward the inner response rather than re-wrapping at 500. The
+          // age-review guard answers a refused unban with a structured 409
+          // (code/caseId/state) that callers route on, and flattening it to 500
+          // both destroys that contract and mislabels a permanent refusal as
+          // transient, which is the shape retrying clients treat as "try again".
+          //
+          // Note this is not 409-only. Three non-ok returns are reachable from
+          // here: the guard's 409, its 503 when the case lookup cannot run
+          // under fail-closed, and a 400 when the underlying NIP-86 call fails.
+          // The canonical-hex 400 is deliberately NOT one of them: allow_pubkey
+          // issues unbanpubkey, which is exempt from that check so a row banned
+          // with a non-canonical value stays removable, so such a value is
+          // forwarded to the relay and comes back 200.
+          //
+          // So a relay-side failure surfaces here as 400 rather
+          // than 500, which makes /api/moderate consistent with /api/relay-rpc
+          // (already 400 in that case) but does flip it from retryable to
+          // terminal for an automated caller. Deliberate: consistency is worth
+          // more than an accidental 500, and no current caller consumes this
+          // path. Only allow_pubkey forwards: delete_event and ban_pubkey still
+          // flatten to 500, because neither is guarded and so neither can
+          // produce a 409/503 whose code a caller would need.
+          return rpcResponse;
+        }
         const rpcResult = await rpcResponse.json() as { success: boolean; error?: string };
         if (!rpcResult.success) {
           return jsonResponse({ success: false, error: rpcResult.error || 'unbanpubkey RPC failed' }, 500, corsHeaders);
         }
         if (env.DB) {
-          await markHumanReviewed(env.DB, 'pubkey', body.pubkey);
+          await markHumanAction(env.DB, 'pubkey', body.pubkey, body.action);
         }
         try {
           await syncZendeskAfterAction(env, body.action, 'pubkey', body.pubkey, getPublicKey(secretKey));
@@ -1027,21 +1262,110 @@ async function handleRelayRpc(
     return jsonResponse({ success: false, error: 'Missing method' }, 400, corsHeaders);
   }
 
-  // Age-review guard: a bare suspend/unsuspend on a pubkey with an open
+  // Age-review guard: a bare account-state change on a pubkey with an open
   // (non-terminal) age-review case must not half-enforce (Suspend orphans the
   // case) or silently lift the hold (Unsuspend skips verification). Refuse and
   // route the moderator to the case; Restrict/Clear live in the age-review flow.
-  // Age-review's own enforcement calls the nip86 helpers directly, and internal
-  // moderation/bulk callers use ban*/unban* only, so neither reaches this guard.
-  if (body.method === 'suspendpubkey' || body.method === 'unsuspendpubkey') {
-    const target = body.params?.[0] ? String(body.params[0]) : '';
+  //
+  // unbanpubkey is included because it calls unsuspendUser, which sets Keycast
+  // status to active and so lifts a suspension as well as a ban. An unban on an
+  // account under age review therefore restores login and signing while skipping
+  // the case, which is exactly what this guard exists to prevent. Two callers
+  // outside this repo reach it: divine-moderation-service, which has mapped
+  // allow_pubkey -> unbanpubkey onto /api/relay-rpc since 2026-06-08, and the
+  // Coop enforcement adapter, whose reversal routes followed on 2026-06-17.
+  // Only the adapter surfaces the refusal; divine-moderation-service discards
+  // code/caseId/state (divinevideo/divine-moderation-service#191).
+  //
+  // banpubkey is deliberately NOT included: it is a severe-action escape hatch, so
+  // a moderator who finds something like CSAM on an account under review can act
+  // without resolving the case first. Pinned by an existing test.
+  //
+  // What makes guarding one direction but not the other coherent is mechanical,
+  // not a matter of taste. banpubkey performs a destructive content purge that
+  // unbanpubkey cannot reverse (see nip86.ts, where suspendpubkey is documented
+  // as the reversible alternative "without the destructive purge that banpubkey
+  // performs"). So guarding the unban removes no recovery path that ever existed
+  // for content; it defers only restoring login and signing, which is precisely
+  // the hold the case owns. Nor is it a one-way door: once the case reaches a
+  // terminal state getActiveAgeReviewCase returns null and the unban proceeds.
+  //
+  // Age-review's own enforcement calls the nip86 helpers directly, so it does not
+  // reach this guard and can still act on its own cases.
+  const target = body.params?.[0] ? String(body.params[0]) : '';
+
+  // Canonical hex is required to ENFORCE, but deliberately not to REVERSE.
+  //
+  // The relay stores and matches these bytes exactly, so a ban or suspend carrying a
+  // non-canonical pubkey enforces on nobody while reporting success. 400 rather than
+  // the guard's 503: it is the same answer handleGetActiveAgeReviewCase gives for the
+  // same regex, and unlike a D1 outage a malformed pubkey never becomes valid on a
+  // retry, so the retryable class would be a lie.
+  //
+  // The reverse direction must NOT get the same check. banpubkey did not always have
+  // one, and rows written with a non-canonical value are stored byte-exactly and are
+  // removable only by sending that same value back. Refusing it here would make
+  // cleanup stricter than the thing that created the mess, leaving those rows stuck in
+  // the ban list with no way out of the UI. Nothing is risked by allowing it: an
+  // age-review case is keyed to a real lowercase pubkey, so a non-canonical value has
+  // no case to skip past, which is why the guard also lets it through.
+  if (
+    (body.method === 'banpubkey' || body.method === 'suspendpubkey')
+    && !/^[0-9a-f]{64}$/.test(target)
+  ) {
+    return jsonResponse({ success: false, error: 'Invalid pubkey' }, 400, corsHeaders);
+  }
+
+  if (
+    body.method === 'suspendpubkey' ||
+    body.method === 'unsuspendpubkey' ||
+    body.method === 'unbanpubkey'
+  ) {
+    if (env.DB) {
+      // Bootstrapping is part of the check, not a precondition for it: a DDL
+      // failure must reach the same fail-open/fail-closed decision as a failed
+      // lookup rather than escape as an unhandled rejection. This route returns
+      // its promise without awaiting (see the /api/relay-rpc case above), so the
+      // top-level catch never sees a rejection from here -- it would leave the
+      // caller with no body and no CORS headers. Swallow and let the guard
+      // decide: the lookup below fails the same way, refusing a reversal and
+      // proceeding for a suspend.
+      try {
+        await ensureSchemaOnce(env.DB);
+      } catch (err) {
+        console.error('[handleRelayRpc] age-review schema bootstrap failed:', err);
+      }
+    }
+    // Reversals fail closed: if the case lookup itself fails we refuse rather
+    // than lift a hold without having checked. Suspend keeps the default,
+    // because failing open there over-enforces, which is visible and undoable.
+    const isReversal = body.method === 'unsuspendpubkey' || body.method === 'unbanpubkey';
     const guarded = await ageReviewActiveGuard(target, env, corsHeaders,
-      'This account is under age review. Restrict or clear it from the Age Review flow.');
+      'This account is under age review. Restrict or clear it from the Age Review flow.',
+      { failClosed: isReversal });
     if (guarded) return guarded;
   }
 
-  // Use shared NIP-86 RPC utility
-  const result = await callNip86Rpc(body.method, body.params || [], env);
+  const eventVisibilityAction = body.method === 'banevent'
+    ? 'hide'
+    : body.method === 'allowevent'
+      ? 'allow'
+      : null;
+  if (body.method === 'banevent' && !/^[0-9a-f]{64}$/.test(target)) {
+    return jsonResponse({ success: false, error: 'Invalid event id' }, 400, corsHeaders);
+  }
+
+  // Preserve cleanup for legacy non-canonical bans by forwarding allowevent
+  // byte-for-byte. Canonical event actions use the coordinator and persist the
+  // direction that auto-hide compensation reads.
+  const shouldCoordinateEvent = eventVisibilityAction && /^[0-9a-f]{64}$/.test(target);
+  const result = shouldCoordinateEvent
+    ? await coordinateEventVisibility(env, {
+      eventId: target,
+      relayAction: eventVisibilityAction,
+      reason: body.params?.[1] ? String(body.params[1]) : undefined,
+    })
+    : await callNip86Rpc(body.method, body.params || [], env);
 
   if (!result.success) {
     return jsonResponse({ success: false, error: result.error }, 400, corsHeaders);
@@ -1078,7 +1402,7 @@ async function handleRelayRpc(
     }
   }
 
-  return new Response(JSON.stringify({ success: true, result: result.result }), {
+  return new Response(JSON.stringify({ success: true, result: 'result' in result ? result.result : true }), {
     status: 200,
     headers: { 'Content-Type': 'application/json', ...corsHeaders },
   });
@@ -1287,18 +1611,6 @@ Respond with JSON only:
   }
 }
 
-async function markHumanReviewed(db: D1Database, targetType: string, targetId: string): Promise<void> {
-  try {
-    await db.prepare(`
-      INSERT INTO moderation_targets (target_id, target_type, ever_human_reviewed)
-      VALUES (?, ?, 1)
-      ON CONFLICT(target_id) DO UPDATE SET ever_human_reviewed = 1
-    `).bind(targetId, targetType).run();
-  } catch (error) {
-    console.error('[markHumanReviewed] Failed to update moderation_targets:', error);
-  }
-}
-
 async function handleLogDecision(
   request: Request,
   env: Env,
@@ -1321,6 +1633,9 @@ async function handleLogDecision(
     if (!body.targetType || !body.targetId || !body.action) {
       return jsonResponse({ success: false, error: 'Missing required fields' }, 400, corsHeaders);
     }
+    if (body.targetType === 'event' && COORDINATED_AUTO_HIDE_ACTIONS.has(body.action)) {
+      return jsonResponse({ success: false, error: 'Event auto-hide state must use its coordinated endpoint' }, 400, corsHeaders);
+    }
 
     await ensureSchemaOnce(env.DB);
 
@@ -1336,6 +1651,8 @@ async function handleLogDecision(
       body.reportId || null
     ).run();
 
+    // This endpoint is an append-only audit write. Detached clients can deliver it
+    // after a newer enforcement action, so it must not redefine visibility intent.
     await markHumanReviewed(env.DB, body.targetType, body.targetId);
 
     return new Response(JSON.stringify({ success: true }), {
@@ -1350,6 +1667,44 @@ async function handleLogDecision(
       corsHeaders
     );
   }
+}
+
+async function handleConfirmAutoHide(
+  request: Request,
+  env: Env,
+  corsHeaders: Record<string, string>,
+): Promise<Response> {
+  const body = await request.json() as {
+    eventId?: string;
+    reason?: string;
+    moderatorPubkey?: string;
+    reportId?: string;
+    reporterPubkey?: string;
+  };
+  if (typeof body.eventId !== 'string' || !/^[a-f0-9]{64}$/i.test(body.eventId)) {
+    return jsonResponse({ success: false, error: 'Missing or invalid eventId' }, 400, corsHeaders);
+  }
+  if (body.reason !== undefined && typeof body.reason !== 'string') {
+    return jsonResponse({ success: false, error: 'Invalid reason' }, 400, corsHeaders);
+  }
+  if (body.moderatorPubkey !== undefined && !/^[a-f0-9]{64}$/i.test(body.moderatorPubkey)) {
+    return jsonResponse({ success: false, error: 'Invalid moderatorPubkey' }, 400, corsHeaders);
+  }
+  if (body.reportId !== undefined && !/^[a-f0-9]{64}$/i.test(body.reportId)) {
+    return jsonResponse({ success: false, error: 'Invalid reportId' }, 400, corsHeaders);
+  }
+  if (body.reporterPubkey !== undefined && !/^[a-f0-9]{64}$/i.test(body.reporterPubkey)) {
+    return jsonResponse({ success: false, error: 'Invalid reporterPubkey' }, 400, corsHeaders);
+  }
+  const result = await coordinateEventVisibility(env, {
+    eventId: body.eventId.toLowerCase(),
+    relayAction: 'confirm',
+    reason: body.reason,
+    moderatorPubkey: body.moderatorPubkey?.toLowerCase(),
+    reportId: body.reportId?.toLowerCase(),
+    reporterPubkey: body.reporterPubkey?.toLowerCase(),
+  });
+  return jsonResponse(result, result.success ? 200 : result.conflict ? 409 : 500, corsHeaders);
 }
 
 async function handleGetAllDecisions(
@@ -1371,7 +1726,7 @@ async function handleGetAllDecisions(
 
     const decisions = await env.DB.prepare(`
       SELECT * FROM moderation_decisions
-      ORDER BY created_at DESC
+      ORDER BY created_at DESC, id DESC
       LIMIT ?
     `).bind(DECISIONS_LIMIT + 1).all();
 
@@ -1414,7 +1769,7 @@ async function handleGetDecisions(
     const decisions = await env.DB.prepare(`
       SELECT * FROM moderation_decisions
       WHERE target_id = ?
-      ORDER BY created_at DESC
+      ORDER BY created_at DESC, id DESC
     `).bind(targetId).all();
 
     return new Response(JSON.stringify({
@@ -1434,10 +1789,35 @@ async function handleGetDecisions(
   }
 }
 
+// Kind 1985 is a regular event, not replaceable, so review/reopen cycles
+// accumulate resolution labels on one target. A real target carries one or two,
+// so this is far above the expected count -- but it is NOT set by that. Every
+// label costs one sequential signed NIP-86 round-trip at roughly 200-400ms, and
+// each filter also spends up to the 5s queryRelay cap on its read, so a full
+// page is ~15-25s of work per filter.
+//
+// The binding constraint is the client's 30s abort (API_TIMEOUT_MS in
+// adminApi.ts): blowing it aborts a reopen the worker had already completed and
+// reports it as a failure. A cap of 200 blows it outright. 50 fits the path
+// every current caller takes, which is one filter -- ReportDetail always sends
+// targetType. It does NOT fit the two-filter fallback at the top of the range;
+// that path is reachable only by a frontend older than this deploy, and only
+// against a target carrying tens of labels.
+//
+// Subrequests are not the constraint: this is Workers Paid, so the budget is
+// 1000/request and even the two-filter worst case spends ~102 (two sockets plus
+// two full pages of bans).
+//
+// A full page is reported as an incomplete cleanup rather than assumed
+// complete, so a target somehow past the cap still gets cleared over successive
+// reopens instead of silently half-cleared.
+const LABEL_CLEANUP_LIMIT = 50;
+
 async function handleDeleteDecisions(
   targetId: string,
   env: Env,
-  corsHeaders: Record<string, string>
+  corsHeaders: Record<string, string>,
+  targetType?: 'event' | 'pubkey'
 ): Promise<Response> {
   try {
     if (!env.DB) {
@@ -1447,17 +1827,48 @@ async function handleDeleteDecisions(
     await ensureSchemaOnce(env.DB);
 
     let labelsDeleted = 0;
+    let labelCleanupFailed = false;
 
-    // First, query for and delete any resolution labels (kind 1985) on the relay
-    // Try both 'e' tag (event target) and 'p' tag (pubkey target)
-    const labelFilters = [
-      { kinds: [1985], '#e': [targetId], '#L': ['moderation/resolution'], limit: 10 },
-      { kinds: [1985], '#p': [targetId], '#L': ['moderation/resolution'], limit: 10 },
-    ];
+    // Query for and delete any resolution labels (kind 1985) on the relay.
+    // publishLabel tags a label with 'e' for an event target or 'p' for a
+    // pubkey target, never both, so naming the type skips a query that could
+    // not have matched. Without a type (an older frontend) both are checked:
+    // guessing wrong would silently skip the labels that do exist.
+    const tagForType = { event: '#e', pubkey: '#p' } as const;
+    const labelTags = targetType ? [tagForType[targetType]] : ['#e', '#p'];
+    const labelFilters = labelTags.map((tag) => ({
+      kinds: [1985],
+      [tag]: [targetId],
+      '#L': ['moderation/resolution'],
+      limit: LABEL_CLEANUP_LIMIT,
+    }));
 
     for (const filter of labelFilters) {
       const queryResult = await queryRelay(filter, env.RELAY_URL);
-      if (queryResult.success && queryResult.events && queryResult.events.length > 0) {
+      if (!queryResult.success) {
+        // Best-effort cleanup, but the caller has to hear about it. The D1
+        // delete below is unconditional, so a surviving resolution label
+        // leaves the report hidden by resolvedTargets even though its
+        // decisions are gone. Reporting a clean reopen would tell the
+        // moderator the report is back in the queue when it is not.
+        labelCleanupFailed = true;
+        console.warn('[reopen] resolution-label query failed, labels may remain:', queryResult.error);
+      } else if ((queryResult.events?.length ?? 0) >= LABEL_CLEANUP_LIMIT) {
+        // A full page is indistinguishable from a truncated one, so any labels
+        // past the cap are invisible here and would survive silently. Same
+        // outcome as a failed read, so it reports the same way.
+        //
+        // This detects our own cap, not the relay's: a relay enforcing a lower
+        // maximum returns a short page and truncation stays invisible. Raising
+        // the cap well above any plausible label count is what makes that
+        // remote, rather than this check.
+        labelCleanupFailed = true;
+        console.warn('[reopen] resolution-label read hit the page limit, labels may remain');
+      }
+      // Deliberately not gated on success: an incomplete read still hands back
+      // the labels it did receive, and removing those is strictly progress.
+      // labelCleanupFailed above already records that the set may be partial.
+      if (queryResult.events && queryResult.events.length > 0) {
         for (const labelEvent of queryResult.events) {
           const eventId = (labelEvent as { id?: string }).id;
           if (eventId) {
@@ -1476,10 +1887,24 @@ async function handleDeleteDecisions(
               const rpcResult = await rpcResponse.json() as { success: boolean };
               if (rpcResult.success) {
                 labelsDeleted++;
+              } else {
+                // The label was found but could not be removed (a relay admin
+                // key mismatch 403s every management command while reads keep
+                // working). It survives and keeps the report hidden, so this
+                // reopen is no cleaner than a failed read.
+                labelCleanupFailed = true;
+                console.warn('[reopen] banevent failed for resolution label:', eventId);
               }
             } catch (err) {
-              console.error('Failed to delete resolution label:', eventId, err);
+              labelCleanupFailed = true;
+              console.error('[reopen] banevent threw for resolution label:', eventId, err);
             }
+          } else {
+            // Events come off the wire unvalidated, so an id-less label is
+            // possible. It cannot be banned, so it survives and keeps the
+            // report hidden: the same outcome as any other failed cleanup.
+            labelCleanupFailed = true;
+            console.warn('[reopen] resolution label has no id, cannot remove it');
           }
         }
       }
@@ -1496,9 +1921,10 @@ async function handleDeleteDecisions(
       success: true,
       deleted: result.meta.changes || 0,
       labelsDeleted,
+      labelCleanupFailed,
     }, 200, corsHeaders);
   } catch (error) {
-    console.error('Delete decisions error:', error);
+    console.error('[reopen] delete decisions failed:', error);
     return jsonResponse(
       { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
       500,
@@ -1575,11 +2001,22 @@ async function handleModerateMedia(
       sha256: string;
       action: 'SAFE' | 'REVIEW' | 'QUARANTINE' | 'AGE_RESTRICTED' | 'PERMANENT_BAN' | 'DELETE';
       reason?: string;
+      // Optional expected-state check. The state the caller believes it is changing.
+      // Typed `unknown` rather than `string` because this object is a cast over
+      // `request.json()`, so the annotation is a claim about a stranger's input,
+      // not a fact. `unknown` makes the compiler insist on the narrowing below
+      // instead of letting a declared type stand in for a check.
+      from?: unknown;
     };
 
     if (!body.sha256) {
       return jsonResponse({ success: false, error: 'Missing sha256' }, 400, corsHeaders);
     }
+
+    // The hash used for the upstream write. Left exactly as sent unless the
+    // expected-state path canonicalises it below, so callers that send no
+    // `from` see no change in what reaches moderation-service.
+    let sha256 = body.sha256;
 
     if (!body.action) {
       return jsonResponse({ success: false, error: 'Missing action' }, 400, corsHeaders);
@@ -1605,11 +2042,175 @@ async function handleModerateMedia(
       headers['CF-Access-Client-Secret'] = cfAccess.clientSecret;
     }
 
+    // The expected-state check, when the caller declares what it believes it is
+    // changing.
+    //
+    // This endpoint is a state SETTER, not a transition: `SAFE` means "make this
+    // blob Active", not "undo the age-restriction I applied". So the intent is
+    // lost, and nothing distinguishes a moderator reversing their own
+    // age-restrict from one clearing the QUARANTINE that hides a minor's content
+    // under age review (see bulk-moderate.ts, whose own comment explains why
+    // AGE_RESTRICTED must never be used for a minor). Both are the same request.
+    //
+    // ageReviewActiveGuard refuses that class of reversal for unbanpubkey and
+    // unsuspendpubkey, but it is pubkey-keyed and this endpoint is hash-keyed, so
+    // it was never wired here. `from` closes the gap for callers that opt in,
+    // without a breaking change for the ones that do not.
+    //
+    // The check and the write are two separate steps, not one. Reading the state
+    // is a request to moderation-service and changing it is another, with no lock
+    // and nothing conditional available upstream, so a change landing between them
+    // is not caught. That window is one round trip and the result is no worse than
+    // the unguarded behaviour it replaces, but do not build anything on this that
+    // needs the two to happen together.
+    //
+    // It is also a mistake-guard, not a security boundary. The caller supplies
+    // `from` and omitting it restores the old behaviour, so this protects a
+    // cooperating caller from its own bug -- which is the actual threat here,
+    // since the endpoint already sits behind admin auth.
+    //
+    // Omitting `from` means "no check" and is the supported default.
+    // Sending it present-but-unusable means the caller tried to declare a state
+    // and failed to -- an unmapped action name, a template that rendered empty,
+    // the wrong type off a JSON payload. Treating that as "absent" would hand
+    // back the old unguarded behaviour AND a 200, so the caller would believe it
+    // asked for the check and was told it succeeded. Refuse instead, and
+    // refuse before the upstream read so a malformed request costs no call.
+    if (body.from !== undefined) {
+      const declared = typeof body.from === 'string' ? body.from.trim() : '';
+      if (!declared) {
+        return jsonResponse(
+          {
+            success: false,
+            error: '`from` must be a non-empty string naming the state being changed; omit it to skip the check',
+            code: 'invalid_from',
+          },
+          400,
+          corsHeaders
+        );
+      }
+      const expected = declared.toUpperCase();
+
+      // `sha256` becomes a path segment below, and the URL constructor resolves
+      // `..` before the request goes out. Unchecked, a caller can point the state
+      // read at any path on moderation-service -- with relay-manager's service
+      // token attached -- and satisfy the comparison against the `status` of an
+      // endpoint that has nothing to do with the blob.
+      //
+      // Not a bypass: `from` is optional, so anyone wanting no check just omits
+      // it. What this actually costs is a credentialed GET to an arbitrary
+      // upstream path, and a caller that believes it verified something when it
+      // read an unrelated endpoint.
+      //
+      // Same shape as the check moderation-service applies to this value
+      // (handlePublicCheckResult, src/index.mjs:1494), so nothing that survives
+      // here is something the upstream would have rejected.
+      //
+      // Deliberately scoped to the expected-state path. Callers that send no
+      // `from` pass sha256 in a POST body, which moderation-service validates
+      // itself, so widening this would change behaviour for existing callers to
+      // no benefit and is left out of this change.
+      if (typeof body.sha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(body.sha256)) {
+        return jsonResponse(
+          { success: false, error: '`sha256` must be a 64-character hex hash to use `from`', code: 'invalid_sha256' },
+          400,
+          corsHeaders
+        );
+      }
+
+      // Canonicalise the hash so the row that is verified is the row that gets
+      // written. moderation-service lowercases before its SELECT
+      // (handlePublicCheckResult, src/index.mjs:1497) but /api/v1/moderate binds
+      // sha256 raw into `INSERT ... ON CONFLICT(sha256)`, and the column is
+      // `sha256 TEXT PRIMARY KEY` with no COLLATE NOCASE. BINARY collation makes
+      // an uppercase hash a DIFFERENT key, so unnormalised this reads dd44... and
+      // writes DD44... while reporting that it checked first.
+      //
+      // Only the expected-state path is normalised, matching how the validation
+      // above is scoped. That an uppercase hash can open a second row at all is a
+      // pre-existing hazard of this endpoint, not something introduced here, and
+      // fixing it for every caller belongs in its own change.
+      sha256 = body.sha256.toLowerCase();
+
+      // NOTE: the read goes to MODERATION_SERVICE_URL and the write below goes to
+      // MODERATION_ADMIN_URL. Today those are the same host in local, staging and
+      // prod, which is what makes comparing one against the other meaningful. If
+      // they are ever pointed at different deployments, this reads state from one
+      // service and acts on another, and the guard keeps returning 200 while
+      // checking nothing. Split them and this has to move to the admin URL.
+      //
+      // What `current` reflects is moderation-service's `moderation_results` row,
+      // which is NOT the blob's live state everywhere: Blossom's own admin UI
+      // (divine-blossom, handle_admin_moderate_action) changes blob status without
+      // calling back here, so an action taken there leaves this row stale. The
+      // age-review path that motivates this guard does go through /api/v1/moderate
+      // (bulk-moderate.ts), so it IS reflected -- but do not read this as covering
+      // every way media gets restricted.
+      let current: string;
+      try {
+        // Built inside the try on purpose: getModerationServiceUrl throws when the
+        // binding is missing, and a misconfiguration is the same "could not check"
+        // case as an upstream failure. Outside, it exited as a 500 naming an
+        // internal binding instead of the retryable 503 this block commits to.
+        const checkRequest = new Request(`${getModerationServiceUrl(env)}/check-result/${encodeURIComponent(sha256)}`, {
+          method: 'GET',
+          headers,
+        });
+        const checkResponse = env.MODERATION_API
+          ? await env.MODERATION_API.fetch(checkRequest)
+          : await fetch(checkRequest);
+        if (!checkResponse.ok) throw new Error(`check-result ${checkResponse.status}`);
+        const state = await checkResponse.json() as { status?: string; moderated?: boolean };
+        // `status` is the stored action lowercased, or the literal 'unknown' when
+        // there is no row -- handlePublicCheckResult emits one or the other on
+        // every 200 (src/index.mjs:1508, :1520). Its absence therefore does not
+        // mean the blob is in an unknown state; it means this is not a response
+        // this code understands, so the state is unreadable and belongs in the
+        // 503 class below.
+        //
+        // Defaulting it to 'unknown' instead would answer 409 "expected
+        // AGE_RESTRICTED, found UNKNOWN", asserting a fact about the blob that
+        // was never established. An explicit 'unknown' FROM the service is a real
+        // answer and still refuses; a missing field is not.
+        if (typeof state?.status !== 'string' || !state.status) {
+          throw new Error('check-result carried no status');
+        }
+        current = state.status.toUpperCase();
+      } catch (err) {
+        // 503, not 409, and never success: "could not check" is a different answer
+        // from "no conflict", and the retryable class is the honest one. Same
+        // reasoning as ageReviewActiveGuard's failClosed.
+        console.error('[handleModerateMedia] expected-state read failed:', err);
+        return jsonResponse(
+          { success: false, error: 'Could not read current media state; refusing to act', code: 'state_unreadable' },
+          503,
+          corsHeaders
+        );
+      }
+
+      if (current !== expected) {
+        // Names both states: an operator seeing only "conflict" cannot tell this
+        // from any other 409 and will retry it. Echoes the NORMALISED value, so
+        // what is reported is what was actually compared.
+        return jsonResponse(
+          {
+            success: false,
+            error: `Refusing ${body.action}: expected current state ${expected}, found ${current}`,
+            code: 'state_mismatch',
+            from: expected,
+            current,
+          },
+          409,
+          corsHeaders
+        );
+      }
+    }
+
     const moderationRequest = new Request(`${getModerationAdminUrl(env)}/api/v1/moderate`, {
       method: 'POST',
       headers,
       body: JSON.stringify({
-        sha256: body.sha256,
+        sha256,
         action: body.action,
         reason: body.reason || 'Moderated via Divine Relay Admin',
         source: 'relay-manager',
@@ -1659,70 +2260,6 @@ async function handleModerateMedia(
       corsHeaders
     );
   }
-}
-
-// Query relay for events matching a filter
-async function queryRelay(
-  filter: object,
-  relayUrl: string
-): Promise<{ success: boolean; events?: object[]; error?: string; complete?: boolean }> {
-  return new Promise((resolve) => {
-    try {
-      const ws = new WebSocket(relayUrl);
-      let resolved = false;
-      const events: object[] = [];
-      const subId = `query-${Date.now()}`;
-
-      const timeout = setTimeout(() => {
-        if (!resolved) {
-          resolved = true;
-          ws.close();
-          // Timed out without EOSE: results may be truncated, so absence is unconfirmed.
-          resolve({ success: true, events, complete: false });
-        }
-      }, 5000);
-
-      ws.addEventListener('open', () => {
-        ws.send(JSON.stringify(['REQ', subId, filter]));
-      });
-
-      ws.addEventListener('message', (msg) => {
-        try {
-          const data = JSON.parse(msg.data as string);
-          if (data[0] === 'EVENT' && data[1] === subId) {
-            events.push(data[2]);
-          } else if (data[0] === 'EOSE' && data[1] === subId) {
-            clearTimeout(timeout);
-            resolved = true;
-            ws.close();
-            // EOSE = relay confirmed end of stored events, so an empty result is real.
-            resolve({ success: true, events, complete: true });
-          }
-        } catch {
-          // Ignore parse errors
-        }
-      });
-
-      ws.addEventListener('error', () => {
-        if (!resolved) {
-          clearTimeout(timeout);
-          resolved = true;
-          resolve({ success: false, error: 'WebSocket error' });
-        }
-      });
-
-      ws.addEventListener('close', () => {
-        if (!resolved) {
-          clearTimeout(timeout);
-          resolved = true;
-          // Closed before EOSE: absence is unconfirmed.
-          resolve({ success: true, events, complete: false });
-        }
-      });
-    } catch (error) {
-      resolve({ success: false, error: error instanceof Error ? error.message : 'Unknown error' });
-    }
-  });
 }
 
 async function publishToRelay(
@@ -1939,9 +2476,9 @@ interface Nip98Result {
 // Returns true iff `signedUrl` matches `expectedUrl` in scheme + path + query,
 // and its hostname is in `allowedHosts` (bare hostnames). Port and fragment are
 // intentionally not compared — this is a bare-hostname allowlist by design;
-// tightening to port would mean comparing `.host` instead of `.hostname`. Used
-// only by the two mobile endpoints (#173); strict callers pass an empty
-// allowlist, so this can never return true for them. Malformed URLs → false.
+// tightening to port would mean comparing `.host` instead of `.hostname`.
+// Passing an empty allowlist keeps this helper strict: it can never return true
+// for a different host. Malformed URLs → false.
 function hostAllowlistedUrlMatch(signedUrl: string, expectedUrl: string, allowedHosts: string[]): boolean {
   if (allowedHosts.length === 0) return false;
   try {
@@ -2069,8 +2606,20 @@ async function handleMediaProxy(
     // Stream response body through without buffering
     const responseHeaders: Record<string, string> = {
       ...corsHeaders,
-      'Cache-Control': 'private, no-cache',
+      // no-store, not no-cache: these bytes can be CSAM, and no-cache still lets
+      // the browser write them to its HTTP disk cache (revalidated on reuse).
+      // Both consumers (SPA MediaPreview and the /media/ viewer) fetch once into
+      // a Blob URL, so nothing re-reads the HTTP cache anyway.
+      'Cache-Control': 'private, no-store',
       'X-Admin-Proxy': 'blossom-admin',
+      // The upstream Content-Type is stored as-uploaded and is not validated, so
+      // a text/html blob navigated to directly would run script on this origin,
+      // which holds the moderator's CF Access session. nosniff alone does not
+      // stop a declared text/html from rendering; sandbox neutralizes it (unique
+      // origin, no script). Blob-fetch consumers are unaffected: a CSP response
+      // header applies to document loads, not to fetch()-into-Blob pipelines.
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy': 'sandbox',
     };
 
     // Pass through relevant headers from upstream
@@ -2392,19 +2941,6 @@ async function handleZendeskRoutes(
   return jsonResponse({ success: false, error: 'Not found' }, 404, corsHeaders);
 }
 
-// Cap best-effort report-note enrichment so a slow relay can't push the Zendesk webhook
-// handler toward Zendesk's delivery timeout. On timeout we post the note without enrichment.
-const ENRICHMENT_TIMEOUT_MS = 3000;
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<null>((resolve) => {
-    timer = setTimeout(() => resolve(null), ms);
-  });
-  return Promise.race([promise, timeout]).finally(() => {
-    if (timer !== undefined) clearTimeout(timer);
-  });
-}
-
 // Parse content report ticket and store mapping, add helpful links as internal note
 async function handleParseReport(
   request: Request,
@@ -2545,9 +3081,14 @@ async function handleZendeskPreAuth(
     // Ensure nonce table exists
     await ensureSchemaOnce(env.DB);
 
-    // Verify NIP-98 auth. Intentionally strict: no allowedHosts passed, so this
-    // Zendesk pre-auth path stays same-host only (#173 scope — do not relax).
-    const authResult = await verifyNip98Auth(request, request.url);
+    // Mobile signs the canonical public API URL while the edge forwards to the
+    // worker host. Relax only the host via the configured allowlist; scheme,
+    // path, query, method, timestamp, and event signature remain exact.
+    const authResult = await verifyNip98Auth(
+      request,
+      request.url,
+      getNip98AllowedHosts(env),
+    );
     if (!authResult.valid) {
       return jsonResponse(
         { success: false, error: `NIP-98 auth required: ${authResult.error}` },

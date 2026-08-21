@@ -11,6 +11,7 @@ import {
   type BulkModerateEnv,
 } from './bulk-moderate';
 import type { BulkJob, BulkJobMessage, BulkEnqueueResponse } from '../../shared/bulk-moderation';
+import { banEvent, getAdminPubkey } from './nip86';
 
 vi.mock('./nip86', () => ({
   getAdminPubkey: vi.fn().mockResolvedValue('moderator-pubkey'),
@@ -90,12 +91,11 @@ function makeJobDb() {
         bind(...args: unknown[]) { binds = args; return stmt; },
         async run() {
           if (/^\s*INSERT INTO bulk_jobs/i.test(sql)) {
-            const [job_id, pubkey, action, status, events_processed, media_processed, failures, failures_dropped, created_at, updated_at] = binds;
-            rows.set(job_id as string, { job_id, pubkey, action, status, events_processed, media_processed, failures, failures_dropped, created_at, updated_at });
+            const [job_id, pubkey, action, status, events_processed, media_processed, failures, failures_dropped, version, created_at, updated_at] = binds;
+            rows.set(job_id as string, { job_id, pubkey, action, status, events_processed, media_processed, failures, failures_dropped, version, created_at, updated_at });
             return { success: true, meta: { changes: 1 } };
           }
           if (/^\s*UPDATE bulk_jobs/i.test(sql)) {
-            const cols = sql.match(/SET (.+) WHERE/i)![1].split(',').map((c) => c.trim().split('=')[0].trim());
             const jobId = binds[binds.length - 1] as string;
             const row = rows.get(jobId);
             let changes = 0;
@@ -106,7 +106,19 @@ function makeJobDb() {
               let statusOk = true;
               if (inMatch) statusOk = inMatch[1].split(',').map((s) => s.trim().replace(/'/g, '')).includes(row.status as string);
               else if (eqMatch) statusOk = row.status === eqMatch[1];
-              if (statusOk) { cols.forEach((c, i) => { row[c] = binds[i]; }); changes = 1; }
+              const versionOk = !/version\s*=\s*\?/i.test(where)
+                || Number(row.version ?? 0) === Number(binds[binds.length - 2]);
+              if (statusOk && versionOk) {
+                if (/version\s*=\s*version\s*\+\s*1/i.test(sql)) {
+                  row.status = binds[0];
+                  row.updated_at = binds[1];
+                  row.version = Number(row.version ?? 0) + 1;
+                } else {
+                  const cols = sql.match(/SET (.+) WHERE/i)![1].split(',').map((c) => c.trim().split('=')[0].trim());
+                  cols.forEach((c, i) => { row[c] = binds[i]; });
+                }
+                changes = 1;
+              }
             }
             return { success: true, meta: { changes } };
           }
@@ -210,6 +222,8 @@ describe('runBulkModeration', () => {
 
   beforeEach(() => {
     vi.restoreAllMocks();
+    vi.mocked(getAdminPubkey).mockResolvedValue('moderator-pubkey');
+    vi.mocked(banEvent).mockResolvedValue({ success: true });
     mockUserVideos([]); // default: no videos unless a test provides them
     mockEnv = baseEnv();
   });
@@ -264,7 +278,6 @@ describe('runBulkModeration', () => {
   });
 
   it('marks bulk delete as failed when relay deletion returns success false', async () => {
-    const { banEvent } = await import('./nip86');
     vi.mocked(banEvent).mockResolvedValueOnce({ success: false, error: 'relay refused' });
     mockRelay([{ id: 'e'.repeat(64), kind: 1, content: '', tags: [] }]);
 
@@ -284,6 +297,7 @@ describe('runBulkModeration', () => {
     expect(result.eventsProcessed).toBe(1);
     expect(result.failures).toEqual([]);
     expect(result.success).toBe(true);
+    expect(vi.mocked(banEvent)).toHaveBeenCalledWith('e'.repeat(64), 'r', mockEnv, 'delete_event');
   });
 
   it('a failing decision-log batch (non-critical) does not abort an otherwise-successful delete-all', async () => {
@@ -329,7 +343,7 @@ describe('async bulk job model', () => {
 
     expect(jobDb.rows.get(body.jobId)?.status).toBe('pending'); // row created, not yet run
     expect(sent).toHaveLength(1);
-    expect(sent[0]).toMatchObject({ jobId: body.jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all' });
+    expect(sent[0]).toMatchObject({ jobId: body.jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', version: 0 });
   });
 
   it('enqueue validates the action/pubkey and does NOT enqueue on a bad request', async () => {
@@ -425,22 +439,49 @@ describe('async bulk job model', () => {
   });
 
   it('delete-all transitions events -> media across messages and finishes', async () => {
-    const { banEvent } = await import('./nip86');
     vi.mocked(banEvent).mockResolvedValue({ success: true });
+    vi.mocked(banEvent).mockClear();
     mockPaginatedRelay(Array.from({ length: 30 }, (_, i) => ({ id: `e${i}`, kind: 1, content: '', tags: [] as string[][], created_at: 30 - i })));
     mockUserVideos([{ sha256: 'a'.repeat(64) }]);
     const jobId = 'job-del-1';
     jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'delete-all', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', created_at: 't', updated_at: 't' });
 
-    let msg: BulkJobMessage | undefined = { jobId, pubkey: 'a'.repeat(64), action: 'delete-all' };
-    let iterations = 0;
+    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'delete-all' }, mockEnv);
+    expect(vi.mocked(banEvent)).toHaveBeenCalledTimes(20);
+    expect(sent[0]?.eventIds).toHaveLength(10);
+
+    let msg: BulkJobMessage | undefined = sent[0];
+    let iterations = 1;
     while (msg && iterations++ < 10) { sent.length = 0; await processBulkJob(msg, mockEnv); msg = sent[0]; }
 
-    expect(iterations).toBe(2); // events chunk -> media chunk
+    expect(iterations).toBe(3); // two bounded event batches -> media chunk
     const row = jobDb.rows.get(jobId)!;
     expect(row.status).toBe('done');
     expect(row.events_processed).toBe(30);
     expect(row.media_processed).toBe(1);
+  });
+
+  it('stops between concurrency waves when the event budget is exhausted', async () => {
+    let now = 1_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    vi.mocked(banEvent).mockImplementation(async () => {
+      now += 5 * 60 * 1000;
+      return { success: true };
+    });
+    vi.mocked(banEvent).mockClear();
+    mockPaginatedRelay(Array.from({ length: 30 }, (_, i) => ({ id: `budget-${i}`, kind: 1, content: '', tags: [] as string[][], created_at: 30 - i })));
+    const jobId = 'job-event-budget';
+    jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'delete-all', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, version: 0, created_at: 't', updated_at: 't' });
+
+    try {
+      await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'delete-all' }, mockEnv);
+    } finally {
+      nowSpy.mockRestore();
+    }
+
+    expect(vi.mocked(banEvent)).toHaveBeenCalledTimes(5);
+    expect(sent[0]?.eventIds).toHaveLength(25);
+    expect(jobDb.rows.get(jobId)?.events_processed).toBe(5);
   });
 
   it('processBulkJob runs the work and writes status=done with counts', async () => {
@@ -462,7 +503,6 @@ describe('async bulk job model', () => {
     // 250 events all at one created_at: a chunk takes 200, the rest at that second
     // cannot be reached by an `until` cursor. The job must complete but RECORD the
     // gap, not silently report success on a partial destructive delete.
-    const { banEvent } = await import('./nip86');
     vi.mocked(banEvent).mockResolvedValue({ success: true });
     mockPaginatedRelay(Array.from({ length: 250 }, (_, i) => ({ id: `e${i}`, kind: 1, content: '', tags: [] as string[][], created_at: 1000 })));
     mockUserVideos([{ sha256: hashA }]);
@@ -471,12 +511,60 @@ describe('async bulk job model', () => {
 
     let msg: BulkJobMessage | undefined = { jobId, pubkey: 'a'.repeat(64), action: 'delete-all' };
     let iterations = 0;
-    while (msg && iterations++ < 10) { sent.length = 0; await processBulkJob(msg, mockEnv); msg = sent[0]; }
+    while (msg && iterations++ < 20) { sent.length = 0; await processBulkJob(msg, mockEnv); msg = sent[0]; }
 
     const row = jobDb.rows.get(jobId)!;
     expect(row.status).toBe('done');
     expect(row.events_processed).toBe(200);                 // one chunk's worth; the rest unreachable
+    expect(iterations).toBe(12);                            // ten event batches + empty cursor check + media
     expect(JSON.parse(row.failures as string).some((f: string) => /share one timestamp/.test(f))).toBe(true);
+  });
+
+  it('claims each chunk version once so duplicate deliveries cannot fork progress', async () => {
+    vi.mocked(banEvent).mockResolvedValue({ success: true });
+    vi.mocked(banEvent).mockClear();
+    mockPaginatedRelay(Array.from({ length: 2 }, (_, i) => ({ id: `dup${i}`, kind: 1, content: '', tags: [] as string[][], created_at: 2 - i })));
+    const jobId = 'job-duplicate-chunk';
+    jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'delete-all', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, version: 0, created_at: 't', updated_at: 't' });
+    const message: BulkJobMessage = { jobId, pubkey: 'a'.repeat(64), action: 'delete-all', version: 0 };
+
+    await processBulkJob(message, mockEnv);
+    const firstContinuation = sent[0];
+    await processBulkJob(message, mockEnv);
+
+    expect(vi.mocked(banEvent)).toHaveBeenCalledTimes(2);
+    expect(sent).toEqual([firstContinuation]);
+    expect(jobDb.rows.get(jobId)?.version).toBe(1);
+    expect(firstContinuation.version).toBe(1);
+  });
+
+  it('does not fail a job when the delivery never acquired its version claim', async () => {
+    const jobId = 'job-unclaimed-error';
+    jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'delete-all', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, version: 0, created_at: 't', updated_at: 't' });
+    const prepare = jobDb.db.prepare.bind(jobDb.db);
+    const db = {
+      prepare(sql: string) {
+        const statement = prepare(sql);
+        if (/UPDATE bulk_jobs SET status = \?, updated_at = \?, version = version \+ 1/i.test(sql)) {
+          return {
+            bind: (..._args: unknown[]) => ({
+              run: async () => { throw new Error('claim transport failed'); },
+            }),
+          };
+        }
+        return statement;
+      },
+    } as unknown as D1Database;
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await processBulkJob(
+      { jobId, pubkey: 'a'.repeat(64), action: 'delete-all', version: 0 },
+      { ...mockEnv, DB: db },
+    );
+
+    expect(jobDb.rows.get(jobId)?.status).toBe('pending');
+    expect(jobDb.rows.get(jobId)?.version).toBe(0);
+    expect(errorSpy).toHaveBeenCalledWith('[bulk-job] failed before claiming chunk', jobId, expect.any(Error));
   });
 
   it('media phase fails closed when the funnelcake cursor never advances (repeats)', async () => {
@@ -524,7 +612,6 @@ describe('async bulk job model', () => {
   });
 
   it('delete-all fails closed when the videos REST call errors (no events banned)', async () => {
-    const { banEvent } = await import('./nip86');
     vi.mocked(banEvent).mockClear(); // call history accumulates across tests
     mockRelay([{ id: 'e'.repeat(64), kind: 34235, content: '', tags: [] }]);
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('err', { status: 500 }));

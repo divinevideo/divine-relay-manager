@@ -87,16 +87,15 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const {
-    deleteEvent, allowEvent, markAsReviewed, logDecision, deleteDecisions,
+    deleteEvent, restoreEvent, markAsReviewed, logDecision, confirmAutoHide, deleteDecisions,
   } = useAdminApi();
   const { getModeratorPubkey } = useCurrentUser();
 
   // Audit logging is a non-critical side effect. Fire-and-forget so a failing
   // /api/decisions write can't make an action whose authoritative step already
-  // SUCCEEDED (markAsReviewed label publish, allowEvent) report failure. On a
+  // SUCCEEDED (markAsReviewed label publish, restoreEvent) report failure. On a
   // successful write, re-invalidate the decision log; on failure, a non-blocking
-  // toast. Mirrors UserActions.logAudit. (confirmAutoHide keeps an awaited
-  // logDecision: there the decision write IS the action.)
+  // toast. Mirrors UserActions.logAudit.
   // Detached audit write. `moderator` is captured by the caller BEFORE the
   // authoritative request (so a logout/switch mid-request can't retarget it) and
   // reused across every write in the action. Waits for the in-flight identity,
@@ -206,7 +205,13 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     mutationFn: async ({ status, comment }: { status: ResolutionStatus; comment?: string }) => {
       if (!context.target) throw new Error('No target');
       const moderator = getModeratorPubkey(); // capture before the authoritative request
-      await markAsReviewed(context.target.type, context.target.value, status, comment);
+      const result = await markAsReviewed(
+        context.target.type,
+        context.target.value,
+        status,
+        comment,
+        await moderator,
+      );
       // Audit log is non-critical; markAsReviewed (the resolution label) is the
       // authoritative action, so don't let a failed decision write report failure.
       logAudit(moderator, {
@@ -216,13 +221,25 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
         reason: comment,
         reportId: report?.id,
       });
+      return result;
     },
-    onSuccess: (_, variables) => {
+    onSuccess: (result, variables) => {
       queryClient.invalidateQueries({ queryKey: ['reports'] });
       queryClient.invalidateQueries({ queryKey: ['labels'] });
       queryClient.invalidateQueries({ queryKey: ['resolution-labels'] });
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
       decisionLog.refetch();
+      if (result.recorded !== true || result.reconciled === false) {
+        toast({
+          title: 'Resolution saved; visibility needs attention',
+          description: result.recorded
+            ? 'The review was recorded, but auto-hidden content could not be restored. Use Restore content before closing this report.'
+            : 'The resolution label was published, but visibility and review state could not be reconciled.',
+          variant: 'destructive',
+          duration: Infinity,
+        });
+        return;
+      }
       toast({
         title: variables.status === 'reviewed' ? "Marked as reviewed" : "Marked as false positive",
         description: "A resolution label has been created",
@@ -238,26 +255,83 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     },
   });
 
+  // What a reopen acts on, captured at click time rather than read from
+  // `context` when the mutation runs. The degraded toast below outlives this
+  // panel's selection (duration Infinity, and selecting another report
+  // re-renders ReportDetail rather than remounting it), and mutate() rebuilds
+  // the mutation from the observer's LATEST options -- so a mutationFn closing
+  // over `context` would send the retry at whichever report is selected when
+  // it is clicked, deleting that report's decisions instead.
+  type ReopenTarget = { type: 'event' | 'pubkey'; value: string; reportedPubkey?: string | null };
+
   const reopenMutation = useMutation({
-    mutationFn: async () => {
-      if (!context.target) throw new Error('No target');
+    mutationFn: async (target: ReopenTarget | null) => {
+      if (!target) throw new Error('No target');
       // Delete all decisions for this target
-      await deleteDecisions(context.target.value);
+      const primary = await deleteDecisions(target.value, target.type);
       // Also delete decisions for the pubkey if this is an event report
-      if (context.target.type === 'event' && context.reportedUser.pubkey) {
-        await deleteDecisions(context.reportedUser.pubkey);
+      let secondary = { labelCleanupFailed: false };
+      if (target.type === 'event' && target.reportedPubkey) {
+        secondary = await deleteDecisions(target.reportedPubkey, 'pubkey');
       }
+      return { labelCleanupFailed: primary.labelCleanupFailed || secondary.labelCleanupFailed };
     },
-    onSuccess: () => {
+    onSuccess: ({ labelCleanupFailed }, target) => {
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      // Resolution labels also gate whether the report reappears, so a reopen
+      // that does not refresh them can leave the target hidden for a poll cycle.
+      queryClient.invalidateQueries({ queryKey: ['resolution-labels'] });
       decisionLog.refetch();
       pubkeyDecisionLog.refetch();
-      toast({
-        title: "Report reopened",
-        description: "This report is now back in the pending queue",
-      });
+      // Report what the reopen did, not where the report ends up. Whether it
+      // returns to the queue depends on resolvedTargets, which is also built
+      // from relay bans and deletions that reopen never undoes -- so a
+      // ban-resolved report stays hidden even on a fully clean run.
+      toast(labelCleanupFailed
+        ? {
+            // Deliberately does not name the relay: one of the causes is our
+            // own page cap, where the relay did exactly what it was asked.
+            title: "Reopened, but resolution labels could not all be cleared",
+            description: "Some may remain, so this report may stay hidden.",
+            variant: "destructive" as const,
+            // The decisions ARE gone on this path, so hasDecisions goes false
+            // and the Reopen button unmounts. Retrying is the right advice and
+            // the cleanup is idempotent, so the retry has to come with it, and
+            // it does not expire on a timer.
+            //
+            // It is still single-use. Radix renders ToastAction as a
+            // ToastClose, so the click that fires the retry also dismisses this
+            // toast. A retry that comes back still-degraded raises a fresh one
+            // carrying a fresh action; a retry that THROWS lands in onError,
+            // which has no action, and ends the chain. TOAST_LIMIT is 1, so any
+            // later toast evicts it too. The fallback in both cases is to
+            // resolve the report again and reopen.
+            //
+            // Re-sends the target this toast was raised for, not whatever is
+            // selected when it is clicked -- see ReopenTarget above.
+            action: (
+              <ToastAction altText="Retry the reopen" onClick={() => reopenMutation.mutate(target)}>
+                Try again
+              </ToastAction>
+            ),
+            duration: Infinity,
+          }
+        : {
+            title: "Report reopened",
+            description: "Decisions and resolution labels cleared. A report hidden by a relay ban or deletion stays hidden until that is lifted.",
+            // Longer than the 5s Radix default can be read in.
+            duration: 10000,
+          });
     },
     onError: (error: Error) => {
+      // The first delete may already have committed server-side before the
+      // second threw, so the cached decision state can be stale even though
+      // the action reports failure. Refresh it rather than leaving the panel
+      // showing decisions the server no longer has.
+      queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      queryClient.invalidateQueries({ queryKey: ['resolution-labels'] });
+      decisionLog.refetch();
+      pubkeyDecisionLog.refetch();
       toast({
         title: "Failed to reopen",
         description: error.message,
@@ -301,14 +375,24 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   const confirmAutoHideMutation = useMutation({
     mutationFn: async ({ targetId, targetType }: { targetId: string; targetType: 'event' | 'pubkey' }) => {
       const moderator = getModeratorPubkey(); // snapshot identity at action start
-      await logDecision({
-        targetType,
-        targetId,
-        action: 'auto_hide_confirmed',
-        reason: 'Auto-hide confirmed by moderator',
-        reportId: report?.id,
-        moderatorPubkey: await moderator,
-      });
+      if (targetType === 'event') {
+        await confirmAutoHide({
+          eventId: targetId,
+          reason: 'Auto-hide confirmed by moderator',
+          reportId: report?.id,
+          reporterPubkey: report?.pubkey,
+          moderatorPubkey: await moderator,
+        });
+      } else {
+        await logDecision({
+          targetType,
+          targetId,
+          action: 'auto_hide_confirmed',
+          reason: 'Auto-hide confirmed by moderator',
+          reportId: report?.id,
+          moderatorPubkey: await moderator,
+        });
+      }
       return targetId;
     },
     onSuccess: async () => {
@@ -329,25 +413,24 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   // Restore auto-hidden content (reverse the auto-hide)
   const restoreAutoHideMutation = useMutation({
     mutationFn: async ({ eventId }: { eventId: string }) => {
-      const moderator = getModeratorPubkey(); // capture before the authoritative request
-      await allowEvent(eventId);
-      logAudit(moderator, {
-        targetType: 'event',
-        targetId: eventId,
-        action: 'auto_hide_restored',
-        reason: 'Auto-hide reversed by moderator',
-        reportId: report?.id,
-      });
-      return eventId;
+      const moderatorPubkey = await getModeratorPubkey();
+      return restoreEvent(eventId, moderatorPubkey, 'Auto-hide reversed by moderator');
     },
-    onSuccess: async () => {
+    onSuccess: async (result) => {
       queryClient.invalidateQueries({ queryKey: ['reports'] });
       queryClient.invalidateQueries({ queryKey: ['banned-events'] });
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
 
       moderationStatus.recheck();
       decisionLog.refetch();
-      toast({ title: "Content restored", description: "Auto-hide has been reversed" });
+      toast(result.recorded === true && result.reconciled !== false
+        ? { title: "Content restored", description: "Auto-hide has been reversed" }
+        : {
+            title: result.recorded === true
+              ? "Restore recorded; final relay state uncertain"
+              : "Restore applied but not recorded",
+            variant: "destructive",
+          });
     },
     onError: (error: Error) => {
       toast({
@@ -453,12 +536,14 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                     Auto-Hidden — Pending Review
                   </p>
                   <p className="text-sm text-orange-600 dark:text-orange-400">
-                    This content was automatically hidden based on a report. Please review and confirm or restore.
+                    {decisionLog.isAutoHideRestoreFailed
+                      ? 'An automatic restore failed. Retry restoring this content.'
+                      : 'This content was automatically hidden based on a report. Please review and confirm or restore.'}
                   </p>
                 </div>
               </div>
               <div className="flex gap-2">
-                <Tooltip>
+                {!decisionLog.isAutoHideRestoreFailed && <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
                       variant="default"
@@ -480,7 +565,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                   <TooltipContent side="bottom" className="max-w-xs">
                     <p>Confirm this auto-hide decision. The content will remain hidden.</p>
                   </TooltipContent>
-                </Tooltip>
+                </Tooltip>}
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
@@ -707,8 +792,8 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                 targetEventId={context.target?.type === 'event' ? context.target.value : undefined}
                 replies={context.thread?.replies}
                 reportedPubkey={context.reportedUser.pubkey}
-                isEventDeleted={moderationStatus.isEventGone === true}
-                isUserBanned={moderationStatus.isUserBanned === true}
+                isEventDeleted={moderationStatus.isEventGone}
+                isUserBanned={moderationStatus.isUserBanned}
                 checkedAt={moderationStatus.checkedAt}
                 onRecheck={moderationStatus.recheck}
                 isRechecking={moderationStatus.isChecking}
@@ -778,18 +863,27 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
           {/* User moderation status - for user reports where there's no ThreadContext to show it */}
           {context.target?.type === 'pubkey' && (moderationStatus.checkedAt || moderationStatus.isChecking) && (
             <div className="rounded-md border bg-muted/30 p-3 space-y-2">
-              {moderationStatus.isUserBanned ? (
+              {moderationStatus.isUserBanned === true ? (
                 <div className="flex items-center gap-2 p-2 rounded bg-green-100 dark:bg-green-950/50">
                   <Ban className="h-4 w-4 text-green-600 shrink-0" />
                   <span className="text-sm font-medium text-green-700 dark:text-green-400">
                     User is banned on the relay
                   </span>
                 </div>
-              ) : moderationStatus.checkedAt ? (
+              ) : moderationStatus.isUserBanned === false && moderationStatus.checkedAt ? (
                 <div className="flex items-center gap-2 p-2 rounded bg-yellow-100 dark:bg-yellow-950/50">
                   <User className="h-4 w-4 text-yellow-600 shrink-0" />
                   <span className="text-sm font-medium text-yellow-700 dark:text-yellow-400">
                     User is not banned
+                  </span>
+                </div>
+              ) : moderationStatus.checkedAt ? (
+                // The check ran and could not answer. Saying "not banned" here
+                // would state a fact nothing observed.
+                <div className="flex items-center gap-2 p-2 rounded bg-muted">
+                  <RefreshCw className="h-4 w-4 text-muted-foreground shrink-0" />
+                  <span className="text-sm font-medium text-muted-foreground">
+                    Could not check ban status
                   </span>
                 </div>
               ) : null}
@@ -845,9 +939,20 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                   description: "The event has been removed from the relay.",
                   action: (
                     <ToastAction altText="Undo delete" onClick={async () => {
-                      await allowEvent(eventId);
+                      const result = await restoreEvent(
+                        eventId,
+                        await moderator,
+                        'Deletion undone by moderator',
+                      );
                       handleActionComplete();
-                      toast({ title: "Event restored" });
+                      toast(result.recorded === true && result.reconciled !== false
+                        ? { title: "Event restored" }
+                        : {
+                            title: result.recorded === true
+                              ? "Restore recorded; final relay state uncertain"
+                              : "Restore applied but not recorded",
+                            variant: "destructive",
+                          });
                     }}>
                       Undo
                     </ToastAction>
@@ -1067,7 +1172,9 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                     <Button
                       variant="outline"
                       className="border-orange-500 text-orange-600 hover:bg-orange-50"
-                      onClick={() => reopenMutation.mutate()}
+                      onClick={() => reopenMutation.mutate(
+                        context.target && { ...context.target, reportedPubkey: context.reportedUser.pubkey }
+                      )}
                       disabled={reopenMutation.isPending}
                     >
                       <History className="h-4 w-4 mr-1" />
@@ -1075,7 +1182,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent side="bottom" className="max-w-xs">
-                    <p>Reopen this report for review. Removes the dismiss decision and puts it back in the pending queue.</p>
+                    <p>Reopen this report for review. Clears its moderation decisions and resolution labels. A report hidden by a relay ban or deletion stays hidden until that is lifted.</p>
                   </TooltipContent>
                 </Tooltip>
               )}

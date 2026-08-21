@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -14,6 +13,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/useToast";
 import { Globe, FileText, Image, Plus, Trash2, Shield, Network } from "lucide-react";
+import { normalizeAllowedKinds, type AllowedKindEntry } from "@/lib/allowedKinds";
 
 interface RelaySettingsProps {
   relayUrl: string;
@@ -21,7 +21,6 @@ interface RelaySettingsProps {
 
 
 export function RelaySettings({ relayUrl }: RelaySettingsProps) {
-  const { user } = useCurrentUser();
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const { callRelayRpc } = useAdminApi();
@@ -40,15 +39,16 @@ export function RelaySettings({ relayUrl }: RelaySettingsProps) {
   // Query for allowed kinds
   const { data: allowedKinds, isLoading: loadingKinds, error: kindsError } = useQuery({
     queryKey: ['allowed-kinds', relayUrl],
-    queryFn: () => callRelayRpc<number[]>('listallowedkinds'),
-    enabled: !!relayUrl && !!user,
+    queryFn: () => callRelayRpc<AllowedKindEntry[]>('listallowedkinds'),
+    select: normalizeAllowedKinds,
+    enabled: !!relayUrl,
   });
 
   // Query for blocked IPs
   const { data: blockedIps, isLoading: loadingIps, error: ipsError } = useQuery({
     queryKey: ['blocked-ips', relayUrl],
     queryFn: () => callRelayRpc<Array<{ ip: string; reason?: string }>>('listblockedips'),
-    enabled: !!relayUrl && !!user,
+    enabled: !!relayUrl,
   });
 
   // Mutation for changing relay name
@@ -216,16 +216,6 @@ export function RelaySettings({ relayUrl }: RelaySettingsProps) {
     }
     blockIpMutation.mutate({ ip: newIp.trim(), reason: newIpReason.trim() || undefined });
   };
-
-  if (!user) {
-    return (
-      <Alert>
-        <AlertDescription>
-          Please log in to manage relay settings.
-        </AlertDescription>
-      </Alert>
-    );
-  }
 
   return (
     <div className="space-y-6">

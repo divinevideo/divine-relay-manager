@@ -140,6 +140,26 @@ describe('UserActions', () => {
     await waitFor(() => expect(navigate).toHaveBeenCalledWith(`/age-review?pubkey=${PUBKEY}`));
   });
 
+  it('routes to Age Review when an unban is guard-blocked (age_review_active)', async () => {
+    // Unban lifts the Keycast hold as well as the ban, so the worker refuses it on
+    // an open case. Without this the moderator gets a raw destructive toast rather
+    // than the case, which is the drift this pattern exists to prevent.
+    api.unbanPubkey.mockRejectedValue(new ApiError('under age review', 409, 'Conflict', 'age_review_active'));
+    renderWithProvider(<UserActions pubkey={PUBKEY} isBanned />);
+    fireEvent.click(screen.getByRole('button', { name: /Unban User/i }));
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith(`/age-review?pubkey=${PUBKEY}`));
+  });
+
+  it('routes to Age Review when an unsuspend is guard-blocked (age_review_active)', async () => {
+    // The other reversal, and the last unpinned redirect in this file. Suspend
+    // and unban are covered above; without this one, deleting the unsuspend
+    // redirect leaves the whole suite green.
+    api.unsuspendPubkey.mockRejectedValue(new ApiError('under age review', 409, 'Conflict', 'age_review_active'));
+    renderWithProvider(<UserActions pubkey={PUBKEY} isSuspended />);
+    fireEvent.click(screen.getByRole('button', { name: /Unsuspend User/i }));
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith(`/age-review?pubkey=${PUBKEY}`));
+  });
+
   it('attributes the audit write to the logged-in moderator (#178)', async () => {
     renderWithProvider(<UserActions pubkey={PUBKEY} />);
     fireEvent.click(screen.getByRole('button', { name: /Suspend User/i }));

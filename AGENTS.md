@@ -252,6 +252,31 @@ This starts:
 - **Caddy HTTPS proxy** on `https://localhost:8788` (terminates TLS, forwards to worker)
 - **Vite frontend** on `https://localhost:5173`
 
+### Backing services
+
+`dev-local.sh` does **not** start these, but the worker calls them. It warns at
+startup for any that are not answering, and continues.
+
+| Service | Where | How to start |
+|---------|-------|--------------|
+| Funnelcake relay | `ws://127.0.0.1:4444` | `cd ~/code/divine-relay-test && ./scripts/relays/setup-funnelcake.sh` |
+| Funnelcake REST API | `http://127.0.0.1:3333` | Same kind cluster as the relay (`kind-config.yaml` hostPort 3333). Native `divine-funnelcake/scripts/dev.sh` uses 3000+7777 instead; do not mix that with relay 4444. |
+| moderation-service | `http://127.0.0.1:8789` | `cd ~/code/divine-moderation-service && npx wrangler dev --port 8789 --local` |
+
+Without them, moderation actions and relay reads fail. They do **not** fall
+through to production.
+
+That is a deliberate change. The committed `wrangler.local.toml` used to name
+the deployed services. A machine with a populated `worker/.dev.vars` already
+overrode `RELAY_URL`, `FUNNELCAKE_API_URL` and `MODERATION_ADMIN_URL`, but
+`MODERATION_SERVICE_URL` was not in that file, and a fresh clone or worktree
+gets none of it. The tracked defaults are now local so that safety does not
+depend on an untracked file. `worker/test/local-config-targets-local-stack.test.ts`
+fails if any local URL points at deployed infrastructure.
+
+Do not put those outbound URLs in `worker/.dev.vars`. That file overrides
+`[vars]`; a leftover production value there would undo this fix.
+
 Select "Local" in the environment selector. The frontend sends `X-Admin-Key` header (from `VITE_ADMIN_API_KEY`) for admin auth since CF Access isn't available locally.
 
 ### Why HTTPS locally

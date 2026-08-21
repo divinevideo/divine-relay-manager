@@ -4,8 +4,8 @@ import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useToast } from '@/hooks/useToast';
 import { useAdminApi } from '@/hooks/useAdminApi';
+import { useAgeReviewGuardRedirect } from '@/hooks/useAgeReviewGuardRedirect';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
-import { ApiError } from '@/lib/adminApi';
 import { UNDERAGE_REPORT_CATEGORY } from '@/lib/constants';
 import { useBulkModerateJob } from '@/hooks/useBulkModerateJob';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -49,17 +49,10 @@ export function UserActions({
   // on an open case regardless). Ban stays as the severe-action escape hatch.
   const showBulkActions = context !== 'age-review' && !isUnderageReport;
 
-  // The worker guard refuses a bare suspend/unsuspend on an account under age
-  // review (any context). Route the moderator to the case instead of surfacing
-  // a raw error, so enforcement can't drift from the case out of band.
-  const routeToAgeReviewIfGuarded = (error: Error): boolean => {
-    if (error instanceof ApiError && error.code === 'age_review_active') {
-      toast({ title: 'This account is under age review', description: 'Opening it in the Age Review flow.' });
-      navigate(`/age-review?pubkey=${encodeURIComponent(pubkey)}`);
-      return true;
-    }
-    return false;
-  };
+  // Shared: the worker refuses suspend/unsuspend/unban on an account under age
+  // review. See useAgeReviewGuardRedirect for why this is not copied per site.
+  const redirectIfGuarded = useAgeReviewGuardRedirect();
+  const routeToAgeReviewIfGuarded = (error: Error): boolean => redirectIfGuarded(error, pubkey);
 
   // Whether this account has an open age-review case, which changes the Ban
   // copy (a ban purges content the review may still need). For an underage
@@ -186,6 +179,7 @@ export function UserActions({
       onActionComplete?.();
     },
     onError: (error: Error) => {
+      if (routeToAgeReviewIfGuarded(error)) return;
       toast({ title: 'Failed to unban user', description: error.message, variant: 'destructive' });
     },
   });

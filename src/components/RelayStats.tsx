@@ -1,5 +1,4 @@
 import { useQuery } from "@tanstack/react-query";
-import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import type { BannedPubkeyEntry } from "@/lib/adminApi";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -8,6 +7,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Progress } from "@/components/ui/progress";
 import { Users, FileText, Shield, Activity, Clock, Globe } from "lucide-react";
+import { normalizeAllowedKinds, type AllowedKindEntry } from "@/lib/allowedKinds";
 
 interface RelayStatsProps {
   relayUrl: string;
@@ -31,7 +31,6 @@ async function fetchRelayInfo(relayUrl: string) {
 }
 
 export function RelayStats({ relayUrl }: RelayStatsProps) {
-  const { user } = useCurrentUser();
   const { callRelayRpc } = useAdminApi();
 
   // Query for relay info
@@ -45,35 +44,36 @@ export function RelayStats({ relayUrl }: RelayStatsProps) {
   const { data: bannedUsers, isLoading: loadingBanned } = useQuery({
     queryKey: ['banned-users', relayUrl],
     queryFn: () => callRelayRpc<BannedPubkeyEntry[]>('listbannedpubkeys'),
-    enabled: !!relayUrl && !!user,
+    enabled: !!relayUrl,
   });
 
   // Query for allowed users count
   const { data: allowedUsers, isLoading: loadingAllowed } = useQuery({
     queryKey: ['allowed-users', relayUrl],
     queryFn: () => callRelayRpc<BannedPubkeyEntry[]>('listallowedpubkeys'),
-    enabled: !!relayUrl && !!user,
+    enabled: !!relayUrl,
   });
 
   // Query for banned events count
   const { data: bannedEvents, isLoading: loadingBannedEvents } = useQuery({
     queryKey: ['banned-events'],
     queryFn: () => callRelayRpc<Array<{ id: string; reason?: string }>>('listbannedevents'),
-    enabled: !!relayUrl && !!user,
+    enabled: !!relayUrl,
   });
 
   // Query for events needing moderation
   const { data: eventsNeedingModeration, isLoading: loadingPending } = useQuery({
     queryKey: ['events-needing-moderation', relayUrl],
     queryFn: () => callRelayRpc<Array<{ id: string; reason?: string }>>('listeventsneedingmoderation'),
-    enabled: !!relayUrl && !!user,
+    enabled: !!relayUrl,
   });
 
   // Query for allowed kinds
   const { data: allowedKinds, isLoading: loadingKinds } = useQuery({
     queryKey: ['allowed-kinds', relayUrl],
-    queryFn: () => callRelayRpc<number[]>('listallowedkinds'),
-    enabled: !!relayUrl && !!user,
+    queryFn: () => callRelayRpc<AllowedKindEntry[]>('listallowedkinds'),
+    select: normalizeAllowedKinds,
+    enabled: !!relayUrl,
   });
 
   const isLoading = loadingInfo || loadingBanned || loadingAllowed || loadingBannedEvents || loadingPending || loadingKinds;

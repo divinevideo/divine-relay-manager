@@ -4,8 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "dev": "wrangler dev --config wrangler.local.toml",
+    "deploy:staging": "wrangler deploy --config wrangler.staging.toml",
+    "deploy:prod": "wrangler deploy --config wrangler.prod.toml",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest",
     "test:run": "vitest run",

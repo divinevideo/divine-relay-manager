@@ -22,6 +22,17 @@ import { resolveZendeskCreds } from './zendesk-sync';
 import type { BulkAction } from '../../shared/bulk-moderation';
 import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, createMinorAccount, type KeycastEnv } from './keycast-client';
 import { suspendPubkey, unsuspendPubkey, banPubkey, type SecretStoreSecret } from './nip86';
+import { buildAgeReviewIdentityBlock, buildClaimedParentName, toNpub } from './report-note';
+
+/**
+ * The identity a case captured at creation, as stored on `age_review_cases`.
+ * Every field is optional: capture is best-effort, and an account that had no
+ * profile -- or whose profile was already hidden by enforcement -- yields none.
+ */
+type AgeReviewCaseIdentity = Pick<
+  Partial<AgeReviewCase>,
+  'account_name' | 'account_nip05' | 'account_vine_username'
+>;
 
 export interface AgeReviewEnv extends BulkModerateEnv, KeycastEnv {
   SLACK_WEBHOOK_URL?: string;
@@ -34,6 +45,10 @@ export interface AgeReviewEnv extends BulkModerateEnv, KeycastEnv {
   // Group to route resolved tickets to (the Trust & Safety queue), instead of
   // assigning the API credential's owner. Numeric Zendesk group id as a string.
   ZENDESK_GROUP_ID?: string;
+  // Identity domain used to derive an account's NIP-05 from its username on the
+  // operator-created path. Environment-specific: staging accounts do not live
+  // under the production domain.
+  NIP05_DOMAIN?: string;
 }
 
 interface ZendeskClientConfig {
@@ -120,29 +135,84 @@ export async function getActiveAgeReviewCase(
 
 /**
  * Refuse-and-route guard shared by the interactive enforcement endpoints
- * (relay-rpc suspend/unsuspend, bulk-moderate enqueue): if the pubkey has an
- * open (non-terminal) age-review case, returns a structured 409
+ * (relay-rpc suspend/unsuspend/unban, bulk-moderate enqueue): if the pubkey has
+ * an open (non-terminal) age-review case, returns a structured 409
  * (`age_review_active` + caseId/state) that the frontend turns into a redirect
  * to the case; returns null when nothing blocks the action.
  *
- * Fails open: the guard is a safety net (the report hand-off is the primary
- * path), so a transient D1 error must not block core moderation — log and
- * proceed. A malformed pubkey also skips the guard (no point querying; the
- * caller's own validation produces the 400). Age-review's own enforcement
- * calls the nip86 helpers / runBulkModeration directly, so it never hits the
- * guarded endpoints.
+ * Fails open by default: the guard is a safety net (the report hand-off is the
+ * primary path), so a transient D1 error must not block core moderation — log
+ * and proceed. Age-review's own enforcement calls the nip86 helpers /
+ * runBulkModeration directly, so it never hits the guarded endpoints.
+ *
+ * `failClosed` inverts that for the REVERSAL direction, where the default is
+ * the wrong trade. Failing open on a suspend over-enforces: visible, and
+ * undone by the moderator who did it. Failing open on an unsuspend or unban
+ * silently LIFTS a minor-safety hold while reporting success, so nobody learns
+ * the check never ran — and those calls now arrive from automation rather than
+ * a human who might notice. The cost is that a real outage blocks reversals
+ * entirely, which is accepted: an outage long enough to matter is not tenable
+ * and has to be fixed rather than papered over. `banpubkey` is unguarded, so
+ * severe enforcement still works throughout.
+ *
+ * Under `failClosed` there are two ways the check "cannot happen", and both
+ * refuse identically: no DB binding, and a thrown lookup. A non-canonical pubkey
+ * is NOT one of them: no case can be keyed to a value the lookup could never
+ * match, so there is nothing to refuse on its behalf.
+ *
+ * `failClosed` is opt-in PER CALL SITE, not a property of the guard. Only
+ * relay-rpc's reversals pass it today; bulk-moderate deliberately does not, for
+ * reasons recorded at its call site in index.ts.
  */
 export async function ageReviewActiveGuard(
   pubkey: string,
   env: AgeReviewEnv,
   corsHeaders: Record<string, string>,
   error: string,
+  opts: { failClosed?: boolean } = {},
 ): Promise<Response | null> {
-  if (!/^[0-9a-f]{64}$/.test(pubkey) || !env.DB) return null;
+  // 503, not 409: "could not check" is a different answer from "there is a
+  // case", and 5xx is the retryable class. No caseId/state, since neither is
+  // known.
+  const cannotCheck = () => json({
+    success: false,
+    error: 'Could not check age-review status. Try again.',
+    code: 'age_review_check_failed',
+  }, 503, corsHeaders);
+
+  // A non-canonical pubkey proceeds in both modes, and that is not the same
+  // omission the earlier version made. It skipped on the stated grounds that the
+  // caller validates, which no caller did. The reason now is that there is nothing
+  // here to protect: a case is keyed to a real lowercase pubkey, so a value that
+  // cannot match one cannot be hiding an open case either. Refusing would only
+  // block the reverse direction, which deliberately carries such values so a row
+  // banned with one stays removable (see handleRelayRpc).
+  //
+  // The enforce direction does not reach this: handleRelayRpc answers those with a
+  // 400 first, since a ban on a value the relay cannot match enforces on nobody.
+  if (!/^[0-9a-f]{64}$/.test(pubkey)) return null;
+
+  // A missing binding is the check not happening, so it refuses under
+  // failClosed exactly as a thrown lookup does. Handling only the throw would
+  // leave the PERSISTENT failure lifting holds while the transient one refused,
+  // which is the wrong way round. Every deployment binds DB (wrangler prod,
+  // staging and local), so this costs real traffic nothing.
+  if (!env.DB) {
+    if (opts.failClosed) {
+      console.error('[ageReviewActiveGuard] no DB binding; refusing (fail-closed)');
+      return cannotCheck();
+    }
+    return null;
+  }
+
   let activeCase: AgeReviewCase | null = null;
   try {
     activeCase = await getActiveAgeReviewCase(pubkey, env);
   } catch (err) {
+    if (opts.failClosed) {
+      console.error('[ageReviewActiveGuard] lookup failed; refusing (fail-closed):', err);
+      return cannotCheck();
+    }
     console.error('[ageReviewActiveGuard] lookup failed; proceeding:', err);
   }
   if (!activeCase) return null;
@@ -349,6 +419,7 @@ export async function handleUpdateAgeReviewCase(
         (updated?.suspected_age_band ?? existing.suspected_age_band) as AgeBand,
         updated?.deadline_at ?? existing.deadline_at,
         env,
+        updated ?? existing,
       );
       if (updated && zendeskTicketId) {
         updated = { ...updated, zendesk_ticket_id: zendeskTicketId };
@@ -543,11 +614,50 @@ export async function handleCreateMinorAccount(
 
   const caseId = crypto.randomUUID();
   try {
+    // Identity is known up front on this path -- the operator supplied it -- so
+    // there is nothing to look up. Storing it keeps this case as identifiable as
+    // a report-created one, where the name has to be fetched before enforcement
+    // hides the profile.
+    //
+    // account_name prefers display_name, so the username would be dropped
+    // entirely whenever one is supplied. It is stored twice over, because the
+    // two places it can go fail in different environments:
+    //
+    //  - account_nip05 records the address the account is expected to claim.
+    //    Divine's NIP-05 is the subdomain form `_@<username>.<domain>`, so the
+    //    username is recoverable from it. Derived from what the operator gave
+    //    us, not read back from Keycast -- the create-minor-account response
+    //    carries no nip05. No fallback domain on purpose: staging accounts do
+    //    not live under the production identity domain, and guessing one would
+    //    write a wrong address into a record agents read to decide who a case
+    //    is about. Unconfigured stores nothing rather than something false.
+    //
+    //  - account_vine_username holds the username itself, unconditionally.
+    //    Without this, an unconfigured NIP05_DOMAIN means a case created with a
+    //    display_name keeps no trace of the username at all -- and because this
+    //    path stamps identity_captured_at, the backfill's `IS NULL` keying never
+    //    revisits the row, so the loss is permanent. That is the exact defect
+    //    the nip05 derivation was added to close; it just has to survive in the
+    //    environment shipped without the config too. The column is unused on
+    //    this path and resolveHandle already falls back to it, so it costs
+    //    nothing and reads correctly wherever the block is rendered.
+    const nip05 = env.NIP05_DOMAIN ? `_@${username}.${env.NIP05_DOMAIN}` : null;
     await env.DB.prepare(`
       INSERT INTO age_review_cases
-      (id, pubkey, suspected_age_band, state, allowed_resolution, resolution_note, created_via, claim_link_url, claim_link_expires_at, zendesk_ticket_id)
-      VALUES (?, ?, 'age_13_15', 'cleared', 'parent_video_or_email', 'Approved via parental consent (minor onboarding)', 'minor_onboarding', ?, ?, ?)
-    `).bind(caseId, result.pubkey, result.claim_url, result.expires_at ?? null, body.zendesk_ticket_id ?? null).run();
+      (id, pubkey, suspected_age_band, state, allowed_resolution, resolution_note, created_via, claim_link_url, claim_link_expires_at, zendesk_ticket_id,
+       account_name, account_nip05, account_vine_username, identity_captured_at)
+      VALUES (?, ?, 'age_13_15', 'cleared', 'parent_video_or_email', 'Approved via parental consent (minor onboarding)', 'minor_onboarding', ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      caseId,
+      result.pubkey,
+      result.claim_url,
+      result.expires_at ?? null,
+      body.zendesk_ticket_id ?? null,
+      displayName ?? username,
+      nip05,
+      username,
+      new Date().toISOString(),
+    ).run();
   } catch (err) {
     console.error(`[age-review] D1 audit record failed for minor account: pubkey=${result.pubkey}, case=${caseId}`, err);
     return json({
@@ -721,13 +831,14 @@ export async function handleParentContact(
         body.email,
         activeCase.suspected_age_band as AgeBand,
         env,
+        activeCase,
       );
     } catch (error) {
       console.error('[age-review] Failed to update Zendesk ticket with parent contact:', error);
     }
   } else {
     try {
-      await createAgeReviewTicket(caseId, body.email, activeCase.suspected_age_band as AgeBand, activeCase.deadline_at, env);
+      await createAgeReviewTicket(caseId, body.email, activeCase.suspected_age_band as AgeBand, activeCase.deadline_at, env, activeCase);
     } catch (error) {
       console.error('[age-review] Failed to create Zendesk ticket:', error);
     }
@@ -756,20 +867,243 @@ async function getZendeskClientConfig(env: AgeReviewEnv): Promise<ZendeskClientC
   };
 }
 
-function buildParentOutreachBody(ageBand: AgeBand): string {
+/**
+ * Escape text for interpolation into the HTML outreach body. The display name
+ * and NIP-05 come from the account's own kind-0 and are stored raw, so every
+ * render surface has to neutralize them itself.
+ */
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/** The same 80 characters `sanitizeInline` allows a rendered handle. */
+const IDENTITY_MAX_LEN = 80;
+
+/**
+ * Strip what has no business in a rendered identity and truncate to the cap.
+ *
+ * Control characters and zero-width joiners are removed rather than escaped:
+ * they cannot help a parent recognise an account, and a zero-width character
+ * inside a hostname is a way to hide one from `looksLinkish` while a mail
+ * client's own parser still sees the link.
+ *
+ * Truncation is by code point, not code unit -- emoji in display names are
+ * ordinary, and slicing one in half emits a lone surrogate into the mail body.
+ * The ellipsis matches `sanitizeInline`, so a cut name is not presented to a
+ * parent as if it were whole.
+ */
+function cleanIdentityText(value: string): string {
+  // Control characters, invisible/format characters, and unpaired surrogates,
+  // tested by Unicode property rather than an enumerated list: the set that can
+  // hide a hostname from `looksLinkish` while a mail client still parses one is
+  // far wider than the well-known zero-width characters, and includes the bidi
+  // controls. Property escapes do not trip no-control-regex, so noInlineConfig
+  // is not a constraint here.
+  const stripped = Array.from(value)
+    .filter((ch) => !/[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/u.test(ch))
+    .join('')
+    .trim();
+  const points = Array.from(stripped);
+  return points.length > IDENTITY_MAX_LEN
+    ? `${points.slice(0, IDENTITY_MAX_LEN).join('')}…`
+    : stripped;
+}
+
+/**
+ * True when a display name is trying to look like a link.
+ *
+ * Escaping stops markup, not linkification: mail clients auto-link bare URLs in
+ * text, and `report-note.ts` wraps these same values in a code span for exactly
+ * this reason. That defence does not carry over here, because this render goes
+ * out as mail rather than into an agent-facing note.
+ *
+ * The threat is specific. The account under review picks its own kind-0 display
+ * name AND supplies the address this mail is sent to, so a name of
+ * "verify at http://not-divine.example/claim" would have Divine Trust & Safety
+ * deliver an attacker's link, under Divine's branding, to an address the
+ * attacker chose. Dropping the row is the safe failure: the parent still gets
+ * the username and the ID.
+ *
+ * Compared on a normalized copy, because a linkifier resolves hostnames under
+ * UTS-46: U+3002, U+FF0E and U+FF61 all map to `.`, so `evil。example` is a
+ * hostname to the client and was not to an ASCII-only check. NFKC alone does
+ * not cover it -- it folds U+FF0E and leaves the other two -- so they are
+ * replaced outright.
+ *
+ * Deliberately blunt. A dotted token with a letter suffix is enough to trip it,
+ * so a legitimate name like "Anna.Marie" is dropped too. Losing a display name
+ * costs recognisability; shipping a live link costs more.
+ */
+function looksLinkish(value: string): boolean {
+  const normalized = value.normalize('NFKC').replace(/[。．｡]/g, '.');
+  return (
+    /:\/\/|\bwww\./iu.test(normalized) ||
+    /[\p{L}\p{N}-]+\.[\p{L}]{2,}/u.test(normalized) ||
+    // A bare IPv4 host has no letters after the final dot, so the rule above
+    // does not see it. Narrower than widening that suffix class, which would
+    // also drop ordinary names containing a decimal.
+    /\b\d{1,3}(\.\d{1,3}){3}\b/.test(normalized)
+  );
+}
+
+/**
+ * The display form of a NIP-05, or undefined when we will not vouch for it.
+ *
+ * Two gates. Shape first: anything carrying a scheme, a path, whitespace or a
+ * second `@` is not a NIP-05.
+ *
+ * Then the issuing domain, which is the gate that matters. A NIP-05 is a bare
+ * hostname by construction, so `looksLinkish` cannot be applied to it -- it
+ * would reject every legitimate value. That leaves the same hole this row was
+ * supposed to be exempt from: `account_nip05` is unverified kind-0 the account
+ * chose, so `_@claim-your-teen-account.example` would render as a clean, highly
+ * linkifiable hostname, mailed under Divine branding to an address the same
+ * account supplied. We can only vouch for domains we issue, so anything else is
+ * dropped.
+ *
+ * Unset `NIP05_DOMAIN` therefore renders no username at all. That is the same
+ * call #222 made for the capture side: staging accounts come from a different
+ * Keycast instance, and no username beats a wrong or unvouched one.
+ *
+ * NIP-05 calls `_@domain` the "root" identifier and says to display it as the
+ * bare domain (nips/05.md, "Showing just the domain as an identifier"). Divine
+ * issues `_@<username>.<NIP05_DOMAIN>`, so the prefix is noise to a parent. Any
+ * other local part is left intact unless it is itself hostname-shaped: the host
+ * gate does not see the local part, so a `looksLinkish` one is dropped below.
+ */
+function displayNip05(nip05: string, issuingDomain?: string): string | undefined {
+  if (!issuingDomain) return undefined;
+  if (!/^[a-z0-9._-]+@[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(nip05)) return undefined;
+
+  const host = nip05.split('@').pop() ?? '';
+  const domain = issuingDomain.toLowerCase();
+  const lowerHost = host.toLowerCase();
+  if (lowerHost !== domain && !lowerHost.endsWith(`.${domain}`)) return undefined;
+
+  // The gate above constrains only the host. The local part is attacker-chosen
+  // kind-0 and NIP-05 permits `.` there, so it can be hostname-shaped
+  // (`www.evil.example@divine.video`) even when the host is ours. Drop it for the
+  // same reason looksLinkish drops a display name: a mail client may parse a link
+  // out of text delivered under Divine branding. The root form `_@…` and a plain
+  // local part like `alice` survive; only a dotted, hostname-shaped one is refused.
+  if (looksLinkish(nip05.split('@')[0] ?? '')) return undefined;
+
+  const display = nip05.startsWith('_@') ? nip05.slice(2) : nip05;
+  return display.length > 0 && display.length <= IDENTITY_MAX_LEN ? display : undefined;
+}
+
+/**
+ * Tells the parent which account this is about.
+ *
+ * A narrower set than agents get: the contact-notes block also carries the case
+ * deeplink, the band, and the claimed-and-unverified qualifier. A parent needs
+ * only enough to recognise their child's account.
+ *
+ * `account_vine_username` is captured and is the agent block's third fallback,
+ * but is deliberately not shown here. It may have informed what became the
+ * Divine username, but by the time a case exists the original Vine name that
+ * happened to be carried over is not what a parent would recognise.
+ *
+ * Every row is conditional except the npub. Capture is best effort -- an account
+ * whose profile was already hidden by enforcement yields no name and no NIP-05
+ * -- but the pubkey is on the case row and always resolves.
+ */
+function buildAccountIdentityHtml(
+  identity: AgeReviewCaseIdentity & { pubkey?: string },
+  issuingDomain?: string,
+): string {
+  const rows: string[] = [];
+
+  // Cleaned and capped before the link check, never after: the check has to run
+  // on exactly the string that gets rendered, or truncation could cut a URL out
+  // of view of the check while leaving one in the mail.
+  const name = identity.account_name ? cleanIdentityText(identity.account_name) : undefined;
+  const nip05 = identity.account_nip05
+    ? displayNip05(identity.account_nip05.trim(), issuingDomain)
+    : undefined;
+
+  if (name && !looksLinkish(name)) rows.push(`Display name: ${escapeHtml(name)}`);
+  // The escape here cannot fire: displayNip05's charset already excludes every
+  // HTML-special character, so a markup-bearing value is dropped before it
+  // arrives. Kept so the row does not become the one that forgot, if that
+  // validation is ever loosened. Deliberately not covered by a test -- there is
+  // no input that would reach it.
+  if (nip05) rows.push(`Username: ${escapeHtml(nip05)}`);
+  if (identity.pubkey) rows.push(`ID: ${escapeHtml(toNpub(identity.pubkey))}`);
+  if (rows.length === 0) return '';
+
+  return `<p>The account under review:<br>\n${rows.join('<br>\n')}</p>`;
+}
+
+/**
+ * The first message a parent or guardian receives. It leads with what we need
+ * from them rather than asking them to confirm who they are: a reply that only
+ * says "yes" tells us nothing, and anyone who is not the parent cannot produce
+ * the video regardless.
+ *
+ * One template covers both bands this path can reach. It carries no age-band
+ * label because the same message is sent to a 13-15 case and to someone
+ * claiming to be 16 or older, and "possibly under 16" is true of both.
+ *
+ * It names the account. That is a deliberate reversal of the position #222 took
+ * for this message, taken by the T&S lead: a parent cannot act on a review
+ * without knowing which account it concerns. The risk #222 named is real and
+ * unchanged -- the address is supplied by the account under review and is
+ * unverified until someone replies from it -- so the requester name stays
+ * address-only and this is the only surface where the handle reaches an
+ * unverified recipient.
+ *
+ * Sent as HTML: Zendesk renders `html_body` through the account's mail template
+ * and derives the plain-text alternative itself.
+ */
+export function buildParentOutreachBody(
+  identity: AgeReviewCaseIdentity & { pubkey?: string } = {},
+  issuingDomain?: string,
+): string {
+  const identityHtml = buildAccountIdentityHtml(identity, issuingDomain);
+
   return [
-    'Hello,',
+    '<p>Hello,</p>',
     '',
-    'We received a report that an account on Divine may belong to a minor in the ' +
-      `${BAND_DISPLAY[ageBand]} age range. As part of our safety process, we need a ` +
-      'parent or guardian to verify they are aware of and approve this account.',
+    '<p>An account on Divine was flagged as possibly belonging to someone under 16. ' +
+      'Where permitted by law, teens aged 13 to 15 can use Divine through Divine Greenlight, ' +
+      'with a parent or guardian who is aware and involved.</p>',
+    ...(identityHtml ? ['', identityHtml] : []),
     '',
-    'Please reply to this email to confirm you are the parent or legal guardian of the account holder.',
+    '<p>To keep the account open, reply to this email with a short private video that shows:</p>',
     '',
-    'If you have questions, you can reply directly to this email or contact us at contact@divine.video.',
+    '<ul>',
+    '  <li>the teen</li>',
+    '  <li>a parent or guardian speaking on camera</li>',
+    '  <li>that the teen is between 13 and 15</li>',
+    '  <li>that the teen has permission to use Divine</li>',
+    '  <li>that the parent or guardian knows about the account and will supervise its use</li>',
+    '  <li>the country or countries where you live</li>',
+    '</ul>',
     '',
-    'Thank you,',
-    'Divine Trust & Safety',
+    '<p>You can attach the video or include a private link to it.</p>',
+    '',
+    '<p><strong>Please do NOT send government IDs, payment details, school or medical records, ' +
+      'or passwords.</strong> We only need the short video.</p>',
+    '',
+    '<p>Please reply within 15 days. If we do not hear from you, your child&#39;s account will be deleted.</p>',
+    '',
+    '<p>If you are the account holder and you are 16 or older, reply and tell us that. ' +
+      'No video needed, and we will take another look.</p>',
+    '',
+    '<p>If you have questions about this request, or want tips on supporting your family&#39;s ' +
+      'healthy use of social media, visit our <a href="https://divine.video/family">For Families page</a>. ' +
+      'Read <a href="https://divine.video/kids">how accounts work for kids on Divine</a>.</p>',
+    '',
+    '<p>You can also reply directly to this email with any questions.</p>',
+    '',
+    '<p>Thank you,<br>',
+    'Divine Trust &amp; Safety</p>',
   ].join('\n');
 }
 
@@ -792,12 +1126,123 @@ function buildAgeReviewCustomFields(
   return customFields;
 }
 
+// Bracketed on purpose: sanitizeInline strips [ and ], so no account-chosen
+// name can reproduce these markers and forge a block boundary in the notes.
+const CONTACT_NOTES_START = '--- [Divine age review] ---';
+const CONTACT_NOTES_END = '--- [end Divine age review] ---';
+
+/**
+ * Resolve a ticket requester to a contact it is safe to write case data onto.
+ *
+ * The parent address is supplied by the teen under review and is validated
+ * only as email-shaped. Zendesk resolves `requester: {email}` to an *existing*
+ * user when one matches, and permits agents to be requesters -- so naming a
+ * Divine staff address makes that staff member the requester of the case
+ * ticket. A Zendesk display name is global, so renaming them would put a
+ * minor's handle in the header of every mail they later send, on any ticket.
+ *
+ * A non-null `parent_contact_email` on the case does not establish this: that
+ * column is written before the Zendesk call, and the call's failure is
+ * swallowed, so the row can claim a parent while the requester is still the
+ * admin who opened the internal ticket.
+ *
+ * Returns null when the contact is anyone other than the end user at exactly
+ * the address we were given. Callers must not write on null.
+ */
+async function resolveVerifiedParentContact(
+  requesterId: number,
+  expectedEmail: string,
+  zendesk: ZendeskClientConfig,
+): Promise<{ notes: string } | null> {
+  const res = await fetch(`${zendesk.baseUrl}/users/${requesterId}`, {
+    headers: { 'Authorization': `Basic ${zendesk.auth}`, 'Content-Type': 'application/json' },
+  });
+  if (!res.ok) throw new Error(`Zendesk contact read failed: ${res.status}`);
+
+  const user = (await res.json() as {
+    user?: { role?: string; email?: string; notes?: string | null };
+  }).user;
+  if (!user) return null;
+
+  if (user.role !== 'end-user') {
+    console.warn(`[age-review] Refusing to write case data to a non-end-user contact (role=${user.role})`);
+    return null;
+  }
+  if ((user.email ?? '').toLowerCase() !== expectedEmail.toLowerCase()) {
+    console.warn('[age-review] Refusing to write case data: requester is not the parent address on the case');
+    return null;
+  }
+  return { notes: user.notes ?? '' };
+}
+
+/**
+ * Splice our block into a contact's existing `notes`, replacing only a block we
+ * wrote before.
+ *
+ * `notes` is a single free-text field a human writes in too, and the bottom of
+ * it is exactly where an agent adds a line. So both sides are preserved: text
+ * before our block and text after it. Only the region between our own markers
+ * is replaced, which keeps repeated attaches -- a re-submitted parent address,
+ * or two cases sharing one address -- from stacking copies up.
+ */
+export function composeContactNotes(current: string, block: string): string {
+  const start = current.indexOf(CONTACT_NOTES_START);
+  const head = (start === -1 ? current : current.slice(0, start)).trimEnd();
+
+  let tail = '';
+  if (start !== -1) {
+    const endIdx = current.indexOf(CONTACT_NOTES_END, start);
+    tail = endIdx === -1
+      // No end marker, so we cannot tell where our block stopped and an agent's
+      // text began. Keep the remainder: this field belongs to the agent, and a
+      // visible duplicate is something they can fix, whereas a silent deletion
+      // is not something they can even notice.
+      ? current.slice(start + CONTACT_NOTES_START.length).trimStart()
+      : current.slice(endIdx + CONTACT_NOTES_END.length).trimStart();
+  }
+
+  return [head, CONTACT_NOTES_START, block, CONTACT_NOTES_END, tail]
+    .filter((part) => part !== '')
+    .join('\n');
+}
+
+/**
+ * Append the identity block to a Zendesk contact's `notes`, which is where an
+ * agent sees who a requester is without opening the case.
+ *
+ * Writes nothing unless the requester verifies as the end user at the parent
+ * address on the case -- see resolveVerifiedParentContact for why the case row
+ * alone is not evidence of that.
+ *
+ * Best-effort by contract: the caller's outreach must not fail because
+ * enrichment did.
+ */
+async function writeParentContactNotes(
+  requesterId: number,
+  parentEmail: string,
+  block: string,
+  zendesk: ZendeskClientConfig,
+): Promise<void> {
+  const contact = await resolveVerifiedParentContact(requesterId, parentEmail, zendesk);
+  if (!contact) return;
+
+  const res = await fetch(`${zendesk.baseUrl}/users/${requesterId}`, {
+    method: 'PUT',
+    headers: { 'Authorization': `Basic ${zendesk.auth}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ user: { notes: composeContactNotes(contact.notes, block) } }),
+  });
+  if (!res.ok) {
+    throw new Error(`Zendesk contact write failed: ${res.status}`);
+  }
+}
+
 async function createAgeReviewTicket(
   caseId: string,
   parentEmail: string,
   ageBand: AgeBand,
   deadlineAt: string | null,
   env: AgeReviewEnv,
+  identity: AgeReviewCaseIdentity & { pubkey?: string } = {},
 ): Promise<void> {
   const zendesk = await getZendeskClientConfig(env);
   if (!zendesk) {
@@ -807,7 +1252,7 @@ async function createAgeReviewTicket(
   if (!env.DB) return;
 
   const subject = `Age review: parental verification needed [${caseId}]`;
-  const outreachBody = buildParentOutreachBody(ageBand);
+  const outreachBody = buildParentOutreachBody(identity, env.NIP05_DOMAIN);
   const customFields = buildAgeReviewCustomFields(env, deadlineAt);
 
   const res = await fetch(`${zendesk.baseUrl}/tickets`, {
@@ -819,8 +1264,12 @@ async function createAgeReviewTicket(
     body: JSON.stringify({
       ticket: {
         subject,
-        comment: { body: outreachBody, public: true },
-        requester: { email: parentEmail, name: 'Parent/Guardian' },
+        comment: { html_body: outreachBody, public: true },
+        // The address alone. Zendesk renders this into the To: header of every
+        // outbound mail, and this ticket's first message goes to an address the
+        // teen supplied that nobody has verified -- so it must not carry the
+        // account's handle. It gains one only once the parent replies.
+        requester: { email: parentEmail, name: parentEmail },
         tags: ['age-review', `age-band-${ageBand}`],
         priority: 'high',
         custom_fields: customFields.length > 0 ? customFields : undefined,
@@ -833,12 +1282,78 @@ async function createAgeReviewTicket(
     throw new Error(`Zendesk ticket creation failed: ${res.status} - ${errorText}`);
   }
 
-  const data = await res.json() as { ticket?: { id: number } };
+  const data = await res.json() as { ticket?: { id: number; requester_id?: number } };
   if (data.ticket?.id) {
     await env.DB.prepare(
       'UPDATE age_review_cases SET zendesk_ticket_id = ? WHERE id = ?'
     ).bind(data.ticket.id, caseId).run();
     console.log(`[age-review] Created Zendesk ticket #${data.ticket.id} for case ${caseId}`);
+  }
+
+  await attachIdentityToParentContact({
+    requesterId: data.ticket?.requester_id,
+    parentEmail,
+    caseId,
+    ageBand,
+    deadlineAt,
+    originTicketId: data.ticket?.id ?? null,
+    identity,
+    zendesk,
+  });
+}
+
+/**
+ * Put the case identity on the parent's contact record. Agent-only surface.
+ *
+ * Named arguments rather than positional: this takes several strings, numbers
+ * and nullables of the same shape (case id, ticket id, requester id, email),
+ * and a silent swap between them would write one case's data onto another
+ * case's contact.
+ *
+ * Wrapped whole and swallowed: the parent's outreach is the critical path and
+ * must survive a Zendesk contact API failure.
+ */
+async function attachIdentityToParentContact(args: {
+  requesterId: number | undefined;
+  parentEmail: string;
+  caseId: string;
+  ageBand: AgeBand;
+  deadlineAt: string | null;
+  originTicketId: number | null;
+  identity: AgeReviewCaseIdentity & { pubkey?: string };
+  zendesk: ZendeskClientConfig;
+}): Promise<void> {
+  const { requesterId, parentEmail, caseId, ageBand, deadlineAt, originTicketId, identity, zendesk } = args;
+
+  // Without a requester id there is no contact to write to; without a pubkey or
+  // case id the block would render a broken deeplink and identify nothing.
+  //
+  // The requester-id and pubkey clauses are reachable and tested. The caseId and
+  // parentEmail clauses are defence-in-depth against a future caller and are
+  // unreachable today: both call sites take caseId from a validated route param
+  // or the case row's own id, and parentEmail is rejected as empty by
+  // handleParentContact before either path runs. Kept because this function
+  // writes a minor's identity to an external system, and cheap; deliberately
+  // left untested rather than reached through a contorted fixture.
+  if (!requesterId || !identity.pubkey || !caseId || !parentEmail) return;
+  try {
+    await writeParentContactNotes(
+      requesterId,
+      parentEmail,
+      buildAgeReviewIdentityBlock({
+        caseId,
+        pubkey: identity.pubkey,
+        ageBand: BAND_DISPLAY[ageBand],
+        accountName: identity.account_name,
+        accountNip05: identity.account_nip05,
+        accountVineUsername: identity.account_vine_username,
+        originTicketId,
+        deadlineAt: deadlineAt ? deadlineAt.split('T')[0] : null,
+      }),
+      zendesk,
+    );
+  } catch (error) {
+    console.error('[age-review] Failed to write parent contact notes:', error);
   }
 }
 
@@ -847,11 +1362,12 @@ async function updateTicketWithParentContact(
   parentEmail: string,
   ageBand: AgeBand,
   env: AgeReviewEnv,
+  identity: AgeReviewCaseIdentity & { pubkey?: string; id?: string; deadline_at?: string | null } = {},
 ): Promise<void> {
   const zendesk = await getZendeskClientConfig(env);
   if (!zendesk) return;
 
-  const outreachBody = buildParentOutreachBody(ageBand);
+  const outreachBody = buildParentOutreachBody(identity, env.NIP05_DOMAIN);
 
   const res = await fetch(`${zendesk.baseUrl}/tickets/${ticketId}`, {
     method: 'PUT',
@@ -861,8 +1377,11 @@ async function updateTicketWithParentContact(
     },
     body: JSON.stringify({
       ticket: {
-        requester: { email: parentEmail, name: 'Parent/Guardian' },
-        comment: { body: outreachBody, public: true },
+        // Address only -- see the note on the creation path. This one is
+        // riskier still: it reassigns the requester on a ticket that already
+        // exists, so the name lands on a contact an agent may already see.
+        requester: { email: parentEmail, name: parentEmail },
+        comment: { html_body: outreachBody, public: true },
       },
     }),
   });
@@ -871,7 +1390,21 @@ async function updateTicketWithParentContact(
     const errorText = await res.text();
     throw new Error(`Zendesk ticket update failed: ${res.status} - ${errorText}`);
   }
-  console.log(`[age-review] Updated Zendesk ticket #${ticketId} with parent contact ${parentEmail}`);
+  // The ticket id is the useful identifier here. The address itself is a
+  // parent's personal data and does not belong in worker logs.
+  console.log(`[age-review] Updated Zendesk ticket #${ticketId} with parent contact`);
+
+  const data = await res.json().catch(() => null) as { ticket?: { requester_id?: number } } | null;
+  await attachIdentityToParentContact({
+    requesterId: data?.ticket?.requester_id,
+    parentEmail,
+    caseId: identity.id ?? '',
+    ageBand,
+    deadlineAt: identity.deadline_at ?? null,
+    originTicketId: ticketId,
+    identity,
+    zendesk,
+  });
 }
 
 function buildDeadlineCustomField(
@@ -891,6 +1424,7 @@ async function createAgeReviewInternalTicket(
   ageBand: AgeBand,
   deadlineAt: string | null,
   env: AgeReviewEnv,
+  identity: AgeReviewCaseIdentity = {},
 ): Promise<number | null> {
   const zendesk = await getZendeskClientConfig(env);
   if (!zendesk) {
@@ -900,10 +1434,19 @@ async function createAgeReviewInternalTicket(
   if (!env.DB) return null;
 
   const subject = `Age review: ${BAND_DISPLAY[ageBand]} account restricted [${caseId}]`;
+  // Agent-only. The identity block leads so the first thing a moderator sees is
+  // which account this is and a link that opens the case; the pubkey alone told
+  // them neither.
   const note = [
-    `Account \`${pubkey}\` restricted for age review.`,
-    `Suspected age band: ${BAND_DISPLAY[ageBand]}`,
-    deadlineAt ? `Deadline: ${deadlineAt.split('T')[0]}` : 'No deadline set',
+    buildAgeReviewIdentityBlock({
+      caseId,
+      pubkey,
+      ageBand: BAND_DISPLAY[ageBand],
+      accountName: identity.account_name,
+      accountNip05: identity.account_nip05,
+      accountVineUsername: identity.account_vine_username,
+      deadlineAt: deadlineAt ? deadlineAt.split('T')[0] : null,
+    }),
     '',
     'This ticket was created automatically when a moderator restricted the account.',
     'It will be updated if a parent/guardian email is provided or the case is resolved.',
@@ -1009,6 +1552,69 @@ export async function syncAgeReviewTicketResolution(
 }
 
 // Caller (index.ts) must verify HMAC signature before dispatching here.
+/**
+ * Rename the parent's Zendesk contact to carry the account handle, once they
+ * have replied.
+ *
+ * Staged deliberately. Zendesk renders the stored contact name into the To:
+ * header of outbound mail, and the address is supplied unverified by the teen
+ * under review, so naming the contact after the account any earlier would
+ * disclose a real handle to whoever holds a mistyped address. A reply proves
+ * the address is live and held by someone engaging with the review.
+ *
+ * The contact is verified before the write, not merely assumed from the case
+ * row -- see resolveVerifiedParentContact. A Zendesk display name is global,
+ * so renaming the wrong user would put a minor's handle in the header of every
+ * mail they subsequently send.
+ *
+ * Best-effort by contract -- the caller has already advanced the case, and a
+ * Zendesk failure must not change what the webhook reports.
+ */
+async function upgradeParentContactName(
+  ticketId: number,
+  caseRow: AgeReviewCase,
+  env: AgeReviewEnv,
+): Promise<void> {
+  if (!caseRow.parent_contact_email) return;
+
+  const name = buildClaimedParentName({
+    accountName: caseRow.account_name,
+    accountNip05: caseRow.account_nip05,
+    accountVineUsername: caseRow.account_vine_username,
+  });
+  if (!name) return;
+
+  try {
+    // Credential resolution is inside the try on purpose: a Secrets Store
+    // binding can throw on .get(), and that must degrade like any other
+    // enrichment failure rather than escaping this function.
+    const zendesk = await getZendeskClientConfig(env);
+    if (!zendesk) return;
+
+    const headers = {
+      'Authorization': `Basic ${zendesk.auth}`,
+      'Content-Type': 'application/json',
+    };
+
+    const ticketRes = await fetch(`${zendesk.baseUrl}/tickets/${ticketId}`, { headers });
+    if (!ticketRes.ok) throw new Error(`Zendesk ticket read failed: ${ticketRes.status}`);
+    const requesterId = (await ticketRes.json() as { ticket?: { requester_id?: number } }).ticket?.requester_id;
+    if (!requesterId) return;
+
+    if (!await resolveVerifiedParentContact(requesterId, caseRow.parent_contact_email, zendesk)) return;
+
+    const res = await fetch(`${zendesk.baseUrl}/users/${requesterId}`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ user: { name } }),
+    });
+    if (!res.ok) throw new Error(`Zendesk contact rename failed: ${res.status}`);
+    console.log(`[age-review] Renamed parent contact for ticket #${ticketId}`);
+  } catch (error) {
+    console.error('[age-review] Failed to rename parent contact:', error);
+  }
+}
+
 export async function handleAgeReviewReplyWebhook(
   request: Request,
   env: AgeReviewEnv,
@@ -1038,11 +1644,26 @@ export async function handleAgeReviewReplyWebhook(
   // silently overwriting the fact that the parent replied. On a CAS miss we
   // re-read once and re-apply if the case is still advanceable, so a real parent
   // reply is never dropped just because an unrelated write bumped the row.
+  //
+  // The rename is deliberately NOT tied to this delivery winning the CAS. Its
+  // only real precondition is "the parent has replied", which is what reaching
+  // this handler means at all -- the Zendesk trigger gates on an end-user public
+  // comment on an age-review ticket. Tying it to `changes === 1` made it
+  // one-shot: upgradeParentContactName swallows its errors and the handler
+  // answers 200 regardless, so Zendesk never redelivers, and the next reply
+  // returns early because the case has already advanced. A single transient
+  // Zendesk blip therefore left the Requester column showing a bare email
+  // permanently, with no path back -- and that column is the readable-queue
+  // payoff the staging exists to unlock. Renaming on every delivery is
+  // idempotent, still gated on resolveVerifiedParentContact, and self-heals.
+  let advanced: AgeReviewCase | null = null;
+  let notAdvanceable = false;
   let target: AgeReviewCase | null = activeCase;
   for (let attempt = 0; attempt < 2 && target; attempt++) {
     const allowed = VALID_TRANSITIONS[target.state as AgeReviewState];
     if (!allowed?.includes('submitted_for_review')) {
-      return json({ success: true, message: 'Case not in a state that can advance to submitted_for_review' }, 200, corsHeaders);
+      notAdvanceable = true;
+      break;
     }
 
     const now = new Date();
@@ -1066,12 +1687,25 @@ export async function handleAgeReviewReplyWebhook(
 
     if (result.meta?.changes === 1) {
       console.log(`[age-review] Parent replied on ticket #${ticketId}, case ${target.id} → submitted_for_review (clock paused)`);
-      return json({ success: true, case_id: target.id, new_state: 'submitted_for_review' }, 200, corsHeaders);
+      advanced = target;
+      break;
     }
 
     // CAS miss: the row changed between our read and this write. Re-read and retry.
     target = await env.DB.prepare('SELECT * FROM age_review_cases WHERE id = ?')
       .bind(activeCase.id).first<AgeReviewCase>();
+  }
+
+  // Every exit below goes through this. The identity fields it reads are written
+  // at case creation and never change, so activeCase is as good a source as the
+  // re-read row. Still best-effort: it must not change what the webhook reports.
+  await upgradeParentContactName(ticketId, activeCase, env);
+
+  if (advanced) {
+    return json({ success: true, case_id: advanced.id, new_state: 'submitted_for_review' }, 200, corsHeaders);
+  }
+  if (notAdvanceable) {
+    return json({ success: true, message: 'Case not in a state that can advance to submitted_for_review' }, 200, corsHeaders);
   }
 
   console.log(`[age-review] Parent reply on ticket #${ticketId}, case ${activeCase.id} not advanced (changed concurrently)`);
