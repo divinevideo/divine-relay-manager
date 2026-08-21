@@ -1,7 +1,7 @@
 #!/usr/bin/env npx tsx
 /**
  * Seed test events for moderation testing
- * Usage: npx tsx scripts/seed-test-events.ts
+ * Usage: RELAY_URL=ws://127.0.0.1:4444 npx tsx scripts/seed-test-events.ts
  */
 
 import { getPublicKey, finalizeEvent } from 'nostr-tools/pure';
@@ -9,7 +9,18 @@ import { bytesToHex } from '@noble/hashes/utils';
 import { sha256 } from '@noble/hashes/sha256';
 import WebSocket from 'ws';
 
-const RELAY_URL = process.env.RELAY_URL || 'wss://relay.divine.video';
+// This script publishes fabricated profiles, videos, and kind 1984 reports.
+// It must not default to a live relay: a run with RELAY_URL unset would inject
+// fake content and reports into whatever relay it hit. Require it explicitly.
+const configuredRelayUrl = process.env.RELAY_URL;
+if (!configuredRelayUrl) {
+  console.error(
+    'RELAY_URL is required. This script publishes fabricated events and reports and will not ' +
+    'default to a relay. Example: RELAY_URL=ws://127.0.0.1:4444 npx tsx scripts/seed-test-events.ts',
+  );
+  process.exit(1);
+}
+const RELAY_URL = configuredRelayUrl;
 
 // Generate a deterministic sha256 hash from a seed string
 function makeHash(seed: string): string {
