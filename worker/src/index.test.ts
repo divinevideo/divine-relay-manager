@@ -2064,6 +2064,19 @@ describe('GET /api/decisions truncation reporting (#221)', () => {
     expect(body.oldest_covered).toBe('2026-06-14 00:00:02');
   });
 
+  // Exactly at the cap is the case the extra fetched row exists to get right:
+  // 1000 rows is a COMPLETE window, not a truncated one. The query asks for
+  // DECISIONS_LIMIT + 1 precisely so this can be told apart without a second
+  // COUNT, and a `>=` here would throw the "history only reaches back to..."
+  // banner on every corpus that happens to land on the boundary.
+  it('does not flag truncation on a table of exactly 1000 decisions', async () => {
+    const res = await getDecisions(makeDecisionsEnv(1000));
+    const body = await res.json() as { decisions: unknown[]; truncated: boolean };
+
+    expect(body.decisions).toHaveLength(1000);
+    expect(body.truncated).toBe(false);
+  });
+
   it('reports a null oldest_covered on an empty table rather than truncated', async () => {
     const res = await getDecisions(makeDecisionsEnv(0));
     const body = await res.json() as { decisions: unknown[]; truncated: boolean; oldest_covered: string | null };
