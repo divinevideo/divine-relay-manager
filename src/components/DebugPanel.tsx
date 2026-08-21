@@ -177,7 +177,7 @@ export function DebugPanel() {
       const start = Date.now();
       try {
         const result = await getAllDecisions();
-        return { success: true, data: result, duration: Date.now() - start };
+        return { success: true, data: result.items, duration: Date.now() - start };
       } catch (error) {
         return { success: false, error: String(error), duration: Date.now() - start };
       }

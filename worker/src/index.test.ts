@@ -2008,6 +2008,167 @@ describe('scheduled cron — DB-unavailable alert', () => {
   });
 });
 
+describe('GET /api/decisions truncation reporting (#221)', () => {
+  function makeDecisionsEnv(rowCount: number) {
+    const rows = Array.from({ length: rowCount }, (_, i) => ({
+      id: rowCount - i,
+      target_type: 'pubkey',
+      target_id: 'a'.repeat(64),
+      action: 'dismissed',
+      // Newest first, one second apart, so the oldest returned row is predictable.
+      created_at: `2026-06-${String(14 + Math.floor(i / 100)).padStart(2, '0')} 00:00:${String(i % 60).padStart(2, '0')}`,
+    }));
+    return {
+      ALLOWED_ORIGINS: 'https://app.divine.video',
+      RELAY_URL: 'wss://relay.divine.video',
+      ADMIN_API_KEY: 'test-admin-key',
+      DB: {
+        prepare: (_sql: string) => ({
+          bind: (limit: number) => ({
+            all: async () => ({ results: rows.slice(0, limit) }),
+          }),
+          run: async () => ({}),
+          all: async () => ({ results: [] }),
+        }),
+      },
+    } as never;
+  }
+
+  async function getDecisions(env: never) {
+    return worker.fetch(
+      new Request('https://api.example/api/decisions', {
+        headers: { 'X-Admin-Key': 'test-admin-key' },
+      }),
+      env,
+      ctx
+    );
+  }
+
+  it('reports truncated with the oldest covered row when more than 1000 decisions exist', async () => {
+    const res = await getDecisions(makeDecisionsEnv(1500));
+    const body = await res.json() as { decisions: unknown[]; truncated: boolean; oldest_covered: string | null };
+
+    expect(res.status).toBe(200);
+    expect(body.decisions).toHaveLength(1000);
+    expect(body.truncated).toBe(true);
+    // The 1001st row must not leak out, and oldest_covered describes what DID come back.
+    expect(body.oldest_covered).toBe('2026-06-23 00:00:39');
+  });
+
+  it('reports not truncated when the table fits under the cap', async () => {
+    const res = await getDecisions(makeDecisionsEnv(3));
+    const body = await res.json() as { decisions: unknown[]; truncated: boolean; oldest_covered: string | null };
+
+    expect(body.decisions).toHaveLength(3);
+    expect(body.truncated).toBe(false);
+    expect(body.oldest_covered).toBe('2026-06-14 00:00:02');
+  });
+
+  // Exactly at the cap is the case the extra fetched row exists to get right:
+  // 1000 rows is a COMPLETE window, not a truncated one. The query asks for
+  // DECISIONS_LIMIT + 1 precisely so this can be told apart without a second
+  // COUNT, and a `>=` here would throw the "history only reaches back to..."
+  // banner on every corpus that happens to land on the boundary.
+  it('does not flag truncation on a table of exactly 1000 decisions', async () => {
+    const res = await getDecisions(makeDecisionsEnv(1000));
+    const body = await res.json() as { decisions: unknown[]; truncated: boolean };
+
+    expect(body.decisions).toHaveLength(1000);
+    expect(body.truncated).toBe(false);
+  });
+
+  it('reports a null oldest_covered on an empty table rather than truncated', async () => {
+    const res = await getDecisions(makeDecisionsEnv(0));
+    const body = await res.json() as { decisions: unknown[]; truncated: boolean; oldest_covered: string | null };
+
+    expect(body.decisions).toEqual([]);
+    expect(body.truncated).toBe(false);
+    expect(body.oldest_covered).toBeNull();
+  });
+});
+
+describe('GET /api/resolution-labels truncation reporting (#221)', () => {
+  // Minimal fake relay: accepts the REQ, replays the given events, then EOSE.
+  // queryRelay() wires up via addEventListener (not onmessage/onopen properties),
+  // so the stub must implement that dispatch — matching the pattern already used
+  // for other queryRelay-backed tests in this repo (see human-decision.test.ts,
+  // ReportWatcher.test.ts, zendesk-sync.test.ts). The brief's version used
+  // onmessage/onopen properties, which queryRelay never assigns, so every test
+  // silently hit the outer try/catch and got `success: false` instead of events.
+  function stubRelay(events: Array<{ id: string; created_at: number }>) {
+    class FakeWebSocket {
+      private listeners: Map<string, Array<(event: unknown) => void>> = new Map();
+      constructor(_url: string) {
+        setTimeout(() => this.emit('open', {}), 0);
+      }
+      addEventListener(type: string, listener: (event: unknown) => void) {
+        if (!this.listeners.has(type)) this.listeners.set(type, []);
+        this.listeners.get(type)!.push(listener);
+      }
+      send(raw: string) {
+        const [, subId] = JSON.parse(raw) as [string, string];
+        setTimeout(() => {
+          for (const ev of events) {
+            this.emit('message', { data: JSON.stringify(['EVENT', subId, ev]) });
+          }
+          this.emit('message', { data: JSON.stringify(['EOSE', subId]) });
+        }, 0);
+      }
+      close() { /* no-op */ }
+      private emit(type: string, event: unknown) {
+        for (const handler of this.listeners.get(type) || []) handler(event);
+      }
+    }
+    vi.stubGlobal('WebSocket', FakeWebSocket as never);
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  async function getLabels() {
+    return worker.fetch(
+      new Request('https://api.example/api/resolution-labels', {
+        headers: { 'X-Admin-Key': 'test-admin-key' },
+      }),
+      { ALLOWED_ORIGINS: 'https://app.divine.video', RELAY_URL: 'wss://relay.divine.video', ADMIN_API_KEY: 'test-admin-key' } as never,
+      ctx
+    );
+  }
+
+  it('flags truncation when the relay fills the 500-event limit', async () => {
+    stubRelay(Array.from({ length: 500 }, (_, i) => ({ id: String(i).padStart(64, '0'), created_at: 1_760_000_000 - i })));
+
+    const body = await (await getLabels()).json() as { events: unknown[]; truncated: boolean; oldest_covered: number | null };
+
+    expect(body.events).toHaveLength(500);
+    expect(body.truncated).toBe(true);
+    expect(body.oldest_covered).toBe(1_760_000_000 - 499);
+  });
+
+  it('does not flag truncation below the limit', async () => {
+    stubRelay([
+      { id: 'a'.repeat(64), created_at: 1_760_000_000 },
+      { id: 'b'.repeat(64), created_at: 1_759_000_000 },
+    ]);
+
+    const body = await (await getLabels()).json() as { events: unknown[]; truncated: boolean; oldest_covered: number | null };
+
+    expect(body.truncated).toBe(false);
+    expect(body.oldest_covered).toBe(1_759_000_000);
+  });
+
+  it('reports a null oldest_covered when the relay returns nothing', async () => {
+    stubRelay([]);
+
+    const body = await (await getLabels()).json() as { events: unknown[]; truncated: boolean; oldest_covered: number | null };
+
+    expect(body.events).toEqual([]);
+    expect(body.truncated).toBe(false);
+    expect(body.oldest_covered).toBeNull();
+  });
+});
+
 // A relay whose backing store is slow or dying must not make the moderation
 // queue render as legitimately empty. queryRelay() may only report success on
 // an EOSE-complete result; timeout and close-before-EOSE are errors so the

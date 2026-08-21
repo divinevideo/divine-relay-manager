@@ -603,11 +603,33 @@ export default {
       }
 
       if (path === '/api/resolution-labels' && request.method === 'GET') {
-        const result = await queryRelay({ kinds: [1985], '#L': ['moderation/resolution'], limit: 500 }, env.RELAY_URL);
+        // A label that ages out of this window stops hiding its target, and the
+        // queue then shows handled work as pending with nothing explaining it
+        // (#221). Say when the window is full and how far back it reaches. A
+        // corpus of exactly RESOLUTION_LABEL_LIMIT over-warns by one case, which
+        // is the safe direction to be wrong.
+        const RESOLUTION_LABEL_LIMIT = 500;
+        const result = await queryRelay(
+          { kinds: [1985], '#L': ['moderation/resolution'], limit: RESOLUTION_LABEL_LIMIT },
+          env.RELAY_URL
+        );
         if (!result.success) {
           return jsonResponse({ success: false, error: result.error }, 502, corsHeaders);
         }
-        return jsonResponse({ success: true, events: result.events }, 200, corsHeaders);
+        const events = (result.events || []) as Array<{ created_at?: number }>;
+        const timestamps = events
+          .map((e) => e.created_at)
+          .filter((t): t is number => typeof t === 'number');
+        // Not jsonResponse(): its ApiResponse type is shared across every route,
+        // and truncated/oldest_covered only apply here and on /api/decisions.
+        // proxyJsonResponse produces the same status/content-type/CORS shape
+        // without weakening jsonResponse's type guard.
+        return proxyJsonResponse({
+          success: true,
+          events: result.events,
+          truncated: events.length >= RESOLUTION_LABEL_LIMIT,
+          oldest_covered: timestamps.length > 0 ? Math.min(...timestamps) : null,
+        }, 200, corsHeaders);
       }
 
       // Bulk moderation (server-side iteration for batch operations)
@@ -1696,20 +1718,31 @@ async function handleGetAllDecisions(
 
     await ensureSchemaOnce(env.DB);
 
-    // Get all decisions, ordered by most recent first
+    // The queue subtracts these rows to hide handled work, so a silently capped
+    // read un-hides resolved targets with nothing saying why (#221). Fetch one
+    // past the cap: a full extra row is the truncation signal, and no second
+    // COUNT query is needed.
+    const DECISIONS_LIMIT = 1000;
+
     const decisions = await env.DB.prepare(`
       SELECT * FROM moderation_decisions
       ORDER BY created_at DESC, id DESC
-      LIMIT 1000
-    `).all();
+      LIMIT ?
+    `).bind(DECISIONS_LIMIT + 1).all();
 
-    return new Response(JSON.stringify({
+    const rows = (decisions.results || []) as Array<Record<string, unknown>>;
+    const truncated = rows.length > DECISIONS_LIMIT;
+    const kept = truncated ? rows.slice(0, DECISIONS_LIMIT) : rows;
+    const oldestCovered = kept.length > 0
+      ? (kept[kept.length - 1].created_at as string ?? null)
+      : null;
+
+    return proxyJsonResponse({
       success: true,
-      decisions: decisions.results || [],
-    }), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json', ...corsHeaders },
-    });
+      decisions: kept,
+      truncated,
+      oldest_covered: oldestCovered,
+    }, 200, corsHeaders);
   } catch (error) {
     console.error('Get all decisions error:', error);
     return jsonResponse(

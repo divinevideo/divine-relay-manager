@@ -12,6 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { ResolutionUnavailablePane, ResolutionOverrideWarning, StaleResolutionBanner, TruncatedHistoryBanner } from "@/components/ResolutionStateNotice";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Switch } from "@/components/ui/switch";
@@ -84,6 +85,20 @@ const SORT_OPTIONS: { value: SortOption; label: string }[] = [
 ];
 
 const MEDIUM_PRIORITY_CATEGORIES = ['doxxing_pii', 'malware_scam', 'illegal_goods'];
+
+// Timeout for the four resolution reads that build resolvedTargets, replacing
+// adminApi's 30s API_TIMEOUT_MS for these calls only. On a COLD load there is no
+// error to latch onto yet, so every escape hatch this page offers sits behind the
+// loading skeleton: a source that times out at 30s and then retries strands the
+// moderator on a bare skeleton for a minute with nothing to click, and any of the
+// four can cause it. A 30s bound buys nothing here anyway, being twice the 15s
+// poll interval that would have recovered the read on its own (#221). Scoped to
+// these reads: one-shot moderation actions still want the generous default.
+const RESOLUTION_READ_TIMEOUT_MS = 8_000;
+
+// The four polled reads that build resolvedTargets. Named at module scope so the
+// acknowledged-override state can be keyed by it.
+type ResolutionSourceKey = 'labels' | 'banned-pubkeys' | 'banned-events' | 'decisions';
 
 // Category priority for sorting
 function getCategoryPriority(categories: string[]): number {
@@ -370,6 +385,19 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const [sortBy, setSortBy] = useState<SortOption>('reports');
   const [filterCategory, setFilterCategory] = useState<string | null>(null);
   const [filterTargetType, setFilterTargetType] = useState<'all' | 'event' | 'pubkey'>('all');
+  // The resolution sources a moderator has explicitly chosen to proceed without.
+  // A Set rather than a boolean: the blocked pane names the sources it is
+  // blocking on, and its consent paragraph changes depending on whether
+  // DECISIONS is among them (proceeding then also exposes auto-hidden content).
+  // A blanket boolean silently carried consent given for "Banned posts" over to
+  // a later cold decisions failure, so the moderator never saw that paragraph --
+  // a consent bypass, not just staleness.
+  //
+  // Component-local on purpose: acknowledgements survive polls within this mount
+  // so a moderator is not thrown back to the blocked pane every 15s, and reset
+  // on reload so the safe default reasserts itself.
+  const [acknowledgedBlockedSources, setAcknowledgedBlockedSources] =
+    useState<ReadonlySet<ResolutionSourceKey>>(() => new Set());
   // Check for deep link params to force fresh data fetch
   const hasDeepLinkParams = !!(searchParams.get('event') || searchParams.get('pubkey'));
   // Deep-link resolution: 'resolving' while we look a target up, 'gone' when the
@@ -401,40 +429,61 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // a failed fetch makes the queue bigger and wrong rather than smaller and
   // safe (#221). One retry, because a single slow relay read should not cost a
   // moderator their whole resolution filter -- this is the only polling query
-  // here that retries, for that reason. Surfacing the incompleteness in the UI
-  // belongs to #221, which reports per-source completeness from the worker.
-  const { data: resolutionLabels } = useQuery({
+  // here that retries, for that reason.
+  const {
+    data: labelsResult,
+    error: labelsError,
+    dataUpdatedAt: labelsUpdatedAt,
+    isPending: labelsPending,
+    fetchStatus: labelsFetchStatus,
+    errorUpdateCount: labelsErrorUpdateCount,
+  } = useQuery({
     queryKey: ['resolution-labels', relayUrl],
-    queryFn: fetchResolutionLabels,
+    queryFn: () => fetchResolutionLabels({ timeoutMs: RESOLUTION_READ_TIMEOUT_MS }),
     refetchInterval: 15 * 1000,
     placeholderData: (previousData) => previousData,
     retry: 1,
   });
+  const resolutionLabels = labelsResult?.items;
 
   // Query banned pubkeys from relay (NIP-86 RPC)
   // Force fresh fetch (staleTime: 0) when deep linking to ensure accurate ban status
-  const { data: bannedPubkeys } = useQuery({
+  const {
+    data: bannedPubkeys,
+    error: bannedPubkeysError,
+    dataUpdatedAt: bannedPubkeysUpdatedAt,
+    isPending: bannedPubkeysPending,
+    fetchStatus: bannedPubkeysFetchStatus,
+    errorUpdateCount: bannedPubkeysErrorUpdateCount,
+  } = useQuery({
     queryKey: ['banned-pubkeys'],
     queryFn: async () => {
       try {
-        return await listBannedPubkeys();
+        return await listBannedPubkeys({ timeoutMs: RESOLUTION_READ_TIMEOUT_MS });
       } catch (error) {
         console.warn('NIP-86 listbannedpubkeys failed:', error);
-        throw error; // let React Query handle it, but retry: false + placeholderData keeps UI stable
+        throw error; // let React Query handle it, but retry: 1 + placeholderData keeps UI stable
       }
     },
     staleTime: hasDeepLinkParams ? 0 : 30 * 1000,
     refetchInterval: 15 * 1000,
     placeholderData: (previousData) => previousData,
-    retry: false,
+    retry: 1,
   });
 
   // Query banned/deleted events from relay (NIP-86 RPC)
-  const { data: bannedEvents } = useQuery({
+  const {
+    data: bannedEvents,
+    error: bannedEventsError,
+    dataUpdatedAt: bannedEventsUpdatedAt,
+    isPending: bannedEventsPending,
+    fetchStatus: bannedEventsFetchStatus,
+    errorUpdateCount: bannedEventsErrorUpdateCount,
+  } = useQuery({
     queryKey: ['banned-events'],
     queryFn: async () => {
       try {
-        return await listBannedEvents();
+        return await listBannedEvents({ timeoutMs: RESOLUTION_READ_TIMEOUT_MS });
       } catch (error) {
         console.warn('NIP-86 listbannedevents failed:', error);
         throw error;
@@ -443,19 +492,27 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     staleTime: 30 * 1000,
     refetchInterval: 15 * 1000,
     placeholderData: (previousData) => previousData,
-    retry: false,
+    retry: 1,
   });
 
   // Query all moderation decisions from our D1 database.
-  // retry: false is intentional — placeholderData keeps stale data visible on failure,
-  // and refetchInterval (15s) provides automatic recovery. This avoids stacking retries
-  // on cold-start timeouts which compound latency. (Previously retry: 2.) The
-  // resolution-labels query above is the one deliberate exception.
-  const { data: allDecisions, isLoading: decisionsLoading } = useQuery({
+  // retry: 1, not 0. The original reasoning still holds (stacking retries on a
+  // cold-start timeout compounds latency), but it no longer justifies zero:
+  // resolvedTargets is subtractive, so a source that gives up immediately does
+  // not fail safe, it un-hides work already handled (#221). One retry buys back
+  // most of the single-timeout case without stacking.
+  const {
+    data: decisionsResult,
+    error: decisionsError,
+    dataUpdatedAt: decisionsUpdatedAt,
+    isPending: decisionsPending,
+    fetchStatus: decisionsFetchStatus,
+    errorUpdateCount: decisionsErrorUpdateCount,
+  } = useQuery({
     queryKey: ['decisions'],
     queryFn: async () => {
       try {
-        return await getAllDecisions();
+        return await getAllDecisions({ timeoutMs: RESOLUTION_READ_TIMEOUT_MS });
       } catch (error) {
         console.warn('[Reports] Decisions query failed:', error);
         throw error;
@@ -464,8 +521,18 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     staleTime: 30 * 1000,
     refetchInterval: 15 * 1000,
     placeholderData: (previousData) => previousData,
-    retry: false,
+    retry: 1,
   });
+  const allDecisions = decisionsResult?.items;
+
+  // The oldest point each capped source can still speak to, kept apart because
+  // the two are load-bearing in different views. A target resolved before a
+  // source's bound is invisible to whatever that source feeds, and would sit in
+  // the queue forever with nothing explaining why.
+  const truncationBounds = useMemo(() => ({
+    labels: labelsResult?.truncated ? labelsResult.oldestCovered : null,
+    decisions: decisionsResult?.truncated ? decisionsResult.oldestCovered : null,
+  }), [labelsResult, decisionsResult]);
 
   // Track relative time since last data update for freshness indicator
   const [lastUpdatedText, setLastUpdatedText] = useState<string>('');
@@ -561,6 +628,181 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
     return pending;
   }, [allDecisions]);
+
+  // The four sources that build resolvedTargets, described once so the gate,
+  // the banners, and the blocked pane read from one list and cannot drift
+  // apart from EACH OTHER the way the queries themselves did. This does not
+  // guarantee the list itself stays complete: a new resolution query has to
+  // be added here by hand, or it silently reintroduces #221.
+  interface ResolutionSource {
+    key: ResolutionSourceKey;
+    label: string;
+    hasData: boolean;
+    error: unknown;
+    updatedAt: number;
+    isPending: boolean;
+    // True when the query is holding off fetching because the browser is
+    // offline (fetchStatus 'paused'), as distinct from isPending, which stays
+    // true throughout a paused wait and cannot tell "loading" from "stuck
+    // offline" on its own.
+    isPaused: boolean;
+    // Monotonic count of settled failures. The ONLY failure signal that survives
+    // a refetch: see hasColdFailed below.
+    errorUpdateCount: number;
+    gatesAlways: boolean;
+  }
+
+  const resolutionSources = useMemo<ResolutionSource[]>(() => [
+    {
+      key: 'labels',
+      label: 'Resolution labels',
+      hasData: !!resolutionLabels,
+      error: labelsError,
+      updatedAt: labelsUpdatedAt,
+      isPending: labelsPending,
+      isPaused: labelsFetchStatus === 'paused',
+      errorUpdateCount: labelsErrorUpdateCount,
+      gatesAlways: false,
+    },
+    {
+      key: 'banned-pubkeys',
+      label: 'Banned accounts',
+      hasData: !!bannedPubkeys,
+      error: bannedPubkeysError,
+      updatedAt: bannedPubkeysUpdatedAt,
+      isPending: bannedPubkeysPending,
+      isPaused: bannedPubkeysFetchStatus === 'paused',
+      errorUpdateCount: bannedPubkeysErrorUpdateCount,
+      gatesAlways: false,
+    },
+    {
+      key: 'banned-events',
+      label: 'Banned posts',
+      hasData: !!bannedEvents,
+      error: bannedEventsError,
+      updatedAt: bannedEventsUpdatedAt,
+      isPending: bannedEventsPending,
+      isPaused: bannedEventsFetchStatus === 'paused',
+      errorUpdateCount: bannedEventsErrorUpdateCount,
+      gatesAlways: false,
+    },
+    {
+      // Decisions feeds pendingReviewTargets as well as resolvedTargets, and
+      // pendingReviewTargets is applied on every path (filtered TO it in the
+      // pending view, filtered OUT of it otherwise). So it gates regardless of
+      // the hide-resolved toggle, which is what the old decisionsLoading guard
+      // did for loading and failed to do for errors.
+      key: 'decisions',
+      label: 'Moderation decisions',
+      hasData: !!allDecisions,
+      error: decisionsError,
+      updatedAt: decisionsUpdatedAt,
+      isPending: decisionsPending,
+      isPaused: decisionsFetchStatus === 'paused',
+      errorUpdateCount: decisionsErrorUpdateCount,
+      gatesAlways: true,
+    },
+  ], [
+    resolutionLabels, labelsError, labelsUpdatedAt, labelsPending, labelsFetchStatus, labelsErrorUpdateCount,
+    bannedPubkeys, bannedPubkeysError, bannedPubkeysUpdatedAt, bannedPubkeysPending, bannedPubkeysFetchStatus, bannedPubkeysErrorUpdateCount,
+    bannedEvents, bannedEventsError, bannedEventsUpdatedAt, bannedEventsPending, bannedEventsFetchStatus, bannedEventsErrorUpdateCount,
+    allDecisions, decisionsError, decisionsUpdatedAt, decisionsPending, decisionsFetchStatus, decisionsErrorUpdateCount,
+  ]);
+
+  // Models only when the LIST FILTER (the "hide resolved" toggle applied to
+  // consolidated/individual) consults resolvedTargets. Three other
+  // consumers -- the deep-link auto-deselect, the deep-link resolved
+  // branch, and the resolved-count label -- key on hideResolved alone and
+  // stay live even in the pending-review view where this is false. That is
+  // deliberate, not a gap this flag should also gate: all three fail in the
+  // show-more direction on a partially-loaded resolvedTargets, which is the
+  // safe direction for a subtractive set, and they self-correct once the
+  // source lands.
+  const resolvedFilterActive = hideResolved && !showPendingReview;
+  const gatingSources = resolutionSources.filter(s => s.gatesAlways || resolvedFilterActive);
+  // Has this source failed with nothing to fall back on, and stayed failed?
+  //
+  // Reading the live `error` alone is not enough to answer that. query-core's
+  // fetchState() (see the 'fetch' action in query.js) resets
+  // `{error: null, status: 'pending'}` on every refetch of a query whose data is
+  // undefined, and refetchInterval keeps firing on errored queries. So a source
+  // that is failing continuously spends each poll cycle looking like a FIRST
+  // load: blockingErrors empties, blockingLoad refills, and because the cold-load
+  // skeleton is checked before the blocked pane, the moderator gets bounced back
+  // to a bare skeleton with Retry and the override gone from under the cursor.
+  //
+  // errorUpdateCount is the counter that survives: fetchState() does not touch
+  // it, and neither does the 'success' action (unlike fetchFailureCount, which
+  // both reset). It only ever increments, so `hasData` turning true is what
+  // releases the latch -- a source that genuinely recovers stops counting as
+  // failed, and a source that fails again while HOLDING data is warm, not cold,
+  // and belongs to staleSources instead.
+  //
+  // A live `error` is subsumed: the same reducer action sets both, so
+  // errorUpdateCount > 0 whenever error is set. The isPaused exclusion keeps the
+  // offline branch's precedence: a source that failed and has since gone
+  // offline should say "offline", not re-report the earlier error.
+  const hasColdFailed = (s: ResolutionSource) =>
+    !s.hasData && !s.isPaused && s.errorUpdateCount > 0;
+  const blockingLoad = gatingSources.filter(s => !s.hasData && s.isPending && !hasColdFailed(s));
+  // Offline addition (#221): fetchStatus 'paused' (not isPending, which stays
+  // true the whole time) is the only signal that a blocking source isn't
+  // merely slow, so the block can say why instead of sitting indefinitely.
+  const blockingLoadPaused = blockingLoad.filter(s => s.isPaused);
+  // Paused never resolves on its own while offline (no timeout applies, see
+  // ResolutionUnavailablePane's offline branch below), so once the moderator has
+  // acknowledged a paused source, it can't be allowed to keep failing the
+  // isLoading/blockingLoad gate the way a merely-slow source still should. Keyed
+  // per source: a paused source they have NOT acknowledged still blocks.
+  const blockingLoadStillBlocking = blockingLoad.filter(
+    s => !(s.isPaused && acknowledgedBlockedSources.has(s.key))
+  );
+  // The errorUpdateCount term inside hasColdFailed is near-unreachable today:
+  // past the cold-load gate above, every gating source with `!hasData` has
+  // already settled, and every settled non-error source yields at least `[]`
+  // (truthy), so `!hasData` alone already implies a failure in practice. Kept
+  // anyway because it states the actual intent -- block on sources that FAILED,
+  // not merely on sources that are empty -- and it would start mattering the
+  // moment a source can settle with no data and no error (e.g. a 200 with a
+  // missing field). Don't delete this as dead code.
+  const blockingErrors = gatingSources.filter(hasColdFailed);
+  // Sources an override is currently bypassing, whether by cold error or by an
+  // indefinite offline pause -- combined because the override warning and the
+  // decisions-unavailable copy read the same regardless of which reason applies.
+  const currentlyBlockedSources = [...blockingErrors, ...blockingLoadPaused];
+  const decisionsUnavailable = currentlyBlockedSources.some(s => s.key === 'decisions');
+  // Blocked sources the moderator has already accepted. Anything blocking that
+  // is NOT acknowledged re-raises the pane, so consent given for one source
+  // cannot stand in for consent to a different one that failed later.
+  const overriddenBlockedSources = currentlyBlockedSources.filter(
+    s => acknowledgedBlockedSources.has(s.key)
+  );
+  const unacknowledgedPaused = blockingLoadPaused.filter(s => !acknowledgedBlockedSources.has(s.key));
+  const unacknowledgedErrors = blockingErrors.filter(s => !acknowledgedBlockedSources.has(s.key));
+  // Errored but still holding previous data: filter with the stale set, say so.
+  const staleSources = gatingSources.filter(s => s.hasData && s.error);
+
+  // How far back the banner can honestly claim history reaches, given which
+  // capped sources are load-bearing in the current view. Gated per source for
+  // the same reason gatesAlways exists: a truncated LABELS read only matters
+  // where resolvedTargets is being subtracted, but a truncated DECISIONS read
+  // matters everywhere, because decisions also feeds pendingReviewTargets. The
+  // pending-review queue is built ENTIRELY from decisions, and switching it on
+  // force-clears hideResolved -- so gating the whole banner on the resolved
+  // filter switched it off in the one view most exposed to the cap, exactly
+  // where an auto_hidden row aging out silently drops a target from the CSAM
+  // queue.
+  //
+  // Math.max, not Math.min: the window can only be as deep as the MORE
+  // restrictive (later) of the two bounds. Reporting the earlier one would tell
+  // a moderator history reaches further back than it does.
+  const activeTruncationBounds = [
+    resolvedFilterActive ? truncationBounds.labels : null,
+    truncationBounds.decisions,
+  ].filter((v): v is number => typeof v === 'number');
+  const truncatedOldestCovered = activeTruncationBounds.length > 0
+    ? Math.max(...activeTruncationBounds)
+    : null;
 
   // Get all unique categories from reports for filter chips
   const availableCategories = useMemo(() => {
@@ -879,9 +1121,52 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // fallback, so the two paths cannot drift.
   const dismissDetail = () => handleSelectReport(null);
 
-  // Wait for both reports AND decisions to load before rendering
-  // This prevents auto-hidden CSAM from briefly appearing in default view
-  if (isLoading || decisionsLoading) {
+  // Taking the override acknowledges exactly the sources blocking at that moment,
+  // and nothing else. A source that fails later is unacknowledged, so the pane
+  // re-raises and the moderator sees that source's own consent copy.
+  const acknowledgeBlockedSources = (sources: ResolutionSource[]) => {
+    setAcknowledgedBlockedSources(prev => {
+      const next = new Set(prev);
+      for (const s of sources) next.add(s.key);
+      return next;
+    });
+  };
+
+  // Shared by both the offline pane and the cold-error pane below so the two
+  // retry paths cannot drift apart.
+  const retryResolutionSources = () => {
+    refetch();
+    queryClient.invalidateQueries({ queryKey: ['resolution-labels'] });
+    queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
+    queryClient.invalidateQueries({ queryKey: ['banned-events'] });
+    queryClient.invalidateQueries({ queryKey: ['decisions'] });
+  };
+
+  // Purely offline-blocked (a gating source is paused, not merely slow) and
+  // not yet overridden: give the same Retry/override affordances as a cold
+  // error, with offline-specific copy. fetchStatus 'paused' never times out
+  // (React Query does not even issue the fetch), so unlike a cold error this
+  // state cannot convert into blockingErrors on its own -- without this
+  // branch a moderator stuck behind a `navigator.onLine` false negative
+  // (captive portals, some VM/Electron/Linux net stacks) has no way forward
+  // at all (#221).
+  if (unacknowledgedPaused.length > 0) {
+    return (
+      <ResolutionUnavailablePane
+        offline
+        sources={blockingLoadPaused.map(s => ({ key: s.key, label: s.label }))}
+        decisionsUnavailable={decisionsUnavailable}
+        onRetry={retryResolutionSources}
+        onOverride={() => acknowledgeBlockedSources(blockingLoadPaused)}
+      />
+    );
+  }
+
+  // Wait for reports AND every gating resolution source. A source that has not
+  // landed contributes nothing to resolvedTargets, so rendering here would show
+  // handled work as pending, and would show auto-hidden content in the default
+  // view (#221).
+  if (isLoading || blockingLoadStillBlocking.length > 0) {
     return (
       <Card className="h-[calc(100vh-200px)]">
         <CardHeader>
@@ -891,7 +1176,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="space-y-3">
+          <div className="space-y-3" data-testid="reports-loading-skeleton">
             {[...Array(5)].map((_, i) => (
               <Skeleton key={i} className="h-16 w-full" />
             ))}
@@ -901,11 +1186,13 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     );
   }
 
-  // Full-pane error only when there is nothing to show. When a REFRESH fails
+  // The reports query itself failing is the more fundamental problem: if the
+  // relay read is down, resolution state is beside the point, and the
+  // resolution pane's Retry can't fix it anyway. Report this first (#221) --
+  // but only full-pane when there is nothing to show. When a REFRESH fails
   // (e.g. the worker 502s on a relay timeout), the last good list stays
-  // rendered with a stale-data warning below. Replacing a populated queue
-  // with an error pane (or, before the worker fix, with silent emptiness)
-  // made one slow poll look like "no reports pending".
+  // rendered with a stale-data warning below, so one slow poll does not look
+  // like "no reports pending".
   if (error && !reports) {
     return (
       <Alert variant="destructive">
@@ -913,6 +1200,20 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           Failed to load reports: {error instanceof Error ? error.message : "Unknown error"}
         </AlertDescription>
       </Alert>
+    );
+  }
+
+  // A gating source failed cold (no previous data to fall back on). Rendering
+  // the queue here would present handled work as pending; the moderator gets
+  // an explicit, named override instead of a silent wrong list or a hard lock-out.
+  if (unacknowledgedErrors.length > 0) {
+    return (
+      <ResolutionUnavailablePane
+        sources={blockingErrors.map(s => ({ key: s.key, label: s.label }))}
+        decisionsUnavailable={decisionsUnavailable}
+        onRetry={retryResolutionSources}
+        onOverride={() => acknowledgeBlockedSources(blockingErrors)}
+      />
     );
   }
 
@@ -1011,6 +1312,26 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
               </Button>
             </div>
           </div>
+
+          {/* Stays up for as long as the override is in effect, not a one-off
+              toast, so a moderator can't forget they are looking at an
+              unfiltered queue (#221). */}
+          {overriddenBlockedSources.length > 0 && (
+            <ResolutionOverrideWarning
+              sources={overriddenBlockedSources.map(s => ({ key: s.key, label: s.label }))}
+              decisionsUnavailable={decisionsUnavailable}
+            />
+          )}
+
+          {staleSources.length > 0 && (
+            <StaleResolutionBanner
+              sources={staleSources.map(s => ({ key: s.key, label: s.label, updatedAt: s.updatedAt }))}
+            />
+          )}
+
+          {truncatedOldestCovered !== null && (
+            <TruncatedHistoryBanner oldestCovered={truncatedOldestCovered} />
+          )}
 
           {/* Refresh failed but we still hold a previous list: warn instead of
               blanking the queue. The poll keeps retrying every 15s. */}
