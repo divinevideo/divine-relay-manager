@@ -23,6 +23,15 @@ import type { BulkAction } from '../../shared/bulk-moderation';
 import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, createMinorAccount, type KeycastEnv } from './keycast-client';
 import { suspendPubkey, unsuspendPubkey, banPubkey, type SecretStoreSecret } from './nip86';
 import { buildAgeReviewIdentityBlock, buildClaimedParentName, toNpub } from './report-note';
+import {
+  clearSubject,
+  fingerprintProvisioningRequest,
+  markProjectionAttempt,
+  markProjectionComplete,
+  pendingProjectionJobs,
+  pendingSubjectClears,
+  UUID_RE,
+} from './protected-minors';
 
 /**
  * The identity a case captured at creation, as stored on `age_review_cases`.
@@ -442,6 +451,9 @@ export async function handleUpdateAgeReviewCase(
   let keycastError: string | undefined;
   let keycastMinorClear: EnforcementLegStatus = 'not_attempted';
   let keycastMinorClearError: string | undefined;
+  let subjectClear: EnforcementLegStatus = 'not_attempted';
+  let subjectClearError: string | undefined;
+  let minorProjectionPubkey = existing.pubkey;
 
   // Shared wrapper for the relay and Keycast legs (both resolve to
   // { success, error }). Returns not_attempted when no call applies.
@@ -531,12 +543,36 @@ export async function handleUpdateAgeReviewCase(
     // moderator_pubkey is unvalidated on write). A malformed/absent actor is
     // dropped server-side in clearVerifiedMinor → keycast logs-only.
     const minorClearActor = (updated?.moderator_pubkey ?? existing.moderator_pubkey) ?? undefined;
+    if (deniedCase && env.DB) {
+      try {
+        const result = await clearSubject(env.DB, existing.pubkey, minorClearActor, 'age_review_denied');
+        subjectClear = result.success ? 'ok' : 'failed';
+        subjectClearError = result.error;
+        minorProjectionPubkey = result.projectionPubkey ?? existing.pubkey;
+        if (!result.success) {
+          console.error(`[age-review] Protected subject clear ${requestedState} failed for case ${caseId}: ${result.error}`);
+        }
+      } catch (error) {
+        subjectClear = 'failed';
+        subjectClearError = error instanceof Error ? error.message : String(error);
+        console.error(`[age-review] Protected subject clear action failed for case ${caseId}:`, error);
+      }
+    }
     const minorClearLeg = await runStatusLeg('Keycast verified_minor clear', () =>
-      deniedCase
-        ? clearVerifiedMinor(existing.pubkey, minorClearActor, 'age_review_denied', env)
+      deniedCase && subjectClear !== 'failed'
+        ? clearVerifiedMinor(minorProjectionPubkey, minorClearActor, 'age_review_denied', env)
         : undefined);
     keycastMinorClear = minorClearLeg.status;
     keycastMinorClearError = minorClearLeg.error;
+    if (deniedCase && keycastMinorClear === 'ok' && env.DB) {
+      try {
+        await markProjectionComplete(env.DB, minorProjectionPubkey);
+      } catch (error) {
+        // The pending job remains a safe retry boundary after the projection
+        // itself succeeded, so do not turn an applied denial into a 500.
+        console.error(`[age-review] Failed to mark protected-minor projection complete for case ${caseId}:`, error);
+      }
+    }
   }
 
   // A failed critical leg is reported (success:false, HTTP 207) so the
@@ -551,10 +587,10 @@ export async function handleUpdateAgeReviewCase(
   }
   const enforcement: AgeReviewEnforcement = {
     relay, relayError, bulk, bulkError, keycast, keycastError,
-    keycastMinorClear, keycastMinorClearError,
+    keycastMinorClear, keycastMinorClearError, subjectClear, subjectClearError,
   };
   const enforcementComplete = relay !== 'failed' && bulk !== 'failed' && keycast !== 'failed'
-    && keycastMinorClear !== 'failed';
+    && keycastMinorClear !== 'failed' && subjectClear !== 'failed';
   const response: AgeReviewCaseResponse = {
     success: enforcementComplete,
     case: updated,
@@ -577,7 +613,7 @@ export async function handleCreateMinorAccount(
 ): Promise<Response> {
   if (!env.DB) return json({ success: false, error: 'Database not configured' }, 500, corsHeaders);
 
-  let body: { username?: string; display_name?: string; zendesk_ticket_id?: number };
+  let body: { username?: string; display_name?: string; zendesk_ticket_id?: number; provisioning_operation_id?: string };
   try {
     body = await request.json();
   } catch {
@@ -597,6 +633,10 @@ export async function handleCreateMinorAccount(
     return json({ success: false, error: 'display_name must be a string' }, 400, corsHeaders);
   }
   const displayName = body.display_name?.trim() || undefined;
+  const provisioningOperationId = body.provisioning_operation_id ?? crypto.randomUUID();
+  if (!UUID_RE.test(provisioningOperationId)) {
+    return json({ success: false, error: 'provisioning_operation_id must be a lowercase UUID' }, 400, corsHeaders);
+  }
 
   if (body.zendesk_ticket_id !== undefined && body.zendesk_ticket_id !== null) {
     if (typeof body.zendesk_ticket_id !== 'number' || !Number.isInteger(body.zendesk_ticket_id) || body.zendesk_ticket_id <= 0) {
@@ -604,15 +644,74 @@ export async function handleCreateMinorAccount(
     }
   }
 
-  const result = await createMinorAccount(username, displayName, env);
-  if (!result.success || !result.pubkey || !result.claim_url) {
+  const requestFingerprint = await fingerprintProvisioningRequest({
+    kind: 'onboarding', username, displayName, zendeskTicketId: body.zendesk_ticket_id,
+  });
+  let existingOperation = await env.DB.prepare(`SELECT kind, request_fingerprint, state, subject_id, result_pubkey
+    FROM protected_minor_provisioning_operations WHERE provisioning_operation_id = ?`).bind(provisioningOperationId)
+    .first<{ kind: string; request_fingerprint: string; state: string; subject_id: string | null; result_pubkey: string | null }>();
+  if (existingOperation && (existingOperation.kind !== 'onboarding' || existingOperation.request_fingerprint !== requestFingerprint)) {
+    return json({ success: false, code: 'provisioning_operation_conflict', error: 'Provisioning operation conflicts with its original request' }, 409, corsHeaders);
+  }
+  if (!existingOperation) {
+    const now = new Date().toISOString();
+    try {
+      await env.DB.prepare(`INSERT INTO protected_minor_provisioning_operations
+        (provisioning_operation_id, subject_id, kind, request_fingerprint, state, created_at, updated_at)
+        VALUES (?, NULL, 'onboarding', ?, 'pending', ?, ?)`)
+        .bind(provisioningOperationId, requestFingerprint, now, now).run();
+    } catch {
+      return json({ success: false, error: 'Could not persist provisioning operation; no account was created.' }, 500, corsHeaders);
+    }
+  }
+
+  const result = await createMinorAccount(username, displayName, env, provisioningOperationId);
+  if (!result.success || !result.pubkey || (result.account_state !== 'claimed' && !result.claim_url)) {
     const is409 = result.error?.startsWith('409:');
     const is4xx = result.error?.match(/^4\d{2}:/);
     const status = is409 ? 409 : is4xx ? 400 : 502;
-    return json({ success: false, error: result.error ?? 'Keycast account creation failed' }, status, corsHeaders);
+    return json({ success: false, error: result.error ?? 'Keycast account creation failed', provisioning_operation_id: provisioningOperationId }, status, corsHeaders);
+  }
+
+  if (existingOperation?.result_pubkey && existingOperation.result_pubkey !== result.pubkey) {
+    return json({ success: false, code: 'provisioning_result_conflict', error: 'Provisioning replay returned a conflicting result' }, 409, corsHeaders);
+  }
+  if (existingOperation?.state !== 'complete') {
+    const observedAt = new Date().toISOString();
+    const observed = await env.DB.prepare(`UPDATE protected_minor_provisioning_operations
+      SET result_pubkey = ?, updated_at = ?
+      WHERE provisioning_operation_id = ? AND kind = 'onboarding' AND state = 'pending'
+        AND (result_pubkey IS NULL OR result_pubkey = ?)`)
+      .bind(result.pubkey, observedAt, provisioningOperationId, result.pubkey).run();
+    if (observed.meta.changes !== 1) {
+      const current = await env.DB.prepare(`SELECT kind, request_fingerprint, state, subject_id, result_pubkey
+        FROM protected_minor_provisioning_operations WHERE provisioning_operation_id = ?`).bind(provisioningOperationId)
+        .first<{ kind: string; request_fingerprint: string; state: string; subject_id: string | null; result_pubkey: string | null }>();
+      if (current?.result_pubkey && current.result_pubkey !== result.pubkey) {
+        return json({ success: false, code: 'provisioning_result_conflict', error: 'Provisioning replay returned a conflicting result' }, 409, corsHeaders);
+      }
+      if (!current || current.kind !== 'onboarding') {
+        return json({ success: false, error: 'Could not persist provisioning result. Retry with the same operation ID.', provisioning_operation_id: provisioningOperationId }, 500, corsHeaders);
+      }
+      existingOperation = current;
+    } else if (existingOperation) {
+      existingOperation = { ...existingOperation, result_pubkey: result.pubkey };
+    }
+  }
+
+  if (existingOperation?.state === 'complete') {
+    if (existingOperation.result_pubkey !== result.pubkey || !existingOperation.subject_id) {
+      return json({ success: false, code: 'provisioning_result_conflict', error: 'Provisioning replay returned a conflicting result' }, 409, corsHeaders);
+    }
+    const prior = await env.DB.prepare(`SELECT source_case_id FROM protected_minor_subjects WHERE subject_id = ?`)
+      .bind(existingOperation.subject_id).first<{ source_case_id: string }>();
+    return json({ success: true, pubkey: result.pubkey, claim_url: result.claim_url, expires_at: result.expires_at,
+      account_state: result.account_state, case_id: prior?.source_case_id,
+      provisioning_operation_id: provisioningOperationId, replayed: true }, 200, corsHeaders);
   }
 
   const caseId = crypto.randomUUID();
+  const subjectId = crypto.randomUUID();
   try {
     // Identity is known up front on this path -- the operator supplied it -- so
     // there is nothing to look up. Storing it keeps this case as identifiable as
@@ -642,7 +741,8 @@ export async function handleCreateMinorAccount(
     //    this path and resolveHandle already falls back to it, so it costs
     //    nothing and reads correctly wherever the block is rendered.
     const nip05 = env.NIP05_DOMAIN ? `_@${username}.${env.NIP05_DOMAIN}` : null;
-    await env.DB.prepare(`
+    const now = new Date().toISOString();
+    await env.DB.batch([env.DB.prepare(`
       INSERT INTO age_review_cases
       (id, pubkey, suspected_age_band, state, allowed_resolution, resolution_note, created_via, claim_link_url, claim_link_expires_at, zendesk_ticket_id,
        account_name, account_nip05, account_vine_username, identity_captured_at)
@@ -656,15 +756,25 @@ export async function handleCreateMinorAccount(
       displayName ?? username,
       nip05,
       username,
-      new Date().toISOString(),
-    ).run();
+      now,
+    ), env.DB.prepare(`INSERT INTO protected_minor_subjects
+      (subject_id, source_case_id, classification_state, classified_at) VALUES (?, ?, 'active', ?)`)
+      .bind(subjectId, caseId, now),
+    env.DB.prepare(`INSERT INTO protected_minor_account_bindings
+      (id, subject_id, pubkey, bound_at) VALUES (?, ?, ?, ?)`)
+      .bind(crypto.randomUUID(), subjectId, result.pubkey, now),
+    env.DB.prepare(`UPDATE protected_minor_provisioning_operations
+      SET subject_id = ?, state = 'complete', result_pubkey = ?, updated_at = ?
+      WHERE provisioning_operation_id = ? AND state = 'pending'`)
+      .bind(subjectId, result.pubkey, now, provisioningOperationId)]);
   } catch (err) {
     console.error(`[age-review] D1 audit record failed for minor account: pubkey=${result.pubkey}, case=${caseId}`, err);
     return json({
       success: false,
-      error: 'Account created in Keycast but audit record failed. Contact engineering to reconcile.',
+      error: `Account created in Keycast but registry persistence failed. Retry with provisioning operation ${provisioningOperationId}.`,
       pubkey: result.pubkey,
       case_id: caseId,
+      provisioning_operation_id: provisioningOperationId,
     }, 500, corsHeaders);
   }
 
@@ -675,7 +785,9 @@ export async function handleCreateMinorAccount(
     pubkey: result.pubkey,
     claim_url: result.claim_url,
     expires_at: result.expires_at,
+    account_state: result.account_state,
     case_id: caseId,
+    provisioning_operation_id: provisioningOperationId,
   }, 200, corsHeaders);
 }
 
@@ -1808,21 +1920,20 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
       console.error(`[age-review] Keycast ban failed for expired case ${row.id}:`, error);
     }
 
-    // Clear verified_minor on the auto-deny path too (#147): the interactive
-    // deny leg does this; the deadline-expiry auto-deny is the same terminal
-    // outcome with no moderator, so it must not leave a banned account with
-    // its protected-minor flag still set. System-initiated => no actor
-    // (keycast falls back to log-only audit). Idempotent no-op for a
-    // never-minor account. Best-effort, logged on failure.
-    try {
-      const clearResult = await clearVerifiedMinor(row.pubkey, undefined, 'age_review_expired', env);
-      if (clearResult.success) {
-        console.log(`[age-review] Keycast verified_minor clear sent for expired case ${row.id}`);
-      } else {
-        console.error(`[age-review] Keycast verified_minor clear failed for expired case ${row.id}: ${clearResult.error}`);
+    // Commit the durable classification clear first. That creates a projection
+    // job which this tick (or a later tick after an outage) converges in Keycast.
+    const durableClear = await clearSubject(env.DB, row.pubkey, undefined, 'age_review_expired');
+    if (!durableClear.success) {
+      console.error(`[age-review] Protected subject clear failed for expired case ${row.id}: ${durableClear.error}`);
+    } else {
+      try {
+        const projectionPubkey = durableClear.projectionPubkey ?? row.pubkey;
+        const clearResult = await clearVerifiedMinor(projectionPubkey, undefined, 'age_review_expired', env);
+        if (clearResult.success) await markProjectionComplete(env.DB, projectionPubkey);
+        else console.error(`[age-review] Keycast verified_minor clear failed for expired case ${row.id}: ${clearResult.error}`);
+      } catch (error) {
+        console.error(`[age-review] Keycast verified_minor clear failed for expired case ${row.id}:`, error);
       }
-    } catch (error) {
-      console.error(`[age-review] Keycast verified_minor clear failed for expired case ${row.id}:`, error);
     }
 
     // purge the user's events at the relay (one-way) -- the case is closed
@@ -1836,6 +1947,49 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
       }
     } catch (error) {
       console.error(`[age-review] Relay banpubkey failed for expired case ${row.id}:`, error);
+    }
+  }
+
+  // A terminal denial is itself the durable retry source if the subject update
+  // failed before it could create a projection job.
+  let subjectClearRetries: Awaited<ReturnType<typeof pendingSubjectClears>> = [];
+  try {
+    subjectClearRetries = await pendingSubjectClears(env.DB);
+  } catch (error) {
+    console.error('[age-review] Failed to load protected-subject clear retries:', error);
+  }
+  for (const retry of subjectClearRetries) {
+    const result = await clearSubject(
+      env.DB, retry.pubkey, retry.clearedBy, retry.reason, retry.subjectId,
+    );
+    if (!result.success) {
+      console.error(`[age-review] Protected-subject clear retry failed for ${retry.pubkey}: ${result.error}`);
+    }
+  }
+
+  // Durable retry boundary for Keycast projection failures after the subject
+  // clear commits.
+  let projectionJobs: Array<{ pubkey: string; reason: string }> = [];
+  try {
+    projectionJobs = await pendingProjectionJobs(env.DB);
+  } catch (error) {
+    console.error('[age-review] Failed to load protected-minor projection retries:', error);
+  }
+  for (const job of projectionJobs) {
+    try {
+      const result = await clearVerifiedMinor(job.pubkey, undefined, job.reason as 'age_review_denied' | 'age_review_expired', env);
+      if (result.success) await markProjectionComplete(env.DB, job.pubkey);
+      else {
+        await markProjectionAttempt(env.DB, job.pubkey);
+        console.error(`[age-review] Keycast protected-minor projection retry failed for ${job.pubkey}: ${result.error}`);
+      }
+    } catch (error) {
+      try {
+        await markProjectionAttempt(env.DB, job.pubkey);
+      } catch (markError) {
+        console.error(`[age-review] Failed to rotate protected-minor projection retry ${job.pubkey}:`, markError);
+      }
+      console.error(`[age-review] Keycast protected-minor projection retry failed for ${job.pubkey}:`, error);
     }
   }
 

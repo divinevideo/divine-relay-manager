@@ -4,6 +4,8 @@
 
 The Divine Relay Manager exposes several API endpoints for integration with external systems like Zendesk (ticket report parsing, decision sync, age-review replies). Note: Zendesk does **not** execute moderation actions. Moderation is performed in Relay Manager; Zendesk only receives decision updates back. The former inbound moderation-execution path has been retired (see the note under `POST /api/zendesk/webhook`).
 
+Protected-minor deletion and replacement service endpoints are documented in [protected-minor-registry.md](protected-minor-registry.md). They use a dedicated bearer credential and are not authorized by moderator/browser credentials.
+
 **Base URL:** `https://api-relay-prod.divine.video` (production) or `https://api-relay-staging.divine.video` (staging)
 
 ## Authentication

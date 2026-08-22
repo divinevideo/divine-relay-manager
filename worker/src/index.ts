@@ -9,6 +9,7 @@ import {
   type SecretStoreSecret,
 } from './nip86';
 import { ensureSchema } from './db';
+import { backfillProtectedMinorSubjects, handleProtectedMinorServiceRoute } from './protected-minors';
 import { buildReportsFilter } from './reports-filter';
 import { generatePreAuthToken, verifyPreAuthToken, base64UrlEncode } from './zendesk-preauth';
 import { deriveFunnelcakeApiUrl, proxyFunnelcakeRequest } from './funnelcake-proxy';
@@ -103,6 +104,8 @@ interface Env extends KeycastEnv {
   // Secrets Store secret (MODERATION_TO_RELAY_ADMIN_KEY), accepted in addition to
   // ADMIN_API_KEY on that route so it can be rotated independently of other callers (#170).
   MOD_RELAY_ADMIN_KEY?: string | SecretStoreSecret;
+  PROTECTED_MINOR_SERVICE_TOKEN?: string | SecretStoreSecret;
+  PROTECTED_MINOR_REPLACEMENT_ENABLED?: string;
   // Slack webhook for age review deadline alerts
   SLACK_WEBHOOK_URL?: string;
   // Environment identifier for deep links (e.g., "production", "staging")
@@ -445,6 +448,12 @@ export default {
         return handleZendeskRoutes(request, path, env, corsHeaders);
       }
 
+      // Dedicated service boundary: moderator/browser credentials must never
+      // authorize protected-subject lifecycle calls.
+      if (path.startsWith('/api/internal/protected-minors/')) {
+        return handleProtectedMinorServiceRoute(request, path, env, corsHeaders, ensureSchemaOnce);
+      }
+
       // Mobile-facing endpoints: NIP-98 user auth, not admin auth
       if (path === '/v1/account/moderation-status' && request.method === 'GET') {
         const authResult = await verifyNip98Auth(request, request.url, getNip98AllowedHosts(env));
@@ -511,6 +520,13 @@ export default {
 
       if (path === '/api/publish' && request.method === 'POST') {
         return handlePublish(request, env, corsHeaders);
+      }
+
+      if (path === '/api/admin/protected-minors/backfill' && request.method === 'POST') {
+        if (!env.DB) return jsonResponse({ success: false, error: 'Database not configured' }, 500, corsHeaders);
+        await ensureSchemaOnce(env.DB);
+        const result = await backfillProtectedMinorSubjects(env.DB);
+        return jsonResponse({ success: true, ...result }, 200, corsHeaders);
       }
 
       if (path === '/api/moderate' && request.method === 'POST') {

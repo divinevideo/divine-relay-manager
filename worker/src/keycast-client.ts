@@ -241,8 +241,10 @@ export async function getUserStatus(pubkey: string, env: KeycastEnv): Promise<Us
 export interface CreateMinorAccountResult {
   success: boolean;
   pubkey?: string;
-  claim_url?: string;
+  claim_url?: string | null;
   expires_at?: string;
+  account_state?: 'unclaimed' | 'claimed';
+  replayed?: boolean;
   error?: string;
 }
 
@@ -250,6 +252,7 @@ export async function createMinorAccount(
   username: string,
   displayName: string | undefined,
   env: KeycastEnv,
+  provisioningOperationId?: string,
 ): Promise<CreateMinorAccountResult> {
   if (!env.KEYCAST_URL || !env.KEYCAST_SERVICE_TOKEN) {
     return { success: false, error: 'not configured' };
@@ -261,6 +264,7 @@ export async function createMinorAccount(
   try {
     const body: Record<string, string> = { username };
     if (displayName !== undefined) body.display_name = displayName;
+    if (provisioningOperationId !== undefined) body.provisioning_operation_id = provisioningOperationId;
 
     const res = await fetch(`${env.KEYCAST_URL}/api/admin/create-minor-account`, {
       method: 'POST',
@@ -279,8 +283,10 @@ export async function createMinorAccount(
     return {
       success: true,
       pubkey: typeof data.pubkey === 'string' ? data.pubkey : undefined,
-      claim_url: typeof data.claim_url === 'string' ? data.claim_url : undefined,
+      claim_url: typeof data.claim_url === 'string' ? data.claim_url : data.claim_url === null ? null : undefined,
       expires_at: typeof data.expires_at === 'string' ? data.expires_at : undefined,
+      account_state: data.account_state === 'claimed' ? 'claimed' : data.account_state === 'unclaimed' ? 'unclaimed' : undefined,
+      replayed: data.replayed === true,
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

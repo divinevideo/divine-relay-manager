@@ -1327,7 +1327,7 @@ describe('checkAgeReviewDeadlines', () => {
     }));
 
     const closeCalls = db.prepare.mock.calls.filter(
-      (c: string[]) => c[0]?.includes('denied_closed')
+      (c: string[]) => c[0]?.includes('UPDATE age_review_cases') && c[0]?.includes('denied_closed')
     );
     expect(closeCalls.length).toBe(1);
 
@@ -1374,7 +1374,7 @@ describe('checkAgeReviewDeadlines', () => {
     await checkAgeReviewDeadlines(makeEnv(db));
 
     const closeCalls = db.prepare.mock.calls.filter(
-      (c: string[]) => c[0]?.includes('denied_closed')
+      (c: string[]) => c[0]?.includes('UPDATE age_review_cases') && c[0]?.includes('denied_closed')
     );
     expect(closeCalls.length).toBe(1);
     expect(banUser).toHaveBeenCalledOnce();
@@ -2932,12 +2932,13 @@ describe('handleCreateMinorAccount', () => {
   }
 
   function makeMinorDb(runImpl?: () => Promise<unknown>) {
+    const execute = runImpl ?? (() => Promise.resolve({ success: true, meta: { changes: 1 } }));
     return {
-      prepare: vi.fn().mockReturnValue({
-        bind: vi.fn().mockReturnValue({
-          run: vi.fn().mockImplementation(runImpl ?? (() => Promise.resolve({ success: true }))),
-        }),
+      prepare: vi.fn().mockImplementation(() => {
+        const bound = { run: vi.fn().mockImplementation(execute), first: vi.fn().mockResolvedValue(null) };
+        return { bind: vi.fn().mockReturnValue(bound), run: vi.fn().mockImplementation(execute), first: vi.fn().mockResolvedValue(null) };
       }),
+      batch: vi.fn().mockImplementation(async () => { await execute(); return [{ meta: { changes: 1 } }]; }),
     } as unknown as D1Database;
   }
 
@@ -3114,7 +3115,7 @@ describe('handleCreateMinorAccount', () => {
   it('strips empty display_name before calling Keycast', async () => {
     const db = makeMinorDb();
     await handleCreateMinorAccount(makeRequest({ username: 'test', display_name: '  ' }), makeEnv(db), corsHeaders);
-    expect(mockCreateMinorAccount).toHaveBeenCalledWith('test', undefined, expect.anything());
+    expect(mockCreateMinorAccount).toHaveBeenCalledWith('test', undefined, expect.anything(), expect.any(String));
   });
 
   it('rejects non-integer zendesk_ticket_id', async () => {
@@ -3128,7 +3129,7 @@ describe('handleCreateMinorAccount', () => {
     expect(mockCreateMinorAccount).not.toHaveBeenCalled();
   });
 
-  it('returns 500 without claim_url when D1 insert fails after Keycast success', async () => {
+  it('returns 500 without calling Keycast when the operation ledger write fails', async () => {
     const db = makeMinorDb(() => Promise.reject(new Error('D1 write failed')));
     const res = await handleCreateMinorAccount(makeRequest({ username: 'testuser' }), makeEnv(db), corsHeaders);
     const body = await res.json() as Record<string, unknown>;
@@ -3136,8 +3137,9 @@ describe('handleCreateMinorAccount', () => {
     expect(res.status).toBe(500);
     expect(body.success).toBe(false);
     expect(body.claim_url).toBeUndefined();
-    expect(body.pubkey).toBe('a'.repeat(64));
-    expect(body.error).toContain('audit record failed');
+    expect(body.pubkey).toBeUndefined();
+    expect(body.error).toContain('no account was created');
+    expect(mockCreateMinorAccount).not.toHaveBeenCalled();
   });
 
   it('maps Keycast 409 to 409 status', async () => {
@@ -3162,15 +3164,7 @@ describe('handleCreateMinorAccount', () => {
   });
 
   it('persists claim_link_expires_at from the Keycast response', async () => {
-    const bindArgs: unknown[] = [];
-    const db = {
-      prepare: vi.fn().mockReturnValue({
-        bind: vi.fn().mockImplementation((...args: unknown[]) => {
-          bindArgs.push(...args);
-          return { run: vi.fn().mockResolvedValue({ success: true }) };
-        }),
-      }),
-    };
+    const db = makeMinorDb();
 
     const res = await handleCreateMinorAccount(
       makeRequest({ username: 'testuser' }),
@@ -3181,6 +3175,11 @@ describe('handleCreateMinorAccount', () => {
     expect(res.status).toBe(200);
     // INSERT bind order: caseId, pubkey, claim_url, claim_link_expires_at, zendesk_ticket_id.
     // Assert positionally so this also guards the column/bind ordering.
+    const values = identityBinds(db).sql;
+    expect(values).toContain('claim_link_expires_at');
+    const prepareMock = db.prepare as ReturnType<typeof vi.fn>;
+    const insert = prepareMock.mock.calls.findIndex((call: unknown[]) => String(call[0]).includes('INSERT INTO age_review_cases'));
+    const bindArgs = prepareMock.mock.results[insert].value.bind.mock.calls[0];
     expect(bindArgs[2]).toBe('https://login.test/claim/abc');
     expect(bindArgs[3]).toBe('2026-06-15T00:00:00Z');
   });
@@ -3192,15 +3191,7 @@ describe('handleCreateMinorAccount', () => {
       claim_url: 'https://login.test/claim/abc',
     });
 
-    const bindArgs: unknown[] = [];
-    const db = {
-      prepare: vi.fn().mockReturnValue({
-        bind: vi.fn().mockImplementation((...args: unknown[]) => {
-          bindArgs.push(...args);
-          return { run: vi.fn().mockResolvedValue({ success: true }) };
-        }),
-      }),
-    };
+    const db = makeMinorDb();
 
     const res = await handleCreateMinorAccount(
       makeRequest({ username: 'testuser' }),
@@ -3211,6 +3202,9 @@ describe('handleCreateMinorAccount', () => {
     expect(res.status).toBe(200);
     // claim_url is present (binds at index 2), but expires_at is absent -> bound as null at index 3.
     // Assert positionally: toContain(null) would also match the null zendesk_ticket_id.
+    const prepareMock = db.prepare as ReturnType<typeof vi.fn>;
+    const insert = prepareMock.mock.calls.findIndex((call: unknown[]) => String(call[0]).includes('INSERT INTO age_review_cases'));
+    const bindArgs = prepareMock.mock.results[insert].value.bind.mock.calls[0];
     expect(bindArgs[2]).toBe('https://login.test/claim/abc');
     expect(bindArgs[3]).toBeNull();
   });

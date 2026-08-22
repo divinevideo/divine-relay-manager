@@ -1269,9 +1269,12 @@ export async function updateAgeReviewCase(
 export interface CreateMinorAccountResponse {
   success: boolean;
   pubkey?: string;
-  claim_url?: string;
+  claim_url?: string | null;
   expires_at?: string;
+  account_state?: 'unclaimed' | 'claimed';
   case_id?: string;
+  provisioning_operation_id?: string;
+  replayed?: boolean;
   error?: string;
 }
 
@@ -1280,10 +1283,12 @@ export async function createMinorAccount(
   username: string,
   displayName?: string,
   zendeskTicketId?: number,
+  provisioningOperationId?: string,
 ): Promise<CreateMinorAccountResponse> {
   const body: Record<string, unknown> = { username };
   if (displayName != null) body.display_name = displayName;
   if (zendeskTicketId != null) body.zendesk_ticket_id = zendeskTicketId;
+  if (provisioningOperationId != null) body.provisioning_operation_id = provisioningOperationId;
   return apiRequest<CreateMinorAccountResponse>(apiUrl, '/api/age-review/create-minor-account', 'POST', body);
 }
 

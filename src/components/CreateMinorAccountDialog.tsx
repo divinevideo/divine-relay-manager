@@ -23,11 +23,12 @@ export function CreateMinorAccountDialog() {
   const [displayName, setDisplayName] = useState("");
   const [zendeskTicketId, setZendeskTicketId] = useState("");
   const [claimUrlCopied, setClaimUrlCopied] = useState(false);
+  const [provisioningOperationId, setProvisioningOperationId] = useState(() => crypto.randomUUID());
 
   const createAccount = useMutation({
     mutationFn: () => {
       const ticketId = zendeskTicketId ? parseInt(zendeskTicketId, 10) : undefined;
-      return api.createMinorAccount(username.trim(), displayName.trim() || undefined, ticketId);
+      return api.createMinorAccount(username.trim(), displayName.trim() || undefined, ticketId, provisioningOperationId);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['age-review-cases'] });
@@ -54,6 +55,7 @@ export function CreateMinorAccountDialog() {
     setZendeskTicketId("");
     createAccount.reset();
     setClaimUrlCopied(false);
+    setProvisioningOperationId(crypto.randomUUID());
   }
 
   return (
@@ -76,7 +78,7 @@ export function CreateMinorAccountDialog() {
               <Input
                 placeholder="username"
                 value={username}
-                onChange={(e) => setUsername(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))}
+                onChange={(e) => { setUsername(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '')); setProvisioningOperationId(crypto.randomUUID()); }}
                 maxLength={63}
                 className="h-8 text-sm"
                 disabled={createAccount.isPending}
@@ -87,7 +89,7 @@ export function CreateMinorAccountDialog() {
               <Input
                 placeholder="Display name (optional)"
                 value={displayName}
-                onChange={(e) => setDisplayName(e.target.value)}
+                onChange={(e) => { setDisplayName(e.target.value); setProvisioningOperationId(crypto.randomUUID()); }}
                 className="h-8 text-sm"
                 disabled={createAccount.isPending}
               />
@@ -97,7 +99,7 @@ export function CreateMinorAccountDialog() {
               <Input
                 placeholder="e.g. 12345 (optional)"
                 value={zendeskTicketId}
-                onChange={(e) => setZendeskTicketId(e.target.value.replace(/\D/g, ''))}
+                onChange={(e) => { setZendeskTicketId(e.target.value.replace(/\D/g, '')); setProvisioningOperationId(crypto.randomUUID()); }}
                 className="h-8 text-sm"
                 disabled={createAccount.isPending}
               />
@@ -130,27 +132,33 @@ export function CreateMinorAccountDialog() {
               </div>
             </div>
 
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium">Claim Link</label>
-              <div className="flex gap-1.5">
-                <Input
-                  readOnly
-                  value={result.claim_url ?? ''}
-                  className="h-8 text-xs font-mono"
-                />
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-8 shrink-0"
-                  onClick={handleCopyClaimUrl}
-                >
-                  {claimUrlCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-                </Button>
-              </div>
-              <p className="text-[10px] text-muted-foreground">
-                Send this link to the parent via Zendesk reply. The minor uses it to set their email and password.
+            {result.account_state === 'claimed' ? (
+              <p className="text-xs text-muted-foreground">
+                This account has already been claimed. No claim link is needed.
               </p>
-            </div>
+            ) : (
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium">Claim Link</label>
+                <div className="flex gap-1.5">
+                  <Input
+                    readOnly
+                    value={result.claim_url ?? ''}
+                    className="h-8 text-xs font-mono"
+                  />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-8 shrink-0"
+                    onClick={handleCopyClaimUrl}
+                  >
+                    {claimUrlCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                  </Button>
+                </div>
+                <p className="text-[10px] text-muted-foreground">
+                  Send this link to the parent via Zendesk reply. The minor uses it to set their email and password.
+                </p>
+              </div>
+            )}
 
             <Button variant="outline" className="w-full h-8 text-xs" onClick={handleClose}>
               Done
