@@ -1327,7 +1327,7 @@ describe('checkAgeReviewDeadlines', () => {
     }));
 
     const closeCalls = db.prepare.mock.calls.filter(
-      (c: string[]) => c[0]?.includes('denied_closed')
+      (c: string[]) => c[0]?.includes('UPDATE age_review_cases') && c[0]?.includes('denied_closed')
     );
     expect(closeCalls.length).toBe(1);
 
@@ -1374,7 +1374,7 @@ describe('checkAgeReviewDeadlines', () => {
     await checkAgeReviewDeadlines(makeEnv(db));
 
     const closeCalls = db.prepare.mock.calls.filter(
-      (c: string[]) => c[0]?.includes('denied_closed')
+      (c: string[]) => c[0]?.includes('UPDATE age_review_cases') && c[0]?.includes('denied_closed')
     );
     expect(closeCalls.length).toBe(1);
     expect(banUser).toHaveBeenCalledOnce();

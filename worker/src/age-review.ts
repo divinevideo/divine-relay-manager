@@ -23,7 +23,15 @@ import type { BulkAction } from '../../shared/bulk-moderation';
 import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, createMinorAccount, type KeycastEnv } from './keycast-client';
 import { suspendPubkey, unsuspendPubkey, banPubkey, type SecretStoreSecret } from './nip86';
 import { buildAgeReviewIdentityBlock, buildClaimedParentName, toNpub } from './report-note';
-import { clearSubject, fingerprintProvisioningRequest, markProjectionComplete, pendingProjectionJobs } from './protected-minors';
+import {
+  clearSubject,
+  fingerprintProvisioningRequest,
+  markProjectionAttempt,
+  markProjectionComplete,
+  pendingProjectionJobs,
+  pendingSubjectClears,
+  UUID_RE,
+} from './protected-minors';
 
 /**
  * The identity a case captured at creation, as stored on `age_review_cases`.
@@ -626,7 +634,7 @@ export async function handleCreateMinorAccount(
   }
   const displayName = body.display_name?.trim() || undefined;
   const provisioningOperationId = body.provisioning_operation_id ?? crypto.randomUUID();
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(provisioningOperationId)) {
+  if (!UUID_RE.test(provisioningOperationId)) {
     return json({ success: false, error: 'provisioning_operation_id must be a lowercase UUID' }, 400, corsHeaders);
   }
 
@@ -1942,9 +1950,25 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
     }
   }
 
-  // Durable retry boundary for both interactive and scheduled clears. A case
-  // is already terminal when an external Keycast call fails, so the projection
-  // job—not the case query—is what makes the next cron retry it.
+  // A terminal denial is itself the durable retry source if the subject update
+  // failed before it could create a projection job.
+  let subjectClearRetries: Awaited<ReturnType<typeof pendingSubjectClears>> = [];
+  try {
+    subjectClearRetries = await pendingSubjectClears(env.DB);
+  } catch (error) {
+    console.error('[age-review] Failed to load protected-subject clear retries:', error);
+  }
+  for (const retry of subjectClearRetries) {
+    const result = await clearSubject(
+      env.DB, retry.pubkey, retry.clearedBy, retry.reason, retry.subjectId,
+    );
+    if (!result.success) {
+      console.error(`[age-review] Protected-subject clear retry failed for ${retry.pubkey}: ${result.error}`);
+    }
+  }
+
+  // Durable retry boundary for Keycast projection failures after the subject
+  // clear commits.
   let projectionJobs: Array<{ pubkey: string; reason: string }> = [];
   try {
     projectionJobs = await pendingProjectionJobs(env.DB);
@@ -1955,8 +1979,16 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
     try {
       const result = await clearVerifiedMinor(job.pubkey, undefined, job.reason as 'age_review_denied' | 'age_review_expired', env);
       if (result.success) await markProjectionComplete(env.DB, job.pubkey);
-      else console.error(`[age-review] Keycast protected-minor projection retry failed for ${job.pubkey}: ${result.error}`);
+      else {
+        await markProjectionAttempt(env.DB, job.pubkey);
+        console.error(`[age-review] Keycast protected-minor projection retry failed for ${job.pubkey}: ${result.error}`);
+      }
     } catch (error) {
+      try {
+        await markProjectionAttempt(env.DB, job.pubkey);
+      } catch (markError) {
+        console.error(`[age-review] Failed to rotate protected-minor projection retry ${job.pubkey}:`, markError);
+      }
       console.error(`[age-review] Keycast protected-minor projection retry failed for ${job.pubkey}:`, error);
     }
   }

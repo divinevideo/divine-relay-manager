@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { handleProtectedMinorServiceRoute } from './protected-minors';
+import { handleProtectedMinorServiceRoute, UUID_RE } from './protected-minors';
 
 const path = '/api/internal/protected-minors/resolve';
 const cors = {};
@@ -8,6 +8,12 @@ function request(headers?: HeadersInit) {
 }
 
 describe('protected-minor service authentication', () => {
+  it('accepts modern lowercase UUID versions without interpreting them', () => {
+    for (const version of ['6', '7', '8']) {
+      expect(UUID_RE.test(`018f1f4e-7b3a-${version}abc-8def-0123456789ab`)).toBe(true);
+    }
+    expect(UUID_RE.test('018f1f4e-7b3a-9abc-8def-0123456789ab')).toBe(false);
+  });
   it.each([
     ['missing', undefined],
     ['wrong bearer', { Authorization: 'Bearer wrong' }],

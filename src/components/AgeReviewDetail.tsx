@@ -185,7 +185,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
         if (enforcement?.keycastMinorClear === 'failed') failed.push('protected-minor account projection');
         toast({
           title: 'Enforcement incomplete',
-          description: `Case updated, but these did not apply: ${failed.join(', ') || 'one or more enforcement steps'}. The user's content or account may still be reachable. Retry the action or escalate.`,
+          description: `Case updated, but these did not apply: ${failed.join(', ') || 'one or more enforcement steps'}. The case is now closed; automated retry will continue where supported. Escalate if enforcement does not converge.`,
           variant: 'destructive',
         });
       }

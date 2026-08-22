@@ -3,7 +3,7 @@
 
 import { createMinorAccount, type KeycastEnv } from './keycast-client';
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const PUBKEY_RE = /^[0-9a-f]{64}$/;
 
 export interface ProtectedMinorEnv extends KeycastEnv {
@@ -68,6 +68,7 @@ export async function clearSubject(
   pubkey: string,
   clearedBy: string | undefined,
   reason: string,
+  expectedSubjectId?: string,
 ): Promise<{ success: boolean; projectionPubkey?: string; error?: string }> {
   try {
     const now = new Date().toISOString();
@@ -76,8 +77,9 @@ export async function clearSubject(
           WHERE current.subject_id = s.subject_id AND current.unbound_at IS NULL LIMIT 1) AS projection_pubkey
       FROM protected_minor_subjects s
       JOIN protected_minor_account_bindings history ON history.subject_id = s.subject_id
-      WHERE history.pubkey = ?
-      ORDER BY (history.unbound_at IS NULL) DESC, datetime(history.bound_at) DESC, history.rowid DESC LIMIT 1`).bind(pubkey)
+      WHERE history.pubkey = ? AND (? IS NULL OR s.subject_id = ?)
+      ORDER BY (history.unbound_at IS NULL) DESC, datetime(history.bound_at) DESC, history.rowid DESC LIMIT 1`)
+      .bind(pubkey, expectedSubjectId ?? null, expectedSubjectId ?? null)
       .first<{ subject_id: string; classification_state: string; projection_pubkey: string | null }>();
     const projectionPubkey = subject?.projection_pubkey ?? pubkey;
     if (!subject || subject.classification_state === 'cleared') return { success: true, projectionPubkey };
@@ -103,10 +105,38 @@ export async function markProjectionComplete(db: D1Database, pubkey: string): Pr
     WHERE pubkey = ? AND state = 'pending'`).bind(new Date().toISOString(), pubkey).run();
 }
 
+export async function markProjectionAttempt(db: D1Database, pubkey: string): Promise<void> {
+  await db.prepare(`UPDATE protected_minor_projection_jobs SET updated_at = ?
+    WHERE pubkey = ? AND state = 'pending'`).bind(new Date().toISOString(), pubkey).run();
+}
+
 export async function pendingProjectionJobs(db: D1Database): Promise<Array<{ pubkey: string; reason: string }>> {
   const rows = await db.prepare(`SELECT pubkey, reason FROM protected_minor_projection_jobs
-    WHERE state = 'pending' ORDER BY created_at LIMIT 100`).all<{ pubkey: string; reason: string }>();
+    WHERE state = 'pending' ORDER BY updated_at, created_at LIMIT 100`).all<{ pubkey: string; reason: string }>();
   return rows.results.filter((row) => typeof row.pubkey === 'string' && typeof row.reason === 'string');
+}
+
+export async function pendingSubjectClears(db: D1Database): Promise<Array<{
+  subjectId: string; pubkey: string; clearedBy?: string; reason: 'age_review_denied' | 'age_review_expired';
+}>> {
+  const rows = await db.prepare(`SELECT s.subject_id, c.pubkey, c.moderator_pubkey, c.resolution_note
+    FROM protected_minor_subjects s
+    JOIN protected_minor_account_bindings b ON b.subject_id = s.subject_id
+    JOIN age_review_cases c ON c.pubkey = b.pubkey AND c.state = 'denied_closed'
+    WHERE s.classification_state = 'active'
+      AND c.rowid = (SELECT c2.rowid FROM age_review_cases c2
+        JOIN protected_minor_account_bindings b2 ON b2.pubkey = c2.pubkey
+        WHERE b2.subject_id = s.subject_id AND c2.state = 'denied_closed'
+        ORDER BY datetime(c2.updated_at) DESC, c2.rowid DESC LIMIT 1)
+    ORDER BY datetime(c.updated_at), c.rowid LIMIT 100`).all<{
+      subject_id: string; pubkey: string; moderator_pubkey: string | null; resolution_note: string | null;
+    }>();
+  return rows.results.map((row) => ({
+    subjectId: row.subject_id,
+    pubkey: row.pubkey,
+    clearedBy: row.moderator_pubkey ?? undefined,
+    reason: row.resolution_note?.startsWith('Auto-closed:') ? 'age_review_expired' : 'age_review_denied',
+  }));
 }
 
 export async function resolveByPubkey(db: D1Database, pubkey: string): Promise<{ subjectRef: string } | null> {

@@ -2,7 +2,7 @@ import { Miniflare } from 'miniflare';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ensureSchema } from '../src/db';
 import { handleCreateMinorAccount } from '../src/age-review';
-import { backfillProtectedMinorSubjects, clearSubject, closeBinding, createSubjectWithBinding, fingerprintProvisioningRequest, handleProtectedMinorServiceRoute, resolveByPubkey, startOrResumeReplacement } from '../src/protected-minors';
+import { backfillProtectedMinorSubjects, clearSubject, closeBinding, createSubjectWithBinding, fingerprintProvisioningRequest, handleProtectedMinorServiceRoute, pendingSubjectClears, resolveByPubkey, startOrResumeReplacement } from '../src/protected-minors';
 
 const PUBKEY_A = 'a'.repeat(64);
 const PUBKEY_B = 'b'.repeat(64);
@@ -68,6 +68,19 @@ describe('protected-minor registry on real D1', () => {
     expect(await resolveByPubkey(DB, PUBKEY_B)).toBeNull();
     const job = await DB.prepare('SELECT pubkey, state FROM protected_minor_projection_jobs').first();
     expect(job).toEqual({ pubkey: PUBKEY_B, state: 'pending' });
+  });
+
+  it('derives subject-clear retries from terminal denial rows', async () => {
+    const { subjectId } = await createSubjectWithBinding(DB, 'case-a', PUBKEY_A);
+    await DB.prepare(`INSERT INTO age_review_cases
+      (id, pubkey, state, moderator_pubkey, resolution_note, created_at, updated_at)
+      VALUES ('deny-a', ?, 'denied_closed', ?, 'Denied by moderator', ?, ?)`)
+      .bind(PUBKEY_A, PUBKEY_B, '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z').run();
+    expect(await pendingSubjectClears(DB)).toEqual([{
+      subjectId, pubkey: PUBKEY_A, clearedBy: PUBKEY_B, reason: 'age_review_denied',
+    }]);
+    await clearSubject(DB, PUBKEY_A, PUBKEY_B, 'age_review_denied', subjectId);
+    expect(await pendingSubjectClears(DB)).toEqual([]);
   });
 
   it('serves the frozen resolve and close response shapes without logging the subject reference', async () => {

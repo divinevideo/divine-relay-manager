@@ -19,7 +19,7 @@ Opaque subject references must never be logged, emitted in analytics, placed in 
 1. Create the `PROTECTED_MINOR_SERVICE_TOKEN` Secrets Store entry and configure the Cloudflare Access service-token path.
 2. Deploy Keycast #385 before deploying Relay Manager, because onboarding now sends its provisioning operation ID for crash-safe recovery.
 3. Deploy Relay Manager with replacement disabled. `ensureSchema()` creates the tables; do not run Wrangler migrations against this database.
-4. Invoke `POST /api/admin/protected-minors/backfill` once in staging, inspect its counts, then repeat in production.
+4. Invoke `POST /api/admin/protected-minors/backfill` in staging and inspect its counts, then repeat in production. If a row exposes an integrity conflict, resolve it and rerun; committed rows are skipped by source case ID.
 5. Deploy and enable Funnelcake #1118 only after resolve/close have been verified.
 6. Enable replacement only after the full cross-service flow and retention gate support-trust-safety#204 are approved.
 
