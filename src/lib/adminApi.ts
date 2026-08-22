@@ -1269,8 +1269,9 @@ export async function updateAgeReviewCase(
 export interface CreateMinorAccountResponse {
   success: boolean;
   pubkey?: string;
-  claim_url?: string;
+  claim_url?: string | null;
   expires_at?: string;
+  account_state?: 'unclaimed' | 'claimed';
   case_id?: string;
   provisioning_operation_id?: string;
   replayed?: boolean;

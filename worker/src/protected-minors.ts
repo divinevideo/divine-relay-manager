@@ -68,14 +68,19 @@ export async function clearSubject(
   pubkey: string,
   clearedBy: string | undefined,
   reason: string,
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; projectionPubkey?: string; error?: string }> {
   try {
     const now = new Date().toISOString();
-    const subject = await db.prepare(`SELECT s.subject_id, s.classification_state
-      FROM protected_minor_subjects s JOIN protected_minor_account_bindings b ON b.subject_id = s.subject_id
-      WHERE b.pubkey = ? AND b.unbound_at IS NULL LIMIT 1`).bind(pubkey)
-      .first<{ subject_id: string; classification_state: string }>();
-    if (!subject || subject.classification_state === 'cleared') return { success: true };
+    const subject = await db.prepare(`SELECT s.subject_id, s.classification_state,
+        (SELECT current.pubkey FROM protected_minor_account_bindings current
+          WHERE current.subject_id = s.subject_id AND current.unbound_at IS NULL LIMIT 1) AS projection_pubkey
+      FROM protected_minor_subjects s
+      JOIN protected_minor_account_bindings history ON history.subject_id = s.subject_id
+      WHERE history.pubkey = ?
+      ORDER BY (history.unbound_at IS NULL) DESC, datetime(history.bound_at) DESC, history.rowid DESC LIMIT 1`).bind(pubkey)
+      .first<{ subject_id: string; classification_state: string; projection_pubkey: string | null }>();
+    const projectionPubkey = subject?.projection_pubkey ?? pubkey;
+    if (!subject || subject.classification_state === 'cleared') return { success: true, projectionPubkey };
     await db.batch([
       db.prepare(`UPDATE protected_minor_subjects
         SET classification_state = 'cleared', cleared_at = ?, cleared_by = ?, clear_reason = ?
@@ -85,9 +90,9 @@ export async function clearSubject(
         (subject_id, pubkey, reason, state, created_at, updated_at)
         VALUES (?, ?, ?, 'pending', ?, ?)
         ON CONFLICT(subject_id) DO NOTHING`)
-        .bind(subject.subject_id, pubkey, reason, now, now),
+        .bind(subject.subject_id, projectionPubkey, reason, now, now),
     ]);
-    return { success: true };
+    return { success: true, projectionPubkey };
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
@@ -141,9 +146,9 @@ export async function closeBinding(
 }
 
 export async function backfillProtectedMinorSubjects(db: D1Database): Promise<{ created: number; skippedDuplicates: number }> {
-  const rows = await db.prepare(`SELECT id, pubkey, created_at FROM age_review_cases
-    WHERE created_via = 'minor_onboarding' ORDER BY created_at ASC, id ASC`).all<{
-      id: string; pubkey: string; created_at: string;
+  const rows = await db.prepare(`SELECT rowid AS source_rowid, id, pubkey, created_at FROM age_review_cases
+    WHERE created_via = 'minor_onboarding' ORDER BY datetime(created_at) ASC, rowid ASC`).all<{
+      source_rowid: number; id: string; pubkey: string; created_at: string;
     }>();
   let created = 0;
   let skippedDuplicates = 0;
@@ -159,8 +164,10 @@ export async function backfillProtectedMinorSubjects(db: D1Database): Promise<{ 
     if (exists) continue;
     const ending = await db.prepare(`SELECT moderator_pubkey, resolution_note, updated_at
       FROM age_review_cases WHERE pubkey = ? AND state = 'denied_closed'
-        AND datetime(updated_at) > datetime(?) ORDER BY datetime(updated_at) DESC, id DESC LIMIT 1`)
-      .bind(row.pubkey, row.created_at).first<{ moderator_pubkey: string | null; resolution_note: string | null; updated_at: string }>();
+        AND (datetime(updated_at) > datetime(?) OR (datetime(updated_at) = datetime(?) AND rowid > ?))
+        ORDER BY datetime(updated_at) DESC, rowid DESC LIMIT 1`)
+      .bind(row.pubkey, row.created_at, row.created_at, row.source_rowid)
+      .first<{ moderator_pubkey: string | null; resolution_note: string | null; updated_at: string }>();
     const subjectId = crypto.randomUUID();
     const bindingId = crypto.randomUUID();
     if (ending) {
@@ -188,9 +195,19 @@ export async function backfillProtectedMinorSubjects(db: D1Database): Promise<{ 
   return { created, skippedDuplicates };
 }
 
-export async function fingerprintProvisioningRequest(username: string, displayName: string | undefined): Promise<string> {
-  const input = JSON.stringify({ username, display_name: displayName ?? null });
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input));
+export async function fingerprintProvisioningRequest(input: {
+  kind: 'onboarding' | 'replacement';
+  username: string;
+  displayName?: string;
+  zendeskTicketId?: number;
+}): Promise<string> {
+  const canonical = JSON.stringify({
+    kind: input.kind,
+    username: input.username,
+    display_name: input.displayName ?? null,
+    zendesk_ticket_id: input.zendeskTicketId ?? null,
+  });
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(canonical));
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
@@ -199,16 +216,23 @@ export async function startOrResumeReplacement(
   input: { subjectRef: string; provisioningOperationId: string; username: string; displayName?: string },
 ): Promise<{ outcome: 'complete'; pubkey: string; claimUrl: string | null; expiresAt: string | null; accountState: 'unclaimed' | 'claimed'; replayed: boolean } | { outcome: 'conflict'; code: string } | { outcome: 'failed'; error: string }> {
   if (!env.DB) return { outcome: 'failed', error: 'Database not configured' };
-  const fingerprint = await fingerprintProvisioningRequest(input.username, input.displayName);
-  const existing = await env.DB.prepare(`SELECT subject_id, request_fingerprint, state, result_pubkey
+  const fingerprint = await fingerprintProvisioningRequest({
+    kind: 'replacement', username: input.username, displayName: input.displayName,
+  });
+  let existing = await env.DB.prepare(`SELECT subject_id, kind, request_fingerprint, state, result_pubkey
     FROM protected_minor_provisioning_operations WHERE provisioning_operation_id = ?`)
-    .bind(input.provisioningOperationId).first<{ subject_id: string; request_fingerprint: string; state: string; result_pubkey: string | null }>();
-  if (existing && (existing.subject_id !== input.subjectRef || existing.request_fingerprint !== fingerprint)) {
+    .bind(input.provisioningOperationId).first<{ subject_id: string; kind: string; request_fingerprint: string; state: string; result_pubkey: string | null }>();
+  if (existing && (existing.kind !== 'replacement' || existing.subject_id !== input.subjectRef || existing.request_fingerprint !== fingerprint)) {
     return { outcome: 'conflict', code: 'provisioning_operation_conflict' };
   }
   const subject = await env.DB.prepare(`SELECT classification_state FROM protected_minor_subjects WHERE subject_id = ?`)
     .bind(input.subjectRef).first<{ classification_state: string }>();
   if (!subject || subject.classification_state !== 'active') return { outcome: 'conflict', code: 'classification_cleared' };
+  if (existing?.state !== 'complete') {
+    const activeBinding = await env.DB.prepare(`SELECT id FROM protected_minor_account_bindings
+      WHERE subject_id = ? AND unbound_at IS NULL LIMIT 1`).bind(input.subjectRef).first();
+    if (activeBinding) return { outcome: 'conflict', code: 'stale_binding' };
+  }
   if (!existing) {
     const now = new Date().toISOString();
     await env.DB.prepare(`INSERT INTO protected_minor_provisioning_operations
@@ -217,11 +241,37 @@ export async function startOrResumeReplacement(
       .bind(input.provisioningOperationId, input.subjectRef, fingerprint, now, now).run();
   }
   const result = await createMinorAccount(input.username, input.displayName, env, input.provisioningOperationId);
-  if (!result.success || !result.pubkey || !PUBKEY_RE.test(result.pubkey)) {
+  if (!result.success || !result.pubkey || !PUBKEY_RE.test(result.pubkey)
+    || (result.account_state !== 'claimed' && result.account_state !== 'unclaimed')
+    || (result.account_state === 'claimed' && result.claim_url != null)
+    || (result.account_state === 'unclaimed' && (typeof result.claim_url !== 'string' || typeof result.expires_at !== 'string'))) {
     return { outcome: 'failed', error: result.error ?? 'Provisioning failed' };
   }
+  const accountState = result.account_state;
   if (existing?.result_pubkey && existing.result_pubkey !== result.pubkey) {
     return { outcome: 'conflict', code: 'provisioning_result_conflict' };
+  }
+  if (existing?.state !== 'complete') {
+    const observed = await env.DB.prepare(`UPDATE protected_minor_provisioning_operations
+      SET result_pubkey = ?, updated_at = ?
+      WHERE provisioning_operation_id = ? AND subject_id = ? AND kind = 'replacement' AND state = 'pending'
+        AND (result_pubkey IS NULL OR result_pubkey = ?)`)
+      .bind(result.pubkey, new Date().toISOString(), input.provisioningOperationId, input.subjectRef, result.pubkey).run();
+    if (observed.meta.changes !== 1) {
+      const current = await env.DB.prepare(`SELECT subject_id, kind, request_fingerprint, state, result_pubkey
+        FROM protected_minor_provisioning_operations WHERE provisioning_operation_id = ?`)
+        .bind(input.provisioningOperationId)
+        .first<{ subject_id: string; kind: string; request_fingerprint: string; state: string; result_pubkey: string | null }>();
+      if (current?.result_pubkey && current.result_pubkey !== result.pubkey) {
+        return { outcome: 'conflict', code: 'provisioning_result_conflict' };
+      }
+      if (!current || current.kind !== 'replacement' || current.subject_id !== input.subjectRef) {
+        return { outcome: 'failed', error: 'Replacement persistence failed' };
+      }
+      existing = current;
+    } else if (existing) {
+      existing = { ...existing, result_pubkey: result.pubkey };
+    }
   }
   if (existing?.state === 'complete' && existing.result_pubkey === result.pubkey) {
     const binding = await env.DB.prepare(`SELECT id FROM protected_minor_account_bindings
@@ -229,7 +279,7 @@ export async function startOrResumeReplacement(
     if (!binding) return { outcome: 'failed', error: 'Replacement operation is missing its active binding' };
     return {
       outcome: 'complete', pubkey: result.pubkey, claimUrl: result.claim_url ?? null,
-      expiresAt: result.expires_at ?? null, accountState: result.account_state ?? 'unclaimed', replayed: true,
+      expiresAt: result.expires_at ?? null, accountState, replayed: true,
     };
   }
   const now = new Date().toISOString();
@@ -241,20 +291,42 @@ export async function startOrResumeReplacement(
           AND NOT EXISTS (SELECT 1 FROM protected_minor_account_bindings WHERE subject_id = ? AND unbound_at IS NULL)`)
         .bind(crypto.randomUUID(), result.pubkey, now, input.subjectRef, input.subjectRef),
       env.DB.prepare(`UPDATE protected_minor_provisioning_operations SET state = 'complete', result_pubkey = ?, updated_at = ?
-        WHERE provisioning_operation_id = ? AND subject_id IN
-          (SELECT subject_id FROM protected_minor_subjects WHERE classification_state = 'active')`)
-        .bind(result.pubkey, now, input.provisioningOperationId),
+        WHERE provisioning_operation_id = ? AND subject_id = ? AND kind = 'replacement' AND state = 'pending'
+          AND subject_id IN (SELECT subject_id FROM protected_minor_subjects WHERE classification_state = 'active')
+          AND EXISTS (SELECT 1 FROM protected_minor_account_bindings
+            WHERE subject_id = ? AND pubkey = ? AND unbound_at IS NULL)`)
+        .bind(result.pubkey, now, input.provisioningOperationId, input.subjectRef, input.subjectRef, result.pubkey),
     ]);
-    if (batch[1].meta.changes !== 1) return { outcome: 'conflict', code: 'classification_cleared' };
+    if (batch[1].meta.changes !== 1) {
+      const current = await env.DB.prepare(`SELECT classification_state FROM protected_minor_subjects WHERE subject_id = ?`)
+        .bind(input.subjectRef).first<{ classification_state: string }>();
+      if (current?.classification_state !== 'active') return { outcome: 'conflict', code: 'classification_cleared' };
+      return { outcome: 'failed', error: 'Replacement persistence failed' };
+    }
   } catch {
     const current = await env.DB.prepare(`SELECT classification_state FROM protected_minor_subjects WHERE subject_id = ?`)
       .bind(input.subjectRef).first<{ classification_state: string }>();
     if (current?.classification_state !== 'active') return { outcome: 'conflict', code: 'classification_cleared' };
+    const completed = await env.DB.prepare(`SELECT state, result_pubkey FROM protected_minor_provisioning_operations
+      WHERE provisioning_operation_id = ? AND subject_id = ? AND kind = 'replacement'`)
+      .bind(input.provisioningOperationId, input.subjectRef)
+      .first<{ state: string; result_pubkey: string | null }>();
+    if (completed?.state === 'complete' && completed.result_pubkey === result.pubkey) {
+      const binding = await env.DB.prepare(`SELECT id FROM protected_minor_account_bindings
+        WHERE subject_id = ? AND pubkey = ? AND unbound_at IS NULL`)
+        .bind(input.subjectRef, result.pubkey).first();
+      if (binding) {
+        return {
+          outcome: 'complete', pubkey: result.pubkey, claimUrl: result.claim_url ?? null,
+          expiresAt: result.expires_at ?? null, accountState, replayed: true,
+        };
+      }
+    }
     return { outcome: 'failed', error: 'Replacement persistence failed' };
   }
   return {
     outcome: 'complete', pubkey: result.pubkey, claimUrl: result.claim_url ?? null,
-    expiresAt: result.expires_at ?? null, accountState: result.account_state ?? 'unclaimed', replayed: result.replayed === true,
+    expiresAt: result.expires_at ?? null, accountState, replayed: result.replayed === true,
   };
 }
 
@@ -263,9 +335,15 @@ export async function handleProtectedMinorServiceRoute(
   path: string,
   env: ProtectedMinorEnv,
   corsHeaders: Record<string, string>,
+  prepareDb?: (db: D1Database) => Promise<void>,
 ): Promise<Response> {
   if (!(await verifyProtectedMinorService(request, env))) return json({ error: 'unauthorized' }, 401, corsHeaders);
   if (!env.DB) return json({ error: 'service_unavailable' }, 503, corsHeaders);
+  try {
+    if (prepareDb) await prepareDb(env.DB);
+  } catch {
+    return json({ error: 'service_unavailable' }, 503, corsHeaders);
+  }
   let body: Record<string, unknown>;
   try { body = await request.json(); } catch { return json({ error: 'invalid_request' }, 400, corsHeaders); }
   try {

@@ -451,8 +451,7 @@ export default {
       // Dedicated service boundary: moderator/browser credentials must never
       // authorize protected-subject lifecycle calls.
       if (path.startsWith('/api/internal/protected-minors/')) {
-        if (env.DB) await ensureSchemaOnce(env.DB);
-        return handleProtectedMinorServiceRoute(request, path, env, corsHeaders);
+        return handleProtectedMinorServiceRoute(request, path, env, corsHeaders, ensureSchemaOnce);
       }
 
       // Mobile-facing endpoints: NIP-98 user auth, not admin auth

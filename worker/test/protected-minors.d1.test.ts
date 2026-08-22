@@ -2,10 +2,11 @@ import { Miniflare } from 'miniflare';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ensureSchema } from '../src/db';
 import { handleCreateMinorAccount } from '../src/age-review';
-import { backfillProtectedMinorSubjects, clearSubject, closeBinding, createSubjectWithBinding, handleProtectedMinorServiceRoute, resolveByPubkey, startOrResumeReplacement } from '../src/protected-minors';
+import { backfillProtectedMinorSubjects, clearSubject, closeBinding, createSubjectWithBinding, fingerprintProvisioningRequest, handleProtectedMinorServiceRoute, resolveByPubkey, startOrResumeReplacement } from '../src/protected-minors';
 
 const PUBKEY_A = 'a'.repeat(64);
 const PUBKEY_B = 'b'.repeat(64);
+const PUBKEY_C = 'c'.repeat(64);
 const ATTEMPT_A = '11111111-1111-4111-8111-111111111111';
 let mf: Miniflare;
 let DB: D1Database;
@@ -38,8 +39,8 @@ describe('protected-minor registry on real D1', () => {
   it('resolves active subjects and clear wins without deleting binding history', async () => {
     const { subjectId } = await createSubjectWithBinding(DB, 'case-a', PUBKEY_A);
     expect(await resolveByPubkey(DB, PUBKEY_A)).toEqual({ subjectRef: subjectId });
-    await expect(clearSubject(DB, PUBKEY_A, undefined, 'age_review_denied')).resolves.toEqual({ success: true });
-    await expect(clearSubject(DB, PUBKEY_A, undefined, 'age_review_denied')).resolves.toEqual({ success: true });
+    await expect(clearSubject(DB, PUBKEY_A, undefined, 'age_review_denied')).resolves.toEqual({ success: true, projectionPubkey: PUBKEY_A });
+    await expect(clearSubject(DB, PUBKEY_A, undefined, 'age_review_denied')).resolves.toEqual({ success: true, projectionPubkey: PUBKEY_A });
     expect(await resolveByPubkey(DB, PUBKEY_A)).toBeNull();
     const binding = await DB.prepare('SELECT subject_id, unbound_at FROM protected_minor_account_bindings').first();
     expect(binding).toEqual({ subject_id: subjectId, unbound_at: null });
@@ -53,6 +54,20 @@ describe('protected-minor registry on real D1', () => {
     expect(await closeBinding(DB, subjectId, PUBKEY_A, ATTEMPT_A)).toBe('closed');
     expect(await closeBinding(DB, subjectId, PUBKEY_B, ATTEMPT_A)).toBe('idempotency_conflict');
     expect(await closeBinding(DB, subjectId, PUBKEY_A, '22222222-2222-4222-8222-222222222222')).toBe('stale_binding');
+  });
+
+  it('clears through binding history and targets the current replacement projection', async () => {
+    const { subjectId } = await createSubjectWithBinding(DB, 'case-a', PUBKEY_A);
+    await closeBinding(DB, subjectId, PUBKEY_A, ATTEMPT_A);
+    await DB.prepare(`INSERT INTO protected_minor_account_bindings (id, subject_id, pubkey, bound_at)
+      VALUES (?, ?, ?, ?)`).bind(crypto.randomUUID(), subjectId, PUBKEY_B, new Date().toISOString()).run();
+
+    expect(await clearSubject(DB, PUBKEY_A, undefined, 'age_review_denied')).toEqual({
+      success: true, projectionPubkey: PUBKEY_B,
+    });
+    expect(await resolveByPubkey(DB, PUBKEY_B)).toBeNull();
+    const job = await DB.prepare('SELECT pubkey, state FROM protected_minor_projection_jobs').first();
+    expect(job).toEqual({ pubkey: PUBKEY_B, state: 'pending' });
   });
 
   it('serves the frozen resolve and close response shapes without logging the subject reference', async () => {
@@ -90,12 +105,15 @@ describe('protected-minor registry on real D1', () => {
       VALUES ('onboard-a', ?, 'cleared', 'minor_onboarding', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
              ('duplicate-a', ?, 'cleared', 'minor_onboarding', '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z'),
              ('deny-a', ?, 'denied_closed', 'report', '2026-01-03T00:00:00Z', '2026-01-04T00:00:00Z'),
-             ('onboard-b', ?, 'cleared', 'minor_onboarding', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`)
-      .bind(PUBKEY_A, PUBKEY_A, PUBKEY_A, PUBKEY_B).run();
-    expect(await backfillProtectedMinorSubjects(DB)).toEqual({ created: 2, skippedDuplicates: 1 });
+             ('onboard-b', ?, 'cleared', 'minor_onboarding', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+             ('onboard-c', ?, 'cleared', 'minor_onboarding', '2026-01-05T00:00:00Z', '2026-01-05T00:00:00Z'),
+             ('deny-c', ?, 'denied_closed', 'report', '2026-01-05T00:00:00Z', '2026-01-05T00:00:00Z')`)
+      .bind(PUBKEY_A, PUBKEY_A, PUBKEY_A, PUBKEY_B, PUBKEY_C, PUBKEY_C).run();
+    expect(await backfillProtectedMinorSubjects(DB)).toEqual({ created: 3, skippedDuplicates: 1 });
     expect(await backfillProtectedMinorSubjects(DB)).toEqual({ created: 0, skippedDuplicates: 1 });
     expect(await resolveByPubkey(DB, PUBKEY_A)).toBeNull();
     expect(await resolveByPubkey(DB, PUBKEY_B)).not.toBeNull();
+    expect(await resolveByPubkey(DB, PUBKEY_C)).toBeNull();
     const copied = await DB.prepare(`SELECT parent_contact_email FROM age_review_cases WHERE id = 'onboard-a'`).first();
     expect(copied).toEqual({ parent_contact_email: null });
   });
@@ -119,6 +137,70 @@ describe('protected-minor registry on real D1', () => {
     const stale = await startOrResumeReplacement(env, input);
     expect(stale).toEqual({ outcome: 'conflict', code: 'classification_cleared' });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    vi.unstubAllGlobals();
+  });
+
+  it('does not provision a replacement until the old binding is closed', async () => {
+    const { subjectId } = await createSubjectWithBinding(DB, 'case-a', PUBKEY_A);
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await startOrResumeReplacement(
+      { DB, KEYCAST_URL: 'https://keycast.test', KEYCAST_SERVICE_TOKEN: 'token' },
+      { subjectRef: subjectId, provisioningOperationId: '55555555-5555-4555-8555-555555555555', username: 'replacement' },
+    );
+    expect(result).toEqual({ outcome: 'conflict', code: 'stale_binding' });
+    expect(fetchMock).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it('rejects malformed replacement success and conflicting observed results', async () => {
+    const { subjectId } = await createSubjectWithBinding(DB, 'case-a', PUBKEY_A);
+    await closeBinding(DB, subjectId, PUBKEY_A, ATTEMPT_A);
+    const operationId = '77777777-7777-4777-8777-777777777777';
+    const env = { DB, KEYCAST_URL: 'https://keycast.test', KEYCAST_SERVICE_TOKEN: 'token' };
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ pubkey: PUBKEY_B }), { status: 201 })));
+    expect(await startOrResumeReplacement(env, {
+      subjectRef: subjectId, provisioningOperationId: operationId, username: 'replacement',
+    })).toEqual({ outcome: 'failed', error: 'Provisioning failed' });
+
+    const fingerprintHex = await fingerprintProvisioningRequest({ kind: 'replacement', username: 'replacement' });
+    await DB.prepare(`UPDATE protected_minor_provisioning_operations SET result_pubkey = ?, request_fingerprint = ?
+      WHERE provisioning_operation_id = ?`).bind(PUBKEY_C, fingerprintHex, operationId).run();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      pubkey: PUBKEY_B, claim_url: 'https://claim.test/replacement', expires_at: '2026-09-01T00:00:00Z',
+      account_state: 'unclaimed', replayed: true,
+    }), { status: 200 })));
+    expect(await startOrResumeReplacement(env, {
+      subjectRef: subjectId, provisioningOperationId: operationId, username: 'replacement',
+    })).toEqual({ outcome: 'conflict', code: 'provisioning_result_conflict' });
+    vi.unstubAllGlobals();
+  });
+
+  it('rejects changed onboarding provenance and cross-kind operation reuse', async () => {
+    const operationId = '66666666-6666-4666-8666-666666666666';
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      pubkey: PUBKEY_A, claim_url: 'https://claim.test/onboard', expires_at: '2026-09-01T00:00:00Z',
+      account_state: 'unclaimed', replayed: false,
+    }), { status: 201 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const request = (ticketId: number) => new Request('https://api.test/api/age-review/create-minor-account', {
+      method: 'POST', body: JSON.stringify({
+        username: 'new-minor', zendesk_ticket_id: ticketId, provisioning_operation_id: operationId,
+      }),
+    });
+    const env = { DB, KEYCAST_URL: 'https://keycast.test', KEYCAST_SERVICE_TOKEN: 'token' };
+    expect((await handleCreateMinorAccount(request(101), env, {})).status).toBe(200);
+    expect((await handleCreateMinorAccount(request(202), env, {})).status).toBe(409);
+
+    const subject = await DB.prepare('SELECT subject_id FROM protected_minor_subjects').first<{ subject_id: string }>();
+    expect(subject).not.toBeNull();
+    await closeBinding(DB, subject!.subject_id, PUBKEY_A, ATTEMPT_A);
+    const replacement = await startOrResumeReplacement(env, {
+      subjectRef: subject!.subject_id, provisioningOperationId: operationId, username: 'new-minor',
+    });
+    expect(replacement).toEqual({ outcome: 'conflict', code: 'provisioning_operation_conflict' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     vi.unstubAllGlobals();
   });
 

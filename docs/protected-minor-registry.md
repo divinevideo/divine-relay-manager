@@ -10,7 +10,7 @@ All `/api/internal/protected-minors/*` routes accept only `Authorization: Bearer
 
 - `POST /api/internal/protected-minors/resolve` accepts `{"pubkey":"<64 lowercase hex>"}` and returns either `{"classification":"active","subject_ref":"<uuid>","binding_state":"active"}` or `{"classification":"none"}`. Only these HTTP 200 responses are determinate. Database failures return 503, never a false negative.
 - `POST /api/internal/protected-minors/bindings/close` accepts `subject_ref`, `pubkey`, and `deletion_attempt_id`. Exact replay returns `{"outcome":"closed"}`. Conflicting operation reuse and stale bindings return stable 409 codes.
-- `POST /api/internal/protected-minors/replacements` accepts `subject_ref`, `provisioning_operation_id`, `username`, and optional `display_name`. It is disabled unless `PROTECTED_MINOR_REPLACEMENT_ENABLED=true`. Do not enable it until Keycast #385 is deployed and its replay contract has been verified.
+- `POST /api/internal/protected-minors/replacements` accepts `subject_ref`, `provisioning_operation_id`, `username`, and optional `display_name`. The previous active binding must already be closed; otherwise the request returns HTTP 409 `stale_binding` without calling Keycast. It is disabled unless `PROTECTED_MINOR_REPLACEMENT_ENABLED=true`. Do not enable it until Keycast #385 is deployed and its replay contract has been verified.
 
 Opaque subject references must never be logged, emitted in analytics, placed in metrics labels, or returned in errors. Resolve's successful active response is the sole intended disclosure to the deletion coordinator.
 

@@ -2932,7 +2932,7 @@ describe('handleCreateMinorAccount', () => {
   }
 
   function makeMinorDb(runImpl?: () => Promise<unknown>) {
-    const execute = runImpl ?? (() => Promise.resolve({ success: true }));
+    const execute = runImpl ?? (() => Promise.resolve({ success: true, meta: { changes: 1 } }));
     return {
       prepare: vi.fn().mockImplementation(() => {
         const bound = { run: vi.fn().mockImplementation(execute), first: vi.fn().mockResolvedValue(null) };
