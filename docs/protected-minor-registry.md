@@ -6,7 +6,9 @@ The registry deliberately stores only opaque subject and operation UUIDs, accoun
 
 ## Service API
 
-All `/api/internal/protected-minors/*` routes accept only `Authorization: Bearer <PROTECTED_MINOR_SERVICE_TOKEN>`. Cloudflare Access browser assertions and `X-Admin-Key` do not authorize them. Infrastructure must separately allow the caller through Cloudflare Access using a service token or a path-scoped policy; the Worker bearer remains mandatory defense in depth.
+All `/api/internal/protected-minors/*` routes accept only `Authorization: Bearer <PROTECTED_MINOR_SERVICE_TOKEN>`. Cloudflare Access browser assertions and `X-Admin-Key` do not authorize them. Funnelcake must also authenticate at the edge with a dedicated Cloudflare Access service token. The Worker bearer remains mandatory defense in depth and must be distinct from both Access token values.
+
+The Access application is scoped only to `/api/internal/protected-minors/*` on each Relay Manager API hostname. Do not attach this service identity to the hostname-wide application and do not add a hostname-wide or path-scoped Bypass policy. The path boundary prevents the deletion coordinator's identity from authorizing unrelated moderator APIs. The configuration owner and operating procedure are recorded in [Protected-minor edge authentication](protected-minor-edge-auth.md).
 
 - `POST /api/internal/protected-minors/resolve` accepts `{"pubkey":"<64 lowercase hex>"}` and returns either `{"classification":"active","subject_ref":"<uuid>","binding_state":"active"}` or `{"classification":"none"}`. Only these HTTP 200 responses are determinate. Database failures return 503, never a false negative.
 - `POST /api/internal/protected-minors/bindings/close` accepts `subject_ref`, `pubkey`, and `deletion_attempt_id`. Exact replay returns `{"outcome":"closed"}`. Conflicting operation reuse and stale bindings return stable 409 codes.
@@ -16,7 +18,7 @@ Opaque subject references must never be logged, emitted in analytics, placed in 
 
 ## Deployment and rollback
 
-1. Create the `PROTECTED_MINOR_SERVICE_TOKEN` Secrets Store entry and configure the Cloudflare Access service-token path.
+1. Create the `PROTECTED_MINOR_SERVICE_TOKEN` Secrets Store entry, then complete the environment's Cloudflare Access and caller configuration in [Protected-minor edge authentication](protected-minor-edge-auth.md).
 2. Deploy Keycast #385 before deploying Relay Manager, because onboarding now sends its provisioning operation ID for crash-safe recovery.
 3. Deploy Relay Manager with replacement disabled. `ensureSchema()` creates the tables; do not run Wrangler migrations against this database.
 4. Invoke `POST /api/admin/protected-minors/backfill` in staging and inspect its counts, then repeat in production. If a row exposes an integrity conflict, resolve it and rerun; committed rows are skipped by source case ID.
