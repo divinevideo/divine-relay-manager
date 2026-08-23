@@ -1,6 +1,7 @@
-import { ReactNode, useEffect } from 'react';
+import { ReactNode, useEffect, useMemo } from 'react';
 import { useLocalStorage } from '@/hooks/useLocalStorage';
 import { AppContext, type AppConfig, type AppContextType, type Theme } from '@/contexts/AppContext';
+import { parseStoredConfig } from '@/lib/appConfig';
 
 interface AppProviderProps {
   children: ReactNode;
@@ -20,8 +21,15 @@ export function AppProvider(props: AppProviderProps) {
     presetRelays,
   } = props;
 
-  // App configuration state with localStorage persistence
-  const [config, setConfig] = useLocalStorage<AppConfig>(storageKey, defaultConfig);
+  // App configuration state with localStorage persistence. The stored copy is
+  // reconciled against defaultConfig on read so a config saved before a field
+  // existed picks it up instead of staying undefined for the life of the browser.
+  const serializer = useMemo(() => ({
+    serialize: JSON.stringify,
+    deserialize: (raw: string) => parseStoredConfig(raw, defaultConfig),
+  }), [defaultConfig]);
+
+  const [config, setConfig] = useLocalStorage<AppConfig>(storageKey, defaultConfig, serializer);
 
   // Fix stale localhost URLs saved from dev sessions
   useEffect(() => {
