@@ -55,8 +55,8 @@ describe('parseStoredConfig', () => {
   });
 
   it('fills in a field that did not exist when the config was saved', () => {
-    // The shape persisted before apiUrl was introduced. Without this, apiUrl is
-    // undefined forever and every worker request throws "No relay selected".
+    // No current writer produces this shape; this guards future AppConfig fields
+    // against remaining undefined when an older persisted config is loaded.
     const raw = JSON.stringify({ theme: 'dark', relayUrl: 'wss://relay.example.com' });
 
     expect(parseStoredConfig(raw, defaults).apiUrl).toBe('https://api.example.com');
