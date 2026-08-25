@@ -5,7 +5,7 @@
 Funnelcake authenticates to Relay Manager's protected-minor service with two independent credentials:
 
 1. A dedicated Cloudflare Access service token at the edge, sent as `CF-Access-Client-Id` and `CF-Access-Client-Secret`.
-2. The environment-specific `PROTECTED_MINOR_SERVICE_TOKEN` bearer credential, verified by the Worker.
+2. The shared staging/production `PROTECTED_MINOR_SERVICE_TOKEN` bearer credential, verified by the Worker.
 
 Divine's Cloudflare Zero Trust administrators own the Access applications, policies, service-token lifecycle, and audit logs. The Funnelcake platform deployment owner owns delivery of all three credential values to the caller. Relay Manager owns the Worker bearer check and this contract.
 
