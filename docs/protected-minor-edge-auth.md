@@ -52,7 +52,7 @@ curl --silent --show-error \
   --data '{"pubkey":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'
 
 head -n 1 "$RESPONSE_HEADERS_FILE"
-rg -i '^content-type: application/json(?:;|$)' "$RESPONSE_HEADERS_FILE"
+rg -i '^content-type: application/json(?:;|\r?$)' "$RESPONSE_HEADERS_FILE"
 jq -e 'keys == ["classification"] and .classification == "none"' "$RESPONSE_BODY_FILE"
 rm -f "$RESPONSE_HEADERS_FILE" "$RESPONSE_BODY_FILE"
 ```
@@ -73,7 +73,7 @@ The exact unauthenticated status can vary with Access request handling. The inva
 
 ## Rotation
 
-Rotate one environment at a time. Create or rotate the Access service token, update both caller values together, restart Funnelcake, and repeat the positive and negative verification matrix before retiring the previous values. Rotate `PROTECTED_MINOR_SERVICE_TOKEN` separately but coordinate its Cloudflare Secrets Store and Funnelcake secret values so they continue to match.
+Rotate one environment at a time. Create a replacement Access service token and temporarily include both the old and replacement tokens in the application's Service Auth policy. Update both caller values together, restart Funnelcake, and repeat the positive and negative verification matrix before removing and deleting the old token. Rotate `PROTECTED_MINOR_SERVICE_TOKEN` separately but coordinate its Cloudflare Secrets Store and Funnelcake secret values so they continue to match.
 
 Never log or retrieve secret values for comparison. Confirm secret versions, synchronization status, workload readiness, and the functional request instead.
 
