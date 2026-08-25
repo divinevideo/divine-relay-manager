@@ -74,9 +74,9 @@ The exact unauthenticated status can vary with Access request handling. The inva
 
 ## Rotation
 
-Rotate one environment at a time. Create a replacement Access service token and temporarily include both the old and replacement tokens in the application's Service Auth policy. Update both caller values together, restart Funnelcake, and repeat the positive and negative verification matrix before removing and deleting the old token.
+Rotate Access service tokens one environment at a time. Create a replacement token and temporarily include both the old and replacement tokens in the application's Service Auth policy. Update both caller values together, restart Funnelcake, and repeat the positive and negative verification matrix before removing and deleting the old token.
 
-Rotate `PROTECTED_MINOR_SERVICE_TOKEN` separately. The Worker accepts only one bearer value, so there is no dual-token overlap window: disable the affected Funnelcake component, update the Cloudflare Secrets Store and Funnelcake values, restart Funnelcake, then re-enable it only after the positive verification passes. Requests made while the values differ fail closed with HTTP 401.
+Rotate `PROTECTED_MINOR_SERVICE_TOKEN` separately. Staging and production currently use the same Cloudflare Secrets Store entry, and the Worker accepts only one bearer value, so there is no per-environment or dual-token overlap window. Disable both Funnelcake components, update the shared Secrets Store value and both Funnelcake environment values, restart both workloads, then re-enable each environment only after its positive verification passes. Requests made while the values differ fail closed with HTTP 401.
 
 Never log or retrieve secret values for comparison. Confirm secret versions, synchronization status, workload readiness, and the functional request instead.
 
