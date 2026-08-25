@@ -26,7 +26,7 @@ Configure staging before production. Use a separate Access application and servi
 
 For each environment:
 
-1. Inspect the hostname-wide moderator application's policies before creating the new token. It must not use the **Any Access Service Token** selector, and none of its policies may include the protected-deletion token. Replace any broad selector with the explicit approved moderator service tokens before continuing.
+1. Inspect the hostname-wide moderator application's policies before creating the new token. It must not use the **Any Access Service Token** selector, and none of its policies may include the protected-deletion token. Before replacing a broad selector, inventory its current machine callers in the approved operational record and preserve the previous policy for rollback. After narrowing to the explicit approved moderator service tokens, verify every known machine caller still succeeds; restore the previous policy and stop if any caller fails.
 2. Create the named Access service token under **Access controls → Service credentials → Service Tokens**. Set an explicit expiry approved by the platform owner.
 3. Store the client ID and client secret through the approved secret-management process. Do not paste either value into issues, pull requests, commands recorded in shell history, logs, screenshots, or verification notes.
 4. Create a self-hosted Access application with the exact domain and path above.
