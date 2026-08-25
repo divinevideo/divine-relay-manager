@@ -26,12 +26,13 @@ Configure staging before production. Use a separate Access application and servi
 
 For each environment:
 
-1. Create the named Access service token under **Access controls → Service credentials → Service Tokens**. Set an explicit expiry approved by the platform owner.
-2. Store the client ID and client secret through the approved secret-management process. Do not paste either value into issues, pull requests, commands recorded in shell history, logs, screenshots, or verification notes.
-3. Create a self-hosted Access application with the exact domain and path above.
-4. Attach one policy with action **Service Auth**, including only the named service token.
-5. Confirm the path-specific application is the application selected for a protected-minor URL. Cloudflare evaluates the more-specific application instead of the hostname-wide moderator application; policy ordering within the hostname-wide application does not provide this boundary.
-6. Configure Funnelcake with both Access headers and the Worker bearer. The Access pair is all-or-nothing: either both values are present or startup must fail. Do not activate an environment until all three values are available.
+1. Inspect the hostname-wide moderator application's policies before creating the new token. It must not use the **Any Access Service Token** selector, and none of its policies may include the protected-deletion token. Replace any broad selector with the explicit approved moderator service tokens before continuing.
+2. Create the named Access service token under **Access controls → Service credentials → Service Tokens**. Set an explicit expiry approved by the platform owner.
+3. Store the client ID and client secret through the approved secret-management process. Do not paste either value into issues, pull requests, commands recorded in shell history, logs, screenshots, or verification notes.
+4. Create a self-hosted Access application with the exact domain and path above.
+5. Attach one policy with action **Service Auth**, including only the named service token.
+6. Confirm the path-specific application is the application selected for a protected-minor URL. Cloudflare evaluates the more-specific application instead of the hostname-wide moderator application; policy ordering within the hostname-wide application does not provide this boundary.
+7. Configure Funnelcake with both Access headers and the Worker bearer. The Access pair is all-or-nothing: either both values are present or startup must fail. Do not activate an environment until all three values are available.
 
 ## Verification
 
@@ -73,7 +74,9 @@ The exact unauthenticated status can vary with Access request handling. The inva
 
 ## Rotation
 
-Rotate one environment at a time. Create a replacement Access service token and temporarily include both the old and replacement tokens in the application's Service Auth policy. Update both caller values together, restart Funnelcake, and repeat the positive and negative verification matrix before removing and deleting the old token. Rotate `PROTECTED_MINOR_SERVICE_TOKEN` separately but coordinate its Cloudflare Secrets Store and Funnelcake secret values so they continue to match.
+Rotate one environment at a time. Create a replacement Access service token and temporarily include both the old and replacement tokens in the application's Service Auth policy. Update both caller values together, restart Funnelcake, and repeat the positive and negative verification matrix before removing and deleting the old token.
+
+Rotate `PROTECTED_MINOR_SERVICE_TOKEN` separately. The Worker accepts only one bearer value, so there is no dual-token overlap window: disable the affected Funnelcake component, update the Cloudflare Secrets Store and Funnelcake values, restart Funnelcake, then re-enable it only after the positive verification passes. Requests made while the values differ fail closed with HTTP 401.
 
 Never log or retrieve secret values for comparison. Confirm secret versions, synchronization status, workload readiness, and the functional request instead.
 
