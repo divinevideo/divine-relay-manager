@@ -76,8 +76,11 @@ describe('AgeReview drill-down chips', () => {
   it('shows a chip per non-terminal state, with counts, on the default Active tab', async () => {
     renderPage();
     const chips = await screen.findByRole('group', { name: /Filter by case status/ });
+    // The chip row renders unconditionally, so finding the group is NOT a
+    // barrier for the counts query behind the numbers. Await the first count;
+    // asserting it synchronously here raced the query and went red on CI.
+    expect(await within(chips).findByRole('button', { name: /In Review\s*4/ })).toBeInTheDocument();
     expect(within(chips).getByRole('button', { name: /^All/ })).toBeInTheDocument();
-    expect(within(chips).getByRole('button', { name: /In Review\s*4/ })).toBeInTheDocument();
     expect(within(chips).getByRole('button', { name: /Pending User\s*99/ })).toBeInTheDocument();
     // needs_follow_up is absent from by_state → rendered as 0, not hidden.
     expect(within(chips).getByRole('button', { name: /Follow-up\s*0/ })).toBeInTheDocument();
@@ -110,7 +113,8 @@ describe('AgeReview drill-down chips', () => {
     await user.click(screen.getByRole('tab', { name: 'Closed' }));
     await waitFor(() => expect(lastListState()).toBe('closed'));
     const closedChips = await screen.findByRole('group', { name: /Filter by case status/ });
-    expect(within(closedChips).getByRole('button', { name: /Cleared\s*135/ })).toBeInTheDocument();
+    // Same barrier as above: the group is present before the counts land.
+    expect(await within(closedChips).findByRole('button', { name: /Cleared\s*135/ })).toBeInTheDocument();
     expect(within(closedChips).getByRole('button', { name: /Denied\s*74/ })).toBeInTheDocument();
     expect(within(closedChips).queryByRole('button', { name: /In Review/ })).not.toBeInTheDocument();
   });
