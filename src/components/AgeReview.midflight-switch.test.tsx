@@ -11,6 +11,7 @@ import { AgeReview } from './AgeReview';
 const getAgeReviewCases = vi.fn();
 const getActiveAgeReviewCase = vi.fn();
 const getAgeReviewCase = vi.fn();
+const getAgeReviewCaseCounts = vi.fn();
 const updateAgeReviewCase = vi.fn();
 const getAgeReviewConfig = vi.fn();
 const getAccountStatus = vi.fn();
@@ -29,6 +30,7 @@ vi.mock('@/hooks/useAdminApi', () => ({
     getAgeReviewCases,
     getActiveAgeReviewCase,
     getAgeReviewCase,
+    getAgeReviewCaseCounts,
     updateAgeReviewCase,
     getAgeReviewConfig,
     getAccountStatus,
@@ -89,6 +91,9 @@ function makeCase(overrides: Partial<AgeReviewCase> = {}): AgeReviewCase {
 beforeEach(() => {
   vi.clearAllMocks();
   getAgeReviewConfig.mockResolvedValue({ auto_delete_on_deny: false });
+  // AgeReview's chip counts come from their own query; without this the
+  // mocked api has no such function and the query dies with a TypeError.
+  getAgeReviewCaseCounts.mockResolvedValue({ success: true, by_state: {} });
   getAccountStatus.mockResolvedValue({ success: true, verified_minor: false });
   getActiveAgeReviewCase.mockResolvedValue({ success: true, case: null });
 });

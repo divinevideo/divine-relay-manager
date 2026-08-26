@@ -11,6 +11,7 @@ import { AgeReview } from './AgeReview';
 const getAgeReviewCases = vi.fn();
 const getActiveAgeReviewCase = vi.fn();
 const getAgeReviewCase = vi.fn();
+const getAgeReviewCaseCounts = vi.fn();
 
 vi.mock('@/hooks/useAdminApi', () => ({
   useApiUrl: () => 'https://api.test.divine.video',
@@ -18,6 +19,7 @@ vi.mock('@/hooks/useAdminApi', () => ({
     getAgeReviewCases,
     getActiveAgeReviewCase,
     getAgeReviewCase,
+    getAgeReviewCaseCounts,
   }),
 }));
 
@@ -91,6 +93,9 @@ beforeEach(() => {
   getAgeReviewCases.mockReset();
   getActiveAgeReviewCase.mockReset();
   getAgeReviewCase.mockReset();
+  // AgeReview's chip counts come from their own query; without this the
+  // mocked api has no such function and the query dies with a TypeError.
+  getAgeReviewCaseCounts.mockResolvedValue({ success: true, by_state: {} });
   // Case lists resolve empty by default (fresh case not yet in the 30s cache)
   getAgeReviewCases.mockResolvedValue({ success: true, cases: [] });
   getAgeReviewCase.mockResolvedValue({ success: true, case: null });
