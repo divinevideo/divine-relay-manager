@@ -2914,12 +2914,15 @@ describe('handleAgeReviewReplyWebhook', () => {
     expect(updateCall![0]).toContain('clock_paused = 1');
   });
 
-  it('re-pauses clock when moderator had resumed it', async () => {
+  it.each([
+    ['preserves positive time', '2026-08-31T12:00:00.000Z', 5],
+    ['clamps expired time', '2026-08-25T12:00:00.000Z', 0],
+  ] as const)('re-pauses a resumed clock and %s', async (_label, deadlineAt, expectedRemaining) => {
     const c = makeCase({
       state: 'restricted_pending_parental_consent',
       zendesk_ticket_id: 42,
       clock_paused: 0,
-      deadline_at: '2026-08-25T12:00:00.000Z',
+      deadline_at: deadlineAt,
     });
     const runMock = vi.fn().mockResolvedValue({ meta: { changes: 1 } });
     const boundValues: unknown[] = [];
@@ -2946,10 +2949,11 @@ describe('handleAgeReviewReplyWebhook', () => {
     const res = await handleAgeReviewReplyWebhook(req, makeEnv(db), corsHeaders);
     expect(res.status).toBe(200);
 
-    // An expired response window stays representable when the webhook pauses it.
+    // Both sides matter: preserving positive time avoids premature closure on resume,
+    // while flooring expired time keeps the stored paused tuple valid.
     expect(boundValues.length).toBeGreaterThanOrEqual(2);
     expect(boundValues[0]).toBe('2026-08-26T12:00:00.000Z');
-    expect(boundValues[1]).toBe(0);
+    expect(boundValues[1]).toBe(expectedRemaining);
   });
 
   it('returns 404 when no case linked to ticket', async () => {
