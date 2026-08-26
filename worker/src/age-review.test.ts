@@ -2875,6 +2875,10 @@ describe('contact name upgrade on parent reply', () => {
 });
 
 describe('handleAgeReviewReplyWebhook', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('transitions pending case to submitted_for_review', async () => {
     const c = makeCase({
       state: 'restricted_pending_parental_consent',
@@ -2915,7 +2919,7 @@ describe('handleAgeReviewReplyWebhook', () => {
       state: 'restricted_pending_parental_consent',
       zendesk_ticket_id: 42,
       clock_paused: 0,
-      deadline_at: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString(),
+      deadline_at: '2026-08-25T12:00:00.000Z',
     });
     const runMock = vi.fn().mockResolvedValue({ meta: { changes: 1 } });
     const boundValues: unknown[] = [];
@@ -2932,6 +2936,8 @@ describe('handleAgeReviewReplyWebhook', () => {
         }),
       })),
     };
+    vi.useFakeTimers();
+    vi.setSystemTime('2026-08-26T12:00:00.000Z');
 
     const req = new Request('https://api.test/api/zendesk/age-review-reply', {
       method: 'POST',
@@ -2940,11 +2946,10 @@ describe('handleAgeReviewReplyWebhook', () => {
     const res = await handleAgeReviewReplyWebhook(req, makeEnv(db), corsHeaders);
     expect(res.status).toBe(200);
 
-    // Should have bound an ISO timestamp and remaining days (~5)
+    // An expired response window stays representable when the webhook pauses it.
     expect(boundValues.length).toBeGreaterThanOrEqual(2);
-    const remainingDays = boundValues[1] as number;
-    expect(remainingDays).toBeGreaterThan(4);
-    expect(remainingDays).toBeLessThan(6);
+    expect(boundValues[0]).toBe('2026-08-26T12:00:00.000Z');
+    expect(boundValues[1]).toBe(0);
   });
 
   it('returns 404 when no case linked to ticket', async () => {

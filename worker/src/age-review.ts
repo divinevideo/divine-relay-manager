@@ -1816,7 +1816,9 @@ export async function handleAgeReviewReplyWebhook(
     const deadline = target.deadline_at ? new Date(target.deadline_at) : null;
     const remainingDays = target.clock_paused
       ? target.remaining_days_when_paused
-      : deadline ? (deadline.getTime() - now.getTime()) / (24 * 60 * 60 * 1000) : DEADLINE_DAYS;
+      : deadline
+        ? Math.max(0, (deadline.getTime() - now.getTime()) / (24 * 60 * 60 * 1000))
+        : DEADLINE_DAYS;
 
     // This path advances an already-restricted case to moderator review, so it
     // intentionally leaves Keycast state unchanged.
