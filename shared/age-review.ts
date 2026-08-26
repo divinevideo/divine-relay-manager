@@ -60,8 +60,8 @@ export function listStateParam(
 }
 
 /** Fold a `SELECT state, COUNT(*) AS n ... GROUP BY state` result into a
- * per-state count map. Drives the drill-down chip counts and each view's total,
- * computed server-side so they are exact regardless of the list query's LIMIT. */
+ * per-state count map. Drives the queue's drill-down chip counts, computed
+ * server-side so they are exact regardless of the list query's LIMIT. */
 export function foldByState(rows: Iterable<{ state: string; n: number }>): Record<string, number> {
   const by_state: Record<string, number> = {};
   for (const row of rows) by_state[row.state] = (by_state[row.state] ?? 0) + (Number(row.n) || 0);

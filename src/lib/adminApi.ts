@@ -1201,8 +1201,8 @@ export async function getAgeReviewCases(
 }
 
 /** Per-state case counts for the age-review queue, server-computed over the
- * whole table so the tab totals and drill-down chip counts survive the list
- * query's LIMIT. Band-scoped to match the list. */
+ * whole table so the drill-down chip counts survive the list query's LIMIT.
+ * Band-scoped to match the list. */
 export async function getAgeReviewCaseCounts(
   apiUrl: string,
   params?: { age_band?: string },

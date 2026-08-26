@@ -1,7 +1,7 @@
 // ABOUTME: Tests the age-review queue's per-state drill-down chips: they narrow
 // ABOUTME: Active/Closed/All to one state and reset when the tab changes.
 
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -48,6 +48,9 @@ function lastListState(): string | undefined {
   const calls = getAgeReviewCases.mock.calls;
   return (calls[calls.length - 1]?.[0] as { state?: string } | undefined)?.state;
 }
+
+// Radix Select scrolls the active option into view on open; jsdom has no layout.
+beforeEach(() => { window.HTMLElement.prototype.scrollIntoView = vi.fn(); });
 
 beforeEach(() => {
   getAgeReviewCases.mockReset();
@@ -121,5 +124,52 @@ describe('AgeReview drill-down chips', () => {
     const chips = await screen.findByRole('group', { name: /Filter by case status/ });
     await user.click(within(chips).getByRole('button', { name: /Cleared/ }));
     await waitFor(() => expect(lastListState()).toBe('cleared'));
+  });
+
+  it('toggles a chip off when clicked again, back to the whole view', async () => {
+    // Asserts pressed-state, not the API call: toggling back to 'active' is
+    // served from the still-fresh cache, so no new fetch is observable — but the
+    // drill-down clearing is the behavior under test, and it drives serverParams.
+    const user = userEvent.setup();
+    renderPage();
+    const chips = await screen.findByRole('group', { name: /Filter by case status/ });
+    const inReview = within(chips).getByRole('button', { name: /In Review/ });
+    const allChip = within(chips).getByRole('button', { name: /^All/ });
+
+    await user.click(inReview);
+    await waitFor(() => expect(lastListState()).toBe('under_moderator_review'));
+    expect(inReview).toHaveAttribute('aria-pressed', 'true');
+    expect(allChip).toHaveAttribute('aria-pressed', 'false');
+
+    await user.click(inReview);
+    await waitFor(() => expect(inReview).toHaveAttribute('aria-pressed', 'false'));
+    expect(allChip).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('scopes the chip counts to the selected age band, not just the list', async () => {
+    renderPage();
+    // 'all' band → no age_band param on the counts query.
+    await waitFor(() => expect(getAgeReviewCaseCounts).toHaveBeenCalledWith(undefined));
+
+    fireEvent.click(screen.getByRole('combobox'));
+    fireEvent.click(await screen.findByRole('option', { name: 'Under 13' }));
+
+    // The band must reach the counts query, or the chips would show whole-table
+    // numbers beside a band-filtered list.
+    await waitFor(() => expect(getAgeReviewCaseCounts).toHaveBeenCalledWith({ age_band: 'under_13' }));
+    await waitFor(() =>
+      expect(getAgeReviewCases.mock.calls.some(
+        (c) => (c[0] as { age_band?: string } | undefined)?.age_band === 'under_13',
+      )).toBe(true));
+  });
+
+  it('names the drilled-in state in the empty message', async () => {
+    const user = userEvent.setup();
+    renderPage(); // getAgeReviewCases resolves an empty list by default
+    expect(await screen.findByText('No active cases')).toBeInTheDocument();
+
+    const chips = await screen.findByRole('group', { name: /Filter by case status/ });
+    await user.click(within(chips).getByRole('button', { name: /In Review/ }));
+    expect(await screen.findByText(/No .*In Review.* cases/)).toBeInTheDocument();
   });
 });
