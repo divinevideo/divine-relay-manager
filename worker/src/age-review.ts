@@ -338,7 +338,9 @@ export async function handleUpdateAgeReviewCase(
   if (body.clock_paused === true && !existing.clock_paused) {
     const now = new Date();
     const deadline = existing.deadline_at ? new Date(existing.deadline_at) : null;
-    const remainingDays = deadline ? (deadline.getTime() - now.getTime()) / (24 * 60 * 60 * 1000) : null;
+    const remainingDays = deadline
+      ? Math.max(0, (deadline.getTime() - now.getTime()) / (24 * 60 * 60 * 1000))
+      : null;
     updates.push('clock_paused = 1', 'clock_paused_at = ?', 'remaining_days_when_paused = ?');
     binds.push(now.toISOString(), remainingDays);
   } else if (body.clock_paused === false && existing.clock_paused) {
@@ -944,7 +946,9 @@ export async function handleParentContact(
   } else {
     const now = new Date();
     const deadline = activeCase.deadline_at ? new Date(activeCase.deadline_at) : null;
-    const remainingDays = deadline ? (deadline.getTime() - now.getTime()) / (24 * 60 * 60 * 1000) : DEADLINE_DAYS;
+    const remainingDays = deadline
+      ? Math.max(0, (deadline.getTime() - now.getTime()) / (24 * 60 * 60 * 1000))
+      : DEADLINE_DAYS;
 
     await env.DB.prepare(`
       UPDATE age_review_cases

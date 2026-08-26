@@ -208,6 +208,10 @@ describe('handleUpdateAgeReviewCase', () => {
     vi.mocked(banUser).mockClear();
   });
 
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('transitions state', async () => {
     const req = new Request('https://api.test/api/age-review/cases/case-1', {
       method: 'PATCH',
@@ -269,6 +273,46 @@ describe('handleUpdateAgeReviewCase', () => {
       (c: string[]) => c[0]?.includes('UPDATE') && c[0]?.includes('clock_paused = 1')
     );
     expect(updateCall).toBeTruthy();
+  });
+
+  it('clamps an expired clock to zero when pausing it', async () => {
+    const expiredCase = makeCase({ deadline_at: '2026-08-25T12:00:00.000Z' });
+    const pausedCase = {
+      ...expiredCase,
+      clock_paused: 1,
+      clock_paused_at: '2026-08-26T12:00:00.000Z',
+      remaining_days_when_paused: 0,
+    };
+    const bound: unknown[][] = [];
+    let selectCount = 0;
+    const expiredDb = {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        bind: vi.fn().mockImplementation((...params: unknown[]) => {
+          bound.push(params);
+          return {
+            first: vi.fn().mockImplementation(async () => {
+              if (sql === 'SELECT * FROM age_review_cases WHERE id = ?') {
+                selectCount += 1;
+                return selectCount === 1 ? expiredCase : pausedCase;
+              }
+              return null;
+            }),
+            run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+          };
+        }),
+      })),
+    };
+    vi.useFakeTimers();
+    vi.setSystemTime('2026-08-26T12:00:00.000Z');
+
+    const req = new Request('https://api.test/api/age-review/cases/case-1', {
+      method: 'PATCH',
+      body: JSON.stringify({ clock_paused: true }),
+    });
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(expiredDb), corsHeaders);
+
+    expect(res.status).toBe(200);
+    expect(bound).toContainEqual(['2026-08-26T12:00:00.000Z', 0, 'case-1', 0]);
   });
 
   it('resumes clock and sets new deadline', async () => {
@@ -1216,8 +1260,15 @@ describe('sendDbUnavailableAlert', () => {
 // -- handleParentContact ------------------------------------------------------
 
 describe('handleParentContact', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('saves email and pauses clock for age_13_15 case', async () => {
-    const c = makeCase({ state: 'restricted_pending_user_response' });
+    const c = makeCase({
+      state: 'restricted_pending_user_response',
+      deadline_at: '2026-08-25T12:00:00.000Z',
+    });
     const db = createMockDb([c]);
     // Override: first returns case when queried by id+pubkey
     db.prepare.mockImplementation((sql: string) => ({
@@ -1228,6 +1279,8 @@ describe('handleParentContact', () => {
         run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
       }),
     }));
+    vi.useFakeTimers();
+    vi.setSystemTime('2026-08-26T12:00:00.000Z');
 
     const req = new Request('https://api.test/v1/minor-review-cases/case-1/parent-contact', {
       method: 'POST',
@@ -1240,6 +1293,13 @@ describe('handleParentContact', () => {
       (call: string[]) => call[0]?.includes('UPDATE') && call[0]?.includes('clock_paused = 1')
     );
     expect(updateCall).toBeTruthy();
+    const updateIndex = db.prepare.mock.calls.indexOf(updateCall!);
+    expect(db.prepare.mock.results[updateIndex].value.bind).toHaveBeenCalledWith(
+      'parent@example.com',
+      '2026-08-26T12:00:00.000Z',
+      0,
+      'case-1',
+    );
   });
 
   it('rejects request for under_13 case', async () => {
