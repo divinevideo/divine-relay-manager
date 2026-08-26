@@ -79,6 +79,22 @@ export async function ensureZendeskTable(db: D1Database): Promise<void> {
   } catch {
     // Index might already exist
   }
+
+  // Expression indexes for the case-insensitive linkage lookups (getLinkedTickets /
+  // syncZendeskAfterAction query `WHERE lower(event_id|author_pubkey) = ?`). Without
+  // these the raw-column indexes above can't serve those queries, forcing a full
+  // scan that grows with the ticket table.
+  try {
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_zendesk_event_lower ON zendesk_tickets(lower(event_id))`).run();
+  } catch {
+    // Index might already exist
+  }
+
+  try {
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_zendesk_pubkey_lower ON zendesk_tickets(lower(author_pubkey))`).run();
+  } catch {
+    // Index might already exist
+  }
 }
 
 export async function addZendeskInternalNote(
