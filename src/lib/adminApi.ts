@@ -1200,6 +1200,20 @@ export async function getAgeReviewCases(
   return apiRequest<AgeReviewCasesResponse>(apiUrl, `/api/age-review/cases${qs ? `?${qs}` : ''}`, 'GET');
 }
 
+/** Per-state case counts for the age-review queue, server-computed over the
+ * whole table so the tab totals and drill-down chip counts survive the list
+ * query's LIMIT. Band-scoped to match the list. */
+export async function getAgeReviewCaseCounts(
+  apiUrl: string,
+  params?: { age_band?: string },
+): Promise<import('../../shared/age-review').AgeReviewCountsResponse> {
+  const query = new URLSearchParams();
+  if (params?.age_band) query.set('age_band', params.age_band);
+  const qs = query.toString();
+  return apiRequest<import('../../shared/age-review').AgeReviewCountsResponse>(
+    apiUrl, `/api/age-review/counts${qs ? `?${qs}` : ''}`, 'GET');
+}
+
 export async function getAgeReviewCase(
   apiUrl: string,
   caseId: string,

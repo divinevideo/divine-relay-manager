@@ -29,6 +29,51 @@ export function isAccountRestrictedAgeReviewState(state: AgeReviewState): boolea
   );
 }
 
+// The moderator queue's top axis. Kept as three coarse views; the per-state
+// chips below the tabs sub-divide within whichever one is active.
+export type AgeReviewListView = 'active' | 'closed' | 'all';
+
+// The non-terminal states, in canonical order — everything the Active view
+// lists. Derived from AGE_REVIEW_STATES minus the terminal ones so a new state
+// joins Active automatically unless it is added to TERMINAL_STATES.
+export const ACTIVE_AGE_REVIEW_STATES: readonly AgeReviewState[] =
+  AGE_REVIEW_STATES.filter((s) => !TERMINAL_STATES.includes(s));
+
+/** The states a queue view drills into, for the per-state chip filter under the
+ * tab strip: Active spans the non-terminal states, Closed the terminal ones,
+ * All every state. One source for both the chip row and each view's total. */
+export function statesForTab(view: AgeReviewListView): readonly AgeReviewState[] {
+  if (view === 'closed') return TERMINAL_STATES;
+  if (view === 'active') return ACTIVE_AGE_REVIEW_STATES;
+  return AGE_REVIEW_STATES;
+}
+
+/** The `state` param for GET /api/age-review/cases given the active view and an
+ * optional drill-down chip. A chip is an exact state that overrides the view.
+ * 'active' and 'closed' are themselves accepted filters; 'all' means no filter. */
+export function listStateParam(
+  view: AgeReviewListView,
+  chip: AgeReviewState | null,
+): string | undefined {
+  if (chip) return chip;
+  return view === 'all' ? undefined : view;
+}
+
+/** Fold a `SELECT state, COUNT(*) AS n ... GROUP BY state` result into a
+ * per-state count map. Drives the drill-down chip counts and each view's total,
+ * computed server-side so they are exact regardless of the list query's LIMIT. */
+export function foldByState(rows: Iterable<{ state: string; n: number }>): Record<string, number> {
+  const by_state: Record<string, number> = {};
+  for (const row of rows) by_state[row.state] = (by_state[row.state] ?? 0) + (Number(row.n) || 0);
+  return by_state;
+}
+
+/** Response body for GET /api/age-review/counts. */
+export interface AgeReviewCountsResponse {
+  success: boolean;
+  by_state: Record<string, number>;
+}
+
 export const VALID_TRANSITIONS: Record<AgeReviewState, readonly AgeReviewState[]> = {
   open_reported: ['under_moderator_review', 'cleared', 'denied_closed'],
   under_moderator_review: ['restricted_pending_user_response', 'restricted_pending_support_email', 'needs_follow_up', 'cleared', 'denied_closed'],

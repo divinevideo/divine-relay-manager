@@ -26,6 +26,8 @@ import {
   AGE_BANDS,
   TERMINAL_STATES,
   getDaysRemaining,
+  statesForTab,
+  listStateParam,
   type AgeReviewState,
   type AgeBand,
 } from "../../shared/age-review";
@@ -67,14 +69,26 @@ export function AgeReview() {
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
   const [filterMode, setFilterMode] = useState<FilterMode>('active');
+  // Drill-down chip under the tab strip: an exact state within the active view,
+  // or null for the whole view. Cleared on tab change (below) because a state
+  // from the old view may not belong to the new one.
+  const [stateFilter, setStateFilter] = useState<AgeReviewState | null>(null);
   const [bandFilter, setBandFilter] = useState<string>('all');
+
+  // Switching tabs resets the chip: a Closed state left selected while moving to
+  // Active would query an empty intersection and read as a bug.
+  const selectTab = useCallback((mode: FilterMode) => {
+    setFilterMode(mode);
+    setStateFilter(null);
+  }, []);
 
   const serverParams = useMemo(() => {
     const params: { state?: string; age_band?: string } = {};
-    if (filterMode !== 'all') params.state = filterMode;
+    const state = listStateParam(filterMode, stateFilter);
+    if (state) params.state = state;
     if (bandFilter !== 'all') params.age_band = bandFilter;
     return params;
-  }, [filterMode, bandFilter]);
+  }, [filterMode, stateFilter, bandFilter]);
 
   const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ['age-review-cases', serverParams],
@@ -93,6 +107,18 @@ export function AgeReview() {
     staleTime: 30_000,
     refetchInterval: 30_000,
   });
+
+  // Per-state counts for the drill-down chips: one GROUP BY over the whole table
+  // (band-scoped to match the list), so counts are exact regardless of the list
+  // query's LIMIT. A state with no rows is absent here, hence rendered as 0.
+  const { data: countsData, refetch: refetchCounts } = useQuery({
+    queryKey: ['age-review-counts', bandFilter],
+    queryFn: () => api.getAgeReviewCaseCounts(bandFilter === 'all' ? undefined : { age_band: bandFilter }),
+    staleTime: 30_000,
+    refetchInterval: 30_000,
+  });
+  const stateCounts = countsData?.by_state;
+  const chipStates = statesForTab(filterMode);
 
   // Fallback fetch so a deep-linked case outside the current filter still opens.
   const { data: fetchedCaseData } = useQuery({
@@ -187,7 +213,9 @@ export function AgeReview() {
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => refetch()}
+              // Refresh both, or the chip counts keep their old numbers beside a
+              // freshly refetched list until the 30s interval catches up.
+              onClick={() => { refetch(); refetchCounts(); }}
               className="h-7"
             >
               <RefreshCw className="h-3.5 w-3.5" />
@@ -196,7 +224,7 @@ export function AgeReview() {
         </div>
 
         <div className="flex gap-2">
-          <Tabs value={filterMode} onValueChange={(v) => setFilterMode(v as FilterMode)} className="flex-1">
+          <Tabs value={filterMode} onValueChange={(v) => selectTab(v as FilterMode)} className="flex-1">
             <TabsList className="h-7 w-full">
               <TabsTrigger value="active" className="text-xs h-6 flex-1">Active</TabsTrigger>
               <TabsTrigger value="closed" className="text-xs h-6 flex-1">Closed</TabsTrigger>
@@ -205,8 +233,10 @@ export function AgeReview() {
           </Tabs>
 
           <Select value={bandFilter} onValueChange={setBandFilter}>
-            <SelectTrigger className="h-7 w-24 text-xs">
-              <Filter className="h-3 w-3 mr-1" />
+            {/* w-auto (not a fixed w-24) so "All ages" shows in full instead of
+                clipping to "All…". */}
+            <SelectTrigger className="h-7 w-auto text-xs gap-1">
+              <Filter className="h-3 w-3" />
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -219,6 +249,47 @@ export function AgeReview() {
             </SelectContent>
           </Select>
         </div>
+
+        {/* Drill-down chips: narrow the active view to one state. "All" clears
+            the drill-down; clicking the active chip again toggles it off. Every
+            view spans more than one state, so the row always shows. */}
+        {chipStates.length > 1 && (
+          <div className="flex flex-wrap gap-1" role="group" aria-label="Filter by case status">
+            <button
+              type="button"
+              onClick={() => setStateFilter(null)}
+              aria-pressed={stateFilter === null}
+              className={`text-[10px] h-5 px-1.5 rounded-full border transition-colors ${
+                stateFilter === null
+                  ? 'bg-primary text-primary-foreground border-primary'
+                  : 'border-input text-muted-foreground hover:bg-muted'
+              }`}
+            >
+              All
+            </button>
+            {chipStates.map((s) => {
+              const selected = stateFilter === s;
+              return (
+                <button
+                  key={s}
+                  type="button"
+                  onClick={() => setStateFilter(selected ? null : s)}
+                  aria-pressed={selected}
+                  className={`inline-flex items-center gap-1 text-[10px] h-5 px-1.5 rounded-full border transition-colors ${
+                    selected
+                      ? 'bg-primary text-primary-foreground border-primary'
+                      : 'border-input text-muted-foreground hover:bg-muted'
+                  }`}
+                >
+                  <span>{STATE_SHORT[s]}</span>
+                  {stateCounts && (
+                    <span className="tabular-nums opacity-70">{stateCounts[s] ?? 0}</span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Case list */}
@@ -233,7 +304,9 @@ export function AgeReview() {
           <div className="p-3 text-sm text-red-600">Failed to load cases</div>
         ) : filteredCases.length === 0 ? (
           <div className="p-6 text-center text-sm text-muted-foreground">
-            No {filterMode === 'all' ? '' : filterMode} cases
+            {stateFilter
+              ? `No “${STATE_SHORT[stateFilter]}” cases`
+              : `No ${filterMode === 'all' ? '' : filterMode} cases`}
           </div>
         ) : (
           <div className="divide-y">
