@@ -37,6 +37,7 @@ import {
   extractMediaHashes,
   isBlockedMediaAction,
   updateAgeReviewCase,
+  getAgeReviewCaseCounts,
   bulkModerate,
   getBulkJobStatus,
   ApiError,
@@ -74,6 +75,31 @@ class FakeWebSocket {
 describe('adminApi', () => {
   beforeEach(() => {
     mockFetch.mockReset();
+  });
+
+  describe('getAgeReviewCaseCounts', () => {
+    it('GETs /api/age-review/counts with no query when no band is given', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, by_state: {} }) });
+
+      const result = await getAgeReviewCaseCounts(API_URL);
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        `${API_URL}/api/age-review/counts`,
+        expect.objectContaining({ method: 'GET' }),
+      );
+      expect(result).toMatchObject({ success: true });
+    });
+
+    it('appends the age_band query param when a band is given', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, by_state: { cleared: 3 } }) });
+
+      await getAgeReviewCaseCounts(API_URL, { age_band: 'under_13' });
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        `${API_URL}/api/age-review/counts?age_band=under_13`,
+        expect.objectContaining({ method: 'GET' }),
+      );
+    });
   });
 
   describe('getAccountStatus', () => {
