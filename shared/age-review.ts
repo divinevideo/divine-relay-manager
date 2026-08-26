@@ -74,6 +74,81 @@ export interface AgeReviewCountsResponse {
   by_state: Record<string, number>;
 }
 
+export type ResponseClockState = 'running' | 'paused' | 'expired' | 'not_applicable' | 'unknown';
+
+export interface MinorReviewResponseDeadline {
+  clock: ResponseClockState;
+  /** Present only while the clock is running or has expired. */
+  deadlineAt: string | null;
+  pausedAt: string | null;
+  remainingDaysWhenPaused: number | null;
+}
+
+export type ModerationStatusResponse =
+  | { restriction: { status: 'active' } }
+  | {
+      restriction: { status: 'restricted_minor_review' };
+      minorReviewCase: {
+        id: string;
+        state: AgeReviewState;
+        suspectedAgeBand: AgeBand;
+        allowedResolution: ResolutionType;
+        instructions: string | null;
+        supportEmail: string;
+        moderationConversationPubkey: string | null;
+        moderationConversationId: string | null;
+        responseDeadline: MinorReviewResponseDeadline;
+      };
+    };
+
+/** Normalize stored ISO or SQLite datetime values to absolute UTC ISO-8601. */
+export function toUtcIso(value: string | null): string | null {
+  if (!value) return null;
+
+  const sqliteMatch = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?)$/.exec(value);
+  const normalized = sqliteMatch ? `${sqliteMatch[1]}T${sqliteMatch[2]}Z` : value;
+  const millis = Date.parse(normalized);
+  return Number.isFinite(millis) ? new Date(millis).toISOString() : null;
+}
+
+export function deriveResponseClock(
+  c: Pick<AgeReviewCase, 'state' | 'deadline_at' | 'clock_paused' | 'clock_paused_at' | 'remaining_days_when_paused'>,
+  now: Date,
+): MinorReviewResponseDeadline {
+  const empty = (clock: ResponseClockState): MinorReviewResponseDeadline => ({
+    clock,
+    deadlineAt: null,
+    pausedAt: null,
+    remainingDaysWhenPaused: null,
+  });
+
+  if (!isAccountRestrictedAgeReviewState(c.state)) return empty('not_applicable');
+
+  if (c.clock_paused) {
+    const pausedAt = toUtcIso(c.clock_paused_at);
+    const remaining = c.remaining_days_when_paused;
+    if (!pausedAt || remaining == null || !Number.isFinite(remaining) || remaining < 0) {
+      return empty('unknown');
+    }
+    return {
+      clock: 'paused',
+      deadlineAt: null,
+      pausedAt,
+      remainingDaysWhenPaused: remaining,
+    };
+  }
+
+  const deadlineAt = toUtcIso(c.deadline_at);
+  if (!deadlineAt || !Number.isFinite(now.getTime())) return empty('unknown');
+
+  return {
+    clock: Date.parse(deadlineAt) <= now.getTime() ? 'expired' : 'running',
+    deadlineAt,
+    pausedAt: null,
+    remainingDaysWhenPaused: null,
+  };
+}
+
 export const VALID_TRANSITIONS: Record<AgeReviewState, readonly AgeReviewState[]> = {
   open_reported: ['under_moderator_review', 'cleared', 'denied_closed'],
   under_moderator_review: ['restricted_pending_user_response', 'restricted_pending_support_email', 'needs_follow_up', 'cleared', 'denied_closed'],

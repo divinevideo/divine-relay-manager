@@ -9,6 +9,8 @@ import {
   foldByState,
   VALID_TRANSITIONS,
   isAccountRestrictedAgeReviewState,
+  deriveResponseClock,
+  type ModerationStatusResponse,
   DEADLINE_DAYS,
   defaultResolutionForBand,
   type EnforcementLegStatus,
@@ -837,7 +839,7 @@ export async function handleGetModerationStatus(
     // failed open; that one fires from the cron proactively detecting the DB
     // binding is absent. Not a typo -- two distinct signals.
     console.error('[age-review] MODERATION_STATUS_DB_UNAVAILABLE — DB binding absent, returning fail-open active status for', userPubkey);
-    return json({ restriction: { status: 'active' } }, 200, corsHeaders);
+    return json({ restriction: { status: 'active' } } satisfies ModerationStatusResponse, 200, corsHeaders);
   }
 
   // Only surface restriction for states where a moderator has reviewed.
@@ -858,7 +860,7 @@ export async function handleGetModerationStatus(
   `).bind(userPubkey, ...RESTRICTED_STATES).first<AgeReviewCase>();
 
   if (!activeCase) {
-    return json({ restriction: { status: 'active' } }, 200, corsHeaders);
+    return json({ restriction: { status: 'active' } } satisfies ModerationStatusResponse, 200, corsHeaders);
   }
 
   return json({
@@ -872,8 +874,9 @@ export async function handleGetModerationStatus(
       supportEmail: 'contact@divine.video',
       moderationConversationPubkey: null,
       moderationConversationId: null,
+      responseDeadline: deriveResponseClock(activeCase, new Date()),
     },
-  }, 200, corsHeaders);
+  } satisfies ModerationStatusResponse, 200, corsHeaders);
 }
 
 export async function handleParentContact(

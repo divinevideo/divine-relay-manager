@@ -21,8 +21,8 @@ import {
   buildParentOutreachBody,
   type AgeReviewEnv,
 } from './age-review';
-import type { AgeReviewCase } from '../../shared/age-review';
-import { FUNNEL_ZENDESK_QUERIES } from '../../shared/age-review';
+import type { AgeReviewCase, MinorReviewResponseDeadline } from '../../shared/age-review';
+import { deriveResponseClock, FUNNEL_ZENDESK_QUERIES, toUtcIso } from '../../shared/age-review';
 import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, createMinorAccount } from './keycast-client';
 import { suspendPubkey, unsuspendPubkey, banPubkey } from './nip86';
 
@@ -1026,6 +1026,58 @@ describe('Relay pubkey enforcement wiring', () => {
 
 // -- handleGetModerationStatus ------------------------------------------------
 
+describe('deriveResponseClock', () => {
+  const now = new Date('2026-08-26T12:00:00.000Z');
+  const applicableCase = (overrides: Partial<AgeReviewCase> = {}) => makeCase({
+    state: 'restricted_pending_user_response',
+    ...overrides,
+  });
+
+  it.each([
+    ['running', applicableCase({ deadline_at: '2026-08-27T12:00:00.000Z' }), {
+      clock: 'running', deadlineAt: '2026-08-27T12:00:00.000Z', pausedAt: null, remainingDaysWhenPaused: null,
+    }],
+    ['resumed', applicableCase({ deadline_at: '2026-08-28 12:00:00', clock_paused: 0, clock_paused_at: null, remaining_days_when_paused: null }), {
+      clock: 'running', deadlineAt: '2026-08-28T12:00:00.000Z', pausedAt: null, remainingDaysWhenPaused: null,
+    }],
+    ['expired', applicableCase({ deadline_at: '2026-08-25T12:00:00Z' }), {
+      clock: 'expired', deadlineAt: '2026-08-25T12:00:00.000Z', pausedAt: null, remainingDaysWhenPaused: null,
+    }],
+    ['paused', applicableCase({ clock_paused: 1, clock_paused_at: '2026-08-24 09:30:00', remaining_days_when_paused: 7.5 }), {
+      clock: 'paused', deadlineAt: null, pausedAt: '2026-08-24T09:30:00.000Z', remainingDaysWhenPaused: 7.5,
+    }],
+  ] as const)('derives a %s clock', (_label, c, expected) => {
+    expect(deriveResponseClock(c, now)).toEqual(expected);
+  });
+
+  it.each(['under_moderator_review', 'submitted_for_review', 'needs_follow_up', 'cleared', 'denied_closed'] as const)(
+    'returns not_applicable for %s even when a stored deadline exists',
+    (state) => {
+      expect(deriveResponseClock(makeCase({ state, deadline_at: '2026-08-27T12:00:00.000Z' }), now)).toEqual({
+        clock: 'not_applicable', deadlineAt: null, pausedAt: null, remainingDaysWhenPaused: null,
+      });
+    },
+  );
+
+  it.each([
+    ['missing deadline', applicableCase({ deadline_at: null })],
+    ['malformed deadline', applicableCase({ deadline_at: 'not-a-date' })],
+    ['missing paused time', applicableCase({ clock_paused: 1, clock_paused_at: null, remaining_days_when_paused: 4 })],
+    ['missing paused duration', applicableCase({ clock_paused: 1, clock_paused_at: '2026-08-24T09:30:00Z', remaining_days_when_paused: null })],
+    ['negative paused duration', applicableCase({ clock_paused: 1, clock_paused_at: '2026-08-24T09:30:00Z', remaining_days_when_paused: -1 })],
+  ] as const)('returns unknown for %s', (_label, c) => {
+    expect(deriveResponseClock(c, now)).toEqual({
+      clock: 'unknown', deadlineAt: null, pausedAt: null, remainingDaysWhenPaused: null,
+    });
+  });
+
+  it('normalizes SQLite and offset timestamps to UTC with milliseconds', () => {
+    expect(toUtcIso('2026-08-26 09:30:00')).toBe('2026-08-26T09:30:00.000Z');
+    expect(toUtcIso('2026-08-26T09:30:00-05:00')).toBe('2026-08-26T14:30:00.000Z');
+    expect(toUtcIso('invalid')).toBeNull();
+  });
+});
+
 describe('handleGetModerationStatus', () => {
   it('returns active when no case exists', async () => {
     const db = createMockDb([]);
@@ -1056,6 +1108,7 @@ describe('handleGetModerationStatus', () => {
         state: string;
         suspectedAgeBand: string;
         allowedResolution: string;
+        responseDeadline: MinorReviewResponseDeadline;
       };
     };
 
@@ -1066,6 +1119,12 @@ describe('handleGetModerationStatus', () => {
     expect(body.minorReviewCase.state).toBe('restricted_pending_user_response');
     expect(body.minorReviewCase.suspectedAgeBand).toBe('age_13_15');
     expect(body.minorReviewCase.allowedResolution).toBe('parent_video_or_email');
+    expect(body.minorReviewCase.responseDeadline).toEqual({
+      clock: 'running',
+      deadlineAt: c.deadline_at,
+      pausedAt: null,
+      remainingDaysWhenPaused: null,
+    });
   });
 
   it('returns active for open_reported case (pre-moderator review)', async () => {
