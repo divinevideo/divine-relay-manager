@@ -172,6 +172,10 @@ export function AgeReviewDetail({ caseData: c }: Props) {
       // this order keeps reconciled data rendering now AND every list due a
       // real refetch.
       queryClient.invalidateQueries({ queryKey: ['age-review-cases'] });
+      // The queue's per-state chip counts are derived from a separate query; a
+      // moderation action moves a case between states, so refresh them alongside
+      // the list or the chips disagree with the list until their 30s interval.
+      queryClient.invalidateQueries({ queryKey: ['age-review-counts'] });
       const requestedState = pendingStateRef.current as AgeReviewState | undefined;
       if (requestedState && ENFORCEMENT_STATES.includes(requestedState) && data.enforcementComplete === false) {
         // Surface only actual failed enforcement legs. `not_attempted` is valid
@@ -197,6 +201,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
       // blindly replay a possibly-stale transition.
       if (error instanceof ApiError && error.code === 'version_conflict') {
         queryClient.invalidateQueries({ queryKey: ['age-review-cases'] });
+        queryClient.invalidateQueries({ queryKey: ['age-review-counts'] });
         // Mutate-time identity (ctx), not the render closure: a mid-flight
         // case switch must reload the case that conflicted
         queryClient.invalidateQueries({ queryKey: ['age-review-case', ctx?.caseId] });
@@ -672,7 +677,10 @@ export function AgeReviewDetail({ caseData: c }: Props) {
               // reporting success.
               pubkey={subjectPubkey}
               context="age-review"
-              onActionComplete={() => queryClient.invalidateQueries({ queryKey: ['age-review-cases'] })}
+              onActionComplete={() => {
+                queryClient.invalidateQueries({ queryKey: ['age-review-cases'] });
+                queryClient.invalidateQueries({ queryKey: ['age-review-counts'] });
+              }}
             />
           </div>
         )}
