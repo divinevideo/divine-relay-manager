@@ -3067,74 +3067,69 @@ async function handleParseReport(
     const eventId = event_id ? event_id.toLowerCase() : null;
     let authorPubkey = author_pubkey ? author_pubkey.toLowerCase() : null;
 
-    // Best-effort: when the description gave us an event but no author, derive the
-    // author from the reported event. Account-level actions (ban/delete-all) match
-    // tickets on author_pubkey, so without this an event-only ticket can never be
-    // closed by a whole-account action. Only runs in the missing-author case.
-    if (eventId && !authorPubkey) {
+    // Short-circuit an already-processed ticket BEFORE any relay work, so a
+    // redelivered webhook costs no fetches. The stored row is authoritative once
+    // written; re-deriving here would only spend time and could disagree with it.
+    if (env.DB) {
+      await ensureZendeskTable(env.DB);
+      const existing = await env.DB.prepare(
+        `SELECT id FROM zendesk_tickets WHERE ticket_id = ?`
+      ).bind(ticket_id).first();
+      if (existing) {
+        console.log(`[handleParseReport] Ticket ${ticket_id} already processed, skipping`);
+        return jsonResponse({ success: true, ticket_id, event_id: eventId, author_pubkey: authorPubkey, violation_type, skipped: true }, 200, corsHeaders);
+      }
+    }
+
+    // Fetch the reported event ONCE (best-effort). It serves two purposes: derive
+    // the author when the description omitted it — account-level actions match
+    // tickets on author_pubkey, so an event-only ticket would otherwise never be
+    // closed by a whole-account action — and label the content kind for the note.
+    // Presence-first, not success-first: under the relay contract an event can be
+    // streamed before a non-EOSE close leaves success=false, and we still want it.
+    let reportedEventKind: number | null = null;
+    if (eventId) {
       try {
         const evtRes = await withTimeout(
           queryRelay({ ids: [eventId], limit: 1 }, env.RELAY_URL),
           ENRICHMENT_TIMEOUT_MS,
         );
-        const pk = evtRes?.success && evtRes.events?.length
-          ? (evtRes.events[0] as { pubkey?: string }).pubkey
-          : undefined;
-        if (pk && /^[a-f0-9]{64}$/i.test(pk)) authorPubkey = pk.toLowerCase();
+        const evt = evtRes?.events?.length ? (evtRes.events[0] as { kind?: number; pubkey?: string }) : undefined;
+        if (evt) {
+          if (typeof evt.kind === 'number') reportedEventKind = evt.kind;
+          if (!authorPubkey && evt.pubkey && /^[a-f0-9]{64}$/i.test(evt.pubkey)) {
+            authorPubkey = evt.pubkey.toLowerCase();
+          }
+        }
       } catch (err) {
-        console.warn('[handleParseReport] author derivation failed (continuing):', err);
+        console.warn('[handleParseReport] reported-event lookup failed (continuing):', err);
       }
     }
 
-    // Store mapping in D1 (skip if already processed)
+    // Store mapping in D1 (author_pubkey now includes any value derived above).
     if (env.DB) {
-      await ensureZendeskTable(env.DB);
-
-      // Check if we've already processed this ticket
-      const existing = await env.DB.prepare(
-        `SELECT id FROM zendesk_tickets WHERE ticket_id = ?`
-      ).bind(ticket_id).first();
-
-      if (existing) {
-        console.log(`[handleParseReport] Ticket ${ticket_id} already processed, skipping`);
-        return jsonResponse({ success: true, ticket_id, event_id: eventId, author_pubkey: authorPubkey, violation_type, skipped: true }, 200, corsHeaders);
-      }
-
       await env.DB.prepare(`
         INSERT INTO zendesk_tickets (ticket_id, event_id, author_pubkey, violation_type, status)
         VALUES (?, ?, ?, ?, 'open')
       `).bind(ticket_id, eventId, authorPubkey, violation_type).run();
     }
 
-    // Enrich the note with profile + event context (best-effort; never block the note).
-    // The reported subject's kind-0 gives a human-legible name/nip05 and flags restored OG
-    // Vine accounts; the reported event's kind labels the content type (video/note/etc).
+    // Enrich the note with the reported subject's kind-0 profile (best-effort). Runs
+    // after the event fetch because the author may have just been derived from it.
+    // Presence-first for the same reason as the event fetch above.
     let profile: ReportedProfile | null = null;
-    let reportedEventKind: number | null = null;
-    try {
-      const [profRes, evtRes] = await Promise.all([
-        authorPubkey
-          ? withTimeout(
-              queryRelay({ authors: [authorPubkey], kinds: [0], limit: 1 }, env.RELAY_URL),
-              ENRICHMENT_TIMEOUT_MS,
-            )
-          : Promise.resolve(null),
-        eventId
-          ? withTimeout(
-              queryRelay({ ids: [eventId], limit: 1 }, env.RELAY_URL),
-              ENRICHMENT_TIMEOUT_MS,
-            )
-          : Promise.resolve(null),
-      ]);
-      if (profRes?.success && profRes.events?.length) {
-        profile = parseKind0Profile(profRes.events[0] as { content?: string; tags?: string[][] });
+    if (authorPubkey) {
+      try {
+        const profRes = await withTimeout(
+          queryRelay({ authors: [authorPubkey], kinds: [0], limit: 1 }, env.RELAY_URL),
+          ENRICHMENT_TIMEOUT_MS,
+        );
+        if (profRes?.events?.length) {
+          profile = parseKind0Profile(profRes.events[0] as { content?: string; tags?: string[][] });
+        }
+      } catch (err) {
+        console.warn('[handleParseReport] profile enrichment failed (continuing):', err);
       }
-      if (evtRes?.success && evtRes.events?.length) {
-        const kind = (evtRes.events[0] as { kind?: number }).kind;
-        reportedEventKind = typeof kind === 'number' ? kind : null;
-      }
-    } catch (err) {
-      console.warn('[handleParseReport] enrichment fetch failed (continuing without it):', err);
     }
 
     const note = buildReportNote({

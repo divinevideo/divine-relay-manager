@@ -97,16 +97,20 @@ export async function ensureZendeskTable(db: D1Database): Promise<void> {
   }
 }
 
+// Returns true only when the note (and, when solve=true, the status change)
+// actually landed at Zendesk. Callers that treat closure as best-effort (the
+// moderation-action side effect) may ignore the result; callers for which the
+// Zendesk write IS the operation (manual close) must check it.
 export async function addZendeskInternalNote(
   ticketId: number,
   note: string,
   env: ZendeskSyncEnv,
   solve: boolean = false
-): Promise<void> {
+): Promise<boolean> {
   const creds = await resolveZendeskCreds(env);
   if (!creds) {
     console.warn('[addZendeskInternalNote] Missing Zendesk credentials, skipping');
-    return;
+    return false;
   }
 
   try {
@@ -150,9 +154,12 @@ export async function addZendeskInternalNote(
     if (!response.ok) {
       const errorText = await response.text();
       console.error(`[addZendeskInternalNote] Failed: ${response.status} - ${errorText}`);
+      return false;
     }
+    return true;
   } catch (error) {
     console.error('[addZendeskInternalNote] Error:', error);
+    return false;
   }
 }
 
@@ -312,7 +319,14 @@ export async function closeTicketById(
     `**Closed by:** ${moderator ?? 'unknown'}`,
     `**Time:** ${new Date().toISOString()}`,
   ].join('\n');
-  await addZendeskInternalNote(ticketId, note, env, true);
+  const solved = await addZendeskInternalNote(ticketId, note, env, true);
+  if (!solved) {
+    // Manual close is this endpoint's PRIMARY operation, not a best-effort side
+    // effect. If the Zendesk solve did not land (creds missing, non-2xx, network),
+    // do NOT mark D1 resolved — that would flip the panel to "Closed ✓" over a
+    // still-open ticket and hide the retry. Surface it so the UI keeps the button.
+    throw new Error('Zendesk solve did not succeed; ticket not marked resolved');
+  }
   if (env.DB) {
     await ensureZendeskTable(env.DB);
     await env.DB.prepare(`

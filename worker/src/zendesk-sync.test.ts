@@ -356,6 +356,19 @@ describe('closeTicketById', () => {
     // Zendesk-only: closing a ticket must never fabricate a content decision.
     expect(sqlLog.some(entry => entry.sql.includes('moderation_decisions'))).toBe(false);
   });
+
+  it('throws and does NOT mark D1 resolved when the Zendesk solve fails', async () => {
+    const { db, sqlLog } = createMockDB();
+    const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 500, text: async () => 'boom' });
+    vi.stubGlobal('fetch', mockFetch);
+
+    await expect(
+      closeTicketById(makeEnv({ DB: db }), 555, 'b'.repeat(64)),
+    ).rejects.toThrow(/Zendesk solve did not succeed/);
+
+    // A failed solve must leave the ticket open in D1 so the UI keeps the Close button.
+    expect(sqlLog.some(entry => entry.sql.includes('UPDATE zendesk_tickets'))).toBe(false);
+  });
 });
 
 describe('addZendeskInternalNote solve payload', () => {
