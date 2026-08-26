@@ -6,6 +6,7 @@ import {
   AGE_REVIEW_STATES,
   TERMINAL_STATES,
   ACCOUNT_RESTRICTED_AGE_REVIEW_STATES,
+  foldByState,
   VALID_TRANSITIONS,
   isAccountRestrictedAgeReviewState,
   DEADLINE_DAYS,
@@ -108,6 +109,32 @@ export async function handleGetAgeReviewCases(
 
   const result = await env.DB.prepare(query).bind(...binds).all<AgeReviewCase>();
   return json({ success: true, cases: result.results }, 200, corsHeaders);
+}
+
+/**
+ * Per-state case counts for the moderator queue — one `GROUP BY state` over the
+ * whole table (age-band scoped to match the list). Returned as `by_state` so the
+ * queue's tab totals and drill-down chip counts are exact regardless of the
+ * list query's LIMIT 500, which a client-side tally over the list could not be.
+ */
+export async function handleGetAgeReviewCaseCounts(
+  request: Request,
+  env: AgeReviewEnv,
+  corsHeaders: Record<string, string>,
+): Promise<Response> {
+  if (!env.DB) return json({ success: false, error: 'Database not configured' }, 500, corsHeaders);
+
+  const bandFilter = new URL(request.url).searchParams.get('age_band');
+  let query = 'SELECT state, COUNT(*) AS n FROM age_review_cases';
+  const binds: string[] = [];
+  if (bandFilter && AGE_BANDS.includes(bandFilter as AgeBand)) {
+    query += ' WHERE suspected_age_band = ?';
+    binds.push(bandFilter);
+  }
+  query += ' GROUP BY state';
+
+  const result = await env.DB.prepare(query).bind(...binds).all<{ state: string; n: number }>();
+  return json({ success: true, by_state: foldByState(result.results ?? []) }, 200, corsHeaders);
 }
 
 export async function handleGetAgeReviewCase(
