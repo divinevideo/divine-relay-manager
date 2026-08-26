@@ -36,7 +36,7 @@ import {
 import { handleAccountStatus } from './account-status';
 import { handleBulkModerateEnqueue, handleBulkJobStatus, processBulkJob } from './bulk-moderate';
 import type { BulkJobMessage } from '../../shared/bulk-moderation';
-import { ensureZendeskTable, addZendeskInternalNote, syncZendeskAfterAction } from './zendesk-sync';
+import { ensureZendeskTable, addZendeskInternalNote, syncZendeskAfterAction, getLinkedTickets, closeTicketById } from './zendesk-sync';
 import { buildReportNote, parseKind0Profile, type ReportedProfile } from './report-note';
 import { queryRelay, withTimeout, ENRICHMENT_TIMEOUT_MS } from './relay-profile';
 import { coordinateEventVisibility, type EventVisibilityResult } from './event-visibility';
@@ -385,6 +385,8 @@ interface ApiResponse {
   // seeing only "conflict" cannot tell this from any other refusal.
   from?: string;
   current?: string;
+  // /api/tickets: Zendesk tickets linked to a report target.
+  tickets?: Array<{ ticket_id: number; status: string; url: string }>;
 }
 
 // Verify that the request is authorized for admin API access.
@@ -556,6 +558,24 @@ export default {
 
       if (path === '/api/decisions' && request.method === 'GET') {
         return handleGetAllDecisions(env, corsHeaders);
+      }
+
+      // Linked Zendesk tickets for a report target (admin-gated: MUST stay here,
+      // after verifyAdminAccess, and NOT under /api/zendesk/* which bypasses it).
+      if (path === '/api/tickets' && request.method === 'GET') {
+        const eventId = url.searchParams.get('event') ?? undefined;
+        const pubkey = url.searchParams.get('pubkey') ?? undefined;
+        return handleGetLinkedTickets(env, { eventId, pubkey }, corsHeaders);
+      }
+
+      if (path.startsWith('/api/tickets/') && path.endsWith('/close') && request.method === 'POST') {
+        const idStr = path.replace('/api/tickets/', '').replace('/close', '');
+        const ticketId = Number.parseInt(idStr, 10);
+        if (!Number.isInteger(ticketId)) {
+          return jsonResponse({ success: false, error: 'Invalid ticket id' }, 400, corsHeaders);
+        }
+        const closeBody = await request.json().catch(() => ({})) as { moderatorPubkey?: string };
+        return handleCloseTicket(env, ticketId, closeBody, corsHeaders);
       }
 
       if (path.startsWith('/api/decisions/') && request.method === 'GET') {
@@ -2960,6 +2980,39 @@ async function handleZendeskRoutes(
   }
 
   return jsonResponse({ success: false, error: 'Not found' }, 404, corsHeaders);
+}
+
+// List the Zendesk tickets linked to a report target (event and/or pubkey).
+// Degrades to an empty list on DB error so it never blocks the report view.
+async function handleGetLinkedTickets(
+  env: Env,
+  target: { eventId?: string; pubkey?: string },
+  corsHeaders: Record<string, string>,
+): Promise<Response> {
+  try {
+    const tickets = await getLinkedTickets(env, target);
+    return jsonResponse({ success: true, tickets }, 200, corsHeaders);
+  } catch (err) {
+    console.error('[handleGetLinkedTickets] error:', err);
+    return jsonResponse({ success: true, tickets: [] }, 200, corsHeaders);
+  }
+}
+
+// Manually close one linked Zendesk ticket (the fallback for actions that did not
+// auto-close it). Zendesk-only: never writes a moderation_decisions row.
+async function handleCloseTicket(
+  env: Env,
+  ticketId: number,
+  body: { moderatorPubkey?: string },
+  corsHeaders: Record<string, string>,
+): Promise<Response> {
+  try {
+    await closeTicketById(env, ticketId, body.moderatorPubkey ?? null);
+    return jsonResponse({ success: true }, 200, corsHeaders);
+  } catch (err) {
+    console.error('[handleCloseTicket] error:', err);
+    return jsonResponse({ success: false, error: err instanceof Error ? err.message : 'Unknown error' }, 500, corsHeaders);
+  }
 }
 
 // Parse content report ticket and store mapping, add helpful links as internal note

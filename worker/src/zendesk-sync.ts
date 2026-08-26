@@ -236,3 +236,76 @@ export async function syncZendeskAfterAction(
     console.error('[syncZendeskAfterAction] Error:', error);
   }
 }
+
+export interface LinkedTicket {
+  ticket_id: number;
+  status: string;
+  url: string;
+}
+
+export function zendeskTicketUrl(subdomain: string, ticketId: number): string {
+  return `https://${subdomain}.zendesk.com/agent/tickets/${ticketId}`;
+}
+
+// Look up the Zendesk tickets linked to an event and/or a pubkey, deduped by
+// ticket_id (a ticket can match on both). Matches case-insensitively, mirroring
+// the closure query. Returns every linked ticket regardless of status so the UI
+// can show closed ones as an affirmative "done" state, not just openable ones.
+export async function getLinkedTickets(
+  env: ZendeskSyncEnv,
+  target: { eventId?: string; pubkey?: string },
+): Promise<LinkedTicket[]> {
+  if (!env.DB) return [];
+  await ensureZendeskTable(env.DB);
+  const creds = await resolveZendeskCreds(env);
+  const subdomain = creds?.subdomain ?? '';
+
+  const byId = new Map<number, LinkedTicket>();
+  const add = (rows: Array<{ ticket_id: number; status: string }>) => {
+    for (const r of rows) {
+      byId.set(r.ticket_id, { ticket_id: r.ticket_id, status: r.status, url: zendeskTicketUrl(subdomain, r.ticket_id) });
+    }
+  };
+
+  if (target.eventId) {
+    const r = await env.DB.prepare(
+      `SELECT ticket_id, status FROM zendesk_tickets WHERE lower(event_id) = ?`
+    ).bind(target.eventId.toLowerCase()).all<{ ticket_id: number; status: string }>();
+    add(r.results ?? []);
+  }
+  if (target.pubkey) {
+    const r = await env.DB.prepare(
+      `SELECT ticket_id, status FROM zendesk_tickets WHERE lower(author_pubkey) = ?`
+    ).bind(target.pubkey.toLowerCase()).all<{ ticket_id: number; status: string }>();
+    add(r.results ?? []);
+  }
+  return [...byId.values()];
+}
+
+// Close a single ticket from Relay Manager: internal note + Zendesk solve + D1
+// status. Deliberately does NOT write a moderation_decisions row — closing a
+// ticket is not the same as actioning content (it may be a duplicate or no-op).
+export async function closeTicketById(
+  env: ZendeskSyncEnv,
+  ticketId: number,
+  moderator: string | null,
+): Promise<void> {
+  const note = [
+    '📋 **Ticket closed from Relay Manager**',
+    '',
+    `**Closed by:** ${moderator ?? 'unknown'}`,
+    `**Time:** ${new Date().toISOString()}`,
+  ].join('\n');
+  await addZendeskInternalNote(ticketId, note, env, true);
+  if (env.DB) {
+    await ensureZendeskTable(env.DB);
+    await env.DB.prepare(`
+      UPDATE zendesk_tickets
+      SET status = 'resolved',
+          resolved_at = CURRENT_TIMESTAMP,
+          resolution_action = 'manual_close',
+          resolution_moderator = ?
+      WHERE ticket_id = ?
+    `).bind(moderator, ticketId).run();
+  }
+}

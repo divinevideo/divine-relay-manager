@@ -3,7 +3,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import worker from './index';
-import { syncZendeskAfterAction } from './zendesk-sync';
+import { syncZendeskAfterAction, getLinkedTickets, closeTicketById } from './zendesk-sync';
 
 const WEBHOOK_SECRET = 'test-parse-report-secret';
 const TEST_NSEC = 'nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5';
@@ -291,6 +291,70 @@ describe('handleParseReport author derivation', () => {
     expect(response.status).toBe(200);
     expect(data.event_id).toBe(eventId);        // lowercased on store/return
     expect(data.author_pubkey).toBe(author);     // derived from the event
+  });
+});
+
+function makeLinkedTicketsDB(
+  eventRows: Array<{ ticket_id: number; status: string }>,
+  pubkeyRows: Array<{ ticket_id: number; status: string }>,
+) {
+  return {
+    prepare: (sql: string) => ({
+      bind: (..._a: unknown[]) => ({
+        all: async () => {
+          if (sql.includes('lower(event_id)')) return { results: eventRows };
+          if (sql.includes('lower(author_pubkey)')) return { results: pubkeyRows };
+          return { results: [] };
+        },
+        run: async () => ({ success: true }),
+        first: async () => null,
+      }),
+      run: async () => ({ success: true }),
+      all: async () => ({ results: [] }),
+      first: async () => null,
+    }),
+  } as never;
+}
+
+describe('getLinkedTickets', () => {
+  it('returns deduped linked tickets for event and/or pubkey, with agent urls', async () => {
+    const db = makeLinkedTicketsDB(
+      [{ ticket_id: 1, status: 'open' }, { ticket_id: 3, status: 'open' }],
+      [{ ticket_id: 2, status: 'resolved' }, { ticket_id: 3, status: 'open' }],
+    );
+    const tickets = await getLinkedTickets(makeEnv({ DB: db }), { eventId: 'A'.repeat(64), pubkey: 'B'.repeat(64) });
+
+    expect(tickets.map(t => t.ticket_id).sort((a, b) => a - b)).toEqual([1, 2, 3]); // 3 deduped
+    expect(tickets.find(t => t.ticket_id === 1)?.url).toBe('https://rabblelabs.zendesk.com/agent/tickets/1');
+    expect(tickets.find(t => t.ticket_id === 2)?.status).toBe('resolved');
+  });
+});
+
+describe('closeTicketById', () => {
+  beforeEach(() => {
+    vi.stubGlobal('WebSocket', MockWebSocket);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('solves the ticket in Zendesk + D1 without writing a moderation decision', async () => {
+    const { db, sqlLog } = createMockDB();
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true, text: async () => '' });
+    vi.stubGlobal('fetch', mockFetch);
+
+    await closeTicketById(makeEnv({ DB: db, ZENDESK_GROUP_ID: '15225535020687' }), 555, 'b'.repeat(64));
+
+    const [url, options] = mockFetch.mock.calls[0];
+    expect(url).toBe('https://rabblelabs.zendesk.com/api/v2/tickets/555');
+    expect(JSON.parse(options.body as string).ticket.status).toBe('solved');
+
+    const update = sqlLog.find(entry => entry.sql.includes('UPDATE zendesk_tickets'));
+    expect(update?.sql).toContain("resolution_action = 'manual_close'");
+    expect(update?.bindings).toEqual(['b'.repeat(64), 555]);
+
+    // Zendesk-only: closing a ticket must never fabricate a content decision.
+    expect(sqlLog.some(entry => entry.sql.includes('moderation_decisions'))).toBe(false);
   });
 });
 
