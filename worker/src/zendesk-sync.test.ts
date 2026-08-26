@@ -245,6 +245,55 @@ describe('handleParseReport regex', () => {
   });
 });
 
+// REQ-responding WebSocket mock (mirrors relay-profile.test.ts) so the real
+// queryRelay resolves with the given events. Used to exercise author derivation.
+function mockRelay(events: Array<Record<string, unknown>>) {
+  vi.spyOn(globalThis, 'WebSocket').mockImplementation((function () {
+    const listeners = new Map<string, Array<(value?: unknown) => void>>();
+    let subId = 'parse-report-test';
+    queueMicrotask(() => {
+      listeners.get('open')?.forEach((h) => h());
+      for (const event of events) {
+        listeners.get('message')?.forEach((h) => h({ data: JSON.stringify(['EVENT', subId, event]) }));
+      }
+      listeners.get('message')?.forEach((h) => h({ data: JSON.stringify(['EOSE', subId]) }));
+    });
+    return {
+      addEventListener: (e: string, h: (value?: unknown) => void) => {
+        listeners.set(e, [...(listeners.get(e) || []), h]);
+      },
+      send: vi.fn((payload: string) => {
+        const parsed = JSON.parse(payload);
+        if (parsed[0] === 'REQ') subId = parsed[1];
+      }),
+      close: vi.fn(),
+    };
+  } as unknown as typeof WebSocket));
+}
+
+describe('handleParseReport author derivation', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('derives author_pubkey from the reported event when the description omits it, and lowercases ids', async () => {
+    const eventId = 'e'.repeat(64);
+    const author = 'a'.repeat(64);
+    // Relay returns the reported event, authored by `author`.
+    mockRelay([{ id: eventId, kind: 32, pubkey: author, tags: [], content: '' }]);
+
+    // Uppercase event id in the description, and NO pubkey line.
+    const description = `Event ID: ${eventId.toUpperCase()}\nReason: spam`;
+
+    const response = await worker.fetch(makeParseReportRequest(description, 900), makeEnv(), ctx);
+    const data = await response.json() as Record<string, unknown>;
+
+    expect(response.status).toBe(200);
+    expect(data.event_id).toBe(eventId);        // lowercased on store/return
+    expect(data.author_pubkey).toBe(author);     // derived from the event
+  });
+});
+
 describe('addZendeskInternalNote solve payload', () => {
   beforeEach(() => {
     vi.stubGlobal('WebSocket', MockWebSocket);

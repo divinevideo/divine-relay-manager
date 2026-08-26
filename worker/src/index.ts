@@ -3009,6 +3009,30 @@ async function handleParseReport(
       return jsonResponse({ success: false, error: 'Could not parse event_id or author_pubkey from description' }, 400, corsHeaders);
     }
 
+    // Normalize to lowercase so the stored row matches the lowercased ids the
+    // action-side sync queries with (relay/moderation_targets ids are lowercase).
+    const eventId = event_id ? event_id.toLowerCase() : null;
+    let authorPubkey = author_pubkey ? author_pubkey.toLowerCase() : null;
+
+    // Best-effort: when the description gave us an event but no author, derive the
+    // author from the reported event. Account-level actions (ban/delete-all) match
+    // tickets on author_pubkey, so without this an event-only ticket can never be
+    // closed by a whole-account action. Only runs in the missing-author case.
+    if (eventId && !authorPubkey) {
+      try {
+        const evtRes = await withTimeout(
+          queryRelay({ ids: [eventId], limit: 1 }, env.RELAY_URL),
+          ENRICHMENT_TIMEOUT_MS,
+        );
+        const pk = evtRes?.success && evtRes.events?.length
+          ? (evtRes.events[0] as { pubkey?: string }).pubkey
+          : undefined;
+        if (pk && /^[a-f0-9]{64}$/i.test(pk)) authorPubkey = pk.toLowerCase();
+      } catch (err) {
+        console.warn('[handleParseReport] author derivation failed (continuing):', err);
+      }
+    }
+
     // Store mapping in D1 (skip if already processed)
     if (env.DB) {
       await ensureZendeskTable(env.DB);
@@ -3020,13 +3044,13 @@ async function handleParseReport(
 
       if (existing) {
         console.log(`[handleParseReport] Ticket ${ticket_id} already processed, skipping`);
-        return jsonResponse({ success: true, ticket_id, event_id, author_pubkey, violation_type, skipped: true }, 200, corsHeaders);
+        return jsonResponse({ success: true, ticket_id, event_id: eventId, author_pubkey: authorPubkey, violation_type, skipped: true }, 200, corsHeaders);
       }
 
       await env.DB.prepare(`
         INSERT INTO zendesk_tickets (ticket_id, event_id, author_pubkey, violation_type, status)
         VALUES (?, ?, ?, ?, 'open')
-      `).bind(ticket_id, event_id, author_pubkey, violation_type).run();
+      `).bind(ticket_id, eventId, authorPubkey, violation_type).run();
     }
 
     // Enrich the note with profile + event context (best-effort; never block the note).
@@ -3036,15 +3060,15 @@ async function handleParseReport(
     let reportedEventKind: number | null = null;
     try {
       const [profRes, evtRes] = await Promise.all([
-        author_pubkey
+        authorPubkey
           ? withTimeout(
-              queryRelay({ authors: [author_pubkey], kinds: [0], limit: 1 }, env.RELAY_URL),
+              queryRelay({ authors: [authorPubkey], kinds: [0], limit: 1 }, env.RELAY_URL),
               ENRICHMENT_TIMEOUT_MS,
             )
           : Promise.resolve(null),
-        event_id
+        eventId
           ? withTimeout(
-              queryRelay({ ids: [event_id], limit: 1 }, env.RELAY_URL),
+              queryRelay({ ids: [eventId], limit: 1 }, env.RELAY_URL),
               ENRICHMENT_TIMEOUT_MS,
             )
           : Promise.resolve(null),
@@ -3061,8 +3085,8 @@ async function handleParseReport(
     }
 
     const note = buildReportNote({
-      eventId: event_id,
-      authorPubkey: author_pubkey,
+      eventId,
+      authorPubkey,
       violationType: violation_type,
       environment: env.ENVIRONMENT,
       keycastUrl: env.KEYCAST_URL,
@@ -3073,7 +3097,7 @@ async function handleParseReport(
     // Add internal note to Zendesk
     await addZendeskInternalNote(ticket_id, note, env);
 
-    return jsonResponse({ success: true, ticket_id, event_id, author_pubkey, violation_type }, 200, corsHeaders);
+    return jsonResponse({ success: true, ticket_id, event_id: eventId, author_pubkey: authorPubkey, violation_type }, 200, corsHeaders);
   } catch (error) {
     console.error('[handleParseReport] Error:', error);
     return jsonResponse(
