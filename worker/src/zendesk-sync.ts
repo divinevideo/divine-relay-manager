@@ -240,9 +240,15 @@ export async function syncZendeskAfterAction(
     ].join('\n');
 
     for (const { ticket_id } of linkedTickets) {
-      await addZendeskInternalNote(ticket_id, note, env, isResolution);
+      const posted = await addZendeskInternalNote(ticket_id, note, env, isResolution);
 
-      if (isResolution) {
+      // Record the D1 resolution ONLY when Zendesk actually confirmed the close.
+      // The panel reads this status; marking a row resolved after a failed solve
+      // would show "Closed ✓" over a still-open ticket and hide the Close button.
+      // Leaving it 'open' keeps the row honest and lets the next action (or a manual
+      // close) retry. Still best-effort: this never throws — the moderation action
+      // itself already succeeded.
+      if (isResolution && posted) {
         await env.DB.prepare(`
           UPDATE zendesk_tickets
           SET status = 'resolved',
@@ -251,9 +257,10 @@ export async function syncZendeskAfterAction(
               resolution_moderator = ?
           WHERE ticket_id = ?
         `).bind(action, moderator, ticket_id).run();
+        console.log(`[syncZendeskAfterAction] Resolved ticket #${ticket_id} with action: ${action}`);
+      } else if (isResolution) {
+        console.warn(`[syncZendeskAfterAction] Zendesk solve failed for ticket #${ticket_id}; left open for retry`);
       }
-
-      console.log(`[syncZendeskAfterAction] Updated ticket #${ticket_id} with action: ${action}`);
     }
   } catch (error) {
     console.error('[syncZendeskAfterAction] Error:', error);

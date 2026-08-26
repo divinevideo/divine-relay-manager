@@ -462,4 +462,20 @@ describe('addZendeskInternalNote solve payload', () => {
       .sort();
     expect(updatedIds).toEqual([111, 222]);
   });
+
+  it('leaves the ticket open (no D1 resolve) when the Zendesk solve fails', async () => {
+    const { db, sqlLog } = createMockDB([111]);
+    const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 502, text: async () => 'down' });
+    vi.stubGlobal('fetch', mockFetch);
+
+    await syncZendeskAfterAction(
+      makeEnv({ DB: db }),
+      'ban_pubkey', 'pubkey', 'a'.repeat(64), 'b'.repeat(64),
+    );
+
+    // The Zendesk solve was attempted...
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    // ...but failed, so D1 must NOT be marked resolved — the panel keeps the Close button.
+    expect(sqlLog.some(entry => entry.sql.includes('UPDATE zendesk_tickets'))).toBe(false);
+  });
 });

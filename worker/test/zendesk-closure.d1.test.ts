@@ -4,17 +4,33 @@
 // a lowercase action-side id still resolves it. Removing lower() from the query
 // makes this fail (exact match would miss the mixed-case row).
 import { Miniflare } from 'miniflare';
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { ensureZendeskTable, syncZendeskAfterAction } from '../src/zendesk-sync';
 
 let mf: Miniflare;
 let DB: D1Database;
 
-// No Zendesk creds: addZendeskInternalNote no-ops (no network) while the D1
-// resolution UPDATE still runs, so the test needs no fetch mocking.
+// Full Zendesk creds + a succeeding fetch stub: the resolution UPDATE only runs
+// when the Zendesk solve confirms (best-effort, honest-status behavior), so the
+// row is marked resolved and the case-insensitive match is observable through it.
 function makeEnv(db: D1Database) {
-  return { DB: db, NOSTR_NSEC: 'nsec-test', RELAY_URL: 'wss://relay.test' } as never;
+  return {
+    DB: db,
+    NOSTR_NSEC: 'nsec-test',
+    RELAY_URL: 'wss://relay.test',
+    ZENDESK_SUBDOMAIN: 'rabblelabs',
+    ZENDESK_API_TOKEN: 'test-token',
+    ZENDESK_EMAIL: 'test@divine.video',
+  } as never;
 }
+
+beforeEach(() => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, text: async () => '' }));
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 beforeAll(async () => {
   mf = new Miniflare({
