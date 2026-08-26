@@ -252,44 +252,43 @@ export function AgeReview() {
 
         {/* Drill-down chips: narrow the active view to one state. "All" clears
             the drill-down; clicking the active chip again toggles it off. Every
-            view spans more than one state, so the row always shows. */}
-        {chipStates.length > 1 && (
-          <div className="flex flex-wrap gap-1" role="group" aria-label="Filter by case status">
-            <button
-              type="button"
-              onClick={() => setStateFilter(null)}
-              aria-pressed={stateFilter === null}
-              className={`text-[10px] h-5 px-1.5 rounded-full border transition-colors ${
-                stateFilter === null
-                  ? 'bg-primary text-primary-foreground border-primary'
-                  : 'border-input text-muted-foreground hover:bg-muted'
-              }`}
-            >
-              All
-            </button>
-            {chipStates.map((s) => {
-              const selected = stateFilter === s;
-              return (
-                <button
-                  key={s}
-                  type="button"
-                  onClick={() => setStateFilter(selected ? null : s)}
-                  aria-pressed={selected}
-                  className={`inline-flex items-center gap-1 text-[10px] h-5 px-1.5 rounded-full border transition-colors ${
-                    selected
-                      ? 'bg-primary text-primary-foreground border-primary'
-                      : 'border-input text-muted-foreground hover:bg-muted'
-                  }`}
-                >
-                  <span>{STATE_SHORT[s]}</span>
-                  {stateCounts && (
-                    <span className="tabular-nums opacity-70">{stateCounts[s] ?? 0}</span>
-                  )}
-                </button>
-              );
-            })}
-          </div>
-        )}
+            view spans at least two states (Active 7, Closed 2, All 9), so the
+            row is unconditional. */}
+        <div className="flex flex-wrap gap-1" role="group" aria-label="Filter by case status">
+          <button
+            type="button"
+            onClick={() => setStateFilter(null)}
+            aria-pressed={stateFilter === null}
+            className={`text-[10px] h-5 px-1.5 rounded-full border transition-colors ${
+              stateFilter === null
+                ? 'bg-primary text-primary-foreground border-primary'
+                : 'border-input text-muted-foreground hover:bg-muted'
+            }`}
+          >
+            All
+          </button>
+          {chipStates.map((s) => {
+            const selected = stateFilter === s;
+            return (
+              <button
+                key={s}
+                type="button"
+                onClick={() => setStateFilter(selected ? null : s)}
+                aria-pressed={selected}
+                className={`inline-flex items-center gap-1 text-[10px] h-5 px-1.5 rounded-full border transition-colors ${
+                  selected
+                    ? 'bg-primary text-primary-foreground border-primary'
+                    : 'border-input text-muted-foreground hover:bg-muted'
+                }`}
+              >
+                <span>{STATE_SHORT[s]}</span>
+                {stateCounts && (
+                  <span className="tabular-nums opacity-70">{stateCounts[s] ?? 0}</span>
+                )}
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       {/* Case list */}

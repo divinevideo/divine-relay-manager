@@ -114,8 +114,8 @@ export async function handleGetAgeReviewCases(
 /**
  * Per-state case counts for the moderator queue — one `GROUP BY state` over the
  * whole table (age-band scoped to match the list). Returned as `by_state` so the
- * queue's tab totals and drill-down chip counts are exact regardless of the
- * list query's LIMIT 500, which a client-side tally over the list could not be.
+ * queue's drill-down chip counts are exact regardless of the list query's LIMIT
+ * 500, which a client-side tally over the capped list could not be.
  */
 export async function handleGetAgeReviewCaseCounts(
   request: Request,
