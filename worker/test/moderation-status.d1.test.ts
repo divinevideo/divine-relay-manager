@@ -81,4 +81,19 @@ describe('moderation status response deadline on real D1', () => {
       remainingDaysWhenPaused: 5.25,
     });
   });
+
+  it("returns only the authenticated account's case timing", async () => {
+    const firstPubkey = 'c'.repeat(64);
+    const secondPubkey = 'd'.repeat(64);
+    await insertCase('first-account', firstPubkey, { deadline: '2099-09-01T12:00:00.000Z' });
+    await insertCase('second-account', secondPubkey, { deadline: '2099-10-01T12:00:00.000Z' });
+
+    const res = await handleGetModerationStatus(firstPubkey, { DB }, cors);
+    const body = await res.json() as {
+      minorReviewCase: { id: string; responseDeadline: { deadlineAt: string | null } };
+    };
+
+    expect(body.minorReviewCase.id).toBe('first-account');
+    expect(body.minorReviewCase.responseDeadline.deadlineAt).toBe('2099-09-01T12:00:00.000Z');
+  });
 });
