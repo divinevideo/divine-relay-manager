@@ -40,6 +40,8 @@ import {
   getAgeReviewCaseCounts,
   bulkModerate,
   getBulkJobStatus,
+  getLinkedTickets,
+  closeTicket,
   ApiError,
   type UnsignedEvent,
   type ApiResponse,
@@ -1885,6 +1887,45 @@ describe('adminApi', () => {
 
       await expect(listBannedEvents(API_URL, { timeoutMs: 8_000 })).rejects.toThrow(
         /Relay RPC 'listbannedevents' timed out after 8s\. Could not reach the relay\. Try again\./,
+      );
+    });
+  });
+
+  describe('getLinkedTickets', () => {
+    it('GETs /api/tickets with event and pubkey params and returns tickets', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, tickets: [{ ticket_id: 1, status: 'open', url: 'u' }] }),
+      });
+
+      const out = await getLinkedTickets(API_URL, { eventId: 'e'.repeat(64), pubkey: 'p'.repeat(64) });
+
+      const calledUrl = mockFetch.mock.calls[0][0] as string;
+      expect(calledUrl).toContain(`${API_URL}/api/tickets?`);
+      expect(calledUrl).toContain(`event=${'e'.repeat(64)}`);
+      expect(calledUrl).toContain(`pubkey=${'p'.repeat(64)}`);
+      expect(mockFetch.mock.calls[0][1]).toMatchObject({ method: 'GET' });
+      expect(out).toEqual([{ ticket_id: 1, status: 'open', url: 'u' }]);
+    });
+
+    it('returns [] when the response carries no tickets', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true }) });
+      expect(await getLinkedTickets(API_URL, { eventId: 'e'.repeat(64) })).toEqual([]);
+    });
+  });
+
+  describe('closeTicket', () => {
+    it('POSTs /api/tickets/:id/close with the moderator pubkey', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true }) });
+
+      await closeTicket(API_URL, 555, 'b'.repeat(64));
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        `${API_URL}/api/tickets/555/close`,
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ moderatorPubkey: 'b'.repeat(64) }),
+        }),
       );
     });
   });
