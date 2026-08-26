@@ -48,6 +48,7 @@ import { MediaPreview } from "@/components/MediaPreview";
 import { BulkDeleteByKind } from "@/components/BulkDeleteByKind";
 import { EventActions } from "@/components/EventActions";
 import { UserActions } from "@/components/UserActions";
+import { LinkedTicketPanel } from "@/components/LinkedTicketPanel";
 import { CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, getReportCategory } from "@/lib/constants";
 import { KIND_NAMES } from "@/lib/kindNames";
 import { Flag, CheckCircle, History, Ban, ShieldX, Link2, User, FileText, Repeat2, FileCode, RefreshCw, EyeOff, Eye } from "lucide-react";
@@ -121,6 +122,10 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
 
   const context = useReportContext(report);
   const reportedPubkey = context.reportedUser.pubkey;
+  // Linked-ticket panel inputs: the reported event (when the target is an event)
+  // and the reported author. Both feed the /api/tickets lookup.
+  const linkedTicketEventId = context.target?.type === 'event' ? context.target.value : undefined;
+  const linkedTicketPubkey = reportedPubkey ?? undefined;
 
   // Banned event fallback: if thread found no event and target is an event ID, try management API
   const targetEventId = context.target?.type === 'event' ? context.target.value : undefined;
@@ -450,6 +455,8 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     queryClient.invalidateQueries({ queryKey: ['decisions'] });
     queryClient.invalidateQueries({ queryKey: ['media-status'] });
     queryClient.invalidateQueries({ queryKey: ['user-stats', context.reportedUser.pubkey] });
+    // Reflect any ticket the action auto-closed so the panel flips to "Closed ✓".
+    queryClient.invalidateQueries({ queryKey: ['linked-tickets'] });
     moderationStatus.recheck();
     decisionLog.refetch();
   };
@@ -661,6 +668,12 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                 timeZoneName: 'short'
               })}
             </span>
+          </div>
+
+          {/* Linked Zendesk ticket(s): always present so closure state is legible. */}
+          <div className="flex items-center gap-2">
+            <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Linked ticket</h4>
+            <LinkedTicketPanel eventId={linkedTicketEventId} pubkey={linkedTicketPubkey} />
           </div>
 
           {/* Report Reasons - What reporters said */}
