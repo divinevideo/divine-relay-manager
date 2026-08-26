@@ -124,10 +124,13 @@ export function deriveResponseClock(
 
   if (!isAccountRestrictedAgeReviewState(c.state)) return empty('not_applicable');
 
-  if (c.clock_paused) {
+  if (c.clock_paused !== 0 && c.clock_paused !== 1) return empty('unknown');
+
+  const deadlineAt = toUtcIso(c.deadline_at);
+  if (c.clock_paused === 1) {
     const pausedAt = toUtcIso(c.clock_paused_at);
     const remaining = c.remaining_days_when_paused;
-    if (!pausedAt || remaining == null || !Number.isFinite(remaining) || remaining < 0) {
+    if (!deadlineAt || !pausedAt || remaining == null || !Number.isFinite(remaining) || remaining < 0) {
       return empty('unknown');
     }
     return {
@@ -138,8 +141,12 @@ export function deriveResponseClock(
     };
   }
 
-  const deadlineAt = toUtcIso(c.deadline_at);
-  if (!deadlineAt || !Number.isFinite(now.getTime())) return empty('unknown');
+  if (
+    !deadlineAt ||
+    c.clock_paused_at !== null ||
+    c.remaining_days_when_paused !== null ||
+    !Number.isFinite(now.getTime())
+  ) return empty('unknown');
 
   return {
     clock: Date.parse(deadlineAt) <= now.getTime() ? 'expired' : 'running',

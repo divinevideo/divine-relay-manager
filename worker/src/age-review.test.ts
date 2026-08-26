@@ -1065,6 +1065,10 @@ describe('deriveResponseClock', () => {
     ['missing paused time', applicableCase({ clock_paused: 1, clock_paused_at: null, remaining_days_when_paused: 4 })],
     ['missing paused duration', applicableCase({ clock_paused: 1, clock_paused_at: '2026-08-24T09:30:00Z', remaining_days_when_paused: null })],
     ['negative paused duration', applicableCase({ clock_paused: 1, clock_paused_at: '2026-08-24T09:30:00Z', remaining_days_when_paused: -1 })],
+    ['missing source deadline while paused', applicableCase({ deadline_at: null, clock_paused: 1, clock_paused_at: '2026-08-24T09:30:00Z', remaining_days_when_paused: 4 })],
+    ['unsupported pause flag', applicableCase({ clock_paused: 2 })],
+    ['stale paused time while running', applicableCase({ clock_paused_at: '2026-08-24T09:30:00Z' })],
+    ['stale paused duration while running', applicableCase({ remaining_days_when_paused: 4 })],
   ] as const)('returns unknown for %s', (_label, c) => {
     expect(deriveResponseClock(c, now)).toEqual({
       clock: 'unknown', deadlineAt: null, pausedAt: null, remainingDaysWhenPaused: null,
