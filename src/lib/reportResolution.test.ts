@@ -11,6 +11,11 @@ describe('isConsolidatedReportResolved', () => {
     expect(isConsolidatedReportResolved(report, new Set(), banned)).toBe(true);
   });
 
+  it('cross-resolves case-insensitively when the p-tag author is uppercase', () => {
+    const report = { target: { type: 'event' as const, value: EVENT }, authorPubkey: AUTHOR.toUpperCase() };
+    expect(isConsolidatedReportResolved(report, new Set(), banned)).toBe(true);
+  });
+
   it('does not resolve an event report whose author is not banned', () => {
     const report = { target: { type: 'event' as const, value: EVENT }, authorPubkey: 'c'.repeat(64) };
     expect(isConsolidatedReportResolved(report, new Set(), banned)).toBe(false);

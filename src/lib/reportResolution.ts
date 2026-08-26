@@ -27,7 +27,14 @@ export function isConsolidatedReportResolved(
   bannedPubkeys: Set<string>,
 ): boolean {
   if (resolvedTargets.has(`${report.target.type}:${report.target.value}`)) return true;
-  if (report.target.type === 'event' && report.authorPubkey && bannedPubkeys.has(report.authorPubkey)) {
+  // authorPubkey comes from a reporter-authored `p` tag and is not case-normalized
+  // upstream; the ban set is relay-canonical lowercase. Lowercase before matching so
+  // an uppercase tag still cross-resolves.
+  if (
+    report.target.type === 'event' &&
+    report.authorPubkey &&
+    bannedPubkeys.has(report.authorPubkey.toLowerCase())
+  ) {
     return true;
   }
   return false;

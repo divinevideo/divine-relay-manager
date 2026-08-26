@@ -61,6 +61,9 @@ export function LinkedTicketPanel({ eventId, pubkey }: LinkedTicketPanelProps) {
     <div className="space-y-1">
       {tickets.map((ticket) => {
         const isOpen = ticket.status === 'open';
+        // Scope pending state to THIS ticket, so closing one open ticket never
+        // greys out or mislabels a sibling open ticket on the same report.
+        const isClosingThis = closeMutation.isPending && closeMutation.variables === ticket.ticket_id;
         return (
           <div key={ticket.ticket_id} className="flex items-center gap-2 text-sm">
             <a href={ticket.url} target="_blank" rel="noreferrer" className="underline">
@@ -72,10 +75,10 @@ export function LinkedTicketPanel({ eventId, pubkey }: LinkedTicketPanelProps) {
                 <Button
                   size="sm"
                   variant="outline"
-                  disabled={closeMutation.isPending}
+                  disabled={isClosingThis}
                   onClick={() => closeMutation.mutate(ticket.ticket_id)}
                 >
-                  {closeMutation.isPending ? 'Closing…' : 'Close ticket'}
+                  {isClosingThis ? 'Closing…' : 'Close ticket'}
                 </Button>
               </>
             ) : (
