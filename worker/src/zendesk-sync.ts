@@ -157,23 +157,32 @@ export async function syncZendeskAfterAction(
   try {
     await ensureZendeskTable(env.DB);
 
-    let linked: { ticket_id: number } | null = null;
+    // Match case-insensitively: event ids and pubkeys are stored lowercase going
+    // forward, but older rows may be mixed-case, and the action-side ids arrive
+    // lowercased. lower() on the column keeps the match robust either way.
+    const id = targetId.toLowerCase();
+    let linkedTickets: Array<{ ticket_id: number }> = [];
 
     if (targetType === 'event') {
-      console.log('[syncZendeskAfterAction] Querying for event_id:', targetId);
-      linked = await env.DB.prepare(
-        `SELECT ticket_id FROM zendesk_tickets WHERE event_id = ? AND status = 'open'`
-      ).bind(targetId).first();
+      console.log('[syncZendeskAfterAction] Querying for event_id:', id);
+      const res = await env.DB.prepare(
+        `SELECT ticket_id FROM zendesk_tickets WHERE lower(event_id) = ? AND status = 'open'`
+      ).bind(id).all<{ ticket_id: number }>();
+      linkedTickets = res.results ?? [];
     } else if (targetType === 'pubkey') {
-      console.log('[syncZendeskAfterAction] Querying for author_pubkey:', targetId);
-      linked = await env.DB.prepare(
-        `SELECT ticket_id FROM zendesk_tickets WHERE author_pubkey = ? AND status = 'open'`
-      ).bind(targetId).first();
+      console.log('[syncZendeskAfterAction] Querying for author_pubkey:', id);
+      const res = await env.DB.prepare(
+        `SELECT ticket_id FROM zendesk_tickets WHERE lower(author_pubkey) = ? AND status = 'open'`
+      ).bind(id).all<{ ticket_id: number }>();
+      linkedTickets = res.results ?? [];
     }
 
-    console.log('[syncZendeskAfterAction] Query result:', linked);
+    console.log('[syncZendeskAfterAction] Query result:', linkedTickets);
 
-    if (!linked?.ticket_id) {
+    // Close EVERY open ticket linked to this target, not just the first. Multiple
+    // reports on one piece of content (or one author) produce multiple tickets;
+    // a single action resolves all of them.
+    if (linkedTickets.length === 0) {
       console.log('[syncZendeskAfterAction] No linked open ticket found, skipping');
       return;
     }
@@ -207,20 +216,22 @@ export async function syncZendeskAfterAction(
       `**Time:** ${timestamp}`,
     ].join('\n');
 
-    await addZendeskInternalNote(linked.ticket_id, note, env, isResolution);
+    for (const { ticket_id } of linkedTickets) {
+      await addZendeskInternalNote(ticket_id, note, env, isResolution);
 
-    if (isResolution) {
-      await env.DB.prepare(`
-        UPDATE zendesk_tickets
-        SET status = 'resolved',
-            resolved_at = CURRENT_TIMESTAMP,
-            resolution_action = ?,
-            resolution_moderator = ?
-        WHERE ticket_id = ?
-      `).bind(action, moderator, linked.ticket_id).run();
+      if (isResolution) {
+        await env.DB.prepare(`
+          UPDATE zendesk_tickets
+          SET status = 'resolved',
+              resolved_at = CURRENT_TIMESTAMP,
+              resolution_action = ?,
+              resolution_moderator = ?
+          WHERE ticket_id = ?
+        `).bind(action, moderator, ticket_id).run();
+      }
+
+      console.log(`[syncZendeskAfterAction] Updated ticket #${ticket_id} with action: ${action}`);
     }
-
-    console.log(`[syncZendeskAfterAction] Updated ticket #${linked.ticket_id} with action: ${action}`);
   } catch (error) {
     console.error('[syncZendeskAfterAction] Error:', error);
   }

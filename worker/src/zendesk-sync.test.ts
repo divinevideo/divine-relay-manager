@@ -77,19 +77,25 @@ function makeEnv(overrides: Record<string, unknown> = {}) {
   } as never;
 }
 
-function createMockDB() {
+function createMockDB(ticketIds: number[] = [LINKED_TICKET_ID]) {
   const sqlLog: { sql: string; bindings: unknown[] }[] = [];
+  const linkedRows = ticketIds.map((id) => ({ ticket_id: id }));
 
   const db = {
     prepare: vi.fn().mockImplementation((sql: string) => ({
       bind: vi.fn().mockImplementation((...args: unknown[]) => {
         sqlLog.push({ sql, bindings: args });
 
-        if (sql.includes("SELECT ticket_id FROM zendesk_tickets WHERE event_id = ? AND status = 'open'")) {
+        // The linked-ticket lookup: matches both the event_id and author_pubkey
+        // variants, which are now case-insensitive (lower(...)) and read via .all().
+        if (
+          sql.includes('FROM zendesk_tickets WHERE lower(event_id)') ||
+          sql.includes('FROM zendesk_tickets WHERE lower(author_pubkey)')
+        ) {
           return {
-            first: vi.fn().mockResolvedValue({ ticket_id: LINKED_TICKET_ID }),
+            first: vi.fn().mockResolvedValue(linkedRows[0] ?? null),
             run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 0 } }),
-            all: vi.fn().mockResolvedValue({ results: [] }),
+            all: vi.fn().mockResolvedValue({ results: linkedRows }),
           };
         }
 
@@ -304,5 +310,30 @@ describe('addZendeskInternalNote solve payload', () => {
     expect(payload.ticket.status).toBe('solved');
     const resolvedUpdate = sqlLog.find(entry => entry.sql.includes('UPDATE zendesk_tickets'));
     expect(resolvedUpdate?.bindings).toEqual([action, expect.any(String), LINKED_TICKET_ID]);
+  });
+
+  it('closes every open ticket linked to the same target, not just the first', async () => {
+    const { db, sqlLog } = createMockDB([111, 222]);
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true, text: async () => '' });
+    vi.stubGlobal('fetch', mockFetch);
+
+    await syncZendeskAfterAction(
+      makeEnv({ DB: db, ZENDESK_GROUP_ID: '15225535020687' }),
+      'ban_pubkey',
+      'pubkey',
+      'a'.repeat(64),
+      'b'.repeat(64),
+    );
+
+    // One Zendesk solve PUT per linked ticket.
+    const putTicketIds = mockFetch.mock.calls.map(call => String(call[0]).split('/').pop());
+    expect(putTicketIds.sort()).toEqual(['111', '222']);
+
+    // One D1 resolution UPDATE per linked ticket (ticket_id is the last binding).
+    const updatedIds = sqlLog
+      .filter(entry => entry.sql.includes('UPDATE zendesk_tickets'))
+      .map(entry => entry.bindings[entry.bindings.length - 1])
+      .sort();
+    expect(updatedIds).toEqual([111, 222]);
   });
 });
