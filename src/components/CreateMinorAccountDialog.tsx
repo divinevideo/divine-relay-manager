@@ -32,6 +32,10 @@ export function CreateMinorAccountDialog() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['age-review-cases'] });
+      // The new account lands in the case table as a `cleared` case, so the
+      // queue's per-state chip counts move with it. Invalidate them alongside
+      // the list or the Cleared chip sits one behind the row it just gained.
+      queryClient.invalidateQueries({ queryKey: ['age-review-counts'] });
     },
     onError: (err: Error) => {
       toast({ title: 'Failed to create account', description: err.message, variant: 'destructive' });
