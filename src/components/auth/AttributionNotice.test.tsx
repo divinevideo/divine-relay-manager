@@ -114,6 +114,23 @@ describe('AttributionNotice', () => {
     expect(screen.queryByText(/without attribution/i)).toBeNull();
   });
 
+  it('still renders and dismisses when storage is unavailable', async () => {
+    const getItem = vi.fn(() => { throw new Error('storage disabled'); });
+    const setItem = vi.fn(() => { throw new Error('storage disabled'); });
+    Object.defineProperty(window, 'localStorage', {
+      value: { getItem, setItem },
+      writable: true,
+    });
+    session.getSession.mockResolvedValue(null);
+
+    renderNotice();
+    fireEvent.click(await screen.findByRole('button', { name: /dismiss/i }));
+
+    expect(getItem).toHaveBeenCalled();
+    expect(setItem).toHaveBeenCalledWith('attribution-notice:dismissed', '1');
+    expect(screen.queryByText(/without attribution/i)).toBeNull();
+  });
+
   it('stays out of the way once the moderator is attributed', async () => {
     session.getSession.mockResolvedValue({ accessToken: 'tok-abc' });
     getPublicKey.mockResolvedValue(PUBKEY);
