@@ -64,6 +64,16 @@ function renderNotice() {
 }
 
 beforeEach(() => {
+  const store = new Map<string, string>();
+  Object.defineProperty(window, 'localStorage', {
+    value: {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => store.set(key, value),
+      removeItem: (key: string) => store.delete(key),
+      clear: () => store.clear(),
+    },
+    writable: true,
+  });
   session.getSession.mockReset();
   session.startLogin.mockReset();
   session.startLogin.mockResolvedValue(undefined);
@@ -86,6 +96,39 @@ describe('AttributionNotice', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: /sign in/i }));
     expect(session.startLogin).toHaveBeenCalled();
+  });
+
+  it('stays dismissed after the notice remounts', async () => {
+    session.getSession.mockResolvedValue(null);
+
+    const firstRender = renderNotice();
+    fireEvent.click(await screen.findByRole('button', { name: /dismiss/i }));
+
+    expect(screen.queryByText(/without attribution/i)).toBeNull();
+    expect(localStorage.getItem('attribution-notice:dismissed')).toBe('1');
+
+    firstRender.unmount();
+    renderNotice();
+
+    await waitFor(() => expect(screen.getByTestId('state')).toHaveTextContent('settled:false'));
+    expect(screen.queryByText(/without attribution/i)).toBeNull();
+  });
+
+  it('still renders and dismisses when storage is unavailable', async () => {
+    const getItem = vi.fn(() => { throw new Error('storage disabled'); });
+    const setItem = vi.fn(() => { throw new Error('storage disabled'); });
+    Object.defineProperty(window, 'localStorage', {
+      value: { getItem, setItem },
+      writable: true,
+    });
+    session.getSession.mockResolvedValue(null);
+
+    renderNotice();
+    fireEvent.click(await screen.findByRole('button', { name: /dismiss/i }));
+
+    expect(getItem).toHaveBeenCalled();
+    expect(setItem).toHaveBeenCalledWith('attribution-notice:dismissed', '1');
+    expect(screen.queryByText(/without attribution/i)).toBeNull();
   });
 
   it('stays out of the way once the moderator is attributed', async () => {
