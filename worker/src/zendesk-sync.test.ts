@@ -99,6 +99,14 @@ function createMockDB(ticketIds: number[] = [LINKED_TICKET_ID]) {
           };
         }
 
+        if (sql.includes('SELECT status FROM zendesk_tickets WHERE ticket_id')) {
+          return {
+            first: vi.fn().mockResolvedValue({ status: 'open' }),
+            run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 0 } }),
+            all: vi.fn().mockResolvedValue({ results: [] }),
+          };
+        }
+
         return {
           first: vi.fn().mockResolvedValue(null),
           run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 1 } }),
@@ -328,6 +336,14 @@ describe('getLinkedTickets', () => {
     expect(tickets.find(t => t.ticket_id === 1)?.url).toBe('https://rabblelabs.zendesk.com/agent/tickets/1');
     expect(tickets.find(t => t.ticket_id === 2)?.status).toBe('resolved');
   });
+
+  it('rejects the lookup when no Zendesk subdomain can produce valid ticket links', async () => {
+    const db = makeLinkedTicketsDB([{ ticket_id: 1, status: 'open' }], []);
+
+    await expect(
+      getLinkedTickets(makeEnv({ DB: db, ZENDESK_SUBDOMAIN: undefined }), { eventId: 'A'.repeat(64) }),
+    ).rejects.toThrow(/subdomain is not configured/);
+  });
 });
 
 describe('closeTicketById', () => {
@@ -484,13 +500,14 @@ describe('POST /api/tickets/:id/close id validation', () => {
   const ADMIN_KEY = 'test-admin-key';
 
   function close(id: string) {
+    const { db } = createMockDB();
     return worker.fetch(
       new Request(`https://api-relay-prod.divine.video/api/tickets/${id}/close`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Admin-Key': ADMIN_KEY },
         body: JSON.stringify({}),
       }),
-      makeEnv({ ADMIN_API_KEY: ADMIN_KEY }),
+      makeEnv({ ADMIN_API_KEY: ADMIN_KEY, DB: db }),
       ctx,
     );
   }
@@ -527,6 +544,25 @@ describe('POST /api/tickets/:id/close id validation', () => {
 
     expect(response.status).toBe(200);
     expect(mockFetch.mock.calls[0][0]).toBe('https://rabblelabs.zendesk.com/api/v2/tickets/926');
+  });
+
+  it('returns 404 without calling Zendesk when the ticket is not linked', async () => {
+    const mockFetch = vi.fn();
+    vi.stubGlobal('fetch', mockFetch);
+
+    const response = await worker.fetch(
+      new Request('https://api-relay-prod.divine.video/api/tickets/927/close', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Key': ADMIN_KEY },
+        body: JSON.stringify({}),
+      }),
+      makeEnv({ ADMIN_API_KEY: ADMIN_KEY }),
+      ctx,
+    );
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ success: false, error: 'Linked ticket not found' });
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 });
 

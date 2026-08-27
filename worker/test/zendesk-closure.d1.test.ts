@@ -100,6 +100,14 @@ describe('closeTicketById preserves the audit trail (real D1)', () => {
     // The original ban decision must survive — the guard declines to rewrite it.
     expect(row?.resolution_action).toBe('ban_pubkey');
     expect(row?.resolution_moderator).toBe('a'.repeat(64));
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('does not solve an untracked Zendesk ticket', async () => {
+    await ensureZendeskTable(DB);
+
+    await expect(closeTicketById(makeEnv(DB), 899, 'b'.repeat(64))).resolves.toBe(false);
+    expect(fetch).not.toHaveBeenCalled();
   });
 });
 

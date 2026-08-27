@@ -35,6 +35,12 @@ export async function resolveZendeskCreds(env: Pick<ZendeskSyncEnv, 'ZENDESK_SUB
   return { subdomain, email, apiToken };
 }
 
+async function requireZendeskSubdomain(env: Pick<ZendeskSyncEnv, 'ZENDESK_SUBDOMAIN'>): Promise<string> {
+  const subdomain = await resolveString(env.ZENDESK_SUBDOMAIN);
+  if (!subdomain) throw new Error('Zendesk subdomain is not configured');
+  return subdomain;
+}
+
 function buildResolutionCustomFields(env: ZendeskSyncEnv): Array<{ id: number; value: string }> | undefined {
   if (!env.ZENDESK_FIELD_CATEGORY || !env.ZENDESK_FIELD_ISSUE) {
     return undefined;
@@ -287,8 +293,7 @@ export async function getLinkedTickets(
 ): Promise<LinkedTicket[]> {
   if (!env.DB) return [];
   await ensureZendeskTable(env.DB);
-  const creds = await resolveZendeskCreds(env);
-  const subdomain = creds?.subdomain ?? '';
+  const subdomain = await requireZendeskSubdomain(env);
 
   const byId = new Map<number, LinkedTicket>();
   const add = (rows: Array<{ ticket_id: number; status: string }>) => {
@@ -319,7 +324,19 @@ export async function closeTicketById(
   env: ZendeskSyncEnv,
   ticketId: number,
   moderator: string | null,
-): Promise<void> {
+): Promise<boolean> {
+  if (!env.DB) throw new Error('D1 database is not configured');
+  await ensureZendeskTable(env.DB);
+
+  // This endpoint is a fallback for tickets surfaced by the linked-ticket lookup,
+  // not a general-purpose Zendesk mutation API. Refuse ids that Relay Manager does
+  // not track before making the external write.
+  const linked = await env.DB.prepare(
+    `SELECT status FROM zendesk_tickets WHERE ticket_id = ?`
+  ).bind(ticketId).first<{ status: string }>();
+  if (!linked) return false;
+  if (linked.status !== 'open') return true;
+
   const note = [
     '📋 **Ticket closed from Relay Manager**',
     '',
@@ -334,21 +351,15 @@ export async function closeTicketById(
     // still-open ticket and hide the retry. Surface it so the UI keeps the button.
     throw new Error('Zendesk solve did not succeed; ticket not marked resolved');
   }
-  if (env.DB) {
-    await ensureZendeskTable(env.DB);
-    // AND status = 'open' protects the audit trail: without it, manually closing an
-    // already-resolved ticket overwrites the original resolution (e.g. "ban_pubkey by
-    // X at T") with "manual_close by Y at now". The Zendesk solve above is idempotent,
-    // so re-solving a resolved ticket is harmless; this just declines to rewrite the
-    // record. #256 only offers the button while status==='open', so this guards the
-    // direct-API path.
-    await env.DB.prepare(`
-      UPDATE zendesk_tickets
-      SET status = 'resolved',
-          resolved_at = CURRENT_TIMESTAMP,
-          resolution_action = 'manual_close',
-          resolution_moderator = ?
-      WHERE ticket_id = ? AND status = 'open'
-    `).bind(moderator, ticketId).run();
-  }
+  // AND status = 'open' protects the audit trail if another action resolves the
+  // ticket after the presence check and before this update.
+  await env.DB.prepare(`
+    UPDATE zendesk_tickets
+    SET status = 'resolved',
+        resolved_at = CURRENT_TIMESTAMP,
+        resolution_action = 'manual_close',
+        resolution_moderator = ?
+    WHERE ticket_id = ? AND status = 'open'
+  `).bind(moderator, ticketId).run();
+  return true;
 }

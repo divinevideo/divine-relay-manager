@@ -2990,7 +2990,7 @@ async function handleZendeskRoutes(
 }
 
 // List the Zendesk tickets linked to a report target (event and/or pubkey).
-// Degrades to an empty list on DB error so it never blocks the report view.
+// Lookup failures remain distinguishable from a target with no linked tickets.
 async function handleGetLinkedTickets(
   env: Env,
   target: { eventId?: string; pubkey?: string },
@@ -3018,7 +3018,10 @@ async function handleCloseTicket(
   corsHeaders: Record<string, string>,
 ): Promise<Response> {
   try {
-    await closeTicketById(env, ticketId, body.moderatorPubkey ?? null);
+    const linked = await closeTicketById(env, ticketId, body.moderatorPubkey ?? null);
+    if (!linked) {
+      return jsonResponse({ success: false, error: 'Linked ticket not found' }, 404, corsHeaders);
+    }
     return jsonResponse({ success: true }, 200, corsHeaders);
   } catch (err) {
     console.error('[handleCloseTicket] error:', err);
