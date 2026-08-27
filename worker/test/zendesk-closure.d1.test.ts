@@ -5,7 +5,7 @@
 // makes this fail (exact match would miss the mixed-case row).
 import { Miniflare } from 'miniflare';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
-import { ensureZendeskTable, syncZendeskAfterAction } from '../src/zendesk-sync';
+import { ensureZendeskTable, syncZendeskAfterAction, closeTicketById } from '../src/zendesk-sync';
 
 let mf: Miniflare;
 let DB: D1Database;
@@ -79,5 +79,46 @@ describe('syncZendeskAfterAction case-insensitive linkage (real D1)', () => {
       `SELECT status FROM zendesk_tickets WHERE ticket_id = 701`
     ).first<{ status: string }>();
     expect(row?.status).toBe('resolved');
+  });
+});
+
+describe('closeTicketById preserves the audit trail (real D1)', () => {
+  it('does not overwrite an already-resolved ticket\'s resolution', async () => {
+    await ensureZendeskTable(DB);
+    // A ticket already resolved by a real moderation action.
+    await DB.prepare(
+      `INSERT INTO zendesk_tickets (ticket_id, status, resolution_action, resolution_moderator)
+       VALUES (?, 'resolved', 'ban_pubkey', ?)`
+    ).bind(800, 'a'.repeat(64)).run();
+
+    // A later manual close of the same ticket (reachable via direct API).
+    await closeTicketById(makeEnv(DB), 800, 'b'.repeat(64));
+
+    const row = await DB.prepare(
+      `SELECT status, resolution_action, resolution_moderator FROM zendesk_tickets WHERE ticket_id = 800`
+    ).first<{ status: string; resolution_action: string; resolution_moderator: string }>();
+    // The original ban decision must survive — the guard declines to rewrite it.
+    expect(row?.resolution_action).toBe('ban_pubkey');
+    expect(row?.resolution_moderator).toBe('a'.repeat(64));
+  });
+});
+
+describe('handleParseReport INSERT tolerates a concurrent duplicate (real D1)', () => {
+  it('does not throw when the same ticket_id is inserted twice (ON CONFLICT DO NOTHING)', async () => {
+    await ensureZendeskTable(DB);
+    const insert = () => DB.prepare(
+      `INSERT INTO zendesk_tickets (ticket_id, event_id, status)
+       VALUES (?, ?, 'open') ON CONFLICT(ticket_id) DO NOTHING`
+    ).bind(850, 'e'.repeat(64)).run();
+
+    await insert();
+    // The second delivery (the race the already-processed check can't close) must
+    // not throw and must not create a duplicate row.
+    await expect(insert()).resolves.toBeDefined();
+
+    const count = await DB.prepare(
+      `SELECT COUNT(*) AS n FROM zendesk_tickets WHERE ticket_id = 850`
+    ).first<{ n: number }>();
+    expect(count?.n).toBe(1);
   });
 });

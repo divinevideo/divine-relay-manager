@@ -3000,8 +3000,12 @@ async function handleGetLinkedTickets(
     const tickets = await getLinkedTickets(env, target);
     return jsonResponse({ success: true, tickets }, 200, corsHeaders);
   } catch (err) {
+    // Surface the failure rather than degrading to an empty list: an empty list
+    // renders in #256 as "no linked ticket", indistinguishable from a target that
+    // genuinely has none, so a moderator moves on and leaves the ticket open — the
+    // backlog this exists to drain. A 500 lets the panel show "couldn't check".
     console.error('[handleGetLinkedTickets] error:', err);
-    return jsonResponse({ success: true, tickets: [] }, 200, corsHeaders);
+    return jsonResponse({ success: false, error: 'Failed to look up linked tickets' }, 500, corsHeaders);
   }
 }
 
@@ -3143,9 +3147,15 @@ async function handleParseReport(
 
     // Store mapping in D1 (author_pubkey now includes any value derived above).
     if (env.DB) {
+      // ON CONFLICT DO NOTHING closes the race the already-processed check above
+      // cannot: the relay fetch now sits between that check and this INSERT, so two
+      // concurrent deliveries of the same webhook (a Zendesk retry overlapping the
+      // original) can both pass the check, and a plain INSERT would 500 the second
+      // and lose its note. The winning delivery's row (and note) already stands.
       await env.DB.prepare(`
         INSERT INTO zendesk_tickets (ticket_id, event_id, author_pubkey, violation_type, status)
         VALUES (?, ?, ?, ?, 'open')
+        ON CONFLICT(ticket_id) DO NOTHING
       `).bind(ticket_id, eventId, authorPubkey, violation_type).run();
     }
 

@@ -336,13 +336,19 @@ export async function closeTicketById(
   }
   if (env.DB) {
     await ensureZendeskTable(env.DB);
+    // AND status = 'open' protects the audit trail: without it, manually closing an
+    // already-resolved ticket overwrites the original resolution (e.g. "ban_pubkey by
+    // X at T") with "manual_close by Y at now". The Zendesk solve above is idempotent,
+    // so re-solving a resolved ticket is harmless; this just declines to rewrite the
+    // record. #256 only offers the button while status==='open', so this guards the
+    // direct-API path.
     await env.DB.prepare(`
       UPDATE zendesk_tickets
       SET status = 'resolved',
           resolved_at = CURRENT_TIMESTAMP,
           resolution_action = 'manual_close',
           resolution_moderator = ?
-      WHERE ticket_id = ?
+      WHERE ticket_id = ? AND status = 'open'
     `).bind(moderator, ticketId).run();
   }
 }

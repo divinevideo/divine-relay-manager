@@ -619,3 +619,22 @@ describe('handleParseReport enrichment concurrency', () => {
     expect(relay.sent[1]).toMatchObject({ authors: [author], kinds: [0] });
   });
 });
+
+describe('GET /api/tickets surfaces a lookup failure instead of an empty list', () => {
+  const ADMIN_KEY = 'test-admin-key';
+
+  it('returns 500 when D1 throws, so the panel can show "couldn\'t check" not "no ticket"', async () => {
+    const throwingDb = { prepare: () => { throw new Error('D1 unavailable'); } };
+    const response = await worker.fetch(
+      new Request(`https://api-relay-prod.divine.video/api/tickets?event=${'e'.repeat(64)}`, {
+        method: 'GET',
+        headers: { 'X-Admin-Key': ADMIN_KEY },
+      }),
+      makeEnv({ ADMIN_API_KEY: ADMIN_KEY, DB: throwingDb }),
+      ctx,
+    );
+
+    expect(response.status).toBe(500);
+    expect((await response.json() as { success: boolean }).success).toBe(false);
+  });
+});
