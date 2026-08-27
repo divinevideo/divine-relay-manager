@@ -569,11 +569,18 @@ export default {
       }
 
       if (path.startsWith('/api/tickets/') && path.endsWith('/close') && request.method === 'POST') {
-        const idStr = path.replace('/api/tickets/', '').replace('/close', '');
-        const ticketId = Number.parseInt(idStr, 10);
-        if (!Number.isInteger(ticketId)) {
+        const idStr = path.slice('/api/tickets/'.length, -'/close'.length);
+        // Whole-string digits, not Number.parseInt. parseInt stops at the first
+        // character it cannot read and returns what it had, so `/api/tickets/12abc/close`
+        // passed this gate as 12 and solved ticket 12 -- closing a ticket nobody asked
+        // about, which is worse than the 400 this gate exists to return. `-5`, `1.9`
+        // and `1e5` got through the same way. The safe-integer bound covers the other
+        // end: a 20-digit id is exactly representable as a string and not as a Number,
+        // so it would round to a different -- possibly real -- ticket.
+        if (!/^\d+$/.test(idStr) || !Number.isSafeInteger(Number(idStr))) {
           return jsonResponse({ success: false, error: 'Invalid ticket id' }, 400, corsHeaders);
         }
+        const ticketId = Number(idStr);
         const closeBody = await request.json().catch(() => ({})) as { moderatorPubkey?: string };
         return handleCloseTicket(env, ticketId, closeBody, corsHeaders);
       }

@@ -479,3 +479,53 @@ describe('addZendeskInternalNote solve payload', () => {
     expect(sqlLog.some(entry => entry.sql.includes('UPDATE zendesk_tickets'))).toBe(false);
   });
 });
+
+describe('POST /api/tickets/:id/close id validation', () => {
+  const ADMIN_KEY = 'test-admin-key';
+
+  function close(id: string) {
+    return worker.fetch(
+      new Request(`https://api-relay-prod.divine.video/api/tickets/${id}/close`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Key': ADMIN_KEY },
+        body: JSON.stringify({}),
+      }),
+      makeEnv({ ADMIN_API_KEY: ADMIN_KEY }),
+      ctx,
+    );
+  }
+
+  beforeEach(() => {
+    vi.stubGlobal('WebSocket', MockWebSocket);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // Number.parseInt('12abc') is 12, so before this guard the endpoint solved
+  // ticket 12 for a request that named no such ticket -- a wrong-ticket close.
+  // '9'.repeat(20) rounds past Number.MAX_SAFE_INTEGER into a different id.
+  it.each(['12abc', '-5', '1.9', '1e5', '+7', ' 12', '1/close', 'abc', '', '9'.repeat(20)])(
+    'rejects %j with 400 and never calls Zendesk',
+    async (id) => {
+      const mockFetch = vi.fn();
+      vi.stubGlobal('fetch', mockFetch);
+
+      const response = await close(id);
+
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ success: false, error: 'Invalid ticket id' });
+      expect(mockFetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it('accepts a plain numeric id and closes that exact ticket', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true, text: async () => '' });
+    vi.stubGlobal('fetch', mockFetch);
+
+    const response = await close('926');
+
+    expect(response.status).toBe(200);
+    expect(mockFetch.mock.calls[0][0]).toBe('https://rabblelabs.zendesk.com/api/v2/tickets/926');
+  });
+});
