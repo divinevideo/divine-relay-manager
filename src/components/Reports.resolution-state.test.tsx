@@ -93,6 +93,7 @@ interface SourceState {
   // pubkey as author. Same value => the group's reports agree; a different value =>
   // they disagree, which must not cross-resolve (the burying case).
   secondAuthoredEventReportP?: string;
+  secondAuthoredEventReportWithoutP?: boolean;
 }
 
 function stubFetch(state: SourceState) {
@@ -109,6 +110,12 @@ function stubFetch(state: SourceState) {
       if (state.authoredEventReportP) events.push(authoredEventReport(state.authoredEventReportP));
       if (state.secondAuthoredEventReportP) {
         events.push(authoredEventReport(state.secondAuthoredEventReportP, '9'.repeat(64), 1751000070));
+      }
+      if (state.secondAuthoredEventReportWithoutP) {
+        events.push({
+          ...authoredEventReport(REPORTED_PUBKEY, '6'.repeat(64), 1751000070),
+          tags: [['e', AUTHORED_EVENT_ID, 'spam']],
+        });
       }
       return jsonResponse({ success: true, events });
     }
@@ -317,6 +324,17 @@ describe('resolution sources genuinely hide handled work (controls)', () => {
     renderReports();
 
     // The group stays visible because its two reports name different authors.
+    expect(await screen.findByText(AUTHORED_NOTE)).toBeInTheDocument();
+  });
+
+  it('does not bury an event group when one report has no author', async () => {
+    stubFetch({
+      labels: 'empty', bannedPubkeys: 'resolves', bannedEvents: 'empty', decisions: 'empty',
+      authoredEventReportP: REPORTED_PUBKEY,
+      secondAuthoredEventReportWithoutP: true,
+    });
+    renderReports();
+
     expect(await screen.findByText(AUTHORED_NOTE)).toBeInTheDocument();
   });
 

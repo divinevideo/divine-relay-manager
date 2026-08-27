@@ -189,18 +189,17 @@ function consolidateReports(reports: NostrEvent[]): ConsolidatedReport[] {
   // queue, so taking the author from a single unverified `p` tag is gameable: a newer
   // report naming any banned pubkey would bury the genuine older report with it
   // (NIP-56 warns reports "can be easily gamed"). Require agreement instead — cross-
-  // resolve only when every report that carries a `p` tag names the same author.
-  // Lowercased so a casing difference is not a false disagreement; undefined when the
-  // reports conflict or none carry a `p` tag (a spec-valid blob report has none), in
-  // which case the group is never cross-resolved.
+  // resolve only when every report carries a valid `p` tag and names the same author.
+  // A missing author cannot be ignored: otherwise one later report naming a banned
+  // pubkey could still bury an existing report that supplied no author. Lowercased so
+  // a casing difference is not a false disagreement; undefined when any author is
+  // missing or the reports conflict, in which case the group is never cross-resolved.
   for (const consolidated of byTarget.values()) {
-    const authors = new Set(
-      consolidated.reports
-        .map(r => getReportTargetIds(r).pubkey)
-        .filter((p): p is string => !!p)
-        .map(p => p.toLowerCase()),
-    );
-    consolidated.authorPubkey = authors.size === 1 ? [...authors][0] : undefined;
+    const authors = consolidated.reports.map(r => getReportTargetIds(r).pubkey);
+    const uniqueAuthors = new Set(authors.filter((p): p is string => !!p).map(p => p.toLowerCase()));
+    consolidated.authorPubkey = authors.every((p): p is string => !!p) && uniqueAuthors.size === 1
+      ? [...uniqueAuthors][0]
+      : undefined;
   }
 
   // Sort by number of reports (most reported first), then by latest report date
