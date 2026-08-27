@@ -56,6 +56,14 @@ describe('LinkedTicketPanel', () => {
     expect(screen.queryByRole('button', { name: /close ticket/i })).not.toBeInTheDocument();
   });
 
+  it('does not claim an unexpected status is closed', async () => {
+    getLinkedTickets.mockResolvedValue([{ ticket_id: 1004, status: 'pending', url: 'https://z.test/1004' }]);
+    renderPanel();
+
+    expect(await screen.findByText(/Status unavailable/)).toBeInTheDocument();
+    expect(screen.queryByText(/Closed/)).not.toBeInTheDocument();
+  });
+
   it('says no ticket is linked only when the lookup actually returned none', async () => {
     getLinkedTickets.mockResolvedValue([]);
     renderPanel();

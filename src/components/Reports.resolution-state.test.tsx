@@ -336,6 +336,7 @@ describe('resolution sources genuinely hide handled work (controls)', () => {
     renderReports();
 
     expect(await screen.findByText(AUTHORED_NOTE)).toBeInTheDocument();
+    expect(screen.getByText('All (2)')).toBeInTheDocument();
   });
 
   it('still hides an event group when all its reports name the banned author', async () => {

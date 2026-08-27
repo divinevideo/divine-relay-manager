@@ -932,6 +932,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     return consolidateReports(reports);
   }, [reports]);
 
+  const authorByTarget = useMemo(() => new Map(
+    allConsolidated.map(c => [`${c.target.type}:${c.target.value}`, c.authorPubkey]),
+  ), [allConsolidated]);
+
   // Filter individual reports when hideResolved is on
   const filteredReports = useMemo(() => {
     if (!reports) return [];
@@ -957,7 +961,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           const target = getReportTarget(report);
           if (!target) return true; // Keep reports without targets
           return !isConsolidatedReportResolved(
-            { target, authorPubkey: getReportTargetIds(report).pubkey },
+            { target, authorPubkey: authorByTarget.get(`${target.type}:${target.value}`) },
             resolvedTargets,
             bannedPubkeySet,
           );
@@ -1000,7 +1004,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     });
 
     return items;
-  }, [reports, hideResolved, showPendingReview, resolvedTargets, bannedPubkeySet, pendingReviewTargets, filterCategory, filterTargetType, sortBy]);
+  }, [reports, hideResolved, showPendingReview, resolvedTargets, bannedPubkeySet, authorByTarget, pendingReviewTargets, filterCategory, filterTargetType, sortBy]);
 
   const uniqueTargets = consolidated.length;
   const pendingReviewCount = pendingReviewTargets.size;
@@ -1026,13 +1030,13 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     if (!hideResolved || !selectedReport) return;
     const target = getReportTarget(selectedReport);
     if (target && isConsolidatedReportResolved(
-      { target, authorPubkey: getReportTargetIds(selectedReport).pubkey },
+      { target, authorPubkey: authorByTarget.get(`${target.type}:${target.value}`) },
       resolvedTargets,
       bannedPubkeySet,
     )) {
       setHideResolved(false);
     }
-  }, [hideResolved, selectedReport, resolvedTargets, bannedPubkeySet]);
+  }, [hideResolved, selectedReport, resolvedTargets, bannedPubkeySet, authorByTarget]);
 
   // Handle deep linking via query params (?event=... or ?pubkey=... or &env=...)
   useEffect(() => {

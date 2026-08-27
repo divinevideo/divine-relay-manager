@@ -672,11 +672,13 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
             </span>
           </div>
 
-          {/* Linked Zendesk ticket(s): always present so closure state is legible. */}
-          <div className="flex items-center gap-2">
-            <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Linked ticket</h4>
-            <LinkedTicketPanel eventId={linkedTicketEventId} pubkey={linkedTicketPubkey} />
-          </div>
+          {/* Linked Zendesk ticket(s), when the report has a valid lookup target. */}
+          {(linkedTicketEventId || linkedTicketPubkey) && (
+            <div className="flex items-start gap-2">
+              <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Linked ticket</h4>
+              <LinkedTicketPanel eventId={linkedTicketEventId} pubkey={linkedTicketPubkey} />
+            </div>
+          )}
 
           {/* Report Reasons - What reporters said */}
           {allReportsForTarget && allReportsForTarget.length > 0 ? (

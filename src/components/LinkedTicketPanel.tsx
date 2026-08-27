@@ -70,6 +70,7 @@ export function LinkedTicketPanel({ eventId, pubkey }: LinkedTicketPanelProps) {
     <div className="space-y-1">
       {tickets.map((ticket) => {
         const isOpen = ticket.status === 'open';
+        const isResolved = ticket.status === 'resolved';
         // Scope pending state to THIS ticket, so closing one open ticket never
         // greys out or mislabels a sibling open ticket on the same report.
         const isClosingThis = closeMutation.isPending && closeMutation.variables === ticket.ticket_id;
@@ -90,8 +91,10 @@ export function LinkedTicketPanel({ eventId, pubkey }: LinkedTicketPanelProps) {
                   {isClosingThis ? 'Closing…' : 'Close ticket'}
                 </Button>
               </>
-            ) : (
+            ) : isResolved ? (
               <Badge variant="outline" className="border-green-500 text-green-600">Closed ✓</Badge>
+            ) : (
+              <Badge variant="outline">Status unavailable</Badge>
             )}
           </div>
         );
