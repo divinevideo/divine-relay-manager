@@ -609,8 +609,20 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // whose author has been banned. banpubkey purges the account's events without
   // registering each in listbannedevents, so the event's own key never lands in
   // resolvedTargets; this bridges that gap. See lib/reportResolution.
+  //
+  // Lowercased because the predicate lowercases the report's side, and the relay
+  // does not canonicalise this list: funnelcake stores whatever `banpubkey` was
+  // given (its hex check accepts A-F) and `listbannedpubkeys` reads it back
+  // verbatim, while our own ban call forwards the pubkey unchanged -- which for a
+  // report whose event is no longer on the relay is the raw `p` tag. Matching only
+  // on the report side would leave that ban unable to clear its own reports.
+  // Runtime-guarded for the same reason getReportTargetIds is: this is a relay
+  // payload, and a malformed entry must not take the whole queue down.
   const bannedPubkeySet = useMemo(
-    () => new Set((bannedPubkeys ?? []).map(entry => entry.pubkey)),
+    () => new Set(
+      (bannedPubkeys ?? []).flatMap(entry =>
+        typeof entry.pubkey === 'string' ? [entry.pubkey.toLowerCase()] : []),
+    ),
     [bannedPubkeys],
   );
 

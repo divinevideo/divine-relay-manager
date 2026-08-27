@@ -77,7 +77,9 @@ interface SourceState {
   // a chance to, since it's the more fundamental failure).
   reports?: 'ok' | 'error';
   labels?: 'resolves' | 'empty' | 'error';
-  bannedPubkeys?: 'resolves' | 'empty' | 'error';
+  // 'resolves-uppercase' returns the same ban written in uppercase hex, which the
+  // relay accepts and stores verbatim.
+  bannedPubkeys?: 'resolves' | 'resolves-uppercase' | 'empty' | 'error';
   bannedEvents?: 'resolves' | 'empty' | 'error';
   decisions?: 'resolves' | 'empty' | 'error';
   slow?: Array<'labels' | 'bannedPubkeys' | 'bannedEvents' | 'decisions'>;
@@ -139,10 +141,10 @@ function stubFetch(state: SourceState) {
       if (slow.has(method)) return never;
       const mode = method === 'bannedPubkeys' ? state.bannedPubkeys : state.bannedEvents;
       if (mode === 'error') return jsonResponse({ success: false, error: 'nip-86 failed' }, 500);
-      const result = mode !== 'resolves'
+      const result = mode !== 'resolves' && mode !== 'resolves-uppercase'
         ? []
         : method === 'bannedPubkeys'
-          ? [{ pubkey: REPORTED_PUBKEY }]
+          ? [{ pubkey: mode === 'resolves-uppercase' ? REPORTED_PUBKEY.toUpperCase() : REPORTED_PUBKEY }]
           : [{ id: REPORTED_EVENT_ID }];
       return jsonResponse({ success: true, result });
     }
@@ -275,6 +277,24 @@ describe('resolution sources genuinely hide handled work (controls)', () => {
     renderReports();
 
     await waitFor(() => expect(screen.getByText(/0 pending/i)).toBeInTheDocument());
+    expect(screen.queryByText(AUTHORED_NOTE)).not.toBeInTheDocument();
+  });
+
+  // The other side of the same mismatch. The relay does not canonicalise its ban
+  // list -- funnelcake's hex check accepts A-F and stores what it was given -- so
+  // an uppercase entry must still clear the reports that ban was meant to clear.
+  it('hides an event target when the relay reports the ban in uppercase', async () => {
+    stubFetch({
+      labels: 'empty', bannedPubkeys: 'resolves-uppercase', bannedEvents: 'empty', decisions: 'empty',
+      authoredEventReportP: REPORTED_PUBKEY,
+    });
+    renderReports();
+
+    // The pubkey-target report stays: resolvedTargets keys on the relay's string
+    // as-is, so an uppercase ban does not match a lowercase `pubkey:` target.
+    // That is pre-existing and untouched here -- waiting on it also proves the
+    // queue has actually rendered before the absence below is asserted.
+    expect(await screen.findByText(REPORTED_NPUB)).toBeInTheDocument();
     expect(screen.queryByText(AUTHORED_NOTE)).not.toBeInTheDocument();
   });
 });
