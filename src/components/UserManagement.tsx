@@ -87,7 +87,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
   const banUserMutation = useMutation({
     mutationFn: async ({ pubkey, reason }: { pubkey: string; reason?: string }) => {
       const moderator = getModeratorPubkey(); // snapshot identity at action start
-      await banPubkey(pubkey, reason);
+      await banPubkey(pubkey, reason || 'Account banned by moderator');
       // Log to D1 for audit trail
       await logDecision({
         targetType: 'pubkey',

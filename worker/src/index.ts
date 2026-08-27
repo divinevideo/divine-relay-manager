@@ -1420,8 +1420,8 @@ async function handleRelayRpc(
   }
 
   // Account-state side effects (all non-critical, off the response path).
-  // This is the actual moderation path used by the UI -- handleModerate's
-  // ban_pubkey case exists but is not called by any frontend component.
+  // Direct RPC callers enter here, and handleModerate delegates here before
+  // running its own post-action bookkeeping such as linked-ticket sync.
   // params[0] = pubkey, params[1] = reason.
   if (body.params?.[0]) {
     const pubkey = String(body.params[0]);

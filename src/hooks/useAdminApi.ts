@@ -41,6 +41,8 @@ export function useAdminApi() {
       adminApi.restoreEvent(apiUrl, eventId, moderatorPubkey, reason),
     banPubkeyViaModerate: (pubkey: string, reason?: string) =>
       adminApi.banPubkeyViaModerate(apiUrl, pubkey, reason),
+    banPubkey: (pubkey: string, reason?: string) =>
+      adminApi.banPubkey(apiUrl, pubkey, reason),
     allowPubkey: (pubkey: string) =>
       adminApi.allowPubkey(apiUrl, pubkey),
 
@@ -51,8 +53,6 @@ export function useAdminApi() {
       adminApi.banEvent(apiUrl, eventId, reason),
     allowEvent: (eventId: string) =>
       adminApi.allowEvent(apiUrl, eventId),
-    banPubkey: (pubkey: string, reason?: string) =>
-      adminApi.banPubkey(apiUrl, pubkey, reason),
     unbanPubkey: (pubkey: string) =>
       adminApi.unbanPubkey(apiUrl, pubkey),
     // opts threads a per-call timeout through. Reports' 15s-polled resolution

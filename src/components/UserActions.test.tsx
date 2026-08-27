@@ -381,7 +381,7 @@ describe('UserActions', () => {
 
   it('surfaces a ban timeout as an error toast and keeps the dialog open for retry', async () => {
     api.banPubkey.mockRejectedValue(
-      new Error("Relay RPC 'banpubkey' timed out after 30s. The action may still have applied. Re-check before retrying."),
+      new Error('Request to /api/moderate timed out after 30s. The action may still have applied. Re-check before retrying.'),
     );
     renderWithProvider(<UserActions pubkey={'a'.repeat(64)} />);
     fireEvent.click(screen.getByRole('button', { name: /Ban User/i }));

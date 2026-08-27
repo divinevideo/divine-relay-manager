@@ -143,7 +143,7 @@ describe('UserManagement age-review guard wiring', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: /^Ban User$/i }));
 
-    await waitFor(() => expect(api.banPubkey).toHaveBeenCalledWith(PUBKEY, undefined));
+    await waitFor(() => expect(api.banPubkey).toHaveBeenCalledWith(PUBKEY, 'Account banned by moderator'));
     expect(api.callRelayRpc).not.toHaveBeenCalledWith('banpubkey', expect.anything());
   });
 
