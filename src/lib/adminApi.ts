@@ -620,6 +620,30 @@ export async function logDecision(apiUrl: string, params: {
   await apiRequest<ApiResponse>(apiUrl, '/api/decisions', 'POST', params);
 }
 
+// Zendesk ticket linkage
+export interface LinkedTicket {
+  ticket_id: number;
+  status: string;
+  url: string;
+}
+
+// List the Zendesk tickets linked to a report target (event and/or pubkey).
+export async function getLinkedTickets(
+  apiUrl: string,
+  target: { eventId?: string; pubkey?: string },
+): Promise<LinkedTicket[]> {
+  const qs = new URLSearchParams();
+  if (target.eventId) qs.set('event', target.eventId);
+  if (target.pubkey) qs.set('pubkey', target.pubkey);
+  const res = await apiRequest<{ tickets?: LinkedTicket[] }>(apiUrl, `/api/tickets?${qs.toString()}`, 'GET');
+  return res.tickets ?? [];
+}
+
+// Manually close a single linked Zendesk ticket (Zendesk-only; no content decision).
+export async function closeTicket(apiUrl: string, ticketId: number, moderatorPubkey?: string): Promise<void> {
+  await apiRequest<ApiResponse>(apiUrl, `/api/tickets/${ticketId}/close`, 'POST', { moderatorPubkey });
+}
+
 export async function confirmAutoHide(apiUrl: string, params: {
   eventId: string;
   reason?: string;

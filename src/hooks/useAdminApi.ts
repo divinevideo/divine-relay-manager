@@ -167,6 +167,12 @@ export function useAdminApi() {
     createMinorAccount: (username: string, displayName?: string, zendeskTicketId?: number, provisioningOperationId?: string) =>
       adminApi.createMinorAccount(apiUrl, username, displayName, zendeskTicketId, provisioningOperationId),
 
+    // Zendesk tickets linked to a report target
+    getLinkedTickets: (target: { eventId?: string; pubkey?: string }) =>
+      adminApi.getLinkedTickets(apiUrl, target),
+    closeTicket: (ticketId: number, moderatorPubkey?: string) =>
+      adminApi.closeTicket(apiUrl, ticketId, moderatorPubkey),
+
   }), [apiUrl, relayUrl]);
 
   return boundApi;

@@ -44,6 +44,25 @@ const EVENT_REPORT = {
   sig: 'e'.repeat(128),
 };
 
+// An event report that also names its author, which is what lets a ban on the
+// ACCOUNT clear reports filed against its individual posts. EVENT_REPORT above
+// deliberately carries no `p` tag, so the two together separate "hidden because
+// the author is banned" from "hidden because it is an event report".
+const AUTHORED_EVENT_ID = '7'.repeat(64);
+const AUTHORED_NOTE = nip19.noteEncode(AUTHORED_EVENT_ID);
+
+function authoredEventReport(pTag: string, id = '8'.repeat(64), created_at = 1751000060) {
+  return {
+    id,
+    pubkey: 'b'.repeat(64),
+    created_at,
+    kind: 1984,
+    tags: [['e', AUTHORED_EVENT_ID, 'spam'], ['p', pTag]],
+    content: 'a post by the reported account',
+    sig: 'e'.repeat(128),
+  };
+}
+
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -58,13 +77,23 @@ interface SourceState {
   // a chance to, since it's the more fundamental failure).
   reports?: 'ok' | 'error';
   labels?: 'resolves' | 'empty' | 'error';
-  bannedPubkeys?: 'resolves' | 'empty' | 'error';
+  // 'resolves-uppercase' returns the same ban written in uppercase hex, which the
+  // relay accepts and stores verbatim.
+  bannedPubkeys?: 'resolves' | 'resolves-uppercase' | 'empty' | 'error';
   bannedEvents?: 'resolves' | 'empty' | 'error';
   decisions?: 'resolves' | 'empty' | 'error';
   slow?: Array<'labels' | 'bannedPubkeys' | 'bannedEvents' | 'decisions'>;
   // banned-events resolves EVENT targets, not pubkey targets, so exercising
   // it for real needs a second fixture report with an `e` tag in the queue.
   includeEventReport?: boolean;
+  // An `e`-tagged report that also carries a `p` tag. Pass the pubkey the report
+  // names as the author; omit for none.
+  authoredEventReportP?: string;
+  // A SECOND `e`-tagged report on the SAME event, newer than the first, naming this
+  // pubkey as author. Same value => the group's reports agree; a different value =>
+  // they disagree, which must not cross-resolve (the burying case).
+  secondAuthoredEventReportP?: string;
+  secondAuthoredEventReportWithoutP?: boolean;
 }
 
 function stubFetch(state: SourceState) {
@@ -76,7 +105,18 @@ function stubFetch(state: SourceState) {
 
     if (url.includes('/api/reports')) {
       if (state.reports === 'error') return jsonResponse({ success: false, error: 'relay unreachable' }, 500);
-      const events = state.includeEventReport ? [REPORT, EVENT_REPORT] : [REPORT];
+      const events: unknown[] = [REPORT];
+      if (state.includeEventReport) events.push(EVENT_REPORT);
+      if (state.authoredEventReportP) events.push(authoredEventReport(state.authoredEventReportP));
+      if (state.secondAuthoredEventReportP) {
+        events.push(authoredEventReport(state.secondAuthoredEventReportP, '9'.repeat(64), 1751000070));
+      }
+      if (state.secondAuthoredEventReportWithoutP) {
+        events.push({
+          ...authoredEventReport(REPORTED_PUBKEY, '6'.repeat(64), 1751000070),
+          tags: [['e', AUTHORED_EVENT_ID, 'spam']],
+        });
+      }
       return jsonResponse({ success: true, events });
     }
 
@@ -115,10 +155,10 @@ function stubFetch(state: SourceState) {
       if (slow.has(method)) return never;
       const mode = method === 'bannedPubkeys' ? state.bannedPubkeys : state.bannedEvents;
       if (mode === 'error') return jsonResponse({ success: false, error: 'nip-86 failed' }, 500);
-      const result = mode !== 'resolves'
+      const result = mode !== 'resolves' && mode !== 'resolves-uppercase'
         ? []
         : method === 'bannedPubkeys'
-          ? [{ pubkey: REPORTED_PUBKEY }]
+          ? [{ pubkey: mode === 'resolves-uppercase' ? REPORTED_PUBKEY.toUpperCase() : REPORTED_PUBKEY }]
           : [{ id: REPORTED_EVENT_ID }];
       return jsonResponse({ success: true, result });
     }
@@ -209,6 +249,110 @@ describe('resolution sources genuinely hide handled work (controls)', () => {
 
     expect(await screen.findByText(REPORTED_NOTE)).toBeInTheDocument();
     expect(screen.getByText(REPORTED_NPUB)).toBeInTheDocument();
+  });
+
+  // Banning an ACCOUNT clears the account's own report, but the reports filed
+  // against its individual posts were matched only by their own event key, so
+  // they stayed in the queue as unhandled work after the account was gone.
+  // banned-events is deliberately empty in these: the relay does not register an
+  // event under banpubkey, which is the whole reason the author path exists.
+  it('hides an event target once its author is banned, with the event itself unbanned', async () => {
+    stubFetch({
+      labels: 'empty', bannedPubkeys: 'resolves', bannedEvents: 'empty', decisions: 'empty',
+      includeEventReport: true, authoredEventReportP: REPORTED_PUBKEY,
+    });
+    renderReports();
+
+    await waitFor(() => expect(screen.getByText(/1 pending/i)).toBeInTheDocument());
+    expect(screen.queryByText(AUTHORED_NOTE)).not.toBeInTheDocument();
+    // The event report that names no author is untouched, so this measures the
+    // author match specifically rather than event reports being hidden wholesale.
+    expect(screen.getByText(REPORTED_NOTE)).toBeInTheDocument();
+  });
+
+  it('keeps an event target whose author is not banned', async () => {
+    stubFetch({
+      labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty',
+      authoredEventReportP: REPORTED_PUBKEY,
+    });
+    renderReports();
+
+    expect(await screen.findByText(AUTHORED_NOTE)).toBeInTheDocument();
+  });
+
+  // `p` tag values are reporter-authored and validated as hex without being
+  // case-normalized, while the relay's ban list is lowercase. An uppercase tag
+  // must still match, or the ban silently fails to clear the post's report.
+  it('hides an event target whose author is banned but written uppercase in the tag', async () => {
+    stubFetch({
+      labels: 'empty', bannedPubkeys: 'resolves', bannedEvents: 'empty', decisions: 'empty',
+      authoredEventReportP: REPORTED_PUBKEY.toUpperCase(),
+    });
+    renderReports();
+
+    await waitFor(() => expect(screen.getByText(/0 pending/i)).toBeInTheDocument());
+    expect(screen.queryByText(AUTHORED_NOTE)).not.toBeInTheDocument();
+  });
+
+  // The other side of the same mismatch. The relay does not canonicalise its ban
+  // list -- funnelcake's hex check accepts A-F and stores what it was given -- so
+  // an uppercase entry must still clear the reports that ban was meant to clear.
+  it('hides an event target when the relay reports the ban in uppercase', async () => {
+    stubFetch({
+      labels: 'empty', bannedPubkeys: 'resolves-uppercase', bannedEvents: 'empty', decisions: 'empty',
+      authoredEventReportP: REPORTED_PUBKEY,
+    });
+    renderReports();
+
+    // The pubkey-target report stays: resolvedTargets keys on the relay's string
+    // as-is, so an uppercase ban does not match a lowercase `pubkey:` target.
+    // That is pre-existing and untouched here -- waiting on it also proves the
+    // queue has actually rendered before the absence below is asserted.
+    expect(await screen.findByText(REPORTED_NPUB)).toBeInTheDocument();
+    expect(screen.queryByText(AUTHORED_NOTE)).not.toBeInTheDocument();
+  });
+
+  // Anyone can publish a kind-1984, and cross-resolution hides a whole consolidated
+  // group. Taking the author from the newest report alone lets a newer report name a
+  // banned pubkey and bury the genuine older report with it. Agreement is required.
+  it('does not bury an event group when its reports disagree on the author', async () => {
+    stubFetch({
+      labels: 'empty', bannedPubkeys: 'resolves', bannedEvents: 'empty', decisions: 'empty',
+      authoredEventReportP: 'a'.repeat(64),             // genuine author, not banned
+      secondAuthoredEventReportP: REPORTED_PUBKEY,       // banned, newer, same event
+    });
+    renderReports();
+
+    // The group stays visible because its two reports name different authors.
+    expect(await screen.findByText(AUTHORED_NOTE)).toBeInTheDocument();
+  });
+
+  it('does not bury an event group when one report has no author', async () => {
+    stubFetch({
+      labels: 'empty', bannedPubkeys: 'resolves', bannedEvents: 'empty', decisions: 'empty',
+      authoredEventReportP: REPORTED_PUBKEY,
+      secondAuthoredEventReportWithoutP: true,
+    });
+    renderReports();
+
+    expect(await screen.findByText(AUTHORED_NOTE)).toBeInTheDocument();
+    expect(screen.getByText('All (2)')).toBeInTheDocument();
+  });
+
+  // Anchored on the count first, like its three siblings. A lone negative
+  // assertion inside waitFor passes on its first tick, before the queue has
+  // rendered anything -- so this read green with cross-resolution ripped out
+  // entirely, which is the one thing it is here to catch.
+  it('still hides an event group when all its reports name the banned author', async () => {
+    stubFetch({
+      labels: 'empty', bannedPubkeys: 'resolves', bannedEvents: 'empty', decisions: 'empty',
+      authoredEventReportP: REPORTED_PUBKEY,
+      secondAuthoredEventReportP: REPORTED_PUBKEY,       // second report, same author
+    });
+    renderReports();
+
+    await waitFor(() => expect(screen.getByText(/0 pending/i)).toBeInTheDocument());
+    expect(screen.queryByText(AUTHORED_NOTE)).not.toBeInTheDocument();
   });
 });
 

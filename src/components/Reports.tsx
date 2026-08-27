@@ -48,7 +48,8 @@ import { ReportDetailErrorFallback } from "@/components/ReportDetailErrorFallbac
 import { DeepLinkFallback } from "@/components/DeepLinkFallback";
 import { classifyTargetedFetch, decisionsForTarget, reportsMatchingTarget, type DeepLinkStatus } from "@/lib/deepLinkResolution";
 import { useAdminApi } from "@/hooks/useAdminApi";
-import { AUTO_HIDE_ACTION, AUTO_HIDE_ACTIONS, CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, getLatestAutoHideState, getReportCategory } from "@/lib/constants";
+import { AUTO_HIDE_ACTION, AUTO_HIDE_ACTIONS, CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, getLatestAutoHideState, getReportCategory, getReportTargetIds } from "@/lib/constants";
+import { isConsolidatedReportResolved } from "@/lib/reportResolution";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
 import type { NostrEvent } from "@nostrify/nostrify";
@@ -124,6 +125,9 @@ interface ConsolidatedReport {
   reporters: string[];
   latestReport: NostrEvent;
   oldestReport: NostrEvent;
+  // The reported author (report `p` tag), used to cross-resolve an event-scoped
+  // report when its author has been banned. Undefined if no valid `p` tag.
+  authorPubkey?: string;
 }
 
 // Deliberately presence-based (a valueless ["e"] still yields an event target)
@@ -178,6 +182,24 @@ function consolidateReports(reports: NostrEvent[]): ConsolidatedReport[] {
     if (report.created_at < consolidated.oldestReport.created_at) {
       consolidated.oldestReport = report;
     }
+  }
+
+  // Derive each group's author from ALL its reports, not just the first-processed
+  // (newest) one. Cross-resolution hides a whole consolidated group from the default
+  // queue, so taking the author from a single unverified `p` tag is gameable: a newer
+  // report naming any banned pubkey would bury the genuine older report with it
+  // (NIP-56 warns reports "can be easily gamed"). Require agreement instead — cross-
+  // resolve only when every report carries a valid `p` tag and names the same author.
+  // A missing author cannot be ignored: otherwise one later report naming a banned
+  // pubkey could still bury an existing report that supplied no author. Lowercased so
+  // a casing difference is not a false disagreement; undefined when any author is
+  // missing or the reports conflict, in which case the group is never cross-resolved.
+  for (const consolidated of byTarget.values()) {
+    const authors = consolidated.reports.map(r => getReportTargetIds(r).pubkey);
+    const uniqueAuthors = new Set(authors.filter((p): p is string => !!p).map(p => p.toLowerCase()));
+    consolidated.authorPubkey = authors.every((p): p is string => !!p) && uniqueAuthors.size === 1
+      ? [...uniqueAuthors][0]
+      : undefined;
   }
 
   // Sort by number of reports (most reported first), then by latest report date
@@ -600,6 +622,27 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     return resolved;
   }, [resolutionLabels, bannedPubkeys, bannedEvents, allDecisions]);
 
+  // Set of relay-banned pubkeys, used to cross-resolve an event-scoped report
+  // whose author has been banned. banpubkey purges the account's events without
+  // registering each in listbannedevents, so the event's own key never lands in
+  // resolvedTargets; this bridges that gap. See lib/reportResolution.
+  //
+  // Lowercased because the predicate lowercases the report's side, and the relay
+  // does not canonicalise this list: funnelcake stores whatever `banpubkey` was
+  // given (its hex check accepts A-F) and `listbannedpubkeys` reads it back
+  // verbatim, while our own ban call forwards the pubkey unchanged -- which for a
+  // report whose event is no longer on the relay is the raw `p` tag. Matching only
+  // on the report side would leave that ban unable to clear its own reports.
+  // Runtime-guarded for the same reason getReportTargetIds is: this is a relay
+  // payload, and a malformed entry must not take the whole queue down.
+  const bannedPubkeySet = useMemo(
+    () => new Set(
+      (bannedPubkeys ?? []).flatMap(entry =>
+        typeof entry.pubkey === 'string' ? [entry.pubkey.toLowerCase()] : []),
+    ),
+    [bannedPubkeys],
+  );
+
   // Build set of targets pending review (auto-hidden but not yet confirmed/restored)
   const pendingReviewTargets = useMemo(() => {
     const pending = new Set<string>();
@@ -826,7 +869,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       items = items.filter(c => !pendingReviewTargets.has(`${c.target.type}:${c.target.value}`));
       // Also filter out resolved if toggle is on
       if (hideResolved) {
-        items = items.filter(c => !resolvedTargets.has(`${c.target.type}:${c.target.value}`));
+        items = items.filter(c => !isConsolidatedReportResolved(c, resolvedTargets, bannedPubkeySet));
       }
     }
 
@@ -882,12 +925,16 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     });
 
     return items;
-  }, [reports, hideResolved, showPendingReview, resolvedTargets, pendingReviewTargets, filterCategory, filterTargetType, sortBy]);
+  }, [reports, hideResolved, showPendingReview, resolvedTargets, bannedPubkeySet, pendingReviewTargets, filterCategory, filterTargetType, sortBy]);
 
   const allConsolidated = useMemo(() => {
     if (!reports) return [];
     return consolidateReports(reports);
   }, [reports]);
+
+  const authorByTarget = useMemo(() => new Map(
+    allConsolidated.map(c => [`${c.target.type}:${c.target.value}`, c.authorPubkey]),
+  ), [allConsolidated]);
 
   // Filter individual reports when hideResolved is on
   const filteredReports = useMemo(() => {
@@ -913,7 +960,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         items = items.filter(report => {
           const target = getReportTarget(report);
           if (!target) return true; // Keep reports without targets
-          return !resolvedTargets.has(`${target.type}:${target.value}`);
+          return !isConsolidatedReportResolved(
+            { target, authorPubkey: authorByTarget.get(`${target.type}:${target.value}`) },
+            resolvedTargets,
+            bannedPubkeySet,
+          );
         });
       }
     }
@@ -953,7 +1004,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     });
 
     return items;
-  }, [reports, hideResolved, showPendingReview, resolvedTargets, pendingReviewTargets, filterCategory, filterTargetType, sortBy]);
+  }, [reports, hideResolved, showPendingReview, resolvedTargets, bannedPubkeySet, authorByTarget, pendingReviewTargets, filterCategory, filterTargetType, sortBy]);
 
   const uniqueTargets = consolidated.length;
   const pendingReviewCount = pendingReviewTargets.size;
@@ -978,10 +1029,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   useEffect(() => {
     if (!hideResolved || !selectedReport) return;
     const target = getReportTarget(selectedReport);
-    if (target && resolvedTargets.has(`${target.type}:${target.value}`)) {
+    if (target && isConsolidatedReportResolved(
+      { target, authorPubkey: authorByTarget.get(`${target.type}:${target.value}`) },
+      resolvedTargets,
+      bannedPubkeySet,
+    )) {
       setHideResolved(false);
     }
-  }, [hideResolved, selectedReport, resolvedTargets]);
+  }, [hideResolved, selectedReport, resolvedTargets, bannedPubkeySet, authorByTarget]);
 
   // Handle deep linking via query params (?event=... or ?pubkey=... or &env=...)
   useEffect(() => {
@@ -1028,8 +1083,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
     if (inBulk) {
       // If target is resolved and we're hiding resolved, temporarily show it
-      const targetKey = `${inBulk.target.type}:${inBulk.target.value}`;
-      if (hideResolved && resolvedTargets.has(targetKey)) {
+      if (hideResolved && isConsolidatedReportResolved(inBulk, resolvedTargets, bannedPubkeySet)) {
         setHideResolved(false);
       }
       setSelectedReport(inBulk.latestReport);
@@ -1097,7 +1151,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         setDeepLinkStatus('unavailable');
       }
     })();
-  }, [allConsolidated, searchParams, hideResolved, resolvedTargets, navigate, isLoading, config.relayUrl, config.apiUrl, updateConfig, queryClient, fetchReportsByTarget, relayUrl, retryNonce]);
+  }, [allConsolidated, searchParams, hideResolved, resolvedTargets, bannedPubkeySet, navigate, isLoading, config.relayUrl, config.apiUrl, updateConfig, queryClient, fetchReportsByTarget, relayUrl, retryNonce]);
 
   // Update URL when report selection changes
   const handleSelectReport = (report: NostrEvent | null) => {
