@@ -316,9 +316,10 @@ export async function callRelayRpc<T = unknown>(
   return data.result as T;
 }
 
-// Convenience function for banning pubkey via NIP-86 RPC
+// Route account bans through the moderation endpoint so worker-side follow-up
+// (human-review state and linked Zendesk ticket closure) runs after the relay RPC.
 export async function banPubkey(apiUrl: string, pubkey: string, reason?: string): Promise<void> {
-  await callRelayRpc(apiUrl, 'banpubkey', [pubkey, reason || 'Banned via admin']);
+  await moderateAction(apiUrl, { action: 'ban_pubkey', pubkey, reason: reason || 'Banned via admin' });
 }
 
 export async function banEvent(apiUrl: string, eventId: string, reason?: string): Promise<void> {

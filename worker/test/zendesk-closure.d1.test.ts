@@ -119,14 +119,16 @@ describe('handleParseReport INSERT tolerates a concurrent duplicate (real D1)', 
        VALUES (?, ?, 'open') ON CONFLICT(ticket_id) DO NOTHING`
     ).bind(850, 'e'.repeat(64)).run();
 
-    await insert();
+    const first = await insert();
     // The second delivery (the race the already-processed check can't close) must
     // not throw and must not create a duplicate row.
-    await expect(insert()).resolves.toBeDefined();
+    const duplicate = await insert();
 
     const count = await DB.prepare(
       `SELECT COUNT(*) AS n FROM zendesk_tickets WHERE ticket_id = 850`
     ).first<{ n: number }>();
     expect(count?.n).toBe(1);
+    expect(first.meta.changes).toBe(1);
+    expect(duplicate.meta.changes).toBe(0);
   });
 });

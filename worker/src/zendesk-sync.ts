@@ -291,7 +291,7 @@ export async function getLinkedTickets(
   env: ZendeskSyncEnv,
   target: { eventId?: string; pubkey?: string },
 ): Promise<LinkedTicket[]> {
-  if (!env.DB) return [];
+  if (!env.DB) throw new Error('D1 database is not configured');
   await ensureZendeskTable(env.DB);
   const subdomain = await requireZendeskSubdomain(env);
 

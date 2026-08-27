@@ -11,6 +11,7 @@ import { ApiError } from '@/lib/adminApi';
 
 const api = vi.hoisted(() => ({
   callRelayRpc: vi.fn(),
+  banPubkey: vi.fn(),
   verifyPubkeyBanned: vi.fn(),
   verifyPubkeyUnbanned: vi.fn(),
   unbanPubkey: vi.fn(),
@@ -69,6 +70,7 @@ describe('UserManagement age-review guard wiring', () => {
     // Empty lists: the account is neither banned, allowed, nor suspended, so the
     // Allow button renders.
     api.callRelayRpc.mockResolvedValue([]);
+    api.banPubkey.mockResolvedValue(undefined);
     api.logDecision.mockResolvedValue(undefined);
   });
 
@@ -131,6 +133,18 @@ describe('UserManagement age-review guard wiring', () => {
     fireEvent.click(screen.getByRole('button', { name: /^Allow User$/i }));
 
     await waitFor(() => expect(api.callRelayRpc).toHaveBeenCalledWith('unbanpubkey', [PUBKEY, undefined]));
+  });
+
+  it('routes a ban through the moderation endpoint helper', async () => {
+    renderWithProvider();
+    fireEvent.click(await screen.findByRole('button', { name: /Add User/i }));
+    fireEvent.change(await screen.findByPlaceholderText(/hex pubkey or npub1/i), {
+      target: { value: PUBKEY },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^Ban User$/i }));
+
+    await waitFor(() => expect(api.banPubkey).toHaveBeenCalledWith(PUBKEY, undefined));
+    expect(api.callRelayRpc).not.toHaveBeenCalledWith('banpubkey', expect.anything());
   });
 
   it('still shows an error toast for a failure that is not a guard refusal', async () => {

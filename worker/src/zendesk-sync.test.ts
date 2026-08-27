@@ -302,6 +302,44 @@ describe('handleParseReport author derivation', () => {
   });
 });
 
+describe('handleParseReport concurrent duplicate', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('does not post a second Zendesk note when its insert loses the race', async () => {
+    const author = 'a'.repeat(64);
+    mockRelay([]);
+    const mockFetch = vi.fn();
+    vi.stubGlobal('fetch', mockFetch);
+    const db = {
+      prepare: (sql: string) => ({
+        bind: (..._args: unknown[]) => ({
+          first: async () => null,
+          run: async () => ({ success: true, meta: { changes: sql.includes('INSERT INTO zendesk_tickets') ? 0 : 1 } }),
+          all: async () => ({ results: [] }),
+        }),
+        run: async () => ({ success: true, meta: { changes: 0 } }),
+        first: async () => null,
+        all: async () => ({ results: [] }),
+      }),
+      exec: async () => ({}),
+      batch: async () => [],
+      dump: async () => new ArrayBuffer(0),
+    };
+
+    const response = await worker.fetch(
+      makeParseReportRequest(`Author Pubkey: ${author}`, 901),
+      makeEnv({ DB: db }),
+      ctx,
+    );
+
+    expect(response.status).toBe(200);
+    expect((await response.json() as { skipped?: boolean }).skipped).toBe(true);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+});
+
 function makeLinkedTicketsDB(
   eventRows: Array<{ ticket_id: number; status: string }>,
   pubkeyRows: Array<{ ticket_id: number; status: string }>,
@@ -667,6 +705,20 @@ describe('GET /api/tickets surfaces a lookup failure instead of an empty list', 
         headers: { 'X-Admin-Key': ADMIN_KEY },
       }),
       makeEnv({ ADMIN_API_KEY: ADMIN_KEY, DB: throwingDb }),
+      ctx,
+    );
+
+    expect(response.status).toBe(500);
+    expect((await response.json() as { success: boolean }).success).toBe(false);
+  });
+
+  it('returns 500 when D1 is not bound', async () => {
+    const response = await worker.fetch(
+      new Request(`https://api-relay-prod.divine.video/api/tickets?event=${'e'.repeat(64)}`, {
+        method: 'GET',
+        headers: { 'X-Admin-Key': ADMIN_KEY },
+      }),
+      makeEnv({ ADMIN_API_KEY: ADMIN_KEY, DB: undefined }),
       ctx,
     );
 

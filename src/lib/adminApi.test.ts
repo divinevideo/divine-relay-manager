@@ -637,7 +637,7 @@ describe('adminApi', () => {
   });
 
   describe('banPubkey', () => {
-    it('should call banpubkey RPC method with pubkey and reason', async () => {
+    it('routes through moderation so linked-ticket side effects run', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => ({ success: true, result: null }),
@@ -646,9 +646,9 @@ describe('adminApi', () => {
       await banPubkey(API_URL, 'pubkey123', 'Spam');
 
       expect(mockFetch).toHaveBeenCalledWith(
-        expect.stringContaining('/api/relay-rpc'),
+        expect.stringContaining('/api/moderate'),
         expect.objectContaining({
-          body: JSON.stringify({ method: 'banpubkey', params: ['pubkey123', 'Spam'] }),
+          body: JSON.stringify({ action: 'ban_pubkey', pubkey: 'pubkey123', reason: 'Spam' }),
         })
       );
     });
@@ -664,7 +664,7 @@ describe('adminApi', () => {
       expect(mockFetch).toHaveBeenCalledWith(
         expect.anything(),
         expect.objectContaining({
-          body: JSON.stringify({ method: 'banpubkey', params: ['pubkey123', 'Banned via admin'] }),
+          body: JSON.stringify({ action: 'ban_pubkey', pubkey: 'pubkey123', reason: 'Banned via admin' }),
         })
       );
     });
@@ -928,8 +928,11 @@ describe('adminApi', () => {
       // Check ban call
       const banCall = mockFetch.mock.calls[1];
       const banBody = JSON.parse(banCall[1].body);
-      expect(banBody.method).toBe('banpubkey');
-      expect(banBody.params).toEqual(['pubkey123', 'Labeled: scam, fraud']);
+      expect(banBody).toEqual({
+        action: 'ban_pubkey',
+        pubkey: 'pubkey123',
+        reason: 'Labeled: scam, fraud',
+      });
     });
 
     it('should not ban when targetType is event', async () => {

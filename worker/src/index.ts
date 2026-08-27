@@ -3152,14 +3152,17 @@ async function handleParseReport(
     if (env.DB) {
       // ON CONFLICT DO NOTHING closes the race the already-processed check above
       // cannot: the relay fetch now sits between that check and this INSERT, so two
-      // concurrent deliveries of the same webhook (a Zendesk retry overlapping the
-      // original) can both pass the check, and a plain INSERT would 500 the second
-      // and lose its note. The winning delivery's row (and note) already stands.
-      await env.DB.prepare(`
+      // concurrent deliveries can both pass the check. The loser must return here;
+      // the winning delivery owns both the stored row and the Zendesk note.
+      const inserted = await env.DB.prepare(`
         INSERT INTO zendesk_tickets (ticket_id, event_id, author_pubkey, violation_type, status)
         VALUES (?, ?, ?, ?, 'open')
         ON CONFLICT(ticket_id) DO NOTHING
       `).bind(ticket_id, eventId, authorPubkey, violation_type).run();
+      if (inserted.meta?.changes === 0) {
+        console.log(`[handleParseReport] Ticket ${ticket_id} inserted concurrently, skipping duplicate note`);
+        return jsonResponse({ success: true, ticket_id, event_id: eventId, author_pubkey: authorPubkey, violation_type, skipped: true }, 200, corsHeaders);
+      }
     }
 
     // Only reachable when the description omitted the author: it was just derived

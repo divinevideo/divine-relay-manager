@@ -44,7 +44,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
   const redirectIfGuarded = useAgeReviewGuardRedirect();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { callRelayRpc, verifyPubkeyBanned, verifyPubkeyUnbanned, unbanPubkey, unsuspendPubkey, logDecision } = useAdminApi();
+  const { callRelayRpc, banPubkey, verifyPubkeyBanned, verifyPubkeyUnbanned, unbanPubkey, unsuspendPubkey, logDecision } = useAdminApi();
   const { getModeratorPubkey } = useCurrentUser();
   const [newPubkey, setNewPubkey] = useState("");
   const [newReason, setNewReason] = useState("");
@@ -87,7 +87,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
   const banUserMutation = useMutation({
     mutationFn: async ({ pubkey, reason }: { pubkey: string; reason?: string }) => {
       const moderator = getModeratorPubkey(); // snapshot identity at action start
-      await callRelayRpc('banpubkey', [pubkey, reason]);
+      await banPubkey(pubkey, reason);
       // Log to D1 for audit trail
       await logDecision({
         targetType: 'pubkey',
