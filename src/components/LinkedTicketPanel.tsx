@@ -1,6 +1,7 @@
 // ABOUTME: Always-present panel showing the Zendesk ticket(s) linked to a report.
 // ABOUTME: Open tickets get an active Close button; closed ones show an affirmative badge.
 
+import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -33,10 +34,29 @@ export function LinkedTicketPanel({ eventId, pubkey }: LinkedTicketPanelProps) {
     staleTime: 15_000,
   });
 
+  // One mutation instance holds ONE `variables`, so it cannot answer "is THIS
+  // ticket closing?" once two closes overlap — the second click overwrites the
+  // first, and the first row silently reverts to an active Close button while its
+  // request is still in flight. Worse on failure: the toast fires for the ticket
+  // that failed while the row still marked "Closing…" is the other one, so the
+  // moderator reads the failure against the wrong ticket and the one that did
+  // fail looks finished. Track the in-flight ids instead.
+  const [closingIds, setClosingIds] = useState<ReadonlySet<number>>(new Set());
+
   const closeMutation = useMutation({
     mutationFn: async (ticketId: number) => {
       const moderator = await getModeratorPubkey();
       await api.closeTicket(ticketId, moderator);
+    },
+    onMutate: (ticketId: number) => {
+      setClosingIds(prev => new Set(prev).add(ticketId));
+    },
+    onSettled: (_data, _error, ticketId: number) => {
+      setClosingIds(prev => {
+        const next = new Set(prev);
+        next.delete(ticketId);
+        return next;
+      });
     },
     onSuccess: () => {
       toast({ title: 'Ticket closed' });
@@ -72,8 +92,9 @@ export function LinkedTicketPanel({ eventId, pubkey }: LinkedTicketPanelProps) {
         const isOpen = ticket.status === 'open';
         const isResolved = ticket.status === 'resolved';
         // Scope pending state to THIS ticket, so closing one open ticket never
-        // greys out or mislabels a sibling open ticket on the same report.
-        const isClosingThis = closeMutation.isPending && closeMutation.variables === ticket.ticket_id;
+        // greys out or mislabels a sibling open ticket on the same report — and so
+        // two overlapping closes each report their own state.
+        const isClosingThis = closingIds.has(ticket.ticket_id);
         return (
           <div key={ticket.ticket_id} className="flex items-center gap-2 text-sm">
             <a href={ticket.url} target="_blank" rel="noreferrer" className="underline">

@@ -103,6 +103,60 @@ describe('LinkedTicketPanel', () => {
     resolveClose();
   });
 
+  // Two open tickets on one report is exactly what the multi-row rendering exists
+  // for, so two closes overlapping is a real sequence, not a contrived one. With
+  // pending state read off the mutation's single `variables`, the second click
+  // overwrote the first: only one row said "Closing…", and when the FIRST close
+  // failed the row still saying it was the other ticket -- so the failure toast
+  // read against a ticket that had not failed, while the one that did looked done.
+  it('marks both tickets as closing when two closes overlap', async () => {
+    getLinkedTickets.mockResolvedValue([
+      { ticket_id: 1001, status: 'open', url: 'https://z.test/1001' },
+      { ticket_id: 1003, status: 'open', url: 'https://z.test/1003' },
+    ]);
+    const settle: Record<number, () => void> = {};
+    closeTicket.mockImplementation((id: number) => new Promise<void>((res) => { settle[id] = res; }));
+    renderPanel();
+
+    const buttons = await screen.findAllByRole('button', { name: /close ticket/i });
+    await userEvent.click(buttons[0]);
+    await waitFor(() => expect(screen.getByText(/Closing…/)).toBeInTheDocument());
+    await userEvent.click(screen.getByRole('button', { name: /close ticket/i }));
+
+    expect(screen.getAllByText(/Closing…/)).toHaveLength(2);
+    expect(screen.queryByRole('button', { name: /close ticket/i })).not.toBeInTheDocument();
+    settle[1001](); settle[1003]();
+  });
+
+  it('leaves the ticket that failed as the one still offering Close', async () => {
+    getLinkedTickets.mockResolvedValue([
+      { ticket_id: 1001, status: 'open', url: 'https://z.test/1001' },
+      { ticket_id: 1003, status: 'open', url: 'https://z.test/1003' },
+    ]);
+    const settle: Record<number, () => void> = {};
+    const reject: Record<number, (e: Error) => void> = {};
+    closeTicket.mockImplementation((id: number) => new Promise<void>((res, rej) => {
+      settle[id] = res; reject[id] = rej;
+    }));
+    renderPanel();
+
+    const buttons = await screen.findAllByRole('button', { name: /close ticket/i });
+    await userEvent.click(buttons[0]);                                        // 1001
+    await waitFor(() => expect(screen.getByText(/Closing…/)).toBeInTheDocument());
+    await userEvent.click(screen.getByRole('button', { name: /close ticket/i })); // 1003
+
+    reject[1001](new Error('Zendesk solve did not succeed'));
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Failed to close ticket', variant: 'destructive' }),
+    ));
+
+    // The failed ticket is the one a moderator can retry; the other is still going.
+    const retry = await screen.findByRole('button', { name: /close ticket/i });
+    expect(retry.closest('div')).toHaveTextContent('Zendesk #1001');
+    expect(screen.getByText(/Closing…/).closest('div')).toHaveTextContent('Zendesk #1003');
+    settle[1003]();
+  });
+
   it('surfaces a close failure instead of reporting success', async () => {
     getLinkedTickets.mockResolvedValue([{ ticket_id: 1001, status: 'open', url: 'https://z.test/1001' }]);
     closeTicket.mockRejectedValue(new Error('Zendesk solve did not succeed'));
