@@ -3,7 +3,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import worker from './index';
-import { syncZendeskAfterAction } from './zendesk-sync';
+import { syncZendeskAfterAction, getLinkedTickets, closeTicketById } from './zendesk-sync';
 
 const WEBHOOK_SECRET = 'test-parse-report-secret';
 const TEST_NSEC = 'nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5';
@@ -77,17 +77,31 @@ function makeEnv(overrides: Record<string, unknown> = {}) {
   } as never;
 }
 
-function createMockDB() {
+function createMockDB(ticketIds: number[] = [LINKED_TICKET_ID]) {
   const sqlLog: { sql: string; bindings: unknown[] }[] = [];
+  const linkedRows = ticketIds.map((id) => ({ ticket_id: id }));
 
   const db = {
     prepare: vi.fn().mockImplementation((sql: string) => ({
       bind: vi.fn().mockImplementation((...args: unknown[]) => {
         sqlLog.push({ sql, bindings: args });
 
-        if (sql.includes("SELECT ticket_id FROM zendesk_tickets WHERE event_id = ? AND status = 'open'")) {
+        // The linked-ticket lookup: matches both the event_id and author_pubkey
+        // variants, which are now case-insensitive (lower(...)) and read via .all().
+        if (
+          sql.includes('FROM zendesk_tickets WHERE lower(event_id)') ||
+          sql.includes('FROM zendesk_tickets WHERE lower(author_pubkey)')
+        ) {
           return {
-            first: vi.fn().mockResolvedValue({ ticket_id: LINKED_TICKET_ID }),
+            first: vi.fn().mockResolvedValue(linkedRows[0] ?? null),
+            run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 0 } }),
+            all: vi.fn().mockResolvedValue({ results: linkedRows }),
+          };
+        }
+
+        if (sql.includes('SELECT status FROM zendesk_tickets WHERE ticket_id')) {
+          return {
+            first: vi.fn().mockResolvedValue({ status: 'open' }),
             run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 0 } }),
             all: vi.fn().mockResolvedValue({ results: [] }),
           };
@@ -239,6 +253,178 @@ describe('handleParseReport regex', () => {
   });
 });
 
+// REQ-responding WebSocket mock (mirrors relay-profile.test.ts) so the real
+// queryRelay resolves with the given events. Used to exercise author derivation.
+function mockRelay(events: Array<Record<string, unknown>>) {
+  vi.spyOn(globalThis, 'WebSocket').mockImplementation((function () {
+    const listeners = new Map<string, Array<(value?: unknown) => void>>();
+    let subId = 'parse-report-test';
+    queueMicrotask(() => {
+      listeners.get('open')?.forEach((h) => h());
+      for (const event of events) {
+        listeners.get('message')?.forEach((h) => h({ data: JSON.stringify(['EVENT', subId, event]) }));
+      }
+      listeners.get('message')?.forEach((h) => h({ data: JSON.stringify(['EOSE', subId]) }));
+    });
+    return {
+      addEventListener: (e: string, h: (value?: unknown) => void) => {
+        listeners.set(e, [...(listeners.get(e) || []), h]);
+      },
+      send: vi.fn((payload: string) => {
+        const parsed = JSON.parse(payload);
+        if (parsed[0] === 'REQ') subId = parsed[1];
+      }),
+      close: vi.fn(),
+    };
+  } as unknown as typeof WebSocket));
+}
+
+describe('handleParseReport author derivation', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('derives author_pubkey from the reported event when the description omits it, and lowercases ids', async () => {
+    const eventId = 'e'.repeat(64);
+    const author = 'a'.repeat(64);
+    // Relay returns the reported event, authored by `author`.
+    mockRelay([{ id: eventId, kind: 32, pubkey: author, tags: [], content: '' }]);
+
+    // Uppercase event id in the description, and NO pubkey line.
+    const description = `Event ID: ${eventId.toUpperCase()}\nReason: spam`;
+
+    const response = await worker.fetch(makeParseReportRequest(description, 900), makeEnv(), ctx);
+    const data = await response.json() as Record<string, unknown>;
+
+    expect(response.status).toBe(200);
+    expect(data.event_id).toBe(eventId);        // lowercased on store/return
+    expect(data.author_pubkey).toBe(author);     // derived from the event
+  });
+});
+
+describe('handleParseReport concurrent duplicate', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('does not post a second Zendesk note when its insert loses the race', async () => {
+    const author = 'a'.repeat(64);
+    mockRelay([]);
+    const mockFetch = vi.fn();
+    vi.stubGlobal('fetch', mockFetch);
+    const db = {
+      prepare: (sql: string) => ({
+        bind: (..._args: unknown[]) => ({
+          first: async () => null,
+          run: async () => ({ success: true, meta: { changes: sql.includes('INSERT INTO zendesk_tickets') ? 0 : 1 } }),
+          all: async () => ({ results: [] }),
+        }),
+        run: async () => ({ success: true, meta: { changes: 0 } }),
+        first: async () => null,
+        all: async () => ({ results: [] }),
+      }),
+      exec: async () => ({}),
+      batch: async () => [],
+      dump: async () => new ArrayBuffer(0),
+    };
+
+    const response = await worker.fetch(
+      makeParseReportRequest(`Author Pubkey: ${author}`, 901),
+      makeEnv({ DB: db }),
+      ctx,
+    );
+
+    expect(response.status).toBe(200);
+    expect((await response.json() as { skipped?: boolean }).skipped).toBe(true);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+});
+
+function makeLinkedTicketsDB(
+  eventRows: Array<{ ticket_id: number; status: string }>,
+  pubkeyRows: Array<{ ticket_id: number; status: string }>,
+) {
+  return {
+    prepare: (sql: string) => ({
+      bind: (..._a: unknown[]) => ({
+        all: async () => {
+          if (sql.includes('lower(event_id)')) return { results: eventRows };
+          if (sql.includes('lower(author_pubkey)')) return { results: pubkeyRows };
+          return { results: [] };
+        },
+        run: async () => ({ success: true }),
+        first: async () => null,
+      }),
+      run: async () => ({ success: true }),
+      all: async () => ({ results: [] }),
+      first: async () => null,
+    }),
+  } as never;
+}
+
+describe('getLinkedTickets', () => {
+  it('returns deduped linked tickets for event and/or pubkey, with agent urls', async () => {
+    const db = makeLinkedTicketsDB(
+      [{ ticket_id: 1, status: 'open' }, { ticket_id: 3, status: 'open' }],
+      [{ ticket_id: 2, status: 'resolved' }, { ticket_id: 3, status: 'open' }],
+    );
+    const tickets = await getLinkedTickets(makeEnv({ DB: db }), { eventId: 'A'.repeat(64), pubkey: 'B'.repeat(64) });
+
+    expect(tickets.map(t => t.ticket_id).sort((a, b) => a - b)).toEqual([1, 2, 3]); // 3 deduped
+    expect(tickets.find(t => t.ticket_id === 1)?.url).toBe('https://rabblelabs.zendesk.com/agent/tickets/1');
+    expect(tickets.find(t => t.ticket_id === 2)?.status).toBe('resolved');
+  });
+
+  it('rejects the lookup when no Zendesk subdomain can produce valid ticket links', async () => {
+    const db = makeLinkedTicketsDB([{ ticket_id: 1, status: 'open' }], []);
+
+    await expect(
+      getLinkedTickets(makeEnv({ DB: db, ZENDESK_SUBDOMAIN: undefined }), { eventId: 'A'.repeat(64) }),
+    ).rejects.toThrow(/subdomain is not configured/);
+  });
+});
+
+describe('closeTicketById', () => {
+  beforeEach(() => {
+    vi.stubGlobal('WebSocket', MockWebSocket);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('solves the ticket in Zendesk + D1 without writing a moderation decision', async () => {
+    const { db, sqlLog } = createMockDB();
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true, text: async () => '' });
+    vi.stubGlobal('fetch', mockFetch);
+
+    await closeTicketById(makeEnv({ DB: db, ZENDESK_GROUP_ID: '15225535020687' }), 555, 'b'.repeat(64));
+
+    const [url, options] = mockFetch.mock.calls[0];
+    expect(url).toBe('https://rabblelabs.zendesk.com/api/v2/tickets/555');
+    expect(JSON.parse(options.body as string).ticket.status).toBe('solved');
+
+    const update = sqlLog.find(entry => entry.sql.includes('UPDATE zendesk_tickets'));
+    expect(update?.sql).toContain("resolution_action = 'manual_close'");
+    expect(update?.bindings).toEqual(['b'.repeat(64), 555]);
+
+    // Zendesk-only: closing a ticket must never fabricate a content decision.
+    expect(sqlLog.some(entry => entry.sql.includes('moderation_decisions'))).toBe(false);
+  });
+
+  it('throws and does NOT mark D1 resolved when the Zendesk solve fails', async () => {
+    const { db, sqlLog } = createMockDB();
+    const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 500, text: async () => 'boom' });
+    vi.stubGlobal('fetch', mockFetch);
+
+    await expect(
+      closeTicketById(makeEnv({ DB: db }), 555, 'b'.repeat(64)),
+    ).rejects.toThrow(/Zendesk solve did not succeed/);
+
+    // A failed solve must leave the ticket open in D1 so the UI keeps the Close button.
+    expect(sqlLog.some(entry => entry.sql.includes('UPDATE zendesk_tickets'))).toBe(false);
+  });
+});
+
 describe('addZendeskInternalNote solve payload', () => {
   beforeEach(() => {
     vi.stubGlobal('WebSocket', MockWebSocket);
@@ -304,5 +490,239 @@ describe('addZendeskInternalNote solve payload', () => {
     expect(payload.ticket.status).toBe('solved');
     const resolvedUpdate = sqlLog.find(entry => entry.sql.includes('UPDATE zendesk_tickets'));
     expect(resolvedUpdate?.bindings).toEqual([action, expect.any(String), LINKED_TICKET_ID]);
+  });
+
+  it('closes every open ticket linked to the same target, not just the first', async () => {
+    const { db, sqlLog } = createMockDB([111, 222]);
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true, text: async () => '' });
+    vi.stubGlobal('fetch', mockFetch);
+
+    await syncZendeskAfterAction(
+      makeEnv({ DB: db, ZENDESK_GROUP_ID: '15225535020687' }),
+      'ban_pubkey',
+      'pubkey',
+      'a'.repeat(64),
+      'b'.repeat(64),
+    );
+
+    // One Zendesk solve PUT per linked ticket.
+    const putTicketIds = mockFetch.mock.calls.map(call => String(call[0]).split('/').pop());
+    expect(putTicketIds.sort()).toEqual(['111', '222']);
+
+    // One D1 resolution UPDATE per linked ticket (ticket_id is the last binding).
+    const updatedIds = sqlLog
+      .filter(entry => entry.sql.includes('UPDATE zendesk_tickets'))
+      .map(entry => entry.bindings[entry.bindings.length - 1])
+      .sort();
+    expect(updatedIds).toEqual([111, 222]);
+  });
+
+  it('leaves the ticket open (no D1 resolve) when the Zendesk solve fails', async () => {
+    const { db, sqlLog } = createMockDB([111]);
+    const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 502, text: async () => 'down' });
+    vi.stubGlobal('fetch', mockFetch);
+
+    await syncZendeskAfterAction(
+      makeEnv({ DB: db }),
+      'ban_pubkey', 'pubkey', 'a'.repeat(64), 'b'.repeat(64),
+    );
+
+    // The Zendesk solve was attempted...
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    // ...but failed, so D1 must NOT be marked resolved — the panel keeps the Close button.
+    expect(sqlLog.some(entry => entry.sql.includes('UPDATE zendesk_tickets'))).toBe(false);
+  });
+});
+
+describe('POST /api/tickets/:id/close id validation', () => {
+  const ADMIN_KEY = 'test-admin-key';
+
+  function close(id: string) {
+    const { db } = createMockDB();
+    return worker.fetch(
+      new Request(`https://api-relay-prod.divine.video/api/tickets/${id}/close`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Key': ADMIN_KEY },
+        body: JSON.stringify({}),
+      }),
+      makeEnv({ ADMIN_API_KEY: ADMIN_KEY, DB: db }),
+      ctx,
+    );
+  }
+
+  beforeEach(() => {
+    vi.stubGlobal('WebSocket', MockWebSocket);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // Number.parseInt('12abc') is 12, so before this guard the endpoint solved
+  // ticket 12 for a request that named no such ticket -- a wrong-ticket close.
+  // '9'.repeat(20) rounds past Number.MAX_SAFE_INTEGER into a different id.
+  it.each(['12abc', '-5', '1.9', '1e5', '+7', ' 12', '1/close', 'abc', '', '9'.repeat(20)])(
+    'rejects %j with 400 and never calls Zendesk',
+    async (id) => {
+      const mockFetch = vi.fn();
+      vi.stubGlobal('fetch', mockFetch);
+
+      const response = await close(id);
+
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ success: false, error: 'Invalid ticket id' });
+      expect(mockFetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it('accepts a plain numeric id and closes that exact ticket', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true, text: async () => '' });
+    vi.stubGlobal('fetch', mockFetch);
+
+    const response = await close('926');
+
+    expect(response.status).toBe(200);
+    expect(mockFetch.mock.calls[0][0]).toBe('https://rabblelabs.zendesk.com/api/v2/tickets/926');
+  });
+
+  it('returns 404 without calling Zendesk when the ticket is not linked', async () => {
+    const mockFetch = vi.fn();
+    vi.stubGlobal('fetch', mockFetch);
+
+    const response = await worker.fetch(
+      new Request('https://api-relay-prod.divine.video/api/tickets/927/close', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Key': ADMIN_KEY },
+        body: JSON.stringify({}),
+      }),
+      makeEnv({ ADMIN_API_KEY: ADMIN_KEY }),
+      ctx,
+    );
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ success: false, error: 'Linked ticket not found' });
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+});
+
+// A relay mock that holds every REQ answer until released, so a test can assert
+// which lookups were in flight at the same time.
+function mockRelayGated(events: Array<Record<string, unknown>>) {
+  const sent: Array<Record<string, unknown>> = [];
+  const pending: Array<() => void> = [];
+
+  vi.spyOn(globalThis, 'WebSocket').mockImplementation((function () {
+    const listeners = new Map<string, Array<(value?: unknown) => void>>();
+    queueMicrotask(() => listeners.get('open')?.forEach((h) => h()));
+    return {
+      addEventListener: (e: string, h: (value?: unknown) => void) => {
+        listeners.set(e, [...(listeners.get(e) || []), h]);
+      },
+      send: vi.fn((payload: string) => {
+        const parsed = JSON.parse(payload);
+        if (parsed[0] !== 'REQ') return;
+        const [, subId, filter] = parsed;
+        sent.push(filter);
+        pending.push(() => {
+          const emit = (m: unknown[]) =>
+            listeners.get('message')?.forEach((h) => h({ data: JSON.stringify(m) }));
+          for (const event of events) {
+            const okIds = !filter.ids || filter.ids.includes(event.id);
+            const okAuthors = !filter.authors || filter.authors.includes(event.pubkey);
+            const okKinds = !filter.kinds || filter.kinds.includes(event.kind);
+            if (okIds && okAuthors && okKinds) emit(['EVENT', subId, event]);
+          }
+          emit(['EOSE', subId]);
+        });
+      }),
+      close: vi.fn(),
+    };
+  } as unknown as typeof WebSocket));
+
+  return { sent, flush: () => { while (pending.length) pending.shift()!(); } };
+}
+
+describe('handleParseReport enrichment concurrency', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('overlaps the event and profile lookups when the description already names the author', async () => {
+    const eventId = 'e'.repeat(64);
+    const author = 'a'.repeat(64);
+    const relay = mockRelayGated([
+      { id: eventId, kind: 32, pubkey: author, tags: [], content: '' },
+      { id: 'f'.repeat(64), kind: 0, pubkey: author, tags: [], content: '{"name":"someone"}' },
+    ]);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, text: async () => '' }));
+
+    const description = `Event ID: ${eventId}\nAuthor Pubkey: ${author}`;
+    const pending = worker.fetch(makeParseReportRequest(description, 910), makeEnv(), ctx);
+
+    // Both relay round-trips must be in flight before either is answered. Running
+    // them back to back spends ENRICHMENT_TIMEOUT_MS twice on a ticket that needs
+    // no author derivation, doubling the budget sized to stay inside Zendesk's
+    // webhook delivery timeout.
+    await vi.waitFor(() => expect(relay.sent).toHaveLength(2));
+    expect(relay.sent.map((f) => ('ids' in f ? 'event' : 'profile')).sort()).toEqual(['event', 'profile']);
+
+    relay.flush();
+    const response = await pending;
+    expect(response.status).toBe(200);
+    expect((await response.json() as Record<string, unknown>).author_pubkey).toBe(author);
+  });
+
+  it('still derives the author from the event when the description omits it', async () => {
+    const eventId = 'b'.repeat(64);
+    const author = 'c'.repeat(64);
+    const relay = mockRelayGated([
+      { id: eventId, kind: 32, pubkey: author, tags: [], content: '' },
+      { id: 'f'.repeat(64), kind: 0, pubkey: author, tags: [], content: '{"name":"someone"}' },
+    ]);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, text: async () => '' }));
+
+    const pending = worker.fetch(makeParseReportRequest(`Event ID: ${eventId}`, 911), makeEnv(), ctx);
+
+    // Only the event lookup can start; the profile lookup has no author yet.
+    await vi.waitFor(() => expect(relay.sent).toHaveLength(1));
+    relay.flush();
+    await vi.waitFor(() => expect(relay.sent).toHaveLength(2));
+    relay.flush();
+
+    const data = await (await pending).json() as Record<string, unknown>;
+    expect(data.author_pubkey).toBe(author);
+    expect(relay.sent[1]).toMatchObject({ authors: [author], kinds: [0] });
+  });
+});
+
+describe('GET /api/tickets surfaces a lookup failure instead of an empty list', () => {
+  const ADMIN_KEY = 'test-admin-key';
+
+  it('returns 500 when D1 throws, so the panel can show "couldn\'t check" not "no ticket"', async () => {
+    const throwingDb = { prepare: () => { throw new Error('D1 unavailable'); } };
+    const response = await worker.fetch(
+      new Request(`https://api-relay-prod.divine.video/api/tickets?event=${'e'.repeat(64)}`, {
+        method: 'GET',
+        headers: { 'X-Admin-Key': ADMIN_KEY },
+      }),
+      makeEnv({ ADMIN_API_KEY: ADMIN_KEY, DB: throwingDb }),
+      ctx,
+    );
+
+    expect(response.status).toBe(500);
+    expect((await response.json() as { success: boolean }).success).toBe(false);
+  });
+
+  it('returns 500 when D1 is not bound', async () => {
+    const response = await worker.fetch(
+      new Request(`https://api-relay-prod.divine.video/api/tickets?event=${'e'.repeat(64)}`, {
+        method: 'GET',
+        headers: { 'X-Admin-Key': ADMIN_KEY },
+      }),
+      makeEnv({ ADMIN_API_KEY: ADMIN_KEY, DB: undefined }),
+      ctx,
+    );
+
+    expect(response.status).toBe(500);
+    expect((await response.json() as { success: boolean }).success).toBe(false);
   });
 });

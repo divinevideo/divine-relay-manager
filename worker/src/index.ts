@@ -36,7 +36,7 @@ import {
 import { handleAccountStatus } from './account-status';
 import { handleBulkModerateEnqueue, handleBulkJobStatus, processBulkJob } from './bulk-moderate';
 import type { BulkJobMessage } from '../../shared/bulk-moderation';
-import { ensureZendeskTable, addZendeskInternalNote, syncZendeskAfterAction } from './zendesk-sync';
+import { ensureZendeskTable, addZendeskInternalNote, syncZendeskAfterAction, getLinkedTickets, closeTicketById } from './zendesk-sync';
 import { buildReportNote, parseKind0Profile, type ReportedProfile } from './report-note';
 import { queryRelay, withTimeout, ENRICHMENT_TIMEOUT_MS } from './relay-profile';
 import { coordinateEventVisibility, type EventVisibilityResult } from './event-visibility';
@@ -385,6 +385,8 @@ interface ApiResponse {
   // seeing only "conflict" cannot tell this from any other refusal.
   from?: string;
   current?: string;
+  // /api/tickets: Zendesk tickets linked to a report target.
+  tickets?: Array<{ ticket_id: number; status: string; url: string }>;
 }
 
 // Verify that the request is authorized for admin API access.
@@ -556,6 +558,31 @@ export default {
 
       if (path === '/api/decisions' && request.method === 'GET') {
         return handleGetAllDecisions(env, corsHeaders);
+      }
+
+      // Linked Zendesk tickets for a report target (admin-gated: MUST stay here,
+      // after verifyAdminAccess, and NOT under /api/zendesk/* which bypasses it).
+      if (path === '/api/tickets' && request.method === 'GET') {
+        const eventId = url.searchParams.get('event') ?? undefined;
+        const pubkey = url.searchParams.get('pubkey') ?? undefined;
+        return handleGetLinkedTickets(env, { eventId, pubkey }, corsHeaders);
+      }
+
+      if (path.startsWith('/api/tickets/') && path.endsWith('/close') && request.method === 'POST') {
+        const idStr = path.slice('/api/tickets/'.length, -'/close'.length);
+        // Whole-string digits, not Number.parseInt. parseInt stops at the first
+        // character it cannot read and returns what it had, so `/api/tickets/12abc/close`
+        // passed this gate as 12 and solved ticket 12 -- closing a ticket nobody asked
+        // about, which is worse than the 400 this gate exists to return. `-5`, `1.9`
+        // and `1e5` got through the same way. The safe-integer bound covers the other
+        // end: a 20-digit id is exactly representable as a string and not as a Number,
+        // so it would round to a different -- possibly real -- ticket.
+        if (!/^\d+$/.test(idStr) || !Number.isSafeInteger(Number(idStr))) {
+          return jsonResponse({ success: false, error: 'Invalid ticket id' }, 400, corsHeaders);
+        }
+        const ticketId = Number(idStr);
+        const closeBody = await request.json().catch(() => ({})) as { moderatorPubkey?: string };
+        return handleCloseTicket(env, ticketId, closeBody, corsHeaders);
       }
 
       if (path.startsWith('/api/decisions/') && request.method === 'GET') {
@@ -1393,8 +1420,8 @@ async function handleRelayRpc(
   }
 
   // Account-state side effects (all non-critical, off the response path).
-  // This is the actual moderation path used by the UI -- handleModerate's
-  // ban_pubkey case exists but is not called by any frontend component.
+  // Direct RPC callers enter here, and handleModerate delegates here before
+  // running its own post-action bookkeeping such as linked-ticket sync.
   // params[0] = pubkey, params[1] = reason.
   if (body.params?.[0]) {
     const pubkey = String(body.params[0]);
@@ -2962,6 +2989,46 @@ async function handleZendeskRoutes(
   return jsonResponse({ success: false, error: 'Not found' }, 404, corsHeaders);
 }
 
+// List the Zendesk tickets linked to a report target (event and/or pubkey).
+// Lookup failures remain distinguishable from a target with no linked tickets.
+async function handleGetLinkedTickets(
+  env: Env,
+  target: { eventId?: string; pubkey?: string },
+  corsHeaders: Record<string, string>,
+): Promise<Response> {
+  try {
+    const tickets = await getLinkedTickets(env, target);
+    return jsonResponse({ success: true, tickets }, 200, corsHeaders);
+  } catch (err) {
+    // Surface the failure rather than degrading to an empty list: an empty list
+    // renders in #256 as "no linked ticket", indistinguishable from a target that
+    // genuinely has none, so a moderator moves on and leaves the ticket open — the
+    // backlog this exists to drain. A 500 lets the panel show "couldn't check".
+    console.error('[handleGetLinkedTickets] error:', err);
+    return jsonResponse({ success: false, error: 'Failed to look up linked tickets' }, 500, corsHeaders);
+  }
+}
+
+// Manually close one linked Zendesk ticket (the fallback for actions that did not
+// auto-close it). Zendesk-only: never writes a moderation_decisions row.
+async function handleCloseTicket(
+  env: Env,
+  ticketId: number,
+  body: { moderatorPubkey?: string },
+  corsHeaders: Record<string, string>,
+): Promise<Response> {
+  try {
+    const linked = await closeTicketById(env, ticketId, body.moderatorPubkey ?? null);
+    if (!linked) {
+      return jsonResponse({ success: false, error: 'Linked ticket not found' }, 404, corsHeaders);
+    }
+    return jsonResponse({ success: true }, 200, corsHeaders);
+  } catch (err) {
+    console.error('[handleCloseTicket] error:', err);
+    return jsonResponse({ success: false, error: err instanceof Error ? err.message : 'Unknown error' }, 500, corsHeaders);
+  }
+}
+
 // Parse content report ticket and store mapping, add helpful links as internal note
 async function handleParseReport(
   request: Request,
@@ -3009,60 +3076,103 @@ async function handleParseReport(
       return jsonResponse({ success: false, error: 'Could not parse event_id or author_pubkey from description' }, 400, corsHeaders);
     }
 
-    // Store mapping in D1 (skip if already processed)
+    // Normalize to lowercase so the stored row matches the lowercased ids the
+    // action-side sync queries with (relay/moderation_targets ids are lowercase).
+    const eventId = event_id ? event_id.toLowerCase() : null;
+    let authorPubkey = author_pubkey ? author_pubkey.toLowerCase() : null;
+
+    // Short-circuit an already-processed ticket BEFORE any relay work, so a
+    // redelivered webhook costs no fetches. The stored row is authoritative once
+    // written; re-deriving here would only spend time and could disagree with it.
     if (env.DB) {
       await ensureZendeskTable(env.DB);
-
-      // Check if we've already processed this ticket
       const existing = await env.DB.prepare(
         `SELECT id FROM zendesk_tickets WHERE ticket_id = ?`
       ).bind(ticket_id).first();
-
       if (existing) {
         console.log(`[handleParseReport] Ticket ${ticket_id} already processed, skipping`);
-        return jsonResponse({ success: true, ticket_id, event_id, author_pubkey, violation_type, skipped: true }, 200, corsHeaders);
+        return jsonResponse({ success: true, ticket_id, event_id: eventId, author_pubkey: authorPubkey, violation_type, skipped: true }, 200, corsHeaders);
       }
+    }
 
-      await env.DB.prepare(`
+    // Best-effort kind-0 lookup for the note. Presence-first for the same reason
+    // as the event fetch below. Never rejects, so it is safe to leave in flight
+    // while the event fetch runs.
+    const fetchProfile = async (pubkey: string): Promise<ReportedProfile | null> => {
+      try {
+        const profRes = await withTimeout(
+          queryRelay({ authors: [pubkey], kinds: [0], limit: 1 }, env.RELAY_URL),
+          ENRICHMENT_TIMEOUT_MS,
+        );
+        return profRes?.events?.length
+          ? parseKind0Profile(profRes.events[0] as { content?: string; tags?: string[][] })
+          : null;
+      } catch (err) {
+        console.warn('[handleParseReport] profile enrichment failed (continuing):', err);
+        return null;
+      }
+    };
+
+    // Start the profile lookup NOW when the description already names the author —
+    // which both the divine-mobile and divine-web ticket formats do. In that case it
+    // does not depend on the event lookup, and running the two back to back spends
+    // ENRICHMENT_TIMEOUT_MS twice on every ticket to serve only the minority that
+    // need the author derived. That constant is sized so ONE relay round-trip cannot
+    // push this handler toward Zendesk's delivery timeout (see relay-profile.ts), so
+    // doubling it is exactly the budget it was written to protect. Measured against a
+    // relay stub slower than the timeout: 3.3s back-to-back-free vs 6.4s serialized.
+    let profilePromise = authorPubkey ? fetchProfile(authorPubkey) : null;
+
+    // Fetch the reported event ONCE (best-effort). It serves two purposes: derive
+    // the author when the description omitted it — account-level actions match
+    // tickets on author_pubkey, so an event-only ticket would otherwise never be
+    // closed by a whole-account action — and label the content kind for the note.
+    // Presence-first, not success-first: under the relay contract an event can be
+    // streamed before a non-EOSE close leaves success=false, and we still want it.
+    let reportedEventKind: number | null = null;
+    if (eventId) {
+      try {
+        const evtRes = await withTimeout(
+          queryRelay({ ids: [eventId], limit: 1 }, env.RELAY_URL),
+          ENRICHMENT_TIMEOUT_MS,
+        );
+        const evt = evtRes?.events?.length ? (evtRes.events[0] as { kind?: number; pubkey?: string }) : undefined;
+        if (evt) {
+          if (typeof evt.kind === 'number') reportedEventKind = evt.kind;
+          if (!authorPubkey && evt.pubkey && /^[a-f0-9]{64}$/i.test(evt.pubkey)) {
+            authorPubkey = evt.pubkey.toLowerCase();
+          }
+        }
+      } catch (err) {
+        console.warn('[handleParseReport] reported-event lookup failed (continuing):', err);
+      }
+    }
+
+    // Store mapping in D1 (author_pubkey now includes any value derived above).
+    if (env.DB) {
+      // ON CONFLICT DO NOTHING closes the race the already-processed check above
+      // cannot: the relay fetch now sits between that check and this INSERT, so two
+      // concurrent deliveries can both pass the check. The loser must return here;
+      // the winning delivery owns both the stored row and the Zendesk note.
+      const inserted = await env.DB.prepare(`
         INSERT INTO zendesk_tickets (ticket_id, event_id, author_pubkey, violation_type, status)
         VALUES (?, ?, ?, ?, 'open')
-      `).bind(ticket_id, event_id, author_pubkey, violation_type).run();
+        ON CONFLICT(ticket_id) DO NOTHING
+      `).bind(ticket_id, eventId, authorPubkey, violation_type).run();
+      if (inserted.meta?.changes === 0) {
+        console.log(`[handleParseReport] Ticket ${ticket_id} inserted concurrently, skipping duplicate note`);
+        return jsonResponse({ success: true, ticket_id, event_id: eventId, author_pubkey: authorPubkey, violation_type, skipped: true }, 200, corsHeaders);
+      }
     }
 
-    // Enrich the note with profile + event context (best-effort; never block the note).
-    // The reported subject's kind-0 gives a human-legible name/nip05 and flags restored OG
-    // Vine accounts; the reported event's kind labels the content type (video/note/etc).
-    let profile: ReportedProfile | null = null;
-    let reportedEventKind: number | null = null;
-    try {
-      const [profRes, evtRes] = await Promise.all([
-        author_pubkey
-          ? withTimeout(
-              queryRelay({ authors: [author_pubkey], kinds: [0], limit: 1 }, env.RELAY_URL),
-              ENRICHMENT_TIMEOUT_MS,
-            )
-          : Promise.resolve(null),
-        event_id
-          ? withTimeout(
-              queryRelay({ ids: [event_id], limit: 1 }, env.RELAY_URL),
-              ENRICHMENT_TIMEOUT_MS,
-            )
-          : Promise.resolve(null),
-      ]);
-      if (profRes?.success && profRes.events?.length) {
-        profile = parseKind0Profile(profRes.events[0] as { content?: string; tags?: string[][] });
-      }
-      if (evtRes?.success && evtRes.events?.length) {
-        const kind = (evtRes.events[0] as { kind?: number }).kind;
-        reportedEventKind = typeof kind === 'number' ? kind : null;
-      }
-    } catch (err) {
-      console.warn('[handleParseReport] enrichment fetch failed (continuing without it):', err);
-    }
+    // Only reachable when the description omitted the author: it was just derived
+    // from the event, so this lookup could not have been started any earlier.
+    if (!profilePromise && authorPubkey) profilePromise = fetchProfile(authorPubkey);
+    const profile: ReportedProfile | null = profilePromise ? await profilePromise : null;
 
     const note = buildReportNote({
-      eventId: event_id,
-      authorPubkey: author_pubkey,
+      eventId,
+      authorPubkey,
       violationType: violation_type,
       environment: env.ENVIRONMENT,
       keycastUrl: env.KEYCAST_URL,
@@ -3073,7 +3183,7 @@ async function handleParseReport(
     // Add internal note to Zendesk
     await addZendeskInternalNote(ticket_id, note, env);
 
-    return jsonResponse({ success: true, ticket_id, event_id, author_pubkey, violation_type }, 200, corsHeaders);
+    return jsonResponse({ success: true, ticket_id, event_id: eventId, author_pubkey: authorPubkey, violation_type }, 200, corsHeaders);
   } catch (error) {
     console.error('[handleParseReport] Error:', error);
     return jsonResponse(

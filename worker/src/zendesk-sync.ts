@@ -35,6 +35,12 @@ export async function resolveZendeskCreds(env: Pick<ZendeskSyncEnv, 'ZENDESK_SUB
   return { subdomain, email, apiToken };
 }
 
+async function requireZendeskSubdomain(env: Pick<ZendeskSyncEnv, 'ZENDESK_SUBDOMAIN'>): Promise<string> {
+  const subdomain = await resolveString(env.ZENDESK_SUBDOMAIN);
+  if (!subdomain) throw new Error('Zendesk subdomain is not configured');
+  return subdomain;
+}
+
 function buildResolutionCustomFields(env: ZendeskSyncEnv): Array<{ id: number; value: string }> | undefined {
   if (!env.ZENDESK_FIELD_CATEGORY || !env.ZENDESK_FIELD_ISSUE) {
     return undefined;
@@ -79,18 +85,38 @@ export async function ensureZendeskTable(db: D1Database): Promise<void> {
   } catch {
     // Index might already exist
   }
+
+  // Expression indexes for the case-insensitive linkage lookups (getLinkedTickets /
+  // syncZendeskAfterAction query `WHERE lower(event_id|author_pubkey) = ?`). Without
+  // these the raw-column indexes above can't serve those queries, forcing a full
+  // scan that grows with the ticket table.
+  try {
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_zendesk_event_lower ON zendesk_tickets(lower(event_id))`).run();
+  } catch {
+    // Index might already exist
+  }
+
+  try {
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_zendesk_pubkey_lower ON zendesk_tickets(lower(author_pubkey))`).run();
+  } catch {
+    // Index might already exist
+  }
 }
 
+// Returns true only when the note (and, when solve=true, the status change)
+// actually landed at Zendesk. Callers that treat closure as best-effort (the
+// moderation-action side effect) may ignore the result; callers for which the
+// Zendesk write IS the operation (manual close) must check it.
 export async function addZendeskInternalNote(
   ticketId: number,
   note: string,
   env: ZendeskSyncEnv,
   solve: boolean = false
-): Promise<void> {
+): Promise<boolean> {
   const creds = await resolveZendeskCreds(env);
   if (!creds) {
     console.warn('[addZendeskInternalNote] Missing Zendesk credentials, skipping');
-    return;
+    return false;
   }
 
   try {
@@ -134,9 +160,12 @@ export async function addZendeskInternalNote(
     if (!response.ok) {
       const errorText = await response.text();
       console.error(`[addZendeskInternalNote] Failed: ${response.status} - ${errorText}`);
+      return false;
     }
+    return true;
   } catch (error) {
     console.error('[addZendeskInternalNote] Error:', error);
+    return false;
   }
 }
 
@@ -157,23 +186,32 @@ export async function syncZendeskAfterAction(
   try {
     await ensureZendeskTable(env.DB);
 
-    let linked: { ticket_id: number } | null = null;
+    // Match case-insensitively: event ids and pubkeys are stored lowercase going
+    // forward, but older rows may be mixed-case, and the action-side ids arrive
+    // lowercased. lower() on the column keeps the match robust either way.
+    const id = targetId.toLowerCase();
+    let linkedTickets: Array<{ ticket_id: number }> = [];
 
     if (targetType === 'event') {
-      console.log('[syncZendeskAfterAction] Querying for event_id:', targetId);
-      linked = await env.DB.prepare(
-        `SELECT ticket_id FROM zendesk_tickets WHERE event_id = ? AND status = 'open'`
-      ).bind(targetId).first();
+      console.log('[syncZendeskAfterAction] Querying for event_id:', id);
+      const res = await env.DB.prepare(
+        `SELECT ticket_id FROM zendesk_tickets WHERE lower(event_id) = ? AND status = 'open'`
+      ).bind(id).all<{ ticket_id: number }>();
+      linkedTickets = res.results ?? [];
     } else if (targetType === 'pubkey') {
-      console.log('[syncZendeskAfterAction] Querying for author_pubkey:', targetId);
-      linked = await env.DB.prepare(
-        `SELECT ticket_id FROM zendesk_tickets WHERE author_pubkey = ? AND status = 'open'`
-      ).bind(targetId).first();
+      console.log('[syncZendeskAfterAction] Querying for author_pubkey:', id);
+      const res = await env.DB.prepare(
+        `SELECT ticket_id FROM zendesk_tickets WHERE lower(author_pubkey) = ? AND status = 'open'`
+      ).bind(id).all<{ ticket_id: number }>();
+      linkedTickets = res.results ?? [];
     }
 
-    console.log('[syncZendeskAfterAction] Query result:', linked);
+    console.log('[syncZendeskAfterAction] Query result:', linkedTickets);
 
-    if (!linked?.ticket_id) {
+    // Close EVERY open ticket linked to this target, not just the first. Multiple
+    // reports on one piece of content (or one author) produce multiple tickets;
+    // a single action resolves all of them.
+    if (linkedTickets.length === 0) {
       console.log('[syncZendeskAfterAction] No linked open ticket found, skipping');
       return;
     }
@@ -207,21 +245,121 @@ export async function syncZendeskAfterAction(
       `**Time:** ${timestamp}`,
     ].join('\n');
 
-    await addZendeskInternalNote(linked.ticket_id, note, env, isResolution);
+    for (const { ticket_id } of linkedTickets) {
+      const posted = await addZendeskInternalNote(ticket_id, note, env, isResolution);
 
-    if (isResolution) {
-      await env.DB.prepare(`
-        UPDATE zendesk_tickets
-        SET status = 'resolved',
-            resolved_at = CURRENT_TIMESTAMP,
-            resolution_action = ?,
-            resolution_moderator = ?
-        WHERE ticket_id = ?
-      `).bind(action, moderator, linked.ticket_id).run();
+      // Record the D1 resolution ONLY when Zendesk actually confirmed the close.
+      // The panel reads this status; marking a row resolved after a failed solve
+      // would show "Closed ✓" over a still-open ticket and hide the Close button.
+      // Leaving it 'open' keeps the row honest and lets the next action (or a manual
+      // close) retry. Still best-effort: this never throws — the moderation action
+      // itself already succeeded.
+      if (isResolution && posted) {
+        await env.DB.prepare(`
+          UPDATE zendesk_tickets
+          SET status = 'resolved',
+              resolved_at = CURRENT_TIMESTAMP,
+              resolution_action = ?,
+              resolution_moderator = ?
+          WHERE ticket_id = ?
+        `).bind(action, moderator, ticket_id).run();
+        console.log(`[syncZendeskAfterAction] Resolved ticket #${ticket_id} with action: ${action}`);
+      } else if (isResolution) {
+        console.warn(`[syncZendeskAfterAction] Zendesk solve failed for ticket #${ticket_id}; left open for retry`);
+      }
     }
-
-    console.log(`[syncZendeskAfterAction] Updated ticket #${linked.ticket_id} with action: ${action}`);
   } catch (error) {
     console.error('[syncZendeskAfterAction] Error:', error);
   }
+}
+
+export interface LinkedTicket {
+  ticket_id: number;
+  status: string;
+  url: string;
+}
+
+export function zendeskTicketUrl(subdomain: string, ticketId: number): string {
+  return `https://${subdomain}.zendesk.com/agent/tickets/${ticketId}`;
+}
+
+// Look up the Zendesk tickets linked to an event and/or a pubkey, deduped by
+// ticket_id (a ticket can match on both). Matches case-insensitively, mirroring
+// the closure query. Returns every linked ticket regardless of status so the UI
+// can show closed ones as an affirmative "done" state, not just openable ones.
+export async function getLinkedTickets(
+  env: ZendeskSyncEnv,
+  target: { eventId?: string; pubkey?: string },
+): Promise<LinkedTicket[]> {
+  if (!env.DB) throw new Error('D1 database is not configured');
+  await ensureZendeskTable(env.DB);
+  const subdomain = await requireZendeskSubdomain(env);
+
+  const byId = new Map<number, LinkedTicket>();
+  const add = (rows: Array<{ ticket_id: number; status: string }>) => {
+    for (const r of rows) {
+      byId.set(r.ticket_id, { ticket_id: r.ticket_id, status: r.status, url: zendeskTicketUrl(subdomain, r.ticket_id) });
+    }
+  };
+
+  if (target.eventId) {
+    const r = await env.DB.prepare(
+      `SELECT ticket_id, status FROM zendesk_tickets WHERE lower(event_id) = ?`
+    ).bind(target.eventId.toLowerCase()).all<{ ticket_id: number; status: string }>();
+    add(r.results ?? []);
+  }
+  if (target.pubkey) {
+    const r = await env.DB.prepare(
+      `SELECT ticket_id, status FROM zendesk_tickets WHERE lower(author_pubkey) = ?`
+    ).bind(target.pubkey.toLowerCase()).all<{ ticket_id: number; status: string }>();
+    add(r.results ?? []);
+  }
+  return [...byId.values()];
+}
+
+// Close a single ticket from Relay Manager: internal note + Zendesk solve + D1
+// status. Deliberately does NOT write a moderation_decisions row — closing a
+// ticket is not the same as actioning content (it may be a duplicate or no-op).
+export async function closeTicketById(
+  env: ZendeskSyncEnv,
+  ticketId: number,
+  moderator: string | null,
+): Promise<boolean> {
+  if (!env.DB) throw new Error('D1 database is not configured');
+  await ensureZendeskTable(env.DB);
+
+  // This endpoint is a fallback for tickets surfaced by the linked-ticket lookup,
+  // not a general-purpose Zendesk mutation API. Refuse ids that Relay Manager does
+  // not track before making the external write.
+  const linked = await env.DB.prepare(
+    `SELECT status FROM zendesk_tickets WHERE ticket_id = ?`
+  ).bind(ticketId).first<{ status: string }>();
+  if (!linked) return false;
+  if (linked.status !== 'open') return true;
+
+  const note = [
+    '📋 **Ticket closed from Relay Manager**',
+    '',
+    `**Closed by:** ${moderator ?? 'unknown'}`,
+    `**Time:** ${new Date().toISOString()}`,
+  ].join('\n');
+  const solved = await addZendeskInternalNote(ticketId, note, env, true);
+  if (!solved) {
+    // Manual close is this endpoint's PRIMARY operation, not a best-effort side
+    // effect. If the Zendesk solve did not land (creds missing, non-2xx, network),
+    // do NOT mark D1 resolved — that would flip the panel to "Closed ✓" over a
+    // still-open ticket and hide the retry. Surface it so the UI keeps the button.
+    throw new Error('Zendesk solve did not succeed; ticket not marked resolved');
+  }
+  // AND status = 'open' protects the audit trail if another action resolves the
+  // ticket after the presence check and before this update.
+  await env.DB.prepare(`
+    UPDATE zendesk_tickets
+    SET status = 'resolved',
+        resolved_at = CURRENT_TIMESTAMP,
+        resolution_action = 'manual_close',
+        resolution_moderator = ?
+    WHERE ticket_id = ? AND status = 'open'
+  `).bind(moderator, ticketId).run();
+  return true;
 }
