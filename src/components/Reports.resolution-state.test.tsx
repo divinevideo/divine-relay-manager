@@ -339,6 +339,10 @@ describe('resolution sources genuinely hide handled work (controls)', () => {
     expect(screen.getByText('All (2)')).toBeInTheDocument();
   });
 
+  // Anchored on the count first, like its three siblings. A lone negative
+  // assertion inside waitFor passes on its first tick, before the queue has
+  // rendered anything -- so this read green with cross-resolution ripped out
+  // entirely, which is the one thing it is here to catch.
   it('still hides an event group when all its reports name the banned author', async () => {
     stubFetch({
       labels: 'empty', bannedPubkeys: 'resolves', bannedEvents: 'empty', decisions: 'empty',
@@ -347,7 +351,8 @@ describe('resolution sources genuinely hide handled work (controls)', () => {
     });
     renderReports();
 
-    await waitFor(() => expect(screen.queryByText(AUTHORED_NOTE)).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/0 pending/i)).toBeInTheDocument());
+    expect(screen.queryByText(AUTHORED_NOTE)).not.toBeInTheDocument();
   });
 });
 
