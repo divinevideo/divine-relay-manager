@@ -44,6 +44,25 @@ const EVENT_REPORT = {
   sig: 'e'.repeat(128),
 };
 
+// An event report that also names its author, which is what lets a ban on the
+// ACCOUNT clear reports filed against its individual posts. EVENT_REPORT above
+// deliberately carries no `p` tag, so the two together separate "hidden because
+// the author is banned" from "hidden because it is an event report".
+const AUTHORED_EVENT_ID = '7'.repeat(64);
+const AUTHORED_NOTE = nip19.noteEncode(AUTHORED_EVENT_ID);
+
+function authoredEventReport(pTag: string) {
+  return {
+    id: '8'.repeat(64),
+    pubkey: 'b'.repeat(64),
+    created_at: 1751000060,
+    kind: 1984,
+    tags: [['e', AUTHORED_EVENT_ID, 'spam'], ['p', pTag]],
+    content: 'a post by the reported account',
+    sig: 'e'.repeat(128),
+  };
+}
+
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -65,6 +84,9 @@ interface SourceState {
   // banned-events resolves EVENT targets, not pubkey targets, so exercising
   // it for real needs a second fixture report with an `e` tag in the queue.
   includeEventReport?: boolean;
+  // An `e`-tagged report that also carries a `p` tag. Pass the pubkey the report
+  // names as the author; omit for none.
+  authoredEventReportP?: string;
 }
 
 function stubFetch(state: SourceState) {
@@ -76,7 +98,9 @@ function stubFetch(state: SourceState) {
 
     if (url.includes('/api/reports')) {
       if (state.reports === 'error') return jsonResponse({ success: false, error: 'relay unreachable' }, 500);
-      const events = state.includeEventReport ? [REPORT, EVENT_REPORT] : [REPORT];
+      const events: unknown[] = [REPORT];
+      if (state.includeEventReport) events.push(EVENT_REPORT);
+      if (state.authoredEventReportP) events.push(authoredEventReport(state.authoredEventReportP));
       return jsonResponse({ success: true, events });
     }
 
@@ -209,6 +233,49 @@ describe('resolution sources genuinely hide handled work (controls)', () => {
 
     expect(await screen.findByText(REPORTED_NOTE)).toBeInTheDocument();
     expect(screen.getByText(REPORTED_NPUB)).toBeInTheDocument();
+  });
+
+  // Banning an ACCOUNT clears the account's own report, but the reports filed
+  // against its individual posts were matched only by their own event key, so
+  // they stayed in the queue as unhandled work after the account was gone.
+  // banned-events is deliberately empty in these: the relay does not register an
+  // event under banpubkey, which is the whole reason the author path exists.
+  it('hides an event target once its author is banned, with the event itself unbanned', async () => {
+    stubFetch({
+      labels: 'empty', bannedPubkeys: 'resolves', bannedEvents: 'empty', decisions: 'empty',
+      includeEventReport: true, authoredEventReportP: REPORTED_PUBKEY,
+    });
+    renderReports();
+
+    await waitFor(() => expect(screen.getByText(/1 pending/i)).toBeInTheDocument());
+    expect(screen.queryByText(AUTHORED_NOTE)).not.toBeInTheDocument();
+    // The event report that names no author is untouched, so this measures the
+    // author match specifically rather than event reports being hidden wholesale.
+    expect(screen.getByText(REPORTED_NOTE)).toBeInTheDocument();
+  });
+
+  it('keeps an event target whose author is not banned', async () => {
+    stubFetch({
+      labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty',
+      authoredEventReportP: REPORTED_PUBKEY,
+    });
+    renderReports();
+
+    expect(await screen.findByText(AUTHORED_NOTE)).toBeInTheDocument();
+  });
+
+  // `p` tag values are reporter-authored and validated as hex without being
+  // case-normalized, while the relay's ban list is lowercase. An uppercase tag
+  // must still match, or the ban silently fails to clear the post's report.
+  it('hides an event target whose author is banned but written uppercase in the tag', async () => {
+    stubFetch({
+      labels: 'empty', bannedPubkeys: 'resolves', bannedEvents: 'empty', decisions: 'empty',
+      authoredEventReportP: REPORTED_PUBKEY.toUpperCase(),
+    });
+    renderReports();
+
+    await waitFor(() => expect(screen.getByText(/0 pending/i)).toBeInTheDocument());
+    expect(screen.queryByText(AUTHORED_NOTE)).not.toBeInTheDocument();
   });
 });
 
