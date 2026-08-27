@@ -472,8 +472,8 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   // tall action footer used to starve the content area (it was a shrink-0 block
   // outside the scroll), squeezing the report context to a sliver and making it
   // unreachable. Scrolling the pane keeps the footer pinned to the bottom when
-  // it fits (tall screens) and lets the content + footer scroll together when it
-  // does not (short laptops).
+  // the content fits and lets the content + footer scroll together when it does
+  // not.
   return (
     <div className="h-full flex flex-col overflow-y-auto">
       {/* Dialogs - rendered as portals, don't affect flex layout */}
