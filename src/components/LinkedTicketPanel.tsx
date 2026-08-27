@@ -26,7 +26,7 @@ export function LinkedTicketPanel({ eventId, pubkey }: LinkedTicketPanelProps) {
 
   const queryKey = ['linked-tickets', eventId ?? null, pubkey ?? null];
 
-  const { data: tickets, isLoading } = useQuery({
+  const { data: tickets, isLoading, isError } = useQuery({
     queryKey,
     queryFn: () => api.getLinkedTickets({ eventId, pubkey }),
     enabled: !!(eventId || pubkey),
@@ -52,6 +52,15 @@ export function LinkedTicketPanel({ eventId, pubkey }: LinkedTicketPanelProps) {
   if (!eventId && !pubkey) return null;
   if (isLoading) {
     return <p className="text-sm text-muted-foreground">Checking linked tickets…</p>;
+  }
+  // A failed read must not render as "no ticket". The lookup is only trustworthy
+  // once it resolves without error, and the two states are indistinguishable to a
+  // moderator otherwise -- including the interim where this ships ahead of the
+  // worker endpoints and every lookup 404s. Same rule as AgeReviewDetail's
+  // contentPresenceKnown. The query refetches on window focus, so this clears
+  // itself once the endpoint answers.
+  if (isError) {
+    return <p className="text-sm text-muted-foreground">Couldn&apos;t check linked tickets</p>;
   }
   if (!tickets || tickets.length === 0) {
     return <p className="text-sm text-muted-foreground">No linked Zendesk ticket found</p>;
