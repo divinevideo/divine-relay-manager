@@ -529,3 +529,93 @@ describe('POST /api/tickets/:id/close id validation', () => {
     expect(mockFetch.mock.calls[0][0]).toBe('https://rabblelabs.zendesk.com/api/v2/tickets/926');
   });
 });
+
+// A relay mock that holds every REQ answer until released, so a test can assert
+// which lookups were in flight at the same time.
+function mockRelayGated(events: Array<Record<string, unknown>>) {
+  const sent: Array<Record<string, unknown>> = [];
+  const pending: Array<() => void> = [];
+
+  vi.spyOn(globalThis, 'WebSocket').mockImplementation((function () {
+    const listeners = new Map<string, Array<(value?: unknown) => void>>();
+    queueMicrotask(() => listeners.get('open')?.forEach((h) => h()));
+    return {
+      addEventListener: (e: string, h: (value?: unknown) => void) => {
+        listeners.set(e, [...(listeners.get(e) || []), h]);
+      },
+      send: vi.fn((payload: string) => {
+        const parsed = JSON.parse(payload);
+        if (parsed[0] !== 'REQ') return;
+        const [, subId, filter] = parsed;
+        sent.push(filter);
+        pending.push(() => {
+          const emit = (m: unknown[]) =>
+            listeners.get('message')?.forEach((h) => h({ data: JSON.stringify(m) }));
+          for (const event of events) {
+            const okIds = !filter.ids || filter.ids.includes(event.id);
+            const okAuthors = !filter.authors || filter.authors.includes(event.pubkey);
+            const okKinds = !filter.kinds || filter.kinds.includes(event.kind);
+            if (okIds && okAuthors && okKinds) emit(['EVENT', subId, event]);
+          }
+          emit(['EOSE', subId]);
+        });
+      }),
+      close: vi.fn(),
+    };
+  } as unknown as typeof WebSocket));
+
+  return { sent, flush: () => { while (pending.length) pending.shift()!(); } };
+}
+
+describe('handleParseReport enrichment concurrency', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('overlaps the event and profile lookups when the description already names the author', async () => {
+    const eventId = 'e'.repeat(64);
+    const author = 'a'.repeat(64);
+    const relay = mockRelayGated([
+      { id: eventId, kind: 32, pubkey: author, tags: [], content: '' },
+      { id: 'f'.repeat(64), kind: 0, pubkey: author, tags: [], content: '{"name":"someone"}' },
+    ]);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, text: async () => '' }));
+
+    const description = `Event ID: ${eventId}\nAuthor Pubkey: ${author}`;
+    const pending = worker.fetch(makeParseReportRequest(description, 910), makeEnv(), ctx);
+
+    // Both relay round-trips must be in flight before either is answered. Running
+    // them back to back spends ENRICHMENT_TIMEOUT_MS twice on a ticket that needs
+    // no author derivation, doubling the budget sized to stay inside Zendesk's
+    // webhook delivery timeout.
+    await vi.waitFor(() => expect(relay.sent).toHaveLength(2));
+    expect(relay.sent.map((f) => ('ids' in f ? 'event' : 'profile')).sort()).toEqual(['event', 'profile']);
+
+    relay.flush();
+    const response = await pending;
+    expect(response.status).toBe(200);
+    expect((await response.json() as Record<string, unknown>).author_pubkey).toBe(author);
+  });
+
+  it('still derives the author from the event when the description omits it', async () => {
+    const eventId = 'b'.repeat(64);
+    const author = 'c'.repeat(64);
+    const relay = mockRelayGated([
+      { id: eventId, kind: 32, pubkey: author, tags: [], content: '' },
+      { id: 'f'.repeat(64), kind: 0, pubkey: author, tags: [], content: '{"name":"someone"}' },
+    ]);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, text: async () => '' }));
+
+    const pending = worker.fetch(makeParseReportRequest(`Event ID: ${eventId}`, 911), makeEnv(), ctx);
+
+    // Only the event lookup can start; the profile lookup has no author yet.
+    await vi.waitFor(() => expect(relay.sent).toHaveLength(1));
+    relay.flush();
+    await vi.waitFor(() => expect(relay.sent).toHaveLength(2));
+    relay.flush();
+
+    const data = await (await pending).json() as Record<string, unknown>;
+    expect(data.author_pubkey).toBe(author);
+    expect(relay.sent[1]).toMatchObject({ authors: [author], kinds: [0] });
+  });
+});

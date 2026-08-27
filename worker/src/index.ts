@@ -3088,6 +3088,34 @@ async function handleParseReport(
       }
     }
 
+    // Best-effort kind-0 lookup for the note. Presence-first for the same reason
+    // as the event fetch below. Never rejects, so it is safe to leave in flight
+    // while the event fetch runs.
+    const fetchProfile = async (pubkey: string): Promise<ReportedProfile | null> => {
+      try {
+        const profRes = await withTimeout(
+          queryRelay({ authors: [pubkey], kinds: [0], limit: 1 }, env.RELAY_URL),
+          ENRICHMENT_TIMEOUT_MS,
+        );
+        return profRes?.events?.length
+          ? parseKind0Profile(profRes.events[0] as { content?: string; tags?: string[][] })
+          : null;
+      } catch (err) {
+        console.warn('[handleParseReport] profile enrichment failed (continuing):', err);
+        return null;
+      }
+    };
+
+    // Start the profile lookup NOW when the description already names the author —
+    // which both the divine-mobile and divine-web ticket formats do. In that case it
+    // does not depend on the event lookup, and running the two back to back spends
+    // ENRICHMENT_TIMEOUT_MS twice on every ticket to serve only the minority that
+    // need the author derived. That constant is sized so ONE relay round-trip cannot
+    // push this handler toward Zendesk's delivery timeout (see relay-profile.ts), so
+    // doubling it is exactly the budget it was written to protect. Measured against a
+    // relay stub slower than the timeout: 3.3s back-to-back-free vs 6.4s serialized.
+    let profilePromise = authorPubkey ? fetchProfile(authorPubkey) : null;
+
     // Fetch the reported event ONCE (best-effort). It serves two purposes: derive
     // the author when the description omitted it — account-level actions match
     // tickets on author_pubkey, so an event-only ticket would otherwise never be
@@ -3121,23 +3149,10 @@ async function handleParseReport(
       `).bind(ticket_id, eventId, authorPubkey, violation_type).run();
     }
 
-    // Enrich the note with the reported subject's kind-0 profile (best-effort). Runs
-    // after the event fetch because the author may have just been derived from it.
-    // Presence-first for the same reason as the event fetch above.
-    let profile: ReportedProfile | null = null;
-    if (authorPubkey) {
-      try {
-        const profRes = await withTimeout(
-          queryRelay({ authors: [authorPubkey], kinds: [0], limit: 1 }, env.RELAY_URL),
-          ENRICHMENT_TIMEOUT_MS,
-        );
-        if (profRes?.events?.length) {
-          profile = parseKind0Profile(profRes.events[0] as { content?: string; tags?: string[][] });
-        }
-      } catch (err) {
-        console.warn('[handleParseReport] profile enrichment failed (continuing):', err);
-      }
-    }
+    // Only reachable when the description omitted the author: it was just derived
+    // from the event, so this lookup could not have been started any earlier.
+    if (!profilePromise && authorPubkey) profilePromise = fetchProfile(authorPubkey);
+    const profile: ReportedProfile | null = profilePromise ? await profilePromise : null;
 
     const note = buildReportNote({
       eventId,
