@@ -162,7 +162,6 @@ function consolidateReports(reports: NostrEvent[]): ConsolidatedReport[] {
         reporters: [],
         latestReport: report,
         oldestReport: report,
-        authorPubkey: getReportTargetIds(report).pubkey,
       });
     }
 
@@ -183,6 +182,25 @@ function consolidateReports(reports: NostrEvent[]): ConsolidatedReport[] {
     if (report.created_at < consolidated.oldestReport.created_at) {
       consolidated.oldestReport = report;
     }
+  }
+
+  // Derive each group's author from ALL its reports, not just the first-processed
+  // (newest) one. Cross-resolution hides a whole consolidated group from the default
+  // queue, so taking the author from a single unverified `p` tag is gameable: a newer
+  // report naming any banned pubkey would bury the genuine older report with it
+  // (NIP-56 warns reports "can be easily gamed"). Require agreement instead — cross-
+  // resolve only when every report that carries a `p` tag names the same author.
+  // Lowercased so a casing difference is not a false disagreement; undefined when the
+  // reports conflict or none carry a `p` tag (a spec-valid blob report has none), in
+  // which case the group is never cross-resolved.
+  for (const consolidated of byTarget.values()) {
+    const authors = new Set(
+      consolidated.reports
+        .map(r => getReportTargetIds(r).pubkey)
+        .filter((p): p is string => !!p)
+        .map(p => p.toLowerCase()),
+    );
+    consolidated.authorPubkey = authors.size === 1 ? [...authors][0] : undefined;
   }
 
   // Sort by number of reports (most reported first), then by latest report date

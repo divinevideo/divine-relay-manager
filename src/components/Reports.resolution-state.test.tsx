@@ -51,11 +51,11 @@ const EVENT_REPORT = {
 const AUTHORED_EVENT_ID = '7'.repeat(64);
 const AUTHORED_NOTE = nip19.noteEncode(AUTHORED_EVENT_ID);
 
-function authoredEventReport(pTag: string) {
+function authoredEventReport(pTag: string, id = '8'.repeat(64), created_at = 1751000060) {
   return {
-    id: '8'.repeat(64),
+    id,
     pubkey: 'b'.repeat(64),
-    created_at: 1751000060,
+    created_at,
     kind: 1984,
     tags: [['e', AUTHORED_EVENT_ID, 'spam'], ['p', pTag]],
     content: 'a post by the reported account',
@@ -89,6 +89,10 @@ interface SourceState {
   // An `e`-tagged report that also carries a `p` tag. Pass the pubkey the report
   // names as the author; omit for none.
   authoredEventReportP?: string;
+  // A SECOND `e`-tagged report on the SAME event, newer than the first, naming this
+  // pubkey as author. Same value => the group's reports agree; a different value =>
+  // they disagree, which must not cross-resolve (the burying case).
+  secondAuthoredEventReportP?: string;
 }
 
 function stubFetch(state: SourceState) {
@@ -103,6 +107,9 @@ function stubFetch(state: SourceState) {
       const events: unknown[] = [REPORT];
       if (state.includeEventReport) events.push(EVENT_REPORT);
       if (state.authoredEventReportP) events.push(authoredEventReport(state.authoredEventReportP));
+      if (state.secondAuthoredEventReportP) {
+        events.push(authoredEventReport(state.secondAuthoredEventReportP, '9'.repeat(64), 1751000070));
+      }
       return jsonResponse({ success: true, events });
     }
 
@@ -296,6 +303,32 @@ describe('resolution sources genuinely hide handled work (controls)', () => {
     // queue has actually rendered before the absence below is asserted.
     expect(await screen.findByText(REPORTED_NPUB)).toBeInTheDocument();
     expect(screen.queryByText(AUTHORED_NOTE)).not.toBeInTheDocument();
+  });
+
+  // Anyone can publish a kind-1984, and cross-resolution hides a whole consolidated
+  // group. Taking the author from the newest report alone lets a newer report name a
+  // banned pubkey and bury the genuine older report with it. Agreement is required.
+  it('does not bury an event group when its reports disagree on the author', async () => {
+    stubFetch({
+      labels: 'empty', bannedPubkeys: 'resolves', bannedEvents: 'empty', decisions: 'empty',
+      authoredEventReportP: 'a'.repeat(64),             // genuine author, not banned
+      secondAuthoredEventReportP: REPORTED_PUBKEY,       // banned, newer, same event
+    });
+    renderReports();
+
+    // The group stays visible because its two reports name different authors.
+    expect(await screen.findByText(AUTHORED_NOTE)).toBeInTheDocument();
+  });
+
+  it('still hides an event group when all its reports name the banned author', async () => {
+    stubFetch({
+      labels: 'empty', bannedPubkeys: 'resolves', bannedEvents: 'empty', decisions: 'empty',
+      authoredEventReportP: REPORTED_PUBKEY,
+      secondAuthoredEventReportP: REPORTED_PUBKEY,       // second report, same author
+    });
+    renderReports();
+
+    await waitFor(() => expect(screen.queryByText(AUTHORED_NOTE)).not.toBeInTheDocument());
   });
 });
 

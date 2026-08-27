@@ -49,6 +49,7 @@ import { BulkDeleteByKind } from "@/components/BulkDeleteByKind";
 import { EventActions } from "@/components/EventActions";
 import { UserActions } from "@/components/UserActions";
 import { LinkedTicketPanel } from "@/components/LinkedTicketPanel";
+import { linkedTicketTarget } from "@/lib/linkedTicketTarget";
 import { CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, getReportCategory } from "@/lib/constants";
 import { KIND_NAMES } from "@/lib/kindNames";
 import { Flag, CheckCircle, History, Ban, ShieldX, Link2, User, FileText, Repeat2, FileCode, RefreshCw, EyeOff, Eye } from "lucide-react";
@@ -122,10 +123,11 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
 
   const context = useReportContext(report);
   const reportedPubkey = context.reportedUser.pubkey;
-  // Linked-ticket panel inputs: the reported event (when the target is an event)
-  // and the reported author. Both feed the /api/tickets lookup.
-  const linkedTicketEventId = context.target?.type === 'event' ? context.target.value : undefined;
-  const linkedTicketPubkey = reportedPubkey ?? undefined;
+  // Linked-ticket panel inputs, scoped to the report's own target (see
+  // linkedTicketTarget): an event-scoped report looks up only its event, a
+  // pubkey-scoped report looks up the author.
+  const { eventId: linkedTicketEventId, pubkey: linkedTicketPubkey } =
+    linkedTicketTarget(context.target, reportedPubkey);
 
   // Banned event fallback: if thread found no event and target is an event ID, try management API
   const targetEventId = context.target?.type === 'event' ? context.target.value : undefined;
