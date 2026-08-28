@@ -21,8 +21,8 @@ import {
   buildParentOutreachBody,
   type AgeReviewEnv,
 } from './age-review';
-import type { AgeReviewCase } from '../../shared/age-review';
-import { FUNNEL_ZENDESK_QUERIES } from '../../shared/age-review';
+import type { AgeReviewCase, MinorReviewResponseDeadline } from '../../shared/age-review';
+import { deriveResponseClock, FUNNEL_ZENDESK_QUERIES, toUtcIso } from '../../shared/age-review';
 import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, createMinorAccount } from './keycast-client';
 import { suspendPubkey, unsuspendPubkey, banPubkey } from './nip86';
 
@@ -208,6 +208,10 @@ describe('handleUpdateAgeReviewCase', () => {
     vi.mocked(banUser).mockClear();
   });
 
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('transitions state', async () => {
     const req = new Request('https://api.test/api/age-review/cases/case-1', {
       method: 'PATCH',
@@ -269,6 +273,46 @@ describe('handleUpdateAgeReviewCase', () => {
       (c: string[]) => c[0]?.includes('UPDATE') && c[0]?.includes('clock_paused = 1')
     );
     expect(updateCall).toBeTruthy();
+  });
+
+  it('clamps an expired clock to zero when pausing it', async () => {
+    const expiredCase = makeCase({ deadline_at: '2026-08-25T12:00:00.000Z' });
+    const pausedCase = {
+      ...expiredCase,
+      clock_paused: 1,
+      clock_paused_at: '2026-08-26T12:00:00.000Z',
+      remaining_days_when_paused: 0,
+    };
+    const bound: unknown[][] = [];
+    let selectCount = 0;
+    const expiredDb = {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        bind: vi.fn().mockImplementation((...params: unknown[]) => {
+          bound.push(params);
+          return {
+            first: vi.fn().mockImplementation(async () => {
+              if (sql === 'SELECT * FROM age_review_cases WHERE id = ?') {
+                selectCount += 1;
+                return selectCount === 1 ? expiredCase : pausedCase;
+              }
+              return null;
+            }),
+            run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+          };
+        }),
+      })),
+    };
+    vi.useFakeTimers();
+    vi.setSystemTime('2026-08-26T12:00:00.000Z');
+
+    const req = new Request('https://api.test/api/age-review/cases/case-1', {
+      method: 'PATCH',
+      body: JSON.stringify({ clock_paused: true }),
+    });
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(expiredDb), corsHeaders);
+
+    expect(res.status).toBe(200);
+    expect(bound).toContainEqual(['2026-08-26T12:00:00.000Z', 0, 'case-1', 0]);
   });
 
   it('resumes clock and sets new deadline', async () => {
@@ -1026,7 +1070,67 @@ describe('Relay pubkey enforcement wiring', () => {
 
 // -- handleGetModerationStatus ------------------------------------------------
 
+describe('deriveResponseClock', () => {
+  const now = new Date('2026-08-26T12:00:00.000Z');
+  const applicableCase = (overrides: Partial<AgeReviewCase> = {}) => makeCase({
+    state: 'restricted_pending_user_response',
+    ...overrides,
+  });
+
+  it.each([
+    ['running', applicableCase({ deadline_at: '2026-08-27T12:00:00.000Z' }), {
+      clock: 'running', serverNow: now.toISOString(), deadlineAt: '2026-08-27T12:00:00.000Z', pausedAt: null, remainingDaysWhenPaused: null,
+    }],
+    ['resumed', applicableCase({ deadline_at: '2026-08-28 12:00:00', clock_paused: 0, clock_paused_at: null, remaining_days_when_paused: null }), {
+      clock: 'running', serverNow: now.toISOString(), deadlineAt: '2026-08-28T12:00:00.000Z', pausedAt: null, remainingDaysWhenPaused: null,
+    }],
+    ['expired', applicableCase({ deadline_at: '2026-08-25T12:00:00Z' }), {
+      clock: 'expired', serverNow: now.toISOString(), deadlineAt: '2026-08-25T12:00:00.000Z', pausedAt: null, remainingDaysWhenPaused: null,
+    }],
+    ['paused', applicableCase({ clock_paused: 1, clock_paused_at: '2026-08-24 09:30:00', remaining_days_when_paused: 7.5 }), {
+      clock: 'paused', serverNow: now.toISOString(), deadlineAt: null, pausedAt: '2026-08-24T09:30:00.000Z', remainingDaysWhenPaused: 7.5,
+    }],
+  ] as const)('derives a %s clock', (_label, c, expected) => {
+    expect(deriveResponseClock(c, now)).toEqual(expected);
+  });
+
+  it.each(['under_moderator_review', 'submitted_for_review', 'needs_follow_up', 'cleared', 'denied_closed'] as const)(
+    'returns not_applicable for %s even when a stored deadline exists',
+    (state) => {
+      expect(deriveResponseClock(makeCase({ state, deadline_at: '2026-08-27T12:00:00.000Z' }), now)).toEqual({
+        clock: 'not_applicable', serverNow: now.toISOString(), deadlineAt: null, pausedAt: null, remainingDaysWhenPaused: null,
+      });
+    },
+  );
+
+  it.each([
+    ['missing deadline', applicableCase({ deadline_at: null })],
+    ['malformed deadline', applicableCase({ deadline_at: 'not-a-date' })],
+    ['missing paused time', applicableCase({ clock_paused: 1, clock_paused_at: null, remaining_days_when_paused: 4 })],
+    ['missing paused duration', applicableCase({ clock_paused: 1, clock_paused_at: '2026-08-24T09:30:00Z', remaining_days_when_paused: null })],
+    ['negative paused duration', applicableCase({ clock_paused: 1, clock_paused_at: '2026-08-24T09:30:00Z', remaining_days_when_paused: -1 })],
+    ['missing source deadline while paused', applicableCase({ deadline_at: null, clock_paused: 1, clock_paused_at: '2026-08-24T09:30:00Z', remaining_days_when_paused: 4 })],
+    ['unsupported pause flag', applicableCase({ clock_paused: 2 })],
+    ['stale paused time while running', applicableCase({ clock_paused_at: '2026-08-24T09:30:00Z' })],
+    ['stale paused duration while running', applicableCase({ remaining_days_when_paused: 4 })],
+  ] as const)('returns unknown for %s', (_label, c) => {
+    expect(deriveResponseClock(c, now)).toEqual({
+      clock: 'unknown', serverNow: now.toISOString(), deadlineAt: null, pausedAt: null, remainingDaysWhenPaused: null,
+    });
+  });
+
+  it('normalizes SQLite and offset timestamps to UTC with milliseconds', () => {
+    expect(toUtcIso('2026-08-26 09:30:00')).toBe('2026-08-26T09:30:00.000Z');
+    expect(toUtcIso('2026-08-26T09:30:00-05:00')).toBe('2026-08-26T14:30:00.000Z');
+    expect(toUtcIso('invalid')).toBeNull();
+  });
+});
+
 describe('handleGetModerationStatus', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('returns active when no case exists', async () => {
     const db = createMockDb([]);
     const res = await handleGetModerationStatus('a'.repeat(64), makeEnv(db), corsHeaders);
@@ -1037,6 +1141,8 @@ describe('handleGetModerationStatus', () => {
   });
 
   it('returns restricted_minor_review when active case exists', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime('2026-08-26T12:00:00.000Z');
     const c = makeCase({ state: 'restricted_pending_user_response' });
     const db = createMockDb([c]);
     // Override first() to return the case for the pubkey query
@@ -1056,6 +1162,7 @@ describe('handleGetModerationStatus', () => {
         state: string;
         suspectedAgeBand: string;
         allowedResolution: string;
+        responseDeadline: MinorReviewResponseDeadline;
       };
     };
 
@@ -1066,6 +1173,13 @@ describe('handleGetModerationStatus', () => {
     expect(body.minorReviewCase.state).toBe('restricted_pending_user_response');
     expect(body.minorReviewCase.suspectedAgeBand).toBe('age_13_15');
     expect(body.minorReviewCase.allowedResolution).toBe('parent_video_or_email');
+    expect(body.minorReviewCase.responseDeadline).toEqual({
+      clock: 'running',
+      serverNow: '2026-08-26T12:00:00.000Z',
+      deadlineAt: c.deadline_at,
+      pausedAt: null,
+      remainingDaysWhenPaused: null,
+    });
   });
 
   it('returns active for open_reported case (pre-moderator review)', async () => {
@@ -1153,8 +1267,15 @@ describe('sendDbUnavailableAlert', () => {
 // -- handleParentContact ------------------------------------------------------
 
 describe('handleParentContact', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('saves email and pauses clock for age_13_15 case', async () => {
-    const c = makeCase({ state: 'restricted_pending_user_response' });
+    const c = makeCase({
+      state: 'restricted_pending_user_response',
+      deadline_at: '2026-08-25T12:00:00.000Z',
+    });
     const db = createMockDb([c]);
     // Override: first returns case when queried by id+pubkey
     db.prepare.mockImplementation((sql: string) => ({
@@ -1165,6 +1286,8 @@ describe('handleParentContact', () => {
         run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
       }),
     }));
+    vi.useFakeTimers();
+    vi.setSystemTime('2026-08-26T12:00:00.000Z');
 
     const req = new Request('https://api.test/v1/minor-review-cases/case-1/parent-contact', {
       method: 'POST',
@@ -1177,6 +1300,13 @@ describe('handleParentContact', () => {
       (call: string[]) => call[0]?.includes('UPDATE') && call[0]?.includes('clock_paused = 1')
     );
     expect(updateCall).toBeTruthy();
+    const updateIndex = db.prepare.mock.calls.indexOf(updateCall!);
+    expect(db.prepare.mock.results[updateIndex].value.bind).toHaveBeenCalledWith(
+      'parent@example.com',
+      '2026-08-26T12:00:00.000Z',
+      0,
+      'case-1',
+    );
   });
 
   it('rejects request for under_13 case', async () => {
@@ -2752,6 +2882,10 @@ describe('contact name upgrade on parent reply', () => {
 });
 
 describe('handleAgeReviewReplyWebhook', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('transitions pending case to submitted_for_review', async () => {
     const c = makeCase({
       state: 'restricted_pending_parental_consent',
@@ -2787,12 +2921,15 @@ describe('handleAgeReviewReplyWebhook', () => {
     expect(updateCall![0]).toContain('clock_paused = 1');
   });
 
-  it('re-pauses clock when moderator had resumed it', async () => {
+  it.each([
+    ['preserves positive time', '2026-08-31T12:00:00.000Z', 5],
+    ['clamps expired time', '2026-08-25T12:00:00.000Z', 0],
+  ] as const)('re-pauses a resumed clock and %s', async (_label, deadlineAt, expectedRemaining) => {
     const c = makeCase({
       state: 'restricted_pending_parental_consent',
       zendesk_ticket_id: 42,
       clock_paused: 0,
-      deadline_at: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString(),
+      deadline_at: deadlineAt,
     });
     const runMock = vi.fn().mockResolvedValue({ meta: { changes: 1 } });
     const boundValues: unknown[] = [];
@@ -2809,6 +2946,8 @@ describe('handleAgeReviewReplyWebhook', () => {
         }),
       })),
     };
+    vi.useFakeTimers();
+    vi.setSystemTime('2026-08-26T12:00:00.000Z');
 
     const req = new Request('https://api.test/api/zendesk/age-review-reply', {
       method: 'POST',
@@ -2817,11 +2956,11 @@ describe('handleAgeReviewReplyWebhook', () => {
     const res = await handleAgeReviewReplyWebhook(req, makeEnv(db), corsHeaders);
     expect(res.status).toBe(200);
 
-    // Should have bound an ISO timestamp and remaining days (~5)
+    // Both sides matter: preserving positive time avoids premature closure on resume,
+    // while flooring expired time keeps the stored paused tuple valid.
     expect(boundValues.length).toBeGreaterThanOrEqual(2);
-    const remainingDays = boundValues[1] as number;
-    expect(remainingDays).toBeGreaterThan(4);
-    expect(remainingDays).toBeLessThan(6);
+    expect(boundValues[0]).toBe('2026-08-26T12:00:00.000Z');
+    expect(boundValues[1]).toBe(expectedRemaining);
   });
 
   it('returns 404 when no case linked to ticket', async () => {

@@ -29,6 +29,72 @@ X-Zendesk-Webhook-Signature: t=<timestamp>,v0=<signature>
 
 ---
 
+## Mobile-facing account endpoints
+
+These `/v1/*` endpoints use [NIP-98](https://github.com/nostr-protocol/nips/blob/master/98.md)
+HTTP authentication. The signed event's pubkey identifies the account; moderator,
+Cloudflare Access, and API-key credentials do not authorize access to another
+account's review data.
+
+### GET /v1/account/moderation-status
+
+Returns the authenticated account's restriction state. An unrestricted account,
+an account without a surfaced review case, or a request handled while the D1
+database binding is unavailable receives:
+
+```json
+{
+  "restriction": { "status": "active" }
+}
+```
+
+The database-unavailable response is deliberately fail-open and contains no case.
+Clients must not interpret it as proof that an earlier restriction was cleared.
+
+A surfaced minor-review case receives:
+
+```json
+{
+  "restriction": { "status": "restricted_minor_review" },
+  "minorReviewCase": {
+    "id": "case-id",
+    "state": "restricted_pending_user_response",
+    "suspectedAgeBand": "age_13_15",
+    "allowedResolution": "parent_video_or_email",
+    "instructions": null,
+    "supportEmail": "contact@divine.video",
+    "moderationConversationPubkey": null,
+    "moderationConversationId": null,
+    "responseDeadline": {
+      "clock": "running",
+      "serverNow": "2026-08-26T14:30:00.000Z",
+      "deadlineAt": "2026-09-10T14:30:00.000Z",
+      "pausedAt": null,
+      "remainingDaysWhenPaused": null
+    }
+  }
+}
+```
+
+`responseDeadline.clock` has these stable values:
+
+| Value | Meaning |
+|-------|---------|
+| `running` | The user-response window is active. `deadlineAt` is present. |
+| `paused` | The response window applies but is suspended. `pausedAt` and `remainingDaysWhenPaused` are present; `deadlineAt` is null because the stored deadline is stale until resume. |
+| `expired` | The response deadline has passed but the scheduled closure has not completed yet. `deadlineAt` is present. |
+| `not_applicable` | The case state does not currently require a timed user response. Case timing fields are null. |
+| `unknown` | Stored timing data is missing, malformed, or inconsistent. Case timing fields are null; clients must not invent a default deadline. |
+
+All returned timestamps are absolute UTC ISO-8601 values serialized with
+milliseconds as `YYYY-MM-DDTHH:mm:ss.sssZ`. `deadlineAt` is non-null only for
+`running` and `expired`. `serverNow` is captured from the same server clock used
+to classify the deadline and is present for every valid response calculation.
+Clients should use it to offset the device clock before deriving display text
+from `deadlineAt`, and must use `clock` to decide whether a countdown applies.
+
+---
+
 ## Moderation Action Endpoints
 
 ### POST /api/moderate

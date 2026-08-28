@@ -1792,6 +1792,10 @@ describe('mobile NIP-98 endpoint host allowlist (#173)', () => {
       ctx,
     );
     expect(res.status).toBe(401);
+    const body = await res.json() as Record<string, unknown>;
+    expect(body).toMatchObject({ success: false, error: expect.any(String) });
+    expect(body).not.toHaveProperty('minorReviewCase');
+    expect(JSON.stringify(body)).not.toContain('responseDeadline');
   });
 });
 
