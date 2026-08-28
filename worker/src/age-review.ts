@@ -865,6 +865,7 @@ export async function handleGetModerationStatus(
     return json({ restriction: { status: 'active' } } satisfies ModerationStatusResponse, 200, corsHeaders);
   }
 
+  const now = new Date();
   return json({
     restriction: { status: 'restricted_minor_review' },
     minorReviewCase: {
@@ -876,7 +877,7 @@ export async function handleGetModerationStatus(
       supportEmail: 'contact@divine.video',
       moderationConversationPubkey: null,
       moderationConversationId: null,
-      responseDeadline: deriveResponseClock(activeCase, new Date()),
+      responseDeadline: deriveResponseClock(activeCase, now),
     },
   } satisfies ModerationStatusResponse, 200, corsHeaders);
 }

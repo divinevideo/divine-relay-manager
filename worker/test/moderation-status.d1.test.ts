@@ -56,6 +56,7 @@ describe('moderation status response deadline on real D1', () => {
 
     expect(body.minorReviewCase.responseDeadline).toEqual({
       clock: 'running',
+      serverNow: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
       deadlineAt: '2099-08-26T09:30:00.000Z',
       pausedAt: null,
       remainingDaysWhenPaused: null,
@@ -76,6 +77,7 @@ describe('moderation status response deadline on real D1', () => {
 
     expect(body.minorReviewCase.responseDeadline).toEqual({
       clock: 'paused',
+      serverNow: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
       deadlineAt: null,
       pausedAt: '2026-08-25T10:15:00.000Z',
       remainingDaysWhenPaused: 5.25,

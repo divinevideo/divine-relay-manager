@@ -67,6 +67,7 @@ A surfaced minor-review case receives:
     "moderationConversationId": null,
     "responseDeadline": {
       "clock": "running",
+      "serverNow": "2026-08-26T14:30:00.000Z",
       "deadlineAt": "2026-09-10T14:30:00.000Z",
       "pausedAt": null,
       "remainingDaysWhenPaused": null
@@ -82,13 +83,15 @@ A surfaced minor-review case receives:
 | `running` | The user-response window is active. `deadlineAt` is present. |
 | `paused` | The response window applies but is suspended. `pausedAt` and `remainingDaysWhenPaused` are present; `deadlineAt` is null because the stored deadline is stale until resume. |
 | `expired` | The response deadline has passed but the scheduled closure has not completed yet. `deadlineAt` is present. |
-| `not_applicable` | The case state does not currently require a timed user response. All timing fields are null. |
-| `unknown` | Stored timing data is missing, malformed, or inconsistent. All timing fields are null; clients must not invent a default deadline. |
+| `not_applicable` | The case state does not currently require a timed user response. Case timing fields are null. |
+| `unknown` | Stored timing data is missing, malformed, or inconsistent. Case timing fields are null; clients must not invent a default deadline. |
 
 All returned timestamps are absolute UTC ISO-8601 values serialized with
 milliseconds as `YYYY-MM-DDTHH:mm:ss.sssZ`. `deadlineAt` is non-null only for
-`running` and `expired`. Clients may derive display text from the absolute
-timestamp but must use `clock` to decide whether a countdown applies.
+`running` and `expired`. `serverNow` is captured from the same server clock used
+to classify the deadline and is present for every valid response calculation.
+Clients should use it to offset the device clock before deriving display text
+from `deadlineAt`, and must use `clock` to decide whether a countdown applies.
 
 ---
 

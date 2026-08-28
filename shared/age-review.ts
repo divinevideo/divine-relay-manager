@@ -78,6 +78,8 @@ export type ResponseClockState = 'running' | 'paused' | 'expired' | 'not_applica
 
 export interface MinorReviewResponseDeadline {
   clock: ResponseClockState;
+  /** Server time captured for this response, for offsetting an inaccurate device clock. */
+  serverNow: string | null;
   /** Present only while the clock is running or has expired. */
   deadlineAt: string | null;
   pausedAt: string | null;
@@ -115,8 +117,10 @@ export function deriveResponseClock(
   c: Pick<AgeReviewCase, 'state' | 'deadline_at' | 'clock_paused' | 'clock_paused_at' | 'remaining_days_when_paused'>,
   now: Date,
 ): MinorReviewResponseDeadline {
+  const serverNow = Number.isFinite(now.getTime()) ? now.toISOString() : null;
   const empty = (clock: ResponseClockState): MinorReviewResponseDeadline => ({
     clock,
+    serverNow,
     deadlineAt: null,
     pausedAt: null,
     remainingDaysWhenPaused: null,
@@ -135,6 +139,7 @@ export function deriveResponseClock(
     }
     return {
       clock: 'paused',
+      serverNow,
       deadlineAt: null,
       pausedAt,
       remainingDaysWhenPaused: remaining,
@@ -150,6 +155,7 @@ export function deriveResponseClock(
 
   return {
     clock: Date.parse(deadlineAt) <= now.getTime() ? 'expired' : 'running',
+    serverNow,
     deadlineAt,
     pausedAt: null,
     remainingDaysWhenPaused: null,

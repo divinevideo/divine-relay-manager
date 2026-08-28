@@ -1079,16 +1079,16 @@ describe('deriveResponseClock', () => {
 
   it.each([
     ['running', applicableCase({ deadline_at: '2026-08-27T12:00:00.000Z' }), {
-      clock: 'running', deadlineAt: '2026-08-27T12:00:00.000Z', pausedAt: null, remainingDaysWhenPaused: null,
+      clock: 'running', serverNow: now.toISOString(), deadlineAt: '2026-08-27T12:00:00.000Z', pausedAt: null, remainingDaysWhenPaused: null,
     }],
     ['resumed', applicableCase({ deadline_at: '2026-08-28 12:00:00', clock_paused: 0, clock_paused_at: null, remaining_days_when_paused: null }), {
-      clock: 'running', deadlineAt: '2026-08-28T12:00:00.000Z', pausedAt: null, remainingDaysWhenPaused: null,
+      clock: 'running', serverNow: now.toISOString(), deadlineAt: '2026-08-28T12:00:00.000Z', pausedAt: null, remainingDaysWhenPaused: null,
     }],
     ['expired', applicableCase({ deadline_at: '2026-08-25T12:00:00Z' }), {
-      clock: 'expired', deadlineAt: '2026-08-25T12:00:00.000Z', pausedAt: null, remainingDaysWhenPaused: null,
+      clock: 'expired', serverNow: now.toISOString(), deadlineAt: '2026-08-25T12:00:00.000Z', pausedAt: null, remainingDaysWhenPaused: null,
     }],
     ['paused', applicableCase({ clock_paused: 1, clock_paused_at: '2026-08-24 09:30:00', remaining_days_when_paused: 7.5 }), {
-      clock: 'paused', deadlineAt: null, pausedAt: '2026-08-24T09:30:00.000Z', remainingDaysWhenPaused: 7.5,
+      clock: 'paused', serverNow: now.toISOString(), deadlineAt: null, pausedAt: '2026-08-24T09:30:00.000Z', remainingDaysWhenPaused: 7.5,
     }],
   ] as const)('derives a %s clock', (_label, c, expected) => {
     expect(deriveResponseClock(c, now)).toEqual(expected);
@@ -1098,7 +1098,7 @@ describe('deriveResponseClock', () => {
     'returns not_applicable for %s even when a stored deadline exists',
     (state) => {
       expect(deriveResponseClock(makeCase({ state, deadline_at: '2026-08-27T12:00:00.000Z' }), now)).toEqual({
-        clock: 'not_applicable', deadlineAt: null, pausedAt: null, remainingDaysWhenPaused: null,
+        clock: 'not_applicable', serverNow: now.toISOString(), deadlineAt: null, pausedAt: null, remainingDaysWhenPaused: null,
       });
     },
   );
@@ -1115,7 +1115,7 @@ describe('deriveResponseClock', () => {
     ['stale paused duration while running', applicableCase({ remaining_days_when_paused: 4 })],
   ] as const)('returns unknown for %s', (_label, c) => {
     expect(deriveResponseClock(c, now)).toEqual({
-      clock: 'unknown', deadlineAt: null, pausedAt: null, remainingDaysWhenPaused: null,
+      clock: 'unknown', serverNow: now.toISOString(), deadlineAt: null, pausedAt: null, remainingDaysWhenPaused: null,
     });
   });
 
@@ -1127,6 +1127,10 @@ describe('deriveResponseClock', () => {
 });
 
 describe('handleGetModerationStatus', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('returns active when no case exists', async () => {
     const db = createMockDb([]);
     const res = await handleGetModerationStatus('a'.repeat(64), makeEnv(db), corsHeaders);
@@ -1137,6 +1141,8 @@ describe('handleGetModerationStatus', () => {
   });
 
   it('returns restricted_minor_review when active case exists', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime('2026-08-26T12:00:00.000Z');
     const c = makeCase({ state: 'restricted_pending_user_response' });
     const db = createMockDb([c]);
     // Override first() to return the case for the pubkey query
@@ -1169,6 +1175,7 @@ describe('handleGetModerationStatus', () => {
     expect(body.minorReviewCase.allowedResolution).toBe('parent_video_or_email');
     expect(body.minorReviewCase.responseDeadline).toEqual({
       clock: 'running',
+      serverNow: '2026-08-26T12:00:00.000Z',
       deadlineAt: c.deadline_at,
       pausedAt: null,
       remainingDaysWhenPaused: null,
