@@ -26,8 +26,6 @@ export default defineConfig(() => {
   test: {
     globals: true,
     environment: 'jsdom',
-    testTimeout: 15000,
-    fileParallelism: false,
     setupFiles: './src/test/setup.ts',
     // CI runners are UTC and set no TZ, which makes every UTC-anchoring guard
     // unfalsifiable there: drop `timeZone: 'UTC'` from TruncatedHistoryBanner
