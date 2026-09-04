@@ -1,8 +1,15 @@
 # ReportWatcher Health Check
 #
-# Polls staging and production ReportWatcher Durable Objects every 15 min.
-# If unhealthy, attempts auto-recovery via /start. If recovery fails,
-# alerts #divine-alerts via Slack webhook (same channel as GKE alerting).
+# Polls staging and production ReportWatcher Durable Objects every 15 min and,
+# on repeated failure, alerts #divine-alerts via Slack (same channel as GKE
+# alerting). Its job is reliable detection, diagnosis, and alerting.
+#
+# Recovery is best-effort only. On an unhealthy check it POSTs /start, but the
+# DO's /start is a no-op when it already believes it is running (the common
+# "running:true, connected:false" case, e.g. a dropped relay socket), and the
+# DO already self-heals via its own alarm-driven reconnect. So treat any
+# recovery inside the re-check window as the DO healing itself, not this
+# workflow, and rely on this workflow to alert a human when it does not.
 #
 # Lives in relay-manager (not iac-coreconfig) because ReportWatcher is a
 # Cloudflare Durable Object outside the GKE observability perimeter.
@@ -49,6 +56,13 @@ jobs:
     # Never mark the workflow as failed -- that emails all repo watchers.
     # Alerting goes through Slack only.
     continue-on-error: true
+
+    # Serialize per environment so a slow run cannot read-modify-write the same
+    # RW_FAILS_* variable as the next scheduled run. Queue rather than cancel;
+    # never abandon an in-flight health check.
+    concurrency:
+      group: report-watcher-health-${{ matrix.env.name }}
+      cancel-in-progress: false
 
     strategy:
       matrix:
@@ -124,9 +138,14 @@ jobs:
           fi
           echo "payload=$(echo "$BODY" | jq -c '.status')" >> "$GITHUB_OUTPUT"
 
-      # --- Self-healing: try to restart before alerting ---
+      # --- Best-effort restart nudge before alerting ---
+      # POSTs /start, but the DO's /start is a no-op when it already believes it
+      # is running, which is the common unhealthy state. Any recovery seen in the
+      # re-check window is usually the DO's own alarm reconnect. Kept because it
+      # is harmless and occasionally helps (a genuinely stopped watcher); the
+      # real value of this step is the post-nudge re-check that decides alerting.
 
-      - name: Attempt auto-recovery
+      - name: Best-effort restart nudge
         id: recover
         if: steps.check.outputs.healthy == 'false' && steps.check.outputs.http_code != '401' && steps.check.outputs.http_code != '403'
         env:
@@ -134,7 +153,7 @@ jobs:
           CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
           API_URL: ${{ matrix.env.url }}
         run: |
-          echo "ReportWatcher unhealthy on ${{ matrix.env.name }}, attempting restart..."
+          echo "ReportWatcher unhealthy on ${{ matrix.env.name }}; sending best-effort /start (no-op if already running) and re-checking..."
           echo "Initial failure: ${{ steps.check.outputs.payload }}"
 
           RESTART_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 -X POST \
@@ -213,10 +232,15 @@ jobs:
             FAILS=$((FAILS + 1))
           fi
 
-          # Write back. Warn (rather than miscount silently) if the PAT lacks
-          # Variables: read/write on this repo.
+          # Write back. A configured-but-failing PAT (expired or under-scoped) is
+          # worse than an absent one: the count would silently reset every run and
+          # never reach the alert threshold, so the monitor would sit broken and
+          # quiet. Flag it (persist_broken) so the next step alerts on the
+          # monitor's OWN failure. (The absent-PAT case above stays quiet: that is
+          # the not-yet-enabled state, not a breakage.)
           if ! gh variable set "$FAILS_VAR" --repo "$GITHUB_REPOSITORY" --body "$FAILS"; then
             echo "::warning::failed to persist $FAILS_VAR (check RW_HEALTH_VARS_TOKEN has Variables: read/write)"
+            echo "persist_broken=true" >> "$GITHUB_OUTPUT"
           fi
 
           echo "fails=$FAILS" >> "$GITHUB_OUTPUT"
@@ -258,6 +282,37 @@ jobs:
               text: ":rotating_light: ReportWatcher *\($env)* unhealthy (\($fails) consecutive failures, auto-restart failed)",
               blocks: [
                 {type: "section", text: {type: "mrkdwn", text: ":rotating_light: *ReportWatcher health check failing*\n*Environment:* \($env)\n*Consecutive failures:* \($fails) (including auto-restart attempts)\n*Status:* `\($status)`"}},
+                {type: "context", elements: [{type: "mrkdwn", text: "<\($run_url)|View workflow run>"}]}
+              ]
+            }')
+          curl -sf --max-time 10 -X POST "$SLACK_WEBHOOK" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD"
+
+      # --- Alert when the monitor itself cannot persist state (fail loud) ---
+      # A configured-but-failing PAT would otherwise leave the check silently
+      # unable to count failures, so the monitor could sit broken and quiet.
+      # A health check that cannot report its own breakage is worse than none.
+
+      - name: Alert monitor failure
+        if: steps.counts.outputs.persist_broken == 'true'
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_ALERTS }}
+          ENV_NAME: ${{ matrix.env.name }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK" ]; then
+            echo "::warning::SLACK_WEBHOOK_ALERTS not configured; cannot alert on monitor failure"
+            exit 0
+          fi
+
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          PAYLOAD=$(jq -n \
+            --arg env "$ENV_NAME" \
+            --arg run_url "$RUN_URL" \
+            '{
+              text: ":warning: ReportWatcher health monitor is broken for *\($env)* (cannot persist failure count)",
+              blocks: [
+                {type: "section", text: {type: "mrkdwn", text: ":warning: *ReportWatcher health monitor cannot persist state*\n*Environment:* \($env)\nRW_HEALTH_VARS_TOKEN is missing, expired, or lacks Variables: read/write, so consecutive failures cannot be counted and outage alerts will not fire. *ReportWatcher \($env) is effectively unmonitored until this is fixed.*"}},
                 {type: "context", elements: [{type: "mrkdwn", text: "<\($run_url)|View workflow run>"}]}
               ]
             }')
