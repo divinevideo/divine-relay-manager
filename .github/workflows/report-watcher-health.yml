@@ -15,16 +15,20 @@
 #
 # Setup:
 #   1. Repo secrets (Settings > Secrets and variables > Actions):
-#      - CF_ACCESS_CLIENT_ID    -- Cloudflare Access service token
+#      - CF_ACCESS_CLIENT_ID     -- Cloudflare Access service token
 #      - CF_ACCESS_CLIENT_SECRET -- Cloudflare Access service token
-#      - SLACK_WEBHOOK_ALERTS   -- Incoming webhook for #divine-alerts
+#      - SLACK_WEBHOOK_ALERTS    -- Incoming webhook for #divine-alerts
 #        (same value as vmalertmanager-slack-webhook-{env} in GCP Secret Manager)
+#      - RW_HEALTH_VARS_TOKEN    -- fine-grained PAT with this repo's
+#        "Variables: Read and write" permission. Required for failure-count
+#        persistence: the default GITHUB_TOKEN CANNOT manage Actions variables,
+#        so without this PAT the consecutive-failure count never persists and
+#        alerts never fire. If the secret is absent the workflow still runs and
+#        reports health, but skips persistence and suppresses alerting.
 #   2. Repo variables (Settings > Secrets and variables > Actions > Variables):
-#      - RW_FAILS_STAGING       -- set to 0 (created automatically on first run)
-#      - RW_FAILS_PRODUCTION    -- set to 0 (created automatically on first run)
-#   3. Workflow permissions: needs read/write access to Actions variables.
-#      The default GITHUB_TOKEN has this for repo-scoped variables.
-#   4. To test manually: Actions tab > "ReportWatcher Health Check" > Run workflow
+#      - RW_FAILS_STAGING        -- created automatically on first run
+#      - RW_FAILS_PRODUCTION     -- created automatically on first run
+#   3. To test manually: Actions tab > "ReportWatcher Health Check" > Run workflow
 
 name: ReportWatcher Health Check
 
@@ -32,6 +36,12 @@ on:
   schedule:
     - cron: '*/15 * * * *'
   workflow_dispatch:
+
+# The default GITHUB_TOKEN needs no write access here: health/restart use CF
+# Access, alerting uses a Slack webhook, and variable persistence uses the
+# dedicated RW_HEALTH_VARS_TOKEN PAT (see header). Keep the token least-privilege.
+permissions:
+  contents: read
 
 jobs:
   health-check:
@@ -171,11 +181,28 @@ jobs:
         id: counts
         if: always()
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RW_HEALTH_VARS_TOKEN }}
           HEALTHY: ${{ steps.check.outputs.healthy }}
           RECOVERED: ${{ steps.recover.outputs.recovered }}
           FAILS_VAR: ${{ matrix.env.fails_var }}
         run: |
+          # Consecutive-failure persistence uses a repo variable, which the
+          # default GITHUB_TOKEN cannot write -- hence the dedicated PAT. If the
+          # PAT is absent, degrade gracefully: report this run's health but skip
+          # persistence and suppress alerting (consecutive runs cannot be counted
+          # without it, and a single-run alert would be noise).
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::RW_HEALTH_VARS_TOKEN not configured; skipping failure-count persistence and alerting"
+            echo "fails=0" >> "$GITHUB_OUTPUT"
+            echo "alert=false" >> "$GITHUB_OUTPUT"
+            if [ "$HEALTHY" = "false" ] && [ "$RECOVERED" = "true" ]; then
+              echo "self_healed=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "self_healed=false" >> "$GITHUB_OUTPUT"
+            fi
+            exit 0
+          fi
+
           # Read current count from repo variable (default 0 if not set)
           FAILS=$(gh variable get "$FAILS_VAR" --repo "$GITHUB_REPOSITORY" 2>/dev/null || echo "0")
           [[ "$FAILS" =~ ^[0-9]+$ ]] || FAILS=0
@@ -186,8 +213,11 @@ jobs:
             FAILS=$((FAILS + 1))
           fi
 
-          # Write back
-          gh variable set "$FAILS_VAR" --repo "$GITHUB_REPOSITORY" --body "$FAILS"
+          # Write back. Warn (rather than miscount silently) if the PAT lacks
+          # Variables: read/write on this repo.
+          if ! gh variable set "$FAILS_VAR" --repo "$GITHUB_REPOSITORY" --body "$FAILS"; then
+            echo "::warning::failed to persist $FAILS_VAR (check RW_HEALTH_VARS_TOKEN has Variables: read/write)"
+          fi
 
           echo "fails=$FAILS" >> "$GITHUB_OUTPUT"
 
