@@ -238,8 +238,19 @@ jobs:
           # quiet. Flag it (persist_broken) so the next step alerts on the
           # monitor's OWN failure. (The absent-PAT case above stays quiet: that is
           # the not-yet-enabled state, not a breakage.)
-          if ! gh variable set "$FAILS_VAR" --repo "$GITHUB_REPOSITORY" --body "$FAILS"; then
-            echo "::warning::failed to persist $FAILS_VAR (check RW_HEALTH_VARS_TOKEN has Variables: read/write)"
+          # Retry a few times so a transient GitHub API blip (5xx, secondary
+          # rate limit) does not page us. Only a persistent write failure --
+          # an expired or under-scoped PAT -- trips persist_broken.
+          SET_OK=false
+          for _ in 1 2 3; do
+            if gh variable set "$FAILS_VAR" --repo "$GITHUB_REPOSITORY" --body "$FAILS"; then
+              SET_OK=true
+              break
+            fi
+            sleep 5
+          done
+          if [ "$SET_OK" != "true" ]; then
+            echo "::warning::failed to persist $FAILS_VAR after retries (check RW_HEALTH_VARS_TOKEN has Variables: read/write)"
             echo "persist_broken=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -257,10 +268,11 @@ jobs:
             echo "self_healed=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # --- Alert to Slack only when auto-recovery failed twice in a row ---
+      # --- Alert to Slack when a check is unhealthy on 2+ consecutive runs ---
+      # always() so a failure in another notification step cannot suppress it.
 
       - name: Alert to Slack
-        if: steps.counts.outputs.alert == 'true'
+        if: always() && steps.counts.outputs.alert == 'true'
         env:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_ALERTS }}
           ENV_NAME: ${{ matrix.env.name }}
@@ -279,9 +291,9 @@ jobs:
             --arg status "$STATUS_PAYLOAD" \
             --arg run_url "$RUN_URL" \
             '{
-              text: ":rotating_light: ReportWatcher *\($env)* unhealthy (\($fails) consecutive failures, auto-restart failed)",
+              text: ":rotating_light: ReportWatcher *\($env)* unhealthy on \($fails) consecutive checks (a restart nudge did not bring it back)",
               blocks: [
-                {type: "section", text: {type: "mrkdwn", text: ":rotating_light: *ReportWatcher health check failing*\n*Environment:* \($env)\n*Consecutive failures:* \($fails) (including auto-restart attempts)\n*Status:* `\($status)`"}},
+                {type: "section", text: {type: "mrkdwn", text: ":rotating_light: *ReportWatcher health check failing*\n*Environment:* \($env)\n*Consecutive failed checks:* \($fails) (counting the post-nudge re-checks)\n*Status:* `\($status)`"}},
                 {type: "context", elements: [{type: "mrkdwn", text: "<\($run_url)|View workflow run>"}]}
               ]
             }')
@@ -295,7 +307,7 @@ jobs:
       # A health check that cannot report its own breakage is worse than none.
 
       - name: Alert monitor failure
-        if: steps.counts.outputs.persist_broken == 'true'
+        if: always() && steps.counts.outputs.persist_broken == 'true'
         env:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_ALERTS }}
           ENV_NAME: ${{ matrix.env.name }}
@@ -322,7 +334,7 @@ jobs:
 
       # --- Quiet log when self-healing worked (no alert, just visibility) ---
 
-      - name: Log self-healing
-        if: steps.counts.outputs.self_healed == 'true'
+      - name: Log recovery
+        if: always() && steps.counts.outputs.self_healed == 'true'
         run: |
-          echo "::notice::ReportWatcher ${{ matrix.env.name }} was unhealthy but recovered after auto-restart"
+          echo "::notice::ReportWatcher ${{ matrix.env.name }} was unhealthy but recovered on re-check (best-effort /start nudge or the DO's own reconnect)"
