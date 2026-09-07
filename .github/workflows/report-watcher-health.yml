@@ -1,7 +1,9 @@
 # ReportWatcher Health Check
 #
 # Polls staging and production ReportWatcher Durable Objects every 15 min and,
-# on repeated failure, alerts #divine-alerts via Slack (same channel as GKE
+# on repeated failure, notifies two ways (matching the sibling
+# minor-review-endpoint-health workflow): it fails the run so GitHub emails the
+# watchers, and it posts to #divine-alerts via Slack (same channel as GKE
 # alerting). Its job is reliable detection, diagnosis, and alerting.
 #
 # Recovery is best-effort only. On an unhealthy check it POSTs /start, but the
@@ -41,7 +43,9 @@ name: ReportWatcher Health Check
 
 on:
   schedule:
-    - cron: '*/15 * * * *'
+    # Every 15 min, offset off the quarter-hour (and off the sibling
+    # minor-review check's 7,22,37,52) to avoid runner contention.
+    - cron: '3,18,33,48 * * * *'
   workflow_dispatch:
 
 # The default GITHUB_TOKEN needs no write access here: health/restart use CF
@@ -53,9 +57,6 @@ permissions:
 jobs:
   health-check:
     runs-on: ubuntu-latest
-    # Never mark the workflow as failed -- that emails all repo watchers.
-    # Alerting goes through Slack only.
-    continue-on-error: true
 
     # Serialize per environment so a slow run cannot read-modify-write the same
     # RW_FAILS_* variable as the next scheduled run. Queue rather than cancel;
@@ -65,6 +66,8 @@ jobs:
       cancel-in-progress: false
 
     strategy:
+      # A failing env must not cancel the other env's health check.
+      fail-fast: false
       matrix:
         env:
           - name: staging
@@ -299,7 +302,7 @@ jobs:
             }')
           curl -sf --max-time 10 -X POST "$SLACK_WEBHOOK" \
             -H "Content-Type: application/json" \
-            -d "$PAYLOAD"
+            -d "$PAYLOAD" || echo "::warning::Slack post failed; the red run still notifies"
 
       # --- Alert when the monitor itself cannot persist state (fail loud) ---
       # A configured-but-failing PAT would otherwise leave the check silently
@@ -330,7 +333,7 @@ jobs:
             }')
           curl -sf --max-time 10 -X POST "$SLACK_WEBHOOK" \
             -H "Content-Type: application/json" \
-            -d "$PAYLOAD"
+            -d "$PAYLOAD" || echo "::warning::Slack post failed; the red run still notifies"
 
       # --- Quiet log when self-healing worked (no alert, just visibility) ---
 
@@ -338,3 +341,11 @@ jobs:
         if: always() && steps.counts.outputs.self_healed == 'true'
         run: |
           echo "::notice::ReportWatcher ${{ matrix.env.name }} was unhealthy but recovered on re-check (best-effort /start nudge or the DO's own reconnect)"
+
+      # --- Fail the run so GitHub notifies, matching the sibling health check ---
+      # Red on the same condition as the Slack alert: a repeated outage (>=2
+      # consecutive) or the monitor's own persistence being broken. Not on a
+      # single transient blip, so watchers are not emailed on noise.
+      - name: Fail the run so GitHub notifies
+        if: always() && (steps.counts.outputs.alert == 'true' || steps.counts.outputs.persist_broken == 'true')
+        run: exit 1
