@@ -13,6 +13,13 @@
 # recovery inside the re-check window as the DO healing itself, not this
 # workflow, and rely on this workflow to alert a human when it does not.
 #
+# Alerting limits:
+#   - Scheduled workflows in public repositories are automatically disabled
+#     after 60 days without repository activity. Re-enable this workflow from
+#     the Actions tab if the repository goes dormant.
+#   - Schedules only run from the default branch, so this monitor goes live
+#     after merge rather than on the pull request.
+#
 # Lives in relay-manager (not iac-coreconfig) because ReportWatcher is a
 # Cloudflare Durable Object outside the GKE observability perimeter.
 # No Prometheus, no VMRule, no liveness probe can reach it.
@@ -51,12 +58,12 @@ on:
 # The default GITHUB_TOKEN needs no write access here: health/restart use CF
 # Access, alerting uses a Slack webhook, and variable persistence uses the
 # dedicated RW_HEALTH_VARS_TOKEN PAT (see header). Keep the token least-privilege.
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
   health-check:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     # Serialize per environment so a slow run cannot read-modify-write the same
     # RW_FAILS_* variable as the next scheduled run. Queue rather than cancel;
@@ -86,7 +93,7 @@ jobs:
           API_URL: ${{ matrix.env.url }}
         run: |
           # Capture HTTP status and body separately for diagnostics (#130)
-          HTTP_CODE=$(curl -s -o /tmp/rw-response.json -w '%{http_code}' --max-time 10 \
+          HTTP_CODE=$(curl -sS -o /tmp/rw-response.json -w '%{http_code}' --max-time 10 \
             -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
             -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
             "$API_URL/api/report-watcher/status" 2>/tmp/rw-curl-err.txt) || {
@@ -110,7 +117,11 @@ jobs:
 
           echo "http_code=$HTTP_CODE" >> "$GITHUB_OUTPUT"
 
-          if [ "$HTTP_CODE" = "403" ] || [ "$HTTP_CODE" = "401" ]; then
+          # CF Access redirects browser-style unauthenticated requests to its
+          # login page. Missing, invalid, expired, or unauthorized service
+          # tokens therefore return 302 on these hosts rather than reaching
+          # the worker's own 401/403 admin-auth response.
+          if [ "$HTTP_CODE" = "302" ] || [ "$HTTP_CODE" = "403" ] || [ "$HTTP_CODE" = "401" ]; then
             echo "healthy=false" >> "$GITHUB_OUTPUT"
             echo "payload=auth_error: HTTP $HTTP_CODE (check CF Access credentials)" >> "$GITHUB_OUTPUT"
             exit 0
@@ -150,14 +161,15 @@ jobs:
 
       - name: Best-effort restart nudge
         id: recover
-        if: steps.check.outputs.healthy == 'false' && steps.check.outputs.http_code != '401' && steps.check.outputs.http_code != '403'
+        if: steps.check.outputs.healthy == 'false' && steps.check.outputs.http_code != '302' && steps.check.outputs.http_code != '401' && steps.check.outputs.http_code != '403'
         env:
           CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
           CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
           API_URL: ${{ matrix.env.url }}
+          INITIAL_FAILURE: ${{ steps.check.outputs.payload }}
         run: |
           echo "ReportWatcher unhealthy on ${{ matrix.env.name }}; sending best-effort /start (no-op if already running) and re-checking..."
-          echo "Initial failure: ${{ steps.check.outputs.payload }}"
+          echo "Initial failure: $INITIAL_FAILURE"
 
           RESTART_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 -X POST \
             -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
