@@ -54,10 +54,13 @@ export function useUserStats(pubkey: string | undefined) {
       }
 
       // queryStrict throws on anything short of a completed read (timeout, a
-      // relay CLOSED, no route). We record that rather than rethrowing: this
-      // hook has four other consumers whose behaviour is not in scope to change
-      // here, so the failure is reported as a flag and only callers that state
-      // absence to a user act on it. Promoting this to a real error is #210.
+      // relay CLOSED, no route). We record that as a per-read `incomplete` flag
+      // rather than rethrowing, and every consumer that states absence to a
+      // moderator honors it (AgeReviewContent, UserProfileCard, and UserStatsRow
+      // in EventDetail) by showing an honest unknown in place of a confident
+      // count. #210 settled on this over promoting the flag to a thrown error,
+      // which would discard the partial data and regress the flag-based
+      // age-review surface that already reads these flags off `data`.
       const read = async (filters: Parameters<typeof queryStrict>[1]) => {
         try {
           return {
