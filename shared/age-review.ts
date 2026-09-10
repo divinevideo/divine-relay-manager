@@ -227,6 +227,9 @@ export interface AgeReviewCase {
   created_via: string | null;
   claim_link_url: string | null;
   claim_link_expires_at: string | null;
+  /** Added by the retention rollout; optional for older worker responses. */
+  closed_at?: string | null;
+  redacted_at?: string | null;
   /**
    * Human-readable identity for the reported account, captured when the case was
    * created. Enforcement hides a suspended account's content from relay queries,

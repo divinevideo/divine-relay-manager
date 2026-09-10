@@ -3,6 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { ensureSchema } from '../src/db';
 import { handleCreateMinorAccount } from '../src/age-review';
 import { backfillProtectedMinorSubjects, clearSubject, closeBinding, createSubjectWithBinding, fingerprintProvisioningRequest, handleProtectedMinorServiceRoute, pendingSubjectClears, resolveByPubkey, startOrResumeReplacement } from '../src/protected-minors';
+import { digestProvisioningFingerprint } from '../src/retention';
 
 const PUBKEY_A = 'a'.repeat(64);
 const PUBKEY_B = 'b'.repeat(64);
@@ -19,8 +20,11 @@ beforeAll(async () => {
 });
 afterAll(async () => mf.dispose());
 beforeEach(async () => {
+  await DB.prepare('DELETE FROM retention_alert_state').run();
+  await DB.prepare('DELETE FROM retention_legal_holds').run();
   await DB.prepare('DELETE FROM protected_minor_projection_jobs').run();
   await DB.prepare('DELETE FROM protected_minor_provisioning_operations').run();
+  await DB.prepare('DELETE FROM protected_minor_provisioning_tombstones').run();
   await DB.prepare('DELETE FROM protected_minor_account_bindings').run();
   await DB.prepare('DELETE FROM protected_minor_subjects').run();
   await DB.prepare('DELETE FROM age_review_cases').run();
@@ -32,7 +36,8 @@ describe('protected-minor registry on real D1', () => {
     const rows = await DB.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'protected_minor_%' ORDER BY name`).all<{ name: string }>();
     expect(rows.results.map((row) => row.name)).toEqual([
       'protected_minor_account_bindings', 'protected_minor_projection_jobs',
-      'protected_minor_provisioning_operations', 'protected_minor_subjects',
+      'protected_minor_provisioning_operations', 'protected_minor_provisioning_tombstones',
+      'protected_minor_subjects',
     ]);
   });
 
@@ -43,7 +48,8 @@ describe('protected-minor registry on real D1', () => {
     await expect(clearSubject(DB, PUBKEY_A, undefined, 'age_review_denied')).resolves.toEqual({ success: true, projectionPubkey: PUBKEY_A });
     expect(await resolveByPubkey(DB, PUBKEY_A)).toBeNull();
     const binding = await DB.prepare('SELECT subject_id, unbound_at FROM protected_minor_account_bindings').first();
-    expect(binding).toEqual({ subject_id: subjectId, unbound_at: null });
+    expect(binding?.subject_id).toBe(subjectId);
+    expect(binding?.unbound_at).not.toBeNull();
     const job = await DB.prepare('SELECT state FROM protected_minor_projection_jobs').first<{ state: string }>();
     expect(job?.state).toBe('pending');
   });
@@ -162,6 +168,32 @@ describe('protected-minor registry on real D1', () => {
       { subjectRef: subjectId, provisioningOperationId: '55555555-5555-4555-8555-555555555555', username: 'replacement' },
     );
     expect(result).toEqual({ outcome: 'conflict', code: 'stale_binding' });
+    expect(fetchMock).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it('rejects compacted exact and conflicting replays without provisioning', async () => {
+    const key = 'synthetic-retention-key';
+    const operationId = '99999999-9999-4999-8999-999999999999';
+    const fingerprint = await fingerprintProvisioningRequest({ kind: 'replacement', username: 'replacement' });
+    const subjectRef = '11111111-1111-4111-8111-111111111111';
+    await DB.prepare(`INSERT INTO protected_minor_provisioning_tombstones
+      (provisioning_operation_id, kind, terminal_outcome, completed_at, request_digest, key_id)
+      VALUES (?, 'replacement', 'complete', datetime('now'), ?, 'v1')`)
+      .bind(operationId, await digestProvisioningFingerprint(key, fingerprint, subjectRef)).run();
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const exact = await startOrResumeReplacement(
+      { DB, KEYCAST_URL: 'https://keycast.test', KEYCAST_SERVICE_TOKEN: 'token', PROTECTED_MINOR_TOMBSTONE_KEY: key },
+      { subjectRef, provisioningOperationId: operationId, username: 'replacement' },
+    );
+    expect(exact).toEqual({ outcome: 'compacted', code: 'provisioning_operation_compacted', replayed: true });
+    const conflict = await startOrResumeReplacement(
+      { DB, KEYCAST_URL: 'https://keycast.test', KEYCAST_SERVICE_TOKEN: 'token', PROTECTED_MINOR_TOMBSTONE_KEY: key },
+      { subjectRef, provisioningOperationId: operationId, username: 'different' },
+    );
+    expect(conflict).toEqual({ outcome: 'conflict', code: 'provisioning_operation_conflict' });
     expect(fetchMock).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
   });

@@ -126,7 +126,8 @@ describe('age-review cron on real D1', () => {
     expect(await stateOf('na-sub')).toBe('submitted_for_review'); // not auto-closed
     const alert = bodies.find((b) => b.includes('awaiting moderator action'));
     expect(alert).toBeTruthy();
-    expect(alert).toContain('pk_na-sub');
+    expect(alert).toContain('submitted_for_review');
+    expect(alert).not.toContain('pk_na-sub');
     const row = await DB.prepare('SELECT last_alerted_at FROM age_review_cases WHERE id = ?')
       .bind('na-sub').first<{ last_alerted_at: string | null }>();
     expect(row!.last_alerted_at).not.toBeNull(); // 12h throttle stamp written

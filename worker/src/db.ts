@@ -80,6 +80,8 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       created_via TEXT DEFAULT 'report',
       claim_link_url TEXT,
       claim_link_expires_at TEXT,
+      closed_at TEXT,
+      redacted_at TEXT,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
       version INTEGER NOT NULL DEFAULT 0
@@ -117,6 +119,16 @@ export async function ensureSchema(db: D1Database): Promise<void> {
     // Column already exists
   }
 
+  for (const column of [`closed_at TEXT`, `redacted_at TEXT`]) {
+    try {
+      await db.prepare(`ALTER TABLE age_review_cases ADD COLUMN ${column}`).run();
+    } catch {
+      // Column already exists
+    }
+  }
+  await db.prepare(`UPDATE age_review_cases SET closed_at = updated_at
+    WHERE state IN ('cleared', 'denied_closed') AND closed_at IS NULL`).run();
+
   // Human-readable identity for the reported account, captured when the case is
   // created. Enforcement hides a suspended account's content from relay queries,
   // so a later lookup returns nothing and the name is unrecoverable -- these
@@ -139,7 +151,6 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       // Column already exists
     }
   }
-
   try {
     await db.prepare(`CREATE INDEX IF NOT EXISTS idx_age_review_pubkey ON age_review_cases(pubkey)`).run();
     await db.prepare(`CREATE INDEX IF NOT EXISTS idx_age_review_state ON age_review_cases(state)`).run();
@@ -193,12 +204,47 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       cleared_at TEXT,
       cleared_by TEXT,
       clear_reason TEXT,
+      clear_reason_class TEXT NOT NULL DEFAULT 'unclassified'
+        CHECK (clear_reason_class IN ('false_positive', 'valid_prior', 'unclassified')),
+      clear_reason_alerted_at TEXT,
       CHECK (
         (classification_state = 'active' AND cleared_at IS NULL AND cleared_by IS NULL AND clear_reason IS NULL)
         OR (classification_state = 'cleared' AND cleared_at IS NOT NULL AND clear_reason IS NOT NULL)
       )
     )
   `).run();
+
+  for (const column of [
+    `clear_reason_class TEXT NOT NULL DEFAULT 'unclassified' CHECK (clear_reason_class IN ('false_positive', 'valid_prior', 'unclassified'))`,
+    `clear_reason_alerted_at TEXT`,
+  ]) {
+    try {
+      await db.prepare(`ALTER TABLE protected_minor_subjects ADD COLUMN ${column}`).run();
+    } catch (error) {
+      if (!String(error).includes('duplicate column name')) throw error;
+    }
+  }
+
+  await db.prepare(`UPDATE protected_minor_subjects SET clear_reason_class = CASE
+      WHEN clear_reason = 'false_positive' THEN 'false_positive'
+      WHEN clear_reason IN ('age_review_denied', 'age_review_expired', 'age_up', 'age_verified') THEN 'valid_prior'
+      ELSE 'unclassified' END
+    WHERE classification_state = 'cleared'`).run();
+
+  await db.prepare(`CREATE TRIGGER IF NOT EXISTS protected_minor_clear_reason_insert
+    BEFORE INSERT ON protected_minor_subjects
+    WHEN NEW.classification_state = 'cleared' AND (
+      (NEW.clear_reason = 'false_positive' AND NEW.clear_reason_class != 'false_positive') OR
+      (NEW.clear_reason IN ('age_review_denied', 'age_review_expired', 'age_up', 'age_verified') AND NEW.clear_reason_class != 'valid_prior') OR
+      (NEW.clear_reason NOT IN ('false_positive', 'age_review_denied', 'age_review_expired', 'age_up', 'age_verified') AND NEW.clear_reason_class != 'unclassified')
+    ) BEGIN SELECT RAISE(ABORT, 'clear reason classification mismatch'); END`).run();
+  await db.prepare(`CREATE TRIGGER IF NOT EXISTS protected_minor_clear_reason_update
+    BEFORE UPDATE OF classification_state, clear_reason, clear_reason_class ON protected_minor_subjects
+    WHEN NEW.classification_state = 'cleared' AND (
+      (NEW.clear_reason = 'false_positive' AND NEW.clear_reason_class != 'false_positive') OR
+      (NEW.clear_reason IN ('age_review_denied', 'age_review_expired', 'age_up', 'age_verified') AND NEW.clear_reason_class != 'valid_prior') OR
+      (NEW.clear_reason NOT IN ('false_positive', 'age_review_denied', 'age_review_expired', 'age_up', 'age_verified') AND NEW.clear_reason_class != 'unclassified')
+    ) BEGIN SELECT RAISE(ABORT, 'clear reason classification mismatch'); END`).run();
 
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS protected_minor_account_bindings (
@@ -249,4 +295,43 @@ export async function ensureSchema(db: D1Database): Promise<void> {
     ON protected_minor_provisioning_operations(subject_id, created_at)`).run();
   await db.prepare(`CREATE INDEX IF NOT EXISTS idx_protected_minor_projection_pending
     ON protected_minor_projection_jobs(state, created_at)`).run();
+
+  // Before retention existed, clearing a subject deliberately kept its current
+  // binding row but did not stamp an unbinding time. The clearance time is the
+  // conservative lifecycle boundary for those legacy rows.
+  await db.prepare(`UPDATE protected_minor_account_bindings SET unbound_at = (
+      SELECT s.cleared_at FROM protected_minor_subjects s
+      WHERE s.subject_id = protected_minor_account_bindings.subject_id)
+    WHERE unbound_at IS NULL AND subject_id IN (
+      SELECT subject_id FROM protected_minor_subjects WHERE classification_state = 'cleared')`).run();
+
+  await db.prepare(`CREATE TABLE IF NOT EXISTS protected_minor_provisioning_tombstones (
+    provisioning_operation_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('onboarding', 'replacement')),
+    terminal_outcome TEXT NOT NULL CHECK (terminal_outcome IN ('complete', 'failed')),
+    completed_at TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    result_digest TEXT,
+    key_id TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`).run();
+
+  await db.prepare(`CREATE TABLE IF NOT EXISTS retention_legal_holds (
+    id TEXT PRIMARY KEY,
+    record_type TEXT NOT NULL CHECK (record_type IN ('protected_subject', 'account_binding', 'provisioning_operation', 'projection_job', 'age_review_case')),
+    record_key TEXT,
+    disposal_stage TEXT NOT NULL DEFAULT 'all' CHECK (disposal_stage IN ('all', 'claim_link', 'redaction', 'compaction', 'deletion')),
+    authorized_role TEXT NOT NULL,
+    starts_at TEXT NOT NULL,
+    review_at TEXT NOT NULL,
+    expires_at TEXT,
+    released_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`).run();
+  await db.prepare(`CREATE INDEX IF NOT EXISTS idx_retention_holds_active
+    ON retention_legal_holds(record_type, record_key, disposal_stage, starts_at, released_at, expires_at)`).run();
+  await db.prepare(`CREATE TABLE IF NOT EXISTS retention_alert_state (
+    alert_type TEXT PRIMARY KEY,
+    last_alerted_at TEXT NOT NULL
+  )`).run();
 }

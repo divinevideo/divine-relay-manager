@@ -2,6 +2,8 @@
 // ABOUTME: Keeps classification independent from replaceable Keycast account rows.
 
 import { createMinorAccount, type KeycastEnv } from './keycast-client';
+import { classifyClearReason } from '../../shared/retention';
+import { digestProvisioningFingerprint, findProvisioningTombstone, resolveTombstoneKey } from './retention';
 
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const PUBKEY_RE = /^[0-9a-f]{64}$/;
@@ -10,6 +12,7 @@ export interface ProtectedMinorEnv extends KeycastEnv {
   DB?: D1Database;
   PROTECTED_MINOR_SERVICE_TOKEN?: string | SecretStoreSecret;
   PROTECTED_MINOR_REPLACEMENT_ENABLED?: string;
+  PROTECTED_MINOR_TOMBSTONE_KEY?: string | SecretStoreSecret;
 }
 
 type SecretStoreSecret = { get(): Promise<string> };
@@ -72,6 +75,7 @@ export async function clearSubject(
 ): Promise<{ success: boolean; projectionPubkey?: string; error?: string }> {
   try {
     const now = new Date().toISOString();
+    const reasonClass = classifyClearReason(reason);
     const subject = await db.prepare(`SELECT s.subject_id, s.classification_state,
         (SELECT current.pubkey FROM protected_minor_account_bindings current
           WHERE current.subject_id = s.subject_id AND current.unbound_at IS NULL LIMIT 1) AS projection_pubkey
@@ -85,9 +89,12 @@ export async function clearSubject(
     if (!subject || subject.classification_state === 'cleared') return { success: true, projectionPubkey };
     await db.batch([
       db.prepare(`UPDATE protected_minor_subjects
-        SET classification_state = 'cleared', cleared_at = ?, cleared_by = ?, clear_reason = ?
+        SET classification_state = 'cleared', cleared_at = ?, cleared_by = ?, clear_reason = ?, clear_reason_class = ?
         WHERE subject_id = ? AND classification_state = 'active'`)
-        .bind(now, clearedBy ?? null, reason, subject.subject_id),
+        .bind(now, clearedBy ?? null, reason, reasonClass, subject.subject_id),
+      db.prepare(`UPDATE protected_minor_account_bindings
+        SET unbound_at = COALESCE(unbound_at, ?) WHERE subject_id = ? AND unbound_at IS NULL`)
+        .bind(now, subject.subject_id),
       db.prepare(`INSERT INTO protected_minor_projection_jobs
         (subject_id, pubkey, reason, state, created_at, updated_at)
         VALUES (?, ?, ?, 'pending', ?, ?)
@@ -203,12 +210,12 @@ export async function backfillProtectedMinorSubjects(db: D1Database): Promise<{ 
     if (ending) {
       await db.batch([
         db.prepare(`INSERT INTO protected_minor_subjects
-          (subject_id, source_case_id, classification_state, classified_at, cleared_at, cleared_by, clear_reason)
-          VALUES (?, ?, 'cleared', ?, ?, ?, ?)`)
-          .bind(subjectId, row.id, row.created_at, ending.updated_at, ending.moderator_pubkey, ending.resolution_note || 'age_review_denied'),
+          (subject_id, source_case_id, classification_state, classified_at, cleared_at, cleared_by, clear_reason, clear_reason_class)
+          VALUES (?, ?, 'cleared', ?, ?, ?, ?, 'valid_prior')`)
+          .bind(subjectId, row.id, row.created_at, ending.updated_at, ending.moderator_pubkey, 'age_review_denied'),
         db.prepare(`INSERT INTO protected_minor_account_bindings
-          (id, subject_id, pubkey, bound_at) VALUES (?, ?, ?, ?)`)
-          .bind(bindingId, subjectId, row.pubkey, row.created_at),
+          (id, subject_id, pubkey, bound_at, unbound_at) VALUES (?, ?, ?, ?, ?)`)
+          .bind(bindingId, subjectId, row.pubkey, row.created_at, ending.updated_at),
       ]);
     } else {
       await db.batch([
@@ -244,11 +251,20 @@ export async function fingerprintProvisioningRequest(input: {
 export async function startOrResumeReplacement(
   env: ProtectedMinorEnv,
   input: { subjectRef: string; provisioningOperationId: string; username: string; displayName?: string },
-): Promise<{ outcome: 'complete'; pubkey: string; claimUrl: string | null; expiresAt: string | null; accountState: 'unclaimed' | 'claimed'; replayed: boolean } | { outcome: 'conflict'; code: string } | { outcome: 'failed'; error: string }> {
+): Promise<{ outcome: 'complete'; pubkey: string; claimUrl: string | null; expiresAt: string | null; accountState: 'unclaimed' | 'claimed'; replayed: boolean } | { outcome: 'compacted'; code: 'provisioning_operation_compacted'; replayed: true } | { outcome: 'conflict'; code: string } | { outcome: 'failed'; error: string }> {
   if (!env.DB) return { outcome: 'failed', error: 'Database not configured' };
   const fingerprint = await fingerprintProvisioningRequest({
     kind: 'replacement', username: input.username, displayName: input.displayName,
   });
+  const compacted = await findProvisioningTombstone(env.DB, input.provisioningOperationId);
+  if (compacted) {
+    const key = await resolveTombstoneKey(env.PROTECTED_MINOR_TOMBSTONE_KEY, compacted.key_id);
+    if (!key || compacted.kind !== 'replacement'
+      || await digestProvisioningFingerprint(key, fingerprint, input.subjectRef) !== compacted.request_digest) {
+      return { outcome: 'conflict', code: 'provisioning_operation_conflict' };
+    }
+    return { outcome: 'compacted', code: 'provisioning_operation_compacted', replayed: true };
+  }
   let existing = await env.DB.prepare(`SELECT subject_id, kind, request_fingerprint, state, result_pubkey
     FROM protected_minor_provisioning_operations WHERE provisioning_operation_id = ?`)
     .bind(input.provisioningOperationId).first<{ subject_id: string; kind: string; request_fingerprint: string; state: string; result_pubkey: string | null }>();
@@ -403,6 +419,7 @@ export async function handleProtectedMinorServiceRoute(
         subjectRef: body.subject_ref, provisioningOperationId: body.provisioning_operation_id,
         username: body.username, displayName: body.display_name as string | undefined,
       });
+      if (result.outcome === 'compacted') return json(result, 410, corsHeaders);
       if (result.outcome === 'conflict') return json({ code: result.code }, 409, corsHeaders);
       if (result.outcome === 'failed') return json({ error: 'service_unavailable' }, 503, corsHeaders);
       return json({ outcome: 'complete', pubkey: result.pubkey, claim_url: result.claimUrl, expires_at: result.expiresAt, account_state: result.accountState, replayed: result.replayed }, 200, corsHeaders);
