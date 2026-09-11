@@ -138,6 +138,7 @@ describe('UserProfileCard incomplete relay reads (#210)', () => {
     const events = screen.getByText('? events');
     expect(events).toBeInTheDocument();
     expect(events).toHaveAttribute('title', STAT_UNKNOWN_TITLE);
+    expect(events).toHaveAttribute('aria-label', 'events count unavailable, relay read did not complete');
     expect(screen.queryByText('0 events')).not.toBeInTheDocument();
     // Only the flagged count is uncertain; a completed 0 still reads as 0.
     expect(screen.getByText('0 reports')).toBeInTheDocument();

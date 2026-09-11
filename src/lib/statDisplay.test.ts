@@ -1,7 +1,7 @@
 // ABOUTME: Unit tests for statCountText, which renders a user-stat count only
 // ABOUTME: when the relay read that produced it completed (#210).
 import { describe, it, expect } from 'vitest';
-import { statCountText } from './statDisplay';
+import { statCountText, statCountAriaLabel } from './statDisplay';
 
 describe('statCountText', () => {
   it('renders a completed count verbatim', () => {
@@ -22,5 +22,17 @@ describe('statCountText', () => {
 
   it('treats an undefined count with no flag as 0 (loading, matching prior display)', () => {
     expect(statCountText(undefined, undefined)).toBe('0');
+  });
+});
+
+describe('statCountAriaLabel', () => {
+  it('has no override for a completed read (the visible count reads fine)', () => {
+    expect(statCountAriaLabel('events', false)).toBeUndefined();
+  });
+
+  it('spells out an incomplete count so a screen reader does not read a bare "?"', () => {
+    expect(statCountAriaLabel('events', true)).toBe(
+      'events count unavailable, relay read did not complete',
+    );
   });
 });

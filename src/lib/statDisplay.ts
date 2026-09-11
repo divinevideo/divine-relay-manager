@@ -17,3 +17,16 @@ export function statCountText(
 ): string {
   return incomplete ? '?' : String(count ?? 0);
 }
+
+/**
+ * Accessible name for a count span, or undefined when the read completed (the
+ * visible number reads fine on its own). For an incomplete read it spells out
+ * the "?" so a screen reader announces the meaning instead of a bare "question
+ * mark". `unit` is the count's noun, e.g. "events".
+ */
+export function statCountAriaLabel(
+  unit: string,
+  incomplete: boolean | undefined,
+): string | undefined {
+  return incomplete ? `${unit} count unavailable, relay read did not complete` : undefined;
+}

@@ -4,7 +4,7 @@
 
 import { FileText, Flag, Tag } from "lucide-react";
 import type { UserStats } from "@/hooks/useUserStats";
-import { statCountText, STAT_UNKNOWN_TITLE } from "@/lib/statDisplay";
+import { statCountText, statCountAriaLabel, STAT_UNKNOWN_TITLE } from "@/lib/statDisplay";
 
 /**
  * The three moderation-relevant counts as inline spans. Rendered by both
@@ -17,6 +17,7 @@ export function UserStatsRow({ stats }: { stats: UserStats }) {
       <span
         className="flex items-center gap-1"
         title={stats.authoredContentIncomplete ? STAT_UNKNOWN_TITLE : undefined}
+        aria-label={statCountAriaLabel('events', stats.authoredContentIncomplete)}
       >
         <FileText className="h-3 w-3" />
         {statCountText(stats.postCount, stats.authoredContentIncomplete)} events
@@ -24,6 +25,7 @@ export function UserStatsRow({ stats }: { stats: UserStats }) {
       <span
         className="flex items-center gap-1"
         title={stats.reportsIncomplete ? STAT_UNKNOWN_TITLE : undefined}
+        aria-label={statCountAriaLabel('reports', stats.reportsIncomplete)}
       >
         <Flag className="h-3 w-3" />
         {statCountText(stats.reportCount, stats.reportsIncomplete)} reports
@@ -31,6 +33,7 @@ export function UserStatsRow({ stats }: { stats: UserStats }) {
       <span
         className="flex items-center gap-1"
         title={stats.labelsIncomplete ? STAT_UNKNOWN_TITLE : undefined}
+        aria-label={statCountAriaLabel('labels', stats.labelsIncomplete)}
       >
         <Tag className="h-3 w-3" />
         {statCountText(stats.labelCount, stats.labelsIncomplete)} labels

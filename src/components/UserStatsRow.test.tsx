@@ -33,11 +33,12 @@ describe('UserStatsRow', () => {
     expect(screen.queryByText(/\?/)).not.toBeInTheDocument();
   });
 
-  it('shows "?" with a tooltip for events when the authored-content read did not complete', () => {
+  it('shows "?" with a tooltip and accessible name for events when the authored-content read did not complete', () => {
     render(<UserStatsRow stats={makeStats({ authoredContentIncomplete: true })} />);
 
     const events = screen.getByText('? events');
     expect(events).toHaveAttribute('title', STAT_UNKNOWN_TITLE);
+    expect(events).toHaveAttribute('aria-label', 'events count unavailable, relay read did not complete');
     expect(screen.queryByText('0 events')).not.toBeInTheDocument();
     expect(screen.getByText('0 reports')).toBeInTheDocument();
   });

@@ -13,7 +13,7 @@ import { User, FileText, Flag, Tag, CheckCircle, ChevronDown, ChevronUp, Copy, C
 import { InlineMediaPreview } from "@/components/MediaPreview";
 import type { NostrEvent, NostrMetadata } from "@nostrify/nostrify";
 import type { UserStats } from "@/hooks/useUserStats";
-import { statCountText, STAT_UNKNOWN_TITLE } from "@/lib/statDisplay";
+import { statCountText, statCountAriaLabel, STAT_UNKNOWN_TITLE } from "@/lib/statDisplay";
 import { getProfileUrl, getPublicEventUrl } from "@/lib/constants";
 import { parseRepostForDisplay } from "@/lib/nip18";
 import { KindBadge } from "@/components/KindBadge";
@@ -195,19 +195,28 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
         <div className="flex flex-wrap items-center gap-4 text-sm">
           <div className="flex items-center gap-1">
             <FileText className="h-4 w-4 text-muted-foreground" />
-            <span title={stats?.authoredContentIncomplete ? STAT_UNKNOWN_TITLE : undefined}>
+            <span
+              title={stats?.authoredContentIncomplete ? STAT_UNKNOWN_TITLE : undefined}
+              aria-label={statCountAriaLabel('events', stats?.authoredContentIncomplete)}
+            >
               {statCountText(stats?.postCount, stats?.authoredContentIncomplete)} events
             </span>
           </div>
           <div className="flex items-center gap-1">
             <Flag className="h-4 w-4 text-muted-foreground" />
-            <span title={stats?.reportsIncomplete ? STAT_UNKNOWN_TITLE : undefined}>
+            <span
+              title={stats?.reportsIncomplete ? STAT_UNKNOWN_TITLE : undefined}
+              aria-label={statCountAriaLabel('reports', stats?.reportsIncomplete)}
+            >
               {statCountText(stats?.reportCount, stats?.reportsIncomplete)} reports
             </span>
           </div>
           <div className="flex items-center gap-1">
             <Tag className="h-4 w-4 text-muted-foreground" />
-            <span title={stats?.labelsIncomplete ? STAT_UNKNOWN_TITLE : undefined}>
+            <span
+              title={stats?.labelsIncomplete ? STAT_UNKNOWN_TITLE : undefined}
+              aria-label={statCountAriaLabel('labels', stats?.labelsIncomplete)}
+            >
               {statCountText(stats?.labelCount, stats?.labelsIncomplete)} labels
             </span>
           </div>
