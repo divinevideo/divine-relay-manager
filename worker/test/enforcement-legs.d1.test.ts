@@ -199,3 +199,59 @@ describe('abandoned rows', () => {
     expect((await rowFor(PK))!.state).toBe('resolved');
   });
 });
+
+describe('re-drive races with a moderator', () => {
+  beforeEach(async () => {
+    await DB.prepare('DELETE FROM enforcement_legs').run();
+  });
+
+  // The cron reads an intent, then a moderator acts before the re-drive lands.
+  // The stale call still goes out -- that window cannot be closed from here --
+  // but it must not be recorded as convergence, or the account stays suspended
+  // at Keycast after a moderator cleared it and nothing ever corrects it.
+  // Leaving the row pending lets the next tick apply the current intent.
+  it('does not mark converged when the intent changed under the re-drive', async () => {
+    await recordFailedKeycastLeg(DB, PK, 'suspended', 'boom', 'case-1');
+    // A moderator's clear lands between the read and the resolve.
+    await recordFailedKeycastLeg(DB, PK, 'active', 'boom', 'case-1');
+
+    await resolveKeycastLeg(DB, PK, 'suspended');
+
+    const row = await rowFor(PK);
+    expect(row!.state).toBe('failed');
+    expect(row!.intent).toBe('active');
+  });
+
+  // Exercises the CRON path, not just the helper: the race is only closed if the
+  // re-drive loop actually passes the intent it read. Simulated deterministically
+  // by superseding the row from inside the Keycast call.
+  it('cron leaves the leg pending when a moderator supersedes it mid-call', async () => {
+    await recordFailedKeycastLeg(DB, PK, 'suspended', 'boom', 'case-1');
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      if (String(input).includes('/api/admin/users/')) {
+        await recordFailedKeycastLeg(DB, PK, 'active', 'moderator cleared', 'case-1');
+        return new Response('{}', { status: 200 });
+      }
+      return new Response('ok', { status: 200 });
+    });
+
+    await checkAgeReviewDeadlines(cronEnv);
+
+    const row = await rowFor(PK);
+    expect(row!.intent).toBe('active');
+    expect(row!.state).toBe('failed'); // still pending, so the next tick applies 'active'
+  });
+
+  it('marks converged when the intent still matches', async () => {
+    await recordFailedKeycastLeg(DB, PK, 'suspended', 'boom', 'case-1');
+    await resolveKeycastLeg(DB, PK, 'suspended');
+    expect((await rowFor(PK))!.state).toBe('resolved');
+  });
+
+  // The handler observed the outcome directly, so it resolves unconditionally.
+  it('resolves unconditionally when no intent is supplied', async () => {
+    await recordFailedKeycastLeg(DB, PK, 'suspended', 'boom', 'case-1');
+    await resolveKeycastLeg(DB, PK);
+    expect((await rowFor(PK))!.state).toBe('resolved');
+  });
+});
