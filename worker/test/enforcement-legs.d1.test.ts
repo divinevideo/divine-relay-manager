@@ -259,3 +259,56 @@ describe('re-drive races with a moderator', () => {
     expect((await rowFor(PK))!.state).toBe('resolved');
   });
 });
+
+describe('re-drive budget and non-attempts', () => {
+  beforeEach(async () => {
+    await DB.prepare('DELETE FROM enforcement_legs').run();
+  });
+
+  // A rotated or unbound secret makes every call return 'not configured' without
+  // a request. Counting those marches the whole backlog to `abandoned` in under
+  // an hour, and nothing re-drives an abandoned leg -- recovery would be hand SQL
+  // against production.
+  it('does not spend the budget on a call that was never made', async () => {
+    await recordFailedKeycastLeg(DB, PK, 'suspended', 'boom', 'case-1');
+    const calls = mockKeycast(() => new Response('{}', { status: 200 }));
+
+    // No KEYCAST_URL / token: callKeycast returns 'not configured' without fetching.
+    await checkAgeReviewDeadlines({ DB });
+
+    expect(calls.calls()).toBe(0);
+    const row = await rowFor(PK);
+    expect(row!.attempts).toBe(0);
+    expect(row!.state).toBe('failed');
+  });
+
+  // A D1 blip after a SUCCESSFUL Keycast call must not read as a Keycast failure.
+  it('does not count a bookkeeping failure as a failed attempt', async () => {
+    await recordFailedKeycastLeg(DB, PK, 'suspended', 'boom', 'case-1');
+    mockKeycast(() => new Response('{}', { status: 200 }));
+
+    await checkAgeReviewDeadlines(cronEnv);
+
+    expect((await rowFor(PK))!.state).toBe('resolved');
+    expect((await rowFor(PK))!.attempts).toBe(0);
+  });
+
+  // A stale failure must not consume the budget of the intent that replaced it.
+  it('does not burn a newer intent\'s budget with an older failure', async () => {
+    await recordFailedKeycastLeg(DB, PK, 'suspended', 'boom', 'case-1');
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      if (String(input).includes('/api/admin/users/')) {
+        await recordFailedKeycastLeg(DB, PK, 'active', 'moderator cleared', 'case-1');
+        return new Response('upstream exploded', { status: 503 });
+      }
+      return new Response('ok', { status: 200 });
+    });
+
+    await checkAgeReviewDeadlines(cronEnv);
+
+    const row = await rowFor(PK);
+    expect(row!.intent).toBe('active');
+    expect(row!.attempts).toBe(0);
+    expect(row!.last_error).toBe('moderator cleared');
+  });
+});

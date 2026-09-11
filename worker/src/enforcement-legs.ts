@@ -33,6 +33,14 @@ export interface PendingEnforcementLeg {
 export const MAX_ENFORCEMENT_ATTEMPTS = 10;
 
 /**
+ * How many legs one cron tick re-drives. Each is a sequential network round trip
+ * inside a scheduled invocation with a wall-clock cap, and this work is the
+ * lowest-priority thing the cron does, so it stays well clear of that cap rather
+ * than draining the backlog as fast as possible. A backlog drains over ticks.
+ */
+export const REDRIVE_BATCH_LIMIT = 20;
+
+/**
  * Record a failed Keycast status leg, or supersede an existing record.
  *
  * One row per pubkey, not per action: a later moderation action replaces the
@@ -99,7 +107,7 @@ export async function pendingKeycastLegs(db: D1Database): Promise<PendingEnforce
   const rows = await db.prepare(`
     SELECT pubkey, intent, attempts FROM enforcement_legs
     WHERE leg = 'keycast_status' AND state = 'failed'
-    ORDER BY updated_at LIMIT 100
+    ORDER BY updated_at LIMIT ${REDRIVE_BATCH_LIMIT}
   `).all<{ pubkey: string; intent: string; attempts: number }>();
   return rows.results
     .filter((row): row is { pubkey: string; intent: EnforcementIntent; attempts: number } =>
@@ -116,14 +124,23 @@ export async function markKeycastLegAttempt(
   db: D1Database,
   pubkey: string,
   error: string | undefined,
+  expectedIntent?: EnforcementIntent,
 ): Promise<boolean> {
   const now = new Date().toISOString();
+  // Intent-guarded for the same reason the resolve is: a moderator may have
+  // superseded the row while the call was in flight, and the new intent must
+  // start with a full budget and its own error, not inherit the old one's.
+  // `last_error` is bounded -- an upstream can answer with kilobytes of HTML.
   const row = await db.prepare(`
     UPDATE enforcement_legs
     SET attempts = attempts + 1, last_error = ?, updated_at = ?,
         state = CASE WHEN attempts + 1 >= ? THEN 'abandoned' ELSE state END
     WHERE pubkey = ? AND leg = 'keycast_status' AND state = 'failed'
+      AND (? IS NULL OR intent = ?)
     RETURNING state
-  `).bind(error ?? null, now, MAX_ENFORCEMENT_ATTEMPTS, pubkey).first<{ state: string }>();
+  `).bind(
+    error?.slice(0, 200) ?? null, now, MAX_ENFORCEMENT_ATTEMPTS, pubkey,
+    expectedIntent ?? null, expectedIntent ?? null,
+  ).first<{ state: string }>();
   return row?.state === 'abandoned';
 }

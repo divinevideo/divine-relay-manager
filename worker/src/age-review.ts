@@ -2131,32 +2131,41 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
   }
   const abandoned: string[] = [];
   for (const leg of staleLegs) {
+    let result: { success: boolean; error?: string } | undefined;
     try {
-      const result = leg.intent === 'suspended' ? await suspendUser(leg.pubkey, 'age_review', env)
+      result = leg.intent === 'suspended' ? await suspendUser(leg.pubkey, 'age_review', env)
         : leg.intent === 'banned' ? await banUser(leg.pubkey, 'age_review_denied', env)
         : await unsuspendUser(leg.pubkey, env);
-      // A 404 means the account is not Keycast-managed, so there is no state to
-      // converge on and no retry that could ever succeed. Settle it (#269).
-      // TODO(#270): read `result.notFound` directly once that PR lands the field
-      // on KeycastResult. Structural read until then so this does not stack on it.
-      const notApplicable = (result as { notFound?: boolean }).notFound === true;
+    } catch (error) {
+      result = { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+    // A call that was never made is not an attempt. `not configured` means an
+    // unresolved binding or secret, so counting it would march the whole backlog
+    // to `abandoned` during a secret rotation -- a state no code path exits.
+    if (result.error === 'not configured') {
+      console.error('[age-review] Keycast re-drive skipped: not configured');
+      continue;
+    }
+    // A 404 means the account is not Keycast-managed, so there is no state to
+    // converge on and no retry that could ever succeed. Settle it (#269).
+    // TODO(#123): read `result.notFound` directly once #270 lands the field on
+    // KeycastResult. Structural read until then so this does not stack on it.
+    const notApplicable = (result as { notFound?: boolean }).notFound === true;
+    // Outside the try: a D1 failure here must not be counted as a Keycast
+    // failure, and must not burn the budget of a call that actually succeeded.
+    try {
       if (result.success || notApplicable) {
         // Intent-guarded: a moderator may have superseded this intent while the
         // call was in flight, and a stale success is not convergence.
         await resolveKeycastLeg(env.DB, leg.pubkey, leg.intent);
-      } else if (await markKeycastLegAttempt(env.DB, leg.pubkey, result.error)) {
+      } else if (await markKeycastLegAttempt(env.DB, leg.pubkey, result.error, leg.intent)) {
         abandoned.push(leg.intent);
       }
     } catch (error) {
-      try {
-        if (await markKeycastLegAttempt(env.DB, leg.pubkey, error instanceof Error ? error.message : String(error))) {
-          abandoned.push(leg.intent);
-        }
-      } catch (markError) {
-        console.error('[age-review] Failed to rotate an enforcement leg re-drive:', markError);
-      }
+      console.error('[age-review] Failed to record an enforcement leg re-drive:', error);
     }
   }
+
   if (abandoned.length > 0) {
     console.error(`[age-review] ${abandoned.length} Keycast enforcement leg(s) abandoned after ${MAX_ENFORCEMENT_ATTEMPTS} attempts`);
     if (env.SLACK_WEBHOOK_URL) {
@@ -2179,13 +2188,19 @@ async function sendEnforcementAbandonedAlert(webhookUrl: string, intents: string
   }, {});
   const detail = Object.entries(byIntent).map(([intent, count]) => `${count} x ${intent}`).join(', ');
   const text = `:rotating_light: ${intents.length} Keycast enforcement leg(s) gave up after ${MAX_ENFORCEMENT_ATTEMPTS} attempts (${detail}). `
-    + 'These accounts are enforced at the relay but their Divine sign-in did not follow. See the enforcement_legs table.';
+    + 'Their Divine sign-in did not follow the moderation action. See the enforcement_legs table.';
   try {
-    await fetch(webhookUrl, {
+    const res = await fetch(webhookUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text }),
     });
+    // This is the only notification a permanently-stuck leg ever produces, and
+    // it is never repeated. A webhook that quietly 403s would lose it outright,
+    // so a non-OK response is logged like a throw.
+    if (!res.ok) {
+      console.error(`[age-review] Abandoned-enforcement alert rejected: ${res.status}`);
+    }
   } catch (error) {
     console.error('[age-review] Failed to send the abandoned-enforcement alert:', error);
   }
