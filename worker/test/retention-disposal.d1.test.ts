@@ -139,7 +139,11 @@ describe('protected-record retention on real D1', () => {
     const after = await createSubjectWithBinding(DB, 'case-after', PUBKEY_B, OLD_30);
     await clearSubject(DB, PUBKEY_A, undefined, 'false_positive');
     await clearSubject(DB, PUBKEY_B, undefined, 'false_positive');
-    for (const [subjectId, days, seconds] of [[before.subjectId, '-30 days', '+1 second'], [after.subjectId, '-30 days', '-1 second']] as const) {
+    // Margin is an hour, not a second: the assertion is about which SIDE of the
+    // 30-day line a record falls on, and a sub-second margin turns that into a
+    // race against how long the disposal run itself takes -- it goes red on a
+    // slow runner, or whenever a stage is added ahead of the deletes.
+    for (const [subjectId, days, seconds] of [[before.subjectId, '-30 days', '+1 hour'], [after.subjectId, '-30 days', '-1 hour']] as const) {
       await DB.prepare(`UPDATE protected_minor_subjects SET cleared_at = datetime('now', ?, ?) WHERE subject_id = ?`)
         .bind(days, seconds, subjectId).run();
       await DB.prepare(`UPDATE protected_minor_account_bindings SET unbound_at = datetime('now', ?, ?) WHERE subject_id = ?`)
