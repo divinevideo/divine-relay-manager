@@ -16,6 +16,8 @@ import {
 import { ExternalLink, FileText, ChevronDown, Copy, Check, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { getProfileUrl, RECENT_CONTENT_KINDS } from "@/lib/constants";
+import { readWithCompleteness } from "@/lib/relayRead";
+import { statCountText, statCountAriaLabel, STAT_UNKNOWN_TITLE } from "@/lib/statDisplay";
 import { parseRepostForDisplay } from "@/lib/nip18";
 import { KindBadge } from "@/components/KindBadge";
 import { useAuthor } from "@/hooks/useAuthor";
@@ -68,9 +70,12 @@ export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButto
     // card can serve the other environment's events for the staleTime window
     queryKey: ['user-posts-stats', config.apiUrl, pubkey],
     queryFn: async ({ signal }) => {
-      const events = await nostr.query(
+      // A strict read so a dead/slow relay is a known incomplete, not a silent
+      // empty that would render as a confident "0 events on relay".
+      const { events, incomplete } = await readWithCompleteness(
+        nostr,
         [{ kinds: [...RECENT_CONTENT_KINDS], authors: [pubkey], limit: 50 }],
-        { signal: AbortSignal.any([signal, AbortSignal.timeout(3000)]) }
+        { signal, timeoutMs: 3000 }
       );
       return {
         count: events.length,
@@ -78,6 +83,7 @@ export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButto
         recentPosts: [...events].sort((a, b) => b.created_at - a.created_at).slice(0, 3),
         // The full set drives the spray roll-up (summarize all comments, not the shown 3)
         allEvents: events,
+        incomplete,
       };
     },
     // UserManagement renders one card per banned/suspended user and Radix
@@ -165,9 +171,13 @@ export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButto
 
               {/* Stats row */}
               <div className="flex items-center gap-3 mt-2 text-sm">
-                <span className="flex items-center gap-1 text-muted-foreground">
+                <span
+                  className="flex items-center gap-1 text-muted-foreground"
+                  title={postStats?.incomplete ? STAT_UNKNOWN_TITLE : undefined}
+                  aria-label={statCountAriaLabel('events', postStats?.incomplete)}
+                >
                   <FileText className="h-3 w-3" />
-                  {postStats?.count || 0} events on relay
+                  {statCountText(postStats?.count, postStats?.incomplete)} events on relay
                 </span>
                 {activityLine && (
                   <span className="text-amber-700 dark:text-amber-400">{activityLine}</span>
