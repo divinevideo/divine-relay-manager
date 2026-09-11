@@ -192,6 +192,53 @@ describe('AgeReviewDetail', () => {
     expect(toast).not.toHaveBeenCalled();
   });
 
+  // Self-custody targets have no Divine login, so the sign-in leg has nothing to
+  // act on. That is not a failed enforcement and must not read as one -- but it
+  // must still be visible, or the moderator walks away believing a sign-in was
+  // blocked when none exists (issue #191).
+  it('reports a not-applicable sign-in leg as information, not a failure', async () => {
+    updateAgeReviewCase.mockResolvedValueOnce({
+      success: true,
+      case: makeCase({ state: 'restricted_pending_user_response' }),
+      enforcementComplete: true,
+      enforcement: { relay: 'ok', bulk: 'ok', keycast: 'not_applicable' },
+    });
+    renderDetail(makeCase({ suspected_age_band: 'age_13_15' }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Restrict Account' }));
+
+    await waitFor(() => expect(toast).toHaveBeenCalled());
+    const arg = toast.mock.calls[0][0];
+    expect(arg.title).not.toBe('Enforcement incomplete');
+    expect(arg.variant).not.toBe('destructive');
+    expect(arg.description).toMatch(/sign-in/i);
+    expect(arg.description).toMatch(/no Divine login/i);
+    // No "retry or escalate" instruction: there is nothing to retry.
+    expect(arg.description).not.toMatch(/escalate/i);
+  });
+
+  // A genuinely failed leg alongside a not-applicable one is still a failure,
+  // and the failure is what the moderator must see.
+  it('still raises the failure toast when another leg failed', async () => {
+    updateAgeReviewCase.mockResolvedValueOnce({
+      success: false,
+      case: makeCase({ state: 'restricted_pending_user_response' }),
+      enforcementComplete: false,
+      enforcement: { relay: 'failed', bulk: 'ok', keycast: 'not_applicable' },
+    });
+    renderDetail(makeCase({ suspected_age_band: 'age_13_15' }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Restrict Account' }));
+
+    await waitFor(() => {
+      expect(toast).toHaveBeenCalledWith(expect.objectContaining({
+        title: 'Enforcement incomplete',
+        variant: 'destructive',
+      }));
+    });
+    expect(toast.mock.calls[0][0].description).not.toMatch(/account sign-in/);
+  });
+
   it('toasts a reload notice on a 409 version_conflict', async () => {
     updateAgeReviewCase.mockRejectedValueOnce(
       new ApiError('Case was modified by another request', 409, 'Conflict', 'version_conflict', 5),

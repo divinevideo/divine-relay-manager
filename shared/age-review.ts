@@ -253,7 +253,16 @@ export interface AgeReviewCase {
 
 // --- Case-update enforcement contract (shared by the worker API and the admin client) ---
 
-export type EnforcementLegStatus = 'not_attempted' | 'ok' | 'failed';
+/**
+ * Per-leg enforcement outcome.
+ *
+ * `not_applicable` is a leg that had nothing to act on: the subject has no
+ * Divine login, so there is no sign-in to suspend. Distinct from `failed`
+ * (something broke and enforcement is short) and from `not_attempted` (the
+ * transition does not call for this leg at all). Additive member: payloads
+ * from an older worker still type-check.
+ */
+export type EnforcementLegStatus = 'not_attempted' | 'ok' | 'failed' | 'not_applicable';
 
 // Per-leg outcome of the enforcement a case update triggers: relay suspend/ban,
 // bulk media/content action, and Keycast account status.
