@@ -269,6 +269,8 @@ export async function runRetentionDisposal(env: RetentionEnv): Promise<Retention
           OR (s.clear_reason_class != 'false_positive'
             AND datetime(b.unbound_at) <= datetime('now', '-${RETENTION_DAYS.validPriorClassification} days')
             AND datetime(s.cleared_at) <= datetime('now', '-${RETENTION_DAYS.validPriorClassification} days')))
+          AND NOT EXISTS (SELECT 1 FROM protected_minor_projection_jobs p WHERE p.subject_id = b.subject_id)
+          AND NOT EXISTS (SELECT 1 FROM protected_minor_provisioning_operations o WHERE o.subject_id = b.subject_id)
           AND ${noHold('account_binding', 'b.id', 'deletion')}
         LIMIT ${BATCH_LIMIT})`).run();
     result.bindingsDeleted = bindings.meta.changes;

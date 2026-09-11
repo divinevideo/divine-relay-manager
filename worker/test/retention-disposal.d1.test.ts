@@ -213,4 +213,22 @@ describe('protected-record retention on real D1', () => {
     expect(await DB.prepare('SELECT 1 FROM protected_minor_account_bindings WHERE subject_id = ?').bind(subjectId).first()).toBeNull();
     expect(await DB.prepare('SELECT 1 FROM protected_minor_subjects WHERE subject_id = ?').bind(subjectId).first()).toBeNull();
   });
+
+  it('retains a binding when projection disposal fails while continuing independent later stages', async () => {
+    const { subjectId } = await createSubjectWithBinding(DB, 'case-dependent', PUBKEY_A, OLD_30);
+    await clearSubject(DB, PUBKEY_A, undefined, 'false_positive');
+    await DB.prepare(`UPDATE protected_minor_subjects SET cleared_at = ? WHERE subject_id = ?`).bind(OLD_30, subjectId).run();
+    await DB.prepare(`UPDATE protected_minor_account_bindings SET unbound_at = ? WHERE subject_id = ?`).bind(OLD_30, subjectId).run();
+    await DB.prepare(`UPDATE protected_minor_projection_jobs SET state = 'complete', updated_at = ? WHERE subject_id = ?`)
+      .bind(OLD_30, subjectId).run();
+    await DB.prepare(`INSERT INTO age_review_cases (id, pubkey, state, closed_at)
+      VALUES ('case-independent', ?, 'cleared', datetime('now', '-366 days'))`).bind(PUBKEY_B).run();
+
+    const faulty = faultyDb(DB, 'DELETE FROM protected_minor_projection_jobs');
+    await runRetentionDisposal({ DB: faulty, PROTECTED_MINOR_TOMBSTONE_KEY: KEY });
+
+    expect(await DB.prepare('SELECT 1 FROM protected_minor_projection_jobs WHERE subject_id = ?').bind(subjectId).first()).not.toBeNull();
+    expect(await DB.prepare('SELECT 1 FROM protected_minor_account_bindings WHERE subject_id = ?').bind(subjectId).first()).not.toBeNull();
+    expect(await DB.prepare("SELECT 1 FROM age_review_cases WHERE id = 'case-independent'").first()).toBeNull();
+  });
 });
