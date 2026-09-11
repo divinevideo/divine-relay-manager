@@ -3120,10 +3120,10 @@ describe('handleCreateMinorAccount', () => {
     const binds = prepareMock.mock.results[insertIdx].value.bind.mock.calls.flat();
     return {
       sql,
-      accountName: binds[5],
-      accountNip05: binds[6],
-      accountVineUsername: binds[7],
-      identityCapturedAt: binds[8],
+      accountName: binds[4],
+      accountNip05: binds[5],
+      accountVineUsername: binds[6],
+      identityCapturedAt: binds[7],
     };
   }
 
@@ -3302,7 +3302,7 @@ describe('handleCreateMinorAccount', () => {
     expect(res.status).toBe(502);
   });
 
-  it('persists claim_link_expires_at from the Keycast response', async () => {
+  it('does not retain a closed case claim URL but preserves its expiry provenance', async () => {
     const db = makeMinorDb();
 
     const res = await handleCreateMinorAccount(
@@ -3312,15 +3312,16 @@ describe('handleCreateMinorAccount', () => {
     );
 
     expect(res.status).toBe(200);
-    // INSERT bind order: caseId, pubkey, claim_url, claim_link_expires_at, zendesk_ticket_id.
-    // Assert positionally so this also guards the column/bind ordering.
+    // The case is born terminal. Its response still carries the one-time URL,
+    // but the D1 row stores SQL NULL immediately and retains only the expiry.
     const values = identityBinds(db).sql;
     expect(values).toContain('claim_link_expires_at');
     const prepareMock = db.prepare as ReturnType<typeof vi.fn>;
     const insert = prepareMock.mock.calls.findIndex((call: unknown[]) => String(call[0]).includes('INSERT INTO age_review_cases'));
     const bindArgs = prepareMock.mock.results[insert].value.bind.mock.calls[0];
-    expect(bindArgs[2]).toBe('https://login.test/claim/abc');
-    expect(bindArgs[3]).toBe('2026-06-15T00:00:00Z');
+    expect(String(prepareMock.mock.calls[insert][0])).toContain("'minor_onboarding', NULL");
+    expect(bindArgs).not.toContain('https://login.test/claim/abc');
+    expect(bindArgs[2]).toBe('2026-06-15T00:00:00Z');
   });
 
   it('persists null claim_link_expires_at when Keycast omits expires_at', async () => {
@@ -3339,13 +3340,13 @@ describe('handleCreateMinorAccount', () => {
     );
 
     expect(res.status).toBe(200);
-    // claim_url is present (binds at index 2), but expires_at is absent -> bound as null at index 3.
-    // Assert positionally: toContain(null) would also match the null zendesk_ticket_id.
+    // claim_url is never bound for a case born terminal; omitted expires_at is
+    // the null at index 2 (index 3 is the optional Zendesk ticket id).
     const prepareMock = db.prepare as ReturnType<typeof vi.fn>;
     const insert = prepareMock.mock.calls.findIndex((call: unknown[]) => String(call[0]).includes('INSERT INTO age_review_cases'));
     const bindArgs = prepareMock.mock.results[insert].value.bind.mock.calls[0];
-    expect(bindArgs[2]).toBe('https://login.test/claim/abc');
-    expect(bindArgs[3]).toBeNull();
+    expect(bindArgs).not.toContain('https://login.test/claim/abc');
+    expect(bindArgs[2]).toBeNull();
   });
 });
 

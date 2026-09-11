@@ -35,6 +35,7 @@ import {
   pendingSubjectClears,
   UUID_RE,
 } from './protected-minors';
+import { digestProvisioningFingerprint, findProvisioningTombstone, resolveTombstoneKey } from './retention';
 
 /**
  * The identity a case captured at creation, as stored on `age_review_cases`.
@@ -48,6 +49,7 @@ type AgeReviewCaseIdentity = Pick<
 
 export interface AgeReviewEnv extends BulkModerateEnv, KeycastEnv {
   SLACK_WEBHOOK_URL?: string;
+  PROTECTED_MINOR_TOMBSTONE_KEY?: string | SecretStoreSecret;
   ZENDESK_SUBDOMAIN?: string | SecretStoreSecret;
   ZENDESK_API_TOKEN?: string | SecretStoreSecret;
   ZENDESK_EMAIL?: string | SecretStoreSecret;
@@ -321,6 +323,9 @@ export async function handleUpdateAgeReviewCase(
     }
     updates.push('state = ?');
     binds.push(body.state);
+    if (TERMINAL_STATES.includes(body.state as AgeReviewState)) {
+      updates.push("closed_at = COALESCE(closed_at, datetime('now'))", 'claim_link_url = NULL');
+    }
   }
 
   // Age band change
@@ -496,10 +501,10 @@ export async function handleUpdateAgeReviewCase(
       const result = await call();
       if (!result) return { status: 'not_attempted' };
       if (result.success) return { status: 'ok' };
-      console.error(`[age-review] ${label} ${requestedState} failed for case ${caseId}: ${result.error}`);
+      console.error(`[age-review] ${label} ${requestedState} failed: ${result.error}`);
       return { status: 'failed', error: result.error };
     } catch (error) {
-      console.error(`[age-review] ${label} action failed for case ${caseId}:`, error);
+      console.error(`[age-review] ${label} action failed:`, error);
       return { status: 'failed', error: error instanceof Error ? error.message : String(error) };
     }
   };
@@ -540,7 +545,7 @@ export async function handleUpdateAgeReviewCase(
     } catch (error) {
       bulk = 'failed';
       bulkError = error instanceof Error ? error.message : String(error);
-      console.error(`[age-review] Bulk action failed for case ${caseId}:`, error);
+      console.error('[age-review] Bulk action failed:', error);
     }
 
     // Keycast account status.
@@ -581,12 +586,12 @@ export async function handleUpdateAgeReviewCase(
         subjectClearError = result.error;
         minorProjectionPubkey = result.projectionPubkey ?? existing.pubkey;
         if (!result.success) {
-          console.error(`[age-review] Protected subject clear ${requestedState} failed for case ${caseId}: ${result.error}`);
+          console.error(`[age-review] Protected subject clear ${requestedState} failed: ${result.error}`);
         }
       } catch (error) {
         subjectClear = 'failed';
         subjectClearError = error instanceof Error ? error.message : String(error);
-        console.error(`[age-review] Protected subject clear action failed for case ${caseId}:`, error);
+        console.error('[age-review] Protected subject clear action failed:', error);
       }
     }
     const minorClearLeg = await runStatusLeg('Keycast verified_minor clear', () =>
@@ -601,7 +606,7 @@ export async function handleUpdateAgeReviewCase(
       } catch (error) {
         // The pending job remains a safe retry boundary after the projection
         // itself succeeded, so do not turn an applied denial into a 500.
-        console.error(`[age-review] Failed to mark protected-minor projection complete for case ${caseId}:`, error);
+        console.error('[age-review] Failed to mark protected-minor projection complete:', error);
       }
     }
   }
@@ -678,6 +683,19 @@ export async function handleCreateMinorAccount(
   const requestFingerprint = await fingerprintProvisioningRequest({
     kind: 'onboarding', username, displayName, zendeskTicketId: body.zendesk_ticket_id,
   });
+  const compacted = await findProvisioningTombstone(env.DB, provisioningOperationId);
+  if (compacted) {
+    const key = await resolveTombstoneKey(env.PROTECTED_MINOR_TOMBSTONE_KEY, compacted.key_id);
+    if (!key || compacted.kind !== 'onboarding') {
+      return json({ success: false, code: 'provisioning_operation_conflict', error: 'Provisioning operation conflicts with its original request' }, 409, corsHeaders);
+    }
+    const digest = await digestProvisioningFingerprint(key, requestFingerprint);
+    if (digest !== compacted.request_digest) {
+      return json({ success: false, code: 'provisioning_operation_conflict', error: 'Provisioning operation conflicts with its original request' }, 409, corsHeaders);
+    }
+    return json({ success: false, code: 'provisioning_operation_compacted', replayed: true,
+      error: 'The original provisioning result has completed its detailed retention period.' }, 410, corsHeaders);
+  }
   let existingOperation = await env.DB.prepare(`SELECT kind, request_fingerprint, state, subject_id, result_pubkey
     FROM protected_minor_provisioning_operations WHERE provisioning_operation_id = ?`).bind(provisioningOperationId)
     .first<{ kind: string; request_fingerprint: string; state: string; subject_id: string | null; result_pubkey: string | null }>();
@@ -776,17 +794,17 @@ export async function handleCreateMinorAccount(
     await env.DB.batch([env.DB.prepare(`
       INSERT INTO age_review_cases
       (id, pubkey, suspected_age_band, state, allowed_resolution, resolution_note, created_via, claim_link_url, claim_link_expires_at, zendesk_ticket_id,
-       account_name, account_nip05, account_vine_username, identity_captured_at)
-      VALUES (?, ?, 'age_13_15', 'cleared', 'parent_video_or_email', 'Approved via parental consent (minor onboarding)', 'minor_onboarding', ?, ?, ?, ?, ?, ?, ?)
+       account_name, account_nip05, account_vine_username, identity_captured_at, closed_at)
+      VALUES (?, ?, 'age_13_15', 'cleared', 'parent_video_or_email', 'Approved via parental consent (minor onboarding)', 'minor_onboarding', NULL, ?, ?, ?, ?, ?, ?, ?)
     `).bind(
       caseId,
       result.pubkey,
-      result.claim_url,
       result.expires_at ?? null,
       body.zendesk_ticket_id ?? null,
       displayName ?? username,
       nip05,
       username,
+      now,
       now,
     ), env.DB.prepare(`INSERT INTO protected_minor_subjects
       (subject_id, source_case_id, classification_state, classified_at) VALUES (?, ?, 'active', ?)`)
@@ -799,7 +817,7 @@ export async function handleCreateMinorAccount(
       WHERE provisioning_operation_id = ? AND state = 'pending'`)
       .bind(subjectId, result.pubkey, now, provisioningOperationId)]);
   } catch (err) {
-    console.error(`[age-review] D1 audit record failed for minor account: pubkey=${result.pubkey}, case=${caseId}`, err);
+    console.error('[age-review] D1 audit record failed for minor account', err);
     return json({
       success: false,
       error: `Account created in Keycast but registry persistence failed. Retry with provisioning operation ${provisioningOperationId}.`,
@@ -809,7 +827,7 @@ export async function handleCreateMinorAccount(
     }, 500, corsHeaders);
   }
 
-  console.log(`[age-review] Minor account created: pubkey=${result.pubkey}, case=${caseId}, username=${username}`);
+  console.log('[age-review] Minor account created and registry state persisted');
 
   return json({
     success: true,
@@ -1434,7 +1452,7 @@ async function createAgeReviewTicket(
     await env.DB.prepare(
       'UPDATE age_review_cases SET zendesk_ticket_id = ? WHERE id = ?'
     ).bind(data.ticket.id, caseId).run();
-    console.log(`[age-review] Created Zendesk ticket #${data.ticket.id} for case ${caseId}`);
+    console.log('[age-review] Created linked Zendesk ticket');
   }
 
   await attachIdentityToParentContact({
@@ -1539,7 +1557,7 @@ async function updateTicketWithParentContact(
   }
   // The ticket id is the useful identifier here. The address itself is a
   // parent's personal data and does not belong in worker logs.
-  console.log(`[age-review] Updated Zendesk ticket #${ticketId} with parent contact`);
+  console.log('[age-review] Updated linked Zendesk ticket with parent contact');
 
   const data = await res.json().catch(() => null) as { ticket?: { requester_id?: number } } | null;
   await attachIdentityToParentContact({
@@ -1628,7 +1646,7 @@ async function createAgeReviewInternalTicket(
     await env.DB.prepare(
       'UPDATE age_review_cases SET zendesk_ticket_id = ? WHERE id = ?'
     ).bind(data.ticket.id, caseId).run();
-    console.log(`[age-review] Created internal Zendesk ticket #${data.ticket.id} for case ${caseId}`);
+    console.log('[age-review] Created internal age-review ticket');
     return data.ticket.id;
   }
 
@@ -1690,8 +1708,8 @@ export async function syncAgeReviewTicketResolution(
       body: JSON.stringify(payload),
     });
     if (!res.ok) {
-      const errorText = await res.text();
-      console.error(`[age-review] Failed to resolve Zendesk ticket #${ticketId}: ${res.status} - ${errorText}`);
+      await res.text();
+      console.error(`[age-review] Failed to resolve linked Zendesk ticket: ${res.status}`);
     }
   } catch (error) {
     console.error('[age-review] Error resolving Zendesk ticket:', error);
@@ -1756,7 +1774,7 @@ async function upgradeParentContactName(
       body: JSON.stringify({ user: { name } }),
     });
     if (!res.ok) throw new Error(`Zendesk contact rename failed: ${res.status}`);
-    console.log(`[age-review] Renamed parent contact for ticket #${ticketId}`);
+    console.log('[age-review] Renamed parent contact for linked ticket');
   } catch (error) {
     console.error('[age-review] Failed to rename parent contact:', error);
   }
@@ -1835,7 +1853,7 @@ export async function handleAgeReviewReplyWebhook(
     `).bind(now.toISOString(), remainingDays, target.id, target.version).run();
 
     if (result.meta?.changes === 1) {
-      console.log(`[age-review] Parent replied on ticket #${ticketId}, case ${target.id} → submitted_for_review (clock paused)`);
+      console.log('[age-review] Parent reply advanced case to submitted_for_review (clock paused)');
       advanced = target;
       break;
     }
@@ -1857,7 +1875,7 @@ export async function handleAgeReviewReplyWebhook(
     return json({ success: true, message: 'Case not in a state that can advance to submitted_for_review' }, 200, corsHeaders);
   }
 
-  console.log(`[age-review] Parent reply on ticket #${ticketId}, case ${activeCase.id} not advanced (changed concurrently)`);
+  console.log('[age-review] Parent reply did not advance case because it changed concurrently');
   return json({ success: true, case_id: activeCase.id, message: 'Case changed concurrently; not advanced' }, 200, corsHeaders);
 }
 
@@ -1922,54 +1940,56 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
     // just-cleared case or double-firing enforcement.
     const closeResult = await env.DB.prepare(`
       UPDATE age_review_cases
-      SET state = 'denied_closed', resolution_note = 'Auto-closed: deadline expired with no response', updated_at = datetime('now'), version = version + 1
+      SET state = 'denied_closed', resolution_note = 'Auto-closed: deadline expired with no response',
+          closed_at = COALESCE(closed_at, datetime('now')), claim_link_url = NULL,
+          updated_at = datetime('now'), version = version + 1
       WHERE id = ? AND version = ?
     `).bind(row.id, row.version).run();
     if (closeResult.meta?.changes !== 1) {
-      console.log(`[age-review] Skipped expired case ${row.id} (modified concurrently)`);
+      console.log('[age-review] Skipped expired case modified concurrently');
       continue;
     }
-    console.log(`[age-review] Auto-closed expired case ${row.id} for ${row.pubkey}`);
+    console.log('[age-review] Auto-closed expired case');
     try {
       await syncAgeReviewTicketResolution(row.id, 'denied_closed', 'Auto-closed: deadline expired with no response', env);
     } catch (error) {
-      console.error(`[age-review] Failed to sync Zendesk for auto-closed case ${row.id}:`, error);
+      console.error('[age-review] Failed to sync Zendesk for auto-closed case:', error);
     }
 
     try {
       const config = await getAgeReviewConfig(env.DB!);
       if (config.auto_delete_on_deny) {
         await triggerBulkModerate(row.pubkey, 'delete-all', 'Age review expired -- auto-deleted', env);
-        console.log(`[age-review] Auto-deleted content for expired case ${row.id}`);
+        console.log('[age-review] Auto-deleted content for expired case');
       }
     } catch (error) {
-      console.error(`[age-review] Auto-delete failed for expired case ${row.id}:`, error);
+      console.error('[age-review] Auto-delete failed for expired case:', error);
     }
 
     try {
       const banResult = await banUser(row.pubkey, 'age_review_expired', env);
       if (banResult.success) {
-        console.log(`[age-review] Keycast ban sent for expired case ${row.id}`);
+        console.log('[age-review] Keycast ban sent for expired case');
       } else {
-        console.error(`[age-review] Keycast ban failed for expired case ${row.id}: ${banResult.error}`);
+        console.error(`[age-review] Keycast ban failed for expired case: ${banResult.error}`);
       }
     } catch (error) {
-      console.error(`[age-review] Keycast ban failed for expired case ${row.id}:`, error);
+      console.error('[age-review] Keycast ban failed for expired case:', error);
     }
 
     // Commit the durable classification clear first. That creates a projection
     // job which this tick (or a later tick after an outage) converges in Keycast.
     const durableClear = await clearSubject(env.DB, row.pubkey, undefined, 'age_review_expired');
     if (!durableClear.success) {
-      console.error(`[age-review] Protected subject clear failed for expired case ${row.id}: ${durableClear.error}`);
+      console.error(`[age-review] Protected subject clear failed for expired case: ${durableClear.error}`);
     } else {
       try {
         const projectionPubkey = durableClear.projectionPubkey ?? row.pubkey;
         const clearResult = await clearVerifiedMinor(projectionPubkey, undefined, 'age_review_expired', env);
         if (clearResult.success) await markProjectionComplete(env.DB, projectionPubkey);
-        else console.error(`[age-review] Keycast verified_minor clear failed for expired case ${row.id}: ${clearResult.error}`);
+        else console.error(`[age-review] Keycast verified_minor clear failed for expired case: ${clearResult.error}`);
       } catch (error) {
-        console.error(`[age-review] Keycast verified_minor clear failed for expired case ${row.id}:`, error);
+        console.error('[age-review] Keycast verified_minor clear failed for expired case:', error);
       }
     }
 
@@ -1978,12 +1998,12 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
     try {
       const relayBan = await banPubkey(row.pubkey, 'age_review_expired', env);
       if (relayBan.success) {
-        console.log(`[age-review] Relay banpubkey sent for expired case ${row.id}`);
+        console.log('[age-review] Relay banpubkey sent for expired case');
       } else {
-        console.error(`[age-review] Relay banpubkey failed for expired case ${row.id}: ${relayBan.error}`);
+        console.error(`[age-review] Relay banpubkey failed for expired case: ${relayBan.error}`);
       }
     } catch (error) {
-      console.error(`[age-review] Relay banpubkey failed for expired case ${row.id}:`, error);
+      console.error('[age-review] Relay banpubkey failed for expired case:', error);
     }
   }
 
@@ -2000,7 +2020,7 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
       env.DB, retry.pubkey, retry.clearedBy, retry.reason, retry.subjectId,
     );
     if (!result.success) {
-      console.error(`[age-review] Protected-subject clear retry failed for ${retry.pubkey}: ${result.error}`);
+      console.error(`[age-review] Protected-subject clear retry failed: ${result.error}`);
     }
   }
 
@@ -2018,15 +2038,15 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
       if (result.success) await markProjectionComplete(env.DB, job.pubkey);
       else {
         await markProjectionAttempt(env.DB, job.pubkey);
-        console.error(`[age-review] Keycast protected-minor projection retry failed for ${job.pubkey}: ${result.error}`);
+        console.error(`[age-review] Keycast protected-minor projection retry failed: ${result.error}`);
       }
     } catch (error) {
       try {
         await markProjectionAttempt(env.DB, job.pubkey);
       } catch (markError) {
-        console.error(`[age-review] Failed to rotate protected-minor projection retry ${job.pubkey}:`, markError);
+        console.error('[age-review] Failed to rotate protected-minor projection retry:', markError);
       }
-      console.error(`[age-review] Keycast protected-minor projection retry failed for ${job.pubkey}:`, error);
+      console.error('[age-review] Keycast protected-minor projection retry failed:', error);
     }
   }
 
@@ -2077,7 +2097,7 @@ async function sendSlackAlert(
 
   const lines = cases.map(c => {
     const deadline = c.deadline_at ? new Date(c.deadline_at).toISOString().split('T')[0] : 'no deadline';
-    return `• \`${c.pubkey}\` — ${c.suspected_age_band} — deadline: ${deadline} — state: ${c.state}`;
+    return `• ${c.suspected_age_band} — deadline: ${deadline} — state: ${c.state}`;
   });
 
   try {

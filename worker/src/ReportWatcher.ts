@@ -849,14 +849,7 @@ export class ReportWatcher implements DurableObject {
     const targetType = targetEventTag ? 'event' : targetPubkeyTag ? 'pubkey' : 'unknown';
     const targetId = targetEventTag?.[1] || targetPubkeyTag?.[1] || 'unknown';
 
-    console.log(`[ReportWatcher] Report received:`, {
-      reportId: event.id,
-      reporter: event.pubkey,
-      category,
-      targetType,
-      targetId,
-      content: event.content.slice(0, 50) + (event.content.length > 50 ? '...' : ''),
-    });
+    console.log('[ReportWatcher] Report received', { category, targetType });
 
     // Process auto-hide if enabled and category qualifies
     if (targetType === 'event' && targetId !== 'unknown') {
@@ -1280,7 +1273,7 @@ export class ReportWatcher implements DurableObject {
         decision.reporterPubkey
       ).run();
 
-      console.log(`[ReportWatcher] Logged decision: ${decision.action} for ${decision.targetId}`);
+      console.log(`[ReportWatcher] Logged decision: ${decision.action}`);
       return true;
     } catch (error) {
       console.error('[ReportWatcher] Failed to log decision:', error);
@@ -1358,7 +1351,7 @@ export class ReportWatcher implements DurableObject {
     `).bind(reportedPubkey, ...TERMINAL_STATES).first<{ id: string; state: string }>();
 
     if (existing) {
-      console.log(`[ReportWatcher] Active age review case ${existing.id} already exists for ${reportedPubkey}, skipping`);
+      console.log('[ReportWatcher] Active age review case already exists; skipping duplicate');
       return;
     }
 
@@ -1379,8 +1372,8 @@ export class ReportWatcher implements DurableObject {
         await this.env.DB.prepare(`
           INSERT INTO age_review_cases
           (id, pubkey, reporter_pubkey, report_id, suspected_age_band, state, allowed_resolution, resolution_note, created_via,
-           account_name, account_nip05, account_vine_username, identity_captured_at)
-          VALUES (?, ?, ?, ?, 'age_13_15', 'cleared', 'parent_video_or_email', 'Auto-cleared: previously verified minor', 'report', ?, ?, ?, ?)
+           account_name, account_nip05, account_vine_username, identity_captured_at, closed_at)
+          VALUES (?, ?, ?, ?, 'age_13_15', 'cleared', 'parent_video_or_email', 'Auto-cleared: previously verified minor', 'report', ?, ?, ?, ?, datetime('now'))
         `).bind(
           caseId,
           reportedPubkey,
@@ -1401,11 +1394,11 @@ export class ReportWatcher implements DurableObject {
           reporterPubkey: event.pubkey,
         });
 
-        console.log(`[ReportWatcher] Age review case ${caseId} auto-cleared for verified minor ${reportedPubkey}`);
+        console.log('[ReportWatcher] Age review case auto-cleared for verified minor');
         return;
       }
     } catch (err) {
-      console.warn(`[ReportWatcher] Keycast verified_minor check failed for ${reportedPubkey}, proceeding with normal case:`, err);
+      console.warn('[ReportWatcher] Keycast verified_minor check failed; proceeding with normal case:', err);
     }
 
     const caseId = crypto.randomUUID();
@@ -1464,7 +1457,7 @@ export class ReportWatcher implements DurableObject {
       reporterPubkey: event.pubkey,
     });
 
-    console.log(`[ReportWatcher] Age review case created: ${caseId} for ${reportedPubkey} (deadline: ${deadline})`);
+    console.log('[ReportWatcher] Age review case created');
   }
 
   /**

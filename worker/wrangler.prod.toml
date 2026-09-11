@@ -58,6 +58,11 @@ binding = "PROTECTED_MINOR_SERVICE_TOKEN"
 store_id = "ef490704b12a4feb91c7feb51229c364"
 secret_name = "PROTECTED_MINOR_SERVICE_TOKEN"
 
+[[secrets_store_secrets]]
+binding = "PROTECTED_MINOR_TOMBSTONE_KEY"
+store_id = "ef490704b12a4feb91c7feb51229c364"
+secret_name = "PROTECTED_MINOR_TOMBSTONE_KEY"
+
 # Zendesk API credentials (shared across workers)
 [[secrets_store_secrets]]
 binding = "ZENDESK_SUBDOMAIN"

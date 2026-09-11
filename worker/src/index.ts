@@ -42,6 +42,7 @@ import { queryRelay, withTimeout, ENRICHMENT_TIMEOUT_MS } from './relay-profile'
 import { coordinateEventVisibility, type EventVisibilityResult } from './event-visibility';
 import { markHumanAction, markHumanReviewed } from './human-decision';
 import { AUTO_HIDE_STATE_ACTIONS } from '../../shared/autohide';
+import { runRetentionDisposal } from './retention';
 
 const COORDINATED_AUTO_HIDE_ACTIONS = new Set<string>(AUTO_HIDE_STATE_ACTIONS);
 
@@ -107,6 +108,7 @@ interface Env extends KeycastEnv {
   MOD_RELAY_ADMIN_KEY?: string | SecretStoreSecret;
   PROTECTED_MINOR_SERVICE_TOKEN?: string | SecretStoreSecret;
   PROTECTED_MINOR_REPLACEMENT_ENABLED?: string;
+  PROTECTED_MINOR_TOMBSTONE_KEY?: string | SecretStoreSecret;
   // Slack webhook for age review deadline alerts
   SLACK_WEBHOOK_URL?: string;
   // Environment identifier for deep links (e.g., "production", "staging")
@@ -789,7 +791,7 @@ export default {
 
   // Cron keep-alive: wake the ReportWatcher DO every 5 minutes so the alarm
   // chain can't break permanently after a Cloudflare-initiated eviction.
-  async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext): Promise<void> {
+  async scheduled(event: ScheduledEvent, env: Env, _ctx: ExecutionContext): Promise<void> {
     if (env.REPORT_WATCHER) {
       try {
         const id = env.REPORT_WATCHER.idFromName('singleton');
@@ -823,6 +825,21 @@ export default {
         await checkAgeReviewDeadlines(env);
       } catch (error) {
         console.error('[scheduled] Age review deadline check failed:', error);
+      }
+
+      // The worker cron runs every five minutes for ReportWatcher health. The
+      // retention scan only needs an hourly cadence; use the scheduled timestamp
+      // so retries and delayed execution do not create an extra full scan.
+      if (new Date(event.scheduledTime).getUTCMinutes() === 0) {
+        try {
+          const disposed = await runRetentionDisposal(env);
+          const changed = disposed.claimLinksCleared + disposed.casesRedacted + disposed.casesDeleted
+            + disposed.projectionsDeleted + disposed.bindingsDeleted + disposed.operationsCompacted
+            + disposed.subjectsDeleted;
+          if (changed > 0) console.log(`[scheduled] Disposed ${changed} expired protected record(s)`);
+        } catch (error) {
+          console.error('[scheduled] Protected-record retention failed:', error);
+        }
       }
     } else if (env.SLACK_WEBHOOK_URL) {
       // #197: D1 binding unavailable — moderation-status is failing open (returning

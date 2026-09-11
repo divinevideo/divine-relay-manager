@@ -54,7 +54,7 @@ async function callKeycast(
     if (HEX_64.test(actor)) {
       payload.actor = actor;
     } else {
-      console.warn(`[keycast] dropping malformed actor for ${body.status} on ${pubkey}; audit falls back to log-only`);
+      console.warn(`[keycast] dropping malformed actor for ${body.status}; audit falls back to log-only`);
     }
   }
 
@@ -70,14 +70,14 @@ async function callKeycast(
 
     if (!res.ok) {
       const text = await res.text();
-      console.error(`[keycast] ${body.status} failed for ${pubkey}: ${res.status} ${text}`);
+      console.error(`[keycast] ${body.status} failed: ${res.status}`);
       return { success: false, status: res.status, error: `${res.status}: ${text}` };
     }
 
     return { success: true };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[keycast] ${body.status} failed for ${pubkey}: ${msg}`);
+    console.error(`[keycast] ${body.status} failed: ${msg}`);
     return { success: false, error: msg };
   }
 }
@@ -136,7 +136,7 @@ export async function clearVerifiedMinor(
     if (HEX_64.test(actor)) {
       params.set('actor', actor);
     } else {
-      console.warn(`[keycast] dropping malformed actor for verified_minor clear on ${pubkey}; audit falls back to log-only`);
+      console.warn('[keycast] dropping malformed actor for verified_minor clear; audit falls back to log-only');
     }
   }
   if (reason) {
@@ -154,14 +154,14 @@ export async function clearVerifiedMinor(
 
     if (!res.ok) {
       const text = await res.text();
-      console.error(`[keycast] verified_minor clear failed for ${pubkey}: ${res.status} ${text}`);
+      console.error(`[keycast] verified_minor clear failed: ${res.status}`);
       return { success: false, status: res.status, error: `${res.status}: ${text}` };
     }
 
     return { success: true };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[keycast] verified_minor clear failed for ${pubkey}: ${msg}`);
+    console.error(`[keycast] verified_minor clear failed: ${msg}`);
     return { success: false, error: msg };
   }
 }
@@ -276,7 +276,7 @@ export async function createMinorAccount(
     });
     if (!res.ok) {
       const text = await res.text();
-      console.error(`[keycast] create-minor-account failed: ${res.status} ${text}`);
+      console.error(`[keycast] create-minor-account failed: ${res.status}`);
       return { success: false, error: `${res.status}: ${text}` };
     }
     const data = await res.json() as Record<string, unknown>;
