@@ -209,5 +209,8 @@ describe('protected-minor projection on a self-custody deny', () => {
       "SELECT COUNT(*) AS c FROM protected_minor_projection_jobs WHERE state = 'pending'",
     ).first<{ c: number }>();
     expect(pending!.c).toBe(0);
+    // This file has no afterEach; restore here or the spy leaks into whatever
+    // test is added after this one.
+    vi.restoreAllMocks();
   });
 });
