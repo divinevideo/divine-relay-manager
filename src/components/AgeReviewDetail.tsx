@@ -200,7 +200,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
           // Divine login and never had one to block (issue #191).
           toast({
             title: 'Case updated',
-            description: 'The sign-in step was not applicable: this account has no Divine login (self-custody). Relay and content enforcement applied as usual.',
+            description: 'The sign-in step was not applicable: this account has no Divine login (self-custody), so there was no sign-in to change. Nothing else was left outstanding.',
           });
         }
       }

@@ -217,6 +217,28 @@ describe('AgeReviewDetail', () => {
     expect(arg.description).not.toMatch(/escalate/i);
   });
 
+  // The confirmation must not assert that the OTHER legs applied. A deny with
+  // auto_delete_on_deny off leaves `bulk` at not_attempted: nothing was applied
+  // for content, and claiming otherwise is the same overstatement in the
+  // opposite direction from the alarm this change removes.
+  it('does not claim content enforcement applied when that leg was never attempted', async () => {
+    updateAgeReviewCase.mockResolvedValueOnce({
+      success: true,
+      case: makeCase({ state: 'denied_closed' }),
+      enforcementComplete: true,
+      enforcement: { relay: 'ok', bulk: 'not_attempted', keycast: 'not_applicable' },
+    });
+    renderDetail(makeCase({ suspected_age_band: 'age_13_15', state: 'restricted_pending_user_response' }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Deny & Close' }));
+
+    await waitFor(() => expect(toast).toHaveBeenCalled());
+    const description = toast.mock.calls[0][0].description as string;
+    expect(description).toMatch(/no Divine login/i);
+    expect(description).not.toMatch(/content enforcement applied/i);
+    expect(description).not.toMatch(/applied as usual/i);
+  });
+
   // A genuinely failed leg alongside a not-applicable one is still a failure,
   // and the failure is what the moderator must see.
   it('still raises the failure toast when another leg failed', async () => {
