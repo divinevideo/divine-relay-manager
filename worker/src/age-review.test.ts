@@ -790,6 +790,28 @@ describe('Keycast suspension wiring', () => {
     };
   };
 
+  // A denied self-custody account has no keycast record to project onto, so the
+  // projection job is settled here rather than deferred to a cron tick that can
+  // only reach the same answer.
+  it('settles the protected-minor projection job when the clear is not applicable', async () => {
+    vi.mocked(clearVerifiedMinor).mockResolvedValue({ success: false, status: 404, notFound: true, error: '404: user not found' });
+    const restrictedCase = makeCase({ state: 'restricted_pending_user_response' });
+    const updatedCase = { ...restrictedCase, state: 'denied_closed' as const };
+
+    const req = new Request('https://api.test/api/age-review/cases/case-1', {
+      method: 'PATCH',
+      body: JSON.stringify({ state: 'denied_closed' }),
+    });
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(makeDbFor(restrictedCase, updatedCase)), corsHeaders);
+    const body = await res.json() as { success: boolean; enforcement: { keycastMinorClear: string } };
+
+    expect(body.enforcement.keycastMinorClear).toBe('not_applicable');
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+    // The durable effect (the projection job settling) is asserted against real
+    // SQLite in worker/test/age-review-handler.d1.test.ts.
+  });
+
   it('clears verified_minor (with actor + deny reason) when transitioning to denied_closed', async () => {
     const moderator = 'b'.repeat(64);
     const restrictedCase = makeCase({ state: 'restricted_pending_user_response', moderator_pubkey: moderator });

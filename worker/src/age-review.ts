@@ -609,7 +609,10 @@ export async function handleUpdateAgeReviewCase(
         : undefined);
     keycastMinorClear = minorClearLeg.status;
     keycastMinorClearError = minorClearLeg.error;
-    if (deniedCase && keycastMinorClear === 'ok' && env.DB) {
+    // `not_applicable` settles the job for the same reason `ok` does: there is no
+    // keycast account to project onto, so leaving the job pending only defers the
+    // identical answer to a cron tick.
+    if (deniedCase && (keycastMinorClear === 'ok' || keycastMinorClear === 'not_applicable') && env.DB) {
       try {
         await markProjectionComplete(env.DB, minorProjectionPubkey);
       } catch (error) {
@@ -1979,6 +1982,8 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
       const banResult = await banUser(row.pubkey, 'age_review_expired', env);
       if (banResult.success) {
         console.log('[age-review] Keycast ban sent for expired case');
+      } else if (banResult.notFound) {
+        console.log('[age-review] Keycast ban not applicable for expired case: no keycast account');
       } else {
         console.error(`[age-review] Keycast ban failed for expired case: ${banResult.error}`);
       }
@@ -1995,7 +2000,9 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
       try {
         const projectionPubkey = durableClear.projectionPubkey ?? row.pubkey;
         const clearResult = await clearVerifiedMinor(projectionPubkey, undefined, 'age_review_expired', env);
-        if (clearResult.success) await markProjectionComplete(env.DB, projectionPubkey);
+        // notFound settles the job here too: there is no account to project onto,
+        // so leaving it pending only defers the same answer to the cron's retry.
+        if (clearResult.success || clearResult.notFound) await markProjectionComplete(env.DB, projectionPubkey);
         else console.error(`[age-review] Keycast verified_minor clear failed for expired case: ${clearResult.error}`);
       } catch (error) {
         console.error('[age-review] Keycast verified_minor clear failed for expired case:', error);

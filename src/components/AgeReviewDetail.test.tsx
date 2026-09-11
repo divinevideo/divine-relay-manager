@@ -235,8 +235,11 @@ describe('AgeReviewDetail', () => {
     await waitFor(() => expect(toast).toHaveBeenCalled());
     const description = toast.mock.calls[0][0].description as string;
     expect(description).toMatch(/no Divine login/i);
-    expect(description).not.toMatch(/content enforcement applied/i);
-    expect(description).not.toMatch(/applied as usual/i);
+    // Asserts the property, not a phrasing that has already been removed: the
+    // confirmation must never claim any leg APPLIED, because this transition
+    // may not have attempted them. An absence assertion against wording that no
+    // version of the copy contains cannot fail, and guards nothing.
+    expect(description).not.toMatch(/\bapplied\b/i);
   });
 
   // A genuinely failed leg alongside a not-applicable one is still a failure,

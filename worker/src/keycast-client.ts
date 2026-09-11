@@ -98,7 +98,9 @@ async function callKeycast(
       const text = await res.text();
       if (res.status === 404 && isKeycastUserNotFound(text)) {
         console.log(`[keycast] ${body.status} not applicable: no keycast account (self-custody)`);
-        return { success: false, status: 404, notFound: true };
+        // `error` stays populated: `notFound` is the discriminator, and callers
+        // that only log the error would otherwise print `undefined`.
+        return { success: false, status: 404, notFound: true, error: `404: ${text}` };
       }
       console.error(`[keycast] ${body.status} failed: ${res.status}`);
       return { success: false, status: res.status, error: `${res.status}: ${text}` };
@@ -186,7 +188,7 @@ export async function clearVerifiedMinor(
       const text = await res.text();
       if (res.status === 404 && isKeycastUserNotFound(text)) {
         console.log('[keycast] verified_minor clear not applicable: no keycast account (self-custody)');
-        return { success: false, status: 404, notFound: true };
+        return { success: false, status: 404, notFound: true, error: `404: ${text}` };
       }
       console.error(`[keycast] verified_minor clear failed: ${res.status}`);
       return { success: false, status: res.status, error: `${res.status}: ${text}` };

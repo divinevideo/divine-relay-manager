@@ -286,6 +286,16 @@ describe('keycast-client', () => {
       expect(result.notFound).toBeUndefined();
     });
 
+    // Callers outside the enforcement legs only log `error`. Dropping it here
+    // turned their log lines into "failed: undefined" -- a worse diagnostic than
+    // before this change existed.
+    it('keeps error populated alongside the flag', async () => {
+      mockNotFound();
+      const result = await suspendUser(VALID_PUBKEY, 'age_review', makeEnv());
+      expect(result.notFound).toBe(true);
+      expect(result.error).toContain('404');
+    });
+
     it('flags the verified_minor clear not-found (the deny path hits the same 404)', async () => {
       mockNotFound();
       const result = await clearVerifiedMinor(VALID_PUBKEY, undefined, 'age_review_denied', makeEnv());

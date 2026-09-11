@@ -4,9 +4,10 @@
 //   enforcement failures are surfaced (success:false / HTTP 207), not
 //         masked as success, while the state transition still persists.
 import { Miniflare } from 'miniflare';
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { ensureSchema } from '../src/db';
 import { handleUpdateAgeReviewCase, handleAgeReviewReplyWebhook } from '../src/age-review';
+import { createSubjectWithBinding } from '../src/protected-minors';
 
 let mf: Miniflare;
 let DB: D1Database;
@@ -43,12 +44,12 @@ async function insertCase(id: string, state: string) {
   ).bind(id, `pk_${id}`, state, new Date(Date.now() + 9 * 864e5).toISOString()).run();
 }
 
-function patch(id: string, patchBody: Record<string, unknown>) {
+function patch(id: string, patchBody: Record<string, unknown>, envOverrides: Record<string, unknown> = {}) {
   const req = new Request(`https://api.test/api/age-review/cases/${id}`, {
     method: 'PATCH',
     body: JSON.stringify(patchBody),
   });
-  return handleUpdateAgeReviewCase(req, id, env, cors);
+  return handleUpdateAgeReviewCase(req, id, { ...env, ...envOverrides }, cors);
 }
 
 async function rowOf(id: string) {
@@ -157,5 +158,49 @@ describe('age-review handler on real D1', () => {
     // ...but the DB state transition still applied (best-effort, retryable).
     expect(body.case.state).toBe('restricted_pending_user_response');
     expect((await rowOf('c5')).state).toBe('restricted_pending_user_response');
+  });
+});
+
+describe('protected-minor projection on a self-custody deny', () => {
+  beforeEach(async () => {
+    await reset();
+    await DB.prepare('DELETE FROM protected_minor_projection_jobs').run();
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  // A denied account keycast does not manage can never satisfy the projection
+  // job the denial creates. Settling it inline keeps the cron from carrying a
+  // job whose only possible answer is already known.
+  it('settles the job rather than leaving it pending', async () => {
+    // A real hex pubkey: protected_minor_account_bindings CHECKs the shape.
+    const pubkey = 'c'.repeat(64);
+    await DB.prepare(
+      `INSERT INTO age_review_cases (id, pubkey, state, deadline_at, clock_paused, version)
+       VALUES ('c8', ?, 'restricted_pending_user_response', ?, 0, 0)`,
+    ).bind(pubkey, new Date(Date.now() + 9 * 864e5).toISOString()).run();
+    // Without a protected-minor subject the denial creates no projection job at
+    // all, and "no pending jobs" would be true whatever the code does.
+    await createSubjectWithBinding(DB, 'c8', pubkey);
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      if (String(input).includes('/api/admin/users/')) {
+        return Promise.resolve(new Response(JSON.stringify({ error: 'user not found' }), { status: 404 }));
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    });
+
+    await patch('c8', { state: 'denied_closed' }, {
+      KEYCAST_URL: 'https://login.test.divine.video',
+      KEYCAST_SERVICE_TOKEN: 'test-token',
+    });
+
+    // Positive assertion first: the denial really did create a job to settle.
+    const total = await DB.prepare(
+      'SELECT COUNT(*) AS c FROM protected_minor_projection_jobs',
+    ).first<{ c: number }>();
+    expect(total!.c).toBe(1);
+    const pending = await DB.prepare(
+      "SELECT COUNT(*) AS c FROM protected_minor_projection_jobs WHERE state = 'pending'",
+    ).first<{ c: number }>();
+    expect(pending!.c).toBe(0);
   });
 });
