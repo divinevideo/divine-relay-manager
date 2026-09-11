@@ -182,3 +182,20 @@ describe('cron re-drive', () => {
     expect(await pendingKeycastLegs(DB)).toEqual([]);
   });
 });
+
+describe('abandoned rows', () => {
+  beforeEach(async () => {
+    await DB.prepare('DELETE FROM enforcement_legs').run();
+  });
+  // An abandoned leg is not a permanent verdict. A moderator who re-runs the
+  // action successfully must clear the row, or it keeps asserting a failure
+  // that no longer exists and the next genuine failure is read against a lie.
+  it('a successful later action clears an abandoned row, not just a failed one', async () => {
+    await recordFailedKeycastLeg(DB, PK, 'suspended', 'boom', 'case-1');
+    await DB.prepare("UPDATE enforcement_legs SET state = 'abandoned' WHERE pubkey = ?").bind(PK).run();
+
+    await resolveKeycastLeg(DB, PK);
+
+    expect((await rowFor(PK))!.state).toBe('resolved');
+  });
+});

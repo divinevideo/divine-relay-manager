@@ -17,6 +17,7 @@ export interface RetentionResult {
   casesRedacted: number;
   casesDeleted: number;
   projectionsDeleted: number;
+  enforcementLegsDeleted: number;
   bindingsDeleted: number;
   operationsCompacted: number;
   subjectsDeleted: number;
@@ -27,7 +28,7 @@ export interface RetentionResult {
 
 function emptyResult(): RetentionResult {
   return {
-    claimLinksCleared: 0, casesRedacted: 0, casesDeleted: 0,
+    claimLinksCleared: 0, casesRedacted: 0, casesDeleted: 0, enforcementLegsDeleted: 0,
     projectionsDeleted: 0, bindingsDeleted: 0, operationsCompacted: 0,
     subjectsDeleted: 0, pendingOperationsOverdue: 0,
     pendingProjectionsOverdue: 0, unknownReasonsAlerted: 0,
@@ -209,6 +210,13 @@ export async function runRetentionDisposal(env: RetentionEnv): Promise<Retention
           AND ${noHold('projection_job', 'protected_minor_projection_jobs.subject_id', 'deletion')}
         LIMIT ${BATCH_LIMIT})`).run();
     result.projectionsDeleted = projections.meta.changes;
+  });
+
+  await runStage('enforcement-leg-delete', async () => {
+    const legs = await db.prepare(`DELETE FROM enforcement_legs
+      WHERE state = 'resolved'
+        AND datetime(updated_at) <= datetime('now', '-${RETENTION_DAYS.enforcementLegResolved} days')`).run();
+    result.enforcementLegsDeleted = legs.meta.changes;
   });
 
   await runStage('provisioning-compaction', async () => {

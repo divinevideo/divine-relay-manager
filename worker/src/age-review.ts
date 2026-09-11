@@ -2081,6 +2081,43 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
     }
   }
 
+  if (expired.results.length > 0 && env.SLACK_WEBHOOK_URL) {
+    await sendSlackAlert(env.SLACK_WEBHOOK_URL, 'expired', expired.results);
+  }
+
+  // Expired but NOT auto-closable: non-terminal cases the cron deliberately does
+  // not auto-close (never restricted, e.g. open_reported / under_moderator_review,
+  // or the user already responded, e.g. submitted_for_review / needs_follow_up).
+  // Without this they would silently sit past deadline -- out of the approaching
+  // window and out of the auto-close set -- so alert (throttled to 12h) to keep a
+  // human in the loop.
+  const expiredNeedsAction = await env.DB.prepare(`
+    SELECT * FROM age_review_cases
+    WHERE state NOT IN (${TERMINAL_STATES.map(() => '?').join(',')})
+      AND state NOT IN (${ACCOUNT_RESTRICTED_AGE_REVIEW_STATES.map(() => '?').join(',')})
+      AND clock_paused = 0
+      AND deadline_at IS NOT NULL
+      AND datetime(deadline_at) < datetime('now')
+      AND (last_alerted_at IS NULL OR last_alerted_at < datetime('now', '-12 hours'))
+    ORDER BY deadline_at ASC
+  `).bind(...TERMINAL_STATES, ...ACCOUNT_RESTRICTED_AGE_REVIEW_STATES).all<AgeReviewCase>();
+
+  if (expiredNeedsAction.results.length > 0 && env.SLACK_WEBHOOK_URL) {
+    const sent = await sendSlackAlert(env.SLACK_WEBHOOK_URL, 'expired_needs_action', expiredNeedsAction.results);
+    if (sent) {
+      for (const row of expiredNeedsAction.results) {
+        await env.DB.prepare(
+          `UPDATE age_review_cases SET last_alerted_at = datetime('now') WHERE id = ?`
+        ).bind(row.id).run();
+      }
+    }
+  }
+
+  // Deliberately last in the cron. This block makes up to 100 sequential Keycast
+  // calls with no client-side timeout, so running it earlier would put the
+  // deadline transitions and their alerts behind an unbounded wait on a slow or
+  // hanging Keycast -- enforcement bookkeeping delaying the case work that is
+  // this cron's actual job.
   // Re-drive Keycast status legs that failed after a case action (issue #123).
   // Only this leg: it is the only one whose idempotency is verified against the
   // service's source. The relay legs and bulk actions stay out -- `banpubkey`
@@ -2124,38 +2161,6 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
       // Pubkey-free by design: the alert says how many and in which direction,
       // and the row carries the rest for whoever picks it up.
       await sendEnforcementAbandonedAlert(env.SLACK_WEBHOOK_URL, abandoned);
-    }
-  }
-
-  if (expired.results.length > 0 && env.SLACK_WEBHOOK_URL) {
-    await sendSlackAlert(env.SLACK_WEBHOOK_URL, 'expired', expired.results);
-  }
-
-  // Expired but NOT auto-closable: non-terminal cases the cron deliberately does
-  // not auto-close (never restricted, e.g. open_reported / under_moderator_review,
-  // or the user already responded, e.g. submitted_for_review / needs_follow_up).
-  // Without this they would silently sit past deadline -- out of the approaching
-  // window and out of the auto-close set -- so alert (throttled to 12h) to keep a
-  // human in the loop.
-  const expiredNeedsAction = await env.DB.prepare(`
-    SELECT * FROM age_review_cases
-    WHERE state NOT IN (${TERMINAL_STATES.map(() => '?').join(',')})
-      AND state NOT IN (${ACCOUNT_RESTRICTED_AGE_REVIEW_STATES.map(() => '?').join(',')})
-      AND clock_paused = 0
-      AND deadline_at IS NOT NULL
-      AND datetime(deadline_at) < datetime('now')
-      AND (last_alerted_at IS NULL OR last_alerted_at < datetime('now', '-12 hours'))
-    ORDER BY deadline_at ASC
-  `).bind(...TERMINAL_STATES, ...ACCOUNT_RESTRICTED_AGE_REVIEW_STATES).all<AgeReviewCase>();
-
-  if (expiredNeedsAction.results.length > 0 && env.SLACK_WEBHOOK_URL) {
-    const sent = await sendSlackAlert(env.SLACK_WEBHOOK_URL, 'expired_needs_action', expiredNeedsAction.results);
-    if (sent) {
-      for (const row of expiredNeedsAction.results) {
-        await env.DB.prepare(
-          `UPDATE age_review_cases SET last_alerted_at = datetime('now') WHERE id = ?`
-        ).bind(row.id).run();
-      }
     }
   }
 }
