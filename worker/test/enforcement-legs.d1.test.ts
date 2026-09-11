@@ -131,20 +131,24 @@ describe('cron re-drive', () => {
     expect(JSON.parse(bodies[0]).status).toBe('active');
   });
 
-  // An account Keycast does not manage answers 404 forever. On this branch that
-  // is a normal failure, so the attempt budget is what bounds it: ten ticks and
-  // one alert, not unbounded churn. #270 adds the not-found discriminator, after
-  // which the re-drive loop settles such a leg on the first tick instead -- the
-  // loop already reads the field, so that upgrade needs no change here.
-  it('bounds an account Keycast does not manage by the attempt budget', async () => {
+  // An account Keycast does not manage answers 404 forever, so the one thing that
+  // must hold is that it cannot churn without bound. How it is bounded differs by
+  // branch and this assertion deliberately spans both: on this branch the 404 is
+  // an ordinary failure and the attempt budget bounds it; once #270 lands the
+  // not-found discriminator, the loop (which already reads the field) settles it
+  // on the first tick. Asserting the exact counter instead would pass here and
+  // turn main red the moment both merge, with no merge conflict to warn anyone.
+  it('never lets an account Keycast does not manage churn without bound', async () => {
     await recordFailedKeycastLeg(DB, PK, 'suspended', 'boom', 'case-1');
     mockKeycast(() => new Response(JSON.stringify({ error: 'user not found' }), { status: 404 }));
 
     await checkAgeReviewDeadlines(cronEnv);
 
     const row = await rowFor(PK);
-    expect(row!.attempts).toBe(1);
-    expect(row!.state).toBe('failed');
+    // Either settled outright, or consuming its budget towards abandonment.
+    expect(['resolved', 'failed']).toContain(row!.state);
+    if (row!.state === 'failed') expect(row!.attempts).toBeGreaterThan(0);
+    else expect(await pendingKeycastLegs(DB)).toEqual([]);
   });
 
   it('counts an attempt and keeps the leg pending while Keycast keeps failing', async () => {
