@@ -2161,7 +2161,9 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
       // on KeycastResult. Structural read until then so this does not stack on it.
       const notApplicable = (result as { notFound?: boolean }).notFound === true;
       if (result.success || notApplicable) {
-        await resolveKeycastLeg(env.DB, leg.pubkey);
+        // Intent-guarded: a moderator may have superseded this intent while the
+        // call was in flight, and a stale success is not convergence.
+        await resolveKeycastLeg(env.DB, leg.pubkey, leg.intent);
       } else if (await markKeycastLegAttempt(env.DB, leg.pubkey, result.error)) {
         abandoned.push(leg.intent);
       }

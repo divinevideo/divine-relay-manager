@@ -74,12 +74,24 @@ export async function recordFailedKeycastLeg(
  * not that the leg is permanently broken: a moderator who re-runs the action
  * successfully has converged it by hand, and leaving the row asserting a failure
  * that no longer exists would have the next genuine failure read against a lie.
+ *
+ * `expectedIntent` guards the cron's re-drive against a moderator acting in the
+ * window between reading the intent and applying it. The stale call still goes
+ * out -- that cannot be closed from this side -- but recording it as convergence
+ * would leave the account in the superseded state with nothing to correct it.
+ * Declining to resolve leaves the row pending so the next tick applies the
+ * current intent. The handler passes no intent: it observed the outcome itself.
  */
-export async function resolveKeycastLeg(db: D1Database, pubkey: string): Promise<void> {
+export async function resolveKeycastLeg(
+  db: D1Database,
+  pubkey: string,
+  expectedIntent?: EnforcementIntent,
+): Promise<void> {
   await db.prepare(`
     UPDATE enforcement_legs SET state = 'resolved', updated_at = ?
     WHERE pubkey = ? AND leg = 'keycast_status' AND state IN ('failed', 'abandoned')
-  `).bind(new Date().toISOString(), pubkey).run();
+      AND (? IS NULL OR intent = ?)
+  `).bind(new Date().toISOString(), pubkey, expectedIntent ?? null, expectedIntent ?? null).run();
 }
 
 /** Legs still awaiting convergence, oldest attempt first. */
