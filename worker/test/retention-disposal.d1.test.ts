@@ -12,6 +12,29 @@ const KEY = 'synthetic-retention-key-for-tests';
 let mf: Miniflare;
 let DB: D1Database;
 
+// Wraps a real D1 binding so that any prepared statement whose SQL contains
+// `faultOnSubstring` throws when executed, while every other statement and
+// `batch` delegate to the real database. This injects a fault at one disposal
+// stage without mocking the function under test: the assertions still read real
+// D1 state.
+function faultyDb(real: D1Database, faultOnSubstring: string): D1Database {
+  return new Proxy(real, {
+    get(target, prop, receiver) {
+      if (prop === 'prepare') {
+        return (sql: string) => {
+          if (sql.includes(faultOnSubstring)) {
+            const thrower = () => { throw new Error(`injected fault: ${faultOnSubstring}`); };
+            return { bind() { return this; }, run: thrower, first: thrower, all: thrower } as unknown as D1PreparedStatement;
+          }
+          return target.prepare(sql);
+        };
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
 beforeAll(async () => {
   mf = new Miniflare({ modules: true, script: 'export default { fetch() { return new Response("ok"); } };',
     compatibilityDate: '2024-12-01', compatibilityFlags: ['nodejs_compat'], d1Databases: ['DB'] });
@@ -170,5 +193,24 @@ describe('protected-record retention on real D1', () => {
     expect(payload).not.toContain('unknown-subject');
     expect(payload).not.toContain('pending-op');
     vi.unstubAllGlobals();
+  });
+
+  it('isolates a failing disposal stage so later stages still dispose eligible records', async () => {
+    const { subjectId } = await createSubjectWithBinding(DB, 'case-iso', PUBKEY_A, OLD_30);
+    await clearSubject(DB, PUBKEY_A, undefined, 'false_positive');
+    await DB.prepare(`UPDATE protected_minor_subjects SET cleared_at = ? WHERE subject_id = ?`).bind(OLD_30, subjectId).run();
+    await DB.prepare(`UPDATE protected_minor_account_bindings SET unbound_at = ? WHERE subject_id = ?`).bind(OLD_30, subjectId).run();
+    await DB.prepare(`UPDATE protected_minor_projection_jobs SET state = 'complete', updated_at = ? WHERE subject_id = ?`)
+      .bind(OLD_30, subjectId).run();
+
+    // Fault the case-redaction stage, which runs before binding/subject disposal.
+    // The `parent_contact_email = NULL` clause appears only in that stage's UPDATE.
+    const faulty = faultyDb(DB, 'parent_contact_email = NULL');
+    await runRetentionDisposal({ DB: faulty, PROTECTED_MINOR_TOMBSTONE_KEY: KEY }).catch(() => undefined);
+
+    // The subject and its binding are eligible and unheld; a failure in an
+    // earlier stage must not leave them undisposed.
+    expect(await DB.prepare('SELECT 1 FROM protected_minor_account_bindings WHERE subject_id = ?').bind(subjectId).first()).toBeNull();
+    expect(await DB.prepare('SELECT 1 FROM protected_minor_subjects WHERE subject_id = ?').bind(subjectId).first()).toBeNull();
   });
 });

@@ -132,141 +132,173 @@ export async function runRetentionDisposal(env: RetentionEnv): Promise<Retention
   const db = env.DB;
   const result = emptyResult();
 
-  const unknown = await db.prepare(`SELECT COUNT(*) AS count FROM (
-    SELECT 1 FROM protected_minor_subjects
-    WHERE classification_state = 'cleared' AND clear_reason_class = 'unclassified'
-      AND clear_reason_alerted_at IS NULL LIMIT ${BATCH_LIMIT})`).first<{ count: number }>();
-  result.unknownReasonsAlerted = Number(unknown?.count ?? 0);
-  if (result.unknownReasonsAlerted > 0) {
-    const sent = await notify(env, `[retention] ${result.unknownReasonsAlerted} protected-subject clear reason(s) require Trust & Safety classification`);
-    if (sent) {
-      await db.prepare(`UPDATE protected_minor_subjects SET clear_reason_alerted_at = datetime('now')
-        WHERE subject_id IN (SELECT subject_id FROM protected_minor_subjects
-          WHERE classification_state = 'cleared' AND clear_reason_class = 'unclassified'
-            AND clear_reason_alerted_at IS NULL LIMIT ${BATCH_LIMIT})`).run();
+  // Each disposal stage is independent and idempotent, and the
+  // dependent-before-subject ordering is enforced by every delete's own
+  // NOT EXISTS guards, not by this sequence running to completion. So one stage
+  // throwing must not starve the stages that follow it: isolate each, log the
+  // failure, and let the next scheduled run retry it. Only the stage label is
+  // safe to log; no protected identifier belongs in this message.
+  const runStage = async (label: string, stage: () => Promise<void>): Promise<void> => {
+    try {
+      await stage();
+    } catch (error) {
+      console.error(`[retention] disposal stage ${label} failed:`, error);
     }
-  }
+  };
 
-  const overdueOps = await db.prepare(`SELECT COUNT(*) AS count FROM protected_minor_provisioning_operations
-    WHERE state = 'pending' AND datetime(created_at) <= datetime('now', '-${RETENTION_DAYS.pendingOperationalDeadline} day')`)
-    .first<{ count: number }>();
-  result.pendingOperationsOverdue = Number(overdueOps?.count ?? 0);
-  const overdueProjections = await db.prepare(`SELECT COUNT(*) AS count FROM protected_minor_projection_jobs
-    WHERE state = 'pending' AND datetime(created_at) <= datetime('now', '-${RETENTION_DAYS.pendingOperationalDeadline} day')`)
-    .first<{ count: number }>();
-  result.pendingProjectionsOverdue = Number(overdueProjections?.count ?? 0);
-  if (result.pendingOperationsOverdue || result.pendingProjectionsOverdue) {
-    await notifyIfDue(env, 'overdue_pending', `[retention] overdue protected-record work: provisioning=${result.pendingOperationsOverdue}, projection=${result.pendingProjectionsOverdue}`);
-  }
-
-  const claims = await db.prepare(`UPDATE age_review_cases SET claim_link_url = NULL
-    WHERE id IN (SELECT id FROM age_review_cases
-      WHERE claim_link_url IS NOT NULL
-        AND ((claim_link_expires_at IS NOT NULL AND datetime(claim_link_expires_at) <= datetime('now'))
-          OR closed_at IS NOT NULL)
-        AND ${noHold('age_review_case', 'age_review_cases.id', 'claim_link')}
-      LIMIT ${BATCH_LIMIT})`).run();
-  result.claimLinksCleared = claims.meta.changes;
-
-  const redacted = await db.prepare(`UPDATE age_review_cases SET
-      parent_contact_email = NULL, claim_link_url = NULL, claim_link_expires_at = NULL,
-      account_name = NULL, account_nip05 = NULL, account_vine_username = NULL,
-      identity_captured_at = NULL, resolution_note = NULL, reporter_pubkey = NULL,
-      moderator_pubkey = NULL, redacted_at = datetime('now')
-    WHERE id IN (SELECT id FROM age_review_cases
-      WHERE closed_at IS NOT NULL AND redacted_at IS NULL
-        AND datetime(closed_at) <= datetime('now', '-${RETENTION_DAYS.ageReviewDetail} days')
-        AND ${noHold('age_review_case', 'age_review_cases.id', 'redaction')}
-      LIMIT ${BATCH_LIMIT})`).run();
-  result.casesRedacted = redacted.meta.changes;
-
-  const projections = await db.prepare(`DELETE FROM protected_minor_projection_jobs
-    WHERE subject_id IN (SELECT subject_id FROM protected_minor_projection_jobs
-      WHERE state = 'complete' AND datetime(updated_at) <= datetime('now', '-${RETENTION_DAYS.projectionComplete} days')
-        AND ${noHold('projection_job', 'protected_minor_projection_jobs.subject_id', 'deletion')}
-      LIMIT ${BATCH_LIMIT})`).run();
-  result.projectionsDeleted = projections.meta.changes;
-
-  const tombstoneKeyring = await readKeyring(env.PROTECTED_MINOR_TOMBSTONE_KEY);
-  const tombstoneKey = tombstoneKeyring?.keys[tombstoneKeyring.active_key_id];
-  if (tombstoneKey && tombstoneKeyring) {
-    const operations = await db.prepare(`SELECT provisioning_operation_id, subject_id, kind, request_fingerprint, state,
-        result_pubkey, updated_at FROM protected_minor_provisioning_operations
-      WHERE state IN ('complete', 'failed')
-        AND datetime(updated_at) <= datetime('now', '-${RETENTION_DAYS.provisioningDetail} days')
-        AND ${noHold('provisioning_operation', 'protected_minor_provisioning_operations.provisioning_operation_id', 'compaction')}
-      ORDER BY datetime(updated_at) LIMIT ${BATCH_LIMIT}`).all<{
-        provisioning_operation_id: string; subject_id: string | null; kind: string; request_fingerprint: string;
-        state: string; result_pubkey: string | null; updated_at: string;
-      }>();
-    for (const operation of operations.results) {
-      const requestDigest = await digestProvisioningFingerprint(
-        tombstoneKey, operation.request_fingerprint, operation.kind === 'replacement' ? operation.subject_id : null,
-      );
-      const resultDigest = operation.result_pubkey
-        ? await digestProvisioningResult(tombstoneKey, operation.result_pubkey) : null;
-      const batch = await db.batch([
-        db.prepare(`INSERT INTO protected_minor_provisioning_tombstones
-          (provisioning_operation_id, kind, terminal_outcome, completed_at, request_digest, result_digest, key_id)
-          SELECT provisioning_operation_id, kind, state, updated_at, ?, ?, ?
-          FROM protected_minor_provisioning_operations
-          WHERE provisioning_operation_id = ? AND state IN ('complete', 'failed')
-            AND ${noHold('provisioning_operation', 'provisioning_operation_id', 'compaction')}
-          ON CONFLICT(provisioning_operation_id) DO NOTHING`)
-          .bind(requestDigest, resultDigest, tombstoneKeyring.active_key_id, operation.provisioning_operation_id),
-        db.prepare(`DELETE FROM protected_minor_provisioning_operations
-          WHERE provisioning_operation_id = ?
-            AND EXISTS (SELECT 1 FROM protected_minor_provisioning_tombstones
-              WHERE provisioning_operation_id = ?)
-            AND ${noHold('provisioning_operation', 'provisioning_operation_id', 'compaction')}`)
-          .bind(operation.provisioning_operation_id, operation.provisioning_operation_id),
-      ]);
-      result.operationsCompacted += batch[1].meta.changes;
+  await runStage('unknown-reason-alert', async () => {
+    const unknown = await db.prepare(`SELECT COUNT(*) AS count FROM (
+      SELECT 1 FROM protected_minor_subjects
+      WHERE classification_state = 'cleared' AND clear_reason_class = 'unclassified'
+        AND clear_reason_alerted_at IS NULL LIMIT ${BATCH_LIMIT})`).first<{ count: number }>();
+    result.unknownReasonsAlerted = Number(unknown?.count ?? 0);
+    if (result.unknownReasonsAlerted > 0) {
+      const sent = await notify(env, `[retention] ${result.unknownReasonsAlerted} protected-subject clear reason(s) require Trust & Safety classification`);
+      if (sent) {
+        await db.prepare(`UPDATE protected_minor_subjects SET clear_reason_alerted_at = datetime('now')
+          WHERE subject_id IN (SELECT subject_id FROM protected_minor_subjects
+            WHERE classification_state = 'cleared' AND clear_reason_class = 'unclassified'
+              AND clear_reason_alerted_at IS NULL LIMIT ${BATCH_LIMIT})`).run();
+      }
     }
-  } else {
-    const eligible = await db.prepare(`SELECT COUNT(*) AS count FROM protected_minor_provisioning_operations
-      WHERE state IN ('complete', 'failed')
-        AND datetime(updated_at) <= datetime('now', '-${RETENTION_DAYS.provisioningDetail} days')`).first<{ count: number }>();
-    if (Number(eligible?.count ?? 0) > 0) {
-      await notifyIfDue(env, 'missing_tombstone_key', '[retention] provisioning compaction paused: tombstone key unavailable');
+  });
+
+  await runStage('overdue-pending-alert', async () => {
+    const overdueOps = await db.prepare(`SELECT COUNT(*) AS count FROM protected_minor_provisioning_operations
+      WHERE state = 'pending' AND datetime(created_at) <= datetime('now', '-${RETENTION_DAYS.pendingOperationalDeadline} day')`)
+      .first<{ count: number }>();
+    result.pendingOperationsOverdue = Number(overdueOps?.count ?? 0);
+    const overdueProjections = await db.prepare(`SELECT COUNT(*) AS count FROM protected_minor_projection_jobs
+      WHERE state = 'pending' AND datetime(created_at) <= datetime('now', '-${RETENTION_DAYS.pendingOperationalDeadline} day')`)
+      .first<{ count: number }>();
+    result.pendingProjectionsOverdue = Number(overdueProjections?.count ?? 0);
+    if (result.pendingOperationsOverdue || result.pendingProjectionsOverdue) {
+      await notifyIfDue(env, 'overdue_pending', `[retention] overdue protected-record work: provisioning=${result.pendingOperationsOverdue}, projection=${result.pendingProjectionsOverdue}`);
     }
-  }
+  });
 
-  const bindings = await db.prepare(`DELETE FROM protected_minor_account_bindings
-    WHERE id IN (SELECT b.id FROM protected_minor_account_bindings b
-      JOIN protected_minor_subjects s ON s.subject_id = b.subject_id
-      WHERE b.unbound_at IS NOT NULL AND s.classification_state = 'cleared'
-        AND ((s.clear_reason_class = 'false_positive'
-          AND datetime(b.unbound_at) <= datetime('now', '-${RETENTION_DAYS.falsePositive} days')
-          AND datetime(s.cleared_at) <= datetime('now', '-${RETENTION_DAYS.falsePositive} days'))
-        OR (s.clear_reason_class != 'false_positive'
-          AND datetime(b.unbound_at) <= datetime('now', '-${RETENTION_DAYS.validPriorClassification} days')
-          AND datetime(s.cleared_at) <= datetime('now', '-${RETENTION_DAYS.validPriorClassification} days')))
-        AND ${noHold('account_binding', 'b.id', 'deletion')}
-      LIMIT ${BATCH_LIMIT})`).run();
-  result.bindingsDeleted = bindings.meta.changes;
+  await runStage('claim-link-clear', async () => {
+    const claims = await db.prepare(`UPDATE age_review_cases SET claim_link_url = NULL
+      WHERE id IN (SELECT id FROM age_review_cases
+        WHERE claim_link_url IS NOT NULL
+          AND ((claim_link_expires_at IS NOT NULL AND datetime(claim_link_expires_at) <= datetime('now'))
+            OR closed_at IS NOT NULL)
+          AND ${noHold('age_review_case', 'age_review_cases.id', 'claim_link')}
+        LIMIT ${BATCH_LIMIT})`).run();
+    result.claimLinksCleared = claims.meta.changes;
+  });
 
-  const subjects = await db.prepare(`DELETE FROM protected_minor_subjects
-    WHERE subject_id IN (SELECT s.subject_id FROM protected_minor_subjects s
-      WHERE s.classification_state = 'cleared'
-        AND ((s.clear_reason_class = 'false_positive' AND datetime(s.cleared_at) <= datetime('now', '-${RETENTION_DAYS.falsePositive} days'))
-          OR (s.clear_reason_class != 'false_positive' AND datetime(s.cleared_at) <= datetime('now', '-${RETENTION_DAYS.validPriorClassification} days')))
-        AND NOT EXISTS (SELECT 1 FROM protected_minor_account_bindings b WHERE b.subject_id = s.subject_id)
-        AND NOT EXISTS (SELECT 1 FROM protected_minor_projection_jobs p WHERE p.subject_id = s.subject_id)
-        AND NOT EXISTS (SELECT 1 FROM protected_minor_provisioning_operations o WHERE o.subject_id = s.subject_id)
-        AND ${noHold('protected_subject', 's.subject_id', 'deletion')}
-      LIMIT ${BATCH_LIMIT})`).run();
-  result.subjectsDeleted = subjects.meta.changes;
+  await runStage('age-review-redaction', async () => {
+    const redacted = await db.prepare(`UPDATE age_review_cases SET
+        parent_contact_email = NULL, claim_link_url = NULL, claim_link_expires_at = NULL,
+        account_name = NULL, account_nip05 = NULL, account_vine_username = NULL,
+        identity_captured_at = NULL, resolution_note = NULL, reporter_pubkey = NULL,
+        moderator_pubkey = NULL, redacted_at = datetime('now')
+      WHERE id IN (SELECT id FROM age_review_cases
+        WHERE closed_at IS NOT NULL AND redacted_at IS NULL
+          AND datetime(closed_at) <= datetime('now', '-${RETENTION_DAYS.ageReviewDetail} days')
+          AND ${noHold('age_review_case', 'age_review_cases.id', 'redaction')}
+        LIMIT ${BATCH_LIMIT})`).run();
+    result.casesRedacted = redacted.meta.changes;
+  });
 
-  const cases = await db.prepare(`DELETE FROM age_review_cases
-    WHERE id IN (SELECT c.id FROM age_review_cases c
-      WHERE c.closed_at IS NOT NULL
-        AND datetime(c.closed_at) <= datetime('now', '-${RETENTION_DAYS.ageReviewDecision} days')
-        AND NOT EXISTS (SELECT 1 FROM protected_minor_subjects s
-          WHERE s.source_case_id = c.id AND s.classification_state = 'active')
-        AND ${noHold('age_review_case', 'c.id', 'deletion')}
-      LIMIT ${BATCH_LIMIT})`).run();
-  result.casesDeleted = cases.meta.changes;
+  await runStage('projection-delete', async () => {
+    const projections = await db.prepare(`DELETE FROM protected_minor_projection_jobs
+      WHERE subject_id IN (SELECT subject_id FROM protected_minor_projection_jobs
+        WHERE state = 'complete' AND datetime(updated_at) <= datetime('now', '-${RETENTION_DAYS.projectionComplete} days')
+          AND ${noHold('projection_job', 'protected_minor_projection_jobs.subject_id', 'deletion')}
+        LIMIT ${BATCH_LIMIT})`).run();
+    result.projectionsDeleted = projections.meta.changes;
+  });
+
+  await runStage('provisioning-compaction', async () => {
+    const tombstoneKeyring = await readKeyring(env.PROTECTED_MINOR_TOMBSTONE_KEY);
+    const tombstoneKey = tombstoneKeyring?.keys[tombstoneKeyring.active_key_id];
+    if (tombstoneKey && tombstoneKeyring) {
+      const operations = await db.prepare(`SELECT provisioning_operation_id, subject_id, kind, request_fingerprint, state,
+          result_pubkey, updated_at FROM protected_minor_provisioning_operations
+        WHERE state IN ('complete', 'failed')
+          AND datetime(updated_at) <= datetime('now', '-${RETENTION_DAYS.provisioningDetail} days')
+          AND ${noHold('provisioning_operation', 'protected_minor_provisioning_operations.provisioning_operation_id', 'compaction')}
+        ORDER BY datetime(updated_at) LIMIT ${BATCH_LIMIT}`).all<{
+          provisioning_operation_id: string; subject_id: string | null; kind: string; request_fingerprint: string;
+          state: string; result_pubkey: string | null; updated_at: string;
+        }>();
+      for (const operation of operations.results) {
+        const requestDigest = await digestProvisioningFingerprint(
+          tombstoneKey, operation.request_fingerprint, operation.kind === 'replacement' ? operation.subject_id : null,
+        );
+        const resultDigest = operation.result_pubkey
+          ? await digestProvisioningResult(tombstoneKey, operation.result_pubkey) : null;
+        const batch = await db.batch([
+          db.prepare(`INSERT INTO protected_minor_provisioning_tombstones
+            (provisioning_operation_id, kind, terminal_outcome, completed_at, request_digest, result_digest, key_id)
+            SELECT provisioning_operation_id, kind, state, updated_at, ?, ?, ?
+            FROM protected_minor_provisioning_operations
+            WHERE provisioning_operation_id = ? AND state IN ('complete', 'failed')
+              AND ${noHold('provisioning_operation', 'provisioning_operation_id', 'compaction')}
+            ON CONFLICT(provisioning_operation_id) DO NOTHING`)
+            .bind(requestDigest, resultDigest, tombstoneKeyring.active_key_id, operation.provisioning_operation_id),
+          db.prepare(`DELETE FROM protected_minor_provisioning_operations
+            WHERE provisioning_operation_id = ?
+              AND EXISTS (SELECT 1 FROM protected_minor_provisioning_tombstones
+                WHERE provisioning_operation_id = ?)
+              AND ${noHold('provisioning_operation', 'provisioning_operation_id', 'compaction')}`)
+            .bind(operation.provisioning_operation_id, operation.provisioning_operation_id),
+        ]);
+        result.operationsCompacted += batch[1].meta.changes;
+      }
+    } else {
+      const eligible = await db.prepare(`SELECT COUNT(*) AS count FROM protected_minor_provisioning_operations
+        WHERE state IN ('complete', 'failed')
+          AND datetime(updated_at) <= datetime('now', '-${RETENTION_DAYS.provisioningDetail} days')`).first<{ count: number }>();
+      if (Number(eligible?.count ?? 0) > 0) {
+        await notifyIfDue(env, 'missing_tombstone_key', '[retention] provisioning compaction paused: tombstone key unavailable');
+      }
+    }
+  });
+
+  await runStage('binding-delete', async () => {
+    const bindings = await db.prepare(`DELETE FROM protected_minor_account_bindings
+      WHERE id IN (SELECT b.id FROM protected_minor_account_bindings b
+        JOIN protected_minor_subjects s ON s.subject_id = b.subject_id
+        WHERE b.unbound_at IS NOT NULL AND s.classification_state = 'cleared'
+          AND ((s.clear_reason_class = 'false_positive'
+            AND datetime(b.unbound_at) <= datetime('now', '-${RETENTION_DAYS.falsePositive} days')
+            AND datetime(s.cleared_at) <= datetime('now', '-${RETENTION_DAYS.falsePositive} days'))
+          OR (s.clear_reason_class != 'false_positive'
+            AND datetime(b.unbound_at) <= datetime('now', '-${RETENTION_DAYS.validPriorClassification} days')
+            AND datetime(s.cleared_at) <= datetime('now', '-${RETENTION_DAYS.validPriorClassification} days')))
+          AND ${noHold('account_binding', 'b.id', 'deletion')}
+        LIMIT ${BATCH_LIMIT})`).run();
+    result.bindingsDeleted = bindings.meta.changes;
+  });
+
+  await runStage('subject-delete', async () => {
+    const subjects = await db.prepare(`DELETE FROM protected_minor_subjects
+      WHERE subject_id IN (SELECT s.subject_id FROM protected_minor_subjects s
+        WHERE s.classification_state = 'cleared'
+          AND ((s.clear_reason_class = 'false_positive' AND datetime(s.cleared_at) <= datetime('now', '-${RETENTION_DAYS.falsePositive} days'))
+            OR (s.clear_reason_class != 'false_positive' AND datetime(s.cleared_at) <= datetime('now', '-${RETENTION_DAYS.validPriorClassification} days')))
+          AND NOT EXISTS (SELECT 1 FROM protected_minor_account_bindings b WHERE b.subject_id = s.subject_id)
+          AND NOT EXISTS (SELECT 1 FROM protected_minor_projection_jobs p WHERE p.subject_id = s.subject_id)
+          AND NOT EXISTS (SELECT 1 FROM protected_minor_provisioning_operations o WHERE o.subject_id = s.subject_id)
+          AND ${noHold('protected_subject', 's.subject_id', 'deletion')}
+        LIMIT ${BATCH_LIMIT})`).run();
+    result.subjectsDeleted = subjects.meta.changes;
+  });
+
+  await runStage('case-delete', async () => {
+    const cases = await db.prepare(`DELETE FROM age_review_cases
+      WHERE id IN (SELECT c.id FROM age_review_cases c
+        WHERE c.closed_at IS NOT NULL
+          AND datetime(c.closed_at) <= datetime('now', '-${RETENTION_DAYS.ageReviewDecision} days')
+          AND NOT EXISTS (SELECT 1 FROM protected_minor_subjects s
+            WHERE s.source_case_id = c.id AND s.classification_state = 'active')
+          AND ${noHold('age_review_case', 'c.id', 'deletion')}
+        LIMIT ${BATCH_LIMIT})`).run();
+    result.casesDeleted = cases.meta.changes;
+  });
 
   return result;
 }
