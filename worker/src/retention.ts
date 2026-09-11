@@ -213,9 +213,15 @@ export async function runRetentionDisposal(env: RetentionEnv): Promise<Retention
   });
 
   await runStage('enforcement-leg-delete', async () => {
+    // Held on behalf of the case that produced the leg: a hold on that case stops
+    // its disposal, and a blanket hold (record_key NULL) stops every leg,
+    // including legs with no case id. Batched like every other stage.
     const legs = await db.prepare(`DELETE FROM enforcement_legs
-      WHERE state = 'resolved'
-        AND datetime(updated_at) <= datetime('now', '-${RETENTION_DAYS.enforcementLegResolved} days')`).run();
+      WHERE rowid IN (SELECT rowid FROM enforcement_legs
+        WHERE state = 'resolved'
+          AND datetime(updated_at) <= datetime('now', '-${RETENTION_DAYS.enforcementLegResolved} days')
+          AND ${noHold('age_review_case', 'enforcement_legs.case_id', 'deletion')}
+        LIMIT ${BATCH_LIMIT})`).run();
     result.enforcementLegsDeleted = legs.meta.changes;
   });
 

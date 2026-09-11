@@ -261,6 +261,28 @@ describe('enforcement leg disposal', () => {
   // An unconverged leg is evidence of an enforcement gap nobody has closed.
   // Age is not a reason to delete it -- that would dispose of the record of an
   // account still enforced in one place and not the other.
+  // Every other disposal stage honours a legal hold. A leg is disposed on behalf
+  // of the case that produced it, so a hold on that case must stop it -- and a
+  // blanket hold (record_key NULL) must stop every leg, including the ones with
+  // no case id.
+  it('honours a legal hold on the originating case', async () => {
+    await DB.prepare(`INSERT INTO enforcement_legs
+      (pubkey, leg, intent, state, attempts, case_id, created_at, updated_at)
+      VALUES (?, 'keycast_status', 'suspended', 'resolved', 0, 'case-held', ?, ?)`)
+      .bind(PUBKEY_A, OLD_30, OLD_30).run();
+    await DB.prepare(`INSERT INTO retention_legal_holds
+      (id, record_type, record_key, disposal_stage, authorized_role, starts_at, review_at)
+      VALUES ('hold-leg', 'age_review_case', 'case-held', 'deletion', 'privacy/legal', ?, ?)`)
+      .bind(OLD_30, RECENT).run();
+
+    const held = await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY });
+    expect(held.enforcementLegsDeleted).toBe(0);
+
+    await DB.prepare("UPDATE retention_legal_holds SET released_at = datetime('now')").run();
+    const resumed = await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY });
+    expect(resumed.enforcementLegsDeleted).toBe(1);
+  });
+
   it('keeps unresolved legs regardless of age', async () => {
     await insertLeg(PUBKEY_A, 'failed', OLD_30);
     await insertLeg(PUBKEY_B, 'abandoned', OLD_30);
