@@ -44,12 +44,12 @@ async function insertCase(id: string, state: string) {
   ).bind(id, `pk_${id}`, state, new Date(Date.now() + 9 * 864e5).toISOString()).run();
 }
 
-function patch(id: string, patchBody: Record<string, unknown>, envOverrides: Record<string, unknown> = {}) {
+function patch(id: string, patchBody: Record<string, unknown>) {
   const req = new Request(`https://api.test/api/age-review/cases/${id}`, {
     method: 'PATCH',
     body: JSON.stringify(patchBody),
   });
-  return handleUpdateAgeReviewCase(req, id, { ...env, ...envOverrides }, cors);
+  return handleUpdateAgeReviewCase(req, id, env, cors);
 }
 
 async function rowOf(id: string) {
@@ -188,10 +188,18 @@ describe('protected-minor projection on a self-custody deny', () => {
       return Promise.resolve(new Response('{}', { status: 200 }));
     });
 
-    await patch('c8', { state: 'denied_closed' }, {
+    // Own request rather than the shared `patch` helper: this needs a keycast-
+    // configured env, and widening the helper collides with the same widening on
+    // the enforcement-leg branch for no benefit to either.
+    const req = new Request('https://api.test/api/age-review/cases/c8', {
+      method: 'PATCH',
+      body: JSON.stringify({ state: 'denied_closed' }),
+    });
+    await handleUpdateAgeReviewCase(req, 'c8', {
+      ...env,
       KEYCAST_URL: 'https://login.test.divine.video',
       KEYCAST_SERVICE_TOKEN: 'test-token',
-    });
+    }, cors);
 
     // Positive assertion first: the denial really did create a job to settle.
     const total = await DB.prepare(
