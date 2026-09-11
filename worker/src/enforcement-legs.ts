@@ -69,11 +69,16 @@ export async function recordFailedKeycastLeg(
  * record has nothing to converge on, so a pending row for it could never be
  * satisfied. Also called when a later action supersedes an earlier failure in
  * the favourable direction.
+ *
+ * Clears an `abandoned` row too. Abandonment means the re-drive budget ran out,
+ * not that the leg is permanently broken: a moderator who re-runs the action
+ * successfully has converged it by hand, and leaving the row asserting a failure
+ * that no longer exists would have the next genuine failure read against a lie.
  */
 export async function resolveKeycastLeg(db: D1Database, pubkey: string): Promise<void> {
   await db.prepare(`
     UPDATE enforcement_legs SET state = 'resolved', updated_at = ?
-    WHERE pubkey = ? AND leg = 'keycast_status' AND state = 'failed'
+    WHERE pubkey = ? AND leg = 'keycast_status' AND state IN ('failed', 'abandoned')
   `).bind(new Date().toISOString(), pubkey).run();
 }
 

@@ -232,3 +232,40 @@ describe('protected-record retention on real D1', () => {
     expect(await DB.prepare("SELECT 1 FROM age_review_cases WHERE id = 'case-independent'").first()).toBeNull();
   });
 });
+
+describe('enforcement leg disposal', () => {
+  beforeEach(async () => {
+    await DB.prepare('DELETE FROM enforcement_legs').run();
+  });
+
+  async function insertLeg(pubkey: string, state: string, updatedAt: string) {
+    await DB.prepare(`INSERT INTO enforcement_legs
+      (pubkey, leg, intent, state, attempts, created_at, updated_at)
+      VALUES (?, 'keycast_status', 'suspended', ?, 0, ?, ?)`)
+      .bind(pubkey, state, updatedAt, updatedAt).run();
+  }
+
+  it('deletes a converged leg past its retention period', async () => {
+    await insertLeg(PUBKEY_A, 'resolved', OLD_30);
+    const result = await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY });
+    expect(result.enforcementLegsDeleted).toBe(1);
+    expect(await DB.prepare('SELECT 1 FROM enforcement_legs WHERE pubkey = ?').bind(PUBKEY_A).first()).toBeNull();
+  });
+
+  it('keeps a recently converged leg', async () => {
+    await insertLeg(PUBKEY_A, 'resolved', RECENT);
+    await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY });
+    expect(await DB.prepare('SELECT 1 FROM enforcement_legs WHERE pubkey = ?').bind(PUBKEY_A).first()).not.toBeNull();
+  });
+
+  // An unconverged leg is evidence of an enforcement gap nobody has closed.
+  // Age is not a reason to delete it -- that would dispose of the record of an
+  // account still enforced in one place and not the other.
+  it('keeps unresolved legs regardless of age', async () => {
+    await insertLeg(PUBKEY_A, 'failed', OLD_30);
+    await insertLeg(PUBKEY_B, 'abandoned', OLD_30);
+    const result = await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY });
+    expect(result.enforcementLegsDeleted).toBe(0);
+    expect(await DB.prepare('SELECT COUNT(*) AS c FROM enforcement_legs').first<{ c: number }>()).toMatchObject({ c: 2 });
+  });
+});
