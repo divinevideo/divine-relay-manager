@@ -4,7 +4,7 @@
 //   enforcement failures are surfaced (success:false / HTTP 207), not
 //         masked as success, while the state transition still persists.
 import { Miniflare } from 'miniflare';
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import { ensureSchema } from '../src/db';
 import { handleUpdateAgeReviewCase, handleAgeReviewReplyWebhook } from '../src/age-review';
 import { createSubjectWithBinding } from '../src/protected-minors';
@@ -166,7 +166,6 @@ describe('protected-minor projection on a self-custody deny', () => {
     await reset();
     await DB.prepare('DELETE FROM protected_minor_projection_jobs').run();
   });
-  afterEach(() => { vi.restoreAllMocks(); });
 
   // A denied account keycast does not manage can never satisfy the projection
   // job the denial creates. Settling it inline keeps the cron from carrying a
