@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { queryStrict, isDefinitiveRpcNegative, RelayReadError, type ReqCapable } from './relayRead';
+import { queryStrict, readWithCompleteness, isDefinitiveRpcNegative, RelayReadError, type ReqCapable } from './relayRead';
 import { ApiError } from './adminApi';
 
 function ev(id: string) {
@@ -115,5 +115,55 @@ describe('isDefinitiveRpcNegative', () => {
   it('rejects non-ApiError failures (network, abort)', () => {
     expect(isDefinitiveRpcNegative(new Error('Failed to fetch'))).toBe(false);
     expect(isDefinitiveRpcNegative(undefined)).toBe(false);
+  });
+});
+
+describe('readWithCompleteness', () => {
+  it('returns events with incomplete=false on a completed read', async () => {
+    const relay = fakeRelay([
+      ['EVENT', 'sub', ev('a')],
+      ['EVENT', 'sub', ev('b')],
+      ['EOSE', 'sub'],
+    ]);
+    await expect(readWithCompleteness(relay, [{ ids: ['a'] }], opts())).resolves.toEqual({
+      events: expect.arrayContaining([]),
+      incomplete: false,
+    });
+    const res = await readWithCompleteness(relay, [{ ids: ['a'] }], opts());
+    expect(res.events).toHaveLength(2);
+    expect(res.incomplete).toBe(false);
+  });
+
+  it('reports incomplete (not a throw) when the relay CLOSES the subscription', async () => {
+    const relay = fakeRelay([['CLOSED', 'sub', 'error: could not complete query']]);
+    await expect(readWithCompleteness(relay, [{ ids: ['a'] }], opts())).resolves.toEqual({
+      events: [],
+      incomplete: true,
+    });
+  });
+
+  it('reports incomplete when the read times out', async () => {
+    const hanging: ReqCapable = {
+      async *req(_filters, o) {
+        await new Promise((_resolve, reject) => {
+          o?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('The signal has been aborted', 'AbortError')));
+        });
+        yield ['EOSE', 'sub'] as [string, ...unknown[]];
+      },
+    } as ReqCapable;
+    await expect(
+      readWithCompleteness(hanging, [{ ids: ['a'] }], { signal: new AbortController().signal, timeoutMs: 50 }),
+    ).resolves.toEqual({ events: [], incomplete: true });
+  });
+
+  it('rethrows a non-read error (a bug in our own code), never masking it as incomplete', async () => {
+    const broken: ReqCapable = {
+      async *req() {
+        await Promise.reject(new TypeError('cannot read property of undefined'));
+        yield ['EOSE', 'sub'] as [string, ...unknown[]]; // unreachable
+      },
+    } as ReqCapable;
+    await expect(readWithCompleteness(broken, [{ ids: ['a'] }], opts())).rejects.toThrow(TypeError);
   });
 });
