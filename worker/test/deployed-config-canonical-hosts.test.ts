@@ -28,10 +28,9 @@ function varsOf(tomlPath: string): Array<[string, string]> {
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => !line.startsWith('#'))
-    .map((line) => /^([A-Z0-9_]+)\s*=\s*"([^"]*)"$/.exec(line))
+    .map((line) => /^([A-Z0-9_]+)\s*=\s*(?:"([^"]*)"|'([^']*)')$/.exec(line))
     .filter((match): match is RegExpExecArray => match !== null)
-    .map((match) => [match[1], match[2]] as [string, string])
-    .filter(([, value]) => value.startsWith('http') || value.startsWith('ws'));
+    .map((match) => [match[1], (match[2] ?? match[3]) as string] as [string, string]);
 }
 
 describe.each(['wrangler.staging.toml', 'wrangler.prod.toml'])('%s', (tomlPath) => {
