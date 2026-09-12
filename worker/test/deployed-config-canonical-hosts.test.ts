@@ -1,17 +1,17 @@
 // Deployed wrangler configs must name hosts that answer directly, not legacy
 // names that redirect.
 //
-// This is not hygiene either. Keycast resolves which tenant a request belongs to
-// from the Host header, and get-or-creates a tenant it does not recognise
-// (keycast api/src/api/tenant.rs). Workers `fetch` follows redirects by default,
-// so a configured hostname that 301s lands on a DIFFERENT host than the one we
-// configured, and every account there can come back "user not found" -- which is
-// byte-identical to a self-custody account and, after #269, reads as "nothing to
-// enforce here" rather than as breakage.
+// login.staging.dvines.org 301s (path-preserving) to login.staging.divine.video,
+// the canonical staging keycast host. Workers `fetch` follows redirects by
+// default, so a configured hostname that 301s is not the host of the request
+// that lands. A cross-origin 301 can also drop Authorization or change method.
+// Either way the URL in wrangler is no longer the request that ran.
 //
 // That was the state of wrangler.staging.toml: KEYCAST_URL named
-// login.staging.dvines.org, which the staging ingress documents as a legacy
-// redirect to login.staging.divine.video.
+// login.staging.dvines.org. Point it at the canonical host. Do not claim the
+// redirect invents an empty Keycast tenant: the Location host is the same host
+// this config now names, so a Host-derived tenant after the hop is the canonical
+// one.
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
