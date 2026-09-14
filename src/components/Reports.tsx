@@ -566,8 +566,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // The fallback pane used to filter the bulk decisions list, which was capped at
   // the newest 1000 rows -- so "No prior moderation actions recorded for this
   // target" could be a statement about the cap rather than about the target.
-  // GET /api/decisions/<id> has no cap, so the claim is now answerable.
-  const { data: deepLinkDecisions } = useQuery({
+  // GET /api/decisions/<id> has no cap, so the claim is now answerable -- once
+  // the read has answered. `data` stays undefined until then, and the pane
+  // renders that as loading (or as failed) rather than as an empty history.
+  const { data: deepLinkDecisions, isError: deepLinkDecisionsFailed } = useQuery({
     queryKey: ['decisions', deepLinkTarget.value],
     queryFn: () => getDecisions(deepLinkTarget.value),
     enabled: hasDeepLinkParams
@@ -1322,7 +1324,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     <DeepLinkFallback
       status={deepLinkStatus === 'gone' ? 'gone' : 'unavailable'}
       target={deepLinkTarget}
-      decisions={deepLinkDecisions ?? []}
+      decisions={deepLinkDecisions}
+      decisionsFailed={deepLinkDecisionsFailed}
       onRetry={() => {
         attemptedTargetRef.current = null;
         setDeepLinkStatus('resolving');

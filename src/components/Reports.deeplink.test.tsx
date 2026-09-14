@@ -106,6 +106,64 @@ describe('Reports deep-link resolution', () => {
     expect(screen.getByText(PGONE)).toBeInTheDocument();
   });
 
+  // The gone pane reads the target's decisions from GET /api/decisions/<id>
+  // (#273), and that read only starts once the target has resolved gone. Until
+  // it answers, the pane has nothing to say about prior actions and must not
+  // say "none": that claim is what a moderator uses to decide whether the
+  // target was ever handled.
+  it('lists prior actions on the gone pane once the per-target read lands, without first claiming there are none', async () => {
+    window.history.pushState({}, '', `/reports?pubkey=${PGONE}`);
+    let answer!: () => void;
+    const pending = new Promise<Response>((resolve) => {
+      answer = () => resolve(jsonResponse({
+        success: true,
+        decisions: [{ id: 1, target_type: 'pubkey', target_id: PGONE, action: 'ban_user', created_at: '2026-01-01 00:00:00' }],
+      }));
+    });
+    stubFetch(() => jsonResponse({ success: true, events: [] }));
+    const healthy = globalThis.fetch as unknown as typeof fetch;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes(`/api/decisions/${PGONE}`)) return pending;
+      return healthy(input, init);
+    }));
+
+    render(
+      <TestApp>
+        <Reports relayUrl="wss://relay.example" />
+      </TestApp>
+    );
+
+    expect(await screen.findByText(/loading prior moderation actions/i)).toBeInTheDocument();
+    expect(screen.queryByText(/no prior moderation actions/i)).not.toBeInTheDocument();
+
+    answer();
+
+    expect(await screen.findByText(/prior moderation actions on this target/i)).toBeInTheDocument();
+    expect(screen.getByText('ban_user')).toBeInTheDocument();
+    expect(screen.queryByText(/no prior moderation actions/i)).not.toBeInTheDocument();
+  });
+
+  it('says the prior-action read failed rather than claiming the target has no history', async () => {
+    window.history.pushState({}, '', `/reports?pubkey=${PGONE}`);
+    stubFetch(() => jsonResponse({ success: true, events: [] }));
+    const healthy = globalThis.fetch as unknown as typeof fetch;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes(`/api/decisions/${PGONE}`)) return jsonResponse({ success: false, error: 'D1 unavailable' }, 500);
+      return healthy(input, init);
+    }));
+
+    render(
+      <TestApp>
+        <Reports relayUrl="wss://relay.example" />
+      </TestApp>
+    );
+
+    expect(await screen.findByText(/prior moderation actions could not be loaded/i)).toBeInTheDocument();
+    expect(screen.queryByText(/no prior moderation actions/i)).not.toBeInTheDocument();
+  });
+
   it('resolves an aged-out target via the targeted fetch and lands on /reports/:id', async () => {
     window.history.pushState({}, '', `/reports?event=${EFOUND}`);
     stubFetch(() => jsonResponse({ success: true, events: [MATCHING_REPORT] }));
