@@ -53,8 +53,8 @@ beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input instanceof Request ? input.url : input);
     if (url.includes('/api/reports')) return jsonResponse({ success: true, events: [REPORT, MALFORMED_REPORT] });
-    if (url.includes('/api/resolution-labels')) return jsonResponse({ success: true, events: [] });
-    if (url.includes('/api/decisions')) return jsonResponse({ success: true, decisions: [] });
+    if (url.includes('/api/resolution-label-targets')) return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
+    if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, resolved: [], states: [] });
     if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
     return jsonResponse({ success: true });
   }));
@@ -120,8 +120,8 @@ describe('Reports stale-data resilience', () => {
           headers: { 'Content-Type': 'application/json' },
         });
       }
-      if (url.includes('/api/resolution-labels')) return jsonResponse({ success: true, events: [] });
-      if (url.includes('/api/decisions')) return jsonResponse({ success: true, decisions: [] });
+      if (url.includes('/api/resolution-label-targets')) return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
+      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, resolved: [], states: [] });
       if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
       return jsonResponse({ success: true });
     }));
@@ -173,11 +173,15 @@ describe('Reports unresolved auto-hide filtering', () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input instanceof Request ? input.url : input);
       if (url.includes('/api/reports')) return jsonResponse({ success: true, events: [REPORT] });
-      if (url.includes('/api/resolution-labels')) return jsonResponse({ success: true, events: [] });
-      if (url.includes('/api/decisions')) {
+      if (url.includes('/api/resolution-label-targets')) return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
+      if (url.includes('/api/resolution-state')) {
         return jsonResponse({
           success: true,
-          decisions: [
+          resolved: [],
+          // Newest-first, as the worker orders them: getLatestAutoHideState takes
+          // the first state action it sees, so 'auto_hide_unresolved' is the
+          // state under test and 'auto_hide_restored' is the older one it wins over.
+          states: [
             { target_type: 'event', target_id: 'c'.repeat(64), action: 'auto_hide_unresolved' },
             { target_type: 'event', target_id: 'c'.repeat(64), action: 'auto_hide_restored' },
           ],
@@ -209,22 +213,17 @@ describe('Reports unresolved auto-hide filtering', () => {
 // this branch briefly carried. What stays here is the control below, which
 // pins that a resolution label genuinely hides its target.
 describe('Reports resolution filtering', () => {
-  const RESOLUTION_LABEL = {
-    id: '1'.repeat(64),
-    pubkey: '2'.repeat(64),
-    created_at: 1751000200,
-    kind: 1985,
-    tags: [['L', 'moderation/resolution'], ['e', 'c'.repeat(64)]],
-    content: '',
-    sig: 'e'.repeat(128),
-  };
+  // The worker reduces resolution labels to target keys before they reach the
+  // browser, so the fixture is the projected target rather than the kind-1985
+  // event it came from.
+  const RESOLVED_LABEL_TARGET = { type: 'event', value: 'c'.repeat(64) };
 
   function stubFetch(labelsResponse: () => Response) {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input instanceof Request ? input.url : input);
-      if (url.includes('/api/resolution-labels')) return labelsResponse();
+      if (url.includes('/api/resolution-label-targets')) return labelsResponse();
       if (url.includes('/api/reports')) return jsonResponse({ success: true, events: [REPORT] });
-      if (url.includes('/api/decisions')) return jsonResponse({ success: true, decisions: [] });
+      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, resolved: [], states: [] });
       if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
       return jsonResponse({ success: true });
     }));
@@ -236,7 +235,7 @@ describe('Reports resolution filtering', () => {
     el?.tagName === 'P' && (el.textContent ?? '').trim().startsWith(`${n} pending`);
 
   it('hides a target that a resolution label has already resolved', async () => {
-    stubFetch(() => jsonResponse({ success: true, events: [RESOLUTION_LABEL] }));
+    stubFetch(() => jsonResponse({ success: true, targets: [RESOLVED_LABEL_TARGET], truncated: false, oldest_covered: null }));
 
     render(
       <TestApp>
@@ -251,7 +250,7 @@ describe('Reports resolution filtering', () => {
   // The inverse, and the reason the labels read is worth retrying: with no
   // label set the same target is presented as pending work again.
   it('lists the target as pending when its resolution label is missing', async () => {
-    stubFetch(() => jsonResponse({ success: true, events: [] }));
+    stubFetch(() => jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null }));
 
     render(
       <TestApp>
@@ -278,7 +277,7 @@ describe('Reports resolution filtering', () => {
           headers: { 'Content-Type': 'application/json' },
         });
       }
-      return jsonResponse({ success: true, events: [RESOLUTION_LABEL] });
+      return jsonResponse({ success: true, targets: [RESOLVED_LABEL_TARGET], truncated: false, oldest_covered: null });
     });
 
     render(

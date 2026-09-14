@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { finalizeEvent, generateSecretKey } from 'nostr-tools';
 import worker from './index';
+import { LABEL_PAGE_SIZE } from './resolution-labels';
 
 const env = {
   ALLOWED_ORIGINS: 'https://app.divine.video,https://*.openvine-app.pages.dev',
@@ -2198,6 +2199,99 @@ describe('GET /api/resolution-labels truncation reporting (#221)', () => {
     expect(body.events).toEqual([]);
     expect(body.truncated).toBe(false);
     expect(body.oldest_covered).toBeNull();
+  });
+});
+
+describe('GET /api/resolution-label-targets pages the relay (#273)', () => {
+  // A relay that honours `limit` and `until` against a fixed corpus, and records
+  // every filter it was asked for. The unit tests in resolution-labels.test.ts
+  // drive the pager through an injected fetcher; this drives it through the real
+  // handler, which is the only place the filter's `limit` and the pager's
+  // `pageSize` meet.
+  function stubPagingRelay(corpus: Array<{ id: string; created_at: number }>) {
+    const filters: Array<{ limit?: number; until?: number }> = [];
+    const sorted = [...corpus].sort((a, b) => b.created_at - a.created_at);
+
+    class FakeWebSocket {
+      private listeners: Map<string, Array<(event: unknown) => void>> = new Map();
+      constructor(_url: string) {
+        setTimeout(() => this.emit('open', {}), 0);
+      }
+      addEventListener(type: string, listener: (event: unknown) => void) {
+        if (!this.listeners.has(type)) this.listeners.set(type, []);
+        this.listeners.get(type)!.push(listener);
+      }
+      send(raw: string) {
+        const [, subId, filter] = JSON.parse(raw) as [string, string, { limit?: number; until?: number }];
+        filters.push(filter);
+        const eligible = filter.until === undefined
+          ? sorted
+          : sorted.filter((e) => e.created_at <= filter.until!);
+        const page = eligible.slice(0, filter.limit ?? eligible.length);
+        setTimeout(() => {
+          for (const ev of page) {
+            this.emit('message', { data: JSON.stringify(['EVENT', subId, { ...ev, tags: [['e', ev.id]] }]) });
+          }
+          this.emit('message', { data: JSON.stringify(['EOSE', subId]) });
+        }, 0);
+      }
+      close() { /* no-op */ }
+      private emit(type: string, event: unknown) {
+        for (const handler of this.listeners.get(type) || []) handler(event);
+      }
+    }
+    vi.stubGlobal('WebSocket', FakeWebSocket as never);
+    return filters;
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  async function getTargets() {
+    return worker.fetch(
+      new Request('https://api.example/api/resolution-label-targets', {
+        headers: { 'X-Admin-Key': 'test-admin-key' },
+      }),
+      { ALLOWED_ORIGINS: 'https://app.divine.video', RELAY_URL: 'wss://relay.divine.video', ADMIN_API_KEY: 'test-admin-key' } as never,
+      ctx
+    );
+  }
+
+  it('asks the relay for exactly the page size the pager treats as a full page', async () => {
+    // These two values live in different places and nothing type-checks that they
+    // agree. If the filter asked for fewer events than the pager's pageSize, every
+    // page would look short, the walk would stop after one, and the endpoint would
+    // silently report partial history as complete -- the exact failure it exists
+    // to remove.
+    const filters = stubPagingRelay([{ id: 'a'.repeat(64), created_at: 1_760_000_000 }]);
+
+    await getTargets();
+
+    expect(filters[0].limit).toBe(LABEL_PAGE_SIZE);
+  });
+
+  it('walks past a full page and returns targets from beyond it', async () => {
+    const corpus = Array.from({ length: LABEL_PAGE_SIZE + 5 }, (_, i) => ({
+      id: String(i).padStart(64, '0'),
+      created_at: 1_760_000_000 - i,
+    }));
+    const filters = stubPagingRelay(corpus);
+
+    const body = await (await getTargets()).json() as {
+      targets: Array<{ type: string; value: string }>;
+      truncated: boolean;
+    };
+
+    // A second REQ, cursored on the oldest of the first page.
+    expect(filters).toHaveLength(2);
+    expect(filters[1].until).toBe(1_760_000_000 - (LABEL_PAGE_SIZE - 1));
+
+    // Every target, including the five only reachable on the second page.
+    expect(body.targets).toHaveLength(LABEL_PAGE_SIZE + 5);
+    expect(body.truncated).toBe(false);
+    const oldest = String(LABEL_PAGE_SIZE + 4).padStart(64, '0');
+    expect(body.targets).toContainEqual({ type: 'event', value: oldest });
   });
 });
 

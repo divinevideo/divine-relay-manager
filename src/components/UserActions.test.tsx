@@ -367,6 +367,10 @@ describe('UserActions', () => {
 
     await waitFor(() => expect(decisionsInvalidations()).toBe(1));
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['decisions'] });
+    // The queue subtracts the ['resolution-state'] projection, not the decision
+    // log, so without this key the suspended account stays listed until the
+    // next poll (#273).
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['resolution-state'] });
   });
 
   it('closes the ban dialog on success (the alertdialog is removed)', async () => {

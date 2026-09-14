@@ -56,7 +56,10 @@ export function EventActions({
   ) =>
     void moderator.then((moderatorPubkey) =>
       api.logDecision({ ...params, moderatorPubkey })
-        .then(() => { queryClient.invalidateQueries({ queryKey: ['decisions'] }); })
+        .then(() => {
+          queryClient.invalidateQueries({ queryKey: ['decisions'] });
+          queryClient.invalidateQueries({ queryKey: ['resolution-state'] });
+        })
         .catch((e) => {
           console.warn('[EventActions] audit log failed', e);
           toast({ title: 'Action applied; audit log not recorded' });

@@ -42,6 +42,9 @@ import { queryRelay, withTimeout, ENRICHMENT_TIMEOUT_MS } from './relay-profile'
 import { coordinateEventVisibility, type EventVisibilityResult } from './event-visibility';
 import { markHumanAction, markHumanReviewed } from './human-decision';
 import { AUTO_HIDE_STATE_ACTIONS } from '../../shared/autohide';
+import { getResolvedTargets, getAutoHideStates } from './resolution-state';
+import { pageResolutionLabels, LABEL_PAGE_SIZE } from './resolution-labels';
+import type { ResolutionLabelEvent } from './resolution-labels';
 import { runRetentionDisposal } from './retention';
 
 const COORDINATED_AUTO_HIDE_ACTIONS = new Set<string>(AUTO_HIDE_STATE_ACTIONS);
@@ -568,6 +571,10 @@ export default {
         return handleGetAllDecisions(env, corsHeaders);
       }
 
+      if (path === '/api/resolution-state' && request.method === 'GET') {
+        return handleGetResolutionState(env, corsHeaders);
+      }
+
       // Linked Zendesk tickets for a report target (admin-gated: MUST stay here,
       // after verifyAdminAccess, and NOT under /api/zendesk/* which bypasses it).
       if (path === '/api/tickets' && request.method === 'GET') {
@@ -682,6 +689,10 @@ export default {
           truncated: events.length >= RESOLUTION_LABEL_LIMIT,
           oldest_covered: timestamps.length > 0 ? Math.min(...timestamps) : null,
         }, 200, corsHeaders);
+      }
+
+      if (path === '/api/resolution-label-targets' && request.method === 'GET') {
+        return handleGetResolutionLabelTargets(env, corsHeaders);
       }
 
       // Bulk moderation (server-side iteration for batch operations)
@@ -1819,6 +1830,93 @@ async function handleGetAllDecisions(
     return jsonResponse(
       { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
       500,
+      corsHeaders
+    );
+  }
+}
+
+// The resolution projection /api/decisions cannot give the queue: every target
+// the decisions table has ever resolved, with no row cap and so no coverage
+// boundary to disclose. /api/decisions is deliberately left as it is -- a
+// frontend deployed before this one still reads it.
+async function handleGetResolutionState(
+  env: Env,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  try {
+    if (!env.DB) {
+      return jsonResponse({ success: false, error: 'Database not configured' }, 500, corsHeaders);
+    }
+
+    await ensureSchemaOnce(env.DB);
+
+    const [resolved, states] = await Promise.all([
+      getResolvedTargets(env.DB),
+      getAutoHideStates(env.DB),
+    ]);
+
+    return proxyJsonResponse({ success: true, resolved, states }, 200, corsHeaders);
+  } catch (error) {
+    console.error('Get resolution state error:', error);
+    return jsonResponse(
+      { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+      500,
+      corsHeaders
+    );
+  }
+}
+
+// The label half of the same projection. /api/resolution-labels reads one page
+// of 500 and discloses the bound; this walks every page and returns only the
+// target keys the queue subtracts, so the bound stops being a date in the UI.
+// /api/resolution-labels stays as it is for a frontend deployed before this one.
+async function handleGetResolutionLabelTargets(
+  env: Env,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  try {
+    // One value feeds both the relay filter's `limit` and the pager's notion of a
+    // full page. They must not drift: the pager treats a page shorter than
+    // pageSize as "the relay has nothing older", so a filter asking for fewer
+    // events than pageSize would make every page look short and stop the walk
+    // after one -- silently, which is the failure this endpoint exists to remove.
+    const pageSize = LABEL_PAGE_SIZE;
+
+    // queryRelay's #186 contract: success:false is an UNCONFIRMED read, not an
+    // empty one. Throwing here is what stops a timed-out page from being folded
+    // into the result as "nothing older" -- which would hand the queue a short
+    // list of resolved targets and un-hide handled work (#221).
+    const fetchPage = async (until: number | undefined) => {
+      const filter: Record<string, unknown> = {
+        kinds: [1985],
+        '#L': ['moderation/resolution'],
+        limit: pageSize,
+      };
+      if (until !== undefined) filter.until = until;
+
+      const result = await queryRelay(filter, env.RELAY_URL);
+      if (!result.success) {
+        throw new Error(result.error || 'Relay query failed');
+      }
+      return (result.events || []) as unknown as ResolutionLabelEvent[];
+    };
+
+    const { targets, truncated, oldestCovered } = await pageResolutionLabels(fetchPage, { pageSize });
+
+    return proxyJsonResponse({
+      success: true,
+      targets,
+      truncated,
+      oldest_covered: oldestCovered,
+    }, 200, corsHeaders);
+  } catch (error) {
+    // 502, matching /api/resolution-labels: the frontend treats an errored
+    // resolution source as unavailable and blocks the queue rather than
+    // rendering it unfiltered.
+    console.error('Get resolution label targets error:', error);
+    return jsonResponse(
+      { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+      502,
       corsHeaders
     );
   }

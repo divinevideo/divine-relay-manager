@@ -81,8 +81,10 @@ export function UserActions({
   // decisions synchronously in onSuccess — racing this detached write. Without a
   // post-write invalidation the report reads back before the row exists and stays
   // "pending" until a manual refresh. The ['decisions'] prefix covers
-  // useDecisionLog's ['decisions', targetId]. A report legitimately stays
-  // unresolved when no row was written (the .catch path), which is correct.
+  // useDecisionLog's ['decisions', targetId]; the queue's resolved set is the
+  // separate ['resolution-state'] projection and needs its own invalidation.
+  // A report legitimately stays unresolved when no row was written (the .catch
+  // path), which is correct.
   // Detached audit write. `moderator` is captured by the caller BEFORE the
   // authoritative request (so a logout/switch mid-request can't retarget it) and
   // reused across the action. Waits for the in-flight identity, attributes or
@@ -95,6 +97,7 @@ export function UserActions({
       api.logDecision({ ...params, moderatorPubkey })
       .then(() => {
         queryClient.invalidateQueries({ queryKey: ['decisions'] });
+        queryClient.invalidateQueries({ queryKey: ['resolution-state'] });
       })
       .catch((e) => {
         console.warn('[UserActions] audit log failed', e);

@@ -11,11 +11,17 @@ const UNAVAILABLE_COPY = "Couldn't reach the relay to look up this report. Try a
 interface DeepLinkFallbackProps {
   status: 'gone' | 'unavailable';
   target: { type: 'event' | 'pubkey'; value: string };
-  decisions: ModerationDecision[];
+  // undefined while the per-target read is still in flight or has failed. The
+  // pane must not say "no prior moderation actions" about a target it has not
+  // finished asking about: that read only starts once the target resolves gone,
+  // so an empty default would show that claim on every gone pane for a round
+  // trip, and for good if the read errors.
+  decisions: ModerationDecision[] | undefined;
+  decisionsFailed?: boolean;
   onRetry: () => void;
 }
 
-export function DeepLinkFallback({ status, target, decisions, onRetry }: DeepLinkFallbackProps) {
+export function DeepLinkFallback({ status, target, decisions, decisionsFailed, onRetry }: DeepLinkFallbackProps) {
   return (
     <Card className="h-full">
       <CardHeader>
@@ -39,7 +45,14 @@ export function DeepLinkFallback({ status, target, decisions, onRetry }: DeepLin
           </Button>
         )}
 
-        {status === 'gone' && decisions.length > 0 && (
+        {status === 'gone' && decisions === undefined && (
+          <p className="text-xs text-muted-foreground">
+            {decisionsFailed
+              ? 'Prior moderation actions could not be loaded.'
+              : 'Loading prior moderation actions…'}
+          </p>
+        )}
+        {status === 'gone' && decisions !== undefined && decisions.length > 0 && (
           <div className="space-y-1">
             <p className="text-xs font-medium">Prior moderation actions on this target:</p>
             <ul className="text-xs text-muted-foreground space-y-2">
@@ -57,7 +70,7 @@ export function DeepLinkFallback({ status, target, decisions, onRetry }: DeepLin
             </ul>
           </div>
         )}
-        {status === 'gone' && decisions.length === 0 && (
+        {status === 'gone' && decisions !== undefined && decisions.length === 0 && (
           <p className="text-xs text-muted-foreground">
             No prior moderation actions recorded for this target.
           </p>

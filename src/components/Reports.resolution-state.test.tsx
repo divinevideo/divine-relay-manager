@@ -120,34 +120,38 @@ function stubFetch(state: SourceState) {
       return jsonResponse({ success: true, events });
     }
 
-    if (url.includes('/api/resolution-labels')) {
+    // The worker now reduces every page of resolution labels to target keys,
+    // so the browser receives targets rather than kind-1985 events.
+    if (url.includes('/api/resolution-label-targets')) {
       if (slow.has('labels')) return never;
       if (state.labels === 'error') return jsonResponse({ success: false, error: 'relay timeout' }, 502);
       return jsonResponse({
         success: true,
-        events: state.labels === 'resolves'
-          ? [{
-              id: 'f'.repeat(64),
-              pubkey: 'b'.repeat(64),
-              created_at: 1751000100,
-              kind: 1985,
-              tags: [['L', 'moderation/resolution'], ['p', REPORTED_PUBKEY]],
-              content: '',
-              sig: 'e'.repeat(128),
-            }]
+        targets: state.labels === 'resolves'
+          ? [{ type: 'pubkey', value: REPORTED_PUBKEY }]
           : [],
+        truncated: false,
+        oldest_covered: null,
       });
     }
 
-    if (url.includes('/api/decisions')) {
+    // Likewise the decisions table arrives as a projection: the resolved target
+    // set, plus the auto-hide state actions that feed pendingReviewTargets.
+    if (url.includes('/api/resolution-state')) {
       if (slow.has('decisions')) return never;
       if (state.decisions === 'error') return jsonResponse({ success: false, error: 'cold start timeout' }, 500);
       return jsonResponse({
         success: true,
-        decisions: state.decisions === 'resolves'
-          ? [{ id: 1, target_type: 'pubkey', target_id: REPORTED_PUBKEY, action: 'dismissed', created_at: '2026-06-14 00:00:00' }]
+        resolved: state.decisions === 'resolves'
+          ? [{ target_type: 'pubkey', target_id: REPORTED_PUBKEY }]
           : [],
+        states: [],
       });
+    }
+
+    // Still reachable: the deep-link pane's per-target read, /api/decisions/<id>.
+    if (url.includes('/api/decisions')) {
+      return jsonResponse({ success: true, decisions: [] });
     }
 
     if (url.includes('/api/relay-rpc')) {
@@ -627,7 +631,7 @@ describe('the escape hatch survives the poll that follows a cold failure (#221)'
     const healthy = globalThis.fetch as unknown as typeof fetch;
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input instanceof Request ? input.url : input);
-      if (url.includes('/api/decisions')) {
+      if (url.includes('/api/resolution-state')) {
         attempts += 1;
         if (attempts <= failures) {
           return jsonResponse({ success: false, error: 'cold start timeout' }, 500);
@@ -692,7 +696,7 @@ describe('the override is scoped to the sources it was granted for (#221)', () =
     const healthy = globalThis.fetch as unknown as typeof fetch;
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input instanceof Request ? input.url : input);
-      if (url.includes('/api/decisions')) {
+      if (url.includes('/api/resolution-state')) {
         attempts += 1;
         if (!decisionsHealthy) return jsonResponse({ success: false, error: 'cold start timeout' }, 500);
       }
@@ -731,7 +735,7 @@ describe('the override is scoped to the sources it was granted for (#221)', () =
     // timer.
     breakDecisions();
     await act(async () => {
-      await queryClient.resetQueries({ queryKey: ['decisions'] });
+      await queryClient.resetQueries({ queryKey: ['resolution-state'] });
     });
 
     expect(await screen.findByText(/resolution state is unavailable/i)).toBeInTheDocument();
@@ -906,52 +910,24 @@ describe('warm failure keeps the stale filter and says so (#221)', () => {
 });
 
 describe('truncated resolution history is stated, not silent (#221)', () => {
-  // Truncates /api/decisions only. `labels` is left at whatever stubFetch's
-  // default state produces (untruncated), so this covers a single-source
-  // truncation. See stubTruncatedBoth below for the two-source case that
-  // exercises the Math.max-vs-Math.min direction.
-  function stubTruncated(oldestCovered: string | null, truncated: boolean) {
+  // Only ONE source can still report a bound. The decisions read is now a
+  // projection over the whole table with no cap, so it has nothing to truncate;
+  // the label pager keeps a page bound purely as a safety valve, and that is
+  // what this stub trips. `oldest_covered` is unix seconds here, matching the
+  // Nostr created_at the bound is derived from.
+  //
+  // The old two-source variant of this helper is gone with the second bound.
+  function stubTruncated(oldestCoveredUnixSeconds: number | null, truncated: boolean) {
     stubFetch({ labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty' });
     const healthy = globalThis.fetch as unknown as typeof fetch;
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input instanceof Request ? input.url : input);
-      if (url.includes('/api/decisions')) {
-        return jsonResponse({ success: true, decisions: [], truncated, oldest_covered: oldestCovered });
-      }
-      return healthy(input, init);
-    }));
-  }
-
-  // Truncates BOTH /api/resolution-labels and /api/decisions independently,
-  // at different depths. The reported window can only be as deep as the
-  // MORE restrictive (later) of the two -- Math.max. A regression to
-  // Math.min would report the LESS restrictive (earlier) bound instead,
-  // falsely telling a moderator history reaches further back than it does.
-  // labels' oldest_covered is unix seconds (matches Nostr created_at);
-  // decisions' is a SQLite CURRENT_TIMESTAMP string. See adminApi.ts's
-  // fetchResolutionLabels/getAllDecisions for the two shapes.
-  function stubTruncatedBoth(
-    labels: { oldestCoveredUnixSeconds: number; truncated: boolean },
-    decisions: { oldestCovered: string; truncated: boolean }
-  ) {
-    stubFetch({ labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty' });
-    const healthy = globalThis.fetch as unknown as typeof fetch;
-    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input instanceof Request ? input.url : input);
-      if (url.includes('/api/decisions')) {
+      if (url.includes('/api/resolution-label-targets')) {
         return jsonResponse({
           success: true,
-          decisions: [],
-          truncated: decisions.truncated,
-          oldest_covered: decisions.oldestCovered,
-        });
-      }
-      if (url.includes('/api/resolution-labels')) {
-        return jsonResponse({
-          success: true,
-          events: [],
-          truncated: labels.truncated,
-          oldest_covered: labels.oldestCoveredUnixSeconds,
+          targets: [],
+          truncated,
+          oldest_covered: oldestCoveredUnixSeconds,
         });
       }
       return healthy(input, init);
@@ -979,14 +955,12 @@ describe('truncated resolution history is stated, not silent (#221)', () => {
   }
 
   it('names the date resolution history reaches back to, in UTC', async () => {
-    stubTruncated('2026-06-14 00:00:00', true);
+    stubTruncated(Date.parse('2026-06-14T00:00:00Z') / 1000, true);
     renderReports();
 
     expect(await screen.findByText(/resolution history only reaches back to/i)).toBeInTheDocument();
-    // '2026-06-14 00:00:00' is UTC (matching parseOldestCovered's handling of
-    // SQLite CURRENT_TIMESTAMP). The banner now renders in UTC regardless of
-    // the runner's local timezone, so the expected date is stable rather
-    // than derived from the runner's own clock.
+    // The banner renders in UTC regardless of the runner's local timezone, so
+    // the expected date is stable rather than derived from the runner's clock.
     assertBannerShowsUtcDate(Date.parse('2026-06-14T00:00:00Z'));
   });
 
@@ -1000,7 +974,7 @@ describe('truncated resolution history is stated, not silent (#221)', () => {
   // on (the runner's own zone, offset exactly 0, still can't shift anything --
   // that's arithmetic, not a coverage gap).
   it('names the date resolution history reaches back to, in UTC, shortly after midnight', async () => {
-    stubTruncated('2026-06-14 00:30:00', true);
+    stubTruncated(Date.parse('2026-06-14T00:30:00Z') / 1000, true);
     renderReports();
 
     expect(await screen.findByText(/resolution history only reaches back to/i)).toBeInTheDocument();
@@ -1008,34 +982,31 @@ describe('truncated resolution history is stated, not silent (#221)', () => {
   });
 
   it('names the date resolution history reaches back to, in UTC, shortly before midnight', async () => {
-    stubTruncated('2026-06-14 23:30:00', true);
+    stubTruncated(Date.parse('2026-06-14T23:30:00Z') / 1000, true);
     renderReports();
 
     expect(await screen.findByText(/resolution history only reaches back to/i)).toBeInTheDocument();
     assertBannerShowsUtcDate(Date.parse('2026-06-14T23:30:00Z'));
   });
 
-  it('shows the more restrictive of two differently-truncated sources', async () => {
-    // labels can see back to 2026-01-01 -- if the derivation regressed to
-    // Math.min, the banner would show this earlier, falsely-reassuring
-    // date. decisions only reaches 2026-06-14, the real reported boundary,
-    // and Math.max must pick it.
-    const labelsOldestCovered = Date.UTC(2026, 0, 1) / 1000;
-    stubTruncatedBoth(
-      { oldestCoveredUnixSeconds: labelsOldestCovered, truncated: true },
-      { oldestCovered: '2026-06-14 00:00:00', truncated: true }
-    );
+  // REMOVED with the second bound: 'shows the more restrictive of two
+  // differently-truncated sources'. It pinned the Math.max-over-two-sources
+  // direction, and the decisions read no longer contributes a bound to compare
+  // against -- it is a projection over the whole table. The replacement below
+  // asserts the stronger property that made it obsolete.
+  it('reports no bound at all for the uncapped decisions read', async () => {
+    // stubFetch's decisions branch carries no truncated/oldest_covered, because
+    // the endpoint has none to carry. If a cap were reintroduced there, this is
+    // the test that should start failing.
+    stubFetch({ labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'resolves' });
     renderReports();
 
-    expect(await screen.findByText(/resolution history only reaches back to/i)).toBeInTheDocument();
-    assertBannerShowsUtcDate(Date.parse('2026-06-14T00:00:00Z'));
-
-    const banner = screen.getByText(/resolution history only reaches back to/i);
-    expect(banner.textContent ?? '').not.toContain('Jan');
+    await waitFor(() => expect(screen.getByText(/0 pending/i)).toBeInTheDocument());
+    expect(screen.queryByText(/resolution history only reaches back to/i)).not.toBeInTheDocument();
   });
 
   it('shows no truncation banner when the window covers everything', async () => {
-    stubTruncated('2026-06-14 00:00:00', false);
+    stubTruncated(Date.parse('2026-06-14T00:00:00Z') / 1000, false);
     renderReports();
 
     await screen.findByText(REPORTED_NPUB);
@@ -1047,10 +1018,7 @@ describe('truncated resolution history is stated, not silent (#221)', () => {
     // subtracted, which is what hide-resolved controls. Decisions is left
     // untruncated here so this measures the labels half on its own. No cold
     // error, so the switch is reachable directly.
-    stubTruncatedBoth(
-      { oldestCoveredUnixSeconds: Date.UTC(2026, 5, 14) / 1000, truncated: true },
-      { oldestCovered: '2026-06-14 00:00:00', truncated: false }
-    );
+    stubTruncated(Date.UTC(2026, 5, 14) / 1000, true);
     const user = userEvent.setup();
     renderReports();
 
@@ -1061,46 +1029,29 @@ describe('truncated resolution history is stated, not silent (#221)', () => {
     expect(screen.queryByText(/resolution history only reaches back to/i)).not.toBeInTheDocument();
   });
 
-  it('still shows the truncation banner for a capped DECISIONS read while hide-resolved is off', async () => {
-    // The mirror image, and the same reasoning as decisions' gatesAlways: the
-    // decisions read also feeds pendingReviewTargets, which is applied on every
-    // path, so its cap stays load-bearing after hide-resolved goes off.
-    stubTruncated('2026-06-14 00:00:00', true);
-    const user = userEvent.setup();
-    renderReports();
-
-    expect(await screen.findByText(/resolution history only reaches back to/i)).toBeInTheDocument();
-
-    await user.click(await screen.findByRole('switch', { name: /hide resolved/i }));
-
-    expect(screen.getByText(/resolution history only reaches back to/i)).toBeInTheDocument();
-  });
-
-  it('states the truncated window in the pending-review view, which is built entirely from that read', async () => {
-    // The worst case for hiding this banner. pendingReviewTargets comes 100%
-    // from the capped decisions read, and switching Pending review on
-    // force-clears hideResolved -- so gating the banner on the resolved filter
-    // switched it off in the one view with no other source to fall back on. An
-    // auto_hidden row that ages out of the cap drops its target from the CSAM
-    // queue with nothing on screen saying the window has a floor.
+  // REPLACES 'states the truncated window in the pending-review view, which is
+  // built entirely from that read'. That test existed because the CSAM queue is
+  // built 100% from the decisions read, so an auto_hidden row ageing out of the
+  // 1000-row cap dropped its target with nothing on screen saying the window had
+  // a floor. The read is uncapped now, so the floor is gone rather than merely
+  // disclosed -- but the view still has to be populated from the new `states`
+  // projection, and it still must not claim a bound.
+  it('builds the pending-review view from the uncapped read, with no window to state', async () => {
     stubFetch({ labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty' });
     const healthy = globalThis.fetch as unknown as typeof fetch;
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input instanceof Request ? input.url : input);
-      if (url.includes('/api/decisions')) {
+      if (url.includes('/api/resolution-state')) {
         return jsonResponse({
           success: true,
+          resolved: [],
           // An auto-hidden, not-yet-confirmed target: what puts a row in the
           // pending-review queue and makes its toggle appear at all.
-          decisions: [{
-            id: 1,
+          states: [{
             target_type: 'pubkey',
             target_id: REPORTED_PUBKEY,
             action: 'auto_hidden',
-            created_at: '2026-06-20 00:00:00',
           }],
-          truncated: true,
-          oldest_covered: '2026-06-14 00:00:00',
         });
       }
       return healthy(input, init);
@@ -1113,7 +1064,9 @@ describe('truncated resolution history is stated, not silent (#221)', () => {
 
     // Precondition: this really is the pending-review view, not the default one.
     expect(screen.getByRole('switch', { name: /hide resolved/i })).toBeDisabled();
-    expect(screen.getByText(/resolution history only reaches back to/i)).toBeInTheDocument();
+    // And the target actually landed in it, so this is not passing on an empty view.
+    expect(screen.getByText(REPORTED_NPUB)).toBeInTheDocument();
+    expect(screen.queryByText(/resolution history only reaches back to/i)).not.toBeInTheDocument();
   });
 
   it('shows no truncation banner against a worker that predates the field', async () => {
@@ -1142,7 +1095,7 @@ describe('one retry absorbs a single transient failure (#221)', () => {
     const healthy = globalThis.fetch as unknown as typeof fetch;
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input instanceof Request ? input.url : input);
-      if (url.includes('/api/decisions')) {
+      if (url.includes('/api/resolution-state')) {
         decisionsAttempts += 1;
         if (decisionsAttempts === 1) {
           return jsonResponse({ success: false, error: 'cold start timeout' }, 500);

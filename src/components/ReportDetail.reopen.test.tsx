@@ -388,15 +388,19 @@ describe('ReportDetail reopen reporting', () => {
     expect(toast.mock.calls[0][0].variant).toBe('destructive');
   });
 
-  // resolvedTargets is built from the resolution-label query, so a reopen that
-  // does not refresh it leaves the target hidden for a poll cycle even when the
-  // cleanup fully succeeded.
-  it('invalidates the resolution-label cache the queue filters on', async () => {
+  // resolvedTargets is built from the worker-side projections of the labels and
+  // decisions (#273), not from the raw reads, so a reopen that does not refresh
+  // THOSE keys leaves the target hidden for a poll cycle even when the cleanup
+  // fully succeeded -- a full minute on the label source. Asserting the exact
+  // keys is the point: an invalidation of a key the queue no longer reads
+  // passes a looser check and refreshes nothing.
+  it('invalidates the resolution caches the queue filters on', async () => {
     const { invalidate } = renderDetail();
     clickReopen();
 
     await waitFor(() => expect(toast).toHaveBeenCalled());
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['resolution-labels'] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['resolution-label-targets'] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['resolution-state'] });
   });
 
   // The two deleteDecisions calls are sequential and the first commits
@@ -413,9 +417,10 @@ describe('ReportDetail reopen reporting', () => {
     await waitFor(() => expect(toast).toHaveBeenCalled());
     expect(toast.mock.calls[0][0].variant).toBe('destructive');
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['decisions'] });
-    // The labels drive whether the target is hidden, so they go stale on a
-    // part-way failure exactly as the decisions do.
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['resolution-labels'] });
+    // The queue's projections drive whether the target is hidden, so they go
+    // stale on a part-way failure exactly as the decision log does.
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['resolution-state'] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['resolution-label-targets'] });
   });
 
   // Each target's type is known here, so the worker never has to run the label

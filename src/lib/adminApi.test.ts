@@ -3,6 +3,8 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
+  fetchResolutionState,
+  fetchResolutionLabelTargets,
   getWorkerInfo,
   getAccountStatus,
   publishEvent,
@@ -1930,6 +1932,68 @@ describe('adminApi', () => {
           body: JSON.stringify({ moderatorPubkey: 'b'.repeat(64) }),
         }),
       );
+    });
+  });
+
+  describe('uncapped resolution sources', () => {
+    function mockFetchOnce(body: unknown) {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => body });
+    }
+
+    it('carries resolved targets and auto-hide states through', async () => {
+      mockFetchOnce({
+        success: true,
+        resolved: [{ target_type: 'pubkey', target_id: 'a'.repeat(64) }],
+        states: [{ target_type: 'event', target_id: 'b'.repeat(64), action: 'auto_hidden' }],
+      });
+
+      const result = await fetchResolutionState(API_URL);
+
+      expect(result.resolved).toHaveLength(1);
+      expect(result.states).toEqual([
+        { target_type: 'event', target_id: 'b'.repeat(64), action: 'auto_hidden' },
+      ]);
+    });
+
+    it('throws when the resolution-state read reports failure', async () => {
+      // Returning empty here would be the #221 bug in client clothing: the queue
+      // subtracts these targets, so an empty-but-failed read un-hides handled
+      // work. It has to reach React Query as an error so the source registers as
+      // unavailable and the queue blocks.
+      mockFetchOnce({ success: false, error: 'Database not configured' });
+
+      await expect(fetchResolutionState(API_URL)).rejects.toThrow('Database not configured');
+    });
+
+    it('normalizes the label-target unix-seconds bound to epoch milliseconds', async () => {
+      mockFetchOnce({
+        success: true,
+        targets: [{ type: 'event', value: 'c'.repeat(64) }],
+        truncated: true,
+        oldest_covered: 1_760_000_000,
+      });
+
+      const result = await fetchResolutionLabelTargets(API_URL);
+
+      expect(result.targets).toEqual([{ type: 'event', value: 'c'.repeat(64) }]);
+      expect(result.truncated).toBe(true);
+      expect(result.oldestCovered).toBe(1_760_000_000_000);
+    });
+
+    it('throws when the label-target read reports failure', async () => {
+      mockFetchOnce({ success: false, error: 'Relay query timed out before EOSE' });
+
+      await expect(fetchResolutionLabelTargets(API_URL)).rejects.toThrow(
+        'Relay query timed out before EOSE'
+      );
+    });
+
+    it('reports an absent label bound as null rather than NaN', async () => {
+      mockFetchOnce({ success: true, targets: [], truncated: false, oldest_covered: null });
+
+      const result = await fetchResolutionLabelTargets(API_URL);
+
+      expect(result.oldestCovered).toBeNull();
     });
   });
 });

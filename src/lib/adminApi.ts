@@ -473,6 +473,70 @@ export async function fetchResolutionLabels(
   };
 }
 
+// The uncapped resolution sources. Both replace a capped read whose bound
+// surfaced in the UI as a date ("resolution history only reaches back to...")
+// that a moderator could do nothing about. Both THROW on a reported failure
+// rather than returning an empty set: resolvedTargets is subtractive, so a
+// quiet empty is indistinguishable from "nothing is resolved" and un-hides
+// every handled report (#221).
+
+export interface ResolutionStateResult {
+  resolved: Array<{ target_type: string; target_id: string }>;
+  states: Array<{ target_type: string; target_id: string; action: string }>;
+}
+
+export async function fetchResolutionState(
+  apiUrl: string,
+  opts?: { timeoutMs?: number }
+): Promise<ResolutionStateResult> {
+  const data = await apiRequest<{
+    success: boolean;
+    resolved?: ResolutionStateResult['resolved'];
+    states?: ResolutionStateResult['states'];
+    error?: string;
+  }>(apiUrl, '/api/resolution-state', 'GET', undefined, opts);
+
+  if (!data.success) {
+    console.error('[adminApi] fetchResolutionState failed:', data.error);
+    throw new ApiError(data.error || 'Failed to get resolution state');
+  }
+
+  return { resolved: data.resolved || [], states: data.states || [] };
+}
+
+export interface ResolutionLabelTargetsResult {
+  targets: Array<{ type: 'event' | 'pubkey'; value: string }>;
+  truncated: boolean;
+  oldestCovered: number | null;
+}
+
+export async function fetchResolutionLabelTargets(
+  apiUrl: string,
+  opts?: { timeoutMs?: number }
+): Promise<ResolutionLabelTargetsResult> {
+  const data = await apiRequest<{
+    success: boolean;
+    targets?: ResolutionLabelTargetsResult['targets'];
+    truncated?: boolean;
+    oldest_covered?: number | null;
+    error?: string;
+  }>(apiUrl, '/api/resolution-label-targets', 'GET', undefined, opts);
+
+  if (!data.success) {
+    console.error('[adminApi] fetchResolutionLabelTargets failed:', data.error);
+    throw new ApiError(data.error || 'Failed to get resolution label targets');
+  }
+
+  return {
+    targets: data.targets || [],
+    truncated: data.truncated === true,
+    // Unix seconds on the wire (it comes from a Nostr created_at), normalized
+    // here so callers never juggle units. The page bound is the only thing that
+    // can still set it, and today nothing does.
+    oldestCovered: parseOldestCovered(data.oldest_covered),
+  };
+}
+
 // Publish a NIP-32 label (kind 1985)
 export async function publishLabel(apiUrl: string, params: LabelParams): Promise<ApiResponse> {
   const tags: string[][] = [
