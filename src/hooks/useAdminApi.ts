@@ -76,6 +76,10 @@ export function useAdminApi() {
       adminApi.fetchReportsByTarget(apiUrl, target),
     fetchResolutionLabels: (opts?: { timeoutMs?: number }) =>
       adminApi.fetchResolutionLabels(apiUrl, opts),
+    fetchResolutionState: (opts?: { timeoutMs?: number }) =>
+      adminApi.fetchResolutionState(apiUrl, opts),
+    fetchResolutionLabelTargets: (opts?: { timeoutMs?: number }) =>
+      adminApi.fetchResolutionLabelTargets(apiUrl, opts),
 
     // Labels
     publishLabel: (params: adminApi.LabelParams) =>

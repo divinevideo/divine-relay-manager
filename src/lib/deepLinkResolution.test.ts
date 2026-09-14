@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { classifyTargetedFetch, decisionsForTarget, reportsMatchingTarget } from './deepLinkResolution';
+import { classifyTargetedFetch, reportsMatchingTarget } from './deepLinkResolution';
 
 describe('classifyTargetedFetch', () => {
   it('gone when the successful fetch returned nothing', () => {
@@ -7,26 +7,6 @@ describe('classifyTargetedFetch', () => {
   });
   it('found when the successful fetch returned at least one report', () => {
     expect(classifyTargetedFetch([{}])).toBe('found');
-  });
-});
-
-describe('decisionsForTarget', () => {
-  const decisions = [
-    { target_id: 'PK', action: 'banned' },
-    { target_id: 'PK', action: 'age_review_case_created' }, // written with the bare pubkey
-    { target_id: 'OTHER', action: 'deleted' },
-  ];
-  it('matches every decision recorded against the bare target id', () => {
-    expect(decisionsForTarget(decisions, 'PK').map((d) => d.action)).toEqual([
-      'banned',
-      'age_review_case_created',
-    ]);
-  });
-  it('does not match a different target id', () => {
-    expect(decisionsForTarget(decisions, 'PK').some((d) => d.target_id === 'OTHER')).toBe(false);
-  });
-  it('returns [] for undefined input', () => {
-    expect(decisionsForTarget(undefined, 'PK')).toEqual([]);
   });
 });
 

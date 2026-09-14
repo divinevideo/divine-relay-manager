@@ -46,9 +46,9 @@ import { ReportDetail } from "@/components/ReportDetail";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { ReportDetailErrorFallback } from "@/components/ReportDetailErrorFallback";
 import { DeepLinkFallback } from "@/components/DeepLinkFallback";
-import { classifyTargetedFetch, decisionsForTarget, reportsMatchingTarget, type DeepLinkStatus } from "@/lib/deepLinkResolution";
+import { classifyTargetedFetch, reportsMatchingTarget, type DeepLinkStatus } from "@/lib/deepLinkResolution";
 import { useAdminApi } from "@/hooks/useAdminApi";
-import { AUTO_HIDE_ACTION, AUTO_HIDE_ACTIONS, CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, getLatestAutoHideState, getReportCategory, getReportTargetIds } from "@/lib/constants";
+import { AUTO_HIDE_ACTION, CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, getLatestAutoHideState, getReportCategory, getReportTargetIds } from "@/lib/constants";
 import { isConsolidatedReportResolved } from "@/lib/reportResolution";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
@@ -395,7 +395,7 @@ function IndividualReportItem({
 export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const { listBannedPubkeys, listBannedEvents, getAllDecisions, fetchReports, fetchReportsByTarget, fetchResolutionLabels } = useAdminApi();
+  const { listBannedPubkeys, listBannedEvents, getDecisions, fetchReports, fetchReportsByTarget, fetchResolutionState, fetchResolutionLabelTargets } = useAdminApi();
   const { config, updateConfig } = useAppContext();
   const queryClient = useQueryClient();
   const isMobile = useIsMobile();
@@ -460,13 +460,20 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     fetchStatus: labelsFetchStatus,
     errorUpdateCount: labelsErrorUpdateCount,
   } = useQuery({
-    queryKey: ['resolution-labels', relayUrl],
-    queryFn: () => fetchResolutionLabels({ timeoutMs: RESOLUTION_READ_TIMEOUT_MS }),
-    refetchInterval: 15 * 1000,
+    queryKey: ['resolution-label-targets', relayUrl],
+    queryFn: () => fetchResolutionLabelTargets({ timeoutMs: RESOLUTION_READ_TIMEOUT_MS }),
+    // 60s, not the 15s the other sources use. This one walks every page of
+    // resolution labels on the relay (five today, and one more every couple of
+    // months), so a 15s poll opens five relay sockets per tab per interval to
+    // re-derive a set that barely moves. A moderator's OWN action still clears
+    // instantly: that writes a decision to D1, and the resolution-state source
+    // below is still on 15s. Only another moderator's label-only resolution can
+    // lag, by at most a minute.
+    refetchInterval: 60 * 1000,
     placeholderData: (previousData) => previousData,
     retry: 1,
   });
-  const resolutionLabels = labelsResult?.items;
+  const labelTargets = labelsResult?.targets;
 
   // Query banned pubkeys from relay (NIP-86 RPC)
   // Force fresh fetch (staleTime: 0) when deep linking to ensure accurate ban status
@@ -531,12 +538,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     fetchStatus: decisionsFetchStatus,
     errorUpdateCount: decisionsErrorUpdateCount,
   } = useQuery({
-    queryKey: ['decisions'],
+    queryKey: ['resolution-state'],
     queryFn: async () => {
       try {
-        return await getAllDecisions({ timeoutMs: RESOLUTION_READ_TIMEOUT_MS });
+        return await fetchResolutionState({ timeoutMs: RESOLUTION_READ_TIMEOUT_MS });
       } catch (error) {
-        console.warn('[Reports] Decisions query failed:', error);
+        console.warn('[Reports] Resolution state query failed:', error);
         throw error;
       }
     },
@@ -545,16 +552,40 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     placeholderData: (previousData) => previousData,
     retry: 1,
   });
-  const allDecisions = decisionsResult?.items;
+  const resolvedDecisionTargets = decisionsResult?.resolved;
+  const autoHideStates = decisionsResult?.states;
+
+  // The deep-link target, resolved here rather than beside the pane that renders
+  // it: the per-target decisions read below is a hook, and the pane sits after
+  // this component's early returns.
+  const deepLinkTarget = searchParams.get('event')
+    ? { type: 'event' as const, value: searchParams.get('event')!.toLowerCase() }
+    : { type: 'pubkey' as const, value: (searchParams.get('pubkey') ?? '').toLowerCase() };
+
+  // The fallback pane used to filter the bulk decisions list, which was capped at
+  // the newest 1000 rows -- so "No prior moderation actions recorded for this
+  // target" could be a statement about the cap rather than about the target.
+  // GET /api/decisions/<id> has no cap, so the claim is now answerable.
+  const { data: deepLinkDecisions } = useQuery({
+    queryKey: ['decisions', deepLinkTarget.value],
+    queryFn: () => getDecisions(deepLinkTarget.value),
+    enabled: hasDeepLinkParams
+      && !!deepLinkTarget.value
+      && (deepLinkStatus === 'gone' || deepLinkStatus === 'unavailable'),
+    staleTime: 30 * 1000,
+  });
 
   // The oldest point each capped source can still speak to, kept apart because
   // the two are load-bearing in different views. A target resolved before a
   // source's bound is invisible to whatever that source feeds, and would sit in
   // the queue forever with nothing explaining why.
+  // Only the label source can still report a bound, and only if the relay pager
+  // hits its page cap -- a safety valve, not a working limit. The decisions read
+  // is now a projection over the whole table with no cap, so it has no bound to
+  // report and no entry here.
   const truncationBounds = useMemo(() => ({
     labels: labelsResult?.truncated ? labelsResult.oldestCovered : null,
-    decisions: decisionsResult?.truncated ? decisionsResult.oldestCovered : null,
-  }), [labelsResult, decisionsResult]);
+  }), [labelsResult]);
 
   // Track relative time since last data update for freshness indicator
   const [lastUpdatedText, setLastUpdatedText] = useState<string>('');
@@ -582,13 +613,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const resolvedTargets = useMemo(() => {
     const resolved = new Set<string>();
 
-    // Add from resolution labels
-    if (resolutionLabels) {
-      for (const label of resolutionLabels) {
-        const eTag = label.tags.find(t => t[0] === 'e');
-        if (eTag) { resolved.add(`event:${eTag[1]}`); }
-        const pTag = label.tags.find(t => t[0] === 'p');
-        if (pTag) { resolved.add(`pubkey:${pTag[1]}`); }
+    // Add from resolution labels. The worker now walks every page of labels and
+    // reduces them to target keys, so this no longer re-derives tags in the
+    // browser over a single capped page.
+    if (labelTargets) {
+      for (const target of labelTargets) {
+        resolved.add(`${target.type}:${target.value}`);
       }
     }
 
@@ -606,21 +636,20 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       }
     }
 
-    // Add from moderation decisions (ban_user, delete_event, etc.)
-    const autoHideActions: readonly string[] = AUTO_HIDE_ACTIONS;
-    if (allDecisions && allDecisions.length > 0) {
-      for (const decision of allDecisions) {
-        if (autoHideActions.includes(decision.action)) continue;
-        if (decision.target_type === 'pubkey') {
-          resolved.add(`pubkey:${decision.target_id}`);
-        } else if (decision.target_type === 'event') {
-          resolved.add(`event:${decision.target_id}`);
+    // Add from moderation decisions (ban_user, delete_event, etc.). The worker
+    // already excluded auto-hide actions and collapsed the table to distinct
+    // targets, so what arrives here is the resolved set itself rather than a
+    // capped window of decision rows to filter down.
+    if (resolvedDecisionTargets) {
+      for (const target of resolvedDecisionTargets) {
+        if (target.target_type === 'pubkey' || target.target_type === 'event') {
+          resolved.add(`${target.target_type}:${target.target_id}`);
         }
       }
     }
 
     return resolved;
-  }, [resolutionLabels, bannedPubkeys, bannedEvents, allDecisions]);
+  }, [labelTargets, bannedPubkeys, bannedEvents, resolvedDecisionTargets]);
 
   // Set of relay-banned pubkeys, used to cross-resolve an event-scoped report
   // whose author has been banned. banpubkey purges the account's events without
@@ -646,11 +675,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // Build set of targets pending review (auto-hidden but not yet confirmed/restored)
   const pendingReviewTargets = useMemo(() => {
     const pending = new Set<string>();
-    if (!allDecisions) return pending;
+    if (!autoHideStates) return pending;
 
-    // Group decisions by target to check status
+    // Group by target to check status. The worker sends only the auto-hide STATE
+    // actions, already newest-first, which is exactly what
+    // getLatestAutoHideState reads -- that function stays the sole authority on
+    // what the state machine means, and is still applied here rather than in SQL.
     const targetDecisions = new Map<string, string[]>();
-    for (const decision of allDecisions) {
+    for (const decision of autoHideStates) {
       const key = `${decision.target_type}:${decision.target_id}`;
       if (!targetDecisions.has(key)) {
         targetDecisions.set(key, []);
@@ -670,7 +702,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
 
     return pending;
-  }, [allDecisions]);
+  }, [autoHideStates]);
 
   // The four sources that build resolvedTargets, described once so the gate,
   // the banners, and the blocked pane read from one list and cannot drift
@@ -699,7 +731,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     {
       key: 'labels',
       label: 'Resolution labels',
-      hasData: !!resolutionLabels,
+      hasData: !!labelTargets,
       error: labelsError,
       updatedAt: labelsUpdatedAt,
       isPending: labelsPending,
@@ -737,7 +769,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       // did for loading and failed to do for errors.
       key: 'decisions',
       label: 'Moderation decisions',
-      hasData: !!allDecisions,
+      hasData: !!resolvedDecisionTargets,
       error: decisionsError,
       updatedAt: decisionsUpdatedAt,
       isPending: decisionsPending,
@@ -746,10 +778,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       gatesAlways: true,
     },
   ], [
-    resolutionLabels, labelsError, labelsUpdatedAt, labelsPending, labelsFetchStatus, labelsErrorUpdateCount,
+    labelTargets, labelsError, labelsUpdatedAt, labelsPending, labelsFetchStatus, labelsErrorUpdateCount,
     bannedPubkeys, bannedPubkeysError, bannedPubkeysUpdatedAt, bannedPubkeysPending, bannedPubkeysFetchStatus, bannedPubkeysErrorUpdateCount,
     bannedEvents, bannedEventsError, bannedEventsUpdatedAt, bannedEventsPending, bannedEventsFetchStatus, bannedEventsErrorUpdateCount,
-    allDecisions, decisionsError, decisionsUpdatedAt, decisionsPending, decisionsFetchStatus, decisionsErrorUpdateCount,
+    resolvedDecisionTargets, decisionsError, decisionsUpdatedAt, decisionsPending, decisionsFetchStatus, decisionsErrorUpdateCount,
   ]);
 
   // Models only when the LIST FILTER (the "hide resolved" toggle applied to
@@ -825,23 +857,18 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // Errored but still holding previous data: filter with the stale set, say so.
   const staleSources = gatingSources.filter(s => s.hasData && s.error);
 
-  // How far back the banner can honestly claim history reaches, given which
-  // capped sources are load-bearing in the current view. Gated per source for
-  // the same reason gatesAlways exists: a truncated LABELS read only matters
-  // where resolvedTargets is being subtracted, but a truncated DECISIONS read
-  // matters everywhere, because decisions also feeds pendingReviewTargets. The
-  // pending-review queue is built ENTIRELY from decisions, and switching it on
-  // force-clears hideResolved -- so gating the whole banner on the resolved
-  // filter switched it off in the one view most exposed to the cap, exactly
-  // where an auto_hidden row aging out silently drops a target from the CSAM
-  // queue.
+  // How far back the banner can honestly claim history reaches. Only the label
+  // source can still report a bound, and only if the relay pager hits its page
+  // cap -- a safety valve that nothing reaches today, not a working limit. The
+  // decisions source used to carry a bound too, and it was the one that mattered
+  // everywhere, because it also feeds pendingReviewTargets; that read is now
+  // uncapped, so it has no bound to contribute.
   //
-  // Math.max, not Math.min: the window can only be as deep as the MORE
-  // restrictive (later) of the two bounds. Reporting the earlier one would tell
-  // a moderator history reaches further back than it does.
+  // Still gated on resolvedFilterActive: a bounded LABELS read only matters
+  // where resolvedTargets is actually being subtracted. It contributes nothing
+  // to pendingReviewTargets, which is built entirely from the decisions source.
   const activeTruncationBounds = [
     resolvedFilterActive ? truncationBounds.labels : null,
-    truncationBounds.decisions,
   ].filter((v): v is number => typeof v === 'number');
   const truncatedOldestCovered = activeTruncationBounds.length > 0
     ? Math.max(...activeTruncationBounds)
@@ -1188,12 +1215,17 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
   // Shared by both the offline pane and the cold-error pane below so the two
   // retry paths cannot drift apart.
+  //
+  // These keys are hand-written and must match the queryKey of every source in
+  // resolutionSources. Nothing type-checks that: a renamed key leaves Retry
+  // invalidating a query that no longer exists, so the button appears to do
+  // nothing and the blocked pane never clears.
   const retryResolutionSources = () => {
     refetch();
-    queryClient.invalidateQueries({ queryKey: ['resolution-labels'] });
+    queryClient.invalidateQueries({ queryKey: ['resolution-label-targets'] });
     queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
     queryClient.invalidateQueries({ queryKey: ['banned-events'] });
-    queryClient.invalidateQueries({ queryKey: ['decisions'] });
+    queryClient.invalidateQueries({ queryKey: ['resolution-state'] });
   };
 
   // Purely offline-blocked (a gating source is paused, not merely slow) and
@@ -1275,22 +1307,21 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // the two views cannot drift. Reports render attacker-authored event data:
   // a crashing report degrades to the inline fallback (with the target's
   // identifiers and retry/dismiss) while the reports list stays usable (#158).
-  // Lowercase to match the worker's reports filter (buildReportsFilter also
-  // lowercases), so decisionsForTarget below keys off the same normalized hex
-  // an uppercase-hex deep link would otherwise miss lowercase-keyed decisions.
-  const deepLinkTarget = searchParams.get('event')
-    ? { type: 'event' as const, value: searchParams.get('event')!.toLowerCase() }
-    : { type: 'pubkey' as const, value: (searchParams.get('pubkey') ?? '').toLowerCase() };
+  // deepLinkTarget is lowercased where it is built, matching the worker's
+  // reports filter (buildReportsFilter lowercases too), so the per-target
+  // decisions read keys off the same normalized hex an uppercase-hex deep link
+  // would otherwise miss.
   const showDeepLinkFallback =
     !selectedReport && hasDeepLinkParams && (deepLinkStatus === 'gone' || deepLinkStatus === 'unavailable');
   const showDeepLinkResolving =
     !selectedReport && deepLinkStatus === 'resolving' && hasDeepLinkParams;
 
+
   const reportDetailPane = showDeepLinkFallback ? (
     <DeepLinkFallback
       status={deepLinkStatus === 'gone' ? 'gone' : 'unavailable'}
       target={deepLinkTarget}
-      decisions={decisionsForTarget(allDecisions, deepLinkTarget.value)}
+      decisions={deepLinkDecisions ?? []}
       onRetry={() => {
         attemptedTargetRef.current = null;
         setDeepLinkStatus('resolving');
