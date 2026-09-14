@@ -32,6 +32,7 @@ afterAll(async () => { await mf?.dispose(); });
 async function reset() {
   await ensureSchema(DB);
   await DB.prepare('DELETE FROM age_review_cases').run();
+  await DB.prepare('DELETE FROM enforcement_legs').run();
   await DB.prepare(
     "INSERT OR REPLACE INTO age_review_config (key, value) VALUES ('auto_delete_on_deny', 'false')",
   ).run();
@@ -44,12 +45,12 @@ async function insertCase(id: string, state: string) {
   ).bind(id, `pk_${id}`, state, new Date(Date.now() + 9 * 864e5).toISOString()).run();
 }
 
-function patch(id: string, patchBody: Record<string, unknown>) {
+function patch(id: string, patchBody: Record<string, unknown>, envOverrides: Record<string, unknown> = {}) {
   const req = new Request(`https://api.test/api/age-review/cases/${id}`, {
     method: 'PATCH',
     body: JSON.stringify(patchBody),
   });
-  return handleUpdateAgeReviewCase(req, id, env, cors);
+  return handleUpdateAgeReviewCase(req, id, { ...env, ...envOverrides }, cors);
 }
 
 async function rowOf(id: string) {
@@ -158,6 +159,66 @@ describe('age-review handler on real D1', () => {
     // ...but the DB state transition still applied (best-effort, retryable).
     expect(body.case.state).toBe('restricted_pending_user_response');
     expect((await rowOf('c5')).state).toBe('restricted_pending_user_response');
+  });
+
+  // Issue #123: the leg outcome must outlive the response. Previously the only
+  // record of a failed leg was the 207 body and a toast, so recovery depended on
+  // a moderator noticing it.
+  it('records a failed Keycast leg durably, with the intent to converge on', async () => {
+    await insertCase('c6', 'under_moderator_review');
+    await patch('c6', { state: 'restricted_pending_user_response' });
+
+    const row = await DB.prepare(
+      "SELECT pubkey, intent, state, attempts FROM enforcement_legs WHERE pubkey = 'pk_c6' AND leg = 'keycast_status'",
+    ).first<{ pubkey: string; intent: string; state: string; attempts: number }>();
+    expect(row).toBeTruthy();
+    expect(row!.pubkey).toBe('pk_c6');
+    expect(row!.intent).toBe('suspended');
+    expect(row!.state).toBe('failed');
+    expect(row!.attempts).toBe(0);
+  });
+
+  // Both other tests here run with Keycast unconfigured, so the leg is always
+  // `failed` and the resolve branch never executes through the handler. Deleting
+  // that call left the whole suite green -- the guard the PR calls load-bearing
+  // died to no mutation. This drives the handler with Keycast answering 200.
+  it('clears the record when the leg actually applies', async () => {
+    const pubkey = 'd'.repeat(64);
+    await DB.prepare(
+      `INSERT INTO age_review_cases (id, pubkey, state, deadline_at, clock_paused, version)
+       VALUES ('c9', ?, 'under_moderator_review', ?, 0, 0)`,
+    ).bind(pubkey, new Date(Date.now() + 9 * 864e5).toISOString()).run();
+    await DB.prepare(`INSERT INTO enforcement_legs
+      (pubkey, leg, intent, state, attempts, created_at, updated_at)
+      VALUES (?, 'keycast_status', 'suspended', 'failed', 3, ?, ?)`)
+      .bind(pubkey, new Date().toISOString(), new Date().toISOString()).run();
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+      Promise.resolve(new Response('{}', { status: 200 })));
+
+    await patch('c9', { state: 'restricted_pending_user_response' }, {
+      KEYCAST_URL: 'https://login.test.divine.video',
+      KEYCAST_SERVICE_TOKEN: 'test-token',
+    });
+
+    const row = await DB.prepare('SELECT state FROM enforcement_legs WHERE pubkey = ?')
+      .bind(pubkey).first<{ state: string }>();
+    expect(row!.state).toBe('resolved');
+    vi.restoreAllMocks();
+  });
+
+  // The favourable direction has to clear the record too, or a cleared account
+  // keeps a pending suspension queued against it.
+  it('a later action in the other direction supersedes the recorded intent', async () => {
+    await insertCase('c7', 'under_moderator_review');
+    await patch('c7', { state: 'restricted_pending_user_response' });
+    await patch('c7', { state: 'cleared' });
+
+    const row = await DB.prepare(
+      "SELECT intent, state FROM enforcement_legs WHERE pubkey = 'pk_c7' AND leg = 'keycast_status'",
+    ).first<{ intent: string; state: string }>();
+    expect(row!.intent).toBe('active');
+    expect(row!.state).toBe('failed'); // still unconfigured here, so still pending -- but pointing at 'active'
   });
 });
 

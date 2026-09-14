@@ -36,6 +36,14 @@ import {
   UUID_RE,
 } from './protected-minors';
 import { digestProvisioningFingerprint, findProvisioningTombstone, resolveTombstoneKey } from './retention';
+import {
+  MAX_ENFORCEMENT_ATTEMPTS,
+  markKeycastLegAttempt,
+  pendingKeycastLegs,
+  recordFailedKeycastLeg,
+  resolveKeycastLeg,
+  type EnforcementIntent,
+} from './enforcement-legs';
 
 /**
  * The identity a case captured at creation, as stored on `age_review_cases`.
@@ -565,6 +573,29 @@ export async function handleUpdateAgeReviewCase(
       : undefined);
     keycast = keycastLeg.status;
     keycastError = keycastLeg.error;
+
+    // Persist the leg's outcome so recovery does not depend on a moderator
+    // noticing the 207 (issue #123). Best-effort: the enforcement result the
+    // caller sees is already decided, and a bookkeeping failure must not change
+    // it or fail the request.
+    const keycastIntent: EnforcementIntent | undefined =
+      enteredRestrictedState ? 'suspended'
+      : clearedCase ? 'active'
+      : deniedCase ? 'banned'
+      : undefined;
+    if (env.DB && keycastIntent) {
+      try {
+        if (keycast === 'failed') {
+          await recordFailedKeycastLeg(env.DB, existing.pubkey, keycastIntent, keycastError, caseId);
+        } else {
+          // ok, or a leg with nothing to converge on. Either way any earlier
+          // failure for this account is superseded by this action's outcome.
+          await resolveKeycastLeg(env.DB, existing.pubkey);
+        }
+      } catch (error) {
+        console.error('[age-review] Failed to record the Keycast enforcement leg:', error);
+      }
+    }
 
     // Clear verified_minor on the DENY/revoke transition ONLY (issue #147:
     // "Revoking an approved minor... clears verified_minor"). Compose, don't
@@ -2100,6 +2131,98 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
         ).bind(row.id).run();
       }
     }
+  }
+
+  // Deliberately last in the cron. This block makes up to 100 sequential Keycast
+  // calls with no client-side timeout, so running it earlier would put the
+  // deadline transitions and their alerts behind an unbounded wait on a slow or
+  // hanging Keycast -- enforcement bookkeeping delaying the case work that is
+  // this cron's actual job.
+  // Re-drive Keycast status legs that failed after a case action (issue #123).
+  // Only this leg: it is the only one whose idempotency is verified against the
+  // service's source. The relay legs and bulk actions stay out -- `banpubkey`
+  // and `delete-all` are one-way, and re-driving an unverified call risks a
+  // second enforcement rather than a repair.
+  let staleLegs: Awaited<ReturnType<typeof pendingKeycastLegs>> = [];
+  try {
+    staleLegs = await pendingKeycastLegs(env.DB);
+  } catch (error) {
+    console.error('[age-review] Failed to load enforcement legs awaiting re-drive:', error);
+  }
+  const abandoned: string[] = [];
+  for (const leg of staleLegs) {
+    let result: { success: boolean; error?: string } | undefined;
+    try {
+      result = leg.intent === 'suspended' ? await suspendUser(leg.pubkey, 'age_review', env)
+        : leg.intent === 'banned' ? await banUser(leg.pubkey, 'age_review_denied', env)
+        : await unsuspendUser(leg.pubkey, env);
+    } catch (error) {
+      result = { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+    // A call that was never made is not an attempt. `not configured` means an
+    // unresolved binding or secret, so counting it would march the whole backlog
+    // to `abandoned` during a secret rotation -- a state no code path exits.
+    if (result.error === 'not configured') {
+      console.error('[age-review] Keycast re-drive skipped: not configured');
+      continue;
+    }
+    // A 404 means the account is not Keycast-managed, so there is no state to
+    // converge on and no retry that could ever succeed. Settle it (#269).
+    // TODO(#123): read `result.notFound` directly once #270 lands the field on
+    // KeycastResult. Structural read until then so this does not stack on it.
+    const notApplicable = (result as { notFound?: boolean }).notFound === true;
+    // Outside the try: a D1 failure here must not be counted as a Keycast
+    // failure, and must not burn the budget of a call that actually succeeded.
+    try {
+      if (result.success || notApplicable) {
+        // Intent-guarded: a moderator may have superseded this intent while the
+        // call was in flight, and a stale success is not convergence.
+        await resolveKeycastLeg(env.DB, leg.pubkey, leg.intent);
+      } else if (await markKeycastLegAttempt(env.DB, leg.pubkey, result.error, leg.intent)) {
+        abandoned.push(leg.intent);
+      }
+    } catch (error) {
+      console.error('[age-review] Failed to record an enforcement leg re-drive:', error);
+    }
+  }
+
+  if (abandoned.length > 0) {
+    console.error(`[age-review] ${abandoned.length} Keycast enforcement leg(s) abandoned after ${MAX_ENFORCEMENT_ATTEMPTS} attempts`);
+    if (env.SLACK_WEBHOOK_URL) {
+      // Pubkey-free by design: the alert says how many and in which direction,
+      // and the row carries the rest for whoever picks it up.
+      await sendEnforcementAbandonedAlert(env.SLACK_WEBHOOK_URL, abandoned);
+    }
+  }
+}
+
+/**
+ * One alert per cron tick for legs that exhausted their re-drive budget. Carries
+ * counts and directions only: a pubkey in a Slack channel is identity-linked
+ * data, and the DB row holds what an operator needs to act.
+ */
+async function sendEnforcementAbandonedAlert(webhookUrl: string, intents: string[]): Promise<void> {
+  const byIntent = intents.reduce<Record<string, number>>((acc, intent) => {
+    acc[intent] = (acc[intent] ?? 0) + 1;
+    return acc;
+  }, {});
+  const detail = Object.entries(byIntent).map(([intent, count]) => `${count} x ${intent}`).join(', ');
+  const text = `:rotating_light: ${intents.length} Keycast enforcement leg(s) gave up after ${MAX_ENFORCEMENT_ATTEMPTS} attempts (${detail}). `
+    + 'Their Divine sign-in did not follow the moderation action. See the enforcement_legs table.';
+  try {
+    const res = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
+    // This is the only notification a permanently-stuck leg ever produces, and
+    // it is never repeated. A webhook that quietly 403s would lose it outright,
+    // so a non-OK response is logged like a throw.
+    if (!res.ok) {
+      console.error(`[age-review] Abandoned-enforcement alert rejected: ${res.status}`);
+    }
+  } catch (error) {
+    console.error('[age-review] Failed to send the abandoned-enforcement alert:', error);
   }
 }
 

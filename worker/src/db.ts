@@ -285,6 +285,27 @@ export async function ensureSchema(db: D1Database): Promise<void> {
     )
   `).run();
 
+  // Enforcement legs that failed after a case action (issue #123). One row per
+  // pubkey+leg: a later action supersedes an earlier intent, so a re-drive
+  // always converges on the current desired state rather than resurrecting a
+  // superseded one.
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS enforcement_legs (
+      pubkey TEXT NOT NULL,
+      leg TEXT NOT NULL CHECK (leg IN ('keycast_status')),
+      intent TEXT NOT NULL CHECK (intent IN ('suspended', 'banned', 'active')),
+      state TEXT NOT NULL CHECK (state IN ('failed', 'resolved', 'abandoned')),
+      attempts INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      case_id TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (pubkey, leg)
+    )
+  `).run();
+  await db.prepare(`CREATE INDEX IF NOT EXISTS idx_enforcement_legs_pending
+    ON enforcement_legs(leg, state, updated_at)`).run();
+
   await db.prepare(`CREATE UNIQUE INDEX IF NOT EXISTS idx_protected_minor_active_subject_binding
     ON protected_minor_account_bindings(subject_id) WHERE unbound_at IS NULL`).run();
   await db.prepare(`CREATE UNIQUE INDEX IF NOT EXISTS idx_protected_minor_active_pubkey_binding

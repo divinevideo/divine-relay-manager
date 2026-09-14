@@ -139,7 +139,11 @@ describe('protected-record retention on real D1', () => {
     const after = await createSubjectWithBinding(DB, 'case-after', PUBKEY_B, OLD_30);
     await clearSubject(DB, PUBKEY_A, undefined, 'false_positive');
     await clearSubject(DB, PUBKEY_B, undefined, 'false_positive');
-    for (const [subjectId, days, seconds] of [[before.subjectId, '-30 days', '+1 second'], [after.subjectId, '-30 days', '-1 second']] as const) {
+    // Margin is an hour, not a second: the assertion is about which SIDE of the
+    // 30-day line a record falls on, and a sub-second margin turns that into a
+    // race against how long the disposal run itself takes -- it goes red on a
+    // slow runner, or whenever a stage is added ahead of the deletes.
+    for (const [subjectId, days, seconds] of [[before.subjectId, '-30 days', '+1 hour'], [after.subjectId, '-30 days', '-1 hour']] as const) {
       await DB.prepare(`UPDATE protected_minor_subjects SET cleared_at = datetime('now', ?, ?) WHERE subject_id = ?`)
         .bind(days, seconds, subjectId).run();
       await DB.prepare(`UPDATE protected_minor_account_bindings SET unbound_at = datetime('now', ?, ?) WHERE subject_id = ?`)
@@ -230,5 +234,64 @@ describe('protected-record retention on real D1', () => {
     expect(await DB.prepare('SELECT 1 FROM protected_minor_projection_jobs WHERE subject_id = ?').bind(subjectId).first()).not.toBeNull();
     expect(await DB.prepare('SELECT 1 FROM protected_minor_account_bindings WHERE subject_id = ?').bind(subjectId).first()).not.toBeNull();
     expect(await DB.prepare("SELECT 1 FROM age_review_cases WHERE id = 'case-independent'").first()).toBeNull();
+  });
+});
+
+describe('enforcement leg disposal', () => {
+  beforeEach(async () => {
+    await DB.prepare('DELETE FROM enforcement_legs').run();
+  });
+
+  async function insertLeg(pubkey: string, state: string, updatedAt: string) {
+    await DB.prepare(`INSERT INTO enforcement_legs
+      (pubkey, leg, intent, state, attempts, created_at, updated_at)
+      VALUES (?, 'keycast_status', 'suspended', ?, 0, ?, ?)`)
+      .bind(pubkey, state, updatedAt, updatedAt).run();
+  }
+
+  it('deletes a converged leg past its retention period', async () => {
+    await insertLeg(PUBKEY_A, 'resolved', OLD_30);
+    const result = await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY });
+    expect(result.enforcementLegsDeleted).toBe(1);
+    expect(await DB.prepare('SELECT 1 FROM enforcement_legs WHERE pubkey = ?').bind(PUBKEY_A).first()).toBeNull();
+  });
+
+  it('keeps a recently converged leg', async () => {
+    await insertLeg(PUBKEY_A, 'resolved', RECENT);
+    await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY });
+    expect(await DB.prepare('SELECT 1 FROM enforcement_legs WHERE pubkey = ?').bind(PUBKEY_A).first()).not.toBeNull();
+  });
+
+  // An unconverged leg is evidence of an enforcement gap nobody has closed.
+  // Age is not a reason to delete it -- that would dispose of the record of an
+  // account still enforced in one place and not the other.
+  // Every other disposal stage honours a legal hold. A leg is disposed on behalf
+  // of the case that produced it, so a hold on that case must stop it -- and a
+  // blanket hold (record_key NULL) must stop every leg, including the ones with
+  // no case id.
+  it('honours a legal hold on the originating case', async () => {
+    await DB.prepare(`INSERT INTO enforcement_legs
+      (pubkey, leg, intent, state, attempts, case_id, created_at, updated_at)
+      VALUES (?, 'keycast_status', 'suspended', 'resolved', 0, 'case-held', ?, ?)`)
+      .bind(PUBKEY_A, OLD_30, OLD_30).run();
+    await DB.prepare(`INSERT INTO retention_legal_holds
+      (id, record_type, record_key, disposal_stage, authorized_role, starts_at, review_at)
+      VALUES ('hold-leg', 'age_review_case', 'case-held', 'deletion', 'privacy/legal', ?, ?)`)
+      .bind(OLD_30, RECENT).run();
+
+    const held = await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY });
+    expect(held.enforcementLegsDeleted).toBe(0);
+
+    await DB.prepare("UPDATE retention_legal_holds SET released_at = datetime('now')").run();
+    const resumed = await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY });
+    expect(resumed.enforcementLegsDeleted).toBe(1);
+  });
+
+  it('keeps unresolved legs regardless of age', async () => {
+    await insertLeg(PUBKEY_A, 'failed', OLD_30);
+    await insertLeg(PUBKEY_B, 'abandoned', OLD_30);
+    const result = await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY });
+    expect(result.enforcementLegsDeleted).toBe(0);
+    expect(await DB.prepare('SELECT COUNT(*) AS c FROM enforcement_legs').first<{ c: number }>()).toMatchObject({ c: 2 });
   });
 });

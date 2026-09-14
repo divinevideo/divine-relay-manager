@@ -6,6 +6,10 @@ export const RETENTION_DAYS = {
   validPriorClassification: 365,
   provisioningDetail: 30,
   projectionComplete: 30,
+  // A converged enforcement leg is a completed job record. Unresolved legs
+  // (failed / abandoned) are deliberately NOT disposed: they are evidence of an
+  // enforcement gap nobody has closed yet.
+  enforcementLegResolved: 30,
   ageReviewDetail: 30,
   ageReviewDecision: 365,
   pendingOperationalDeadline: 1,
