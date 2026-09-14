@@ -237,6 +237,85 @@ describe('keycast-client', () => {
     });
   });
 
+  // A pubkey with no keycast record is a self-custody account: there is no
+  // Divine login to suspend, which is not the same as a failed suspend. The
+  // status legs must report that distinctly so age-review enforcement does not
+  // read "nothing to do here" as "enforcement broke" (issue #191).
+  describe('status legs on an account keycast does not know', () => {
+    const NOT_FOUND_BODY = JSON.stringify({ error: 'user not found' });
+
+    function mockNotFound(body = NOT_FOUND_BODY) {
+      fetchMock.mockResolvedValue({ ok: false, status: 404, text: () => Promise.resolve(body) });
+    }
+
+    it('flags suspendUser not-found rather than a bare failure', async () => {
+      mockNotFound();
+      const result = await suspendUser(VALID_PUBKEY, 'age_review', makeEnv());
+      expect(result.success).toBe(false);
+      expect(result.notFound).toBe(true);
+      expect(result.status).toBe(404);
+    });
+
+    it('flags banUser not-found', async () => {
+      mockNotFound();
+      const result = await banUser(VALID_PUBKEY, 'age_review_denied', makeEnv());
+      expect(result.notFound).toBe(true);
+    });
+
+    it('flags unsuspendUser not-found', async () => {
+      mockNotFound();
+      const result = await unsuspendUser(VALID_PUBKEY, makeEnv());
+      expect(result.notFound).toBe(true);
+    });
+
+    it('accepts keycast\'s capitalised and bare-text not-found bodies', async () => {
+      for (const body of [JSON.stringify({ error: 'User not found' }), 'user not found']) {
+        mockNotFound(body);
+        const result = await suspendUser(VALID_PUBKEY, 'age_review', makeEnv());
+        expect(result.notFound, `body: ${body}`).toBe(true);
+      }
+    });
+
+    // The discriminator that keeps this from swallowing real breakage: a 404
+    // from a bad route or a misconfigured gateway is an outage, not a
+    // self-custody account, and must stay a plain failure.
+    it('leaves an unrecognised 404 a plain failure', async () => {
+      mockNotFound('<html>404 Not Found</html>');
+      const result = await suspendUser(VALID_PUBKEY, 'age_review', makeEnv());
+      expect(result.success).toBe(false);
+      expect(result.notFound).toBeUndefined();
+    });
+
+    // Callers outside the enforcement legs only log `error`. Dropping it here
+    // turned their log lines into "failed: undefined" -- a worse diagnostic than
+    // before this change existed.
+    it('keeps error populated alongside the flag', async () => {
+      mockNotFound();
+      const result = await suspendUser(VALID_PUBKEY, 'age_review', makeEnv());
+      expect(result.notFound).toBe(true);
+      expect(result.error).toContain('404');
+    });
+
+    it('flags the verified_minor clear not-found (the deny path hits the same 404)', async () => {
+      mockNotFound();
+      const result = await clearVerifiedMinor(VALID_PUBKEY, undefined, 'age_review_denied', makeEnv());
+      expect(result.success).toBe(false);
+      expect(result.notFound).toBe(true);
+    });
+
+    it('leaves an unrecognised 404 on the verified_minor clear a plain failure', async () => {
+      mockNotFound('<html>404 Not Found</html>');
+      const result = await clearVerifiedMinor(VALID_PUBKEY, undefined, 'age_review_denied', makeEnv());
+      expect(result.notFound).toBeUndefined();
+    });
+
+    it('leaves a 500 carrying not-found text a plain failure', async () => {
+      fetchMock.mockResolvedValue({ ok: false, status: 500, text: () => Promise.resolve(NOT_FOUND_BODY) });
+      const result = await suspendUser(VALID_PUBKEY, 'age_review', makeEnv());
+      expect(result.notFound).toBeUndefined();
+    });
+  });
+
   describe('getUserStatus', () => {
     it('returns verified_minor true only for boolean true', async () => {
       fetchMock.mockResolvedValue({

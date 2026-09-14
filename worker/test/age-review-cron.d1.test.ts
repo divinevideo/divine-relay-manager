@@ -141,4 +141,47 @@ describe('age-review cron on real D1', () => {
     expect(row!.state).toBe('denied_closed');
     expect(row!.version).toBe(1); // CAS UPDATE applied
   });
+
+  // A denied self-custody case enqueues a protected-minor projection job, but
+  // keycast has no account to project onto and answers "user not found" every
+  // time. Treated as a failure the job stays pending forever: the cron re-calls
+  // keycast on every tick and retention eventually alarms on an overdue job.
+  // There is nothing to project, so the job is settled, not retried.
+  it('settles a projection job for a subject with no keycast account instead of retrying it forever', async () => {
+    const now = new Date().toISOString();
+    await DB.prepare(`INSERT OR REPLACE INTO protected_minor_subjects
+      (subject_id, classification_state, classified_at, cleared_at, clear_reason, clear_reason_class)
+      VALUES ('subj-selfcustody', 'cleared', ?, ?, 'age_review_denied', 'valid_prior')`)
+      .bind(now, now).run();
+    await DB.prepare(`INSERT OR REPLACE INTO protected_minor_projection_jobs
+      (subject_id, pubkey, reason, state, created_at, updated_at)
+      VALUES ('subj-selfcustody', ?, 'age_review_denied', 'pending', ?, ?)`)
+      .bind('b'.repeat(64), now, now).run();
+
+    let keycastCalls = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      if (String(input).includes('/verified-minor')) {
+        keycastCalls += 1;
+        return Promise.resolve(new Response(JSON.stringify({ error: 'user not found' }), { status: 404 }));
+      }
+      return Promise.resolve(new Response('ok', { status: 200 }));
+    });
+
+    const keycastEnv = {
+      ...cronEnv,
+      KEYCAST_URL: 'https://login.test.divine.video',
+      KEYCAST_SERVICE_TOKEN: 'test-token',
+    };
+    await checkAgeReviewDeadlines(keycastEnv);
+    expect(keycastCalls).toBe(1);
+
+    const row = await DB.prepare(
+      "SELECT state FROM protected_minor_projection_jobs WHERE subject_id = 'subj-selfcustody'",
+    ).first<{ state: string }>();
+    expect(row!.state).toBe('complete');
+
+    // Settled means settled: a second tick must not call keycast again.
+    await checkAgeReviewDeadlines(keycastEnv);
+    expect(keycastCalls).toBe(1);
+  });
 });

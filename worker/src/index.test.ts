@@ -403,6 +403,34 @@ describe('relay-rpc account-state side effects', () => {
     fetchSpy.mockRestore();
   });
 
+  // A self-custody target has no keycast account to mirror to. Logging that as a
+  // failure is the same false signal #269 removed from the moderator UI; here it
+  // only reaches the logs, which is where anyone debugging an enforcement gap
+  // looks (#269).
+  it('logs a self-custody Keycast mirror as not applicable, not as a failure', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      if (String(input).includes('/api/admin/users/')) {
+        return Promise.resolve(new Response(JSON.stringify({ error: 'user not found' }), { status: 404 }));
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const waitUntil = vi.fn();
+    const testCtx = { waitUntil } as unknown as ExecutionContext;
+
+    await callRelayRpc('banpubkey', [VALID_PUBKEY, 'spam'], makeAccountStateEnv(), testCtx);
+    await drain(waitUntil);
+
+    const keycastErrors = errorSpy.mock.calls.filter((call) => String(call[0]).includes('Keycast'));
+    expect(keycastErrors).toEqual([]);
+    expect(logSpy.mock.calls.some((call) => String(call[0]).includes('not applicable'))).toBe(true);
+
+    errorSpy.mockRestore();
+    logSpy.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
   it('suspendpubkey triggers Keycast suspend and DM action ACCOUNT_SUSPENDED', async () => {
     const fetchSpy = makeFetchSpy();
     const waitUntil = vi.fn();

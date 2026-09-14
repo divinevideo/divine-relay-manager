@@ -790,6 +790,28 @@ describe('Keycast suspension wiring', () => {
     };
   };
 
+  // A denied self-custody account has no keycast record to project onto, so the
+  // projection job is settled here rather than deferred to a cron tick that can
+  // only reach the same answer.
+  it('settles the protected-minor projection job when the clear is not applicable', async () => {
+    vi.mocked(clearVerifiedMinor).mockResolvedValue({ success: false, status: 404, notFound: true, error: '404: user not found' });
+    const restrictedCase = makeCase({ state: 'restricted_pending_user_response' });
+    const updatedCase = { ...restrictedCase, state: 'denied_closed' as const };
+
+    const req = new Request('https://api.test/api/age-review/cases/case-1', {
+      method: 'PATCH',
+      body: JSON.stringify({ state: 'denied_closed' }),
+    });
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(makeDbFor(restrictedCase, updatedCase)), corsHeaders);
+    const body = await res.json() as { success: boolean; enforcement: { keycastMinorClear: string } };
+
+    expect(body.enforcement.keycastMinorClear).toBe('not_applicable');
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+    // The durable effect (the projection job settling) is asserted against real
+    // SQLite in worker/test/age-review-handler.d1.test.ts.
+  });
+
   it('clears verified_minor (with actor + deny reason) when transitioning to denied_closed', async () => {
     const moderator = 'b'.repeat(64);
     const restrictedCase = makeCase({ state: 'restricted_pending_user_response', moderator_pubkey: moderator });
@@ -899,6 +921,55 @@ describe('Keycast suspension wiring', () => {
     expect(clearVerifiedMinor).not.toHaveBeenCalled();
     const body = await res.json() as { enforcement: { keycastMinorClear: string } };
     expect(body.enforcement.keycastMinorClear).toBe('not_attempted');
+  });
+
+  // Self-custody accounts have no keycast record, so there is no Divine sign-in
+  // to suspend. The relay leg is what enforces against them (it blocks writes
+  // and hides content regardless of key custody), and it applied. Reporting the
+  // sign-in leg as failed here told moderators enforcement was incomplete when
+  // it was not, and sent them to escalate a non-problem (issue #191).
+  it('reports a not-applicable Keycast leg for an account with no Divine login, and stays complete', async () => {
+    vi.mocked(suspendUser).mockResolvedValue({ success: false, status: 404, notFound: true });
+
+    const reviewCase = makeCase({ state: 'under_moderator_review' });
+    const updatedCase = { ...reviewCase, state: 'restricted_pending_user_response' as const };
+
+    let selectCount = 0;
+    const db = {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        bind: vi.fn().mockReturnValue({
+          first: vi.fn().mockImplementation(async () => {
+            if (sql.includes('WHERE id = ?')) {
+              selectCount += 1;
+              return selectCount === 1 ? reviewCase : updatedCase;
+            }
+            return null;
+          }),
+          run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+        }),
+      })),
+    };
+
+    const req = new Request('https://api.test/api/age-review/cases/case-1', {
+      method: 'PATCH',
+      body: JSON.stringify({ state: 'restricted_pending_user_response' }),
+    });
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
+    const body = await res.json() as {
+      success: boolean; keycastUpdated: boolean; enforcementComplete: boolean;
+      enforcement: { keycast: string; relay: string }; case: { state: string };
+    };
+
+    expect(body.enforcement.keycast).toBe('not_applicable');
+    // Not a failure, so enforcement is complete and the response is a plain 200.
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+    expect(body.enforcementComplete).toBe(true);
+    // ...but we still never claim the sign-in was actually changed.
+    expect(body.keycastUpdated).toBe(false);
+    // The leg that does enforce against a self-custody account ran as usual.
+    expect(body.enforcement.relay).toBe('ok');
+    expect(body.case.state).toBe('restricted_pending_user_response');
   });
 
   it('surfaces a Keycast failure (success:false / 207) but still applies the state transition', async () => {

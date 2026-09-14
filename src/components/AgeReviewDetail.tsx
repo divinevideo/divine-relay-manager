@@ -177,7 +177,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
       // the list or the chips disagree with the list until their 30s interval.
       queryClient.invalidateQueries({ queryKey: ['age-review-counts'] });
       const requestedState = pendingStateRef.current as AgeReviewState | undefined;
-      if (requestedState && ENFORCEMENT_STATES.includes(requestedState) && data.enforcementComplete === false) {
+      if (requestedState && ENFORCEMENT_STATES.includes(requestedState)) {
         // Surface only actual failed enforcement legs. `not_attempted` is valid
         // for transitions where a leg does not apply.
         const enforcement = data.enforcement;
@@ -187,11 +187,22 @@ export function AgeReviewDetail({ caseData: c }: Props) {
         if (enforcement?.keycast === 'failed') failed.push('account sign-in');
         if (enforcement?.subjectClear === 'failed') failed.push('protected-minor registry');
         if (enforcement?.keycastMinorClear === 'failed') failed.push('protected-minor account projection');
-        toast({
-          title: 'Enforcement incomplete',
-          description: `Case updated, but these did not apply: ${failed.join(', ') || 'one or more enforcement steps'}. The case is now closed; automated retry will continue where supported. Escalate if enforcement does not converge.`,
-          variant: 'destructive',
-        });
+        if (data.enforcementComplete === false) {
+          toast({
+            title: 'Enforcement incomplete',
+            description: `Case updated, but these did not apply: ${failed.join(', ') || 'one or more enforcement steps'}. The case is now closed; automated retry will continue where supported. Escalate if enforcement does not converge.`,
+            variant: 'destructive',
+          });
+        } else if (enforcement?.keycast === 'not_applicable') {
+          // Enforcement is complete, so this is not a failure and must not read
+          // as one, but it cannot be silent either. Without it the moderator
+          // walks away believing a sign-in was blocked when the account has no
+          // Divine login and never had one to block (issue #191).
+          toast({
+            title: 'Case updated',
+            description: 'The sign-in step was not applicable: this account has no Divine login (self-custody), so there was no sign-in to change. Nothing else was left outstanding.',
+          });
+        }
       }
     },
     onError: (error, _updates, ctx) => {

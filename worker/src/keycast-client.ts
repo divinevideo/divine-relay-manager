@@ -9,11 +9,37 @@ export interface KeycastResult {
   success: boolean;
   status?: number;
   error?: string;
+  /**
+   * Keycast has no record of this pubkey: a self-custody account, with no
+   * Divine login to act on. Distinct from a failure -- there is nothing here
+   * that a retry could fix, and nothing that was left unenforced (issue #191).
+   */
+  notFound?: boolean;
 }
 
 export type KeycastReason = 'age_review' | 'age_review_denied' | 'age_review_expired' | 'moderation';
 
 export const HEX_64 = /^[0-9a-f]{64}$/;
+
+/**
+ * True only for keycast's own "no such user" answer. A 404 from a bad route or
+ * a gateway is an outage, not a self-custody account, so it must not match:
+ * this is the discriminator that keeps not-applicable from swallowing real
+ * breakage.
+ */
+function isKeycastUserNotFound(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+
+  try {
+    const data = JSON.parse(trimmed) as Record<string, unknown>;
+    const code = typeof data.code === 'string' ? data.code.toLowerCase() : '';
+    const error = typeof data.error === 'string' ? data.error.toLowerCase() : '';
+    return code === 'user_not_found' || error === 'user_not_found' || error === 'user not found';
+  } catch {
+    return trimmed.toLowerCase() === 'user not found';
+  }
+}
 
 async function resolveToken(binding: string | SecretStoreSecret | undefined): Promise<string | null> {
   if (!binding) return null;
@@ -70,6 +96,12 @@ async function callKeycast(
 
     if (!res.ok) {
       const text = await res.text();
+      if (res.status === 404 && isKeycastUserNotFound(text)) {
+        console.log(`[keycast] ${body.status} not applicable: no keycast account (self-custody)`);
+        // `error` stays populated: `notFound` is the discriminator, and callers
+        // that only log the error would otherwise print `undefined`.
+        return { success: false, status: 404, notFound: true, error: `404: ${text}` };
+      }
       console.error(`[keycast] ${body.status} failed: ${res.status}`);
       return { success: false, status: res.status, error: `${res.status}: ${text}` };
     }
@@ -154,6 +186,10 @@ export async function clearVerifiedMinor(
 
     if (!res.ok) {
       const text = await res.text();
+      if (res.status === 404 && isKeycastUserNotFound(text)) {
+        console.log('[keycast] verified_minor clear not applicable: no keycast account (self-custody)');
+        return { success: false, status: 404, notFound: true, error: `404: ${text}` };
+      }
       console.error(`[keycast] verified_minor clear failed: ${res.status}`);
       return { success: false, status: res.status, error: `${res.status}: ${text}` };
     }
@@ -176,20 +212,6 @@ export interface UserStatusResult {
   verified_minor_at?: string;
   notFound?: boolean;
   error?: string;
-}
-
-function isKeycastUserNotFound(text: string): boolean {
-  const trimmed = text.trim();
-  if (!trimmed) return false;
-
-  try {
-    const data = JSON.parse(trimmed) as Record<string, unknown>;
-    const code = typeof data.code === 'string' ? data.code.toLowerCase() : '';
-    const error = typeof data.error === 'string' ? data.error.toLowerCase() : '';
-    return code === 'user_not_found' || error === 'user_not_found' || error === 'user not found';
-  } catch {
-    return trimmed.toLowerCase() === 'user not found';
-  }
 }
 
 export async function getUserStatus(pubkey: string, env: KeycastEnv): Promise<UserStatusResult> {

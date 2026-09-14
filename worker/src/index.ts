@@ -262,7 +262,7 @@ function notifyAccountState(
 function enforceKeycastState(
   op: string,
   pubkey: string,
-  fn: () => Promise<{ success: boolean; error?: string }>,
+  fn: () => Promise<{ success: boolean; error?: string; notFound?: boolean }>,
   ctx?: ExecutionContext
 ): void {
   if (!ctx) {
@@ -271,7 +271,13 @@ function enforceKeycastState(
   }
   ctx.waitUntil(
     fn().then(res => {
-      if (!res.success) console.error(`[handleRelayRpc] Keycast ${op} failed for ${pubkey}: ${res.error}`);
+      if (res.notFound) {
+        // No keycast account to mirror to (self-custody). Not a failure: the
+        // relay action is the enforcement for these accounts (#269).
+        console.log(`[handleRelayRpc] Keycast ${op} not applicable: no keycast account`);
+      } else if (!res.success) {
+        console.error(`[handleRelayRpc] Keycast ${op} failed for ${pubkey}: ${res.error}`);
+      }
     }).catch(err => console.error(`[handleRelayRpc] Keycast ${op} error:`, err))
   );
 }

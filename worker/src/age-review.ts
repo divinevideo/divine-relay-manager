@@ -495,12 +495,21 @@ export async function handleUpdateAgeReviewCase(
   // { success, error }). Returns not_attempted when no call applies.
   const runStatusLeg = async (
     label: string,
-    call: () => Promise<{ success: boolean; error?: string }> | undefined,
+    call: () => Promise<{ success: boolean; error?: string; notFound?: boolean }> | undefined,
   ): Promise<{ status: EnforcementLegStatus; error?: string }> => {
     try {
       const result = await call();
       if (!result) return { status: 'not_attempted' };
       if (result.success) return { status: 'ok' };
+      // Keycast has no record of the subject: a self-custody account with no
+      // Divine login. Nothing was left unenforced -- the relay leg is what
+      // restricts these accounts, and it runs regardless of key custody -- so
+      // reporting this as a failure sent moderators to escalate a non-problem
+      // (issue #191). The relay legs never set notFound.
+      if (result.notFound) {
+        console.log(`[age-review] ${label} ${requestedState} not applicable: subject has no keycast account`);
+        return { status: 'not_applicable' };
+      }
       console.error(`[age-review] ${label} ${requestedState} failed: ${result.error}`);
       return { status: 'failed', error: result.error };
     } catch (error) {
@@ -600,7 +609,10 @@ export async function handleUpdateAgeReviewCase(
         : undefined);
     keycastMinorClear = minorClearLeg.status;
     keycastMinorClearError = minorClearLeg.error;
-    if (deniedCase && keycastMinorClear === 'ok' && env.DB) {
+    // `not_applicable` settles the job for the same reason `ok` does: there is no
+    // keycast account to project onto, so leaving the job pending only defers the
+    // identical answer to a cron tick.
+    if (deniedCase && (keycastMinorClear === 'ok' || keycastMinorClear === 'not_applicable') && env.DB) {
       try {
         await markProjectionComplete(env.DB, minorProjectionPubkey);
       } catch (error) {
@@ -1970,6 +1982,8 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
       const banResult = await banUser(row.pubkey, 'age_review_expired', env);
       if (banResult.success) {
         console.log('[age-review] Keycast ban sent for expired case');
+      } else if (banResult.notFound) {
+        console.log('[age-review] Keycast ban not applicable for expired case: no keycast account');
       } else {
         console.error(`[age-review] Keycast ban failed for expired case: ${banResult.error}`);
       }
@@ -1986,7 +2000,9 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
       try {
         const projectionPubkey = durableClear.projectionPubkey ?? row.pubkey;
         const clearResult = await clearVerifiedMinor(projectionPubkey, undefined, 'age_review_expired', env);
-        if (clearResult.success) await markProjectionComplete(env.DB, projectionPubkey);
+        // notFound settles the job here too: there is no account to project onto,
+        // so leaving it pending only defers the same answer to the cron's retry.
+        if (clearResult.success || clearResult.notFound) await markProjectionComplete(env.DB, projectionPubkey);
         else console.error(`[age-review] Keycast verified_minor clear failed for expired case: ${clearResult.error}`);
       } catch (error) {
         console.error('[age-review] Keycast verified_minor clear failed for expired case:', error);
@@ -2035,7 +2051,11 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
   for (const job of projectionJobs) {
     try {
       const result = await clearVerifiedMinor(job.pubkey, undefined, job.reason as 'age_review_denied' | 'age_review_expired', env);
-      if (result.success) await markProjectionComplete(env.DB, job.pubkey);
+      // notFound: the subject has no keycast account, so there is no projection
+      // to make and no retry that could ever succeed. Settle it -- left pending
+      // it re-calls keycast on every tick and eventually trips the retention
+      // overdue-projection alarm.
+      if (result.success || result.notFound) await markProjectionComplete(env.DB, job.pubkey);
       else {
         await markProjectionAttempt(env.DB, job.pubkey);
         console.error(`[age-review] Keycast protected-minor projection retry failed: ${result.error}`);
