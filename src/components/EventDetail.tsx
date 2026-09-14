@@ -6,6 +6,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNostr } from "@/hooks/useNostr";
 import { useAuthor } from "@/hooks/useAuthor";
 import { useUserStats } from "@/hooks/useUserStats";
+import { UserStatsRow } from "@/components/UserStatsRow";
 import { useModerationStatus } from "@/hooks/useModerationStatus";
 import { useToast } from "@/hooks/useToast";
 import { getKindInfo, getKindCategory } from "@/lib/kindNames";
@@ -49,7 +50,6 @@ import {
   AtSign,
   MessageSquare,
   Flag,
-  FileText,
   ShieldX,
   UserX,
   UserCheck,
@@ -715,18 +715,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
                 {/* User Stats */}
                 {userStats.data && (
                   <div className="flex gap-4 text-xs text-muted-foreground p-2 bg-muted/50 rounded">
-                    <span className="flex items-center gap-1">
-                      <FileText className="h-3 w-3" />
-                      {userStats.data.postCount} events
-                    </span>
-                    <span className="flex items-center gap-1">
-                      <Flag className="h-3 w-3" />
-                      {userStats.data.reportCount} reports
-                    </span>
-                    <span className="flex items-center gap-1">
-                      <Tag className="h-3 w-3" />
-                      {userStats.data.labelCount} labels
-                    </span>
+                    <UserStatsRow stats={userStats.data} />
                   </div>
                 )}
 
@@ -888,18 +877,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
             {/* User Stats */}
             {userStats.data && (
               <div className="flex gap-4 text-xs text-muted-foreground pt-2 border-t">
-                <span className="flex items-center gap-1">
-                  <FileText className="h-3 w-3" />
-                  {userStats.data.postCount} events
-                </span>
-                <span className="flex items-center gap-1">
-                  <Flag className="h-3 w-3" />
-                  {userStats.data.reportCount} reports
-                </span>
-                <span className="flex items-center gap-1">
-                  <Tag className="h-3 w-3" />
-                  {userStats.data.labelCount} labels
-                </span>
+                <UserStatsRow stats={userStats.data} />
               </div>
             )}
           </CardContent>

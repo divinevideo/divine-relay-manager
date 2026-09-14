@@ -7,6 +7,7 @@ import { MemoryRouter } from 'react-router-dom';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { UserProfileCard } from './UserProfileCard';
 import type { UserStats } from '@/hooks/useUserStats';
+import { STAT_UNKNOWN_TITLE } from '@/lib/statDisplay';
 
 vi.mock('@/hooks/useAdminApi', () => ({
   useApiUrl: () => 'https://api.example.test',
@@ -126,6 +127,45 @@ describe('UserProfileCard', () => {
 
     rerender(<UserProfileCard pubkey={PUBKEY} stats={stats(RECENT)} />);
     expect(screen.queryByRole('button', { name: /view activity/i })).not.toBeInTheDocument();
+  });
+});
+
+describe('UserProfileCard incomplete relay reads (#210)', () => {
+  it('shows "?" not "0" for events when the authored-content read did not complete', () => {
+    const incomplete: UserStats = { ...stats([]), authoredContentIncomplete: true };
+    render(<UserProfileCard pubkey={PUBKEY} stats={incomplete} />);
+
+    const events = screen.getByText('? events');
+    expect(events).toBeInTheDocument();
+    expect(events).toHaveAttribute('title', STAT_UNKNOWN_TITLE);
+    expect(events).toHaveAttribute('aria-label', 'events count unavailable, relay read did not complete');
+    expect(screen.queryByText('0 events')).not.toBeInTheDocument();
+    // Only the flagged count is uncertain; a completed 0 still reads as 0.
+    expect(screen.getByText('0 reports')).toBeInTheDocument();
+    expect(screen.getByText('0 labels')).toBeInTheDocument();
+  });
+
+  it('shows "?" not "0" for reports when the reports read did not complete', () => {
+    const incomplete: UserStats = { ...stats([]), reportsIncomplete: true };
+    render(<UserProfileCard pubkey={PUBKEY} stats={incomplete} />);
+
+    expect(screen.getByText('? reports')).toBeInTheDocument();
+    expect(screen.queryByText('0 reports')).not.toBeInTheDocument();
+  });
+
+  it('shows "?" not "0" for labels when the labels read did not complete', () => {
+    const incomplete: UserStats = { ...stats([]), labelsIncomplete: true };
+    render(<UserProfileCard pubkey={PUBKEY} stats={incomplete} />);
+
+    expect(screen.getByText('? labels')).toBeInTheDocument();
+    expect(screen.queryByText('0 labels')).not.toBeInTheDocument();
+  });
+
+  it('renders verified counts as numbers when every read completed', () => {
+    render(<UserProfileCard pubkey={PUBKEY} stats={stats(RECENT)} />);
+
+    expect(screen.getByText('5 events')).toBeInTheDocument();
+    expect(screen.queryByText(/\? (events|reports|labels)/)).not.toBeInTheDocument();
   });
 });
 
