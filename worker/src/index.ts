@@ -1869,6 +1869,13 @@ async function handleGetResolutionLabelTargets(
   corsHeaders: Record<string, string>
 ): Promise<Response> {
   try {
+    // One value feeds both the relay filter's `limit` and the pager's notion of a
+    // full page. They must not drift: the pager treats a page shorter than
+    // pageSize as "the relay has nothing older", so a filter asking for fewer
+    // events than pageSize would make every page look short and stop the walk
+    // after one -- silently, which is the failure this endpoint exists to remove.
+    const pageSize = LABEL_PAGE_SIZE;
+
     // queryRelay's #186 contract: success:false is an UNCONFIRMED read, not an
     // empty one. Throwing here is what stops a timed-out page from being folded
     // into the result as "nothing older" -- which would hand the queue a short
@@ -1877,7 +1884,7 @@ async function handleGetResolutionLabelTargets(
       const filter: Record<string, unknown> = {
         kinds: [1985],
         '#L': ['moderation/resolution'],
-        limit: LABEL_PAGE_SIZE,
+        limit: pageSize,
       };
       if (until !== undefined) filter.until = until;
 
@@ -1888,7 +1895,7 @@ async function handleGetResolutionLabelTargets(
       return (result.events || []) as unknown as ResolutionLabelEvent[];
     };
 
-    const { targets, truncated, oldestCovered } = await pageResolutionLabels(fetchPage);
+    const { targets, truncated, oldestCovered } = await pageResolutionLabels(fetchPage, { pageSize });
 
     return proxyJsonResponse({
       success: true,

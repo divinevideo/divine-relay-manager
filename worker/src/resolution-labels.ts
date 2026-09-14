@@ -20,7 +20,26 @@ export interface PagedLabelTargets {
 
 export type LabelPageFetcher = (until: number | undefined) => Promise<ResolutionLabelEvent[]>;
 
-export const LABEL_PAGE_SIZE = 500;
+// Sized against the client's budget, not the relay's comfort. The frontend caps
+// the whole label read at RESOLUTION_READ_TIMEOUT_MS (8s), and queryRelay opens a
+// fresh socket per page, so round trips -- not payload -- are what spend it.
+// Measured against production 2026-09-14: a 500-event page costs ~1.07s end to
+// end, while a single request returning all 2298 labels costs ~1.6s. At 500 the
+// read needed five round trips (~5.4s typical, ~6.9s tail) and gained one every
+// ~1.7 months, which crosses 8s within months; at 2000 it needs two (~2.5s) and
+// gains one every ~6.7 months.
+//
+// That budget is the reason this matters: a read that times out does not degrade
+// to partial history, it fails the source, and a failed resolution source blocks
+// the queue (#221). Raising this is cheaper and more honest than widening the
+// timeout, which would just let the queue hang longer before blocking.
+//
+// Relies on the relay treating `limit` as a maximum and returning what it has,
+// which is the NIP-01 contract and what the 500 here already assumed. Verified
+// on funnelcake: `limit 3000` returns all 2298. A relay that silently capped
+// BELOW this would make a capped page look like a short one, which the pager
+// reads as exhaustion.
+export const LABEL_PAGE_SIZE = 2000;
 export const LABEL_MAX_PAGES = 20;
 
 // Walks the relay's resolution labels back through time with an `until` cursor
