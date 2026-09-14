@@ -22,6 +22,7 @@ const PRE_CAP_HIDDEN_TARGET = 'c'.repeat(64);
 const PRE_CAP_CONFIRMED_TARGET = 'd'.repeat(64);
 
 const SAME_SECOND_TARGET = 'e'.repeat(64);
+const NULL_DATED_TARGET = 'f'.repeat(64);
 const DISTINCT_TARGET_COUNT = 8;
 const distinctTarget = (i: number) => `${i}`.repeat(64).slice(0, 64);
 
@@ -54,6 +55,17 @@ beforeAll(async () => {
   // head and reads as still-pending.
   batch.push(stmt.bind('event', PRE_CAP_CONFIRMED_TARGET, 'auto_hidden', '2026-01-01 00:00:02'));
   batch.push(stmt.bind('event', PRE_CAP_CONFIRMED_TARGET, 'auto_hide_confirmed', '2026-01-01 00:00:03'));
+
+  // created_at is nullable (TEXT DEFAULT CURRENT_TIMESTAMP, no NOT NULL). No
+  // writer produces this today and prod holds none, but the keyset cursor
+  // compares on created_at, and every comparison against NULL is NULL -- so an
+  // unguarded cursor drops such a row from every page after the first, silently,
+  // and a pending-review target would vanish from the queue built to work it.
+  // The unpaginated query this replaced would have returned it.
+  await DB.prepare(
+    `INSERT INTO moderation_decisions (target_type, target_id, action, created_at)
+     VALUES (?, ?, ?, NULL)`
+  ).bind('event', NULL_DATED_TARGET, 'auto_hidden').run();
 
   // Two state actions sharing one created_at. The keyset cursor orders by
   // (created_at, id), and the id half of that pair is the only thing that can
@@ -190,6 +202,12 @@ describe('/api/resolution-state against real D1', () => {
     expect(
       chunked.filter((s) => s.target_id === SAME_SECOND_TARGET).map((s) => s.action).sort()
     ).toEqual(['auto_hidden', 'auto_hide_confirmed'].sort());
+
+    // And the undated row is still there. It is reachable in a single unchunked
+    // read either way, so only the chunked path can lose it.
+    expect(
+      chunked.filter((s) => s.target_id === NULL_DATED_TARGET).map((s) => s.action)
+    ).toEqual(['auto_hidden']);
   });
 
   it('leaves that target out of the capped /api/decisions read', async () => {

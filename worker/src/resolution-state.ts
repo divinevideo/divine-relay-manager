@@ -91,6 +91,13 @@ export async function getAutoHideStates(
   // Keyset cursor on the same (created_at, id) pair the ordering uses. A plain
   // OFFSET would drift if a row were written between chunks; the pair is unique
   // because id is, so it cannot skip or repeat a row.
+  //
+  // COALESCE, in the ordering AND the comparison, because created_at is nullable
+  // (TEXT DEFAULT CURRENT_TIMESTAMP, no NOT NULL). Every comparison against NULL
+  // is NULL, so a bare `created_at < ?` silently drops an undated row from every
+  // page after the first -- and losing an auto_hidden row takes its target out
+  // of the pending-review queue with nothing to show for it. '' sorts below any
+  // timestamp, so undated rows land last and stay reachable.
   let cursor: { createdAt: string; id: number } | null = null;
 
   for (;;) {
@@ -100,7 +107,7 @@ export async function getAutoHideStates(
             `SELECT id, created_at, target_type, target_id, action
                FROM moderation_decisions
               WHERE action IN (${placeholders})
-              ORDER BY created_at DESC, id DESC
+              ORDER BY COALESCE(created_at, '') DESC, id DESC
               LIMIT ?`
           )
           .bind(...AUTO_HIDE_STATE_ACTIONS, chunkSize)
@@ -110,8 +117,9 @@ export async function getAutoHideStates(
             `SELECT id, created_at, target_type, target_id, action
                FROM moderation_decisions
               WHERE action IN (${placeholders})
-                AND (created_at < ? OR (created_at = ? AND id < ?))
-              ORDER BY created_at DESC, id DESC
+                AND (COALESCE(created_at, '') < ?
+                     OR (COALESCE(created_at, '') = ? AND id < ?))
+              ORDER BY COALESCE(created_at, '') DESC, id DESC
               LIMIT ?`
           )
           .bind(...AUTO_HIDE_STATE_ACTIONS, cursor.createdAt, cursor.createdAt, cursor.id, chunkSize)
@@ -130,7 +138,7 @@ export async function getAutoHideStates(
 
     if (rows.length < chunkSize) break;
     const last = rows[rows.length - 1];
-    cursor = { createdAt: last.created_at, id: last.id };
+    cursor = { createdAt: last.created_at ?? '', id: last.id };
   }
 
   return states;
