@@ -21,11 +21,6 @@ const PRE_CAP_TARGET = 'b'.repeat(64);
 const PRE_CAP_HIDDEN_TARGET = 'c'.repeat(64);
 const PRE_CAP_CONFIRMED_TARGET = 'd'.repeat(64);
 
-const SAME_SECOND_TARGET = 'e'.repeat(64);
-const NULL_DATED_TARGET = 'f'.repeat(64);
-const DISTINCT_TARGET_COUNT = 8;
-const distinctTarget = (i: number) => `${i}`.repeat(64).slice(0, 64);
-
 beforeAll(async () => {
   mf = new Miniflare({
     modules: true,
@@ -55,32 +50,6 @@ beforeAll(async () => {
   // head and reads as still-pending.
   batch.push(stmt.bind('event', PRE_CAP_CONFIRMED_TARGET, 'auto_hidden', '2026-01-01 00:00:02'));
   batch.push(stmt.bind('event', PRE_CAP_CONFIRMED_TARGET, 'auto_hide_confirmed', '2026-01-01 00:00:03'));
-
-  // created_at is nullable (TEXT DEFAULT CURRENT_TIMESTAMP, no NOT NULL). No
-  // writer produces this today and prod holds none, but the keyset cursor
-  // compares on created_at, and every comparison against NULL is NULL -- so an
-  // unguarded cursor drops such a row from every page after the first, silently,
-  // and a pending-review target would vanish from the queue built to work it.
-  // The unpaginated query this replaced would have returned it.
-  await DB.prepare(
-    `INSERT INTO moderation_decisions (target_type, target_id, action, created_at)
-     VALUES (?, ?, ?, NULL)`
-  ).bind('event', NULL_DATED_TARGET, 'auto_hidden').run();
-
-  // Two state actions sharing one created_at. The keyset cursor orders by
-  // (created_at, id), and the id half of that pair is the only thing that can
-  // separate these: a cursor that steps by created_at alone skips whichever of
-  // them falls on the chunk boundary.
-  batch.push(stmt.bind('event', SAME_SECOND_TARGET, 'auto_hidden', '2026-01-02 00:00:00'));
-  batch.push(stmt.bind('event', SAME_SECOND_TARGET, 'auto_hide_confirmed', '2026-01-02 00:00:00'));
-
-  // Distinct targets, one decision each, on consecutive ids. These are what make
-  // the chunking tests able to fail: where a target repeats across many rows, a
-  // cursor that skips rows still finds it, so only one-row-per-target data can
-  // tell a correct cursor from one that overshoots the boundary.
-  for (let i = 0; i < DISTINCT_TARGET_COUNT; i++) {
-    batch.push(stmt.bind('pubkey', distinctTarget(i), 'dismissed', '2026-02-01 00:00:00'));
-  }
 
   // 1005 newer rows, all on one other target, so they fill the window by row
   // count without adding distinct targets.
@@ -168,48 +137,6 @@ describe('/api/resolution-state against real D1', () => {
     expect(actions).toEqual(['auto_hide_confirmed', 'auto_hidden']);
   });
 
-  // The reads are chunked so no single D1 query has to return the whole table.
-  // Chunking is invisible in the result by design, so the only way to tell a
-  // working cursor from a broken one is to force several chunks and count.
-  it('returns every resolved target across chunk boundaries', async () => {
-    const all = await getResolvedTargets(DB);
-    const chunked = await getResolvedTargets(DB, { chunkSize: 1 });
-
-    expect(chunked).toHaveLength(all.length);
-    expect(chunked).toEqual(expect.arrayContaining(all));
-
-    // Named explicitly, because the assertions above would still hold if BOTH
-    // reads dropped the same targets. Each of these appears in exactly one row,
-    // so a cursor that steps past its boundary loses it outright.
-    for (let i = 0; i < DISTINCT_TARGET_COUNT; i++) {
-      expect(chunked).toContainEqual({ target_type: 'pubkey', target_id: distinctTarget(i) });
-    }
-  });
-
-  it('returns every auto-hide state action across chunk boundaries, still newest-first', async () => {
-    const all = await getAutoHideStates(DB);
-    const chunked = await getAutoHideStates(DB, { chunkSize: 1 });
-
-    // Order is load-bearing: getLatestAutoHideState takes the first state
-    // action it sees, so chunking must not reshuffle them.
-    expect(chunked).toEqual(all);
-    expect(
-      chunked.filter((s) => s.target_id === PRE_CAP_CONFIRMED_TARGET).map((s) => s.action)
-    ).toEqual(['auto_hide_confirmed', 'auto_hidden']);
-
-    // Both halves of the same-second pair survive the chunk boundary between
-    // them. Without the id tiebreak in the cursor, one of these is skipped.
-    expect(
-      chunked.filter((s) => s.target_id === SAME_SECOND_TARGET).map((s) => s.action).sort()
-    ).toEqual(['auto_hidden', 'auto_hide_confirmed'].sort());
-
-    // And the undated row is still there. It is reachable in a single unchunked
-    // read either way, so only the chunked path can lose it.
-    expect(
-      chunked.filter((s) => s.target_id === NULL_DATED_TARGET).map((s) => s.action)
-    ).toEqual(['auto_hidden']);
-  });
-
   it('leaves that target out of the capped /api/decisions read', async () => {
     // The control: without this contrast the test above could pass against an
     // endpoint that is itself capped, just at a higher number.
@@ -227,5 +154,103 @@ describe('/api/resolution-state against real D1', () => {
 
     expect(body.truncated).toBe(true);
     expect(body.decisions.some((d) => d.target_id === PRE_CAP_TARGET)).toBe(false);
+  });
+});
+
+// Chunking gets its own database, deliberately small. The reads walk the whole
+// table, so forcing many chunks over the 1000-row fixture above meant a thousand
+// sequential D1 queries -- eleven seconds of CPU, enough to slow the runner and
+// trip a time-sensitive test in another file. A dozen purpose-built rows exercise
+// the same cursors in milliseconds.
+describe('resolution-state chunking against real D1', () => {
+  let chunkMf: Miniflare;
+  let chunkDB: D1Database;
+
+  const SAME_SECOND_TARGET = 'e'.repeat(64);
+  const NULL_DATED_TARGET = 'f'.repeat(64);
+  const DISTINCT_TARGET_COUNT = 8;
+  const distinctTarget = (i: number) => `${i}`.repeat(64).slice(0, 64);
+
+  beforeAll(async () => {
+    chunkMf = new Miniflare({
+      modules: true,
+      script: 'export default { fetch() { return new Response("ok"); } };',
+      compatibilityDate: '2024-12-01',
+      compatibilityFlags: ['nodejs_compat'],
+      d1Databases: ['DB'],
+    });
+    chunkDB = (await chunkMf.getD1Database('DB')) as unknown as D1Database;
+    await ensureSchema(chunkDB);
+
+    const stmt = chunkDB.prepare(
+      `INSERT INTO moderation_decisions (target_type, target_id, action, created_at)
+       VALUES (?, ?, ?, ?)`
+    );
+    const batch = [];
+
+    // Distinct targets, one decision each, on consecutive ids. One row per target
+    // is what makes these tests able to fail: where a target repeats across many
+    // rows, a cursor that skips rows still finds it.
+    for (let i = 0; i < DISTINCT_TARGET_COUNT; i++) {
+      batch.push(stmt.bind('pubkey', distinctTarget(i), 'dismissed', '2026-02-01 00:00:00'));
+    }
+
+    // Two state actions sharing one created_at. The cursor orders by
+    // (created_at, id), and the id half is the only thing that separates these:
+    // a cursor stepping by created_at alone skips whichever falls on a boundary.
+    batch.push(stmt.bind('event', SAME_SECOND_TARGET, 'auto_hidden', '2026-01-02 00:00:00'));
+    batch.push(stmt.bind('event', SAME_SECOND_TARGET, 'auto_hide_confirmed', '2026-01-02 00:00:00'));
+
+    await chunkDB.batch(batch);
+
+    // created_at is nullable (TEXT DEFAULT CURRENT_TIMESTAMP, no NOT NULL). No
+    // writer produces this today and prod holds none, but every comparison
+    // against NULL is NULL, so an unguarded cursor drops such a row from every
+    // page after the first -- silently, and a pending-review target would vanish
+    // from the queue built to work it. The unpaginated read this replaced
+    // returned it regardless of date.
+    await chunkDB.prepare(
+      `INSERT INTO moderation_decisions (target_type, target_id, action, created_at)
+       VALUES (?, ?, ?, NULL)`
+    ).bind('event', NULL_DATED_TARGET, 'auto_hidden').run();
+  });
+
+  afterAll(async () => {
+    await chunkMf?.dispose();
+  });
+
+  it('returns every resolved target across chunk boundaries', async () => {
+    const all = await getResolvedTargets(chunkDB);
+    const chunked = await getResolvedTargets(chunkDB, { chunkSize: 1 });
+
+    expect(chunked).toHaveLength(all.length);
+    expect(chunked).toEqual(expect.arrayContaining(all));
+
+    // Named explicitly, because the assertions above would still hold if BOTH
+    // reads dropped the same targets.
+    for (let i = 0; i < DISTINCT_TARGET_COUNT; i++) {
+      expect(chunked).toContainEqual({ target_type: 'pubkey', target_id: distinctTarget(i) });
+    }
+  });
+
+  it('returns every auto-hide state action across chunk boundaries, still newest-first', async () => {
+    const all = await getAutoHideStates(chunkDB);
+    const chunked = await getAutoHideStates(chunkDB, { chunkSize: 1 });
+
+    // Order is load-bearing: getLatestAutoHideState takes the first state action
+    // it sees, so chunking must not reshuffle them.
+    expect(chunked).toEqual(all);
+
+    // Both halves of the same-second pair survive the boundary between them.
+    // Without the id tiebreak in the cursor, one of these is skipped.
+    expect(
+      chunked.filter((s) => s.target_id === SAME_SECOND_TARGET).map((s) => s.action).sort()
+    ).toEqual(['auto_hidden', 'auto_hide_confirmed'].sort());
+
+    // And the undated row is still there. A single unchunked read finds it
+    // either way, so only the chunked path can lose it.
+    expect(
+      chunked.filter((s) => s.target_id === NULL_DATED_TARGET).map((s) => s.action)
+    ).toEqual(['auto_hidden']);
   });
 });
