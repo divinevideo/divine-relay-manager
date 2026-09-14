@@ -463,12 +463,13 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     queryKey: ['resolution-label-targets', relayUrl],
     queryFn: () => fetchResolutionLabelTargets({ timeoutMs: RESOLUTION_READ_TIMEOUT_MS }),
     // 60s, not the 15s the other sources use. This one walks every page of
-    // resolution labels on the relay (five today, and one more every couple of
-    // months), so a 15s poll opens five relay sockets per tab per interval to
+    // resolution labels on the relay (two today, and one more every few
+    // months), so a 15s poll opens a socket per page per tab per interval to
     // re-derive a set that barely moves. A moderator's OWN action still clears
-    // instantly: that writes a decision to D1, and the resolution-state source
-    // below is still on 15s. Only another moderator's label-only resolution can
-    // lag, by at most a minute.
+    // instantly, because the action handlers (ReportDetail, UserActions,
+    // EventActions) invalidate ['resolution-state'] and, for label-writing
+    // actions, this query -- not because of either poll. Only another
+    // moderator's label-only resolution can lag, by at most a minute.
     refetchInterval: 60 * 1000,
     placeholderData: (previousData) => previousData,
     retry: 1,
