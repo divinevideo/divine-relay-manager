@@ -1052,6 +1052,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     if (selectedReportId && reports && !selectedReport) {
       const report = reports.find(r => r.id === selectedReportId);
       if (report) {
+        // Arriving at /reports/<id> directly -- a shared link, or a reload after
+        // following a Zendesk deep link -- is a deep-link selection too, and
+        // needs the same unhide. Safe against the bug this scoping fixes:
+        // handleSelectReport(null) navigates to /reports, so the id is gone and
+        // this cannot re-select behind a dismissal.
+        deepLinkSelectedRef.current = true;
         setSelectedReport(report);
       }
     }

@@ -112,7 +112,7 @@ describe('Hide resolved obeys the moderator', () => {
     // before the effect that moves the toggle has had a chance to run -- and
     // proves nothing.
     await waitFor(() => expect(calls.resolutionState).toBeGreaterThan(before));
-    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
 
     // The moderator never touched the toggle. It must not have moved.
     expect(screen.getByRole('switch', { name: /hide resolved/i })).toBeChecked();
@@ -149,12 +149,35 @@ describe('Hide resolved obeys the moderator', () => {
 
     // Off, because the moderator asked.
     await user.click(toggle);
-    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     expect(screen.getByRole('switch', { name: /hide resolved/i })).not.toBeChecked();
 
     // Back on, and it stays there.
     await user.click(screen.getByRole('switch', { name: /hide resolved/i }));
-    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     expect(screen.getByRole('switch', { name: /hide resolved/i })).toBeChecked();
+  });
+
+  // The path that had no coverage at all before this change. Arriving at
+  // /reports/<id> directly -- a shared link, or a reload after following a
+  // Zendesk deep link -- must still unhide, or the report's pane sits open
+  // while its row is filtered out of the list beside it.
+  it('unhides for a report reached directly by its /reports/:id URL', async () => {
+    const calls = stubFetch(() => true); // the target is already resolved
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, retryDelay: 0 } },
+    });
+
+    render(
+      <TestApp queryClient={queryClient}>
+        <Reports relayUrl={RELAY_URL} selectedReportId={REPORT.id} />
+      </TestApp>
+    );
+
+    await waitFor(() => expect(calls.resolutionState).toBeGreaterThan(0));
+
+    await waitFor(() => {
+      expect(screen.getByRole('switch', { name: /hide resolved/i })).not.toBeChecked();
+    });
   });
 });
