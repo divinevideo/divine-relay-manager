@@ -20,7 +20,12 @@ const REPORT = {
   pubkey: 'b'.repeat(64),
   created_at: 1751000000,
   kind: 1984,
-  tags: [['e', TARGET, 'spam'], ['p', 'd'.repeat(64), 'spam']],
+  tags: [
+    ['e', TARGET, 'spam'],
+    ['p', 'd'.repeat(64), 'spam'],
+    ['L', 'social.nos.ontology'],
+    ['l', 'NS-spam', 'social.nos.ontology'],
+  ],
   content: 'reported',
   sig: 'e'.repeat(128),
 };
@@ -36,7 +41,15 @@ const RESOLVED_REPORT = {
   ...REPORT,
   id: 'f'.repeat(64),
   created_at: 1751000050,
-  tags: [['e', OTHER, 'spam'], ['p', '8'.repeat(64), 'spam']],
+  // A second category, so "a category is selected" is distinguishable from
+  // "no category is selected". With one category the chip reads the same
+  // either way and an assertion on it proves nothing.
+  tags: [
+    ['e', OTHER, 'spam'],
+    ['p', '8'.repeat(64), 'spam'],
+    ['L', 'social.nos.ontology'],
+    ['l', 'NS-harassment', 'social.nos.ontology'],
+  ],
 };
 
 function jsonResponse(body: unknown) {
@@ -326,5 +339,42 @@ describe('Pending review gives back what it borrows', () => {
 
     expect(screen.getByRole('switch', { name: /hide resolved/i })).toBeDisabled();
     expect(screen.getByText(/unavailable while pending review/i)).toBeInTheDocument();
+  });
+
+  // Restoring must not itself discard a choice. The category chips stay live
+  // inside the pending-review view, so a category picked THERE is a deliberate
+  // choice too -- handing back the pre-entry value would overwrite it with the
+  // same silent-discard behaviour this commit exists to remove.
+  it('keeps a category chosen inside the pending-review view', async () => {
+    stubFetch(() => false);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, retryDelay: 0 } },
+    });
+    const user = userEvent.setup();
+
+    render(
+      <TestApp queryClient={queryClient}>
+        <Reports relayUrl={RELAY_URL} />
+      </TestApp>
+    );
+
+    await user.click(await screen.findByRole('switch', { name: /pending review/i }));
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+    // Pick a category from inside the mode.
+    await user.click(await screen.findByText('Spam'));
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+    // With Spam selected, the other category's chip is gone -- that absence is
+    // what distinguishes "selected" from "nothing selected".
+    expect(screen.queryByText('Harassment')).not.toBeInTheDocument();
+
+    // Leaving must not undo the choice. Asserted by the absence of the other
+    // category's chip: if the filter had been reset, that chip would be back.
+    // ("Spam" itself is ambiguous once the list re-renders, since report rows
+    // carry category badges of their own.)
+    await user.click(screen.getByRole('switch', { name: /pending review/i }));
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    expect(screen.queryByText('Harassment')).not.toBeInTheDocument();
   });
 });

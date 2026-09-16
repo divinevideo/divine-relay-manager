@@ -1581,7 +1581,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                       const previous = prePendingReviewRef.current;
                       if (previous) {
                         setHideResolved(previous.hideResolved);
-                        setFilterCategory(previous.filterCategory);
+                        // Only hand the category back if the moderator did not
+                        // choose one inside the view. The chips stay live in
+                        // there, so an in-view pick is a deliberate choice, and
+                        // overwriting it would be the same silent discard this
+                        // is meant to stop.
+                        if (filterCategory === null) {
+                          setFilterCategory(previous.filterCategory);
+                        }
                         prePendingReviewRef.current = null;
                       }
                     }
