@@ -341,6 +341,43 @@ describe('Pending review gives back what it borrows', () => {
     expect(screen.getByText(/unavailable while pending review/i)).toBeInTheDocument();
   });
 
+  // The other half of the same hand-back: a category chosen on the normal
+  // queue is borrowed by the view, so leaving must return it. The in-view case
+  // below cannot catch a restore that silently stopped restoring.
+  it('hands back a category chosen before entering the pending-review view', async () => {
+    stubFetch(() => false);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, retryDelay: 0 } },
+    });
+    const user = userEvent.setup();
+
+    render(
+      <TestApp queryClient={queryClient}>
+        <Reports relayUrl={RELAY_URL} />
+      </TestApp>
+    );
+
+    // Choose Harassment on the normal queue. The only report in the normal
+    // view is Spam, so selecting Harassment filters it out and the Spam chip
+    // goes away with the rest of the unselected chips.
+    await user.click(await screen.findByText('Harassment'));
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    expect(screen.queryByText('Spam')).not.toBeInTheDocument();
+
+    // Entering the mode clears the filter, so both chips are back.
+    await user.click(await screen.findByRole('switch', { name: /pending review/i }));
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    expect(await screen.findByText('Spam')).toBeInTheDocument();
+
+    // Leaving hands Harassment back: the chips disappear again and Spam is
+    // filtered out, exactly as before entering. Without the restore this
+    // assertion fails on the Spam chip.
+    await user.click(screen.getByRole('switch', { name: /pending review/i }));
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    expect(screen.queryByText('Spam')).not.toBeInTheDocument();
+    expect(screen.getByText('Harassment')).toBeInTheDocument();
+  });
+
   // Restoring must not itself discard a choice. The category chips stay live
   // inside the pending-review view, so a category picked THERE is a deliberate
   // choice too -- handing back the pre-entry value would overwrite it with the
