@@ -1587,6 +1587,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                 id="hide-resolved"
                 checked={hideResolved}
                 onCheckedChange={(checked) => {
+                  // The moderator has stated a preference, so the deep-link
+                  // arrival courtesy is spent. Without this, re-enabling the
+                  // toggle re-arms the effect that just cleared it.
+                  deepLinkSelectedRef.current = false;
                   setHideResolved(checked);
                   // When hiding resolved, turn off pending review filter
                   if (checked) setShowPendingReview(false);

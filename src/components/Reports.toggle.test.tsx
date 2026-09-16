@@ -180,4 +180,88 @@ describe('Hide resolved obeys the moderator', () => {
       expect(screen.getByRole('switch', { name: /hide resolved/i })).not.toBeChecked();
     });
   });
+
+  // Raised by an independent review of the first fix: the deep-link flag is set
+  // for the whole life of that selection, not just the load race the effect is
+  // documented to cover. So the original bug survives for anyone arriving from a
+  // Zendesk link -- the primary entry path -- because actioning the open report
+  // re-triggers the effect and the toggle stops obeying again.
+  it('keeps obeying the moderator after a DEEP-LINKED report is actioned', async () => {
+    let resolved = false;
+    const calls = stubFetch(() => resolved);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, retryDelay: 0 } },
+    });
+    const user = userEvent.setup();
+
+    // Arrive by direct report URL, exactly as a Zendesk link lands.
+    render(
+      <TestApp queryClient={queryClient}>
+        <Reports relayUrl={RELAY_URL} selectedReportId={REPORT.id} />
+      </TestApp>
+    );
+
+    const toggle = await screen.findByRole('switch', { name: /hide resolved/i });
+    expect(toggle).toBeChecked();
+
+    // The moderator actions it. The pane stays open: handleActionComplete
+    // invalidates resolution state without dismissing the selection.
+    const before = calls.resolutionState;
+    resolved = true;
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: ['resolution-state'] });
+    });
+    await waitFor(() => expect(calls.resolutionState).toBeGreaterThan(before));
+
+    // The arrival courtesy fires once: the now-resolved open report unhides.
+    await waitFor(() =>
+      expect(screen.getByRole('switch', { name: /hide resolved/i })).not.toBeChecked()
+    );
+
+    // The moderator puts Hide resolved back on. It must stay on -- this is
+    // where the original bug reappeared for deep-linked reports.
+    await user.click(screen.getByRole('switch', { name: /hide resolved/i }));
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    expect(screen.getByRole('switch', { name: /hide resolved/i })).toBeChecked();
+  });
+
+  // Why the revocation lives in the toggle handler rather than being a one-shot
+  // inside the effect: a moderator can state a preference BEFORE the target
+  // becomes resolved. A one-shot would still be armed at that point and would
+  // override them. Touching the toggle has to spend the arrival courtesy.
+  it('respects a preference stated before the deep-linked report resolves', async () => {
+    let resolved = false;
+    const calls = stubFetch(() => resolved);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, retryDelay: 0 } },
+    });
+    const user = userEvent.setup();
+
+    render(
+      <TestApp queryClient={queryClient}>
+        <Reports relayUrl={RELAY_URL} selectedReportId={REPORT.id} />
+      </TestApp>
+    );
+
+    // Target is not resolved yet, so the arrival courtesy has not fired.
+    const toggle = await screen.findByRole('switch', { name: /hide resolved/i });
+    expect(toggle).toBeChecked();
+
+    // The moderator states a preference: off, then deliberately back on.
+    await user.click(screen.getByRole('switch', { name: /hide resolved/i }));
+    await user.click(screen.getByRole('switch', { name: /hide resolved/i }));
+    expect(screen.getByRole('switch', { name: /hide resolved/i })).toBeChecked();
+
+    // Only now does the open report become resolved.
+    const before = calls.resolutionState;
+    resolved = true;
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: ['resolution-state'] });
+    });
+    await waitFor(() => expect(calls.resolutionState).toBeGreaterThan(before));
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+    // Their stated preference stands.
+    expect(screen.getByRole('switch', { name: /hide resolved/i })).toBeChecked();
+  });
 });
