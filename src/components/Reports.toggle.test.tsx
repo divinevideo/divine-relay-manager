@@ -28,6 +28,10 @@ const REPORT = {
 // A second, always-resolved target. Its presence is what makes the toggle
 // observable: with Hide resolved ON it must be absent, with it OFF present.
 const OTHER = '9'.repeat(64);
+// A separate auto-hidden target, present only so the Pending review control
+// renders (it is gated on pendingReviewCount > 0). Deliberately not one of the
+// reports in the list, so it cannot affect the other assertions.
+const AUTOHIDDEN = '7'.repeat(64);
 const RESOLVED_REPORT = {
   ...REPORT,
   id: 'f'.repeat(64),
@@ -57,7 +61,11 @@ function stubFetch(resolvedNow: () => boolean) {
       calls.resolutionState += 1;
       const resolved = [{ target_type: 'event', target_id: OTHER }];
       if (resolvedNow()) resolved.push({ target_type: 'event', target_id: TARGET });
-      return jsonResponse({ success: true, resolved, states: [] });
+      return jsonResponse({
+        success: true,
+        resolved,
+        states: [{ target_type: 'event', target_id: AUTOHIDDEN, action: 'auto_hidden' }],
+      });
     }
     if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
     return jsonResponse({ success: true });
@@ -263,5 +271,60 @@ describe('Hide resolved obeys the moderator', () => {
 
     // Their stated preference stands.
     expect(screen.getByRole('switch', { name: /hide resolved/i })).toBeChecked();
+  });
+});
+
+describe('Pending review gives back what it borrows', () => {
+  // Turning Pending review on forces Hide resolved off and clears the category
+  // filter, because that view is its own mode. Turning it back off never
+  // restored either, so a moderator's settings were silently spent: they came
+  // back to a queue full of resolved reports they had asked to hide.
+  it('restores Hide resolved when the moderator leaves the pending-review view', async () => {
+    stubFetch(() => false);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, retryDelay: 0 } },
+    });
+    const user = userEvent.setup();
+
+    render(
+      <TestApp queryClient={queryClient}>
+        <Reports relayUrl={RELAY_URL} />
+      </TestApp>
+    );
+
+    const hide = await screen.findByRole('switch', { name: /hide resolved/i });
+    expect(hide).toBeChecked();
+
+    const pending = await screen.findByRole('switch', { name: /pending review/i });
+    await user.click(pending);
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    expect(screen.getByRole('switch', { name: /hide resolved/i })).not.toBeChecked();
+
+    // Leaving the mode hands the setting back.
+    await user.click(screen.getByRole('switch', { name: /pending review/i }));
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    expect(screen.getByRole('switch', { name: /hide resolved/i })).toBeChecked();
+  });
+
+  it('says why Hide resolved is unavailable instead of just dimming it', async () => {
+    // A disabled switch at 50% opacity reads as a live control that ignores
+    // clicks -- which is one of the shapes the "toggles do nothing" report took.
+    stubFetch(() => false);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, retryDelay: 0 } },
+    });
+    const user = userEvent.setup();
+
+    render(
+      <TestApp queryClient={queryClient}>
+        <Reports relayUrl={RELAY_URL} />
+      </TestApp>
+    );
+
+    await user.click(await screen.findByRole('switch', { name: /pending review/i }));
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+    expect(screen.getByRole('switch', { name: /hide resolved/i })).toBeDisabled();
+    expect(screen.getByText(/unavailable while pending review/i)).toBeInTheDocument();
   });
 });

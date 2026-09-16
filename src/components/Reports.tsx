@@ -430,6 +430,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // state: the unhide effect reads it when it runs, and flipping it must not
   // itself cause a render.
   const deepLinkSelectedRef = useRef(false);
+  // What the moderator had set before entering the pending-review view. That
+  // view is its own mode and forces Hide resolved off and the category filter
+  // clear, so leaving it has to hand both back -- otherwise a look at the
+  // auto-hidden queue silently spends settings they chose.
+  const prePendingReviewRef = useRef<{ hideResolved: boolean; filterCategory: string | null } | null>(null);
   const [retryNonce, setRetryNonce] = useState(0); // forces the deep-link effect to re-run on retry
   // Tracks mount state so an in-flight targeted lookup that resolves after the component
   // unmounts (e.g. the moderator switched tabs) can't fire a late navigate() and yank them back.
@@ -1569,8 +1574,16 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                   onCheckedChange={(checked) => {
                     setShowPendingReview(checked);
                     if (checked) {
+                      prePendingReviewRef.current = { hideResolved, filterCategory };
                       setHideResolved(false);
                       setFilterCategory(null);
+                    } else {
+                      const previous = prePendingReviewRef.current;
+                      if (previous) {
+                        setHideResolved(previous.hideResolved);
+                        setFilterCategory(previous.filterCategory);
+                        prePendingReviewRef.current = null;
+                      }
                     }
                   }}
                 />
@@ -1583,6 +1596,18 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                 <CheckCircle className="h-3 w-3 text-green-500" />
                 Hide resolved
               </Label>
+              {/* A switch dimmed to 50% still reads as live, and clicking it
+                  does nothing -- one of the shapes the "toggles don't work"
+                  report took. Say why it is inert. Referenced by
+                  aria-describedby rather than nested in the Label, so the
+                  switch keeps "Hide resolved" as its accessible NAME and this
+                  becomes its description. Nesting it made the control's name
+                  contain "Pending review" and collide with that switch. */}
+              {showPendingReview && (
+                <span id="hide-resolved-disabled-reason" className="text-[10px] italic opacity-70">
+                  unavailable while Pending review is on
+                </span>
+              )}
               <Switch
                 id="hide-resolved"
                 checked={hideResolved}
@@ -1596,6 +1621,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                   if (checked) setShowPendingReview(false);
                 }}
                 disabled={showPendingReview}
+                aria-describedby={showPendingReview ? 'hide-resolved-disabled-reason' : undefined}
               />
             </div>
           </div>
