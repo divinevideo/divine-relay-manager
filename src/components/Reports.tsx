@@ -426,6 +426,15 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // relay confirms the report is absent, 'unavailable' when the relay itself failed.
   const [deepLinkStatus, setDeepLinkStatus] = useState<DeepLinkStatus>('idle');
   const attemptedTargetRef = useRef<string | null>(null); // one targeted fetch per target
+  // True only while the CURRENT selection came from a deep link. A ref, not
+  // state: the unhide effect reads it when it runs, and flipping it must not
+  // itself cause a render.
+  const deepLinkSelectedRef = useRef(false);
+  // What the moderator had set before entering the pending-review view. That
+  // view is its own mode and forces Hide resolved off and the category filter
+  // clear, so leaving it has to hand both back -- otherwise a look at the
+  // auto-hidden queue silently spends settings they chose.
+  const prePendingReviewRef = useRef<{ hideResolved: boolean; filterCategory: string | null } | null>(null);
   const [retryNonce, setRetryNonce] = useState(0); // forces the deep-link effect to re-run on retry
   // Tracks mount state so an in-flight targeted lookup that resolves after the component
   // unmounts (e.g. the moderator switched tabs) can't fire a late navigate() and yank them back.
@@ -1048,6 +1057,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     if (selectedReportId && reports && !selectedReport) {
       const report = reports.find(r => r.id === selectedReportId);
       if (report) {
+        // Arriving at /reports/<id> directly -- a shared link, or a reload after
+        // following a Zendesk deep link -- is a deep-link selection too, and
+        // needs the same unhide. Safe against the bug this scoping fixes:
+        // handleSelectReport(null) navigates to /reports, so the id is gone and
+        // this cannot re-select behind a dismissal.
+        deepLinkSelectedRef.current = true;
         setSelectedReport(report);
       }
     }
@@ -1056,8 +1071,16 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // A deep link can select a report before ban/label/decision queries finish.
   // Re-check the selected target as resolution data arrives so it cannot stay
   // hidden from the list while its detail pane is open.
+  //
+  // Scoped to DEEP-LINK selections only. Unscoped, this fights the moderator:
+  // `resolvedTargets` is a dependency and changes on every poll and after every
+  // action, so opening a report and actioning it force-cleared Hide resolved
+  // underneath them, and clicking it back on re-ran the same branch and cleared
+  // it again. Reloading appeared to fix it only because that drops
+  // selectedReport. #274 made it far more frequent by widening resolvedTargets
+  // from a week to all of history, which is when moderators started reporting it.
   useEffect(() => {
-    if (!hideResolved || !selectedReport) return;
+    if (!hideResolved || !selectedReport || !deepLinkSelectedRef.current) return;
     const target = getReportTarget(selectedReport);
     if (target && isConsolidatedReportResolved(
       { target, authorPubkey: authorByTarget.get(`${target.type}:${target.value}`) },
@@ -1116,6 +1139,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       if (hideResolved && isConsolidatedReportResolved(inBulk, resolvedTargets, bannedPubkeySet)) {
         setHideResolved(false);
       }
+      deepLinkSelectedRef.current = true;
       setSelectedReport(inBulk.latestReport);
       setDeepLinkStatus('found');
       // Navigating to the path (no query string) already clears the deep-link params;
@@ -1170,6 +1194,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           // and select the newest report directly — not via a re-run, so a
           // consolidation mismatch can neither loop nor hang the pane on 'resolving'.
           const latest = pool.reduce((a, b) => (b.created_at > a.created_at ? b : a));
+          deepLinkSelectedRef.current = true;
           setSelectedReport(latest);
           setDeepLinkStatus('found');
           navigate(`/reports/${latest.id}`, { replace: true });
@@ -1189,6 +1214,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     // gesture after a crash, but it doesn't change resetKeys — clear the
     // boundary explicitly (no-op when the pane is healthy).
     detailBoundaryRef.current?.reset();
+    // A manual pick supersedes any deep link, so the unhide effect must not
+    // treat this selection as one.
+    deepLinkSelectedRef.current = false;
     setSelectedReport(report);
     setDeepLinkStatus('idle'); // clear any deep-link fallback once the user interacts
     // Invalidate any in-flight targeted lookup: a user selection/dismissal
@@ -1546,8 +1574,23 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                   onCheckedChange={(checked) => {
                     setShowPendingReview(checked);
                     if (checked) {
+                      prePendingReviewRef.current = { hideResolved, filterCategory };
                       setHideResolved(false);
                       setFilterCategory(null);
+                    } else {
+                      const previous = prePendingReviewRef.current;
+                      if (previous) {
+                        setHideResolved(previous.hideResolved);
+                        // Only hand the category back if the moderator did not
+                        // choose one inside the view. The chips stay live in
+                        // there, so an in-view pick is a deliberate choice, and
+                        // overwriting it would be the same silent discard this
+                        // is meant to stop.
+                        if (filterCategory === null) {
+                          setFilterCategory(previous.filterCategory);
+                        }
+                        prePendingReviewRef.current = null;
+                      }
                     }
                   }}
                 />
@@ -1560,15 +1603,32 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                 <CheckCircle className="h-3 w-3 text-green-500" />
                 Hide resolved
               </Label>
+              {/* A switch dimmed to 50% still reads as live, and clicking it
+                  does nothing -- one of the shapes the "toggles don't work"
+                  report took. Say why it is inert. Referenced by
+                  aria-describedby rather than nested in the Label, so the
+                  switch keeps "Hide resolved" as its accessible NAME and this
+                  becomes its description. Nesting it made the control's name
+                  contain "Pending review" and collide with that switch. */}
+              {showPendingReview && (
+                <span id="hide-resolved-disabled-reason" className="text-[10px] italic opacity-70">
+                  unavailable while Pending review is on
+                </span>
+              )}
               <Switch
                 id="hide-resolved"
                 checked={hideResolved}
                 onCheckedChange={(checked) => {
+                  // The moderator has stated a preference, so the deep-link
+                  // arrival courtesy is spent. Without this, re-enabling the
+                  // toggle re-arms the effect that just cleared it.
+                  deepLinkSelectedRef.current = false;
                   setHideResolved(checked);
                   // When hiding resolved, turn off pending review filter
                   if (checked) setShowPendingReview(false);
                 }}
                 disabled={showPendingReview}
+                aria-describedby={showPendingReview ? 'hide-resolved-disabled-reason' : undefined}
               />
             </div>
           </div>
