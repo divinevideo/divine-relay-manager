@@ -2757,16 +2757,24 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
     expect(body.labelCleanupFailed).toBe(true);
   });
 
-  // The other way the delete can fail: signing itself throws, so the RPC never
-  // gets made. Reaches the flag through the catch rather than the refusal
-  // branch, which is why both cases are pinned separately.
-  it('flags labelCleanupFailed when the banevent call throws', async () => {
-    vi.spyOn(console, 'error').mockImplementation(() => {});
+  // The other way the delete can fail: the relay is unreachable, so the call
+  // rejects instead of answering. banevent goes through the event-visibility
+  // coordinator, which turns that rejection into success:false, so this
+  // reaches the flag through the same branch as a refusal. It is pinned
+  // separately because the transport fails, not the relay's answer.
+  //
+  // The rejection is stubbed. Left unstubbed, the coordinator makes a real
+  // request to relay.example, and a slow DNS miss on a CI runner delays the
+  // second label socket past feedLabelToEachFilter's wait.
+  it('flags labelCleanupFailed when the banevent cannot reach the relay', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      throw new TypeError('fetch failed');
+    }));
 
     const resPromise = worker.fetch(
       reopenRequest(),
-      // No NOSTR_NSEC, so the banevent cannot be signed at all.
-      { ...(reportsEnv as object), DB: reopenDb() } as never,
+      { ...(reportsEnv as object), DB: reopenDb(), NOSTR_NSEC: TEST_NSEC } as never,
       ctx,
     );
     await feedLabelToEachFilter();
