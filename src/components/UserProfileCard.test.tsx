@@ -64,6 +64,8 @@ function stats(recentPosts: NostrEvent[]): UserStats {
     authoredContentIncomplete: false,
     labelsIncomplete: false,
     reportsIncomplete: false,
+    reportsTruncated: false,
+    labelsTruncated: false,
     relayIncomplete: false,
   };
 }
