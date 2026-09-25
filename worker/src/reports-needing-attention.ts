@@ -34,6 +34,18 @@ export function resolvedKeysFrom(
   return keys;
 }
 
+// The complement invariant selectReportsNeedingAttention and
+// getResolvedReportsPage both rest on: a target is handled -- resolved and not
+// still pending review -- or it needs attention, never both, never neither.
+// Extracted so the two endpoints cannot drift apart.
+export function isResolvedForReview(
+  key: string,
+  resolved: ReadonlySet<string>,
+  pendingReview: ReadonlySet<string>,
+): boolean {
+  return resolved.has(key) && !pendingReview.has(key);
+}
+
 // Needing attention = unresolved OR pending review. The union is load-bearing:
 // a target can be both resolved and pending review, and dropping it would leave
 // the pending-review view with a badge and no rows.
@@ -61,7 +73,7 @@ export function selectReportsNeedingAttention<T extends RelayReport>(
       continue;
     }
     const key = reportTargetKey(target);
-    if (resolved.has(key) && !pendingReview.has(key)) {
+    if (isResolvedForReview(key, resolved, pendingReview)) {
       resolvedTargets.add(key);
       continue;
     }
@@ -210,6 +222,9 @@ export async function getResolvedReportsPage(
   params: URLSearchParams,
   db: D1Database | undefined,
   relayUrl: string,
+  // Test-only: lets a fixture shrink the label walk to exercise
+  // resolution_truncated without a large corpus. The route never passes this.
+  labelsPaging?: PagingOptions,
 ): Promise<{ status: number; body: Record<string, unknown> }> {
   if (!db) return failure(503, 'Database not configured');
 
@@ -226,29 +241,43 @@ export async function getResolvedReportsPage(
   try {
     const [page, keys] = await Promise.all([
       relayPageFetcher<RelayReport>(relayUrl, { kinds: [REPORT_KIND] }, limit)(cursor),
-      readResolutionKeys(db, relayUrl),
+      readResolutionKeys(db, relayUrl, labelsPaging),
     ]);
 
     const events = page.filter(report => {
       const target = getReportTarget(report);
       if (!target) return false;
       const key = reportTargetKey(target);
-      return keys.resolved.has(key) && !keys.pendingReview.has(key);
+      return isResolvedForReview(key, keys.resolved, keys.pendingReview);
     });
 
+    // Only a whole, non-negative second anchors a cursor: it is sent back
+    // as `cursor=<n>` and the whole-seconds check above would reject
+    // anything else, ending the walk on an error instead of `done`.
     let oldest = Infinity;
     for (const report of page) {
-      if (typeof report?.created_at === 'number' && report.created_at < oldest) oldest = report.created_at;
+      const createdAt = report?.created_at;
+      if (typeof createdAt === 'number' && Number.isInteger(createdAt) && createdAt >= 0 && createdAt < oldest) {
+        oldest = createdAt;
+      }
     }
 
     // A short page is the relay saying there is nothing older.
     const exhausted = page.length < limit;
     let nextCursor: number | null = null;
     let skippedWithinSecond = false;
+    let done = exhausted;
     if (!exhausted && oldest !== Infinity) {
       if (cursor !== undefined && oldest === cursor) {
-        nextCursor = oldest - 1;
         skippedWithinSecond = true;
+        if (oldest === 0) {
+          // Nothing is older than second 0: there is no cursor left to step
+          // to, but the overflow this second held really was skipped.
+          nextCursor = null;
+          done = true;
+        } else {
+          nextCursor = oldest - 1;
+        }
       } else {
         nextCursor = oldest;
       }
@@ -260,11 +289,15 @@ export async function getResolvedReportsPage(
         success: true,
         events,
         next_cursor: nextCursor,
-        // Only true when the relay ran out. A full page with no usable
-        // created_at leaves no cursor AND is not the end; the screen must say
-        // history could not be followed further, not that it ended.
-        done: exhausted,
+        // Only true when the relay ran out, or second 0 leaves nothing older
+        // to step to. A full page with no usable created_at leaves no cursor
+        // AND is not the end; the screen must say history could not be
+        // followed further, not that it ended.
+        done,
         skipped_within_second: skippedWithinSecond,
+        // The label walk stopped early: a label-resolved target beyond its
+        // cap is missing from this page's resolved set.
+        resolution_truncated: keys.labelsTruncated,
       },
     };
   } catch (error) {

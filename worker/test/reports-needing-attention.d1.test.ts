@@ -7,7 +7,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } 
 import { ensureSchema } from '../src/db';
 import worker from '../src/index';
 import { REPORTS_PAGE_SIZE } from '../src/reports-filter';
-import { getReportsNeedingAttention } from '../src/reports-needing-attention';
+import { getReportsNeedingAttention, getResolvedReportsPage } from '../src/reports-needing-attention';
 
 let mf: Miniflare;
 let DB: D1Database;
@@ -369,5 +369,101 @@ describe('GET /api/reports/resolved', () => {
     expect((await get('/api/reports/resolved', false)).status).toBe(503);
     stubRelay([report(1, 100, [['e', E(1)]])], { closeKind: 1984 });
     expect((await get('/api/reports/resolved')).status).toBe(502);
+  });
+
+  it('fails the request when the label page is unconfirmed', async () => {
+    stubRelay([report(1, 100, [['e', E(1)]])], { closeKind: 1985 });
+    expect((await get('/api/reports/resolved')).status).toBe(502);
+  });
+
+  it('fails the request, not with a shorter list, when the D1 resolved-targets read fails', async () => {
+    stubRelay([report(1, 100, [['e', E(1)]])]);
+    // A fresh, migrated D1 with its `moderation_decisions` table dropped out
+    // from under it afterward, isolated from the shared `DB` so this doesn't
+    // leave the suite's database broken for later tests.
+    const brokenMf = new Miniflare({
+      modules: true,
+      script: 'export default { fetch() { return new Response("ok"); } };',
+      compatibilityDate: '2024-12-01',
+      compatibilityFlags: ['nodejs_compat'],
+      d1Databases: ['DB'],
+    });
+    try {
+      const brokenDb = (await brokenMf.getD1Database('DB')) as unknown as D1Database;
+      await ensureSchema(brokenDb);
+      await brokenDb.exec('DROP TABLE moderation_decisions');
+
+      const { status, body } = await getResolvedReportsPage(new URLSearchParams(), brokenDb, 'wss://relay.divine.video');
+      expect(status).not.toBe(200);
+      expect((body as { success: boolean }).success).toBe(false);
+    } finally {
+      await brokenMf.dispose();
+    }
+  });
+
+  it('falls back to the default page size for a zero, negative, or non-numeric limit', async () => {
+    const filters = stubRelay([]);
+    await get('/api/reports/resolved?limit=0');
+    await get('/api/reports/resolved?limit=-5');
+    await get('/api/reports/resolved?limit=abc');
+    const reportReads = filters.filter(f => f.kinds?.includes(1984));
+    expect(reportReads.map(f => f.limit)).toEqual([200, 200, 200]);
+  });
+
+  it('says not done and gives no cursor when a full page has no usable created_at', async () => {
+    // Neither report has a numeric created_at, so nothing can anchor the next
+    // cursor. That is not the same as the relay running out: `done` must stay
+    // false so the screen says history could not be followed, not that it ended.
+    const bad = (n: number, tags: string[][]) => ({ ...report(n, 100, tags), created_at: 'unknown' as unknown as number });
+    stubRelay([bad(1, [['e', E(1)]]), bad(2, [['e', E(2)]])]);
+
+    const body = await (await get('/api/reports/resolved?limit=2')).json() as {
+      next_cursor: number | null; done: boolean;
+    };
+
+    expect(body.done).toBe(false);
+    expect(body.next_cursor).toBeNull();
+  });
+
+  it('ignores a fractional created_at when choosing the next cursor', async () => {
+    // M1: a non-integer created_at must not become next_cursor, since the
+    // cursor is re-sent as `cursor=<n>` and rejected by the whole-seconds check.
+    stubRelay([
+      report(1, 90.5, [['e', E(1)]]),
+      report(2, 100, [['e', E(2)]]),
+    ]);
+
+    const body = await (await get('/api/reports/resolved?limit=2')).json() as { next_cursor: number | null };
+
+    expect(body.next_cursor).toBe(100);
+  });
+
+  it('says done, with no cursor, when stepping back within second 0', async () => {
+    // M1: a full page all in second 0 cannot step to -1, which the whole-seconds
+    // check would reject. There is nothing older than second 0, so this is the
+    // end, and the skip that produced it is still reported.
+    stubRelay(Array.from({ length: 3 }, (_, i) => report(i, 0, [['e', E(i)]])));
+
+    const body = await (await get('/api/reports/resolved?cursor=0&limit=3')).json() as {
+      next_cursor: number | null; done: boolean; skipped_within_second: boolean;
+    };
+
+    expect(body.next_cursor).toBeNull();
+    expect(body.done).toBe(true);
+    expect(body.skipped_within_second).toBe(true);
+  });
+
+  it('surfaces resolution_truncated when the label walk hits its page cap', async () => {
+    stubRelay([
+      report(1, 100, [['e', E(1)]]),
+      label(1, 50, ['e', E(2)]),
+      label(2, 49, ['e', E(3)]),
+    ]);
+
+    const { body } = await getResolvedReportsPage(
+      new URLSearchParams(), DB, 'wss://relay.divine.video', { pageSize: 1, maxPages: 1 },
+    );
+
+    expect((body as { resolution_truncated: boolean }).resolution_truncated).toBe(true);
   });
 });

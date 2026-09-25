@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolvedKeysFrom, selectReportsNeedingAttention, type RelayReport } from './reports-needing-attention';
+import { isResolvedForReview, resolvedKeysFrom, selectReportsNeedingAttention, type RelayReport } from './reports-needing-attention';
 
 const report = (id: string, tags: string[][]): RelayReport => ({ id, created_at: 1, tags });
 const E1 = '1'.repeat(64);
@@ -75,5 +75,25 @@ describe('selectReportsNeedingAttention', () => {
     );
     expect(result.events).toEqual([]);
     expect(result.counts.resolved).toBe(1);
+  });
+});
+
+describe('isResolvedForReview', () => {
+  // The complement invariant selectReportsNeedingAttention and
+  // getResolvedReportsPage both rest on: a target is handled only when it is
+  // resolved AND not still pending review.
+  it('is true only when resolved and not pending review', () => {
+    const resolved = new Set([`event:${E1}`]);
+    const pendingReview = new Set([`event:${E2}`]);
+
+    expect(isResolvedForReview(`event:${E1}`, resolved, pendingReview)).toBe(true);
+    // Not resolved at all.
+    expect(isResolvedForReview(`event:${E2}`, resolved, pendingReview)).toBe(false);
+
+    resolved.add(`event:${E2}`);
+    // Resolved but still pending review.
+    expect(isResolvedForReview(`event:${E2}`, resolved, pendingReview)).toBe(false);
+    // Neither resolved nor pending review.
+    expect(isResolvedForReview(`pubkey:${P1}`, resolved, pendingReview)).toBe(false);
   });
 });
