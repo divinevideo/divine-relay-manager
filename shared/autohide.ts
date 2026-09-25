@@ -62,3 +62,40 @@ export function isImmediateAutoHideTier(tier: AutoHideTier): boolean {
 export function isThresholdAutoHideTier(tier: AutoHideTier): boolean {
   return tier.kind === 'threshold';
 }
+
+export interface AutoHideStateRowLike {
+  target_type: string;
+  target_id: string;
+  action: string;
+}
+
+// Targets auto-hidden and still waiting for a human: the newest auto-hide state
+// is hidden, unresolved, or a restore that failed. Rows must arrive newest
+// first -- the order getAutoHideStates returns -- because getLatestAutoHideState
+// takes the first state transition per target as authoritative.
+//
+// One definition for the worker, which keeps these targets in the queue
+// payload, and the client, which splits them into the pending-review view. Two
+// copies would let the badge and the list it filters disagree again.
+export function pendingReviewTargetKeys(rows: readonly AutoHideStateRowLike[]): Set<string> {
+  const actionsByTarget = new Map<string, string[]>();
+  for (const row of rows) {
+    const key = `${row.target_type}:${row.target_id}`;
+    const actions = actionsByTarget.get(key);
+    if (actions) actions.push(row.action);
+    else actionsByTarget.set(key, [row.action]);
+  }
+
+  const pending = new Set<string>();
+  for (const [key, actions] of actionsByTarget) {
+    const latest = getLatestAutoHideState(actions);
+    if (
+      latest === AUTO_HIDE_ACTION.hidden
+      || latest === AUTO_HIDE_ACTION.unresolved
+      || latest === AUTO_HIDE_ACTION.restoreFailed
+    ) {
+      pending.add(key);
+    }
+  }
+  return pending;
+}
