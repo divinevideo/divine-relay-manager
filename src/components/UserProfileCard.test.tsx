@@ -129,6 +129,16 @@ describe('UserProfileCard', () => {
     rerender(<UserProfileCard pubkey={PUBKEY} stats={stats(RECENT)} />);
     expect(screen.queryByRole('button', { name: /view activity/i })).not.toBeInTheDocument();
   });
+
+  it('marks a report count that is a floor, not a total', () => {
+    render(<UserProfileCard pubkey={PUBKEY} stats={{ ...stats(RECENT), reportCount: 991, reportsTruncated: true }} />);
+    expect(screen.getByText('991+ reports')).toBeInTheDocument();
+  });
+
+  it('marks a label count that is a floor, not a total', () => {
+    render(<UserProfileCard pubkey={PUBKEY} stats={{ ...stats(RECENT), labelCount: 991, labelsTruncated: true }} />);
+    expect(screen.getByText('991+ labels')).toBeInTheDocument();
+  });
 });
 
 describe('UserProfileCard comment context', () => {

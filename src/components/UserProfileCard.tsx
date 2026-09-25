@@ -19,6 +19,7 @@ import { KindBadge } from "@/components/KindBadge";
 import { getCommentTarget, formatCommentActivity } from "@/lib/commentActivity";
 import { useEventTitles } from "@/hooks/useEventTitles";
 import { CommentParentLink } from "@/components/CommentParentLink";
+import { historyCount } from "@/lib/historyCount";
 
 // Label category colors
 const LABEL_COLORS: Record<string, string> = {
@@ -198,11 +199,11 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
           </div>
           <div className="flex items-center gap-1">
             <Flag className="h-4 w-4 text-muted-foreground" />
-            <span>{stats?.reportCount || 0} reports</span>
+            <span>{historyCount(stats?.reportCount || 0, stats?.reportsTruncated ?? false)} reports</span>
           </div>
           <div className="flex items-center gap-1">
             <Tag className="h-4 w-4 text-muted-foreground" />
-            <span>{stats?.labelCount || 0} labels</span>
+            <span>{historyCount(stats?.labelCount || 0, stats?.labelsTruncated ?? false)} labels</span>
           </div>
           {onViewActivity && (
             <Button

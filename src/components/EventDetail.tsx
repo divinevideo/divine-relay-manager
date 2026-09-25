@@ -37,6 +37,7 @@ import { SceneClassification } from "@/components/SceneClassification";
 import { TranscriptAnalysis } from "@/components/TranscriptAnalysis";
 import { ReporterList } from "@/components/ReporterCard";
 import { extractMediaHashes } from "@/lib/adminApi";
+import { historyCount } from "@/lib/historyCount";
 import { MediaPreview } from "@/components/MediaPreview";
 import {
   User,
@@ -721,11 +722,11 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
                     </span>
                     <span className="flex items-center gap-1">
                       <Flag className="h-3 w-3" />
-                      {userStats.data.reportCount} reports
+                      {historyCount(userStats.data.reportCount, userStats.data.reportsTruncated)} reports
                     </span>
                     <span className="flex items-center gap-1">
                       <Tag className="h-3 w-3" />
-                      {userStats.data.labelCount} labels
+                      {historyCount(userStats.data.labelCount, userStats.data.labelsTruncated)} labels
                     </span>
                   </div>
                 )}
@@ -894,11 +895,11 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
                 </span>
                 <span className="flex items-center gap-1">
                   <Flag className="h-3 w-3" />
-                  {userStats.data.reportCount} reports
+                  {historyCount(userStats.data.reportCount, userStats.data.reportsTruncated)} reports
                 </span>
                 <span className="flex items-center gap-1">
                   <Tag className="h-3 w-3" />
-                  {userStats.data.labelCount} labels
+                  {historyCount(userStats.data.labelCount, userStats.data.labelsTruncated)} labels
                 </span>
               </div>
             )}
