@@ -463,19 +463,31 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
     },
   });
 
-  const handleActionComplete = () => {
+  // Every action in the pane lands here. Only UserActions' ban, unban, suspend
+  // and unsuspend change the account's status, and it says so. The rest (post,
+  // media and bulk content actions, through EventActions, BulkDeleteByKind,
+  // UserActions' bulk jobs and the delete below) call it with no change.
+  const handleActionComplete = (change?: { accountStatusChanged: boolean }) => {
     queryClient.invalidateQueries({ queryKey: ['reports'] });
     queryClient.invalidateQueries({ queryKey: ['banned-events'] });
     queryClient.invalidateQueries({ queryKey: ['banned-users'] });
-    queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
-    queryClient.invalidateQueries({ queryKey: ['suspended-pubkeys'] });
     queryClient.invalidateQueries({ queryKey: ['decisions'] });
     queryClient.invalidateQueries({ queryKey: ['resolution-state'] });
     queryClient.invalidateQueries({ queryKey: ['media-status'] });
     queryClient.invalidateQueries({ queryKey: ['user-stats', context.reportedUser.pubkey] });
     // Reflect any ticket the action auto-closed so the panel flips to "Closed ✓".
     queryClient.invalidateQueries({ queryKey: ['linked-tickets'] });
-    moderationStatus.recheck();
+    if (change?.accountStatusChanged) {
+      // The account status on screen predates the action. This check
+      // re-reads the account lists (banned and suspended pubkeys) itself.
+      moderationStatus.recheckAfterAction();
+    } else {
+      // A content action leaves the account status as it was, so the previous
+      // answer stands while the check runs.
+      queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
+      queryClient.invalidateQueries({ queryKey: ['suspended-pubkeys'] });
+      moderationStatus.recheck();
+    }
     decisionLog.refetch();
   };
 
@@ -639,10 +651,20 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                 {context.target?.type === 'event' ? 'Event' : 'User'}
               </Badge>
               {isUserBanned && (
-                <Badge variant="destructive" className="flex items-center gap-1">
-                  <Ban className="h-3 w-3" />
-                  User Banned
-                </Badge>
+                moderationStatus.isUserBannedStale ? (
+                  // Carried over from a copy of the list that is not current (its
+                  // latest refresh failed, or it has not answered since the latest
+                  // check), and no live answer confirms it.
+                  <Badge variant="outline" className="flex items-center gap-1 text-muted-foreground">
+                    <Ban className="h-3 w-3" />
+                    Banned (last known)
+                  </Badge>
+                ) : (
+                  <Badge variant="destructive" className="flex items-center gap-1">
+                    <Ban className="h-3 w-3" />
+                    User Banned
+                  </Badge>
+                )
               )}
               {isEventDeleted && (
                 <Tooltip>
@@ -651,7 +673,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                       <ShieldX className="h-3 w-3" />
                       {decisionLog.isDeleted ? 'Removed by Moderation'
                         : (decisionLog.isAutoHidden && !decisionLog.isAutoHideRestored) ? 'Auto-Hidden'
-                        : isUserBanned ? 'User Banned'
+                        : isUserBanned ? (moderationStatus.isUserBannedStale ? 'Banned (last known)' : 'User Banned')
                         : moderationStatus.isEventBanned ? 'Event Banned'
                         : 'Not Found on Relay'}
                     </Badge>
@@ -667,7 +689,13 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                     ) : (decisionLog.isAutoHidden && !decisionLog.isAutoHideRestored) ? (
                       <p className="text-xs">Auto-hidden by AI classification</p>
                     ) : isUserBanned ? (
-                      <p className="text-xs">User is banned — event removed as part of ban</p>
+                      <p className="text-xs">
+                        {!moderationStatus.isUserBannedStale
+                          ? 'User is banned — event removed as part of ban'
+                          : moderationStatus.isUserBanChecking
+                            ? 'The user was banned at the last good read, which would explain the removal. Checking the ban now.'
+                            : 'The user was banned at the last good read, which would explain the removal. The latest check could not confirm the ban.'}
+                      </p>
                     ) : moderationStatus.isEventBanned ? (
                       <p className="text-xs">Event is in the relay ban list</p>
                     ) : (
@@ -834,6 +862,8 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                 reportedPubkey={context.reportedUser.pubkey}
                 isEventDeleted={moderationStatus.isEventGone}
                 isUserBanned={moderationStatus.isUserBanned}
+                isUserBannedStale={moderationStatus.isUserBannedStale}
+                isUserBanChecking={moderationStatus.isUserBanChecking}
                 checkedAt={moderationStatus.checkedAt}
                 onRecheck={moderationStatus.recheck}
                 isRechecking={moderationStatus.isChecking}
@@ -903,7 +933,23 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
           {/* User moderation status - for user reports where there's no ThreadContext to show it */}
           {context.target?.type === 'pubkey' && (moderationStatus.checkedAt || moderationStatus.isChecking) && (
             <div className="rounded-md border bg-muted/30 p-3 space-y-2">
-              {moderationStatus.isUserBanned === true ? (
+              {moderationStatus.isUserBanned === true && moderationStatus.isUserBannedStale ? (
+                // Carried over from a copy of the list that is not current (its
+                // latest refresh failed, or it has not answered since the latest
+                // check), and no live answer confirms it. Green would present it
+                // as confirmed, which right after an Unban can be exactly wrong.
+                // Ahead of the checking branch below so the last-known ban stays
+                // on screen; while something that can settle the ban is still
+                // out (every Unban), it has not failed to confirm anything yet.
+                <div className="flex items-center gap-2 p-2 rounded bg-muted">
+                  <Ban className="h-4 w-4 text-muted-foreground shrink-0" />
+                  <span className="text-sm font-medium text-muted-foreground">
+                    {moderationStatus.isUserBanChecking
+                      ? 'Last known: banned. Checking now.'
+                      : 'Last known: banned. The latest check could not confirm it.'}
+                  </span>
+                </div>
+              ) : moderationStatus.isUserBanned === true ? (
                 <div className="flex items-center gap-2 p-2 rounded bg-green-100 dark:bg-green-950/50">
                   <Ban className="h-4 w-4 text-green-600 shrink-0" />
                   <span className="text-sm font-medium text-green-700 dark:text-green-400">
@@ -915,6 +961,17 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                   <User className="h-4 w-4 text-yellow-600 shrink-0" />
                   <span className="text-sm font-medium text-yellow-700 dark:text-yellow-400">
                     User is not banned
+                  </span>
+                </div>
+              ) : moderationStatus.isAccountStatusLoading ? (
+                // Not answered yet. isAccountStatusLoading rather than
+                // isChecking: after a live check that could not answer, the
+                // lists' re-read can still settle the ban, and this keeps the
+                // panel in step with the "Checking account status" note.
+                <div className="flex items-center gap-2 p-2 rounded bg-muted">
+                  <RefreshCw className="h-4 w-4 text-muted-foreground shrink-0 animate-spin" />
+                  <span className="text-sm font-medium text-muted-foreground">
+                    Checking ban status...
                   </span>
                 </div>
               ) : moderationStatus.checkedAt ? (
@@ -1266,8 +1323,13 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
                 pubkey={context.reportedUser.pubkey}
                 context="report"
                 reportCategory={category}
-                isBanned={isUserBanned ?? undefined}
-                isSuspended={moderationStatus.isUserSuspended ?? undefined}
+                // Pass null through. `?? undefined` handed UserActions an
+                // absent prop, which its default turned into a confirmed
+                // "not banned" / "not suspended".
+                isBanned={isUserBanned}
+                isSuspended={moderationStatus.isUserSuspended}
+                statusPending={moderationStatus.isAccountStatusLoading}
+                statusStale={moderationStatus.isUserBannedStale || moderationStatus.isUserSuspendedStale}
                 onActionComplete={handleActionComplete}
               />
             )}

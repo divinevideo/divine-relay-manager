@@ -16,9 +16,37 @@ interface UserActionsProps {
   pubkey: string;
   context?: 'report' | 'age-review' | 'users';
   reportCategory?: string;
-  isBanned?: boolean;
-  isSuspended?: boolean;
-  onActionComplete?: () => void;
+  /**
+   * `null` means the status is not confirmed: its relay list read is still in
+   * flight, or did not complete. That is different from a confirmed `false`.
+   * Callers without any status omit these entirely and get the `false` default.
+   * `statusPending` says which of the two a `null` is.
+   */
+  isBanned?: boolean | null;
+  isSuspended?: boolean | null;
+  /**
+   * The account's status is being read or re-checked. Before a list first
+   * answers, its status is null for the same reason a failed read makes it null,
+   * so this is what separates "still checking" from "tried and could not
+   * confirm". It also shows the note on its own: the report pane passes it
+   * while any check it runs is still out. After a ban, unban, suspend or
+   * unsuspend that matters most, because until that check answers the status
+   * on screen is from before the action.
+   */
+  statusPending?: boolean;
+  /**
+   * A shown ban or suspension is carried over from a copy of the list that is
+   * not current: its latest refresh failed, or it has not answered since the
+   * latest check asked it to re-read. The matching undo is still offered --
+   * that is why it is shown -- but the moderator is told it may no longer be
+   * current.
+   */
+  statusStale?: boolean;
+  /**
+   * `accountStatusChanged`: the action was a ban, unban, suspend or unsuspend.
+   * The bulk content actions leave the account's status as it was.
+   */
+  onActionComplete?: (change: { accountStatusChanged: boolean }) => void;
 }
 
 export function UserActions({
@@ -27,6 +55,8 @@ export function UserActions({
   reportCategory,
   isBanned = false,
   isSuspended = false,
+  statusPending = false,
+  statusStale = false,
   onActionComplete,
 }: UserActionsProps) {
   const { toast } = useToast();
@@ -117,7 +147,7 @@ export function UserActions({
     },
     onSuccess: () => {
       toast({ title: 'User suspended' });
-      onActionComplete?.();
+      onActionComplete?.({ accountStatusChanged: true });
     },
     onError: (error: Error) => {
       if (routeToAgeReviewIfGuarded(error)) return;
@@ -138,7 +168,7 @@ export function UserActions({
     },
     onSuccess: () => {
       toast({ title: 'User unsuspended' });
-      onActionComplete?.();
+      onActionComplete?.({ accountStatusChanged: true });
     },
     onError: (error: Error) => {
       if (routeToAgeReviewIfGuarded(error)) return;
@@ -159,7 +189,7 @@ export function UserActions({
     },
     onSuccess: () => {
       toast({ title: 'User banned from relay' });
-      onActionComplete?.();
+      onActionComplete?.({ accountStatusChanged: true });
     },
     onError: (error: Error) => {
       toast({ title: 'Failed to ban user', description: error.message, variant: 'destructive' });
@@ -179,7 +209,7 @@ export function UserActions({
     },
     onSuccess: () => {
       toast({ title: 'User unbanned' });
-      onActionComplete?.();
+      onActionComplete?.({ accountStatusChanged: true });
     },
     onError: (error: Error) => {
       if (routeToAgeReviewIfGuarded(error)) return;
@@ -220,7 +250,7 @@ export function UserActions({
             moderatorPubkey,
           }))
         .catch((e) => console.warn('[UserActions] bulk audit log failed', e));
-      onActionComplete?.();
+      onActionComplete?.({ accountStatusChanged: false });
     },
     onError: (error) => {
       // A guard-refused enqueue (open age-review case) routes to the case, for
@@ -236,8 +266,22 @@ export function UserActions({
   const anyPending = suspendUserMutation.isPending || unsuspendUserMutation.isPending ||
     banUserMutation.isPending || unbanUserMutation.isPending || bulkJob.isRunning;
 
+  // A default-parameter value applies to `undefined`, not to `null`, so a caller
+  // that passes an explicit null keeps it and lands here.
+  const accountStatusUnconfirmed = isBanned === null || isSuspended === null;
+  const showStatusNote = accountStatusUnconfirmed || statusStale || statusPending;
+
   return (
     <div className="flex flex-wrap gap-2">
+      {showStatusNote && (
+        <p className="basis-full text-xs text-muted-foreground">
+          {statusPending
+            ? 'Checking account status'
+            : accountStatusUnconfirmed
+              ? 'Account status could not be confirmed'
+              : 'Account status may be out of date'}
+        </p>
+      )}
       {isBanned ? (
         <Tooltip>
           <TooltipTrigger asChild>

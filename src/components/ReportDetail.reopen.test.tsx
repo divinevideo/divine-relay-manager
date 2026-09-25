@@ -63,9 +63,11 @@ const decisionLog = vi.hoisted(() => ({
   refetch: vi.fn(),
 }));
 vi.mock('@/hooks/useDecisionLog', () => ({ useDecisionLog: () => decisionLog }));
-vi.mock('@/hooks/useModerationStatus', () => ({
-  useModerationStatus: () => ({ isUserBanned: false, isEventGone: false, recheck: vi.fn() }),
-}));
+const modStatus = vi.hoisted(() => ({ recheck: vi.fn(), recheckAfterAction: vi.fn() }));
+vi.mock('@/hooks/useModerationStatus', async () => {
+  const { moderationStatusMock } = await import('@/test/moderationStatusMock');
+  return { useModerationStatus: () => moderationStatusMock({ ...modStatus }) };
+});
 vi.mock('@/hooks/useBannedEvent', () => ({
   useBannedEvent: () => ({ data: null, isLoading: false }),
 }));
@@ -186,6 +188,19 @@ describe('ReportDetail reopen reporting', () => {
     ));
     expect(api.logDecision).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'auto_hide_restored' }));
     expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Content restored' }));
+  });
+
+  it('runs a plain check once an auto-hide restore lands, leaving the account status as it was', async () => {
+    // A restore changes the post, not the account's ban or suspension, so the
+    // account status on screen is not made pre-action by it.
+    decisionLog.isPendingReview = true;
+    api.restoreEvent.mockResolvedValue({ success: true, recorded: true, reconciled: true });
+    renderDetail();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Restore Content' }));
+
+    await waitFor(() => expect(modStatus.recheck).toHaveBeenCalledTimes(1));
+    expect(modStatus.recheckAfterAction).not.toHaveBeenCalled();
   });
 
   it('offers only restore when automatic restore compensation failed', () => {

@@ -416,4 +416,126 @@ describe('UserActions', () => {
       ),
     );
   });
+
+  // `null` here means a relay list read did not complete, which is not the same
+  // as a confirmed negative. The actions stay live either way -- a failed status
+  // read must not block moderation -- but the moderator is told the status was
+  // never confirmed rather than being shown an implied clean account.
+  describe('unconfirmed account status', () => {
+    it('says so when the suspend status could not be confirmed', () => {
+      renderWithProvider(<UserActions pubkey={PUBKEY} isBanned={false} isSuspended={null} />);
+
+      expect(screen.getByText('Account status could not be confirmed')).toBeInTheDocument();
+    });
+
+    it('says so when the ban status could not be confirmed', () => {
+      renderWithProvider(<UserActions pubkey={PUBKEY} isBanned={null} isSuspended={false} />);
+
+      expect(screen.getByText('Account status could not be confirmed')).toBeInTheDocument();
+    });
+
+    it('stays quiet when both statuses were confirmed', () => {
+      renderWithProvider(<UserActions pubkey={PUBKEY} isBanned={false} isSuspended={false} />);
+
+      expect(screen.queryByText('Account status could not be confirmed')).not.toBeInTheDocument();
+    });
+
+    it('stays quiet when the caller has no status to pass at all', () => {
+      // AgeReviewDetail renders this without status props. Omitted must keep
+      // meaning "not applicable", not "unconfirmed".
+      renderWithProvider(<UserActions pubkey={PUBKEY} />);
+
+      expect(screen.queryByText('Account status could not be confirmed')).not.toBeInTheDocument();
+    });
+
+    it('says it is still checking, not that it failed, while a read is in flight', () => {
+      // Before a list first answers, the status is null for the same reason a
+      // failed read makes it null. "Could not be confirmed" claims a failure
+      // that has not happened yet.
+      renderWithProvider(
+        <UserActions pubkey={PUBKEY} isBanned={null} isSuspended={null} statusPending />,
+      );
+
+      expect(screen.getByText('Checking account status')).toBeInTheDocument();
+      expect(screen.queryByText('Account status could not be confirmed')).not.toBeInTheDocument();
+    });
+
+    it('says it is checking while a re-check of a confirmed status runs', () => {
+      // A re-check runs after every action a moderator takes. Until it answers,
+      // the status on screen is from BEFORE that action -- right after an
+      // Unsuspend it still reads "suspended". Presenting it as current with no
+      // note is the one thing this must not do.
+      renderWithProvider(
+        <UserActions pubkey={PUBKEY} isBanned={false} isSuspended={false} statusPending />,
+      );
+
+      expect(screen.getByText('Checking account status')).toBeInTheDocument();
+      expect(screen.queryByText('Account status could not be confirmed')).not.toBeInTheDocument();
+    });
+
+    it('says a kept status may be out of date when its refresh failed', () => {
+      renderWithProvider(<UserActions pubkey={PUBKEY} isBanned={false} isSuspended statusStale />);
+
+      expect(screen.getByText('Account status may be out of date')).toBeInTheDocument();
+      // The undo stays reachable: that is why the kept status is shown at all.
+      expect(screen.getByRole('button', { name: /Unsuspend User/i })).toBeEnabled();
+    });
+
+    it('says it is checking, not out of date, while a re-check runs', () => {
+      renderWithProvider(<UserActions pubkey={PUBKEY} isBanned={false} isSuspended statusStale statusPending />);
+
+      expect(screen.getByText('Checking account status')).toBeInTheDocument();
+      expect(screen.queryByText('Account status may be out of date')).not.toBeInTheDocument();
+    });
+
+    it('still offers the actions when the status is unconfirmed', () => {
+      renderWithProvider(<UserActions pubkey={PUBKEY} isBanned={null} isSuspended={null} />);
+
+      // A relay blip must not take moderation away.
+      expect(screen.getByText('Account status could not be confirmed')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Ban User/i })).toBeEnabled();
+    });
+  });
+
+  // The report pane treats everything from before an account action as
+  // unconfirmed until its check answers. A content action leaves the account
+  // status as it was, so the caller must be told which kind finished.
+  describe('says whether the finished action changed account status', () => {
+    it('after a suspend', async () => {
+      const onActionComplete = vi.fn();
+      renderWithProvider(<UserActions pubkey={PUBKEY} onActionComplete={onActionComplete} />);
+      fireEvent.click(screen.getByRole('button', { name: /Suspend User/i }));
+      await waitFor(() => expect(onActionComplete).toHaveBeenCalledWith({ accountStatusChanged: true }));
+    });
+
+    it('after an unsuspend', async () => {
+      const onActionComplete = vi.fn();
+      renderWithProvider(<UserActions pubkey={PUBKEY} isSuspended onActionComplete={onActionComplete} />);
+      fireEvent.click(screen.getByRole('button', { name: /Unsuspend User/i }));
+      await waitFor(() => expect(onActionComplete).toHaveBeenCalledWith({ accountStatusChanged: true }));
+    });
+
+    it('after a ban', async () => {
+      const onActionComplete = vi.fn();
+      renderWithProvider(<UserActions pubkey={PUBKEY} onActionComplete={onActionComplete} />);
+      fireEvent.click(screen.getByRole('button', { name: /Ban User/i }));
+      fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Ban User' }));
+      await waitFor(() => expect(onActionComplete).toHaveBeenCalledWith({ accountStatusChanged: true }));
+    });
+
+    it('after an unban', async () => {
+      const onActionComplete = vi.fn();
+      renderWithProvider(<UserActions pubkey={PUBKEY} isBanned onActionComplete={onActionComplete} />);
+      fireEvent.click(screen.getByRole('button', { name: /Unban User/i }));
+      await waitFor(() => expect(onActionComplete).toHaveBeenCalledWith({ accountStatusChanged: true }));
+    });
+
+    it('after a bulk content action, which leaves the account as it was', async () => {
+      const onActionComplete = vi.fn();
+      renderWithProvider(<UserActions pubkey={PUBKEY} onActionComplete={onActionComplete} />);
+      fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
+      await waitFor(() => expect(onActionComplete).toHaveBeenCalledWith({ accountStatusChanged: false }));
+    });
+  });
+
 });

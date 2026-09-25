@@ -107,5 +107,35 @@ describe('ThreadContext moderation status summary', () => {
 
     expect(screen.getByText('User is banned on the relay')).toBeInTheDocument();
   });
-});
 
+  it('does not present a kept ban as confirmed when the latest check failed', () => {
+    renderThread({
+      reportedEvent: undefined, isEventDeleted: false, isUserBanned: true, isUserBannedStale: true, checkedAt: CHECKED,
+    });
+
+    expect(screen.getByText(/Last known: banned/)).toBeInTheDocument();
+    expect(screen.queryByText('User is banned on the relay')).not.toBeInTheDocument();
+  });
+
+  // After a live check that could not answer, the banned list's re-read can
+  // still be out. The check has not failed to confirm the ban yet.
+  it('says a kept ban is being checked, not that the check failed, while the ban is still being checked', () => {
+    renderThread({
+      reportedEvent: undefined, isEventDeleted: false, isUserBanned: true, isUserBannedStale: true,
+      isUserBanChecking: true, checkedAt: CHECKED,
+    });
+
+    expect(screen.getByText('Last known: banned. Checking now.')).toBeInTheDocument();
+    expect(screen.queryByText(/could not confirm/)).not.toBeInTheDocument();
+  });
+
+  it('says the check could not confirm a kept ban once nothing is checking it', () => {
+    renderThread({
+      reportedEvent: undefined, isEventDeleted: false, isUserBanned: true, isUserBannedStale: true,
+      isUserBanChecking: false, checkedAt: CHECKED,
+    });
+
+    expect(screen.getByText('Last known: banned. The latest check could not confirm it.')).toBeInTheDocument();
+    expect(screen.queryByText(/Checking now/)).not.toBeInTheDocument();
+  });
+});
