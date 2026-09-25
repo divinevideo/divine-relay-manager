@@ -10,7 +10,8 @@ import {
 } from './nip86';
 import { ensureSchema } from './db';
 import { backfillProtectedMinorSubjects, handleProtectedMinorServiceRoute } from './protected-minors';
-import { buildReportsFilter } from './reports-filter';
+import { reportsMode } from './reports-filter';
+import { getReportsNeedingAttention, relayPageFetcher } from './reports-needing-attention';
 import { generatePreAuthToken, verifyPreAuthToken, base64UrlEncode } from './zendesk-preauth';
 import { deriveFunnelcakeApiUrl, proxyFunnelcakeRequest } from './funnelcake-proxy';
 import { renderMediaPage } from './media-page';
@@ -649,12 +650,18 @@ export default {
       // nostrify NPool connection caching. The worker opens a fresh WebSocket
       // per request via queryRelay(), so every poll gets current data.
       if (path === '/api/reports' && request.method === 'GET') {
-        const filter = buildReportsFilter(url.searchParams);
+        const mode = reportsMode(url.searchParams);
+        if (mode.kind === 'needs-attention') {
+          const { status, body } = await getReportsNeedingAttention(env.DB, env.RELAY_URL);
+          return proxyJsonResponse(body, status, corsHeaders);
+        }
+        // Legacy bulk mode is unchanged; targeted lookups are uncapped in Task 6.
+        const filter = mode.kind === 'legacy-bulk' ? mode.filter : { ...mode.filter, limit: 200 };
         const result = await queryRelay(filter, env.RELAY_URL);
-        // An unconfirmed read is now a failure inside queryRelay itself, so a
-        // targeted lookup can no longer come back empty-but-unconfirmed here:
-        // that case 502s below, and the client still shows "unavailable"
-        // rather than a false "deleted".
+        // An unconfirmed read is a failure inside queryRelay itself, so a
+        // targeted lookup cannot come back empty-but-unconfirmed here: that case
+        // 502s below, and the client still shows "unavailable" rather than a
+        // false "deleted".
         if (!result.success) {
           return jsonResponse({ success: false, error: result.error }, 502, corsHeaders);
         }
@@ -1886,20 +1893,11 @@ async function handleGetResolutionLabelTargets(
     // empty one. Throwing here is what stops a timed-out page from being folded
     // into the result as "nothing older" -- which would hand the queue a short
     // list of resolved targets and un-hide handled work (#221).
-    const fetchPage = async (until: number | undefined) => {
-      const filter: Record<string, unknown> = {
-        kinds: [1985],
-        '#L': ['moderation/resolution'],
-        limit: pageSize,
-      };
-      if (until !== undefined) filter.until = until;
-
-      const result = await queryRelay(filter, env.RELAY_URL);
-      if (!result.success) {
-        throw new Error(result.error || 'Relay query failed');
-      }
-      return (result.events || []) as unknown as ResolutionLabelEvent[];
-    };
+    const fetchPage = relayPageFetcher<ResolutionLabelEvent>(
+      env.RELAY_URL,
+      { kinds: [1985], '#L': ['moderation/resolution'] },
+      pageSize,
+    );
 
     const { targets, truncated, oldestCovered } = await pageResolutionLabels(fetchPage, { pageSize });
 
