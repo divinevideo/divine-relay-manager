@@ -2,6 +2,7 @@
 // ABOUTME: target keys the reports queue subtracts as already handled.
 
 import { pageByUntil } from '../../shared/relay-pager';
+import { relayPageFetcher } from './relay-profile';
 
 export interface LabelTarget {
   type: 'event' | 'pubkey';
@@ -69,6 +70,23 @@ export async function pageResolutionLabels(
   // reduceLabelsToTargets, which keys by target; it is load-bearing for the
   // report reads that share the pager.
   return { targets: reduceLabelsToTargets(events), truncated, oldestCovered };
+}
+
+// The one relay read for resolution-label targets: kind 1985, tagged
+// `moderation/resolution`. /api/resolution-labels (the client's label source)
+// and the worker's needs-attention subtraction both call this, so the two
+// reads that decide what a label resolved cannot drift apart.
+export function readResolutionLabelTargets(
+  relayUrl: string,
+  paging?: { pageSize?: number; maxPages?: number },
+): Promise<PagedLabelTargets> {
+  const pageSize = paging?.pageSize ?? LABEL_PAGE_SIZE;
+  const fetchPage = relayPageFetcher<ResolutionLabelEvent>(
+    relayUrl,
+    { kinds: [1985], '#L': ['moderation/resolution'] },
+    pageSize,
+  );
+  return pageResolutionLabels(fetchPage, { pageSize, maxPages: paging?.maxPages });
 }
 
 // A label may name an event, an author, or both, and both count independently:

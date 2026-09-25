@@ -7,12 +7,13 @@ export interface ReportTarget {
 }
 
 // The first `e` tag wins, else the first `p` tag, else null. Preserved exactly
-// from the three client copies this replaces (Reports.tsx, ReportDetail.tsx,
-// useReportContext.ts), including that a valueless ["e"] still yields an event
-// target: those copies are presence-based so a malformed report stays visible
-// rather than vanishing from the queue. TODO(#160) decides whether that should
-// change; this module must not change it on its own, or the worker would
-// filter on a different target than the client groups by.
+// from the three client copies this is based on (Reports.tsx, ReportDetail.tsx,
+// useReportContext.ts); the worker uses this module now, and the client adopts
+// it in the queue-screen change. Includes that a valueless ["e"] still yields
+// an event target: those copies are presence-based so a malformed report stays
+// visible rather than vanishing from the queue. TODO(#160) decides whether that
+// should change; this module must not change it on its own, or the worker
+// would filter on a different target than the client groups by.
 //
 // The tags guard is new and behaviour-neutral for the client, whose relay
 // payloads are sanitized to always carry a tags array. The worker reads raw

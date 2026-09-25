@@ -34,7 +34,9 @@ describe('pageByUntil', () => {
   });
 
   it('returns the boundary event once although `until` sends it back twice', async () => {
-    // Review Focus 2: inclusive `until` repeats the oldest event of each page.
+    // The relay's `until` filter is inclusive, so the oldest event of one
+    // page is also the newest event `until` returns on the next page. The
+    // pager must de-duplicate by id rather than double-count it.
     const corpus = Array.from({ length: 7 }, (_, i) => ev(i, 100 - i));
     const { fetchPage } = relay(corpus, 5);
     const result = await pageByUntil(fetchPage, { pageSize: 5, maxPages: 10 });

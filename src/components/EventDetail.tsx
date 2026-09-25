@@ -732,11 +732,15 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
                 )}
 
                 {/* Related Reports Summary */}
-                {relatedReports && relatedReports.length > 0 && (
+                {/* Reads the same source as the stats row above (userStats.reportCount), not
+                    relatedReports: that read is capped at 50 per filter, so on a heavily
+                    reported account it disagreed with the full-history count above it. */}
+                {userStats.data && userStats.data.reportCount > 0 && (
                   <div className="p-2 bg-destructive/10 border border-destructive/20 rounded text-xs">
                     <span className="font-medium text-destructive">
                       <AlertTriangle className="h-3 w-3 inline mr-1" />
-                      This user has {relatedReports.length} report{relatedReports.length !== 1 ? 's' : ''} against them
+                      This user has {historyCount(userStats.data.reportCount, userStats.data.reportsTruncated)} report
+                      {userStats.data.reportsTruncated || userStats.data.reportCount !== 1 ? 's' : ''} against them
                     </span>
                   </div>
                 )}

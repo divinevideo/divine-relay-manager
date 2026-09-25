@@ -685,6 +685,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   );
 
   // Build set of targets pending review (auto-hidden but not yet confirmed/restored)
+  // TODO(#160): adopt pendingReviewTargetKeys from shared/autohide.ts in the queue-screen change.
   const pendingReviewTargets = useMemo(() => {
     const pending = new Set<string>();
     if (!autoHideStates) return pending;
@@ -1339,7 +1340,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // a crashing report degrades to the inline fallback (with the target's
   // identifiers and retry/dismiss) while the reports list stays usable (#158).
   // deepLinkTarget is lowercased where it is built, matching the worker's
-  // reports filter (buildReportsFilter lowercases too), so the per-target
+  // reports filter (reportsMode lowercases too), so the per-target
   // decisions read keys off the same normalized hex an uppercase-hex deep link
   // would otherwise miss.
   const showDeepLinkFallback =

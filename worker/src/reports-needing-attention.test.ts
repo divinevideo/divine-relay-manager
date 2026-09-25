@@ -16,7 +16,9 @@ describe('resolvedKeysFrom', () => {
   });
 
   it('does not change the case of a key', () => {
-    // Global constraint: the worker must key exactly as the client does.
+    // Resolved keys must not be case-normalized: the worker has to key exactly
+    // as the client does, or a mixed-case pubkey/id resolves on one side and
+    // not the other.
     const keys = resolvedKeysFrom([{ target_type: 'pubkey', target_id: 'AbC' }], []);
     expect(keys.has('pubkey:AbC')).toBe(true);
   });
@@ -34,8 +36,9 @@ describe('selectReportsNeedingAttention', () => {
   });
 
   it('keeps a resolved target that is still pending review', () => {
-    // Review Focus 4: the union. Without it the pending-review badge counts a
-    // target the list can never show.
+    // A target can be resolved (it has a decision) yet still pending human
+    // review. Needs-attention must keep it in the union, or the
+    // pending-review badge counts a target the list can never show.
     const result = selectReportsNeedingAttention(
       [report('r1', [['e', E1]])],
       new Set([`event:${E1}`]),
@@ -46,7 +49,8 @@ describe('selectReportsNeedingAttention', () => {
   });
 
   it('keeps every report for a target but counts the target once', () => {
-    // Review Focus 3.
+    // One target reported many times: every report is kept, but the target
+    // is counted once.
     const result = selectReportsNeedingAttention(
       [report('r1', [['e', E1]]), report('r2', [['e', E1]]), report('r3', [['e', E2]]), report('r4', [['e', E2]])],
       new Set([`event:${E2}`]),
@@ -57,7 +61,8 @@ describe('selectReportsNeedingAttention', () => {
   });
 
   it('keeps a report that names no usable target, and does not count it as a target', () => {
-    // Review Focus 1: the client keeps these; they can never be resolved by key.
+    // A report naming no usable target can never be resolved by key, so it
+    // must stay in needs-attention; the client keeps these too.
     const result = selectReportsNeedingAttention(
       [report('r1', [['x', 'y']]), { id: 'r2', created_at: 1 } as unknown as RelayReport],
       new Set(),

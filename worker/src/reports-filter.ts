@@ -8,10 +8,11 @@ export const REPORT_KIND = 1984;
 // Pages-only rollback -- gets today's behaviour.
 const LEGACY_BULK_LIMIT = 200;
 
-// Page size for every walked report read. Measured 2026-09-16: a single read of
-// all 3,756 reports took 1.05-1.60s, so a 2000 page keeps today's corpus to two
-// round trips. The filter's `limit` and the pager's `pageSize` are this one
-// value in each code path; if they drifted, every page would read as short.
+// Page size for every walked report read. Large enough that a full walk of
+// today's corpus takes only a couple of round trips, while staying well
+// inside the relay's per-request limits. The filter's `limit` and the
+// pager's `pageSize` are this one value in each code path; if they drifted,
+// every page would read as short.
 export const REPORTS_PAGE_SIZE = 2000;
 export const REPORTS_MAX_PAGES = 20;
 

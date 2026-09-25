@@ -11,7 +11,7 @@ import {
 import { ensureSchema } from './db';
 import { backfillProtectedMinorSubjects, handleProtectedMinorServiceRoute } from './protected-minors';
 import { reportsMode } from './reports-filter';
-import { getReportsForTarget, getReportsNeedingAttention, getResolvedReportsPage, relayPageFetcher } from './reports-needing-attention';
+import { getReportsForTarget, getReportsNeedingAttention, getResolvedReportsPage } from './reports-needing-attention';
 import { generatePreAuthToken, verifyPreAuthToken, base64UrlEncode } from './zendesk-preauth';
 import { deriveFunnelcakeApiUrl, proxyFunnelcakeRequest } from './funnelcake-proxy';
 import { renderMediaPage } from './media-page';
@@ -44,8 +44,7 @@ import { coordinateEventVisibility, type EventVisibilityResult } from './event-v
 import { markHumanAction, markHumanReviewed } from './human-decision';
 import { AUTO_HIDE_STATE_ACTIONS } from '../../shared/autohide';
 import { getResolvedTargets, getAutoHideStates } from './resolution-state';
-import { pageResolutionLabels, LABEL_PAGE_SIZE } from './resolution-labels';
-import type { ResolutionLabelEvent } from './resolution-labels';
+import { readResolutionLabelTargets } from './resolution-labels';
 import { runRetentionDisposal } from './retention';
 
 const COORDINATED_AUTO_HIDE_ACTIONS = new Set<string>(AUTO_HIDE_STATE_ACTIONS);
@@ -1895,24 +1894,12 @@ async function handleGetResolutionLabelTargets(
   corsHeaders: Record<string, string>
 ): Promise<Response> {
   try {
-    // One value feeds both the relay filter's `limit` and the pager's notion of a
-    // full page. They must not drift: the pager treats a page shorter than
-    // pageSize as "the relay has nothing older", so a filter asking for fewer
-    // events than pageSize would make every page look short and stop the walk
-    // after one -- silently, which is the failure this endpoint exists to remove.
-    const pageSize = LABEL_PAGE_SIZE;
-
     // queryRelay's #186 contract: success:false is an UNCONFIRMED read, not an
-    // empty one. Throwing here is what stops a timed-out page from being folded
-    // into the result as "nothing older" -- which would hand the queue a short
-    // list of resolved targets and un-hide handled work (#221).
-    const fetchPage = relayPageFetcher<ResolutionLabelEvent>(
-      env.RELAY_URL,
-      { kinds: [1985], '#L': ['moderation/resolution'] },
-      pageSize,
-    );
-
-    const { targets, truncated, oldestCovered } = await pageResolutionLabels(fetchPage, { pageSize });
+    // empty one. readResolutionLabelTargets's fetcher throws on it, which is
+    // what stops a timed-out page from being folded into the result as
+    // "nothing older" -- which would hand the queue a short list of resolved
+    // targets and un-hide handled work (#221).
+    const { targets, truncated, oldestCovered } = await readResolutionLabelTargets(env.RELAY_URL);
 
     return proxyJsonResponse({
       success: true,

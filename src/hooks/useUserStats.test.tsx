@@ -99,8 +99,8 @@ describe('useUserStats', () => {
   });
 
   // Reports and labels against an account are the answer to "has this target
-  // been reported before?". They were capped at 50 and the cap was shown as the
-  // total; one production account had 80.
+  // been reported before?". They were capped at 50 and the cap was shown as
+  // the total, which understated a heavily-reported account.
   function relayWith(reportCount: number) {
     const reports = Array.from({ length: reportCount }, (_, i) => ({
       id: i.toString(16).padStart(64, '0'), pubkey: 'f'.repeat(64), created_at: 1_760_000_000 - i,

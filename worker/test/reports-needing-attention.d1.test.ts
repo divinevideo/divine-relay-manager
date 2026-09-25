@@ -237,6 +237,7 @@ describe('GET /api/reports needs-attention mode, against real D1', () => {
       const { status, body } = await getReportsNeedingAttention(brokenDb, 'wss://relay.divine.video');
       expect(status).not.toBe(200);
       expect((body as { success: boolean }).success).toBe(false);
+      expect(body).not.toHaveProperty('events');
     } finally {
       await brokenMf.dispose();
     }
@@ -349,7 +350,10 @@ describe('GET /api/reports/resolved', () => {
   });
 
   it('steps past a second that fills a whole page, and says so', async () => {
-    // Review Focus 5: an `until` cursor cannot advance inside one second.
+    // An `until` cursor cannot advance inside one second: if a page fills
+    // entirely within one second's events, stepping `until` to the last
+    // second read would repeat it. The pager must skip past the whole
+    // second instead and disclose that it did.
     stubRelay(Array.from({ length: 3 }, (_, i) => report(i, 500, [['e', E(i)]])));
     const body = await (await get('/api/reports/resolved?cursor=500&limit=3')).json() as {
       next_cursor: number | null; done: boolean; skipped_within_second: boolean;
@@ -396,6 +400,7 @@ describe('GET /api/reports/resolved', () => {
       const { status, body } = await getResolvedReportsPage(new URLSearchParams(), brokenDb, 'wss://relay.divine.video');
       expect(status).not.toBe(200);
       expect((body as { success: boolean }).success).toBe(false);
+      expect(body).not.toHaveProperty('events');
     } finally {
       await brokenMf.dispose();
     }

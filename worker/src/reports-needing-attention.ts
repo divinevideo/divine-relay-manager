@@ -2,11 +2,11 @@
 // ABOUTME: The worker's half of resolution: decisions and labels. Bans stay client-side.
 
 import { getReportTarget, reportTargetKey } from '../../shared/report-target';
-import { queryRelay } from './relay-profile';
+import { relayPageFetcher } from './relay-profile';
 import { pageByUntil } from '../../shared/relay-pager';
 import { pendingReviewTargetKeys } from '../../shared/autohide';
 import { getAutoHideStates, getResolvedTargets } from './resolution-state';
-import { LABEL_PAGE_SIZE, pageResolutionLabels, type ResolutionLabelEvent } from './resolution-labels';
+import { readResolutionLabelTargets } from './resolution-labels';
 import { REPORT_KIND, REPORTS_MAX_PAGES, REPORTS_PAGE_SIZE } from './reports-filter';
 
 export interface RelayReport {
@@ -84,20 +84,6 @@ export function selectReportsNeedingAttention<T extends RelayReport>(
   return { events, counts: { targets: keptTargets.size, resolved: resolvedTargets.size } };
 }
 
-// One page of a relay filter, cursored by `until`. The filter's `limit` is the
-// `pageSize` the caller hands the pager, so the two cannot drift. Throws on an
-// unconfirmed read (#186): a timed-out page must never be folded in as "nothing
-// older", which would hand the queue a short list.
-export function relayPageFetcher<T>(relayUrl: string, base: Record<string, unknown>, pageSize: number) {
-  return async (until: number | undefined): Promise<T[]> => {
-    const filter: Record<string, unknown> = { ...base, limit: pageSize };
-    if (until !== undefined) filter.until = until;
-    const result = await queryRelay(filter, relayUrl);
-    if (!result.success) throw new Error(result.error || 'Relay query failed');
-    return (result.events || []) as unknown as T[];
-  };
-}
-
 export interface ResolutionKeys {
   resolved: Set<string>;
   pendingReview: Set<string>;
@@ -120,14 +106,10 @@ export async function readResolutionKeys(
   relayUrl: string,
   labelsPaging?: PagingOptions,
 ): Promise<ResolutionKeys> {
-  const labelsPageSize = labelsPaging?.pageSize ?? LABEL_PAGE_SIZE;
   const [decisions, autoHideStates, labels] = await Promise.all([
     getResolvedTargets(db),
     getAutoHideStates(db),
-    pageResolutionLabels(
-      relayPageFetcher<ResolutionLabelEvent>(relayUrl, { kinds: [1985], '#L': ['moderation/resolution'] }, labelsPageSize),
-      { pageSize: labelsPageSize, maxPages: labelsPaging?.maxPages },
-    ),
+    readResolutionLabelTargets(relayUrl, labelsPaging),
   ]);
   return {
     resolved: resolvedKeysFrom(decisions, labels.targets),

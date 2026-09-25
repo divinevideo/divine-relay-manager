@@ -230,7 +230,7 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
                   variant="secondary"
                   className={`${getLabelColor(label)} text-white text-xs`}
                 >
-                  {label} ({count})
+                  {label} ({historyCount(count, stats?.labelsTruncated ?? false)})
                 </Badge>
               ))}
             </div>

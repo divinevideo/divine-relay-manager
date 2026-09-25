@@ -35,9 +35,8 @@ export interface UserStats {
 
 // Report and label history against one account. Paged rather than capped: a
 // cap shown as a total told a moderator 50 when the answer was 80. One page
-// covers every account on the relay but one today (2,046 of 2,047, 2026-09-16),
-// so the common case costs a single read. The page bound is a safety valve that
-// is disclosed, never a silent cap.
+// covers the common case, so a typical account costs a single read. The page
+// bound is a disclosed safety valve, never a silent cap.
 export const HISTORY_PAGE_SIZE = 100;
 export const HISTORY_MAX_PAGES = 10;
 
