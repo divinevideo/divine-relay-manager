@@ -10,9 +10,22 @@ import { RECENT_CONTENT_KINDS } from '@/lib/constants';
 import { AppProvider } from '@/components/AppProvider';
 import { BannedUserCard } from './BannedUserCard';
 
-const relayQuery = vi.hoisted(() => ({ fn: vi.fn() }));
+// The card now reads via queryStrict (nostr.req + EOSE), so the fake relay
+// yields a NIP-01 message stream: an EVENT per fixture then EOSE for a complete
+// read, or CLOSED to simulate a read that never completed.
+const relay = vi.hoisted(() => ({
+  reqCalls: [] as unknown[][],
+  messages: [] as Array<[string, ...unknown[]]>,
+}));
 vi.mock('@nostrify/react', () => ({
-  useNostr: () => ({ nostr: { query: relayQuery.fn } }),
+  useNostr: () => ({
+    nostr: {
+      async *req(filters: unknown[]) {
+        relay.reqCalls.push(filters);
+        for (const m of relay.messages) yield m;
+      },
+    },
+  }),
 }));
 
 // Profile loading is useAuthor's concern (tested elsewhere); these tests
@@ -61,7 +74,13 @@ const AUTHORED: NostrEvent[] = [
 // content query). Returns a copy — the component sorts its results, and a
 // shared-reference fixture would be mutated across tests.
 function setAuthored(events: NostrEvent[]) {
-  relayQuery.fn.mockImplementation(async () => [...events]);
+  relay.messages = [...events.map(e => ['EVENT', 'sub', e] as [string, ...unknown[]]), ['EOSE', 'sub']];
+}
+
+// A read that never completes: the relay closes the subscription. queryStrict
+// treats this as a RelayReadError, so readWithCompleteness reports incomplete.
+function setIncompleteRead() {
+  relay.messages = [['CLOSED', 'sub', 'error: could not complete query']];
 }
 
 function renderCard() {
@@ -80,7 +99,8 @@ function renderCard() {
 }
 
 beforeEach(() => {
-  relayQuery.fn.mockReset();
+  relay.reqCalls.length = 0;
+  relay.messages = [];
   titleCalls.targets.length = 0;
   setAuthored(AUTHORED);
 });
@@ -90,8 +110,8 @@ describe('BannedUserCard', () => {
     renderCard();
 
     await waitFor(() => {
-      const postFilter = relayQuery.fn.mock.calls
-        .map(args => args[0]?.[0])
+      const postFilter = relay.reqCalls
+        .map(filters => (filters as Array<{ kinds?: number[] }>)?.[0])
         .find(f => f?.kinds && !f.kinds.includes(0));
       expect(postFilter?.kinds).toEqual([...RECENT_CONTENT_KINDS]);
       // The kinds this issue exists for must never fall out of the list
@@ -125,6 +145,15 @@ describe('BannedUserCard', () => {
     renderCard();
 
     expect(await screen.findByText(/3 events on relay/)).toBeInTheDocument();
+  });
+
+  it('shows "?" not "0 events" when the relay read did not complete', async () => {
+    setIncompleteRead();
+    renderCard();
+
+    const events = await screen.findByText('? events on relay');
+    expect(events).toHaveAttribute('aria-label', 'events count unavailable, relay read did not complete');
+    expect(screen.queryByText('0 events on relay')).not.toBeInTheDocument();
   });
 
   it('shows the newest 3 events regardless of relay result order', async () => {

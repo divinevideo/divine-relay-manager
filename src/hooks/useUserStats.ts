@@ -4,7 +4,7 @@
 import { useNostr } from "@nostrify/react";
 import { useQuery } from "@tanstack/react-query";
 import { useAppContext } from "@/hooks/useAppContext";
-import { queryStrict, RelayReadError } from "@/lib/relayRead";
+import { queryStrict, readWithCompleteness } from "@/lib/relayRead";
 import { RECENT_CONTENT_KINDS } from "@/lib/constants";
 import type { NostrEvent } from "@nostrify/nostrify";
 
@@ -53,27 +53,15 @@ export function useUserStats(pubkey: string | undefined) {
         };
       }
 
-      // queryStrict throws on anything short of a completed read (timeout, a
-      // relay CLOSED, no route). We record that rather than rethrowing: this
-      // hook has four other consumers whose behaviour is not in scope to change
-      // here, so the failure is reported as a flag and only callers that state
-      // absence to a user act on it. Promoting this to a real error is #210.
-      const read = async (filters: Parameters<typeof queryStrict>[1]) => {
-        try {
-          return {
-            events: await queryStrict(nostr, filters, { signal, timeoutMs: 8000 }),
-            incomplete: false,
-          };
-        } catch (e) {
-          // Only classify as a relay problem what queryStrict actually raises for
-          // one. A TypeError from our own code would otherwise be reported to the
-          // moderator as "relay error, retry" forever, with nothing logged.
-          const isReadFailure =
-            e instanceof RelayReadError || (e instanceof DOMException && e.name === 'AbortError');
-          if (!isReadFailure) throw e;
-          return { events: [], incomplete: true };
-        }
-      };
+      // An incomplete read (timeout, a relay CLOSED, no route) is recorded as a
+      // per-read `incomplete` flag rather than rethrown, and every consumer that
+      // states absence to a moderator honors it (AgeReviewContent, UserProfileCard,
+      // and UserStatsRow in EventDetail) by showing an honest unknown in place of a
+      // confident count. #210 settled on this over promoting the flag to a thrown
+      // error, which would discard partial data and regress the flag-based
+      // age-review surface that already reads these flags off `data`.
+      const read = (filters: Parameters<typeof queryStrict>[1]) =>
+        readWithCompleteness(nostr, filters, { signal, timeoutMs: 8000 });
 
       // Fetch in parallel
       const [authoredContentRead, labelsRead, reportsRead] = await Promise.all([

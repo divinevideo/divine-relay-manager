@@ -85,9 +85,6 @@ export function useReportContext(report: NostrEvent | null) {
   const isLoading = thread.isLoading || reportedUser.isLoading ||
                     userStats.isLoading || reporter.isLoading;
 
-  const error = thread.error || reportedUser.error ||
-                userStats.error || reporter.error;
-
   return {
     target,
     thread: thread.data,
@@ -106,7 +103,6 @@ export function useReportContext(report: NostrEvent | null) {
       isFunnelcakeUser: reporter.data?.isFunnelcakeUser ?? false,
     },
     isLoading,
-    error,
     /** Relay hint from the report's e-tag, if present */
     relayHint,
     /** The report event's tags, for fallback display when content is unavailable */

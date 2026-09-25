@@ -72,6 +72,28 @@ export async function queryStrict(
 }
 
 /**
+ * queryStrict, but surfaces an incomplete read as a flag rather than a throw,
+ * for callers that render partial results as an honest "unknown" instead of
+ * failing. The single place that classifies a relay failure: a RelayReadError
+ * or an abort/timeout is `incomplete`; anything else (a bug in our own code) is
+ * rethrown so it cannot masquerade as "no content".
+ */
+export async function readWithCompleteness(
+  nostr: ReqCapable,
+  filters: NostrFilter[],
+  opts: { signal: AbortSignal; timeoutMs: number },
+): Promise<{ events: NostrEvent[]; incomplete: boolean }> {
+  try {
+    return { events: await queryStrict(nostr, filters, opts), incomplete: false };
+  } catch (e) {
+    const isReadFailure =
+      e instanceof RelayReadError || (e instanceof DOMException && e.name === 'AbortError');
+    if (!isReadFailure) throw e;
+    return { events: [], incomplete: true };
+  }
+}
+
+/**
  * The relay's verbatim answer when an event exists but is not banned. Source:
  * funnelcake `crates/clickhouse/src/management.rs` ("Event not found or not
  * banned"). Anchored deliberately, see below.
