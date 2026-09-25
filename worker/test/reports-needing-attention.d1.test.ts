@@ -278,3 +278,26 @@ describe('GET /api/reports needs-attention mode, against real D1', () => {
     });
   });
 });
+
+describe('GET /api/reports single-target lookups', () => {
+  it('returns every report for one account, past the old cap of 200', async () => {
+    stubRelay(Array.from({ length: 250 }, (_, i) => report(i, 1_760_000_000 - i, [['p', P1]])));
+    const body = await (await get(`/api/reports?pubkey=${P1}`)).json() as { events: RelayEvent[]; truncated: boolean };
+    expect(body.events).toHaveLength(250);
+    expect(body.truncated).toBe(false);
+  });
+
+  it('returns a resolved target, and does not need the database to do it', async () => {
+    // The deep-link fallback relies on this to tell "gone" from "still loading".
+    stubRelay([report(1, 100, [['e', E(1)]]), label(1, 50, ['e', E(1)])]);
+    const res = await get(`/api/reports?event=${E(1)}&needs_attention=1`, false);
+    const body = await res.json() as { events: RelayEvent[] };
+    expect(res.status).toBe(200);
+    expect(body.events.map(e => e.id)).toEqual([id(1)]);
+  });
+
+  it('fails a lookup whose page is unconfirmed', async () => {
+    stubRelay([report(1, 100, [['p', P1]])], { closeKind: 1984 });
+    expect((await get(`/api/reports?pubkey=${P1}`)).status).toBe(502);
+  });
+});

@@ -11,7 +11,7 @@ import {
 import { ensureSchema } from './db';
 import { backfillProtectedMinorSubjects, handleProtectedMinorServiceRoute } from './protected-minors';
 import { reportsMode } from './reports-filter';
-import { getReportsNeedingAttention, relayPageFetcher } from './reports-needing-attention';
+import { getReportsForTarget, getReportsNeedingAttention, relayPageFetcher } from './reports-needing-attention';
 import { generatePreAuthToken, verifyPreAuthToken, base64UrlEncode } from './zendesk-preauth';
 import { deriveFunnelcakeApiUrl, proxyFunnelcakeRequest } from './funnelcake-proxy';
 import { renderMediaPage } from './media-page';
@@ -659,13 +659,16 @@ export default {
           const { status, body } = await getReportsNeedingAttention(env.DB, env.RELAY_URL);
           return proxyJsonResponse(body, status, corsHeaders);
         }
-        // Legacy bulk mode is unchanged; targeted lookups are uncapped in Task 6.
-        const filter = mode.kind === 'legacy-bulk' ? mode.filter : { ...mode.filter, limit: 200 };
-        const result = await queryRelay(filter, env.RELAY_URL);
-        // An unconfirmed read is a failure inside queryRelay itself, so a
-        // targeted lookup cannot come back empty-but-unconfirmed here: that case
-        // 502s below, and the client still shows "unavailable" rather than a
-        // false "deleted".
+        if (mode.kind === 'target') {
+          const { status, body } = await getReportsForTarget(mode.filter, env.RELAY_URL);
+          return proxyJsonResponse(body, status, corsHeaders);
+        }
+        // Legacy bulk mode, unchanged.
+        const result = await queryRelay(mode.filter, env.RELAY_URL);
+        // An unconfirmed read is a failure inside queryRelay itself, so the
+        // legacy bulk read cannot come back empty-but-unconfirmed here: that
+        // case 502s below, and the client still shows "unavailable" rather
+        // than a false "deleted".
         if (!result.success) {
           return jsonResponse({ success: false, error: result.error }, 502, corsHeaders);
         }

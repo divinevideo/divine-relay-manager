@@ -167,3 +167,24 @@ export async function getReportsNeedingAttention(
     return failure(502, error);
   }
 }
+
+// GET /api/reports?event= / ?pubkey=. Every report for one target, never
+// filtered: these lookups find reports for targets the queue has dropped,
+// including resolved ones. Paged, because a 200 cap here was the same silent
+// truncation as everywhere else -- an account with more reports had its
+// history quietly cut.
+export async function getReportsForTarget(
+  filter: Record<string, unknown>,
+  relayUrl: string,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  try {
+    const paged = await pageByUntil<RelayReport>(
+      relayPageFetcher<RelayReport>(relayUrl, filter, REPORTS_PAGE_SIZE),
+      { pageSize: REPORTS_PAGE_SIZE, maxPages: REPORTS_MAX_PAGES },
+    );
+    return { status: 200, body: { success: true, events: paged.events, truncated: paged.truncated } };
+  } catch (error) {
+    console.error('Get reports for target error:', error);
+    return failure(502, error);
+  }
+}
