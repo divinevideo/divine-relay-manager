@@ -12,6 +12,18 @@ interface SummaryResponse {
   riskLevel: 'low' | 'medium' | 'high' | 'critical';
 }
 
+// The moderator-facing history is now complete (useUserStats pages past the
+// old 50 cap), but the AI prompt must not grow with it: a larger prompt costs
+// more and the summarizer never needed more than the newest reports/labels.
+// Kept at the size the prompt always had.
+export const SUMMARY_HISTORY_LIMIT = 50;
+
+// Newest N by created_at, without assuming or mutating the caller's order —
+// previousReports/existingLabels are shared with useUserStats' cache.
+function newestFirst<T extends { created_at: number }>(events: T[] | undefined, limit: number): T[] {
+  return [...(events ?? [])].sort((a, b) => b.created_at - a.created_at).slice(0, limit);
+}
+
 export function useUserSummary(
   pubkey: string | undefined,
   recentPosts: NostrEvent[] | undefined,
@@ -48,15 +60,15 @@ export function useUserSummary(
               kind: e.kind,
             };
           }),
-          existingLabels: existingLabels?.map(e => ({
+          existingLabels: newestFirst(existingLabels, SUMMARY_HISTORY_LIMIT).map(e => ({
             tags: e.tags,
             created_at: e.created_at,
-          })) || [],
-          reportHistory: previousReports?.map(e => ({
+          })),
+          reportHistory: newestFirst(previousReports, SUMMARY_HISTORY_LIMIT).map(e => ({
             content: e.content,
             tags: e.tags,
             created_at: e.created_at,
-          })) || [],
+          })),
         }),
       });
 
