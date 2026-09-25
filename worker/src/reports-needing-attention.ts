@@ -188,3 +188,87 @@ export async function getReportsForTarget(
     return failure(502, error);
   }
 }
+
+export const RESOLVED_PAGE_DEFAULT = 200;
+export const RESOLVED_PAGE_MAX = 500;
+
+// GET /api/reports/resolved?cursor=<unix seconds>&limit=<n>. One page of
+// resolved history, fetched only when a moderator asks for it.
+//
+// Reads one relay page of `limit` reports ending at `cursor` (`until`,
+// inclusive), and returns the ones the worker resolved: resolved by a decision
+// or label, and not pending review -- the exact complement of the
+// needs-attention filter. Targets resolved only by a ban are not here; they
+// arrive in the needs-attention payload and the client filters them.
+//
+// Cursor, not offset: offsets drift as new reports arrive. Because `until` is
+// inclusive, the next page repeats the boundary second, and the client
+// de-duplicates by event id. If one second fills a whole page, the cursor cannot
+// advance; this steps one second back and says so in `skipped_within_second`
+// rather than looping forever or pretending nothing was skipped.
+export async function getResolvedReportsPage(
+  params: URLSearchParams,
+  db: D1Database | undefined,
+  relayUrl: string,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  if (!db) return failure(503, 'Database not configured');
+
+  const cursorParam = params.get('cursor');
+  if (cursorParam !== null && !/^\d+$/.test(cursorParam)) {
+    return failure(400, 'cursor must be a unix timestamp in seconds');
+  }
+  const cursor = cursorParam === null ? undefined : Number(cursorParam);
+  const requested = Number.parseInt(params.get('limit') ?? '', 10);
+  const limit = Number.isFinite(requested) && requested > 0
+    ? Math.min(requested, RESOLVED_PAGE_MAX)
+    : RESOLVED_PAGE_DEFAULT;
+
+  try {
+    const [page, keys] = await Promise.all([
+      relayPageFetcher<RelayReport>(relayUrl, { kinds: [REPORT_KIND] }, limit)(cursor),
+      readResolutionKeys(db, relayUrl),
+    ]);
+
+    const events = page.filter(report => {
+      const target = getReportTarget(report);
+      if (!target) return false;
+      const key = reportTargetKey(target);
+      return keys.resolved.has(key) && !keys.pendingReview.has(key);
+    });
+
+    let oldest = Infinity;
+    for (const report of page) {
+      if (typeof report?.created_at === 'number' && report.created_at < oldest) oldest = report.created_at;
+    }
+
+    // A short page is the relay saying there is nothing older.
+    const exhausted = page.length < limit;
+    let nextCursor: number | null = null;
+    let skippedWithinSecond = false;
+    if (!exhausted && oldest !== Infinity) {
+      if (cursor !== undefined && oldest === cursor) {
+        nextCursor = oldest - 1;
+        skippedWithinSecond = true;
+      } else {
+        nextCursor = oldest;
+      }
+    }
+
+    return {
+      status: 200,
+      body: {
+        success: true,
+        events,
+        next_cursor: nextCursor,
+        // Only true when the relay ran out. A full page with no usable
+        // created_at leaves no cursor AND is not the end; the screen must say
+        // history could not be followed further, not that it ended.
+        done: exhausted,
+        skipped_within_second: skippedWithinSecond,
+      },
+    };
+  } catch (error) {
+    console.error('Get resolved reports page error:', error);
+    return failure(502, error);
+  }
+}

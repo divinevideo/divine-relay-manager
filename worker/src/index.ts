@@ -11,7 +11,7 @@ import {
 import { ensureSchema } from './db';
 import { backfillProtectedMinorSubjects, handleProtectedMinorServiceRoute } from './protected-minors';
 import { reportsMode } from './reports-filter';
-import { getReportsForTarget, getReportsNeedingAttention, relayPageFetcher } from './reports-needing-attention';
+import { getReportsForTarget, getReportsNeedingAttention, getResolvedReportsPage, relayPageFetcher } from './reports-needing-attention';
 import { generatePreAuthToken, verifyPreAuthToken, base64UrlEncode } from './zendesk-preauth';
 import { deriveFunnelcakeApiUrl, proxyFunnelcakeRequest } from './funnelcake-proxy';
 import { renderMediaPage } from './media-page';
@@ -673,6 +673,12 @@ export default {
           return jsonResponse({ success: false, error: result.error }, 502, corsHeaders);
         }
         return jsonResponse({ success: true, events: result.events }, 200, corsHeaders);
+      }
+
+      if (path === '/api/reports/resolved' && request.method === 'GET') {
+        if (env.DB) await ensureSchemaOnce(env.DB);
+        const { status, body } = await getResolvedReportsPage(url.searchParams, env.DB, env.RELAY_URL);
+        return proxyJsonResponse(body, status, corsHeaders);
       }
 
       if (path === '/api/resolution-labels' && request.method === 'GET') {

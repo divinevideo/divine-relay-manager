@@ -301,3 +301,73 @@ describe('GET /api/reports single-target lookups', () => {
     expect((await get(`/api/reports?pubkey=${P1}`)).status).toBe(502);
   });
 });
+
+describe('GET /api/reports/resolved', () => {
+  it('returns only reports the worker resolved, and a cursor when the page was full', async () => {
+    stubRelay([
+      report(1, 100, [['e', E(1)]]),   // resolved by a decision
+      report(2, 99, [['e', E(2)]]),    // unresolved: belongs to the queue, not here
+      report(3, 98, [['e', E(3)]]),    // resolved but pending review: the queue shows it
+      report(4, 97, [['e', E(4)]]),    // resolved by a label
+      label(1, 50, ['e', E(4)]),
+    ]);
+    await decide('event', E(1), 'reviewed');
+    await decide('event', E(3), 'reviewed');
+    await decide('event', E(3), 'auto_hidden');
+
+    const body = await (await get('/api/reports/resolved?limit=4')).json() as {
+      events: RelayEvent[]; next_cursor: number | null; done: boolean; skipped_within_second: boolean;
+    };
+
+    expect(body.events.map(e => e.id)).toEqual([id(1), id(4)]);
+    expect(body.next_cursor).toBe(97);
+    expect(body.done).toBe(false);
+    expect(body.skipped_within_second).toBe(false);
+  });
+
+  it('reads the page ending at the cursor, and says done when the relay runs out', async () => {
+    const filters = stubRelay([report(1, 100, [['e', E(1)]]), report(2, 90, [['e', E(2)]])]);
+    await decide('event', E(2), 'reviewed');
+
+    const body = await (await get('/api/reports/resolved?cursor=95&limit=10')).json() as {
+      events: RelayEvent[]; next_cursor: number | null; done: boolean;
+    };
+
+    const reportRead = filters.find(f => f.kinds?.includes(1984))!;
+    expect(reportRead).toEqual({ kinds: [1984], limit: 10, until: 95 });
+    expect(body.events.map(e => e.id)).toEqual([id(2)]);
+    expect(body.next_cursor).toBeNull();
+    expect(body.done).toBe(true);
+  });
+
+  it('defaults to 200 per page and never reads more than 500', async () => {
+    const filters = stubRelay([]);
+    await get('/api/reports/resolved');
+    await get('/api/reports/resolved?limit=9000');
+    const reportReads = filters.filter(f => f.kinds?.includes(1984));
+    expect(reportReads.map(f => f.limit)).toEqual([200, 500]);
+  });
+
+  it('steps past a second that fills a whole page, and says so', async () => {
+    // Review Focus 5: an `until` cursor cannot advance inside one second.
+    stubRelay(Array.from({ length: 3 }, (_, i) => report(i, 500, [['e', E(i)]])));
+    const body = await (await get('/api/reports/resolved?cursor=500&limit=3')).json() as {
+      next_cursor: number | null; done: boolean; skipped_within_second: boolean;
+    };
+    expect(body.next_cursor).toBe(499);
+    expect(body.done).toBe(false);
+    expect(body.skipped_within_second).toBe(true);
+  });
+
+  it('rejects a cursor that is not a whole number of seconds', async () => {
+    stubRelay([]);
+    expect((await get('/api/reports/resolved?cursor=yesterday')).status).toBe(400);
+  });
+
+  it('fails without the database, and on an unconfirmed page', async () => {
+    stubRelay([]);
+    expect((await get('/api/reports/resolved', false)).status).toBe(503);
+    stubRelay([report(1, 100, [['e', E(1)]])], { closeKind: 1984 });
+    expect((await get('/api/reports/resolved')).status).toBe(502);
+  });
+});
