@@ -7,6 +7,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } 
 import { ensureSchema } from '../src/db';
 import worker from '../src/index';
 import { REPORTS_PAGE_SIZE } from '../src/reports-filter';
+import { getReportsNeedingAttention } from '../src/reports-needing-attention';
 
 let mf: Miniflare;
 let DB: D1Database;
@@ -174,5 +175,106 @@ describe('GET /api/reports needs-attention mode, against real D1', () => {
     stubRelay([report(1, 100, [['e', E(1)]])]);
     const res = await get('/api/reports?needs_attention=1', false);
     expect(res.status).toBe(503);
+  });
+
+  it('creates the D1 schema on a database that has never been migrated, matching handleGetResolutionState', async () => {
+    stubRelay([]);
+    // A separate, unmigrated D1 -- ensureSchema was never called on it, unlike
+    // the shared `DB` this file's beforeAll sets up. `schemaReady` in index.ts
+    // is module-level, so once any earlier test reaches ensureSchemaOnce it
+    // becomes a no-op for every request after -- including one against a
+    // different, unmigrated database. vi.resetModules() forces a cold isolate
+    // so this only passes if THIS request is what creates the schema.
+    const freshMf = new Miniflare({
+      modules: true,
+      script: 'export default { fetch() { return new Response("ok"); } };',
+      compatibilityDate: '2024-12-01',
+      compatibilityFlags: ['nodejs_compat'],
+      d1Databases: ['DB'],
+    });
+    try {
+      const freshDb = (await freshMf.getD1Database('DB')) as unknown as D1Database;
+      vi.resetModules();
+      const freshWorker = (await import('../src/index')).default;
+      const res = await freshWorker.fetch(
+        new Request('https://api.example/api/reports?needs_attention=1', {
+          headers: { 'X-Admin-Key': 'test-admin-key' },
+        }),
+        {
+          ALLOWED_ORIGINS: 'https://app.divine.video',
+          RELAY_URL: 'wss://relay.divine.video',
+          ADMIN_API_KEY: 'test-admin-key',
+          DB: freshDb,
+        } as never,
+        ctx,
+      );
+      expect(res.status).toBe(200);
+      const body = await res.json() as { success: boolean; events: RelayEvent[] };
+      expect(body.success).toBe(true);
+      expect(body.events).toEqual([]);
+    } finally {
+      await freshMf.dispose();
+    }
+  });
+
+  it('fails the request, not with a shorter list, when the D1 resolved-targets read fails', async () => {
+    stubRelay([report(1, 100, [['e', E(1)]])]);
+    // A fresh, migrated D1 with its `moderation_decisions` table dropped out
+    // from under it afterward, isolated from the shared `DB` so this doesn't
+    // leave the suite's database broken for later tests.
+    const brokenMf = new Miniflare({
+      modules: true,
+      script: 'export default { fetch() { return new Response("ok"); } };',
+      compatibilityDate: '2024-12-01',
+      compatibilityFlags: ['nodejs_compat'],
+      d1Databases: ['DB'],
+    });
+    try {
+      const brokenDb = (await brokenMf.getD1Database('DB')) as unknown as D1Database;
+      await ensureSchema(brokenDb);
+      await brokenDb.exec('DROP TABLE moderation_decisions');
+
+      const { status, body } = await getReportsNeedingAttention(brokenDb, 'wss://relay.divine.video');
+      expect(status).not.toBe(200);
+      expect((body as { success: boolean }).success).toBe(false);
+    } finally {
+      await brokenMf.dispose();
+    }
+  });
+
+  describe('truncation flags point in the direction that failed', () => {
+    it('a report walk that hits its page cap sets truncated but not resolution_truncated', async () => {
+      // Page size 2, one page allowed: the first page comes back full (2 of 3),
+      // so the walk stops at its cap rather than the relay running dry.
+      stubRelay([
+        report(1, 100, [['e', E(1)]]),
+        report(2, 99, [['e', E(2)]]),
+        report(3, 98, [['e', E(3)]]),
+      ]);
+
+      const { body } = await getReportsNeedingAttention(DB, 'wss://relay.divine.video', {
+        reportsPaging: { pageSize: 2, maxPages: 1 },
+      });
+
+      expect(body.truncated).toBe(true);
+      expect(body.resolution_truncated).toBe(false);
+    });
+
+    it('a label walk that hits its page cap sets resolution_truncated but not truncated', async () => {
+      // Report corpus fits in the default single page; the label corpus does
+      // not fit in a one-event, one-page cap, so only the label walk stops early.
+      stubRelay([
+        report(1, 100, [['e', E(1)]]),
+        label(1, 50, ['e', E(2)]),
+        label(2, 49, ['e', E(3)]),
+      ]);
+
+      const { body } = await getReportsNeedingAttention(DB, 'wss://relay.divine.video', {
+        labelsPaging: { pageSize: 1, maxPages: 1 },
+      });
+
+      expect(body.truncated).toBe(false);
+      expect(body.resolution_truncated).toBe(true);
+    });
   });
 });

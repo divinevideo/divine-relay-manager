@@ -92,16 +92,29 @@ export interface ResolutionKeys {
   labelsTruncated: boolean;
 }
 
+// Page size and page cap for a walked relay read. Optional so a caller can
+// shrink both to exercise truncation against a small fixture; the route never
+// passes this, so its behaviour is unchanged.
+export interface PagingOptions {
+  pageSize?: number;
+  maxPages?: number;
+}
+
 // Everything the worker knows about which targets are handled: human decisions
 // and auto-hide states from D1, resolution labels from the relay.
 // getAutoHideStates returns newest first, which pendingReviewTargetKeys needs.
-export async function readResolutionKeys(db: D1Database, relayUrl: string): Promise<ResolutionKeys> {
+export async function readResolutionKeys(
+  db: D1Database,
+  relayUrl: string,
+  labelsPaging?: PagingOptions,
+): Promise<ResolutionKeys> {
+  const labelsPageSize = labelsPaging?.pageSize ?? LABEL_PAGE_SIZE;
   const [decisions, autoHideStates, labels] = await Promise.all([
     getResolvedTargets(db),
     getAutoHideStates(db),
     pageResolutionLabels(
-      relayPageFetcher<ResolutionLabelEvent>(relayUrl, { kinds: [1985], '#L': ['moderation/resolution'] }, LABEL_PAGE_SIZE),
-      { pageSize: LABEL_PAGE_SIZE },
+      relayPageFetcher<ResolutionLabelEvent>(relayUrl, { kinds: [1985], '#L': ['moderation/resolution'] }, labelsPageSize),
+      { pageSize: labelsPageSize, maxPages: labelsPaging?.maxPages },
     ),
   ]);
   return {
@@ -122,15 +135,18 @@ function failure(status: number, error: unknown) {
 export async function getReportsNeedingAttention(
   db: D1Database | undefined,
   relayUrl: string,
+  opts?: { reportsPaging?: PagingOptions; labelsPaging?: PagingOptions },
 ): Promise<{ status: number; body: Record<string, unknown> }> {
   if (!db) return failure(503, 'Database not configured');
+  const reportsPageSize = opts?.reportsPaging?.pageSize ?? REPORTS_PAGE_SIZE;
+  const reportsMaxPages = opts?.reportsPaging?.maxPages ?? REPORTS_MAX_PAGES;
   try {
     const [reports, keys] = await Promise.all([
       pageByUntil<RelayReport>(
-        relayPageFetcher<RelayReport>(relayUrl, { kinds: [REPORT_KIND] }, REPORTS_PAGE_SIZE),
-        { pageSize: REPORTS_PAGE_SIZE, maxPages: REPORTS_MAX_PAGES },
+        relayPageFetcher<RelayReport>(relayUrl, { kinds: [REPORT_KIND] }, reportsPageSize),
+        { pageSize: reportsPageSize, maxPages: reportsMaxPages },
       ),
-      readResolutionKeys(db, relayUrl),
+      readResolutionKeys(db, relayUrl, opts?.labelsPaging),
     ]);
     const { events, counts } = selectReportsNeedingAttention(reports.events, keys.resolved, keys.pendingReview);
     return {
@@ -147,6 +163,7 @@ export async function getReportsNeedingAttention(
       },
     };
   } catch (error) {
+    console.error('Get reports needing attention error:', error);
     return failure(502, error);
   }
 }

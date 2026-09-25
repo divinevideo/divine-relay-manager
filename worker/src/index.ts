@@ -652,6 +652,10 @@ export default {
       if (path === '/api/reports' && request.method === 'GET') {
         const mode = reportsMode(url.searchParams);
         if (mode.kind === 'needs-attention') {
+          if (!env.DB) {
+            return jsonResponse({ success: false, error: 'Database not configured' }, 503, corsHeaders);
+          }
+          await ensureSchemaOnce(env.DB);
           const { status, body } = await getReportsNeedingAttention(env.DB, env.RELAY_URL);
           return proxyJsonResponse(body, status, corsHeaders);
         }

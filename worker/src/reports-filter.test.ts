@@ -32,4 +32,11 @@ describe('reportsMode', () => {
     // A deep link to a resolved report must still find it.
     expect(reportsMode(params(`event=${'a'.repeat(64)}&needs_attention=1`)).kind).toBe('target');
   });
+
+  it('prefers event over pubkey when both are present', () => {
+    expect(reportsMode(params(`event=${'a'.repeat(64)}&pubkey=${'b'.repeat(64)}`))).toEqual({
+      kind: 'target',
+      filter: { kinds: [REPORT_KIND], '#e': ['a'.repeat(64)] },
+    });
+  });
 });
