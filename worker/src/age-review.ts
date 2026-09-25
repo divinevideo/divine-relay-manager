@@ -2151,7 +2151,7 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
   }
   const abandoned: string[] = [];
   for (const leg of staleLegs) {
-    let result: { success: boolean; error?: string } | undefined;
+    let result: { success: boolean; error?: string; notFound?: boolean } | undefined;
     try {
       result = leg.intent === 'suspended' ? await suspendUser(leg.pubkey, 'age_review', env)
         : leg.intent === 'banned' ? await banUser(leg.pubkey, 'age_review_denied', env)
@@ -2168,13 +2168,10 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
     }
     // A 404 means the account is not Keycast-managed, so there is no state to
     // converge on and no retry that could ever succeed. Settle it (#269).
-    // TODO(#123): read `result.notFound` directly once #270 lands the field on
-    // KeycastResult. Structural read until then so this does not stack on it.
-    const notApplicable = (result as { notFound?: boolean }).notFound === true;
     // Outside the try: a D1 failure here must not be counted as a Keycast
     // failure, and must not burn the budget of a call that actually succeeded.
     try {
-      if (result.success || notApplicable) {
+      if (result.success || result.notFound) {
         // Intent-guarded: a moderator may have superseded this intent while the
         // call was in flight, and a stale success is not convergence.
         await resolveKeycastLeg(env.DB, leg.pubkey, leg.intent);

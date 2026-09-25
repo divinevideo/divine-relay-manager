@@ -131,24 +131,27 @@ describe('cron re-drive', () => {
     expect(JSON.parse(bodies[0]).status).toBe('active');
   });
 
-  // An account Keycast does not manage answers 404 forever, so the one thing that
-  // must hold is that it cannot churn without bound. How it is bounded differs by
-  // branch and this assertion deliberately spans both: on this branch the 404 is
-  // an ordinary failure and the attempt budget bounds it; once #270 lands the
-  // not-found discriminator, the loop (which already reads the field) settles it
-  // on the first tick. Asserting the exact counter instead would pass here and
-  // turn main red the moment both merge, with no merge conflict to warn anyone.
-  it('never lets an account Keycast does not manage churn without bound', async () => {
+  // An account Keycast does not manage answers 404 forever. #270 landed the
+  // not-found discriminator, so the re-drive settles such a leg on the first
+  // tick rather than spending its retry budget reaching the same answer.
+  //
+  // This assertion used to span both worlds, tolerating either outcome so it
+  // could not turn main red while #270 was unmerged. That tolerance has outlived
+  // its purpose: with #270 in the base it let the settle be deleted without any
+  // test noticing.
+  it('settles an account Keycast does not manage on the first tick', async () => {
     await recordFailedKeycastLeg(DB, PK, 'suspended', 'boom', 'case-1');
-    mockKeycast(() => new Response(JSON.stringify({ error: 'user not found' }), { status: 404 }));
+    const keycast = mockKeycast(() => new Response(JSON.stringify({ error: 'user not found' }), { status: 404 }));
 
     await checkAgeReviewDeadlines(cronEnv);
 
     const row = await rowFor(PK);
-    // Either settled outright, or consuming its budget towards abandonment.
-    expect(['resolved', 'failed']).toContain(row!.state);
-    if (row!.state === 'failed') expect(row!.attempts).toBeGreaterThan(0);
-    else expect(await pendingKeycastLegs(DB)).toEqual([]);
+    expect(row!.state).toBe('resolved');
+    expect(row!.attempts).toBe(0);
+    expect(await pendingKeycastLegs(DB)).toEqual([]);
+    // Settled means settled: a second tick must not call Keycast again.
+    await checkAgeReviewDeadlines(cronEnv);
+    expect(keycast.calls()).toBe(1);
   });
 
   it('counts an attempt and keeps the leg pending while Keycast keeps failing', async () => {
