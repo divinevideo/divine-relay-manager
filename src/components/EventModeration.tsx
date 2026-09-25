@@ -13,6 +13,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { useToast } from "@/hooks/useToast";
 import { Shield, ShieldCheck, ShieldX, Plus, AlertTriangle, CheckCircle, XCircle, Loader2 } from "lucide-react";
 import { useAdminApi } from "@/hooks/useAdminApi";
+import { useBannedEvents } from "@/hooks/useRelayBanLists";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { EventActions } from "@/components/EventActions";
 
@@ -48,10 +49,7 @@ export function EventModeration() {
   });
 
   // Query for banned events
-  const { data: bannedEvents, isLoading: loadingBanned, error: bannedError } = useQuery({
-    queryKey: ['banned-events'],
-    queryFn: () => callRelayRpc<BannedEvent[]>('listbannedevents'),
-  });
+  const { data: bannedEvents, isLoading: loadingBanned, error: bannedError } = useBannedEvents();
 
   // Mutation for allowing events
   const allowEventMutation = useMutation({

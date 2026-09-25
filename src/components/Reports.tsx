@@ -48,7 +48,8 @@ import { ReportDetailErrorFallback } from "@/components/ReportDetailErrorFallbac
 import { DeepLinkFallback } from "@/components/DeepLinkFallback";
 import { classifyTargetedFetch, reportsMatchingTarget, type DeepLinkStatus } from "@/lib/deepLinkResolution";
 import { useAdminApi } from "@/hooks/useAdminApi";
-import { AUTO_HIDE_ACTION, CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, getLatestAutoHideState, getReportCategory, getReportTargetIds } from "@/lib/constants";
+import { useBannedPubkeys, useBannedEvents } from "@/hooks/useRelayBanLists";
+import { AUTO_HIDE_ACTION, CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, RESOLUTION_READ_TIMEOUT_MS, getLatestAutoHideState, getReportCategory, getReportTargetIds } from "@/lib/constants";
 import { isConsolidatedReportResolved } from "@/lib/reportResolution";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
@@ -86,16 +87,6 @@ const SORT_OPTIONS: { value: SortOption; label: string }[] = [
 ];
 
 const MEDIUM_PRIORITY_CATEGORIES = ['doxxing_pii', 'malware_scam', 'illegal_goods'];
-
-// Timeout for the four resolution reads that build resolvedTargets, replacing
-// adminApi's 30s API_TIMEOUT_MS for these calls only. On a COLD load there is no
-// error to latch onto yet, so every escape hatch this page offers sits behind the
-// loading skeleton: a source that times out at 30s and then retries strands the
-// moderator on a bare skeleton for a minute with nothing to click, and any of the
-// four can cause it. A 30s bound buys nothing here anyway, being twice the 15s
-// poll interval that would have recovered the read on its own (#221). Scoped to
-// these reads: one-shot moderation actions still want the generous default.
-const RESOLUTION_READ_TIMEOUT_MS = 8_000;
 
 // The four polled reads that build resolvedTargets. Named at module scope so the
 // acknowledged-override state can be keyed by it.
@@ -395,7 +386,7 @@ function IndividualReportItem({
 export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const { listBannedPubkeys, listBannedEvents, getDecisions, fetchReports, fetchReportsByTarget, fetchResolutionState, fetchResolutionLabelTargets } = useAdminApi();
+  const { getDecisions, fetchReports, fetchReportsByTarget, fetchResolutionState, fetchResolutionLabelTargets } = useAdminApi();
   const { config, updateConfig } = useAppContext();
   const queryClient = useQueryClient();
   const isMobile = useIsMobile();
@@ -494,20 +485,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     isPending: bannedPubkeysPending,
     fetchStatus: bannedPubkeysFetchStatus,
     errorUpdateCount: bannedPubkeysErrorUpdateCount,
-  } = useQuery({
-    queryKey: ['banned-pubkeys'],
-    queryFn: async () => {
-      try {
-        return await listBannedPubkeys({ timeoutMs: RESOLUTION_READ_TIMEOUT_MS });
-      } catch (error) {
-        console.warn('NIP-86 listbannedpubkeys failed:', error);
-        throw error; // let React Query handle it, but retry: 1 + placeholderData keeps UI stable
-      }
-    },
+  } = useBannedPubkeys({
+    // 0 on a deep link so an arriving report reads current ban status rather
+    // than a cached one.
     staleTime: hasDeepLinkParams ? 0 : 30 * 1000,
     refetchInterval: 15 * 1000,
-    placeholderData: (previousData) => previousData,
-    retry: 1,
   });
 
   // Query banned/deleted events from relay (NIP-86 RPC)
@@ -518,21 +500,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     isPending: bannedEventsPending,
     fetchStatus: bannedEventsFetchStatus,
     errorUpdateCount: bannedEventsErrorUpdateCount,
-  } = useQuery({
-    queryKey: ['banned-events'],
-    queryFn: async () => {
-      try {
-        return await listBannedEvents({ timeoutMs: RESOLUTION_READ_TIMEOUT_MS });
-      } catch (error) {
-        console.warn('NIP-86 listbannedevents failed:', error);
-        throw error;
-      }
-    },
-    staleTime: 30 * 1000,
-    refetchInterval: 15 * 1000,
-    placeholderData: (previousData) => previousData,
-    retry: 1,
-  });
+  } = useBannedEvents({ refetchInterval: 15 * 1000 });
 
   // Query all moderation decisions from our D1 database.
   // retry: 1, not 0. The original reasoning still holds (stacking retries on a

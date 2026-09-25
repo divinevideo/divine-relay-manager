@@ -55,9 +55,10 @@ export function useAdminApi() {
       adminApi.allowEvent(apiUrl, eventId),
     unbanPubkey: (pubkey: string) =>
       adminApi.unbanPubkey(apiUrl, pubkey),
-    // opts threads a per-call timeout through. Reports' 15s-polled resolution
-    // reads pass a shorter bound than API_TIMEOUT_MS; every other caller omits
-    // it and keeps the default (#221).
+    // opts threads a per-call timeout through. The reports queue's resolution
+    // reads, and every read of the relay lists through useRelayBanLists, pass
+    // RESOLUTION_READ_TIMEOUT_MS; other callers omit it and keep the default
+    // (#221).
     listBannedPubkeys: (opts?: { timeoutMs?: number }) =>
       adminApi.listBannedPubkeys(apiUrl, opts),
     listBannedEvents: (opts?: { timeoutMs?: number }) =>
@@ -66,8 +67,8 @@ export function useAdminApi() {
       adminApi.suspendPubkey(apiUrl, pubkey, reason),
     unsuspendPubkey: (pubkey: string) =>
       adminApi.unsuspendPubkey(apiUrl, pubkey),
-    listSuspendedPubkeys: () =>
-      adminApi.listSuspendedPubkeys(apiUrl),
+    listSuspendedPubkeys: (opts?: { timeoutMs?: number }) =>
+      adminApi.listSuspendedPubkeys(apiUrl, opts),
 
     // Server-side relay queries (replaces browser WebSocket for freshness)
     fetchReports: () =>
