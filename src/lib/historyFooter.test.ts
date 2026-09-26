@@ -9,6 +9,7 @@ const base: HistoryFooterInput = {
   refreshFailed: false,
   lastPage: { done: false, nextCursor: 1751000000 },
   loadingMore: false,
+  busy: false,
   loadMoreFailed: false,
   resolvedRowsShown: 3,
   filterActive: false,
@@ -27,7 +28,7 @@ describe('historyFooterState', () => {
 
   it('offers more while the last page left a cursor and did not end', () => {
     expect(historyFooterState(base)).toEqual({
-      kind: 'more', shown: 3, loadingMore: false, loadMoreFailed: false, filterCaveat: false, notes: [],
+      kind: 'more', shown: 3, loadingMore: false, busy: false, loadMoreFailed: false, filterCaveat: false, notes: [],
     });
   });
 
@@ -42,6 +43,10 @@ describe('historyFooterState', () => {
   it('passes a Load more in flight, or one that failed, through to the button', () => {
     expect(historyFooterState({ ...base, loadingMore: true, loadMoreFailed: true }))
       .toMatchObject({ kind: 'more', loadingMore: true, loadMoreFailed: true });
+  });
+
+  it('passes a re-read of loaded pages in flight through to the button', () => {
+    expect(historyFooterState({ ...base, busy: true })).toMatchObject({ kind: 'more', busy: true });
   });
 
   it('ends only when the worker said history ended', () => {
