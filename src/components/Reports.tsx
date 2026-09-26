@@ -431,6 +431,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     && targetedHistory.target.type === selectedTarget.type
     && targetedHistory.target.value === selectedTarget.value;
   const attemptedTargetRef = useRef<string | null>(null); // one targeted fetch per target
+  // The /reports/<id> the history view was last opened for, so it opens once
+  // per id and does not reopen after the moderator turns Hide resolved back on.
+  const urlHistoryTriedRef = useRef<string | null>(null);
   // True only while the CURRENT selection came from a deep link. A ref, not
   // state: the unhide effect reads it when it runs, and flipping it must not
   // itself cause a render.
@@ -1104,6 +1107,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     skippedWithinSecond: !!historyPages?.some(page => page.skippedWithinSecond),
     resolutionTruncated: !!historyPages?.some(page => page.resolutionTruncated),
   });
+  // In the history view an empty list is final only once resolved history has
+  // been read to its end. While it is loading, failed, cut short or has more,
+  // the footer below says so, and the list must not read as empty (#186, #221).
+  const listEmptyIsFinal = !historyView || footerState.kind === 'ended';
 
   // Sync selected report with URL
   useEffect(() => {
@@ -1117,9 +1124,16 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         // this cannot re-select behind a dismissal.
         deepLinkSelectedRef.current = true;
         setSelectedReport(report);
+      } else if (hideResolved && !showPendingReview && urlHistoryTriedRef.current !== selectedReportId) {
+        // The feed has answered and does not hold it: most likely resolved.
+        // Look in resolved history, as the old single read did for its newest
+        // 200; this branch selects it once page 1 lands. An id older than
+        // page 1 stays unselected, as it did then.
+        urlHistoryTriedRef.current = selectedReportId;
+        setHideResolved(false);
       }
     }
-  }, [selectedReportId, listReports, selectedReport]);
+  }, [selectedReportId, listReports, selectedReport, hideResolved, showPendingReview]);
 
   // A deep link can select a report before ban/label/decision queries finish.
   // Re-check the selected target as resolution data arrives so it cannot stay
@@ -1183,6 +1197,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       : null;
     if (!target) return;
 
+    // In the history view, loaded history rows count as in bulk: the target
+    // is selected from them without the targeted lookup, so no floor mark.
     const inBulk = allConsolidated.find(
       c => c.target.type === target.type && c.target.value === target.value
     );
@@ -1730,10 +1746,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
             <div className="space-y-2 p-4 pt-0">
               {viewMode === 'consolidated' ? (
                 !consolidated || consolidated.length === 0 ? (
-                  <div className="text-center py-8 text-muted-foreground">
-                    <Flag className="h-8 w-8 mx-auto mb-2 opacity-50" />
-                    <p className="text-sm">No reports found</p>
-                  </div>
+                  listEmptyIsFinal ? (
+                    <div className="text-center py-8 text-muted-foreground">
+                      <Flag className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                      <p className="text-sm">No reports found</p>
+                    </div>
+                  ) : null
                 ) : (
                   consolidated.map((item) => (
                     <ConsolidatedReportItem
@@ -1746,10 +1764,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                 )
               ) : (
                 filteredReports.length === 0 ? (
-                  <div className="text-center py-8 text-muted-foreground">
-                    <Flag className="h-8 w-8 mx-auto mb-2 opacity-50" />
-                    <p className="text-sm">No reports found</p>
-                  </div>
+                  listEmptyIsFinal ? (
+                    <div className="text-center py-8 text-muted-foreground">
+                      <Flag className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                      <p className="text-sm">No reports found</p>
+                    </div>
+                  ) : null
                 ) : (
                   filteredReports.map((report) => (
                     <IndividualReportItem
@@ -1765,6 +1785,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                 <ResolvedHistoryFooter
                   state={footerState}
                   errorMessage={history.error instanceof Error ? history.error.message : undefined}
+                  retrying={history.isFetching && !history.isFetchingNextPage}
                   onLoadMore={loadMoreHistory}
                   onRetry={() => history.refetch()}
                 />
