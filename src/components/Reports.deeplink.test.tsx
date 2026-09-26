@@ -2,6 +2,8 @@
 // ABOUTME: resulting /reports/:id URL) / unavailable states driven by ?event=/?pubkey= params.
 
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { QueryClient } from '@tanstack/react-query';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MockInstance } from 'vitest';
 import { useLocation } from 'react-router-dom';
@@ -42,6 +44,8 @@ function ev(id: string, tags: string[][]) {
 }
 const OTHER_REPORT = ev('5'.repeat(64), [['e', OTHER_EVENT]]); // in the bulk list, unrelated target
 const MATCHING_REPORT = ev(MATCHING_ID, [['e', EFOUND]]); // resolves to event:EFOUND
+// An earlier report on the same target, so a lookup can return two and select the newer.
+const EARLIER_MATCHING_REPORT = { ...ev('0'.repeat(64), [['e', EFOUND]]), created_at: 1750000000 };
 
 const PBULK = 'd'.repeat(64);
 const BULK_PUBKEY_REPORT_ID = 'e'.repeat(64);
@@ -66,6 +70,7 @@ const MULTI_ETAG_REPORT = ev(MULTI_ETAG_ID, [['e', OTHER_EVENT], ['e', EFOUND]])
 const SHARED = 'a'.repeat(64);
 const SHARED_FOUND_ID = 'c'.repeat(64);
 const SHARED_FOUND_REPORT = ev(SHARED_FOUND_ID, [['p', SHARED]]);
+const SHARED_EVENT_REPORT = ev('f'.repeat(64), [['e', SHARED]]); // event:SHARED, not pubkey:SHARED
 
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -81,14 +86,15 @@ function RoutedReports() {
 
 let consoleError: MockInstance;
 
-// Bulk /api/reports returns only OTHER_REPORT (so deep-link targets miss the bulk window and
-// fall to the targeted lookup). `targeted` controls the ?event=/?pubkey= response per test.
-function stubFetch(targeted: (url: string) => Response) {
+// Bulk /api/reports returns only OTHER_REPORT by default (so deep-link targets miss the bulk
+// window and fall to the targeted lookup). `targeted` controls the ?event=/?pubkey= response
+// per test.
+function stubFetch(targeted: (url: string) => Response, bulk: unknown[] = [OTHER_REPORT]) {
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input instanceof Request ? input.url : input);
     const isTargeted = url.includes('/api/reports') && (url.includes('event=') || url.includes('pubkey='));
     if (isTargeted) return targeted(url);
-    if (url.includes('/api/reports')) return jsonResponse({ success: true, events: [OTHER_REPORT] });
+    if (url.includes('/api/reports')) return jsonResponse({ success: true, events: bulk });
     if (url.includes('/api/resolution-labels')) return jsonResponse({ success: true, events: [] });
     if (url.includes('/api/decisions')) return jsonResponse({ success: true, decisions: [] });
     if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
@@ -451,8 +457,8 @@ describe('Reports deep-link resolution', () => {
     expect(window.location.pathname).toBe('/reports'); // no reopen
   });
 
-  // A targeted lookup that stopped early marks ITS report's count as a floor.
-  // The mark must not ride along to the next selection, whose reports were
+  // A targeted lookup that stopped early marks ITS target's report count as a
+  // floor. The mark must not ride along to another target, whose reports were
   // never cut short.
   it('drops the floor mark when a deep link moves to a target already in the list', async () => {
     window.history.pushState({}, '', `/reports?event=${EFOUND}`);
@@ -494,5 +500,94 @@ describe('Reports deep-link resolution', () => {
 
     await waitFor(() => expect(screen.getByTestId('report-detail')).toHaveTextContent(OTHER_REPORT.id));
     expect(screen.getByTestId('report-detail')).toHaveAttribute('data-truncated', 'false');
+  });
+  // The floor describes the target's report list, not one report: picking a
+  // different report of the same target shows the same cut-short list.
+  it('keeps the floor mark when a different report of the same target is picked', async () => {
+    window.history.pushState({}, '', `/reports?event=${EFOUND}`);
+    stubFetch(() => jsonResponse({
+      success: true,
+      events: [MATCHING_REPORT, EARLIER_MATCHING_REPORT],
+      truncated: true,
+    }));
+    const user = userEvent.setup();
+
+    render(
+      <TestApp>
+        <Reports relayUrl="wss://relay.example" />
+      </TestApp>
+    );
+    await waitFor(() => expect(screen.getByTestId('report-detail')).toHaveTextContent(MATCHING_ID));
+    expect(screen.getByTestId('report-detail')).toHaveAttribute('data-truncated', 'true');
+
+    await user.click(screen.getByRole('tab', { name: /all \(/i }));
+    const earlierDate = new Date(EARLIER_MATCHING_REPORT.created_at * 1000).toLocaleDateString();
+    await user.click(await screen.findByText(earlierDate));
+
+    await waitFor(() =>
+      expect(screen.getByTestId('report-detail')).toHaveTextContent(EARLIER_MATCHING_REPORT.id)
+    );
+    expect(screen.getByTestId('report-detail')).toHaveAttribute('data-truncated', 'true');
+  });
+
+  it('drops the floor mark when the relay changes under the same selection', async () => {
+    window.history.pushState({}, '', `/reports?event=${EFOUND}`);
+    stubFetch(() => jsonResponse({ success: true, events: [MATCHING_REPORT], truncated: true }));
+    // Shared across the rerender so only the relay changes, not the cache.
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, retryDelay: 0 } } });
+
+    const { rerender } = render(
+      <TestApp queryClient={queryClient}>
+        <Reports relayUrl="wss://relay.example" />
+      </TestApp>
+    );
+    await waitFor(() => expect(screen.getByTestId('report-detail')).toHaveTextContent(MATCHING_ID));
+    expect(screen.getByTestId('report-detail')).toHaveAttribute('data-truncated', 'true');
+
+    rerender(
+      <TestApp queryClient={queryClient}>
+        <Reports relayUrl="wss://relay-two.example" />
+      </TestApp>
+    );
+
+    expect(screen.getByTestId('report-detail')).toHaveTextContent(MATCHING_ID);
+    expect(screen.getByTestId('report-detail')).toHaveAttribute('data-truncated', 'false');
+  });
+  it('drops the floor mark on a pubkey target that shares the cut-short event target\'s value', async () => {
+    // event:SHARED misses the bulk list and comes back cut short; pubkey:SHARED
+    // is in the bulk list and was never cut short.
+    stubFetch(
+      () => jsonResponse({ success: true, events: [SHARED_EVENT_REPORT], truncated: true }),
+      [OTHER_REPORT, SHARED_FOUND_REPORT],
+    );
+
+    window.history.pushState({}, '', `/reports?event=${SHARED}`);
+    render(
+      <TestApp>
+        <Reports relayUrl="wss://relay.example" />
+      </TestApp>
+    );
+    await waitFor(() => expect(screen.getByTestId('report-detail')).toHaveTextContent(SHARED_EVENT_REPORT.id));
+    expect(screen.getByTestId('report-detail')).toHaveAttribute('data-truncated', 'true');
+
+    navigateTo(`/reports?pubkey=${SHARED}`);
+    await waitFor(() => expect(screen.getByTestId('report-detail')).toHaveTextContent(SHARED_FOUND_ID));
+    expect(screen.getByTestId('report-detail')).toHaveAttribute('data-truncated', 'false');
+  });
+
+  // When no returned report resolves to the deep-link target, the pane shows
+  // the selected report's own target list, so that is what the mark describes.
+  it('marks the floor on the selected report\'s own target when the lookup fell back to it', async () => {
+    window.history.pushState({}, '', `/reports?pubkey=${PWITHNOTE}`);
+    stubFetch(() => jsonResponse({ success: true, events: [NOTE_REPORT], truncated: true }));
+
+    render(
+      <TestApp>
+        <Reports relayUrl="wss://relay.example" />
+      </TestApp>
+    );
+
+    await waitFor(() => expect(screen.getByTestId('report-detail')).toHaveTextContent(NOTE_REPORT_ID));
+    expect(screen.getByTestId('report-detail')).toHaveAttribute('data-truncated', 'true');
   });
 });
