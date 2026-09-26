@@ -320,7 +320,7 @@ describe('an unfinished history never reads as an empty list', () => {
 // the default view's filter does, so it waits on them, and names them when
 // they failed, the same way (#186, #221).
 describe('the history view never counts on a resolution source it lacks', () => {
-  it('keeps the banned-posts warning in history once the moderator overrides it', async () => {
+  it('keeps the banned-posts warning in history, and never says there are no resolved reports', async () => {
     stubWorker({ bannedEventsReply: fail, pages: { first: ok(resolvedPage([], { nextCursor: null, done: true })) } });
     const user = userEvent.setup();
     renderQueue();
@@ -335,6 +335,24 @@ describe('the history view never counts on a resolution source it lacks', () => 
     await waitFor(() => expect(footer).not.toHaveTextContent(/Loading/));
 
     expect(screen.getByText(overrideWarning)).toBeInTheDocument();
+    expect(footer).not.toHaveTextContent('No resolved reports.');
+    expect(footer).toHaveTextContent('Resolved count withheld: Banned posts unavailable. End of resolved history.');
+  });
+
+  it('withholds the resolved count while more history remains and a ban list is unread', async () => {
+    stubWorker({ bannedEventsReply: fail, pages: { first: ok(resolvedPage([H1], { nextCursor: PAGE_ONE_CURSOR, done: false })) } });
+    const user = userEvent.setup();
+    renderQueue();
+    await user.click(await screen.findByRole('button', { name: /show the queue anyway/i }));
+    await openHistory(user);
+    await screen.findByText(note(hex('3')));
+
+    // One history row is resolved; the banned post, unread, is not counted.
+    // A count of 1 would be short.
+    const footer = screen.getByTestId('resolved-history-footer');
+    expect(footer).toHaveTextContent('Resolved count withheld: Banned posts unavailable. More further back.');
+    expect(footer).not.toHaveTextContent(/Showing \d+ resolved/);
+    expect(screen.getByRole('button', { name: /load more/i })).toBeEnabled();
   });
 
   it('waits for the ban lists before listing history, rather than counting without them', async () => {

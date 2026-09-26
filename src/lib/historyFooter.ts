@@ -21,6 +21,10 @@ export interface HistoryFooterInput {
   // read knows only what the worker resolved, and the list beside it also
   // holds ban-resolved reports from the feed.
   resolvedRowsShown: number;
+  // Resolution sources the moderator chose to go on without: failed with no
+  // data, or stuck offline. Rows they would resolve are counted as
+  // unresolved, so the footer withholds the count and names them instead.
+  unreadSources: string[];
   // A category or target-type filter is narrowing the list.
   filterActive: boolean;
   skippedWithinSecond: boolean;
@@ -30,10 +34,10 @@ export interface HistoryFooterInput {
 export type HistoryFooterState =
   | { kind: 'loading' }
   | { kind: 'failed' }
-  | { kind: 'refreshFailed'; shown: number; notes: HistoryNote[] }
-  | { kind: 'more'; shown: number; loadingMore: boolean; busy: boolean; loadMoreFailed: boolean; filterCaveat: boolean; notes: HistoryNote[] }
-  | { kind: 'ended'; shown: number; filterActive: boolean; notes: HistoryNote[] }
-  | { kind: 'stopped'; shown: number; notes: HistoryNote[] };
+  | { kind: 'refreshFailed'; shown: number; unreadSources: string[]; notes: HistoryNote[] }
+  | { kind: 'more'; shown: number; unreadSources: string[]; loadingMore: boolean; busy: boolean; loadMoreFailed: boolean; filterCaveat: boolean; notes: HistoryNote[] }
+  | { kind: 'ended'; shown: number; unreadSources: string[]; filterActive: boolean; notes: HistoryNote[] }
+  | { kind: 'stopped'; shown: number; unreadSources: string[]; notes: HistoryNote[] };
 
 // Only the worker's `done` ends history. An empty page with a cursor is more
 // history, not none; a page with no cursor that is not done is a walk that
@@ -47,17 +51,19 @@ export function historyFooterState(input: HistoryFooterInput): HistoryFooterStat
   if (input.skippedWithinSecond) notes.push('skipped-within-second');
   if (input.resolutionTruncated) notes.push('resolution-truncated');
   const shown = input.resolvedRowsShown;
+  const unreadSources = input.unreadSources;
 
   if (input.refreshFailed) {
-    return { kind: 'refreshFailed', shown, notes };
+    return { kind: 'refreshFailed', shown, unreadSources, notes };
   }
   if (input.lastPage.done) {
-    return { kind: 'ended', shown, filterActive: input.filterActive, notes };
+    return { kind: 'ended', shown, unreadSources, filterActive: input.filterActive, notes };
   }
   if (input.lastPage.nextCursor !== null) {
     return {
       kind: 'more',
       shown,
+      unreadSources,
       loadingMore: input.loadingMore,
       busy: input.busy,
       loadMoreFailed: input.loadMoreFailed,
@@ -65,5 +71,5 @@ export function historyFooterState(input: HistoryFooterInput): HistoryFooterStat
       notes,
     };
   }
-  return { kind: 'stopped', shown, notes };
+  return { kind: 'stopped', shown, unreadSources, notes };
 }

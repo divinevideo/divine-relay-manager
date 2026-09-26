@@ -12,6 +12,7 @@ const base: HistoryFooterInput = {
   busy: false,
   loadMoreFailed: false,
   resolvedRowsShown: 3,
+  unreadSources: [],
   filterActive: false,
   skippedWithinSecond: false,
   resolutionTruncated: false,
@@ -28,7 +29,7 @@ describe('historyFooterState', () => {
 
   it('offers more while the last page left a cursor and did not end', () => {
     expect(historyFooterState(base)).toEqual({
-      kind: 'more', shown: 3, loadingMore: false, busy: false, loadMoreFailed: false, filterCaveat: false, notes: [],
+      kind: 'more', shown: 3, unreadSources: [], loadingMore: false, busy: false, loadMoreFailed: false, filterCaveat: false, notes: [],
     });
   });
 
@@ -51,7 +52,7 @@ describe('historyFooterState', () => {
 
   it('ends only when the worker said history ended', () => {
     expect(historyFooterState({ ...base, lastPage: { done: true, nextCursor: null } }))
-      .toEqual({ kind: 'ended', shown: 3, filterActive: false, notes: [] });
+      .toEqual({ kind: 'ended', shown: 3, unreadSources: [], filterActive: false, notes: [] });
   });
 
   it('never offers more once history ended, whatever the cursor', () => {
@@ -60,7 +61,7 @@ describe('historyFooterState', () => {
 
   it('says the walk stopped when a page left no cursor but history did not end', () => {
     expect(historyFooterState({ ...base, lastPage: { done: false, nextCursor: null } }))
-      .toEqual({ kind: 'stopped', shown: 3, notes: [] });
+      .toEqual({ kind: 'stopped', shown: 3, unreadSources: [], notes: [] });
   });
 
   it('carries notes about skipped reports and unread labels', () => {
@@ -72,7 +73,20 @@ describe('historyFooterState', () => {
     // The pages on screen are from the last good read. Whatever that read
     // said about the end is stale once a re-read has failed.
     expect(historyFooterState({ ...base, refreshFailed: true, lastPage: { done: true, nextCursor: null } }))
-      .toEqual({ kind: 'refreshFailed', shown: 3, notes: [] });
-    expect(historyFooterState({ ...base, refreshFailed: true })).toEqual({ kind: 'refreshFailed', shown: 3, notes: [] });
+      .toEqual({ kind: 'refreshFailed', shown: 3, unreadSources: [], notes: [] });
+    expect(historyFooterState({ ...base, refreshFailed: true })).toEqual({ kind: 'refreshFailed', shown: 3, unreadSources: [], notes: [] });
+  });
+
+  it('names the resolution sources the count could not read, in every state that states a count', () => {
+    // The moderator overrode a failed source: rows it would resolve are listed
+    // as unresolved, so the count and "No resolved reports." would be unbacked.
+    const unread = { ...base, unreadSources: ['Banned posts'] };
+    expect(historyFooterState(unread)).toMatchObject({ kind: 'more', unreadSources: ['Banned posts'] });
+    expect(historyFooterState({ ...unread, lastPage: { done: true, nextCursor: null } }))
+      .toMatchObject({ kind: 'ended', unreadSources: ['Banned posts'] });
+    expect(historyFooterState({ ...unread, lastPage: { done: false, nextCursor: null } }))
+      .toMatchObject({ kind: 'stopped', unreadSources: ['Banned posts'] });
+    expect(historyFooterState({ ...unread, refreshFailed: true }))
+      .toMatchObject({ kind: 'refreshFailed', unreadSources: ['Banned posts'] });
   });
 });
