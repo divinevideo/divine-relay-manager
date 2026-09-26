@@ -47,6 +47,8 @@ interface WorkerStub {
   bannedEvents?: string[];
   // The banned-posts read, when it should not answer with the list above.
   bannedEventsReply?: Reply;
+  // The resolution-labels read, when it should not answer with no labels.
+  labelsReply?: Reply;
   // Resolved-history replies by cursor; 'first' is the read with no cursor.
   pages: Record<string, Reply>;
   decisions?: Reply;
@@ -74,6 +76,7 @@ function stubWorker(stub: WorkerStub) {
       return jsonResponse({ success: true, events: stub.feed ?? [OPEN, BANNED], truncated: false });
     }
     if (url.pathname === '/api/resolution-label-targets') {
+      if (stub.labelsReply) return stub.labelsReply();
       return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
     }
     if (url.pathname === '/api/resolution-state') {
@@ -335,11 +338,24 @@ describe('the history view never counts on a resolution source it lacks', () => 
     await waitFor(() => expect(footer).not.toHaveTextContent(/Loading/));
 
     expect(screen.getByText(overrideWarning)).toBeInTheDocument();
+    expect(footer).toHaveTextContent("Resolved count unavailable: Banned posts couldn't be read.");
     expect(footer).not.toHaveTextContent('No resolved reports.');
-    expect(footer).toHaveTextContent('Resolved count withheld: Banned posts unavailable. End of resolved history.');
+    expect(footer).not.toHaveTextContent(/Showing \d+ resolved|End of resolved history/);
   });
 
-  it('withholds the resolved count while more history remains and a ban list is unread', async () => {
+  it('names every source it went on without', async () => {
+    stubWorker({ labelsReply: fail, bannedEventsReply: fail, pages: { first: ok(resolvedPage([], { nextCursor: null, done: true })) } });
+    const user = userEvent.setup();
+    renderQueue();
+    await user.click(await screen.findByRole('button', { name: /show the queue anyway/i }));
+    await openHistory(user);
+
+    const footer = await screen.findByTestId('resolved-history-footer');
+    await waitFor(() => expect(footer).not.toHaveTextContent(/Loading/));
+    expect(footer).toHaveTextContent("Resolved count unavailable: Resolution labels and Banned posts couldn't be read.");
+  });
+
+  it('keeps Load more beside the unavailable count while more history remains', async () => {
     stubWorker({ bannedEventsReply: fail, pages: { first: ok(resolvedPage([H1], { nextCursor: PAGE_ONE_CURSOR, done: false })) } });
     const user = userEvent.setup();
     renderQueue();
@@ -348,11 +364,33 @@ describe('the history view never counts on a resolution source it lacks', () => 
     await screen.findByText(note(hex('3')));
 
     // One history row is resolved; the banned post, unread, is not counted.
-    // A count of 1 would be short.
+    // A count of 1 would be short. The rows are real, so paging goes on.
     const footer = screen.getByTestId('resolved-history-footer');
-    expect(footer).toHaveTextContent('Resolved count withheld: Banned posts unavailable. More further back.');
+    expect(footer).toHaveTextContent("Resolved count unavailable: Banned posts couldn't be read.");
     expect(footer).not.toHaveTextContent(/Showing \d+ resolved/);
     expect(screen.getByRole('button', { name: /load more/i })).toBeEnabled();
+  });
+
+  it('keeps counting on a ban list whose refresh failed, under the stale banner', async () => {
+    // A stale source still holds data, so the banned post is still known to be
+    // resolved: the count stands, as the default view's filter does.
+    let bannedEventsFail = false;
+    stubWorker({
+      bannedEventsReply: () => (bannedEventsFail
+        ? fail()
+        : jsonResponse({ success: true, result: [{ id: BANNED_EVENT }] })),
+      pages: { first: ok(resolvedPage([H1], { nextCursor: null, done: true })) },
+    });
+    const user = userEvent.setup();
+    const queryClient = renderQueue();
+    await openHistory(user);
+    await screen.findByText('Showing 2 resolved. End of resolved history.');
+
+    bannedEventsFail = true;
+    await act(async () => { await queryClient.refetchQueries({ queryKey: ['banned-events'] }); });
+
+    expect(await screen.findByText(/showing resolution state from/i)).toBeInTheDocument();
+    expect(screen.getByTestId('resolved-history-footer')).toHaveTextContent('Showing 2 resolved. End of resolved history.');
   });
 
   it('waits for the ban lists before listing history, rather than counting without them', async () => {

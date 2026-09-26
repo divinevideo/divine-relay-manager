@@ -12,7 +12,7 @@ const base: HistoryFooterInput = {
   busy: false,
   loadMoreFailed: false,
   resolvedRowsShown: 3,
-  unreadSources: [],
+  incompleteSources: [],
   filterActive: false,
   skippedWithinSecond: false,
   resolutionTruncated: false,
@@ -29,7 +29,7 @@ describe('historyFooterState', () => {
 
   it('offers more while the last page left a cursor and did not end', () => {
     expect(historyFooterState(base)).toEqual({
-      kind: 'more', shown: 3, unreadSources: [], loadingMore: false, busy: false, loadMoreFailed: false, filterCaveat: false, notes: [],
+      kind: 'more', shown: 3, loadingMore: false, busy: false, loadMoreFailed: false, filterCaveat: false, notes: [],
     });
   });
 
@@ -52,7 +52,7 @@ describe('historyFooterState', () => {
 
   it('ends only when the worker said history ended', () => {
     expect(historyFooterState({ ...base, lastPage: { done: true, nextCursor: null } }))
-      .toEqual({ kind: 'ended', shown: 3, unreadSources: [], filterActive: false, notes: [] });
+      .toEqual({ kind: 'ended', shown: 3, filterActive: false, notes: [] });
   });
 
   it('never offers more once history ended, whatever the cursor', () => {
@@ -61,7 +61,7 @@ describe('historyFooterState', () => {
 
   it('says the walk stopped when a page left no cursor but history did not end', () => {
     expect(historyFooterState({ ...base, lastPage: { done: false, nextCursor: null } }))
-      .toEqual({ kind: 'stopped', shown: 3, unreadSources: [], notes: [] });
+      .toEqual({ kind: 'stopped', shown: 3, notes: [] });
   });
 
   it('carries notes about skipped reports and unread labels', () => {
@@ -73,20 +73,31 @@ describe('historyFooterState', () => {
     // The pages on screen are from the last good read. Whatever that read
     // said about the end is stale once a re-read has failed.
     expect(historyFooterState({ ...base, refreshFailed: true, lastPage: { done: true, nextCursor: null } }))
-      .toEqual({ kind: 'refreshFailed', shown: 3, unreadSources: [], notes: [] });
-    expect(historyFooterState({ ...base, refreshFailed: true })).toEqual({ kind: 'refreshFailed', shown: 3, unreadSources: [], notes: [] });
+      .toEqual({ kind: 'refreshFailed', shown: 3, notes: [] });
+    expect(historyFooterState({ ...base, refreshFailed: true })).toEqual({ kind: 'refreshFailed', shown: 3, notes: [] });
   });
 
-  it('names the resolution sources the count could not read, in every state that states a count', () => {
-    // The moderator overrode a failed source: rows it would resolve are listed
-    // as unresolved, so the count and "No resolved reports." would be unbacked.
-    const unread = { ...base, unreadSources: ['Banned posts'] };
-    expect(historyFooterState(unread)).toMatchObject({ kind: 'more', unreadSources: ['Banned posts'] });
-    expect(historyFooterState({ ...unread, lastPage: { done: true, nextCursor: null } }))
-      .toMatchObject({ kind: 'ended', unreadSources: ['Banned posts'] });
-    expect(historyFooterState({ ...unread, lastPage: { done: false, nextCursor: null } }))
-      .toMatchObject({ kind: 'stopped', unreadSources: ['Banned posts'] });
-    expect(historyFooterState({ ...unread, refreshFailed: true }))
-      .toMatchObject({ kind: 'refreshFailed', unreadSources: ['Banned posts'] });
+  describe('with a resolution source the moderator went on without', () => {
+    // Rows that source would resolve are listed as unresolved, so neither a
+    // count nor the end of history ("No resolved reports.") can be stated.
+    const incomplete = { ...base, incompleteSources: ['Banned posts'] };
+
+    it('withholds the count and the end, and names the source', () => {
+      expect(historyFooterState({ ...incomplete, lastPage: { done: true, nextCursor: null } })).toEqual({
+        kind: 'resolutionIncomplete', sources: ['Banned posts'], hasMore: false,
+        loadingMore: false, busy: false, loadMoreFailed: false, filterCaveat: false, notes: [],
+      });
+      expect(historyFooterState({ ...incomplete, lastPage: { done: false, nextCursor: null } }))
+        .toMatchObject({ kind: 'resolutionIncomplete', hasMore: false });
+    });
+
+    it('keeps Load more while history has more, with its paging state', () => {
+      expect(historyFooterState({ ...incomplete, loadingMore: true, busy: true, loadMoreFailed: true, filterActive: true }))
+        .toMatchObject({ kind: 'resolutionIncomplete', hasMore: true, loadingMore: true, busy: true, loadMoreFailed: true, filterCaveat: true });
+    });
+
+    it('still says first that a re-read of loaded history failed', () => {
+      expect(historyFooterState({ ...incomplete, refreshFailed: true })).toMatchObject({ kind: 'refreshFailed' });
+    });
   });
 });
