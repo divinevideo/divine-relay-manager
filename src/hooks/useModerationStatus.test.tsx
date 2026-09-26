@@ -534,6 +534,84 @@ describe('useModerationStatus', () => {
     expect(result.current.isUserBannedStale).toBe(false);
   });
 
+  it('shows a ban from a list read after a live "not banned" as last known once a later read fails', async () => {
+    // The live check said not banned, a later list read (the queue poll, say)
+    // had the account banned, and the refresh after that failed. The copy on
+    // hand still holds the ban but is no longer current: last known, not a
+    // confirmed ban, and not dropped to unknown either.
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const clientWrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    verifyPubkeyBanned.mockResolvedValue(false);
+
+    const { result } = renderHook(() => useModerationStatus(PUBKEY, EVENT_ID, false), { wrapper: clientWrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false), { timeout: 5000 });
+    await act(async () => {
+      result.current.recheck();
+    });
+    await waitFor(() => expect(result.current.isUserBanned).toBe(false), { timeout: 5000 });
+    await waitFor(() => expect(result.current.isAccountStatusLoading).toBe(false), { timeout: 5000 });
+
+    listBannedPubkeys.mockResolvedValue([{ pubkey: PUBKEY }]);
+    await act(async () => {
+      await client.refetchQueries({ queryKey: ['banned-pubkeys'] });
+    });
+    await waitFor(() => expect(result.current.isUserBanned).toBe(true), { timeout: 5000 });
+    expect(result.current.isUserBannedStale).toBe(false);
+
+    // Not ...Once: a single rejection would let the shared definition's retry succeed.
+    listBannedPubkeys.mockRejectedValue(new Error('relay unreachable'));
+    await act(async () => {
+      await client.refetchQueries({ queryKey: ['banned-pubkeys'] });
+    });
+    expect(client.getQueryState(['banned-pubkeys'])?.status).toBe('error');
+    await act(async () => {
+      await new Promise(resolve => setTimeout(resolve, 50));
+    });
+
+    expect(result.current.isUserBanned).toBe(true);
+    expect(result.current.isUserBannedStale).toBe(true);
+  });
+
+  it('keeps a live "not banned" confirmed while its re-read is still out after an earlier failed refresh', async () => {
+    // The list's previous refresh failed, so it sits in error. A Re-check then
+    // answers not banned and asks the list to re-read, and that re-read hangs.
+    // The error is from before the check; until the re-read itself fails, the
+    // live answer stands rather than flickering to unknown.
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const clientWrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    verifyPubkeyBanned.mockResolvedValue(false);
+
+    const { result } = renderHook(() => useModerationStatus(PUBKEY, EVENT_ID, false), { wrapper: clientWrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false), { timeout: 5000 });
+
+    listBannedPubkeys.mockRejectedValue(new Error('relay unreachable'));
+    await act(async () => {
+      await client.refetchQueries({ queryKey: ['banned-pubkeys'] });
+    });
+    expect(client.getQueryState(['banned-pubkeys'])?.status).toBe('error');
+
+    listBannedPubkeys.mockImplementation(() => new Promise(() => {}));
+    await act(async () => {
+      result.current.recheck();
+    });
+    await waitFor(() => expect(result.current.checkedAt).not.toBeNull(), { timeout: 5000 });
+    await waitFor(() => expect(listBannedPubkeys).toHaveBeenCalledTimes(4), { timeout: 5000 });
+    await act(async () => {
+      await new Promise(resolve => setTimeout(resolve, 50));
+    });
+
+    // The scenario, not the answer: still in error from before, and re-reading.
+    expect(client.getQueryState(['banned-pubkeys'])?.status).toBe('error');
+    expect(client.getQueryState(['banned-pubkeys'])?.fetchStatus).toBe('fetching');
+    expect(result.current.isAccountStatusLoading).toBe(true);
+
+    expect(result.current.isUserBanned).toBe(false);
+  });
+
   // --- A live check answers for one environment and one report ---------------
   //
   // The live check's result outranks the lists. Switching environment clears
