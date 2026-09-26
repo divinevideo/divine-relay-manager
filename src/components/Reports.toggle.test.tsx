@@ -33,10 +33,24 @@ const REPORT = {
 // A second, always-resolved target. Its presence is what makes the toggle
 // observable: with Hide resolved ON it must be absent, with it OFF present.
 const OTHER = '9'.repeat(64);
-// A separate auto-hidden target, present only so the Pending review control
-// renders (it is gated on pendingReviewCount > 0). Deliberately not one of the
-// reports in the list, so it cannot affect the other assertions.
+// A separate auto-hidden target, present so the Pending review control renders.
+// That control counts the rows its view will list, so the target needs a
+// report in the feed. It is never listed in the default view, so it cannot
+// affect the other assertions. The pending-review view does list it, so its
+// category is neither Spam nor Harassment: a row badge reading "Spam" there
+// would be a second match for the Spam chip the category tests look for.
 const AUTOHIDDEN = '7'.repeat(64);
+const AUTOHIDDEN_REPORT = {
+  ...REPORT,
+  id: '6'.repeat(64),
+  created_at: 1751000020,
+  tags: [
+    ['e', AUTOHIDDEN, 'spam'],
+    ['p', '5'.repeat(64), 'spam'],
+    ['L', 'social.nos.ontology'],
+    ['l', 'NS-violence', 'social.nos.ontology'],
+  ],
+};
 const RESOLVED_REPORT = {
   ...REPORT,
   id: 'f'.repeat(64),
@@ -65,7 +79,7 @@ function stubFetch(resolvedNow: () => boolean) {
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input instanceof Request ? input.url : input);
     if (url.includes('/api/reports')) {
-      return jsonResponse({ success: true, events: [REPORT, RESOLVED_REPORT] });
+      return jsonResponse({ success: true, events: [REPORT, RESOLVED_REPORT, AUTOHIDDEN_REPORT] });
     }
     if (url.includes('/api/resolution-label-targets')) {
       return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
@@ -364,7 +378,7 @@ describe('Pending review gives back what it borrows', () => {
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     expect(screen.queryByText('Spam')).not.toBeInTheDocument();
 
-    // Entering the mode clears the filter, so both chips are back.
+    // Entering the mode clears the filter, so every chip is back.
     await user.click(await screen.findByRole('switch', { name: /pending review/i }));
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     expect(await screen.findByText('Spam')).toBeInTheDocument();
