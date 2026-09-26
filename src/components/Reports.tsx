@@ -50,9 +50,11 @@ import { ReportClientText } from "@/components/ReportClientText";
 import { classifyTargetedFetch, reportsMatchingTarget, type DeepLinkStatus } from "@/lib/deepLinkResolution";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { useBannedPubkeys, useBannedEvents } from "@/hooks/useRelayBanLists";
-import { AUTO_HIDE_ACTION, HIGH_PRIORITY_CATEGORIES, RESOLUTION_READ_TIMEOUT_MS, getCategoryLabel, getLatestAutoHideState, getReportCategory, getReportTargetIds, hasCsamSignal } from "@/lib/constants";
+import { HIGH_PRIORITY_CATEGORIES, RESOLUTION_READ_TIMEOUT_MS, getCategoryLabel, getReportCategory, getReportTargetIds, hasCsamSignal } from "@/lib/constants";
 import { isConsolidatedReportResolved } from "@/lib/reportResolution";
 import { SWITCH_STATE_LABELS, buildSwitchMembership, humanHandledAutoHideTargets, type SwitchState } from "@/lib/sensitiveSwitch";
+import { getReportTarget, reportTargetKey, type ReportTarget } from "../../shared/report-target";
+import { pendingReviewTargetStates } from "../../shared/autohide";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
 import type { NostrEvent } from "@nostrify/nostrify";
@@ -106,11 +108,6 @@ interface ReportsProps {
   selectedReportId?: string;
 }
 
-interface ReportTarget {
-  type: 'event' | 'pubkey';
-  value: string;
-}
-
 interface ConsolidatedReport {
   target: ReportTarget;
   reports: NostrEvent[];
@@ -123,20 +120,6 @@ interface ConsolidatedReport {
   authorPubkey?: string;
 }
 
-// Deliberately presence-based (a valueless ["e"] still yields an event target)
-// rather than delegating to getReportTargetIds: returning null here would drop
-// malformed reports from the consolidated queue entirely, and useReportContext/
-// ReportDetail carry identical copies the detail pane relies on. TODO(#160):
-// consolidate all report-target extraction sites behind shared helpers with
-// agreed semantics.
-function getReportTarget(event: NostrEvent): ReportTarget | null {
-  const eTag = event.tags.find(t => t[0] === 'e');
-  if (eTag) return { type: 'event', value: eTag[1] };
-  const pTag = event.tags.find(t => t[0] === 'p');
-  if (pTag) return { type: 'pubkey', value: pTag[1] };
-  return null;
-}
-
 function consolidateReports(reports: NostrEvent[]): ConsolidatedReport[] {
   const byTarget = new Map<string, ConsolidatedReport>();
 
@@ -144,7 +127,7 @@ function consolidateReports(reports: NostrEvent[]): ConsolidatedReport[] {
     const target = getReportTarget(report);
     if (!target) continue;
 
-    const key = `${target.type}:${target.value}`;
+    const key = reportTargetKey(target);
     const category = getReportCategory(report);
 
     if (!byTarget.has(key)) {
@@ -656,7 +639,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     // browser over a single capped page.
     if (labelTargets) {
       for (const target of labelTargets) {
-        resolved.add(`${target.type}:${target.value}`);
+        resolved.add(reportTargetKey(target));
       }
     }
 
@@ -714,41 +697,15 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     [bannedPubkeys],
   );
 
-  // Targets pending review (auto-hidden but not yet confirmed/restored), keyed
-  // to their latest auto-hide state so a row can say when a hide needs a check
-  // (auto_hide_unresolved / auto_hide_restore_failed).
-  // TODO(#284): share this with pendingReviewTargetKeys in shared/autohide.ts in the
-  // queue-screen change. That helper returns a Set, so it would first need to
-  // return the latest action per key, which the switch labels depend on.
-  const pendingReviewTargets = useMemo(() => {
-    const pending = new Map<string, string>();
-    if (!autoHideStates) return pending;
-
-    // Group by target to check status. The worker sends only the auto-hide STATE
-    // actions, already newest-first, which is exactly what
-    // getLatestAutoHideState reads -- that function stays the sole authority on
-    // what the state machine means, and is still applied here rather than in SQL.
-    const targetDecisions = new Map<string, string[]>();
-    for (const decision of autoHideStates) {
-      const key = `${decision.target_type}:${decision.target_id}`;
-      if (!targetDecisions.has(key)) {
-        targetDecisions.set(key, []);
-      }
-      targetDecisions.get(key)!.push(decision.action);
-    }
-
-    // Decisions arrive newest first, so the first state transition is authoritative.
-    for (const [key, actions] of targetDecisions) {
-      const latestAction = getLatestAutoHideState(actions);
-      if (latestAction === AUTO_HIDE_ACTION.hidden
-        || latestAction === AUTO_HIDE_ACTION.unresolved
-        || latestAction === AUTO_HIDE_ACTION.restoreFailed) {
-        pending.set(key, latestAction);
-      }
-    }
-
-    return pending;
-  }, [autoHideStates]);
+  // Targets auto-hidden and still waiting for a human, keyed to their latest
+  // auto-hide state so a row can say when a hide needs a check
+  // (auto_hide_unresolved / auto_hide_restore_failed). The same definition the
+  // worker uses to keep them in the needs-attention payload, so the queue
+  // splits out exactly the targets the worker kept for this view.
+  const pendingReviewTargets = useMemo(
+    () => pendingReviewTargetStates(autoHideStates ?? []),
+    [autoHideStates],
+  );
 
   const humanHandledTargets = useMemo(
     () => humanHandledAutoHideTargets(autoHideStates ?? []),
@@ -963,10 +920,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
     // If showing pending review, only show items behind the switch
     if (showPendingReview) {
-      items = items.filter(c => switchMembership.has(`${c.target.type}:${c.target.value}`));
+      items = items.filter(c => switchMembership.has(reportTargetKey(c.target)));
     } else {
       // Default view: EXCLUDE items behind the switch (moderators don't see CSAM unless they opt in)
-      items = items.filter(c => !switchMembership.has(`${c.target.type}:${c.target.value}`));
+      items = items.filter(c => !switchMembership.has(reportTargetKey(c.target)));
       // Also filter out resolved if toggle is on
       if (hideResolved) {
         items = items.filter(c => !isConsolidatedReportResolved(c, resolvedTargets, bannedPubkeySet));
@@ -1037,7 +994,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   }, [allConsolidated, hideResolved, showPendingReview, resolvedTargets, bannedPubkeySet, switchMembership, filterCategory, filterTargetType, sortBy]);
 
   const authorByTarget = useMemo(() => new Map(
-    allConsolidated.map(c => [`${c.target.type}:${c.target.value}`, c.authorPubkey]),
+    allConsolidated.map(c => [reportTargetKey(c.target), c.authorPubkey]),
   ), [allConsolidated]);
 
   // Filter individual reports when hideResolved is on
@@ -1050,14 +1007,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       items = items.filter(report => {
         const target = getReportTarget(report);
         if (!target) return false;
-        return switchMembership.has(`${target.type}:${target.value}`);
+        return switchMembership.has(reportTargetKey(target));
       });
     } else {
       // Default view: EXCLUDE items behind the switch (moderators don't see CSAM unless they opt in)
       items = items.filter(report => {
         const target = getReportTarget(report);
         if (!target) return true; // Keep reports without targets
-        return !switchMembership.has(`${target.type}:${target.value}`);
+        return !switchMembership.has(reportTargetKey(target));
       });
       // Also filter resolved if toggle is on
       if (hideResolved) {
@@ -1065,7 +1022,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           const target = getReportTarget(report);
           if (!target) return true; // Keep reports without targets
           return !isConsolidatedReportResolved(
-            { target, authorPubkey: authorByTarget.get(`${target.type}:${target.value}`) },
+            { target, authorPubkey: authorByTarget.get(reportTargetKey(target)) },
             resolvedTargets,
             bannedPubkeySet,
           );
@@ -1165,7 +1122,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     if (!hideResolved || !selectedReport || !deepLinkSelectedRef.current || !switchMembershipKnown) return;
     const target = getReportTarget(selectedReport);
     if (target && isConsolidatedReportResolved(
-      { target, authorPubkey: authorByTarget.get(`${target.type}:${target.value}`) },
+      { target, authorPubkey: authorByTarget.get(reportTargetKey(target)) },
       resolvedTargets,
       bannedPubkeySet,
     )) {
@@ -1344,7 +1301,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         // p-tags a ?pubkey= target (but resolves to an event) a false 'gone'. An empty
         // result here is a relay-confirmed absence; an empty *timeout* never reaches this
         // branch (the worker 502s it → the catch below → 'unavailable').
-        const matching = reportsMatchingTarget(events, target, getReportTarget);
+        const matching = reportsMatchingTarget(events, target, (e: NostrEvent) => getReportTarget(e));
         if (truncated && events.length === 0) {
           setDeepLinkStatus('unavailable');
           return;
@@ -1816,7 +1773,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                   </div>
                 ) : (
                   consolidated.map((item) => {
-                    const key = `${item.target.type}:${item.target.value}`;
+                    const key = reportTargetKey(item.target);
                     return (
                       <ConsolidatedReportItem
                         key={key}

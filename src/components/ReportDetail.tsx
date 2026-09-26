@@ -60,6 +60,7 @@ import { CopyableId, CopyableTags } from "@/components/CopyableId";
 import { ReportedListCard } from "@/components/ReportedListCard";
 import { LIST_KIND_LABEL, isListKind } from "../../shared/list-report";
 import type { NostrEvent } from "@nostrify/nostrify";
+import { getReportTarget } from "../../shared/report-target";
 
 function getKindLabel(kind: number): string {
   if (isListKind(kind)) return LIST_KIND_LABEL[kind];
@@ -85,16 +86,6 @@ interface ReportDetailProps {
   // own auto-hide banner and badge already describe the auto-hidden states.
   switchState?: SwitchState;
 }
-
-// Helper to extract report target
-function getReportTarget(event: NostrEvent): { type: 'event' | 'pubkey'; value: string } | null {
-  const eTag = event.tags.find(t => t[0] === 'e');
-  if (eTag) return { type: 'event', value: eTag[1] };
-  const pTag = event.tags.find(t => t[0] === 'p');
-  if (pTag) return { type: 'pubkey', value: pTag[1] };
-  return null;
-}
-
 
 export function ReportDetail({ report, allReportsForTarget, allReportsForTargetTruncated = false, allReports = [], onDismiss, switchState }: ReportDetailProps) {
   const { toast } = useToast();
