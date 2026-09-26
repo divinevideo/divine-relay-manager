@@ -550,7 +550,7 @@ describe('Reports deep-link resolution', () => {
       </TestApp>
     );
 
-    expect(screen.getByTestId('report-detail')).toHaveTextContent(MATCHING_ID);
+    expect(await screen.findByTestId('report-detail')).toHaveTextContent(MATCHING_ID);
     expect(screen.getByTestId('report-detail')).toHaveAttribute('data-truncated', 'false');
   });
   it('drops the floor mark on a pubkey target that shares the cut-short event target\'s value', async () => {
