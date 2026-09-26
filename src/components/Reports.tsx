@@ -451,10 +451,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // itself cause a render.
   const deepLinkSelectedRef = useRef(false);
   // What the moderator had set before entering the pending-review view. That
-  // view is its own mode and forces Hide resolved off and the category filter
-  // clear, so leaving it has to hand both back -- otherwise a look at the
-  // auto-hidden queue silently spends settings they chose.
-  const prePendingReviewRef = useRef<{ hideResolved: boolean; filterCategory: string | null } | null>(null);
+  // view is its own mode and forces Hide resolved off and the category and
+  // target-type filters clear, so leaving it has to hand all three back --
+  // otherwise a look at the auto-hidden queue silently spends settings they chose.
+  const prePendingReviewRef = useRef<{
+    hideResolved: boolean;
+    filterCategory: string | null;
+    filterTargetType: 'all' | 'event' | 'pubkey';
+  } | null>(null);
   // Hide resolved as the moderator had it before a deep link's courtesy last
   // turned it off to show a resolved linked report. Null until a courtesy
   // does, and again once the moderator sets Hide resolved or the switch
@@ -1103,16 +1107,18 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   }, [reports, hideResolved, showPendingReview, resolvedTargets, bannedPubkeySet, authorByTarget, switchMembership, filterCategory, filterTargetType, sortBy]);
 
   const uniqueTargets = consolidated.length;
-  const pendingReviewCount = switchMembership.size;
-  const totalTargets = allConsolidated.length;
-  const totalReports = reports?.length || 0;
   const filteredReportsCount = filteredReports.length;
-  // Loaded targets behind the switch are pending review, not resolved, so the
-  // header's "N resolved" must not count them.
-  const switchMembersLoaded = allConsolidated.filter(
-    c => switchMembership.has(`${c.target.type}:${c.target.value}`),
-  ).length;
-  const resolvedCount = totalTargets - uniqueTargets - switchMembersLoaded;
+
+  // The pending-review badge counts the rows that view will list on entry: the
+  // grouped targets behind the switch, auto-hidden or CSAM-signal and not yet
+  // handled. Not switchMembership.size -- auto-hidden members span every
+  // decision on record, and a member with no report loaded here is a badge
+  // with no row behind it. "On entry" because entering clears the category and
+  // type filters (D6); a filter chosen inside the view narrows the list and its
+  // Grouped count, not this badge, which keeps saying how many targets are
+  // waiting.
+  const pendingReviewRows = allConsolidated.filter(c => switchMembership.has(reportTargetKey(c.target)));
+  const pendingReviewCount = pendingReviewRows.length;
 
   // Sync selected report with URL
   useEffect(() => {
@@ -1168,10 +1174,15 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     prePendingReviewRef.current = {
       hideResolved: hideResolvedBeforeCourtesyRef.current ?? hideResolved,
       filterCategory,
+      filterTargetType,
     };
     setHideResolved(false);
     setFilterCategory(null);
-  }, [hideResolved, filterCategory]);
+    // The badge counts every target waiting for review, so the view opens on
+    // all of them. A Users filter carried in would hide auto-hidden posts under
+    // a badge that counted them.
+    setFilterTargetType('all');
+  }, [hideResolved, filterCategory, filterTargetType]);
 
   // Memoized for the same reason: the auto-leave effect below depends on it.
   const leavePendingReview = useCallback(({ keepDeepLinkCourtesy = false } = {}) => {
@@ -1193,9 +1204,13 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       if (filterCategory === null) {
         setFilterCategory(previous.filterCategory);
       }
+      // Same rule for the target type.
+      if (filterTargetType === 'all') {
+        setFilterTargetType(previous.filterTargetType);
+      }
       prePendingReviewRef.current = null;
     }
-  }, [filterCategory]);
+  }, [filterCategory, filterTargetType]);
 
   // A link that lands on a report behind the pending-review switch opens the
   // switch, or the report sits in the detail pane with no row in the list.
@@ -1583,9 +1598,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                 Reports
               </CardTitle>
               <CardDescription>
-                {uniqueTargets} pending{resolvedCount > 0 && hideResolved && (
-                  <span className="text-green-600"> ({resolvedCount} resolved)</span>
-                )}
+                {showPendingReview
+                  ? `${uniqueTargets} pending review`
+                  : hideResolved
+                    ? `${uniqueTargets} pending`
+                    : `${uniqueTargets} shown`}
               </CardDescription>
             </div>
             <div className="flex items-center gap-2">
@@ -1650,7 +1667,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
               </TabsTrigger>
               <TabsTrigger value="individual" className="text-xs">
                 <Flag className="h-3 w-3 mr-1" />
-                All ({hideResolved ? filteredReportsCount : totalReports})
+                All ({filteredReportsCount})
               </TabsTrigger>
             </TabsList>
           </Tabs>
