@@ -22,7 +22,6 @@ import {
   listBannedPubkeys,
   listBannedEvents,
   listSuspendedPubkeys,
-  fetchReports,
   fetchReportsByTarget,
   fetchReportsNeedingAttention,
   fetchResolvedReportsPage,
@@ -1568,78 +1567,6 @@ describe('adminApi', () => {
         expect.stringContaining('/api/reports?pubkey=def'),
         expect.objectContaining({ method: 'GET' })
       );
-    });
-  });
-
-  describe('fetchReports', () => {
-    it('should call /api/reports and return sorted events', async () => {
-      const events = [
-        { id: 'report1', kind: 1984, pubkey: 'pk1', created_at: 100, tags: [], content: '', sig: '' },
-        { id: 'report2', kind: 1984, pubkey: 'pk2', created_at: 200, tags: [], content: '', sig: '' },
-      ];
-
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ success: true, events }),
-      });
-
-      const result = await fetchReports(API_URL);
-
-      expect(mockFetch).toHaveBeenCalledWith(
-        expect.stringContaining('/api/reports'),
-        expect.objectContaining({ method: 'GET' })
-      );
-      // Should be sorted newest first
-      expect(result[0].id).toBe('report2');
-      expect(result[1].id).toBe('report1');
-    });
-
-    it('should return empty array when no events', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ success: true, events: [] }),
-      });
-
-      const result = await fetchReports(API_URL);
-      expect(result).toEqual([]);
-    });
-
-    it('should throw on HTTP error', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: false,
-        status: 502,
-        statusText: 'Bad Gateway',
-        json: async () => ({}),
-      });
-
-      await expect(fetchReports(API_URL)).rejects.toThrow('HTTP 502');
-    });
-
-    it('normalizes malformed tags and drops non-object events (raw payload is untrusted)', async () => {
-      const events = [
-        { id: 'r1', kind: 1984, pubkey: 'pk1', created_at: 100, content: '', sig: '' }, // tags missing
-        { id: 'r2', kind: 1984, pubkey: 'pk2', created_at: 200, tags: null, content: '', sig: '' },
-        { id: 'r3', kind: 1984, pubkey: 'pk3', created_at: 300, tags: 'junk', content: '', sig: '' },
-        { id: 'r4', kind: 1984, pubkey: 'pk4', created_at: 400, tags: [['e', 'ok'], 'rogue', [42, 'x'], ['p', 'ok2']], content: '', sig: '' },
-        null,
-        'not an event',
-      ];
-
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ success: true, events }),
-      });
-
-      const result = await fetchReports(API_URL);
-
-      // Sorted newest-first; every survivor has fully validated string[][] tags
-      expect(result.map(e => e.id)).toEqual(['r4', 'r3', 'r2', 'r1']);
-      expect(result.map(e => e.tags)).toEqual([
-        [['e', 'ok'], ['p', 'ok2']],
-        [],
-        [],
-        [],
-      ]);
     });
   });
 

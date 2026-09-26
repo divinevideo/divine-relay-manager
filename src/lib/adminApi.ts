@@ -407,12 +407,6 @@ function sanitizeRelayEvents(events: unknown): NostrEvent[] {
     }));
 }
 
-// Fetch reports via server-side relay query (replaces browser WebSocket)
-export async function fetchReports(apiUrl: string): Promise<NostrEvent[]> {
-  const data = await apiRequest<{ success: boolean; events: NostrEvent[] }>(apiUrl, '/api/reports', 'GET');
-  return sanitizeRelayEvents(data.events).sort((a, b) => b.created_at - a.created_at);
-}
-
 // Fetch reports scoped to a single target (reported event id or pubkey) via the
 // worker's /api/reports filter. Used to resolve a deep-link whose target isn't in
 // the bulk window, so we can tell "aged out / vanished" apart from "still loading".

@@ -12,7 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { ResolutionUnavailablePane, ResolutionOverrideWarning, StaleResolutionBanner, TruncatedHistoryBanner } from "@/components/ResolutionStateNotice";
+import { QueueTruncatedBanner, ResolutionUnavailablePane, ResolutionOverrideWarning, StaleResolutionBanner, TruncatedHistoryBanner } from "@/components/ResolutionStateNotice";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Switch } from "@/components/ui/switch";
@@ -51,6 +51,7 @@ import { useAdminApi } from "@/hooks/useAdminApi";
 import { useBannedPubkeys, useBannedEvents } from "@/hooks/useRelayBanLists";
 import { CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, RESOLUTION_READ_TIMEOUT_MS, getReportCategory, getReportTargetIds } from "@/lib/constants";
 import { isConsolidatedReportResolved } from "@/lib/reportResolution";
+import { mergeReportFeeds } from "@/lib/reportFeeds";
 import { getReportTarget, reportTargetKey, type ReportTarget } from "../../shared/report-target";
 import { pendingReviewTargetKeys } from "../../shared/autohide";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -89,6 +90,16 @@ const SORT_OPTIONS: { value: SortOption; label: string }[] = [
 ];
 
 const MEDIUM_PRIORITY_CATEGORIES = ['doxxing_pii', 'malware_scam', 'illegal_goods'];
+
+// How often the queue re-reads the reports that need attention. Each read
+// walks every report on the relay and, inside the worker, every resolution
+// label and both decision projections, so it runs once a minute: new reports
+// reach the queue within a minute. Handled work still leaves sooner, because
+// the resolution reads below keep their own cadence (decisions and both ban
+// lists every 15s).
+const QUEUE_POLL_MS = 60 * 1000;
+
+const NO_REPORTS: NostrEvent[] = [];
 
 // The four polled reads that build resolvedTargets. Named at module scope so the
 // acknowledged-override state can be keyed by it.
@@ -369,7 +380,7 @@ function IndividualReportItem({
 export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const { getDecisions, fetchReports, fetchReportsByTarget, fetchResolutionState, fetchResolutionLabelTargets } = useAdminApi();
+  const { getDecisions, fetchReportsNeedingAttention, fetchReportsByTarget, fetchResolutionState, fetchResolutionLabelTargets } = useAdminApi();
   const { config, updateConfig } = useAppContext();
   const queryClient = useQueryClient();
   const isMobile = useIsMobile();
@@ -441,12 +452,25 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // old one's data, reported as a success, so the queue listed and filtered
   // with it until the new environment answered. A failed refresh keeps the
   // last good data without it.
-  const { data: reports, isLoading, error, refetch, isFetching, dataUpdatedAt } = useQuery({
+  const { data: queueFeed, isLoading, error, refetch, isFetching, dataUpdatedAt } = useQuery({
     queryKey: ['reports', relayUrl],
-    queryFn: fetchReports,
-    refetchInterval: 15 * 1000,
+    queryFn: fetchReportsNeedingAttention,
+    refetchInterval: QUEUE_POLL_MS,
     retry: false,
   });
+
+  // Reports a deep link found through the targeted lookup, held beside the
+  // feed rather than written into its cache. The feed carries only targets that
+  // still need attention, so a deep link to a resolved target -- the usual way
+  // in from a closed ticket -- would drop out of the list at the next poll
+  // while its detail pane stayed open. Keyed by relay so an environment switch
+  // cannot carry them across.
+  const [deepLinked, setDeepLinked] = useState<{ relayUrl: string; events: NostrEvent[] } | null>(null);
+  const deepLinkedReports = deepLinked?.relayUrl === relayUrl ? deepLinked.events : NO_REPORTS;
+  const reports = useMemo(
+    () => (queueFeed ? mergeReportFeeds(queueFeed.events, deepLinkedReports) : undefined),
+    [queueFeed, deepLinkedReports],
+  );
 
   // resolvedTargets is subtractive: these labels HIDE work already handled, so
   // a failed fetch makes the queue bigger and wrong rather than smaller and
@@ -1132,12 +1156,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           // Prefer a report whose resolved target IS the deep-link target for display;
           // fall back to any returned report (all of them tag the target).
           const pool = matching.length > 0 ? matching : events;
-          // Merge into the reports cache so the detail pane has full context,
-          queryClient.setQueryData<NostrEvent[]>(['reports', relayUrl], (old) => {
-            const merged = [...(old ?? [])];
-            for (const e of pool) if (!merged.some(m => m.id === e.id)) merged.push(e);
-            return merged;
-          });
+          // Held beside the feed so the detail pane has full context and the
+          // row survives polls (see deepLinked above),
+          setDeepLinked({ relayUrl, events: pool });
           // and select the newest report directly — not via a re-run, so a
           // consolidation mismatch can neither loop nor hang the pane on 'resolving'.
           const latest = pool.reduce((a, b) => (b.created_at > a.created_at ? b : a));
@@ -1403,8 +1424,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
             <TruncatedHistoryBanner oldestCovered={truncatedOldestCovered} />
           )}
 
+          {queueFeed?.truncated && (
+            <QueueTruncatedBanner oldestCovered={queueFeed.oldestCovered} />
+          )}
+
           {/* Refresh failed but we still hold a previous list: warn instead of
-              blanking the queue. The poll keeps retrying every 15s. */}
+              blanking the queue. The poll retries every minute. */}
           {error && (
             <Alert variant="destructive" className="mt-2 py-2">
               <AlertDescription className="text-xs">
