@@ -25,7 +25,7 @@ vi.mock('@/hooks/useRelayBanLists', async (orig) => {
 vi.mock('@/components/ReportDetail', () => ({ ReportDetail: () => null }));
 
 const TARGET_PUBKEY = 'd'.repeat(64);
-const QUEUE_POLL_MS = 15 * 1000;
+const BAN_LIST_POLL_MS = 15 * 1000;
 
 function jsonResponse(body: unknown) {
   return new Response(JSON.stringify(body), {
@@ -68,8 +68,8 @@ describe('Reports ban-list reads', () => {
     renderQueue();
 
     await waitFor(() => expect(useBannedEvents).toHaveBeenCalled());
-    expect(useBannedEvents).toHaveBeenCalledWith(expect.objectContaining({ refetchInterval: QUEUE_POLL_MS }));
-    expect(useBannedPubkeys).toHaveBeenCalledWith(expect.objectContaining({ refetchInterval: QUEUE_POLL_MS }));
+    expect(useBannedEvents).toHaveBeenCalledWith(expect.objectContaining({ refetchInterval: BAN_LIST_POLL_MS }));
+    expect(useBannedPubkeys).toHaveBeenCalledWith(expect.objectContaining({ refetchInterval: BAN_LIST_POLL_MS }));
   });
 
   it('reads the banned accounts with the default 30s staleTime without a deep link', async () => {

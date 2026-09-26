@@ -1460,6 +1460,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     );
   }
 
+  const showDeepLinkFallback =
+    !selectedReport && hasDeepLinkParams && (deepLinkStatus === 'gone' || deepLinkStatus === 'unavailable');
+  const showDeepLinkResolving =
+    !selectedReport && deepLinkStatus === 'resolving' && hasDeepLinkParams;
+  // Whether the detail side has anything to show. Opens the mobile sheet, and
+  // keeps a cold queue failure from replacing the screen below.
+  const detailPaneOpen = !!selectedReport || showDeepLinkResolving || showDeepLinkFallback;
+
   // The reports query itself failing is the more fundamental problem: if the
   // relay read is down, resolution state is beside the point, and the
   // resolution pane's Retry can't fix it anyway. Report this first (#221) --
@@ -1467,14 +1475,19 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // (e.g. the worker 502s on a relay timeout), the last good list stays
   // rendered with a stale-data warning below, so one slow poll does not look
   // like "no reports pending".
-  if (error && !reports) {
-    return (
-      <Alert variant="destructive">
-        <AlertDescription>
-          Failed to load reports: {error instanceof Error ? error.message : "Unknown error"}
-        </AlertDescription>
-      </Alert>
-    );
+  const queueFailedCold = !!error && !reports;
+  const queueLoadFailure = (
+    <Alert variant="destructive">
+      <AlertDescription>
+        Failed to load reports: {error instanceof Error ? error.message : "Unknown error"}
+      </AlertDescription>
+    </Alert>
+  );
+  // A deep link's own lookup does not depend on the queue, so the report it
+  // found (or its gone/unavailable pane) still opens, with this failure in
+  // place of the list rather than replacing the screen.
+  if (queueFailedCold && !detailPaneOpen) {
+    return queueLoadFailure;
   }
 
   // A gating source failed cold (no previous data to fall back on). Rendering
@@ -1491,6 +1504,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     );
   }
 
+  // With the queue failed cold there is no list to draw the target's reports
+  // from; the deep link's own lookup holds them.
+  const paneReports = reports ?? deepLinkedReports;
+  const paneConsolidated = reports ? consolidated : consolidateReports(deepLinkedReports);
+
   // Built once and rendered in both the desktop pane and the mobile sheet so
   // the two views cannot drift. Reports render attacker-authored event data:
   // a crashing report degrades to the inline fallback (with the target's
@@ -1499,13 +1517,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // reports filter (reportsMode lowercases too), so the per-target
   // decisions read keys off the same normalized hex an uppercase-hex deep link
   // would otherwise miss.
-  const showDeepLinkFallback =
-    !selectedReport && hasDeepLinkParams && (deepLinkStatus === 'gone' || deepLinkStatus === 'unavailable');
-  const showDeepLinkResolving =
-    !selectedReport && deepLinkStatus === 'resolving' && hasDeepLinkParams;
-
   // The open report's side of the switch, so the pane carries the row's label.
-  const selectedSwitchKey = selectedTarget ? `${selectedTarget.type}:${selectedTarget.value}` : undefined;
+  const selectedSwitchKey = selectedTarget ? reportTargetKey(selectedTarget) : undefined;
 
   const reportDetailPane = showDeepLinkFallback ? (
     <DeepLinkFallback
@@ -1540,13 +1553,13 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         report={selectedReport}
         allReportsForTarget={
           selectedReport
-            ? consolidated.find(c =>
+            ? paneConsolidated.find(c =>
                 c.reports.some(r => r.id === selectedReport.id)
               )?.reports
             : undefined
         }
         allReportsForTargetTruncated={targetedHistoryTruncated}
-        allReports={reports || []}
+        allReports={paneReports}
         onDismiss={dismissDetail}
         switchState={selectedSwitchKey ? switchMembership.get(selectedSwitchKey) : undefined}
       />
@@ -1557,6 +1570,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     <>
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 h-full">
         {/* Left Pane - Report List */}
+        {queueFailedCold ? (
+          <div className="lg:col-span-2">{queueLoadFailure}</div>
+        ) : (
         <ErrorBoundary fallback={reset => <ReportsListErrorFallback onRetry={reset} />}>
         <Card className="lg:col-span-2 h-full overflow-hidden flex flex-col">
         <CardHeader className="pb-3 shrink-0">
@@ -1840,6 +1856,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         </CardContent>
       </Card>
         </ErrorBoundary>
+        )}
 
         {/* Right Pane - Report Detail (Desktop) */}
         {!isMobile && (
@@ -1852,7 +1869,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       {/* Mobile Sheet - Report Detail */}
       {isMobile && (
         <Sheet
-          open={!!selectedReport || showDeepLinkResolving || showDeepLinkFallback}
+          open={detailPaneOpen}
           onOpenChange={(open) => !open && handleSelectReport(null)}
         >
           <SheetContent side="right" className="!w-full !max-w-[100vw] pt-10 px-0 pb-0 overflow-y-auto">
