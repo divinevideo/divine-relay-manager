@@ -13,10 +13,11 @@ const NOTE_TEXT: Record<HistoryNote, string> = {
 interface ResolvedHistoryFooterProps {
   state: HistoryFooterState;
   errorMessage?: string;
-  // A Try again re-read is in flight. With pages loaded the query keeps its
-  // error until the re-read settles, so without this a retry that fails again
-  // looks like a dead click. (With nothing loaded, query-core puts the query
-  // back to pending and the footer shows loading instead.)
+  // A Try again re-read of loaded pages is in flight. With pages loaded the
+  // query keeps its error until the re-read settles, so without this a retry
+  // that fails again looks like a dead click. Only the refreshFailed state
+  // reads it: with nothing loaded, query-core puts the query back to pending
+  // and the footer shows loading instead of the failure.
   retrying?: boolean;
   onLoadMore: () => void;
   onRetry: () => void;
@@ -38,8 +39,8 @@ export function ResolvedHistoryFooter({ state, errorMessage, retrying = false, o
     return (
       <div data-testid="resolved-history-footer" className="space-y-2 py-3 text-center text-xs">
         <p className="text-destructive">Couldn't load resolved history{reason}</p>
-        <Button variant="outline" size="sm" onClick={onRetry} disabled={retrying}>
-          {retrying ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <RefreshCw className="mr-1 h-3 w-3" />}
+        <Button variant="outline" size="sm" onClick={onRetry}>
+          <RefreshCw className="mr-1 h-3 w-3" />
           Try again
         </Button>
       </div>
@@ -73,8 +74,8 @@ export function ResolvedHistoryFooter({ state, errorMessage, retrying = false, o
         )}
         {state.loadMoreFailed && <p className="text-destructive">Couldn't load the next page{reason}</p>}
         {notes}
-        <Button variant="outline" size="sm" onClick={onLoadMore} disabled={state.loadingMore}>
-          {state.loadingMore && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
+        <Button variant="outline" size="sm" onClick={onLoadMore} disabled={state.loadingMore || state.busy}>
+          {(state.loadingMore || state.busy) && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
           {state.loadMoreFailed ? 'Try again' : 'Load more'}
         </Button>
       </div>

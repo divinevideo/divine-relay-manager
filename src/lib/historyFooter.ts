@@ -12,6 +12,10 @@ export interface HistoryFooterInput {
   // Paging state of the newest page loaded; undefined before any page lands.
   lastPage?: { done: boolean; nextCursor: number | null };
   loadingMore: boolean;
+  // Loaded pages are being re-read (on opening the view, on Refresh, or after
+  // a resolve or reopen). Load more would cancel that read and drop what it
+  // was fetching, so it waits.
+  busy: boolean;
   loadMoreFailed: boolean;
   // Resolved rows the list renders right now. Never a fetched total: the paged
   // read knows only what the worker resolved, and the list beside it also
@@ -27,7 +31,7 @@ export type HistoryFooterState =
   | { kind: 'loading' }
   | { kind: 'failed' }
   | { kind: 'refreshFailed'; shown: number; notes: HistoryNote[] }
-  | { kind: 'more'; shown: number; loadingMore: boolean; loadMoreFailed: boolean; filterCaveat: boolean; notes: HistoryNote[] }
+  | { kind: 'more'; shown: number; loadingMore: boolean; busy: boolean; loadMoreFailed: boolean; filterCaveat: boolean; notes: HistoryNote[] }
   | { kind: 'ended'; shown: number; filterActive: boolean; notes: HistoryNote[] }
   | { kind: 'stopped'; shown: number; notes: HistoryNote[] };
 
@@ -55,6 +59,7 @@ export function historyFooterState(input: HistoryFooterInput): HistoryFooterStat
       kind: 'more',
       shown,
       loadingMore: input.loadingMore,
+      busy: input.busy,
       loadMoreFailed: input.loadMoreFailed,
       filterCaveat: input.filterActive,
       notes,

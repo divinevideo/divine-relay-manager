@@ -28,9 +28,10 @@ export function useResolvedHistory(relayUrl: string, enabled: boolean) {
     getNextPageParam: (lastPage: ResolvedReportsPage) => lastPage.nextCursor ?? undefined,
     enabled,
     // No refetchInterval, and not on window focus: either re-reads every loaded
-    // page. History is re-read when the view opens, when the moderator
-    // refreshes, and when an action changes what is resolved
-    // (invalidateResolutionState).
+    // page. History is re-read when the view opens and the pages are more than
+    // a minute old (the app's default staleTime), when the moderator
+    // refreshes, and when this moderator's own action changes what is resolved
+    // (invalidateResolutionState), which re-reads however fresh the pages are.
     refetchOnWindowFocus: false,
     // One retry, as the queue's other relay-backed reads: one slow relay read
     // should not cost a Load more.

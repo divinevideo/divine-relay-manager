@@ -61,7 +61,7 @@ import { CopyableId, CopyableTags } from "@/components/CopyableId";
 import { ReportedListCard } from "@/components/ReportedListCard";
 import { LIST_KIND_LABEL, isListKind } from "../../shared/list-report";
 import type { NostrEvent } from "@nostrify/nostrify";
-import { getReportTarget } from "../../shared/report-target";
+import { getReportTarget, reportTargetKey } from "../../shared/report-target";
 
 function getKindLabel(kind: number): string {
   if (isListKind(kind)) return LIST_KIND_LABEL[kind];
@@ -80,6 +80,9 @@ interface ReportDetailProps {
   report: NostrEvent | null;
   allReportsForTarget?: NostrEvent[];
   allReportsForTargetTruncated?: boolean;
+  // Reports the queue has loaded: needs-attention plus deep-linked, plus any
+  // loaded history. Related Reports counts from these, so its number follows
+  // the view and the pages loaded, not the account's full report history.
   allReports?: NostrEvent[];
   onDismiss?: () => void;
   // Which side of the queue's Pending review switch this report's target is
@@ -199,14 +202,14 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
     if (!context.reportedUser.pubkey || !allReports.length) return { userReports: [], eventReports: [] };
 
     const userPubkey = context.reportedUser.pubkey;
-    const currentTargetKey = context.target ? `${context.target.type}:${context.target.value}` : '';
+    const currentTargetKey = context.target ? reportTargetKey(context.target) : '';
 
     // Reports directly on this user
     const userReports = allReports.filter(r => {
       const target = getReportTarget(r);
       if (!target) return false;
       // Don't include current report's target
-      if (`${target.type}:${target.value}` === currentTargetKey) return false;
+      if (reportTargetKey(target) === currentTargetKey) return false;
       return target.type === 'pubkey' && target.value === userPubkey;
     });
 
@@ -217,7 +220,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       const target = getReportTarget(r);
       if (!target || target.type !== 'event') return false;
       // Don't include current report's target
-      if (`${target.type}:${target.value}` === currentTargetKey) return false;
+      if (reportTargetKey(target) === currentTargetKey) return false;
       // Check if report has a 'p' tag referencing this user
       const pTag = r.tags.find(t => t[0] === 'p' && t[1] === userPubkey);
       return !!pTag;
