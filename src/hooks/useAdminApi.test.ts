@@ -24,6 +24,8 @@ const getBulkKindCounts = vi.hoisted(() => vi.fn());
 const getBulkJobNotes = vi.hoisted(() => vi.fn());
 const moderateMedia = vi.hoisted(() => vi.fn());
 const getAgeReviewBulkNotesJob = vi.hoisted(() => vi.fn());
+const fetchReportsNeedingAttention = vi.hoisted(() => vi.fn());
+const fetchResolvedReportsPage = vi.hoisted(() => vi.fn());
 vi.mock('@/lib/adminApi', async (orig) => ({
   ...(await orig<typeof import('@/lib/adminApi')>()),
   deleteDecisions,
@@ -35,6 +37,8 @@ vi.mock('@/lib/adminApi', async (orig) => ({
   getBulkJobNotes,
   moderateMedia,
   getAgeReviewBulkNotesJob,
+  fetchReportsNeedingAttention,
+  fetchResolvedReportsPage,
 }));
 
 describe('useAdminApi', () => {
@@ -129,6 +133,24 @@ describe('useAdminApi', () => {
     result.current.getBulkKindCounts('abc');
 
     expect(getBulkKindCounts).toHaveBeenCalledWith(API_URL, 'abc');
+  });
+
+  // The history pager passes a cursor and a page size on every read. Dropped
+  // here, every Load more would re-read the first page.
+  it('forwards the cursor and page size to the resolved-history read', () => {
+    const { result } = renderHook(() => useAdminApi());
+
+    result.current.fetchResolvedReportsPage({ cursor: 1751000000, limit: 200 });
+
+    expect(fetchResolvedReportsPage).toHaveBeenCalledWith(API_URL, { cursor: 1751000000, limit: 200 });
+  });
+
+  it('binds the needs-attention read to the current environment', () => {
+    const { result } = renderHook(() => useAdminApi());
+
+    result.current.fetchReportsNeedingAttention();
+
+    expect(fetchReportsNeedingAttention).toHaveBeenCalledWith(API_URL);
   });
 
 });
