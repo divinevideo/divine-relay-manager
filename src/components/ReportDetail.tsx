@@ -39,6 +39,7 @@ import { useAdminApi } from "@/hooks/useAdminApi";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { useAppContext } from "@/hooks/useAppContext";
 import { historyCount } from "@/lib/historyCount";
+import { invalidateResolutionState } from "@/lib/queueInvalidation";
 import { extractMediaHashes, type ResolutionStatus } from "@/lib/adminApi";
 import { useMediaStatus } from "@/hooks/useMediaStatus";
 import { useDecisionLog } from "@/hooks/useDecisionLog";
@@ -103,9 +104,10 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
         .then(() => {
           queryClient.invalidateQueries({ queryKey: ['decisions'] });
           // The queue reads its resolved set from the resolution-state
-          // projection, not the decision log, so it needs its own invalidation
+          // projection, not the decision log, and the worker filters both
+          // report feeds by the same decisions, so all of them need refreshing
           // or the target stays listed until the next poll.
-          queryClient.invalidateQueries({ queryKey: ['resolution-state'] });
+          invalidateResolutionState(queryClient);
         })
         .catch((e) => {
           console.warn('[ReportDetail] audit log failed', e);
@@ -235,12 +237,12 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       return result;
     },
     onSuccess: (result, variables) => {
-      queryClient.invalidateQueries({ queryKey: ['reports'] });
       queryClient.invalidateQueries({ queryKey: ['labels'] });
       // The queue filters on the worker-side projections of labels and
-      // decisions, not on the raw reads, so those are the keys to refresh.
+      // decisions, not on the raw reads, so those are the keys to refresh,
+      // along with both report feeds, which the worker filters the same way.
       queryClient.invalidateQueries({ queryKey: ['resolution-label-targets'] });
-      queryClient.invalidateQueries({ queryKey: ['resolution-state'] });
+      invalidateResolutionState(queryClient);
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
       decisionLog.refetch();
       if (result.recorded !== true || result.reconciled === false) {
@@ -292,10 +294,12 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
     },
     onSuccess: ({ labelCleanupFailed }, target) => {
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
-      queryClient.invalidateQueries({ queryKey: ['resolution-state'] });
+      invalidateResolutionState(queryClient);
       // Resolution labels also gate whether the report reappears, so a reopen
       // that does not refresh them can leave the target hidden for a poll cycle
-      // -- a full minute on the label source.
+      // -- a full minute on the label source. The helper above refreshes the
+      // report feeds: a reopen moves the target out of resolved history and
+      // back into the needs-attention feed.
       queryClient.invalidateQueries({ queryKey: ['resolution-label-targets'] });
       decisionLog.refetch();
       pubkeyDecisionLog.refetch();
@@ -345,7 +349,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       // the action reports failure. Refresh it rather than leaving the panel
       // showing decisions the server no longer has.
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
-      queryClient.invalidateQueries({ queryKey: ['resolution-state'] });
+      invalidateResolutionState(queryClient);
       queryClient.invalidateQueries({ queryKey: ['resolution-label-targets'] });
       decisionLog.refetch();
       pubkeyDecisionLog.refetch();
@@ -416,7 +420,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
       // The pending-review view is built from the resolution-state projection's
       // auto-hide states, so a confirm has to refresh it to leave that view.
-      queryClient.invalidateQueries({ queryKey: ['resolution-state'] });
+      invalidateResolutionState(queryClient);
 
       decisionLog.refetch();
       toast({ title: "Auto-hide confirmed", description: "Content will remain hidden" });
@@ -437,10 +441,9 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       return restoreEvent(eventId, moderatorPubkey, 'Auto-hide reversed by moderator');
     },
     onSuccess: async (result) => {
-      queryClient.invalidateQueries({ queryKey: ['reports'] });
       queryClient.invalidateQueries({ queryKey: ['banned-events'] });
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
-      queryClient.invalidateQueries({ queryKey: ['resolution-state'] });
+      invalidateResolutionState(queryClient);
 
       moderationStatus.recheck();
       decisionLog.refetch();
@@ -467,11 +470,10 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // media and bulk content actions, through EventActions, BulkDeleteByKind,
   // UserActions' bulk jobs and the delete below) call it with no change.
   const handleActionComplete = (change?: { accountStatusChanged: boolean }) => {
-    queryClient.invalidateQueries({ queryKey: ['reports'] });
     queryClient.invalidateQueries({ queryKey: ['banned-events'] });
     queryClient.invalidateQueries({ queryKey: ['banned-users'] });
     queryClient.invalidateQueries({ queryKey: ['decisions'] });
-    queryClient.invalidateQueries({ queryKey: ['resolution-state'] });
+    invalidateResolutionState(queryClient);
     queryClient.invalidateQueries({ queryKey: ['media-status'] });
     queryClient.invalidateQueries({ queryKey: ['user-stats', context.reportedUser.pubkey] });
     // Reflect any ticket the action auto-closed so the panel flips to "Closed ✓".

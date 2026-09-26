@@ -97,6 +97,8 @@ const MEDIUM_PRIORITY_CATEGORIES = ['doxxing_pii', 'malware_scam', 'illegal_good
 // reach the queue within a minute. Handled work still leaves sooner, because
 // the resolution reads below keep their own cadence (decisions and both ban
 // lists every 15s).
+// A moderator's own resolve or reopen refreshes this read at once
+// (invalidateResolutionState).
 const QUEUE_POLL_MS = 60 * 1000;
 
 const NO_REPORTS: NostrEvent[] = [];
