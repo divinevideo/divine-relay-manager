@@ -371,6 +371,7 @@ describe('UserActions', () => {
     // log, so without this key the suspended account stays listed until the
     // next poll (#273).
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['resolution-state'] });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['reports-resolved'] });
   });
 
   it('closes the ban dialog on success (the alertdialog is removed)', async () => {

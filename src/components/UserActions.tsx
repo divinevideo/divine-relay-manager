@@ -7,6 +7,7 @@ import { useAdminApi } from '@/hooks/useAdminApi';
 import { useAgeReviewGuardRedirect } from '@/hooks/useAgeReviewGuardRedirect';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { UNDERAGE_REPORT_CATEGORY } from '@/lib/constants';
+import { invalidateResolutionState } from '@/lib/queueInvalidation';
 import { useBulkModerateJob } from '@/hooks/useBulkModerateJob';
 import { ConfirmDialog } from './ConfirmDialog';
 import { useNavigate } from 'react-router-dom';
@@ -112,7 +113,8 @@ export function UserActions({
   // post-write invalidation the report reads back before the row exists and stays
   // "pending" until a manual refresh. The ['decisions'] prefix covers
   // useDecisionLog's ['decisions', targetId]; the queue's resolved set is the
-  // separate ['resolution-state'] projection and needs its own invalidation.
+  // separate ['resolution-state'] projection, refreshed with both report feeds
+  // by invalidateResolutionState.
   // A report legitimately stays unresolved when no row was written (the .catch
   // path), which is correct.
   // Detached audit write. `moderator` is captured by the caller BEFORE the
@@ -127,7 +129,7 @@ export function UserActions({
       api.logDecision({ ...params, moderatorPubkey })
       .then(() => {
         queryClient.invalidateQueries({ queryKey: ['decisions'] });
-        queryClient.invalidateQueries({ queryKey: ['resolution-state'] });
+        invalidateResolutionState(queryClient);
       })
       .catch((e) => {
         console.warn('[UserActions] audit log failed', e);

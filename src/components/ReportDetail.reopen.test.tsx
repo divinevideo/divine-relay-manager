@@ -276,6 +276,20 @@ describe('ReportDetail reopen reporting', () => {
     expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Marked as false positive' }));
   });
 
+  it('refreshes both report feeds when a report is resolved', async () => {
+    api.markAsReviewed.mockResolvedValue({ success: true, recorded: true, reconciled: true });
+    const { invalidate } = renderDetail(vi.fn());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss Report' }));
+    const dialog = await screen.findByRole('alertdialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Dismiss Report' }));
+
+    // The target leaves the needs-attention feed and belongs in resolved
+    // history. Without the history refresh it shows in neither view.
+    await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ['reports-resolved'] }));
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['reports'] });
+  });
+
   // Even a fully successful reopen cannot promise the report is back in the
   // queue: resolvedTargets also hides targets via relay bans and deletions,
   // which reopen never touches, so a ban-resolved report stays hidden. Report
@@ -416,6 +430,10 @@ describe('ReportDetail reopen reporting', () => {
     await waitFor(() => expect(toast).toHaveBeenCalled());
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['resolution-label-targets'] });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['resolution-state'] });
+    // A reopen moves the target out of resolved history and back into the
+    // needs-attention feed. Both are cached.
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['reports'] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['reports-resolved'] });
   });
 
   // The two deleteDecisions calls are sequential and the first commits
@@ -436,6 +454,10 @@ describe('ReportDetail reopen reporting', () => {
     // stale on a part-way failure exactly as the decision log does.
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['resolution-state'] });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['resolution-label-targets'] });
+    // A reopen moves the target out of resolved history and back into the
+    // needs-attention feed. Both are cached.
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['reports'] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['reports-resolved'] });
   });
 
   // Each target's type is known here, so the worker never has to run the label
