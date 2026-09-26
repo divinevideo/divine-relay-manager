@@ -13,11 +13,16 @@ const NOTE_TEXT: Record<HistoryNote, string> = {
 interface ResolvedHistoryFooterProps {
   state: HistoryFooterState;
   errorMessage?: string;
+  // A Try again re-read is in flight. With pages loaded the query keeps its
+  // error until the re-read settles, so without this a retry that fails again
+  // looks like a dead click. (With nothing loaded, query-core puts the query
+  // back to pending and the footer shows loading instead.)
+  retrying?: boolean;
   onLoadMore: () => void;
   onRetry: () => void;
 }
 
-export function ResolvedHistoryFooter({ state, errorMessage, onLoadMore, onRetry }: ResolvedHistoryFooterProps) {
+export function ResolvedHistoryFooter({ state, errorMessage, retrying = false, onLoadMore, onRetry }: ResolvedHistoryFooterProps) {
   const reason = errorMessage ? `: ${errorMessage}` : '.';
 
   if (state.kind === 'loading') {
@@ -33,8 +38,8 @@ export function ResolvedHistoryFooter({ state, errorMessage, onLoadMore, onRetry
     return (
       <div data-testid="resolved-history-footer" className="space-y-2 py-3 text-center text-xs">
         <p className="text-destructive">Couldn't load resolved history{reason}</p>
-        <Button variant="outline" size="sm" onClick={onRetry}>
-          <RefreshCw className="mr-1 h-3 w-3" />
+        <Button variant="outline" size="sm" onClick={onRetry} disabled={retrying}>
+          {retrying ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <RefreshCw className="mr-1 h-3 w-3" />}
           Try again
         </Button>
       </div>
@@ -51,8 +56,8 @@ export function ResolvedHistoryFooter({ state, errorMessage, onLoadMore, onRetry
         <p className="text-muted-foreground">Showing {state.shown} resolved, as loaded earlier.</p>
         <p className="text-destructive">Couldn't refresh resolved history{reason}</p>
         {notes}
-        <Button variant="outline" size="sm" onClick={onRetry}>
-          <RefreshCw className="mr-1 h-3 w-3" />
+        <Button variant="outline" size="sm" onClick={onRetry} disabled={retrying}>
+          {retrying ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <RefreshCw className="mr-1 h-3 w-3" />}
           Try again
         </Button>
       </div>

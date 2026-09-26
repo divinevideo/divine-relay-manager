@@ -1,7 +1,7 @@
 // ABOUTME: The resolved-history view: read a page at a time, listed with the queue, honest about where it stops.
 // ABOUTME: Pins the footer's states, its resolved count, and how loaded pages combine with the feed.
 
-import { act, render, screen, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import { QueryClient } from '@tanstack/react-query';
@@ -41,7 +41,7 @@ const H3 = eventReport(hex('5'), hex('e'), 1751000500);
 const H4 = eventReport(hex('6'), hex('f'), 1751000400);
 const PAGE_ONE_CURSOR = 1751000800;
 
-type Reply = () => Response;
+type Reply = () => Response | Promise<Response>;
 interface WorkerStub {
   feed?: unknown[];
   bannedEvents?: string[];
@@ -55,6 +55,8 @@ function jsonResponse(body: unknown, status = 200) {
 }
 const ok = (body: unknown): Reply => () => jsonResponse(body);
 const fail: Reply = () => jsonResponse({ success: false, error: 'Relay page unconfirmed' }, 502);
+// A read that never answers.
+const hang: Reply = () => new Promise<Response>(() => {});
 
 function stubWorker(stub: WorkerStub) {
   const calls = { resolved: [] as string[], feed: 0 };
@@ -87,11 +89,11 @@ function stubWorker(stub: WorkerStub) {
   return calls;
 }
 
-function renderQueue() {
+function renderQueue(selectedReportId?: string) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, retryDelay: 0 } } });
   render(
     <TestApp queryClient={queryClient}>
-      <Reports relayUrl={RELAY_URL} />
+      <Reports relayUrl={RELAY_URL} selectedReportId={selectedReportId} />
     </TestApp>
   );
   return queryClient;
@@ -102,9 +104,17 @@ async function openHistory(user: ReturnType<typeof userEvent.setup>) {
   await user.click(screen.getByRole('switch', { name: /hide resolved/i }));
 }
 
+// With an empty feed there is no open row to wait for; the empty list is.
+async function openHistoryOverEmptyFeed(user: ReturnType<typeof userEvent.setup>) {
+  await screen.findByText('No reports found');
+  await user.click(screen.getByRole('switch', { name: /hide resolved/i }));
+}
+
 const rowFor = (eventId: string) => document.querySelector(`[data-row-key="event:${eventId}"]`) as HTMLElement | null;
 const categoryChip = (name: string) =>
   within(screen.getByText('Category').parentElement as HTMLElement).getByText(name);
+// The selected row carries the selection ring.
+const isSelectedRow = (eventId: string) => !!rowFor(eventId)?.className.includes('ring-primary');
 
 let consoleError: MockInstance;
 beforeEach(() => {
@@ -245,6 +255,100 @@ describe('the history footer counts the rows on screen', () => {
   });
 });
 
+describe('an unfinished history never reads as an empty list', () => {
+  // The queue itself is empty, and the moderator turns Hide resolved off to
+  // look at past work. Until history is read to its end, the list says nothing
+  // and the footer says where the read stands.
+  it('does not say no reports were found while the first page is loading', async () => {
+    stubWorker({ feed: [], pages: { first: hang } });
+    const user = userEvent.setup();
+    renderQueue();
+    await openHistoryOverEmptyFeed(user);
+
+    expect(await screen.findByText(/loading resolved history/i)).toBeInTheDocument();
+    expect(screen.queryByText('No reports found')).not.toBeInTheDocument();
+  });
+
+  it('does not say no reports were found when the first page failed', async () => {
+    stubWorker({ feed: [], pages: { first: fail } });
+    const user = userEvent.setup();
+    renderQueue();
+    await openHistoryOverEmptyFeed(user);
+
+    expect(await screen.findByText(/couldn't load resolved history/i)).toBeInTheDocument();
+    expect(screen.queryByText('No reports found')).not.toBeInTheDocument();
+  });
+
+  it('does not say no reports were found when an empty page has more behind it', async () => {
+    stubWorker({ feed: [], pages: { first: ok(resolvedPage([], { nextCursor: PAGE_ONE_CURSOR, done: false })) } });
+    const user = userEvent.setup();
+    renderQueue();
+    await openHistoryOverEmptyFeed(user);
+
+    expect(await screen.findByText('Showing 0 resolved. More further back.')).toBeInTheDocument();
+    expect(screen.queryByText('No reports found')).not.toBeInTheDocument();
+  });
+
+  it('does not say no reports were found in the All tab either, while history is loading', async () => {
+    stubWorker({ feed: [], pages: { first: hang } });
+    const user = userEvent.setup();
+    renderQueue();
+    await openHistoryOverEmptyFeed(user);
+    await user.click(screen.getByRole('tab', { name: /all \(/i }));
+
+    expect(await screen.findByText(/loading resolved history/i)).toBeInTheDocument();
+    expect(screen.queryByText('No reports found')).not.toBeInTheDocument();
+  });
+
+  it('says no reports were found once history is read to its end and holds none', async () => {
+    stubWorker({ feed: [], pages: { first: ok(resolvedPage([], { nextCursor: null, done: true })) } });
+    const user = userEvent.setup();
+    renderQueue();
+    await openHistoryOverEmptyFeed(user);
+
+    expect(await screen.findByText('No resolved reports.')).toBeInTheDocument();
+    expect(screen.getByText('No reports found')).toBeInTheDocument();
+  });
+});
+
+describe('a link to a resolved report opens it', () => {
+  // /reports/<id> is what a row click writes to the address bar, so it is how
+  // a report is shared and what a reload lands on. The needs-attention feed
+  // does not carry a resolved report; resolved history does.
+  it('opens a report from resolved history on arrival, with no click', async () => {
+    const calls = stubWorker({ pages: { first: ok(resolvedPage([H1], { nextCursor: null, done: true })) } });
+    renderQueue(H1.id);
+
+    await waitFor(() => expect(isSelectedRow(hex('3'))).toBe(true));
+    expect(screen.getByRole('switch', { name: /hide resolved/i })).not.toBeChecked();
+    expect(calls.resolved).toEqual(['?limit=200']);
+  });
+
+  it('opens history once for a link it cannot find, and then leaves Hide resolved to the moderator', async () => {
+    // An id older than page 1: history is opened for it once. Turning Hide
+    // resolved back on must not be undone by another look for the same id.
+    const calls = stubWorker({ pages: { first: ok(resolvedPage([H2], { nextCursor: PAGE_ONE_CURSOR, done: false })) } });
+    const user = userEvent.setup();
+    renderQueue(H4.id);
+    expect(await screen.findByText('Showing 2 resolved. More further back.')).toBeInTheDocument();
+    expect(calls.resolved).toEqual(['?limit=200']);
+
+    await user.click(screen.getByRole('switch', { name: /hide resolved/i }));
+    await screen.findByText(note(hex('1')));
+    expect(screen.getByRole('switch', { name: /hide resolved/i })).toBeChecked();
+    expect(screen.queryByTestId('resolved-history-footer')).not.toBeInTheDocument();
+  });
+
+  it('leaves Hide resolved alone for a report the feed holds', async () => {
+    const calls = stubWorker({ pages: { first: ok(resolvedPage([H1], { nextCursor: null, done: true })) } });
+    renderQueue(OPEN.id);
+
+    await waitFor(() => expect(isSelectedRow(hex('1'))).toBe(true));
+    expect(screen.getByRole('switch', { name: /hide resolved/i })).toBeChecked();
+    expect(calls.resolved).toEqual([]);
+  });
+});
+
 describe('the history footer never mistakes a stop for an end', () => {
   it('keeps loaded rows and offers a retry when Load more fails', async () => {
     let nextPageFails = true;
@@ -336,5 +440,40 @@ describe('the history footer never mistakes a stop for an end', () => {
     historyFails = false;
     await user.click(screen.getByRole('button', { name: /try again/i }));
     expect(await screen.findByText('Showing 2 resolved. End of resolved history.')).toBeInTheDocument();
+  });
+
+  it('shows Try again working while a failed first page is re-read', async () => {
+    // With nothing loaded, a re-read puts the query back to pending
+    // (query-core fetchState), so the footer shows loading, not the failure.
+    let reply: Reply = fail;
+    stubWorker({ pages: { first: () => reply() } });
+    const user = userEvent.setup();
+    renderQueue();
+    await openHistory(user);
+    expect(await screen.findByText(/couldn't load resolved history/i)).toBeInTheDocument();
+
+    reply = hang;
+    await user.click(screen.getByRole('button', { name: /try again/i }));
+    expect(await screen.findByText(/loading resolved history/i)).toBeInTheDocument();
+    expect(screen.queryByText(/couldn't load resolved history/i)).not.toBeInTheDocument();
+  });
+
+  it('shows Try again working while a failed re-read of loaded history is retried', async () => {
+    let reply: Reply = ok(resolvedPage([H1], { nextCursor: null, done: true }));
+    stubWorker({ pages: { first: () => reply() } });
+    const user = userEvent.setup();
+    const queryClient = renderQueue();
+    await openHistory(user);
+    expect(await screen.findByText('Showing 2 resolved. End of resolved history.')).toBeInTheDocument();
+
+    reply = fail;
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: ['reports-resolved'] });
+    });
+    expect(await screen.findByText(/couldn't refresh resolved history/i)).toBeInTheDocument();
+
+    reply = hang;
+    await user.click(screen.getByRole('button', { name: /try again/i }));
+    await waitFor(() => expect(screen.getByRole('button', { name: /try again/i })).toBeDisabled());
   });
 });
