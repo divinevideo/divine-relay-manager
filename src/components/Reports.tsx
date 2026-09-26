@@ -48,10 +48,13 @@ import { ReportDetailErrorFallback } from "@/components/ReportDetailErrorFallbac
 import { DeepLinkFallback } from "@/components/DeepLinkFallback";
 import { classifyTargetedFetch, reportsMatchingTarget, type DeepLinkStatus } from "@/lib/deepLinkResolution";
 import { useAdminApi } from "@/hooks/useAdminApi";
+import { useResolvedHistory } from "@/hooks/useResolvedHistory";
 import { useBannedPubkeys, useBannedEvents } from "@/hooks/useRelayBanLists";
 import { CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, RESOLUTION_READ_TIMEOUT_MS, getReportCategory, getReportTargetIds } from "@/lib/constants";
 import { isConsolidatedReportResolved } from "@/lib/reportResolution";
 import { mergeReportFeeds } from "@/lib/reportFeeds";
+import { historyFooterState } from "@/lib/historyFooter";
+import { ResolvedHistoryFooter } from "@/components/ResolvedHistoryFooter";
 import { getReportTarget, reportTargetKey, type ReportTarget } from "../../shared/report-target";
 import { pendingReviewTargetKeys } from "../../shared/autohide";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -267,6 +270,7 @@ function ConsolidatedReportItem({
           : 'hover:bg-muted/50'
       }`}
       onClick={onClick}
+      data-row-key={reportTargetKey(consolidated.target)}
     >
       <div className="space-y-2">
         <div className="flex items-start justify-between gap-2">
@@ -344,6 +348,7 @@ function IndividualReportItem({
           : 'hover:bg-muted/50'
       }`}
       onClick={onClick}
+      data-row-key={report.id}
     >
       <div className="space-y-2">
         <div className="flex items-start justify-between gap-2">
@@ -477,6 +482,28 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     () => (queueFeed ? mergeReportFeeds(queueFeed.events, deepLinkedReports) : undefined),
     [queueFeed, deepLinkedReports],
   );
+
+  // The resolved-history view: Hide resolved off, outside the pending-review
+  // view. The needs-attention feed no longer carries targets the worker
+  // resolved, so this view adds them from their own paged read, fetched only
+  // while the view is open.
+  const historyView = !hideResolved && !showPendingReview;
+  const history = useResolvedHistory(relayUrl, historyView);
+  const historyPages = history.data?.pages;
+  // What the list is built from: the feed plus deep-linked reports, plus
+  // loaded history in the history view. They can hold the same report, and
+  // merging keeps one copy.
+  const listReports = useMemo(() => {
+    if (!reports) return undefined;
+    if (!historyView || !historyPages) return reports;
+    return mergeReportFeeds(reports, ...historyPages.map(page => page.events));
+  }, [reports, historyView, historyPages]);
+
+  // fetchNextPage settles into the query's own state (isFetchNextPageError),
+  // which the footer renders, so nothing here needs its promise.
+  const loadMoreHistory = () => {
+    history.fetchNextPage();
+  };
 
   // resolvedTargets is subtractive: these labels HIDE work already handled, so
   // a failed fetch makes the queue bigger and wrong rather than smaller and
@@ -861,17 +888,17 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
   // Get all unique categories from reports for filter chips
   const availableCategories = useMemo(() => {
-    if (!reports) return [];
+    if (!listReports) return [];
     const categories = new Set<string>();
-    for (const report of reports) {
+    for (const report of listReports) {
       categories.add(getReportCategory(report));
     }
     return Array.from(categories).sort();
-  }, [reports]);
+  }, [listReports]);
 
   const consolidated = useMemo(() => {
-    if (!reports) return [];
-    let items = consolidateReports(reports);
+    if (!listReports) return [];
+    let items = consolidateReports(listReports);
 
     // If showing pending review, only show items pending review (auto-hidden CSAM queue)
     if (showPendingReview) {
@@ -937,12 +964,22 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     });
 
     return items;
-  }, [reports, hideResolved, showPendingReview, resolvedTargets, bannedPubkeySet, pendingReviewTargets, filterCategory, filterTargetType, sortBy]);
+  }, [listReports, hideResolved, showPendingReview, resolvedTargets, bannedPubkeySet, pendingReviewTargets, filterCategory, filterTargetType, sortBy]);
 
   const allConsolidated = useMemo(() => {
-    if (!reports) return [];
-    return consolidateReports(reports);
-  }, [reports]);
+    if (!listReports) return [];
+    return consolidateReports(listReports);
+  }, [listReports]);
+
+  // The needs-attention feed plus deep-linked reports (`reports`), grouped,
+  // without loaded history. The pending-review view lists from `reports`, so
+  // its badge counts from here; and a listed target this does not carry came
+  // from resolved history.
+  const feedConsolidated = useMemo(() => (reports ? consolidateReports(reports) : []), [reports]);
+  const feedTargetKeys = useMemo(
+    () => new Set(feedConsolidated.map(c => reportTargetKey(c.target))),
+    [feedConsolidated],
+  );
 
   const authorByTarget = useMemo(() => new Map(
     allConsolidated.map(c => [reportTargetKey(c.target), c.authorPubkey]),
@@ -950,8 +987,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
   // Filter individual reports when hideResolved is on
   const filteredReports = useMemo(() => {
-    if (!reports) return [];
-    let items = [...reports];
+    if (!listReports) return [];
+    let items = [...listReports];
 
     // If showing pending review, only show items pending review (auto-hidden CSAM queue)
     if (showPendingReview) {
@@ -1016,7 +1053,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     });
 
     return items;
-  }, [reports, hideResolved, showPendingReview, resolvedTargets, bannedPubkeySet, authorByTarget, pendingReviewTargets, filterCategory, filterTargetType, sortBy]);
+  }, [listReports, hideResolved, showPendingReview, resolvedTargets, bannedPubkeySet, authorByTarget, pendingReviewTargets, filterCategory, filterTargetType, sortBy]);
 
   const uniqueTargets = consolidated.length;
   const filteredReportsCount = filteredReports.length;
@@ -1031,13 +1068,47 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // "On entry" because entering clears the category and type filters (D6); a
   // filter chosen inside the view narrows the list and its Grouped count, not
   // this badge, which keeps saying how many targets are waiting.
-  const pendingReviewRows = allConsolidated.filter(c => pendingReviewTargets.has(reportTargetKey(c.target)));
+  const pendingReviewRows = feedConsolidated.filter(c => pendingReviewTargets.has(reportTargetKey(c.target)));
   const pendingReviewCount = pendingReviewRows.length;
+
+  // Whether a listed target is resolved, from both halves of the history view.
+  // A target neither the feed nor a deep link carries came from resolved
+  // history, which the worker resolved by a decision or a label. One they do
+  // carry is resolved if the browser's own sources say so: a relay ban,
+  // including a banned author's posts, or a decision or label (which is how a
+  // deep-linked resolved target counts).
+  const isListedTargetResolved = (target: ReportTarget, authorPubkey: string | undefined) =>
+    !feedTargetKeys.has(reportTargetKey(target))
+    || isConsolidatedReportResolved({ target, authorPubkey }, resolvedTargets, bannedPubkeySet);
+
+  // Counted from the rows on screen in the current view (spec: every count
+  // beside a list comes from the rows it renders).
+  const resolvedRowsShown = viewMode === 'consolidated'
+    ? consolidated.filter(c => isListedTargetResolved(c.target, c.authorPubkey)).length
+    : filteredReports.filter(report => {
+        const target = getReportTarget(report);
+        return !!target && isListedTargetResolved(target, authorByTarget.get(reportTargetKey(target)));
+      }).length;
+
+  const lastHistoryPage = historyPages && historyPages.length > 0 ? historyPages[historyPages.length - 1] : undefined;
+  const footerState = historyFooterState({
+    firstPageFailed: history.isError && !history.data,
+    // isRefetchError is an error with data on hand that is not a Load more
+    // failure (query-core 5.75 infiniteQueryObserver).
+    refreshFailed: history.isRefetchError,
+    lastPage: lastHistoryPage,
+    loadingMore: history.isFetchingNextPage,
+    loadMoreFailed: history.isFetchNextPageError,
+    resolvedRowsShown,
+    filterActive: filterCategory !== null || filterTargetType !== 'all',
+    skippedWithinSecond: !!historyPages?.some(page => page.skippedWithinSecond),
+    resolutionTruncated: !!historyPages?.some(page => page.resolutionTruncated),
+  });
 
   // Sync selected report with URL
   useEffect(() => {
-    if (selectedReportId && reports && !selectedReport) {
-      const report = reports.find(r => r.id === selectedReportId);
+    if (selectedReportId && listReports && !selectedReport) {
+      const report = listReports.find(r => r.id === selectedReportId);
       if (report) {
         // Arriving at /reports/<id> directly -- a shared link, or a reload after
         // following a Zendesk deep link -- is a deep-link selection too, and
@@ -1048,7 +1119,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         setSelectedReport(report);
       }
     }
-  }, [selectedReportId, reports, selectedReport]);
+  }, [selectedReportId, listReports, selectedReport]);
 
   // A deep link can select a report before ban/label/decision queries finish.
   // Re-check the selected target as resolution data arrives so it cannot stay
@@ -1337,8 +1408,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
   // With the queue failed cold there is no list to draw the target's reports
   // from; the deep link's own lookup holds them.
-  const paneReports = reports ?? deepLinkedReports;
-  const paneConsolidated = reports ? consolidated : consolidateReports(deepLinkedReports);
+  const paneReports = listReports ?? deepLinkedReports;
+  const paneConsolidated = listReports ? consolidated : consolidateReports(deepLinkedReports);
 
   // Built once and rendered in both the desktop pane and the mobile sheet so
   // the two views cannot drift. Reports render attacker-authored event data:
@@ -1689,6 +1760,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                     />
                   ))
                 )
+              )}
+              {historyView && (
+                <ResolvedHistoryFooter
+                  state={footerState}
+                  errorMessage={history.error instanceof Error ? history.error.message : undefined}
+                  onLoadMore={loadMoreHistory}
+                  onRetry={() => history.refetch()}
+                />
               )}
             </div>
           </ScrollArea>

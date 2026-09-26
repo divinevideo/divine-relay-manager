@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } fr
 import { QueryClient, onlineManager } from '@tanstack/react-query';
 import { nip19 } from 'nostr-tools';
 import TestApp from '@/test/TestApp';
+import { EMPTY_RESOLVED_PAGE } from '@/test/resolvedHistory';
 import { Reports } from './Reports';
 
 const RELAY_URL = 'wss://relay.example';
@@ -103,6 +104,7 @@ function stubFetch(state: SourceState) {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input instanceof Request ? input.url : input);
 
+    if (url.includes('/api/reports/resolved')) return jsonResponse(EMPTY_RESOLVED_PAGE);
     if (url.includes('/api/reports')) {
       if (state.reports === 'error') return jsonResponse({ success: false, error: 'relay unreachable' }, 500);
       const events: unknown[] = [REPORT];

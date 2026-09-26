@@ -1,0 +1,64 @@
+// ABOUTME: What the resolved-history footer says, from the state of the paged read.
+// ABOUTME: A list that stopped must never read like a list that ended.
+
+export type HistoryNote = 'skipped-within-second' | 'resolution-truncated';
+
+export interface HistoryFooterInput {
+  // The first page failed and nothing is loaded.
+  firstPageFailed: boolean;
+  // Pages are loaded, and re-reading them (on opening the view, on Refresh,
+  // or after a resolve or reopen) failed. The pages on screen are stale.
+  refreshFailed: boolean;
+  // Paging state of the newest page loaded; undefined before any page lands.
+  lastPage?: { done: boolean; nextCursor: number | null };
+  loadingMore: boolean;
+  loadMoreFailed: boolean;
+  // Resolved rows the list renders right now. Never a fetched total: the paged
+  // read knows only what the worker resolved, and the list beside it also
+  // holds ban-resolved reports from the feed.
+  resolvedRowsShown: number;
+  // A category or target-type filter is narrowing the list.
+  filterActive: boolean;
+  skippedWithinSecond: boolean;
+  resolutionTruncated: boolean;
+}
+
+export type HistoryFooterState =
+  | { kind: 'loading' }
+  | { kind: 'failed' }
+  | { kind: 'refreshFailed'; shown: number; notes: HistoryNote[] }
+  | { kind: 'more'; shown: number; loadingMore: boolean; loadMoreFailed: boolean; filterCaveat: boolean; notes: HistoryNote[] }
+  | { kind: 'ended'; shown: number; filterActive: boolean; notes: HistoryNote[] }
+  | { kind: 'stopped'; shown: number; notes: HistoryNote[] };
+
+// Only the worker's `done` ends history. An empty page with a cursor is more
+// history, not none; a page with no cursor that is not done is a walk that
+// could not continue, and says so. A failed re-read says so before anything
+// else: the last good read's word on the end is stale by then (#221).
+export function historyFooterState(input: HistoryFooterInput): HistoryFooterState {
+  if (!input.lastPage) {
+    return input.firstPageFailed ? { kind: 'failed' } : { kind: 'loading' };
+  }
+  const notes: HistoryNote[] = [];
+  if (input.skippedWithinSecond) notes.push('skipped-within-second');
+  if (input.resolutionTruncated) notes.push('resolution-truncated');
+  const shown = input.resolvedRowsShown;
+
+  if (input.refreshFailed) {
+    return { kind: 'refreshFailed', shown, notes };
+  }
+  if (input.lastPage.done) {
+    return { kind: 'ended', shown, filterActive: input.filterActive, notes };
+  }
+  if (input.lastPage.nextCursor !== null) {
+    return {
+      kind: 'more',
+      shown,
+      loadingMore: input.loadingMore,
+      loadMoreFailed: input.loadMoreFailed,
+      filterCaveat: input.filterActive,
+      notes,
+    };
+  }
+  return { kind: 'stopped', shown, notes };
+}

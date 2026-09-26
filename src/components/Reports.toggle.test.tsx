@@ -6,6 +6,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import { QueryClient } from '@tanstack/react-query';
 import TestApp from '@/test/TestApp';
+import { EMPTY_RESOLVED_PAGE } from '@/test/resolvedHistory';
 import { Reports } from './Reports';
 
 const RELAY_URL = 'wss://relay.example';
@@ -78,6 +79,7 @@ function stubFetch(resolvedNow: () => boolean) {
   const calls = { resolutionState: 0 };
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input instanceof Request ? input.url : input);
+    if (url.includes('/api/reports/resolved')) return jsonResponse(EMPTY_RESOLVED_PAGE);
     if (url.includes('/api/reports')) {
       return jsonResponse({ success: true, events: [REPORT, RESOLVED_REPORT, AUTOHIDDEN_REPORT] });
     }
