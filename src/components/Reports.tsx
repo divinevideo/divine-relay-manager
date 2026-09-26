@@ -435,11 +435,16 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // Reports and resolution labels fetched via server-side relay query through
   // the worker. Replaces browser-side WebSocket (nostrify NPool) which served
   // stale cached data. The worker opens a fresh WebSocket per request.
+  //
+  // None of the queue's reads carry `placeholderData: prev => prev`. After an
+  // environment switch it seeded the new environment's empty query with the
+  // old one's data, reported as a success, so the queue listed and filtered
+  // with it until the new environment answered. A failed refresh keeps the
+  // last good data without it.
   const { data: reports, isLoading, error, refetch, isFetching, dataUpdatedAt } = useQuery({
     queryKey: ['reports', relayUrl],
     queryFn: fetchReports,
     refetchInterval: 15 * 1000,
-    placeholderData: (previousData) => previousData,
     retry: false,
   });
 
@@ -467,7 +472,6 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     // actions, this query -- not because of either poll. Only another
     // moderator's label-only resolution can lag, by at most a minute.
     refetchInterval: 60 * 1000,
-    placeholderData: (previousData) => previousData,
     retry: 1,
   });
   const labelTargets = labelsResult?.targets;
@@ -523,7 +527,6 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     },
     staleTime: 30 * 1000,
     refetchInterval: 15 * 1000,
-    placeholderData: (previousData) => previousData,
     retry: 1,
   });
   const resolvedDecisionTargets = decisionsResult?.resolved;

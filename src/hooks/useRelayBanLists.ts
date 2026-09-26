@@ -57,9 +57,8 @@ function baseOptions(opts?: BanListOptions) {
     // success. The pane stated it as that account's ban status and the queue
     // filtered by it. Without the option, these three lists behave after an
     // environment switch exactly as on a fresh page load: nothing until the new
-    // environment answers. (The queue's other reads -- reports,
-    // resolution-state, resolution-label-targets -- still carry the option, so
-    // the queue as a whole does not behave that way yet.)
+    // environment answers. The queue's other reads (reports, resolution-state,
+    // resolution-label-targets) dropped the option for the same reason.
     // One retry, matching the queue's other resolution reads. The React Query
     // default of three stacks backoff onto an already-slow relay.
     retry: 1,
