@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MockInstance } from 'vitest';
 import { useLocation } from 'react-router-dom';
 import TestApp from '@/test/TestApp';
+import { EMPTY_RESOLVED_PAGE } from '@/test/resolvedHistory';
 import { Reports } from './Reports';
 import { useIsMobile } from '@/hooks/useIsMobile';
 
@@ -92,6 +93,7 @@ let consoleError: MockInstance;
 function stubFetch(targeted: (url: string) => Response, bulk: unknown[] = [OTHER_REPORT]) {
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input instanceof Request ? input.url : input);
+    if (url.includes('/api/reports/resolved')) return jsonResponse(EMPTY_RESOLVED_PAGE);
     const isTargeted = url.includes('/api/reports') && (url.includes('event=') || url.includes('pubkey='));
     if (isTargeted) return targeted(url);
     if (url.includes('/api/reports')) return jsonResponse({ success: true, events: bulk });
@@ -205,6 +207,7 @@ describe('Reports deep-link resolution', () => {
     window.history.pushState({}, '', `/reports?event=${OTHER_EVENT}`);
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/reports/resolved')) return jsonResponse(EMPTY_RESOLVED_PAGE);
       if (url.includes('/api/reports') && (url.includes('event=') || url.includes('pubkey='))) {
         throw new Error('bulk hit should not issue targeted lookup');
       }
@@ -233,6 +236,7 @@ describe('Reports deep-link resolution', () => {
     const bannedPubkeysPromise = new Promise<Response>((res) => { resolveBannedPubkeys = res; });
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/reports/resolved')) return jsonResponse(EMPTY_RESOLVED_PAGE);
       if (url.includes('/api/reports')) return jsonResponse({ success: true, events: [BULK_PUBKEY_REPORT] });
       if (url.includes('/api/resolution-labels')) return jsonResponse({ success: true, events: [] });
       if (url.includes('/api/decisions')) return jsonResponse({ success: true, decisions: [] });
@@ -337,6 +341,7 @@ describe('Reports deep-link resolution', () => {
     const targetedPromise = new Promise<Response>((res) => { resolveTargeted = res; });
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/reports/resolved')) return jsonResponse(EMPTY_RESOLVED_PAGE);
       if (url.includes('/api/reports') && url.includes('event=')) return targetedPromise;
       if (url.includes('/api/reports')) return jsonResponse({ success: true, events: [OTHER_REPORT] });
       if (url.includes('/api/resolution-labels')) return jsonResponse({ success: true, events: [] });
@@ -428,6 +433,7 @@ describe('Reports deep-link resolution', () => {
     const targetedPromise = new Promise<Response>((res) => { resolveTargeted = res; });
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/reports/resolved')) return jsonResponse(EMPTY_RESOLVED_PAGE);
       if (url.includes('/api/reports') && url.includes('event=')) return targetedPromise;
       if (url.includes('/api/reports')) return jsonResponse({ success: true, events: [OTHER_REPORT] });
       if (url.includes('/api/resolution-labels')) return jsonResponse({ success: true, events: [] });

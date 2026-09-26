@@ -5,6 +5,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MockInstance } from 'vitest';
 import TestApp from '@/test/TestApp';
+import { EMPTY_RESOLVED_PAGE } from '@/test/resolvedHistory';
 import { Reports } from './Reports';
 
 // Stand-in for a detail pane crashed by hostile event data — always throws,
@@ -52,6 +53,7 @@ beforeEach(() => {
   consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input instanceof Request ? input.url : input);
+    if (url.includes('/api/reports/resolved')) return jsonResponse(EMPTY_RESOLVED_PAGE);
     if (url.includes('/api/reports')) return jsonResponse({ success: true, events: [REPORT, MALFORMED_REPORT] });
     if (url.includes('/api/resolution-label-targets')) return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
     if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, resolved: [], states: [] });
@@ -112,6 +114,7 @@ describe('Reports stale-data resilience', () => {
     let reportsCalls = 0;
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/reports/resolved')) return jsonResponse(EMPTY_RESOLVED_PAGE);
       if (url.includes('/api/reports')) {
         reportsCalls++;
         if (reportsCalls === 1) return jsonResponse({ success: true, events: [REPORT] });
@@ -149,6 +152,7 @@ describe('Reports stale-data resilience', () => {
   it('still shows the full error pane when the first load fails (no stale data to fall back on)', async () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/reports/resolved')) return jsonResponse(EMPTY_RESOLVED_PAGE);
       if (url.includes('/api/reports')) {
         return new Response(JSON.stringify({ success: false, error: 'Relay query timed out before EOSE' }), {
           status: 502,
@@ -172,6 +176,7 @@ describe('Reports unresolved auto-hide filtering', () => {
   it('keeps a newer unresolved hide in the opt-in pending-review queue', async () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/reports/resolved')) return jsonResponse(EMPTY_RESOLVED_PAGE);
       if (url.includes('/api/reports')) return jsonResponse({ success: true, events: [REPORT] });
       if (url.includes('/api/resolution-label-targets')) return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
       if (url.includes('/api/resolution-state')) {
@@ -222,6 +227,7 @@ describe('Reports resolution filtering', () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input instanceof Request ? input.url : input);
       if (url.includes('/api/resolution-label-targets')) return labelsResponse();
+      if (url.includes('/api/reports/resolved')) return jsonResponse(EMPTY_RESOLVED_PAGE);
       if (url.includes('/api/reports')) return jsonResponse({ success: true, events: [REPORT] });
       if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, resolved: [], states: [] });
       if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
