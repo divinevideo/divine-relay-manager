@@ -494,35 +494,26 @@ describe('cold error blocks the queue and offers an override (#221)', () => {
     expect(await screen.findByText(/auto-hidden/i)).toBeInTheDocument();
   });
 
-  it('does not block on a cold labels error while hide-resolved is off', async () => {
-    // resolvedTargets is not applied in that view, so labels cannot un-hide
-    // anything and blocking would be a lie.
+  it('keeps the cold labels warning once hide-resolved goes off', async () => {
+    // The history view counts resolved rows with labels in its footer, so a
+    // labels read that failed must stay named there, as it is in the default
+    // view.
     stubFetch({ labels: 'error', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty' });
     const user = userEvent.setup();
     renderReports();
 
-    // Brief assertion amended: hideResolved defaults to true, so with resolvedFilterActive
-    // true at mount, labels genuinely does gate (matching the other "blocks" tests above) and
-    // the blocked pane fully replaces the queue, filters included, the same way the loading
-    // skeleton does. There is no way to reach the hide-resolved switch except through the
-    // override, so use it to get there, then confirm the block does not return once
-    // hide-resolved is off -- that's the actual claim this test makes.
+    // hideResolved defaults to true, so the blocked pane replaces the queue,
+    // filters included. The override is the only way to reach the switch.
     await user.click(await screen.findByRole('button', { name: /show the queue anyway/i }));
-    // The "Hide resolved" control is a shadcn/Radix Switch (role="switch") with
-    // an associated <Label htmlFor="hide-resolved">; verified against
-    // Reports.tsx:1217-1230 and the existing selector in
-    // Reports.deeplink.test.tsx:178.
     await user.click(await screen.findByRole('switch', { name: /hide resolved/i }));
 
     expect(await screen.findByText(REPORTED_NPUB)).toBeInTheDocument();
-    expect(screen.queryByText(/resolution state is unavailable/i)).not.toBeInTheDocument();
-    // The override is still on (component state, nothing reset it), so an
-    // absent pane alone doesn't prove labels stopped gating -- the override
-    // would mask that regardless. The persistent warning is driven by the
-    // same blockingErrors set as the pane, so its disappearance is the real
-    // signal that gatingSources actually dropped labels once hide-resolved
-    // went off, not just that the override happens to still be in effect.
-    expect(screen.queryByText(/some of these may already be handled/i)).not.toBeInTheDocument();
+    // The override is still on (component state, nothing reset it), so the
+    // pane stays away either way. The persistent warning is driven by the
+    // same blockingErrors set as the pane, so its presence is the signal that
+    // labels still gate once hide-resolved is off.
+    expect(screen.getByRole('switch', { name: /hide resolved/i })).not.toBeChecked();
+    expect(screen.getByText(/some of these may already be handled/i)).toBeInTheDocument();
   });
 
   it('the blocked pane warns that overriding will include auto-hidden content', async () => {
@@ -554,8 +545,7 @@ describe('cold error blocks the queue and offers an override (#221)', () => {
   });
 
   it('still blocks on a cold decisions error while hide-resolved is off', async () => {
-    // Mirror image of "does not block on a cold labels error while hide-resolved
-    // is off" above: decisions carries gatesAlways because it also feeds
+    // Decisions carries gatesAlways because it also feeds
     // pendingReviewTargets, which is applied on every path, so it must keep
     // gating even once the hide-resolved toggle goes off.
     stubFetch({ labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'error' });
@@ -565,9 +555,37 @@ describe('cold error blocks the queue and offers an override (#221)', () => {
     await user.click(await screen.findByRole('button', { name: /show the queue anyway/i }));
     await user.click(await screen.findByRole('switch', { name: /hide resolved/i }));
 
-    // Unlike the labels case, the persistent warning must still be present:
-    // decisions did not stop gating just because hide-resolved went off.
+    // The persistent warning must still be present: decisions did not stop
+    // gating just because hide-resolved went off.
     expect(screen.getByText(/some of these may already be handled/i)).toBeInTheDocument();
+  });
+
+  it('drops the cold labels warning in the pending-review view, which lists from decisions alone', async () => {
+    stubFetch({ labels: 'error', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty' });
+    const failing = globalThis.fetch as unknown as typeof fetch;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/resolution-state')) {
+        // An auto-hidden target puts the pending-review toggle on screen.
+        return jsonResponse({
+          success: true,
+          resolved: [],
+          states: [{ target_type: 'pubkey', target_id: REPORTED_PUBKEY, action: 'auto_hidden' }],
+        });
+      }
+      return failing(input, init);
+    }));
+    const user = userEvent.setup();
+    renderReports();
+
+    await user.click(await screen.findByRole('button', { name: /show the queue anyway/i }));
+    expect(await screen.findByText(/some of these may already be handled/i)).toBeInTheDocument();
+    await user.click(await screen.findByRole('switch', { name: /pending review/i }));
+
+    // Precondition: this is the pending-review view, and the target is listed in it.
+    expect(screen.getByRole('switch', { name: /hide resolved/i })).toBeDisabled();
+    expect(screen.getByText(REPORTED_NPUB)).toBeInTheDocument();
+    expect(screen.queryByText(/some of these may already be handled/i)).not.toBeInTheDocument();
   });
 
   it('shows no unavailable pane when every source is healthy', async () => {

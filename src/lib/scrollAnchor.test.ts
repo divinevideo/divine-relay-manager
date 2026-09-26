@@ -44,6 +44,16 @@ describe('restoreScrollAnchor', () => {
     expect(viewport.scrollTop).toBe(400);
   });
 
+  it('keeps the row as far into the viewport as it was, not snapped to its top edge', () => {
+    // The moderator had scrolled 30px into c before two rows landed above it.
+    const viewport = layout({ a: 0, x: 100, y: 200, b: 300, c: 400 });
+    viewport.scrollTop = 200;
+
+    restoreScrollAnchor(viewport, { key: 'c', offset: -30 });
+
+    expect(viewport.scrollTop).toBe(430);
+  });
+
   it('leaves the scroll alone when the anchored row is no longer listed', () => {
     const viewport = layout({ a: 0 });
     viewport.scrollTop = 50;

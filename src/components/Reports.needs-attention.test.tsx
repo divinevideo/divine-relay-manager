@@ -2,7 +2,8 @@
 // ABOUTME: keeps a deep-linked resolved report listed through the polls that do not carry it,
 // ABOUTME: and keeps that report reachable when the queue itself fails to load.
 
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import { QueryClient, useQuery } from '@tanstack/react-query';
 import { nip19 } from 'nostr-tools';
@@ -121,9 +122,9 @@ describe('the queue reads the needs-attention feed', () => {
   });
 
   it('re-reads resolution labels once a minute', async () => {
-    // The label read walks every page of resolution labels, so it keeps the
-    // 60s poll D1 left it on; a moderator's own label clears through
-    // invalidation, not this poll.
+    // The label read walks every page of resolution labels, so it keeps its
+    // 60s poll; a moderator's own label clears through invalidation, not this
+    // poll.
     stubWorker({});
     renderQueue();
     await screen.findByText(nip19.noteEncode(OPEN_EVENT));
@@ -254,5 +255,33 @@ describe('the queue reads the needs-attention feed', () => {
 
     expect(await screen.findByText('Report no longer on relay')).toBeInTheDocument();
     expect(screen.getByText(/Failed to load reports/)).toBeInTheDocument();
+  });
+
+  it('lists the queue once Try again re-reads a feed that failed to load', async () => {
+    // Nothing else re-reads a failed feed for up to a minute: the header's
+    // Refresh is not on screen in this state.
+    stubWorker({ success: false, error: 'Relay query timed out before EOSE' }, 502);
+    renderQueue();
+    const failure = (await screen.findByText(/Failed to load reports/)).closest('[role="alert"]') as HTMLElement;
+
+    stubWorker({});
+    await userEvent.setup().click(within(failure).getByRole('button', { name: 'Try again' }));
+
+    expect(await screen.findByText(nip19.noteEncode(OPEN_EVENT))).toBeInTheDocument();
+    expect(screen.queryByText(/Failed to load reports/)).not.toBeInTheDocument();
+  });
+
+  it('lists the queue once Try again re-reads a failed feed beside a deep-linked report', async () => {
+    stubWorker({ success: false, error: 'Relay query timed out before EOSE' }, 502);
+    window.history.pushState({}, '', `/reports?event=${RESOLVED_EVENT}`);
+    renderQueue();
+    await screen.findByTestId('report-detail');
+    const failure = screen.getByText(/Failed to load reports/).closest('[role="alert"]') as HTMLElement;
+
+    stubWorker({});
+    await userEvent.setup().click(within(failure).getByRole('button', { name: 'Try again' }));
+
+    expect(await screen.findByText(nip19.noteEncode(OPEN_EVENT))).toBeInTheDocument();
+    expect(screen.queryByText(/Failed to load reports/)).not.toBeInTheDocument();
   });
 });

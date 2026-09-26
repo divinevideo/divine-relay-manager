@@ -45,6 +45,8 @@ type Reply = () => Response | Promise<Response>;
 interface WorkerStub {
   feed?: unknown[];
   bannedEvents?: string[];
+  // The banned-posts read, when it should not answer with the list above.
+  bannedEventsReply?: Reply;
   // Resolved-history replies by cursor; 'first' is the read with no cursor.
   pages: Record<string, Reply>;
   decisions?: Reply;
@@ -79,6 +81,7 @@ function stubWorker(stub: WorkerStub) {
     }
     if (url.pathname === '/api/relay-rpc') {
       const bannedEventsRead = String(init?.body ?? '').includes('listbannedevents');
+      if (bannedEventsRead && stub.bannedEventsReply) return stub.bannedEventsReply();
       return jsonResponse({
         success: true,
         result: bannedEventsRead ? (stub.bannedEvents ?? [BANNED_EVENT]).map(id => ({ id })) : [],
@@ -313,6 +316,41 @@ describe('an unfinished history never reads as an empty list', () => {
   });
 });
 
+// The history view's resolved count reads the ban lists and labels as much as
+// the default view's filter does, so it waits on them, and names them when
+// they failed, the same way (#186, #221).
+describe('the history view never counts on a resolution source it lacks', () => {
+  it('keeps the banned-posts warning in history once the moderator overrides it', async () => {
+    stubWorker({ bannedEventsReply: fail, pages: { first: ok(resolvedPage([], { nextCursor: null, done: true })) } });
+    const user = userEvent.setup();
+    renderQueue();
+    await user.click(await screen.findByRole('button', { name: /show the queue anyway/i }));
+    const overrideWarning = /Banned posts unavailable\), so some of these may already be handled/;
+    expect(await screen.findByText(overrideWarning)).toBeInTheDocument();
+
+    await openHistory(user);
+    // The banned post is listed, but unconfirmed as resolved: its ban was never read.
+    expect(await screen.findByText(note(BANNED_EVENT))).toBeInTheDocument();
+    const footer = await screen.findByTestId('resolved-history-footer');
+    await waitFor(() => expect(footer).not.toHaveTextContent(/Loading/));
+
+    expect(screen.getByText(overrideWarning)).toBeInTheDocument();
+  });
+
+  it('waits for the ban lists before listing history, rather than counting without them', async () => {
+    // A link to a report the feed does not hold opens history as soon as the
+    // feed answers, which can be before the ban lists do.
+    const calls = stubWorker({ bannedEventsReply: hang, pages: { first: ok(resolvedPage([H1], { nextCursor: null, done: true })) } });
+    const queryClient = renderQueue(H1.id);
+    await waitFor(() => expect(calls.resolved).toHaveLength(1));
+    await waitFor(() => expect(queryClient.getQueryState(['reports-resolved', RELAY_URL])?.status).toBe('success'));
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+    expect(screen.getByTestId('reports-loading-skeleton')).toBeInTheDocument();
+    expect(screen.queryByTestId('resolved-history-footer')).not.toBeInTheDocument();
+  });
+});
+
 describe('a link to a resolved report opens it', () => {
   // /reports/<id> is what a row click writes to the address bar, so it is how
   // a report is shared and what a reload lands on. The needs-attention feed
@@ -339,6 +377,33 @@ describe('a link to a resolved report opens it', () => {
     await screen.findByText(note(hex('1')));
     expect(screen.getByRole('switch', { name: /hide resolved/i })).toBeChecked();
     expect(screen.queryByTestId('resolved-history-footer')).not.toBeInTheDocument();
+  });
+
+  it('looks in history again for the same link in another environment', async () => {
+    // Opening history once per id is per environment: the other relay's history
+    // is a different read, and it may hold the report.
+    const calls = stubWorker({ pages: { first: ok(resolvedPage([H2], { nextCursor: PAGE_ONE_CURSOR, done: false })) } });
+    const user = userEvent.setup();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, retryDelay: 0 } } });
+    const { rerender } = render(
+      <TestApp queryClient={queryClient}>
+        <Reports relayUrl={RELAY_URL} selectedReportId={H4.id} />
+      </TestApp>
+    );
+    await screen.findByText('Showing 2 resolved. More further back.');
+    await user.click(screen.getByRole('switch', { name: /hide resolved/i }));
+    await screen.findByText(note(hex('1')));
+    expect(calls.resolved).toHaveLength(1);
+
+    rerender(
+      <TestApp queryClient={queryClient}>
+        <Reports relayUrl="wss://relay-two.example" selectedReportId={H4.id} />
+      </TestApp>
+    );
+
+    await waitFor(() => expect(calls.resolved).toHaveLength(2));
+    expect(await screen.findByText('Showing 2 resolved. More further back.')).toBeInTheDocument();
+    expect(screen.getByRole('switch', { name: /hide resolved/i })).not.toBeChecked();
   });
 
   it('leaves Hide resolved alone for a report the feed holds', async () => {
@@ -374,6 +439,41 @@ describe('the history footer never mistakes a stop for an end', () => {
     nextPageFails = false;
     await user.click(screen.getByRole('button', { name: /try again/i }));
     expect(await screen.findByText(note(hex('5')))).toBeInTheDocument();
+  });
+
+  it('holds Load more while loaded history is being re-read, so the re-read is not thrown away', async () => {
+    // Load more would cancel the re-read (query-core cancels an in-flight
+    // fetch for the next one), and the resolution it was fetching would stay
+    // missing from history until the next re-read.
+    const X = eventReport(hex('0'), hex('7'), 1751000950);
+    let firstReads = 0;
+    let releaseReRead: (() => void) | undefined;
+    stubWorker({
+      pages: {
+        first: () => {
+          firstReads += 1;
+          if (firstReads === 1) return jsonResponse(resolvedPage([H1, H2], { nextCursor: PAGE_ONE_CURSOR, done: false }));
+          return new Promise<Response>(resolve => {
+            releaseReRead = () => resolve(jsonResponse(resolvedPage([X, H1, H2], { nextCursor: PAGE_ONE_CURSOR, done: false })));
+          });
+        },
+        [PAGE_ONE_CURSOR]: ok(resolvedPage([H3], { nextCursor: null, done: true })),
+      },
+    });
+    const user = userEvent.setup();
+    const queryClient = renderQueue();
+    await openHistory(user);
+    await screen.findByText('Showing 3 resolved. More further back.');
+    expect(screen.getByRole('button', { name: /load more/i })).toBeEnabled();
+
+    await act(async () => { queryClient.invalidateQueries({ queryKey: ['reports-resolved'] }); });
+    await waitFor(() => expect(firstReads).toBe(2));
+
+    await waitFor(() => expect(screen.getByRole('button', { name: /load more/i })).toBeDisabled());
+
+    await act(async () => { releaseReRead?.(); });
+    expect(await screen.findByText(note(hex('0')))).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /load more/i })).toBeEnabled();
   });
 
   it('says resolved history failed to load rather than that there is none', async () => {
@@ -519,7 +619,7 @@ describe('the history view keeps what is on screen in order', () => {
     await openHistory(user);
     expect(await screen.findByText(/newest first while resolved history is shown/i)).toBeInTheDocument();
     expect(screen.getByRole('combobox')).toBeDisabled();
-    // The control shows the order the list is actually in (D2).
+    // The control shows the order the list is actually in.
     expect(screen.getByRole('combobox')).toHaveTextContent('Newest First');
 
     await user.click(screen.getByRole('switch', { name: /hide resolved/i }));

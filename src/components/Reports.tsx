@@ -432,8 +432,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     && targetedHistory.target.type === selectedTarget.type
     && targetedHistory.target.value === selectedTarget.value;
   const attemptedTargetRef = useRef<string | null>(null); // one targeted fetch per target
-  // The /reports/<id> the history view was last opened for, so it opens once
-  // per id and does not reopen after the moderator turns Hide resolved back on.
+  // The relay and /reports/<id> the history view was last opened for, so it
+  // opens once per id in each environment and does not reopen after the
+  // moderator turns Hide resolved back on. Keyed like attemptedTargetRef.
   const urlHistoryTriedRef = useRef<string | null>(null);
   // True only while the CURRENT selection came from a deep link. A ref, not
   // state: the unhide effect reads it when it runs, and flipping it must not
@@ -824,17 +825,22 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     resolvedDecisionTargets, decisionsError, decisionsUpdatedAt, decisionsPending, decisionsFetchStatus, decisionsErrorUpdateCount,
   ]);
 
-  // Models only when the LIST FILTER (the "hide resolved" toggle applied to
-  // consolidated/individual) consults resolvedTargets. Three other
-  // consumers -- the deep-link auto-deselect, the deep-link resolved
-  // branch, and the resolved-count label -- key on hideResolved alone and
-  // stay live even in the pending-review view where this is false. That is
-  // deliberate, not a gap this flag should also gate: all three fail in the
-  // show-more direction on a partially-loaded resolvedTargets, which is the
-  // safe direction for a subtractive set, and they self-correct once the
-  // source lands.
+  // Whether the list filter (Hide resolved on, outside the pending-review
+  // view) subtracts resolvedTargets. Only the label truncation bound below
+  // still keys on it.
   const resolvedFilterActive = hideResolved && !showPendingReview;
-  const gatingSources = resolutionSources.filter(s => s.gatesAlways || resolvedFilterActive);
+  // Labels and the ban lists gate every view but pending review. The default
+  // view subtracts them from the list; the history view counts resolved rows
+  // with them in its footer, so a failed or unlanded read there would state a
+  // count, even "No resolved reports.", with nothing to back it. The
+  // pending-review view lists pendingReviewTargets, which the decisions source
+  // alone builds. Two other consumers -- the deep-link auto-deselect and the
+  // deep-link resolved branch -- key on Hide resolved alone, so they stay live
+  // in the pending-review view, where these three do not gate. That is
+  // deliberate: both fail in the show-more direction on a partially-loaded
+  // set, which is safe for a subtractive set, and self-correct once the source
+  // lands.
+  const gatingSources = resolutionSources.filter(s => s.gatesAlways || !showPendingReview);
   // Has this source failed with nothing to fall back on, and stayed failed?
   //
   // Reading the live `error` alone is not enough to answer that. query-core's
@@ -1093,7 +1099,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // grouped targets whose newest auto-hide state is still waiting for a human.
   // Not pendingReviewTargets.size -- that set spans every decision on record,
   // and a target in it with no report here is a badge with no row behind it.
-  // "On entry" because entering clears the category and type filters (D6); a
+  // "On entry" because entering clears the category and type filters; a
   // filter chosen inside the view narrows the list and its Grouped count, not
   // this badge, which keeps saying how many targets are waiting.
   const pendingReviewRows = feedConsolidated.filter(c => pendingReviewTargets.has(reportTargetKey(c.target)));
@@ -1126,6 +1132,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     refreshFailed: history.isRefetchError,
     lastPage: lastHistoryPage,
     loadingMore: history.isFetchingNextPage,
+    busy: history.isFetching && !history.isFetchingNextPage,
     loadMoreFailed: history.isFetchNextPageError,
     resolvedRowsShown,
     filterActive: filterCategory !== null || filterTargetType !== 'all',
@@ -1149,16 +1156,16 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         // this cannot re-select behind a dismissal.
         deepLinkSelectedRef.current = true;
         setSelectedReport(report);
-      } else if (hideResolved && !showPendingReview && urlHistoryTriedRef.current !== selectedReportId) {
+      } else if (hideResolved && !showPendingReview && urlHistoryTriedRef.current !== `${relayUrl}|${selectedReportId}`) {
         // The feed has answered and does not hold it: most likely resolved.
         // Look in resolved history, as the old single read did for its newest
         // 200; this branch selects it once page 1 lands. An id older than
         // page 1 stays unselected, as it did then.
-        urlHistoryTriedRef.current = selectedReportId;
+        urlHistoryTriedRef.current = `${relayUrl}|${selectedReportId}`;
         setHideResolved(false);
       }
     }
-  }, [selectedReportId, listReports, selectedReport, hideResolved, showPendingReview]);
+  }, [selectedReportId, listReports, selectedReport, hideResolved, showPendingReview, relayUrl]);
 
   // A deep link can select a report before ban/label/decision queries finish.
   // Re-check the selected target as resolution data arrives so it cannot stay
@@ -1419,10 +1426,18 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // rendered with a stale-data warning below, so one slow poll does not look
   // like "no reports pending".
   const queueFailedCold = !!error && !reports;
+  // Try again is the only way back short of the next 60s poll: the header's
+  // Refresh is not rendered in either layout. No busy state is needed: with no
+  // data the re-read puts the query back to pending, and the skeleton above
+  // takes the screen until it settles.
   const queueLoadFailure = (
     <Alert variant="destructive">
-      <AlertDescription>
-        Failed to load reports: {error instanceof Error ? error.message : "Unknown error"}
+      <AlertDescription className="space-y-2">
+        <p>Failed to load reports: {error instanceof Error ? error.message : "Unknown error"}</p>
+        <Button variant="outline" size="sm" onClick={() => refetch()}>
+          <RefreshCw className="mr-1 h-3 w-3" />
+          Try again
+        </Button>
       </AlertDescription>
     </Alert>
   );
