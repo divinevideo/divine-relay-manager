@@ -28,9 +28,11 @@ export function useUserSummary(
   pubkey: string | undefined,
   recentPosts: NostrEvent[] | undefined,
   existingLabels: NostrEvent[] | undefined,
-  previousReports: NostrEvent[] | undefined
+  previousReports: NostrEvent[] | undefined,
+  history?: { reportsIncomplete?: boolean; labelsIncomplete?: boolean },
 ) {
   const apiUrl = useApiUrl();
+  const historyIncomplete = history?.reportsIncomplete === true || history?.labelsIncomplete === true;
   return useQuery<SummaryResponse>({
     queryKey: ['user-summary', pubkey],
     queryFn: async () => {
@@ -78,7 +80,7 @@ export function useUserSummary(
 
       return response.json();
     },
-    enabled: !!pubkey && !!recentPosts && recentPosts.length > 0,
+    enabled: !!pubkey && !!recentPosts && recentPosts.length > 0 && !historyIncomplete,
     staleTime: 1000 * 60 * 60, // Cache for 1 hour
     retry: false, // Don't retry AI calls
   });

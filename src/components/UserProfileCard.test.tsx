@@ -130,6 +130,12 @@ describe('UserProfileCard', () => {
     expect(screen.queryByRole('button', { name: /view activity/i })).not.toBeInTheDocument();
   });
 
+  it('does not print a failed report read as zero', () => {
+    render(<UserProfileCard pubkey={PUBKEY} stats={{ ...stats(RECENT), reportsIncomplete: true }} />);
+    expect(screen.getByText('reports unavailable')).toBeInTheDocument();
+    expect(screen.queryByText('0 reports')).not.toBeInTheDocument();
+  });
+
   it('marks a report count that is a floor, not a total', () => {
     render(<UserProfileCard pubkey={PUBKEY} stats={{ ...stats(RECENT), reportCount: 991, reportsTruncated: true }} />);
     expect(screen.getByText('991+ reports')).toBeInTheDocument();

@@ -148,11 +148,17 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
   // True from the moment thread finishes with no event, until banned check completes.
   const isBannedEventLoading = shouldCheckBanned && (bannedEventQueryLoading || bannedEvent === undefined);
 
+  const historyIncomplete = context.userStats?.reportsIncomplete === true
+    || context.userStats?.labelsIncomplete === true;
   const summary = useUserSummary(
     context.reportedUser.pubkey || undefined,
     context.userStats?.recentPosts,
     context.userStats?.existingLabels,
-    context.userStats?.previousReports
+    context.userStats?.previousReports,
+    {
+      reportsIncomplete: context.userStats?.reportsIncomplete,
+      labelsIncomplete: context.userStats?.labelsIncomplete,
+    },
   );
 
   // Unified moderation status: ban lists + WebSocket verification.
@@ -1027,8 +1033,8 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
               <AISummary
                 summary={summary.data?.summary}
                 riskLevel={summary.data?.riskLevel}
-                isLoading={summary.isLoading}
-                error={summary.error as Error | null}
+                isLoading={summary.isLoading && !historyIncomplete}
+                error={historyIncomplete ? new Error('Account history unavailable') : summary.error as Error | null}
               />
             </>
           ) : context.target?.type === 'pubkey' ? (

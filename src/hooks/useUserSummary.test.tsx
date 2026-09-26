@@ -66,4 +66,20 @@ describe('useUserSummary', () => {
     expect(shuffledReports[0].created_at).toBe(79);
     expect(shuffledLabels[0].created_at).toBe(79);
   });
+
+  it('does not call the summarizer when report or label history failed', async () => {
+    const { result } = renderHook(
+      () => useUserSummary(
+        PUBKEY,
+        [event(1, 'a'.repeat(64), 1)],
+        [],
+        [],
+        { reportsIncomplete: true },
+      ),
+      { wrapper },
+    );
+
+    await waitFor(() => expect(result.current.fetchStatus).toBe('idle'));
+    expect(fetch).not.toHaveBeenCalled();
+  });
 });

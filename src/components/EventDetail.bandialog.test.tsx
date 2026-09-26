@@ -137,6 +137,7 @@ describe('EventDetail ban dialog report count', () => {
     vi.clearAllMocks();
     userStatsData.reportCount = 80;
     userStatsData.reportsTruncated = false;
+    userStatsData.reportsIncomplete = false;
   });
 
   it('matches the stats row above it instead of the capped related-reports read', async () => {
@@ -161,6 +162,18 @@ describe('EventDetail ban dialog report count', () => {
 
     expect(within(dialog).getByText('991+ reports')).toBeInTheDocument();
     expect(within(dialog).getByText('This user has 991+ reports against them')).toBeInTheDocument();
+  });
+
+  it('does not treat a failed report read as zero reports', async () => {
+    userStatsData.reportCount = 0;
+    userStatsData.reportsIncomplete = true;
+
+    renderDetail();
+    const dialog = await openBanDialog();
+
+    expect(within(dialog).getByText('reports unavailable')).toBeInTheDocument();
+    expect(within(dialog).getByText('Report history unavailable')).toBeInTheDocument();
+    expect(within(dialog).queryByText('0 reports')).not.toBeInTheDocument();
   });
 
   it('hides the sentence when the account has no reports', async () => {

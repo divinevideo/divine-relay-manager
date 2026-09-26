@@ -6,3 +6,13 @@
 export function historyCount(count: number, truncated: boolean): string {
   return truncated ? `${count}+` : String(count);
 }
+
+export function historyStat(
+  count: number,
+  truncated: boolean,
+  incomplete: boolean,
+  noun: string,
+): string {
+  if (incomplete) return `${noun} unavailable`;
+  return `${historyCount(count, truncated)} ${noun}`;
+}
