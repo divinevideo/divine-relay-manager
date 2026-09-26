@@ -1108,6 +1108,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
   const uniqueTargets = consolidated.length;
   const filteredReportsCount = filteredReports.length;
+  // The header counts the rows the active tab renders: targets when grouped,
+  // reports in the All tab.
+  const headerCount = viewMode === 'consolidated' ? uniqueTargets : filteredReportsCount;
 
   // The pending-review badge counts the rows that view will list on entry: the
   // grouped targets behind the switch, auto-hidden or CSAM-signal and not yet
@@ -1599,10 +1602,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
               </CardTitle>
               <CardDescription>
                 {showPendingReview
-                  ? `${uniqueTargets} pending review`
+                  ? `${headerCount} pending review`
                   : hideResolved
-                    ? `${uniqueTargets} pending`
-                    : `${uniqueTargets} shown`}
+                    ? `${headerCount} pending`
+                    : `${headerCount} shown`}
               </CardDescription>
             </div>
             <div className="flex items-center gap-2">
