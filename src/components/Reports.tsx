@@ -1135,6 +1135,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     busy: history.isFetching && !history.isFetchingNextPage,
     loadMoreFailed: history.isFetchNextPageError,
     resolvedRowsShown,
+    unreadSources: overriddenBlockedSources.map(s => s.label),
     filterActive: filterCategory !== null || filterTargetType !== 'all',
     skippedWithinSecond: !!historyPages?.some(page => page.skippedWithinSecond),
     resolutionTruncated: !!historyPages?.some(page => page.resolutionTruncated),

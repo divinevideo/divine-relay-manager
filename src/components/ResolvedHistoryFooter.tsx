@@ -10,6 +10,15 @@ const NOTE_TEXT: Record<HistoryNote, string> = {
   'resolution-truncated': 'Some resolved reports may be missing: not every resolution label could be read.',
 };
 
+// With a resolution source unread, rows it would resolve are counted as
+// unresolved: a count would run short, and "No resolved reports." could be
+// false. Name the sources instead.
+function shownText(shown: number, unreadSources: string[]): string {
+  return unreadSources.length > 0
+    ? `Resolved count withheld: ${unreadSources.join(', ')} unavailable.`
+    : `Showing ${shown} resolved.`;
+}
+
 interface ResolvedHistoryFooterProps {
   state: HistoryFooterState;
   errorMessage?: string;
@@ -54,7 +63,11 @@ export function ResolvedHistoryFooter({ state, errorMessage, retrying = false, o
   if (state.kind === 'refreshFailed') {
     return (
       <div data-testid="resolved-history-footer" className="space-y-2 py-3 text-center text-xs">
-        <p className="text-muted-foreground">Showing {state.shown} resolved, as loaded earlier.</p>
+        <p className="text-muted-foreground">
+          {state.unreadSources.length > 0
+            ? shownText(state.shown, state.unreadSources)
+            : `Showing ${state.shown} resolved, as loaded earlier.`}
+        </p>
         <p className="text-destructive">Couldn't refresh resolved history{reason}</p>
         {notes}
         <Button variant="outline" size="sm" onClick={onRetry} disabled={retrying}>
@@ -68,7 +81,7 @@ export function ResolvedHistoryFooter({ state, errorMessage, retrying = false, o
   if (state.kind === 'more') {
     return (
       <div data-testid="resolved-history-footer" className="space-y-2 py-3 text-center text-xs text-muted-foreground">
-        <p>Showing {state.shown} resolved. More further back.</p>
+        <p>{shownText(state.shown, state.unreadSources)} More further back.</p>
         {state.filterCaveat && (
           <p>Filters only search the history loaded so far. Load more to search further back.</p>
         )}
@@ -85,7 +98,7 @@ export function ResolvedHistoryFooter({ state, errorMessage, retrying = false, o
   if (state.kind === 'stopped') {
     return (
       <div data-testid="resolved-history-footer" className="space-y-2 py-3 text-center text-xs text-muted-foreground">
-        <p>Showing {state.shown} resolved. Resolved history can't be followed further back from here.</p>
+        <p>{shownText(state.shown, state.unreadSources)} Resolved history can't be followed further back from here.</p>
         {notes}
       </div>
     );
@@ -94,8 +107,8 @@ export function ResolvedHistoryFooter({ state, errorMessage, retrying = false, o
   return (
     <div data-testid="resolved-history-footer" className="space-y-2 py-3 text-center text-xs text-muted-foreground">
       <p>
-        {state.shown > 0
-          ? `Showing ${state.shown} resolved. End of resolved history.`
+        {state.shown > 0 || state.unreadSources.length > 0
+          ? `${shownText(state.shown, state.unreadSources)} End of resolved history.`
           : state.filterActive
             ? 'No resolved reports match the current filters.'
             : 'No resolved reports.'}
