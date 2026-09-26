@@ -6,6 +6,7 @@ import { join, relative } from 'node:path';
 import { QueryClient } from '@tanstack/react-query';
 import { describe, expect, it, vi } from 'vitest';
 import { sourceFiles } from '@/test/sourceFiles';
+import { DIRECT_CALL, hasDisallowedDirectCall } from '@/test/resolutionStateScan';
 import { invalidateResolutionState, RESOLVED_HISTORY_KEY_ROOT } from './queueInvalidation';
 
 describe('invalidateResolutionState', () => {
@@ -24,22 +25,61 @@ describe('invalidateResolutionState', () => {
   });
 });
 
-const DIRECT = /invalidateQueries\(\s*\{\s*queryKey:\s*\[\s*['"]resolution-state['"]\s*\]\s*\}\s*\)/;
-// The helper itself, and the queue's Retry, which must refresh only the failed
-// resolution sources: invalidating resolved history there would re-read every
-// loaded page behind the moderator's back (spec: history stays out of the
-// retry list).
-const ALLOWED = [join('lib', 'queueInvalidation.ts'), join('components', 'Reports.tsx')];
-
-describe('refreshing resolution state', () => {
-  it('recognizes the direct call, and only the direct call', () => {
-    expect(DIRECT.test("queryClient.invalidateQueries({ queryKey: ['resolution-state'] });")).toBe(true);
-    expect(DIRECT.test('invalidateResolutionState(queryClient);')).toBe(false);
+// Fixture strings, not real files: the matcher's own rules -- the regex's
+// tolerance for formatting, and the scope of the Retry exemption -- are
+// pinned here independent of whatever the repo currently contains, so a
+// future real file can never make these rules untestable by satisfying them
+// by accident.
+describe('the direct-call matcher (fixtures)', () => {
+  it('recognizes a single-line direct call', () => {
+    expect(DIRECT_CALL.test("queryClient.invalidateQueries({ queryKey: ['resolution-state'] });")).toBe(true);
   });
 
+  it('does not mistake the helper call for a direct one', () => {
+    expect(DIRECT_CALL.test('invalidateResolutionState(queryClient);')).toBe(false);
+  });
+
+  it('recognizes a multi-line call with a trailing comma', () => {
+    const source = "queryClient.invalidateQueries({\n  queryKey: ['resolution-state'],\n});";
+    expect(DIRECT_CALL.test(source)).toBe(true);
+  });
+
+  it('allows the direct call inside retryResolutionSources in Reports.tsx', () => {
+    const source = `
+function other() {}
+const retryResolutionSources = () => {
+  queryClient.invalidateQueries({ queryKey: ['resolution-state'] });
+};
+`;
+    expect(hasDisallowedDirectCall(source, join('components', 'Reports.tsx'))).toBe(false);
+  });
+
+  // What Important finding #1 in the review exists to prevent: a future
+  // handler added anywhere else in Reports.tsx that writes the raw call
+  // instead of using the helper. At b4cf4b8 this passed (ALLOWED exempted the
+  // whole file); it must fail now.
+  it('still catches a direct call added elsewhere in Reports.tsx', () => {
+    const source = `
+const retryResolutionSources = () => {
+  queryClient.invalidateQueries({ queryKey: ['resolution-label-targets'] });
+};
+function someNewHandler() {
+  queryClient.invalidateQueries({ queryKey: ['resolution-state'] });
+}
+`;
+    expect(hasDisallowedDirectCall(source, join('components', 'Reports.tsx'))).toBe(true);
+  });
+
+  it('allows the direct call anywhere in the helper file itself', () => {
+    const source = "queryClient.invalidateQueries({ queryKey: ['resolution-state'] });";
+    expect(hasDisallowedDirectCall(source, join('lib', 'queueInvalidation.ts'))).toBe(false);
+  });
+});
+
+describe('refreshing resolution state', () => {
   it('finds the direct call in the helper (positive control)', () => {
     const source = readFileSync(join(process.cwd(), 'src', 'lib', 'queueInvalidation.ts'), 'utf8');
-    expect(DIRECT.test(source)).toBe(true);
+    expect(DIRECT_CALL.test(source)).toBe(true);
   });
 
   it('goes through the helper everywhere else', () => {
@@ -48,8 +88,7 @@ describe('refreshing resolution state', () => {
     const srcRoot = join(process.cwd(), 'src');
     const offenders = sourceFiles(srcRoot)
       .map(path => relative(srcRoot, path))
-      .filter(path => !ALLOWED.includes(path))
-      .filter(path => DIRECT.test(readFileSync(join(srcRoot, path), 'utf8')));
+      .filter(path => hasDisallowedDirectCall(readFileSync(join(srcRoot, path), 'utf8'), path));
 
     expect(offenders).toEqual([]);
   });
