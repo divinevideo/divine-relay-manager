@@ -106,29 +106,50 @@ export function StaleResolutionBanner({
   );
 }
 
-// Both /api/decisions and /api/resolution-labels cap how far back they read.
-// Neither cap binds today, but when one does, a target whose only resolution
-// signal is older than the window ages out of resolvedTargets and sits in the
-// queue forever with nothing explaining why (#221).
-export function TruncatedHistoryBanner({ oldestCovered }: { oldestCovered: number }) {
-  // oldestCovered is a UTC-anchored epoch value (see parseOldestCovered).
-  // Rendering it in the browser's local zone can shift the displayed day
-  // backward for moderators west of UTC, understating how far the gap
-  // reaches -- the falsely-reassuring direction #221 exists to remove. The
-  // boundary is a statement about the data, not the reader's calendar day,
-  // so it renders as UTC with an explicit marker.
-  const date = new Date(oldestCovered).toLocaleDateString(undefined, {
+// A UTC-anchored epoch value (see parseOldestCovered) as a calendar date in
+// UTC. Rendering it in the browser's local zone can shift the day backward
+// for moderators west of UTC, understating how far a gap reaches -- the
+// falsely-reassuring direction #221 exists to remove. The boundary is a
+// statement about the data, not the reader's calendar day.
+function formatUtcDate(epochMs: number): string {
+  return new Date(epochMs).toLocaleDateString(undefined, {
     year: 'numeric',
     month: 'short',
     day: 'numeric',
     timeZone: 'UTC',
   });
+}
+
+// Both /api/decisions and /api/resolution-labels cap how far back they read.
+// Neither cap binds today, but when one does, a target whose only resolution
+// signal is older than the window ages out of resolvedTargets and sits in the
+// queue forever with nothing explaining why (#221).
+export function TruncatedHistoryBanner({ oldestCovered }: { oldestCovered: number }) {
+  const date = formatUtcDate(oldestCovered);
 
   return (
     <Alert className="mt-2 py-2">
       <AlertDescription className="text-xs">
         Resolution history only reaches back to {date} (UTC). Anything resolved before then
         may be listed as pending.
+      </AlertDescription>
+    </Alert>
+  );
+}
+
+// The needs-attention walk over the relay's reports stopped at its page bound.
+// The queue is then short again with nothing else on screen saying so, which is
+// the failure this read exists to remove.
+export function QueueTruncatedBanner({ oldestCovered }: { oldestCovered: number | null }) {
+  const date = oldestCovered === null ? null : formatUtcDate(oldestCovered);
+
+  return (
+    <Alert variant="destructive" className="mt-2 py-2">
+      <AlertDescription className="text-xs">
+        The queue stopped reading reports early.{' '}
+        {date
+          ? `Anything reported before ${date} (UTC) may be missing from this list.`
+          : 'Some reports may be missing from this list.'}
       </AlertDescription>
     </Alert>
   );
