@@ -23,6 +23,8 @@ import {
   listSuspendedPubkeys,
   fetchReports,
   fetchReportsByTarget,
+  fetchReportsNeedingAttention,
+  fetchResolvedReportsPage,
   fetchResolutionLabels,
   publishLabel,
   publishLabelAndBan,
@@ -1813,6 +1815,165 @@ describe('adminApi', () => {
         [],
         [],
       ]);
+    });
+  });
+
+  describe('fetchReportsNeedingAttention', () => {
+    it('asks for the needs-attention mode and returns its reports newest first', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          success: true,
+          events: [
+            { id: 'r1', kind: 1984, pubkey: 'pk1', created_at: 100, tags: [], content: '', sig: '' },
+            { id: 'r2', kind: 1984, pubkey: 'pk2', created_at: 200, tags: [], content: '', sig: '' },
+          ],
+          counts: { targets: 2, resolved: 7 },
+          truncated: false,
+          resolution_truncated: false,
+          oldest_covered: 100,
+        }),
+      });
+
+      const result = await fetchReportsNeedingAttention(API_URL);
+
+      // The exact URL: without the parameter the worker serves its legacy
+      // newest-200 read, and nothing on screen would say so.
+      expect(mockFetch).toHaveBeenCalledWith(
+        `${API_URL}/api/reports?needs_attention=1`,
+        expect.objectContaining({ method: 'GET' }),
+      );
+      expect(result.events.map(e => e.id)).toEqual(['r2', 'r1']);
+      expect(result.truncated).toBe(false);
+    });
+
+    it('says the reports walk stopped early, and how far back it reached', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, events: [], truncated: true, oldest_covered: 1751000000 }),
+      });
+
+      const result = await fetchReportsNeedingAttention(API_URL);
+
+      expect(result.truncated).toBe(true);
+      expect(result.oldestCovered).toBe(1751000000 * 1000);
+    });
+
+    it('treats only an explicit truncated: true as stopped early', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, events: [] }) });
+
+      expect((await fetchReportsNeedingAttention(API_URL)).truncated).toBe(false);
+    });
+
+    it('normalizes malformed tags and drops non-object events (raw payload is untrusted)', async () => {
+      const events = [
+        { id: 'r1', kind: 1984, pubkey: 'pk1', created_at: 100, content: '', sig: '' },
+        { id: 'r2', kind: 1984, pubkey: 'pk2', created_at: 200, tags: null, content: '', sig: '' },
+        { id: 'r3', kind: 1984, pubkey: 'pk3', created_at: 300, tags: 'junk', content: '', sig: '' },
+        { id: 'r4', kind: 1984, pubkey: 'pk4', created_at: 400, tags: [['e', 'ok'], 'rogue', [42, 'x'], ['p', 'ok2']], content: '', sig: '' },
+        null,
+        'not an event',
+      ];
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, events }) });
+
+      const result = await fetchReportsNeedingAttention(API_URL);
+
+      expect(result.events.map(e => e.id)).toEqual(['r4', 'r3', 'r2', 'r1']);
+      expect(result.events.map(e => e.tags)).toEqual([[['e', 'ok'], ['p', 'ok2']], [], [], []]);
+    });
+
+    it("throws the worker's reason when the read fails", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 502,
+        statusText: 'Bad Gateway',
+        json: async () => ({ success: false, error: 'Relay page unconfirmed' }),
+      });
+
+      await expect(fetchReportsNeedingAttention(API_URL)).rejects.toThrow('Relay page unconfirmed');
+    });
+  });
+
+  describe('fetchResolvedReportsPage', () => {
+    const page = (overrides: Record<string, unknown> = {}) => ({
+      success: true,
+      events: [
+        { id: 'r1', kind: 1984, pubkey: 'pk1', created_at: 100, tags: [['e', 'x']], content: '', sig: '' },
+        { id: 'r2', kind: 1984, pubkey: 'pk2', created_at: 200, tags: [['e', 'y']], content: '', sig: '' },
+      ],
+      next_cursor: 100,
+      done: false,
+      skipped_within_second: false,
+      resolution_truncated: false,
+      ...overrides,
+    });
+
+    it('reads the first page with no cursor', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => page() });
+
+      const result = await fetchResolvedReportsPage(API_URL, { limit: 200 });
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        `${API_URL}/api/reports/resolved?limit=200`,
+        expect.objectContaining({ method: 'GET' }),
+      );
+      expect(result).toMatchObject({ nextCursor: 100, done: false, skippedWithinSecond: false, resolutionTruncated: false });
+      expect(result.events.map(e => e.id)).toEqual(['r2', 'r1']);
+    });
+
+    it('reads a later page from the cursor', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => page() });
+
+      await fetchResolvedReportsPage(API_URL, { cursor: 1751000000, limit: 200 });
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        `${API_URL}/api/reports/resolved?cursor=1751000000&limit=200`,
+        expect.objectContaining({ method: 'GET' }),
+      );
+    });
+
+    it('reports the end of history only when the worker says so', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => page({ events: [], next_cursor: null, done: true }) });
+
+      expect(await fetchResolvedReportsPage(API_URL, {})).toMatchObject({ events: [], nextCursor: null, done: true });
+    });
+
+    it("carries the worker's notes on what a page skipped", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => page({ skipped_within_second: true, resolution_truncated: true }),
+      });
+
+      expect(await fetchResolvedReportsPage(API_URL, {})).toMatchObject({
+        skippedWithinSecond: true,
+        resolutionTruncated: true,
+      });
+    });
+
+    it('ends paging at a cursor it could not send back', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => page({ next_cursor: 99.5 }) });
+
+      expect((await fetchResolvedReportsPage(API_URL, {})).nextCursor).toBeNull();
+    });
+
+    it('refuses a response that does not say whether history ended', async () => {
+      // Anything answering on this path without the endpoint's contract. Read
+      // as the end, it would tell a moderator there is no more resolved
+      // history when nothing was checked.
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, events: [] }) });
+
+      await expect(fetchResolvedReportsPage(API_URL, {})).rejects.toThrow(/did not say whether it had ended/);
+    });
+
+    it("throws the worker's reason when the page fails", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 502,
+        statusText: 'Bad Gateway',
+        json: async () => ({ success: false, error: 'Relay page unconfirmed' }),
+      });
+
+      await expect(fetchResolvedReportsPage(API_URL, {})).rejects.toThrow('Relay page unconfirmed');
     });
   });
 
