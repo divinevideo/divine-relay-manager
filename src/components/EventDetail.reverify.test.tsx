@@ -43,18 +43,10 @@ vi.mock('@/hooks/useAgeReviewGuardRedirect', () => ({
 
 // The banner only renders when the user reads as banned, which is what puts the
 // Re-verify button on screen.
-vi.mock('@/hooks/useModerationStatus', () => ({
-  useModerationStatus: () => ({
-    isUserBanned: true,
-    isUserSuspended: false,
-    isEventBanned: false,
-    isEventGone: false,
-    isLoading: false,
-    isChecking: false,
-    checkedAt: null,
-    recheck: vi.fn(),
-  }),
-}));
+vi.mock('@/hooks/useModerationStatus', async () => {
+  const { moderationStatusMock } = await import('@/test/moderationStatusMock');
+  return { useModerationStatus: () => moderationStatusMock({ isUserBanned: true }) };
+});
 
 // Heavy presentational children drag in relay sockets of their own and say
 // nothing about the verification outcome.

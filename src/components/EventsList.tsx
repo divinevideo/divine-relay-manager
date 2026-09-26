@@ -7,6 +7,7 @@ import { useToast } from "@/hooks/useToast";
 import { nip19 } from "nostr-tools";
 import { getKindInfo, getKindCategory } from "@/lib/kindNames";
 import { useAdminApi } from "@/hooks/useAdminApi";
+import { useBannedEvents } from "@/hooks/useRelayBanLists";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -563,11 +564,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
   }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
 
   // Query for banned events to mark them
-  const { data: bannedEvents } = useQuery({
-    queryKey: ['banned-events'],
-    queryFn: () => callRelayRpc<Array<{ id: string; reason?: string }>>('listbannedevents'),
-    enabled: !!relayUrl,
-  });
+  const { data: bannedEvents } = useBannedEvents({ enabled: !!relayUrl });
 
   // Query for events needing moderation
   const { data: eventsNeedingModeration } = useQuery({

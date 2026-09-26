@@ -40,6 +40,16 @@ interface ThreadContextProps {
   isEventDeleted?: boolean | null;
   /** True when the user is known to be banned, false when known unbanned, null when the check could not answer */
   isUserBanned?: boolean | null;
+  /**
+   * `isUserBanned` is true only because a copy of the ban list that is not
+   * current said so: its latest refresh failed, or it has not answered since
+   * the latest check asked it to re-read, which covers the whole check after an
+   * account action. No live answer confirms it. Right after an Unban this can be
+   * wrong.
+   */
+  isUserBannedStale?: boolean;
+  /** Something still on its way can settle the ban (useModerationStatus's isUserBanChecking) */
+  isUserBanChecking?: boolean;
   /** When the moderation status was last verified */
   checkedAt?: Date | null;
   /** Callback to re-check moderation status */
@@ -264,6 +274,8 @@ export function ThreadContext({
   reportedPubkey,
   isEventDeleted,
   isUserBanned,
+  isUserBannedStale = false,
+  isUserBanChecking = false,
   checkedAt,
   onRecheck,
   isRechecking,
@@ -331,7 +343,20 @@ export function ThreadContext({
                 </span>
               </div>
             )}
-            {isUserBanned === true && (
+            {isUserBanned === true && isUserBannedStale && (
+              // Green would present a carried-over ban as confirmed. While
+              // something that can settle the ban is still out, the check has
+              // not failed to confirm it yet.
+              <div className="flex items-center gap-2 p-2 rounded bg-muted">
+                <Ban className="h-4 w-4 text-muted-foreground shrink-0" />
+                <span className="text-sm font-medium text-muted-foreground">
+                  {isUserBanChecking
+                    ? 'Last known: banned. Checking now.'
+                    : 'Last known: banned. The latest check could not confirm it.'}
+                </span>
+              </div>
+            )}
+            {isUserBanned === true && !isUserBannedStale && (
               <div className="flex items-center gap-2 p-2 rounded bg-green-100 dark:bg-green-950/50">
                 <Ban className="h-4 w-4 text-green-600 shrink-0" />
                 <span className="text-sm font-medium text-green-700 dark:text-green-400">

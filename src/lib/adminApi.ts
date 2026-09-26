@@ -376,8 +376,11 @@ export async function unsuspendPubkey(apiUrl: string, pubkey: string): Promise<v
   await callRelayRpc(apiUrl, 'unsuspendpubkey', [pubkey]);
 }
 
-export async function listSuspendedPubkeys(apiUrl: string): Promise<BannedPubkeyEntry[]> {
-  const result = await callRelayRpc<string[] | BannedPubkeyEntry[]>(apiUrl, 'listsuspendedpubkeys');
+export async function listSuspendedPubkeys(
+  apiUrl: string,
+  opts?: { timeoutMs?: number }
+): Promise<BannedPubkeyEntry[]> {
+  const result = await callRelayRpc<string[] | BannedPubkeyEntry[]>(apiUrl, 'listsuspendedpubkeys', [], opts);
   return result.map(item => {
     if (typeof item === 'string') {
       return { pubkey: item };
