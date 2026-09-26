@@ -295,6 +295,36 @@ describe('Reports deep-link resolution', () => {
     expect(screen.getByRole('button', { name: /try again/i })).toBeInTheDocument();
   });
 
+  // Empty is only a confirmed absence when the lookup read to the end. One
+  // that stopped early and found nothing has not shown the report is gone.
+  it('shows the "unavailable" pane, not "gone", when a cut-short lookup finds nothing', async () => {
+    window.history.pushState({}, '', `/reports?pubkey=${PUNAVAIL}`);
+    stubFetch(() => jsonResponse({ success: true, events: [], truncated: true }));
+
+    render(
+      <TestApp>
+        <Reports relayUrl="wss://relay.example" />
+      </TestApp>
+    );
+
+    expect(await screen.findByText(/couldn't reach the relay/i)).toBeInTheDocument();
+    expect(screen.queryByText(/no longer on the relay/i)).not.toBeInTheDocument();
+  });
+
+  it('tells the report pane its count is a floor when the lookup that found it was cut short', async () => {
+    window.history.pushState({}, '', `/reports?event=${EFOUND}`);
+    stubFetch(() => jsonResponse({ success: true, events: [MATCHING_REPORT], truncated: true }));
+
+    render(
+      <TestApp>
+        <Reports relayUrl="wss://relay.example" />
+      </TestApp>
+    );
+
+    await waitFor(() => expect(screen.getByTestId('report-detail')).toHaveTextContent(MATCHING_ID));
+    expect(screen.getByTestId('report-detail')).toHaveAttribute('data-truncated', 'true');
+  });
+
   it('does not navigate after unmount while a targeted lookup is in flight', async () => {
     window.history.pushState({}, '', `/reports?event=${EFOUND}`);
     let resolveTargeted!: (r: Response) => void;
