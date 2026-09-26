@@ -9,7 +9,7 @@ vi.mock('@/hooks/useAppContext', () => ({
   useAppContext: () => ({ config: { relayUrl: 'wss://relay.test' } }),
 }));
 
-import { useUserStats } from './useUserStats';
+import { useUserStats, HISTORY_PAGE_SIZE, HISTORY_MAX_PAGES } from './useUserStats';
 
 const PUBKEY = 'd4'.repeat(32);
 
@@ -96,5 +96,48 @@ describe('useUserStats', () => {
     const { result } = show();
     await waitFor(() => expect(result.current.isError).toBe(true));
     expect(result.current.data).toBeUndefined();
+  });
+
+  // Reports and labels against an account are the answer to "has this target
+  // been reported before?". They were capped at 50 and the cap was shown as
+  // the total, which understated a heavily-reported account.
+  function relayWith(reportCount: number) {
+    const reports = Array.from({ length: reportCount }, (_, i) => ({
+      id: i.toString(16).padStart(64, '0'), pubkey: 'f'.repeat(64), created_at: 1_760_000_000 - i,
+      kind: 1984, tags: [['p', PUBKEY]], content: '', sig: '',
+    }));
+    return (filters: Array<{ kinds?: number[]; limit?: number; until?: number }>) => {
+      const f = filters[0];
+      const events = f.kinds?.includes(1984)
+        ? reports.filter(e => f.until === undefined || e.created_at <= f.until).slice(0, f.limit)
+        : [];
+      return completes(events)();
+    };
+  }
+
+  it('returns every report against an account, past the old cap of 50', async () => {
+    req.mockImplementation(relayWith(150));
+    const { result } = show();
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data?.reportCount).toBe(150);
+    expect(result.current.data?.previousReports).toHaveLength(150);
+    expect(result.current.data?.reportsTruncated).toBe(false);
+  });
+
+  it('says the history is partial when it stops before the relay runs out', async () => {
+    req.mockImplementation(relayWith(HISTORY_PAGE_SIZE * HISTORY_MAX_PAGES + 50));
+    const { result } = show();
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data?.reportsTruncated).toBe(true);
+  });
+
+  it('asks each page for the page size it treats as full', async () => {
+    req.mockImplementation(relayWith(1));
+    const { result } = show();
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    const reportFilters = req.mock.calls
+      .map(call => (call[0] as Array<{ kinds?: number[]; limit?: number }>)[0])
+      .filter(f => f.kinds?.includes(1984));
+    expect(reportFilters[0].limit).toBe(HISTORY_PAGE_SIZE);
   });
 });

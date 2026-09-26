@@ -12,13 +12,27 @@ interface SummaryResponse {
   riskLevel: 'low' | 'medium' | 'high' | 'critical';
 }
 
+// The moderator-facing history is now complete (useUserStats pages past the
+// old 50 cap), but the AI prompt must not grow with it: a larger prompt costs
+// more and the summarizer never needed more than the newest reports/labels.
+// Kept at the size the prompt always had.
+export const SUMMARY_HISTORY_LIMIT = 50;
+
+// Newest N by created_at, without assuming or mutating the caller's order —
+// previousReports/existingLabels are shared with useUserStats' cache.
+function newestFirst<T extends { created_at: number }>(events: T[] | undefined, limit: number): T[] {
+  return [...(events ?? [])].sort((a, b) => b.created_at - a.created_at).slice(0, limit);
+}
+
 export function useUserSummary(
   pubkey: string | undefined,
   recentPosts: NostrEvent[] | undefined,
   existingLabels: NostrEvent[] | undefined,
-  previousReports: NostrEvent[] | undefined
+  previousReports: NostrEvent[] | undefined,
+  history?: { reportsIncomplete?: boolean; labelsIncomplete?: boolean },
 ) {
   const apiUrl = useApiUrl();
+  const historyIncomplete = history?.reportsIncomplete === true || history?.labelsIncomplete === true;
   return useQuery<SummaryResponse>({
     queryKey: ['user-summary', pubkey],
     queryFn: async () => {
@@ -48,15 +62,15 @@ export function useUserSummary(
               kind: e.kind,
             };
           }),
-          existingLabels: existingLabels?.map(e => ({
+          existingLabels: newestFirst(existingLabels, SUMMARY_HISTORY_LIMIT).map(e => ({
             tags: e.tags,
             created_at: e.created_at,
-          })) || [],
-          reportHistory: previousReports?.map(e => ({
+          })),
+          reportHistory: newestFirst(previousReports, SUMMARY_HISTORY_LIMIT).map(e => ({
             content: e.content,
             tags: e.tags,
             created_at: e.created_at,
-          })) || [],
+          })),
         }),
       });
 
@@ -66,7 +80,7 @@ export function useUserSummary(
 
       return response.json();
     },
-    enabled: !!pubkey && !!recentPosts && recentPosts.length > 0,
+    enabled: !!pubkey && !!recentPosts && recentPosts.length > 0 && !historyIncomplete,
     staleTime: 1000 * 60 * 60, // Cache for 1 hour
     retry: false, // Don't retry AI calls
   });

@@ -1,6 +1,9 @@
 // ABOUTME: Reduces kind-1985 moderation/resolution labels to the distinct
 // ABOUTME: target keys the reports queue subtracts as already handled.
 
+import { pageByUntil } from '../../shared/relay-pager';
+import { relayPageFetcher } from './relay-profile';
+
 export interface LabelTarget {
   type: 'event' | 'pubkey';
   value: string;
@@ -59,60 +62,31 @@ export async function pageResolutionLabels(
   fetchPage: LabelPageFetcher,
   opts?: { pageSize?: number; maxPages?: number }
 ): Promise<PagedLabelTargets> {
-  const pageSize = opts?.pageSize ?? LABEL_PAGE_SIZE;
-  const maxPages = opts?.maxPages ?? LABEL_MAX_PAGES;
+  const { events, truncated, oldestCovered } = await pageByUntil(fetchPage, {
+    pageSize: opts?.pageSize ?? LABEL_PAGE_SIZE,
+    maxPages: opts?.maxPages ?? LABEL_MAX_PAGES,
+  });
+  // The shared pager de-duplicates by id. For labels that is redundant with
+  // reduceLabelsToTargets, which keys by target; it is load-bearing for the
+  // report reads that share the pager.
+  return { targets: reduceLabelsToTargets(events), truncated, oldestCovered };
+}
 
-  const collected: ResolutionLabelEvent[] = [];
-  let until: number | undefined;
-  let oldestCovered: number | null = null;
-  let truncated = false;
-
-  for (let page = 0; page < maxPages; page += 1) {
-    // No catch, deliberately: see the propagation test. An unconfirmed relay read
-    // must reach the caller as a failure, not as a shorter list.
-    const events = await fetchPage(until);
-
-    let pageOldest = Infinity;
-    for (const event of events) {
-      if (typeof event?.created_at === 'number' && event.created_at < pageOldest) {
-        pageOldest = event.created_at;
-      }
-      if (!event) continue;
-      collected.push(event);
-    }
-    if (pageOldest !== Infinity) {
-      oldestCovered = oldestCovered === null ? pageOldest : Math.min(oldestCovered, pageOldest);
-    }
-
-    // A short page is the relay saying it has nothing older. Exhausted, not capped.
-    if (events.length < pageSize) break;
-
-    // Everything below is a reason to stop WITHOUT having reached the end.
-    if (page === maxPages - 1) {
-      truncated = true;
-      break;
-    }
-    // A full page whose events carry no usable created_at leaves no cursor to
-    // advance, and a cursor that did not move means one second holds more than a
-    // page of labels. Either way the next request would repeat this one.
-    if (pageOldest === Infinity || pageOldest === until) {
-      truncated = true;
-      break;
-    }
-
-    // `until` is inclusive, so the boundary event comes back on the next page.
-    //
-    // The nostr-pagination convention says to deduplicate by event id. That is
-    // satisfied here by reduceLabelsToTargets, which keys by target, so a
-    // repeated label collapses into the same entry. An id set in front of it
-    // would be a second dedup with no observable effect -- removing it broke no
-    // test, which is how it was found. The only cost of the repeat is that it
-    // occupies a slot in `collected` until the reduce, which is bounded by the
-    // page cap below.
-    until = pageOldest;
-  }
-
-  return { targets: reduceLabelsToTargets(collected), truncated, oldestCovered };
+// The one relay read for resolution-label targets: kind 1985, tagged
+// `moderation/resolution`. /api/resolution-labels (the client's label source)
+// and the worker's needs-attention subtraction both call this, so the two
+// reads that decide what a label resolved cannot drift apart.
+export function readResolutionLabelTargets(
+  relayUrl: string,
+  paging?: { pageSize?: number; maxPages?: number },
+): Promise<PagedLabelTargets> {
+  const pageSize = paging?.pageSize ?? LABEL_PAGE_SIZE;
+  const fetchPage = relayPageFetcher<ResolutionLabelEvent>(
+    relayUrl,
+    { kinds: [1985], '#L': ['moderation/resolution'] },
+    pageSize,
+  );
+  return pageResolutionLabels(fetchPage, { pageSize, maxPages: paging?.maxPages });
 }
 
 // A label may name an event, an author, or both, and both count independently:

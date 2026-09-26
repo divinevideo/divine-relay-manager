@@ -99,6 +99,20 @@ export async function queryRelay(
   });
 }
 
+// One page of a relay filter, cursored by `until`. The filter's `limit` is the
+// `pageSize` the caller hands the pager, so the two cannot drift. Throws on an
+// unconfirmed read (#186): a timed-out page must never be folded in as "nothing
+// older", which would hand the queue a short list.
+export function relayPageFetcher<T>(relayUrl: string, base: Record<string, unknown>, pageSize: number) {
+  return async (until: number | undefined): Promise<T[]> => {
+    const filter: Record<string, unknown> = { ...base, limit: pageSize };
+    if (until !== undefined) filter.until = until;
+    const result = await queryRelay(filter, relayUrl);
+    if (!result.success) throw new Error(result.error || 'Relay query failed');
+    return (result.events || []) as unknown as T[];
+  };
+}
+
 /**
  * Cap on best-effort relay enrichment.
  *

@@ -416,16 +416,16 @@ export async function fetchReports(apiUrl: string): Promise<NostrEvent[]> {
 export async function fetchReportsByTarget(
   apiUrl: string,
   target: { event: string } | { pubkey: string }
-): Promise<NostrEvent[]> {
+): Promise<{ events: NostrEvent[]; truncated: boolean }> {
   const qs = 'event' in target
     ? `?event=${encodeURIComponent(target.event)}`
     : `?pubkey=${encodeURIComponent(target.pubkey)}`;
-  const data = await apiRequest<{ success: boolean; events: NostrEvent[] }>(
+  const data = await apiRequest<{ success: boolean; events: NostrEvent[]; truncated?: boolean }>(
     apiUrl,
     `/api/reports${qs}`,
     'GET'
   );
-  return sanitizeRelayEvents(data.events);
+  return { events: sanitizeRelayEvents(data.events), truncated: data.truncated === true };
 }
 
 // A capped resolution read that does not say it was capped un-hides handled

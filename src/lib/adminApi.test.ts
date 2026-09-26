@@ -1541,7 +1541,19 @@ describe('adminApi', () => {
         expect.stringContaining('/api/reports?event=abc'),
         expect.objectContaining({ method: 'GET' })
       );
-      expect(result.map((e) => e.id)).toEqual(['r1']);
+      expect(result.events.map((e) => e.id)).toEqual(['r1']);
+      expect(result.truncated).toBe(false);
+    });
+
+    it('keeps a truncated targeted lookup from looking complete', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, events: [], truncated: true }),
+      });
+
+      const result = await fetchReportsByTarget(API_URL, { event: 'abc' });
+
+      expect(result.truncated).toBe(true);
     });
 
     it('requests /api/reports?pubkey= when given a pubkey target', async () => {

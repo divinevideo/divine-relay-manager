@@ -10,7 +10,8 @@ import {
 } from './nip86';
 import { ensureSchema } from './db';
 import { backfillProtectedMinorSubjects, handleProtectedMinorServiceRoute } from './protected-minors';
-import { buildReportsFilter } from './reports-filter';
+import { reportsMode } from './reports-filter';
+import { getReportsForTarget, getReportsNeedingAttention, getResolvedReportsPage } from './reports-needing-attention';
 import { generatePreAuthToken, verifyPreAuthToken, base64UrlEncode } from './zendesk-preauth';
 import { deriveFunnelcakeApiUrl, proxyFunnelcakeRequest } from './funnelcake-proxy';
 import { renderMediaPage } from './media-page';
@@ -43,8 +44,7 @@ import { coordinateEventVisibility, type EventVisibilityResult } from './event-v
 import { markHumanAction, markHumanReviewed } from './human-decision';
 import { AUTO_HIDE_STATE_ACTIONS } from '../../shared/autohide';
 import { getResolvedTargets, getAutoHideStates } from './resolution-state';
-import { pageResolutionLabels, LABEL_PAGE_SIZE } from './resolution-labels';
-import type { ResolutionLabelEvent } from './resolution-labels';
+import { readResolutionLabelTargets } from './resolution-labels';
 import { runRetentionDisposal } from './retention';
 
 const COORDINATED_AUTO_HIDE_ACTIONS = new Set<string>(AUTO_HIDE_STATE_ACTIONS);
@@ -649,16 +649,35 @@ export default {
       // nostrify NPool connection caching. The worker opens a fresh WebSocket
       // per request via queryRelay(), so every poll gets current data.
       if (path === '/api/reports' && request.method === 'GET') {
-        const filter = buildReportsFilter(url.searchParams);
-        const result = await queryRelay(filter, env.RELAY_URL);
-        // An unconfirmed read is now a failure inside queryRelay itself, so a
-        // targeted lookup can no longer come back empty-but-unconfirmed here:
-        // that case 502s below, and the client still shows "unavailable"
-        // rather than a false "deleted".
+        const mode = reportsMode(url.searchParams);
+        if (mode.kind === 'needs-attention') {
+          if (!env.DB) {
+            return jsonResponse({ success: false, error: 'Database not configured' }, 503, corsHeaders);
+          }
+          await ensureSchemaOnce(env.DB);
+          const { status, body } = await getReportsNeedingAttention(env.DB, env.RELAY_URL);
+          return proxyJsonResponse(body, status, corsHeaders);
+        }
+        if (mode.kind === 'target') {
+          const { status, body } = await getReportsForTarget(mode.filter, env.RELAY_URL);
+          return proxyJsonResponse(body, status, corsHeaders);
+        }
+        // Legacy bulk mode, unchanged.
+        const result = await queryRelay(mode.filter, env.RELAY_URL);
+        // An unconfirmed read is a failure inside queryRelay itself, so the
+        // legacy bulk read cannot come back empty-but-unconfirmed here: that
+        // case 502s below, and the client still shows "unavailable" rather
+        // than a false "deleted".
         if (!result.success) {
           return jsonResponse({ success: false, error: result.error }, 502, corsHeaders);
         }
         return jsonResponse({ success: true, events: result.events }, 200, corsHeaders);
+      }
+
+      if (path === '/api/reports/resolved' && request.method === 'GET') {
+        if (env.DB) await ensureSchemaOnce(env.DB);
+        const { status, body } = await getResolvedReportsPage(url.searchParams, env.DB, env.RELAY_URL);
+        return proxyJsonResponse(body, status, corsHeaders);
       }
 
       if (path === '/api/resolution-labels' && request.method === 'GET') {
@@ -1875,33 +1894,12 @@ async function handleGetResolutionLabelTargets(
   corsHeaders: Record<string, string>
 ): Promise<Response> {
   try {
-    // One value feeds both the relay filter's `limit` and the pager's notion of a
-    // full page. They must not drift: the pager treats a page shorter than
-    // pageSize as "the relay has nothing older", so a filter asking for fewer
-    // events than pageSize would make every page look short and stop the walk
-    // after one -- silently, which is the failure this endpoint exists to remove.
-    const pageSize = LABEL_PAGE_SIZE;
-
     // queryRelay's #186 contract: success:false is an UNCONFIRMED read, not an
-    // empty one. Throwing here is what stops a timed-out page from being folded
-    // into the result as "nothing older" -- which would hand the queue a short
-    // list of resolved targets and un-hide handled work (#221).
-    const fetchPage = async (until: number | undefined) => {
-      const filter: Record<string, unknown> = {
-        kinds: [1985],
-        '#L': ['moderation/resolution'],
-        limit: pageSize,
-      };
-      if (until !== undefined) filter.until = until;
-
-      const result = await queryRelay(filter, env.RELAY_URL);
-      if (!result.success) {
-        throw new Error(result.error || 'Relay query failed');
-      }
-      return (result.events || []) as unknown as ResolutionLabelEvent[];
-    };
-
-    const { targets, truncated, oldestCovered } = await pageResolutionLabels(fetchPage, { pageSize });
+    // empty one. readResolutionLabelTargets's fetcher throws on it, which is
+    // what stops a timed-out page from being folded into the result as
+    // "nothing older" -- which would hand the queue a short list of resolved
+    // targets and un-hide handled work (#221).
+    const { targets, truncated, oldestCovered } = await readResolutionLabelTargets(env.RELAY_URL);
 
     return proxyJsonResponse({
       success: true,
