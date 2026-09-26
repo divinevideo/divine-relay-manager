@@ -429,10 +429,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // itself cause a render.
   const deepLinkSelectedRef = useRef(false);
   // What the moderator had set before entering the pending-review view. That
-  // view is its own mode and forces Hide resolved off and the category filter
-  // clear, so leaving it has to hand both back -- otherwise a look at the
-  // auto-hidden queue silently spends settings they chose.
-  const prePendingReviewRef = useRef<{ hideResolved: boolean; filterCategory: string | null } | null>(null);
+  // view is its own mode and forces Hide resolved off and the category and
+  // target-type filters clear, so leaving it has to hand all three back --
+  // otherwise a look at the auto-hidden queue silently spends settings they chose.
+  const prePendingReviewRef = useRef<{
+    hideResolved: boolean;
+    filterCategory: string | null;
+    filterTargetType: 'all' | 'event' | 'pubkey';
+  } | null>(null);
   const [retryNonce, setRetryNonce] = useState(0); // forces the deep-link effect to re-run on retry
   // Tracks mount state so an in-flight targeted lookup that resolves after the component
   // unmounts (e.g. the moderator switched tabs) can't fire a late navigate() and yank them back.
@@ -1013,11 +1017,17 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   }, [reports, hideResolved, showPendingReview, resolvedTargets, bannedPubkeySet, authorByTarget, pendingReviewTargets, filterCategory, filterTargetType, sortBy]);
 
   const uniqueTargets = consolidated.length;
-  const pendingReviewCount = pendingReviewTargets.size;
-  const totalTargets = allConsolidated.length;
-  const totalReports = reports?.length || 0;
   const filteredReportsCount = filteredReports.length;
-  const resolvedCount = totalTargets - uniqueTargets;
+
+  // The pending-review badge counts the rows that view will list on entry:
+  // grouped targets whose newest auto-hide state is still waiting for a human.
+  // Not pendingReviewTargets.size -- that set spans every decision on record,
+  // and a target in it with no report here is a badge with no row behind it.
+  // "On entry" because entering clears the category and type filters (D6); a
+  // filter chosen inside the view narrows the list and its Grouped count, not
+  // this badge, which keeps saying how many targets are waiting.
+  const pendingReviewRows = allConsolidated.filter(c => pendingReviewTargets.has(reportTargetKey(c.target)));
+  const pendingReviewCount = pendingReviewRows.length;
 
   // Sync selected report with URL
   useEffect(() => {
@@ -1395,9 +1405,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                 Reports
               </CardTitle>
               <CardDescription>
-                {uniqueTargets} pending{resolvedCount > 0 && hideResolved && (
-                  <span className="text-green-600"> ({resolvedCount} resolved)</span>
-                )}
+                {showPendingReview
+                  ? `${uniqueTargets} pending review`
+                  : hideResolved
+                    ? `${uniqueTargets} pending`
+                    : `${uniqueTargets} shown`}
               </CardDescription>
             </div>
             <div className="flex items-center gap-2">
@@ -1462,7 +1474,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
               </TabsTrigger>
               <TabsTrigger value="individual" className="text-xs">
                 <Flag className="h-3 w-3 mr-1" />
-                All ({hideResolved ? filteredReportsCount : totalReports})
+                All ({filteredReportsCount})
               </TabsTrigger>
             </TabsList>
           </Tabs>
@@ -1552,7 +1564,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
             )}
 
             {/* Pending review filter */}
-            {pendingReviewCount > 0 && (
+            {/* Stays while the view is open, even at 0: it is the only way out
+                of the view, because Hide resolved is disabled in there. */}
+            {(pendingReviewCount > 0 || showPendingReview) && (
               <div className="flex items-center justify-between pt-2 border-t">
                 <Label htmlFor="pending-review" className="text-xs text-muted-foreground flex items-center gap-1.5">
                   <EyeOff className="h-3 w-3 text-orange-500" />
@@ -1567,9 +1581,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                   onCheckedChange={(checked) => {
                     setShowPendingReview(checked);
                     if (checked) {
-                      prePendingReviewRef.current = { hideResolved, filterCategory };
+                      prePendingReviewRef.current = { hideResolved, filterCategory, filterTargetType };
                       setHideResolved(false);
                       setFilterCategory(null);
+                      // The badge counts every target waiting for review, so
+                      // the view opens on all of them. A Users filter carried
+                      // in would hide auto-hidden posts under a badge that
+                      // counted them.
+                      setFilterTargetType('all');
                     } else {
                       const previous = prePendingReviewRef.current;
                       if (previous) {
@@ -1581,6 +1600,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                         // is meant to stop.
                         if (filterCategory === null) {
                           setFilterCategory(previous.filterCategory);
+                        }
+                        // Same rule for the target type.
+                        if (filterTargetType === 'all') {
+                          setFilterTargetType(previous.filterTargetType);
                         }
                         prePendingReviewRef.current = null;
                       }
