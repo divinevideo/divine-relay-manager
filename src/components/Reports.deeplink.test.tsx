@@ -4,14 +4,21 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MockInstance } from 'vitest';
+import { useLocation } from 'react-router-dom';
 import TestApp from '@/test/TestApp';
 import { Reports } from './Reports';
 import { useIsMobile } from '@/hooks/useIsMobile';
 
 // Benign detail pane, so a "found" resolution renders instead of crashing (unlike #158's test).
+// It exposes the floor flag so a test can see which selection the pane was told was cut short.
 vi.mock('@/components/ReportDetail', () => ({
-  ReportDetail: ({ report }: { report: { id: string } | null }) => (
-    <div data-testid="report-detail">{report ? report.id : 'none'}</div>
+  ReportDetail: ({ report, allReportsForTargetTruncated }: {
+    report: { id: string } | null;
+    allReportsForTargetTruncated?: boolean;
+  }) => (
+    <div data-testid="report-detail" data-truncated={String(allReportsForTargetTruncated ?? false)}>
+      {report ? report.id : 'none'}
+    </div>
   ),
 }));
 
@@ -62,6 +69,14 @@ const SHARED_FOUND_REPORT = ev(SHARED_FOUND_ID, [['p', SHARED]]);
 
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+}
+
+// Feeds /reports/<id> into selectedReportId the way RelayManager's route does, so a
+// test can reach the URL-sync selection path.
+function RoutedReports() {
+  const { pathname } = useLocation();
+  const reportId = pathname.match(/^\/reports\/([0-9a-f]{64})$/)?.[1];
+  return <Reports relayUrl="wss://relay.example" selectedReportId={reportId} />;
 }
 
 let consoleError: MockInstance;
@@ -404,5 +419,50 @@ describe('Reports deep-link resolution', () => {
     await new Promise((r) => setTimeout(r, 0));
 
     expect(window.location.pathname).toBe('/reports'); // no reopen
+  });
+
+  // A targeted lookup that stopped early marks ITS report's count as a floor.
+  // The mark must not ride along to the next selection, whose reports were
+  // never cut short.
+  it('drops the floor mark when a deep link moves to a target already in the list', async () => {
+    window.history.pushState({}, '', `/reports?event=${EFOUND}`);
+    stubFetch(() => jsonResponse({ success: true, events: [MATCHING_REPORT], truncated: true }));
+
+    render(
+      <TestApp>
+        <Reports relayUrl="wss://relay.example" />
+      </TestApp>
+    );
+    await waitFor(() => expect(screen.getByTestId('report-detail')).toHaveTextContent(MATCHING_ID));
+    expect(screen.getByTestId('report-detail')).toHaveAttribute('data-truncated', 'true');
+
+    navigateTo(`/reports?event=${OTHER_EVENT}`);
+    await waitFor(() => expect(screen.getByTestId('report-detail')).toHaveTextContent(OTHER_REPORT.id));
+    expect(screen.getByTestId('report-detail')).toHaveAttribute('data-truncated', 'false');
+  });
+
+  it('drops the floor mark when /reports/<id> selects a different report', async () => {
+    stubFetch((url) =>
+      url.includes(`event=${EFOUND}`)
+        ? jsonResponse({ success: true, events: [MATCHING_REPORT], truncated: true })
+        : jsonResponse({ success: true, events: [] }) // pubkey=PGONE → gone
+    );
+
+    window.history.pushState({}, '', `/reports?event=${EFOUND}`);
+    render(
+      <TestApp>
+        <RoutedReports />
+      </TestApp>
+    );
+    await waitFor(() => expect(screen.getByTestId('report-detail')).toHaveTextContent(MATCHING_ID));
+    expect(screen.getByTestId('report-detail')).toHaveAttribute('data-truncated', 'true');
+
+    // A lookup that clears the selection and ends gone, then a plain report URL.
+    navigateTo(`/reports?pubkey=${PGONE}`);
+    expect(await screen.findByText(/no longer on the relay/i)).toBeInTheDocument();
+    navigateTo(`/reports/${OTHER_REPORT.id}`);
+
+    await waitFor(() => expect(screen.getByTestId('report-detail')).toHaveTextContent(OTHER_REPORT.id));
+    expect(screen.getByTestId('report-detail')).toHaveAttribute('data-truncated', 'false');
   });
 });

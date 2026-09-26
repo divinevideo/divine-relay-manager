@@ -425,7 +425,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // Deep-link resolution: 'resolving' while we look a target up, 'gone' when the
   // relay confirms the report is absent, 'unavailable' when the relay itself failed.
   const [deepLinkStatus, setDeepLinkStatus] = useState<DeepLinkStatus>('idle');
-  const [targetedHistoryTruncated, setTargetedHistoryTruncated] = useState(false);
+  // Whether a targeted lookup stopped before reading the target's whole report
+  // history, keyed to the report it selected so the floor mark cannot outlive
+  // that selection: once any path selects a different report (a bulk-list deep
+  // link, /reports/<id>, a click), it reads as false.
+  const [targetedHistory, setTargetedHistory] =
+    useState<{ reportId: string; truncated: boolean } | null>(null);
+  const targetedHistoryTruncated =
+    targetedHistory?.truncated === true && targetedHistory.reportId === selectedReport?.id;
   const attemptedTargetRef = useRef<string | null>(null); // one targeted fetch per target
   // True only while the CURRENT selection came from a deep link. A ref, not
   // state: the unhide effect reads it when it runs, and flipping it must not
@@ -1183,7 +1190,6 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         // branch (the worker 502s it → the catch below → 'unavailable').
         const matching = reportsMatchingTarget(events, target, getReportTarget);
         if (truncated && events.length === 0) {
-          setTargetedHistoryTruncated(false);
           setDeepLinkStatus('unavailable');
           return;
         }
@@ -1203,7 +1209,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           const latest = pool.reduce((a, b) => (b.created_at > a.created_at ? b : a));
           deepLinkSelectedRef.current = true;
           setSelectedReport(latest);
-          setTargetedHistoryTruncated(truncated);
+          setTargetedHistory({ reportId: latest.id, truncated });
           setDeepLinkStatus('found');
           navigate(`/reports/${latest.id}`, { replace: true });
         } else {
@@ -1225,7 +1231,6 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     // A manual pick supersedes any deep link, so the unhide effect must not
     // treat this selection as one.
     deepLinkSelectedRef.current = false;
-    setTargetedHistoryTruncated(false);
     setSelectedReport(report);
     setDeepLinkStatus('idle'); // clear any deep-link fallback once the user interacts
     // Invalidate any in-flight targeted lookup: a user selection/dismissal
