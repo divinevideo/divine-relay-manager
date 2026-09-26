@@ -480,6 +480,60 @@ describe('useModerationStatus', () => {
     expect(result.current.isUserBannedStale).toBe(false);
   });
 
+  it('lets a later successful list read that contains the pubkey overrule a live "not banned"', async () => {
+    // The queue poll refreshes the shared key without starting another live
+    // check. A ban that lands after this pane's check must not stay hidden.
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const clientWrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    verifyPubkeyBanned.mockResolvedValue(false);
+
+    const { result } = renderHook(() => useModerationStatus(PUBKEY, EVENT_ID, false), { wrapper: clientWrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false), { timeout: 5000 });
+    await act(async () => {
+      result.current.recheck();
+    });
+    await waitFor(() => expect(result.current.isUserBanned).toBe(false), { timeout: 5000 });
+    await waitFor(() => expect(result.current.isAccountStatusLoading).toBe(false), { timeout: 5000 });
+
+    listBannedPubkeys.mockResolvedValue([{ pubkey: PUBKEY }]);
+    await act(async () => {
+      await client.refetchQueries({ queryKey: ['banned-pubkeys'] });
+    });
+    await waitFor(() => expect(result.current.isUserBanned).toBe(true), { timeout: 5000 });
+    expect(result.current.isUserBannedStale).toBe(false);
+    expect(result.current.isUserBanned).not.toBe(false);
+  });
+
+  it('does not keep a live "not banned" after a later list read fails', async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const clientWrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    verifyPubkeyBanned.mockResolvedValue(false);
+
+    const { result } = renderHook(() => useModerationStatus(PUBKEY, EVENT_ID, false), { wrapper: clientWrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false), { timeout: 5000 });
+    await act(async () => {
+      result.current.recheck();
+    });
+    await waitFor(() => expect(result.current.isUserBanned).toBe(false), { timeout: 5000 });
+    await waitFor(() => expect(result.current.isAccountStatusLoading).toBe(false), { timeout: 5000 });
+
+    listBannedPubkeys.mockRejectedValue(new Error('relay unreachable'));
+    await act(async () => {
+      await client.refetchQueries({ queryKey: ['banned-pubkeys'] });
+    });
+    await act(async () => {
+      await new Promise(resolve => setTimeout(resolve, 50));
+    });
+
+    expect(result.current.isUserBanned).toBeNull();
+    expect(result.current.isUserBanned).not.toBe(false);
+    expect(result.current.isUserBannedStale).toBe(false);
+  });
+
   // --- A live check answers for one environment and one report ---------------
   //
   // The live check's result outranks the lists. Switching environment clears

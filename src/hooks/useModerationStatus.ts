@@ -350,9 +350,27 @@ export function useModerationStatus(
   }, [eventNotFound, eventId, pubkey, banListsLoading, wsResult.isChecking, runCheck]);
 
 
+  // A later successful list read that contains the pubkey is newer than a
+  // live check that said absent. The queue poll and other screens refresh this
+  // shared key without starting another live check, so a stored false must not
+  // keep hiding that membership.
+  const currentListBan = isUserBannedFromList === true && !bannedFromStaleList;
+  // A stored "not banned" stays confirmed while its re-read is still out, and
+  // in the gap before that re-read's fetchStatus flips (a routine check must
+  // not flicker). It stops being confirmed once that read has failed: isError,
+  // not fetching, and not a current copy. Absence is then unknown — or last
+  // known, if the stale copy still contains the pubkey.
+  const liveNegativeUnconfirmed =
+    wsResult.userBanned === false
+    && bannedPubkeys.isError
+    && !bannedReRead.current
+    && !bannedReRead.rereading;
+
   return {
-    // User ban: a completed check wins over the ban list. When the check could
-    // not answer, the list may still settle it — but only positively.
+    // User ban: a completed check wins over the ban list, except a later
+    // current list that contains the pubkey, and except a stored negative
+    // whose list re-read has since failed. When the check could not answer,
+    // the list may still settle it — but only positively.
     //
     // A list `false` means the read succeeded and the pubkey is absent: a failed
     // list read throws rather than returning `[]` (see useRelayBanLists). It
@@ -364,16 +382,24 @@ export function useModerationStatus(
     // "not banned". listMembership applies the same rule to the lists. A
     // confirmed-absent list could arguably answer `false` here; the tests
     // deliberately pin the conservative answer.
-    isUserBanned: wsResult.userBanned === undefined
-      ? isUserBannedFromList
-      : wsResult.userBanned === null && isUserBannedFromList === true
-        ? true
-        : wsResult.userBanned,
+    isUserBanned: currentListBan
+      ? true
+      : wsResult.userBanned === undefined
+        ? isUserBannedFromList
+        : liveNegativeUnconfirmed
+          ? (isUserBannedFromList === true ? true : null)
+          : wsResult.userBanned === null && isUserBannedFromList === true
+            ? true
+            : wsResult.userBanned,
     isUserSuspended: isUserSuspendedFromList,
     // Only stale when the list is what answered. A live check that returned
-    // true or false supersedes the list, fresh by definition.
-    isUserBannedStale:
-      (wsResult.userBanned === undefined || wsResult.userBanned === null) && bannedFromStaleList,
+    // true is fresh by definition. A live false is fresh only while the list
+    // is still current or still re-reading; after that re-read fails, a
+    // leftover presence is last known.
+    isUserBannedStale: currentListBan
+      ? false
+      : (wsResult.userBanned === undefined || wsResult.userBanned === null || liveNegativeUnconfirmed)
+        && bannedFromStaleList,
     isUserSuspendedStale,
     // Event in ban list (separate from "gone" — banned events can be retrieved via admin API)
     isEventBanned: isEventBannedFromList,
