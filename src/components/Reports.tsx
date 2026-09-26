@@ -524,6 +524,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // resolved, so this view adds them from their own paged read, fetched only
   // while the view is open.
   const historyView = !hideResolved && !showPendingReview;
+  // In the history view the list is newest first, whatever the sort control
+  // says. Loading an older page must not change the order of rows already on
+  // screen (spec: relative order holds, the viewport stays put), and only a
+  // newest-first order guarantees that: under "Most reports" an older page adds
+  // reports to a target and moves it.
+  const effectiveSort: SortOption = historyView ? 'newest' : sortBy;
   const history = useResolvedHistory(relayUrl, historyView);
   const historyPages = history.data?.pages;
   // What the list is built from: the feed plus deep-linked reports, plus
@@ -1024,7 +1030,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
     // Apply sorting
     items.sort((a, b) => {
-      switch (sortBy) {
+      switch (effectiveSort) {
         case 'reports':
           // Most reports first, then by date
           if (b.reports.length !== a.reports.length) {
@@ -1064,7 +1070,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     });
 
     return items;
-  }, [allConsolidated, hideResolved, showPendingReview, resolvedTargets, bannedPubkeySet, switchMembership, filterCategory, filterTargetType, sortBy]);
+  }, [allConsolidated, hideResolved, showPendingReview, resolvedTargets, bannedPubkeySet, switchMembership, filterCategory, filterTargetType, effectiveSort]);
 
   const authorByTarget = useMemo(() => new Map(
     allConsolidated.map(c => [reportTargetKey(c.target), c.authorPubkey]),
@@ -1128,7 +1134,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
     // Apply sorting
     items.sort((a, b) => {
-      switch (sortBy) {
+      switch (effectiveSort) {
         case 'newest':
           return b.created_at - a.created_at;
         case 'oldest':
@@ -1146,7 +1152,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     });
 
     return items;
-  }, [listReports, hideResolved, showPendingReview, resolvedTargets, bannedPubkeySet, authorByTarget, switchMembership, filterCategory, filterTargetType, sortBy]);
+  }, [listReports, hideResolved, showPendingReview, resolvedTargets, bannedPubkeySet, authorByTarget, switchMembership, filterCategory, filterTargetType, effectiveSort]);
 
   const uniqueTargets = consolidated.length;
   const filteredReportsCount = filteredReports.length;
@@ -1707,7 +1713,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => refetch()}
+                onClick={() => {
+                  refetch();
+                  // Another moderator's resolutions reach loaded history only
+                  // when it is re-read; this re-reads every loaded page.
+                  if (historyView) history.refetch();
+                }}
                 disabled={isFetching}
                 title={lastUpdatedText ? `Last updated ${lastUpdatedText}` : 'Refresh'}
                 className="min-w-[44px] min-h-[44px] sm:min-w-0 sm:min-h-0"
@@ -1770,8 +1781,15 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
             {/* Sort dropdown */}
             <div className="flex items-center gap-2">
               <ArrowUpDown className="h-3 w-3 text-muted-foreground shrink-0" />
-              <Select value={sortBy} onValueChange={(v) => setSortBy(v as SortOption)}>
-                <SelectTrigger className="h-8 text-xs flex-1">
+              <Select
+                value={effectiveSort}
+                onValueChange={(v) => setSortBy(v as SortOption)}
+                disabled={historyView}
+              >
+                <SelectTrigger
+                  className="h-8 text-xs flex-1"
+                  aria-describedby={historyView ? 'sort-fixed-reason' : undefined}
+                >
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -1783,6 +1801,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                 </SelectContent>
               </Select>
             </div>
+            {/* Say why the control is inert, as the Hide resolved switch does. */}
+            {historyView && (
+              <span id="sort-fixed-reason" className="text-[10px] italic opacity-70">
+                Newest first while resolved history is shown
+              </span>
+            )}
 
             {/* Target type filter */}
             <div className="flex items-center gap-2">

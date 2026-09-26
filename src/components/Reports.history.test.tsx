@@ -111,6 +111,8 @@ async function openHistoryOverEmptyFeed(user: ReturnType<typeof userEvent.setup>
 }
 
 const rowFor = (eventId: string) => document.querySelector(`[data-row-key="event:${eventId}"]`) as HTMLElement | null;
+const key = (c: string) => `event:${hex(c)}`;
+const rowKeys = () => Array.from(document.querySelectorAll('[data-row-key]')).map(el => el.getAttribute('data-row-key'));
 const categoryChip = (name: string) =>
   within(screen.getByText('Category').parentElement as HTMLElement).getByText(name);
 // The selected row carries the selection ring.
@@ -475,5 +477,67 @@ describe('the history footer never mistakes a stop for an end', () => {
     reply = hang;
     await user.click(screen.getByRole('button', { name: /try again/i }));
     await waitFor(() => expect(screen.getByRole('button', { name: /try again/i })).toBeDisabled());
+  });
+});
+
+describe('the history view keeps what is on screen in order', () => {
+  it('lists newest first, so a loaded page never reorders rows already shown', async () => {
+    // Page two adds an older report on H2's post. Under "Most reports" that
+    // post would jump to the top; newest-first leaves it where it was.
+    const H2_AGAIN = eventReport(hex('4'), hex('7'), 1751000500);
+    stubWorker({
+      pages: {
+        first: ok(resolvedPage([H1, H2], { nextCursor: PAGE_ONE_CURSOR, done: false })),
+        [PAGE_ONE_CURSOR]: ok(resolvedPage([H2_AGAIN, H4], { nextCursor: null, done: true })),
+      },
+    });
+    const user = userEvent.setup();
+    renderQueue();
+    await openHistory(user);
+    await screen.findByText(note(hex('4')));
+
+    const before = rowKeys();
+    expect(before).toEqual([key('1'), key('3'), key('4'), key('2')]);
+
+    await user.click(screen.getByRole('button', { name: /load more/i }));
+    await screen.findByText(note(hex('6')));
+
+    const after = rowKeys();
+    // The banned post, at the bottom, moves down as older rows land above it;
+    // nothing already shown changes order relative to anything else.
+    expect(after.filter(k => before.includes(k))).toEqual(before);
+    expect(after).toEqual([key('1'), key('3'), key('4'), key('6'), key('2')]);
+  });
+
+  it('fixes the sort control to Newest First while history is listed, and gives it back after', async () => {
+    stubWorker({ pages: { first: ok(resolvedPage([H1], { nextCursor: null, done: true })) } });
+    const user = userEvent.setup();
+    renderQueue();
+    await screen.findByText(note(hex('1')));
+    expect(screen.getByRole('combobox')).not.toBeDisabled();
+
+    await openHistory(user);
+    expect(await screen.findByText(/newest first while resolved history is shown/i)).toBeInTheDocument();
+    expect(screen.getByRole('combobox')).toBeDisabled();
+    // The control shows the order the list is actually in (D2).
+    expect(screen.getByRole('combobox')).toHaveTextContent('Newest First');
+
+    await user.click(screen.getByRole('switch', { name: /hide resolved/i }));
+    expect(screen.getByRole('combobox')).not.toBeDisabled();
+    expect(screen.getByRole('combobox')).toHaveTextContent('Most Reports');
+  });
+
+  it('re-reads loaded history when the moderator refreshes', async () => {
+    // Another moderator's resolutions reach loaded history only when it is re-read.
+    const calls = stubWorker({ pages: { first: ok(resolvedPage([H1], { nextCursor: null, done: true })) } });
+    const user = userEvent.setup();
+    renderQueue();
+    await openHistory(user);
+    await screen.findByText(note(hex('3')));
+    expect(calls.resolved).toHaveLength(1);
+
+    await user.click(screen.getByTitle(/last updated|refresh/i));
+
+    await waitFor(() => expect(calls.resolved).toHaveLength(2));
   });
 });
