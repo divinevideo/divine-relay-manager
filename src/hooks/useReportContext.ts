@@ -8,21 +8,7 @@ import { useThread } from "@/hooks/useThread";
 import { useUserStats } from "@/hooks/useUserStats";
 import { useAppContext } from "@/hooks/useAppContext";
 import type { NostrEvent } from "@nostrify/nostrify";
-
-interface ReportTarget {
-  type: 'event' | 'pubkey';
-  value: string;
-}
-
-function getReportTarget(event: NostrEvent): ReportTarget | null {
-  const eTag = event.tags.find(t => t[0] === 'e');
-  if (eTag) return { type: 'event', value: eTag[1] };
-
-  const pTag = event.tags.find(t => t[0] === 'p');
-  if (pTag) return { type: 'pubkey', value: pTag[1] };
-
-  return null;
-}
+import { getReportTarget } from "../../shared/report-target";
 
 function getReportedPubkey(event: NostrEvent): string | null {
   const pTag = event.tags.find(t => t[0] === 'p');

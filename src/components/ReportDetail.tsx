@@ -55,6 +55,7 @@ import { KIND_NAMES } from "@/lib/kindNames";
 import { Flag, CheckCircle, History, Ban, ShieldX, Link2, User, FileText, Repeat2, FileCode, RefreshCw, EyeOff, Eye } from "lucide-react";
 import { CopyableId, CopyableTags } from "@/components/CopyableId";
 import type { NostrEvent } from "@nostrify/nostrify";
+import { getReportTarget } from "../../shared/report-target";
 
 function getKindLabel(kind: number): string {
   const entry = KIND_NAMES[kind];
@@ -75,16 +76,6 @@ interface ReportDetailProps {
   allReports?: NostrEvent[];
   onDismiss?: () => void;
 }
-
-// Helper to extract report target
-function getReportTarget(event: NostrEvent): { type: 'event' | 'pubkey'; value: string } | null {
-  const eTag = event.tags.find(t => t[0] === 'e');
-  if (eTag) return { type: 'event', value: eTag[1] };
-  const pTag = event.tags.find(t => t[0] === 'p');
-  if (pTag) return { type: 'pubkey', value: pTag[1] };
-  return null;
-}
-
 
 export function ReportDetail({ report, allReportsForTarget, allReportsForTargetTruncated = false, allReports = [], onDismiss }: ReportDetailProps) {
   const { toast } = useToast();

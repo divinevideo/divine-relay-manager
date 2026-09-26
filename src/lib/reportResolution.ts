@@ -1,6 +1,8 @@
 // ABOUTME: Pure predicate for whether a consolidated report counts as resolved.
 // ABOUTME: Adds event->author cross-resolution so a banned account clears its event reports.
 
+import { reportTargetKey } from '../../shared/report-target';
+
 export interface ResolvableReport {
   target: { type: 'event' | 'pubkey'; value: string };
   // The reported author (the report's `p` tag), when present. Optional because an
@@ -28,7 +30,7 @@ export function isConsolidatedReportResolved(
   resolvedTargets: Set<string>,
   bannedPubkeys: Set<string>,
 ): boolean {
-  if (resolvedTargets.has(`${report.target.type}:${report.target.value}`)) return true;
+  if (resolvedTargets.has(reportTargetKey(report.target))) return true;
   // Both sides of this comparison are lowercased, because neither one is canonical.
   // authorPubkey is a reporter-authored `p` tag, validated as hex without being
   // case-normalized. The relay's side is no better: funnelcake's hex check accepts
