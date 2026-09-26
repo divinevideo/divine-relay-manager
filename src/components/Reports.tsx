@@ -685,7 +685,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   );
 
   // Build set of targets pending review (auto-hidden but not yet confirmed/restored)
-  // TODO(#160): adopt pendingReviewTargetKeys from shared/autohide.ts in the queue-screen change.
+  // TODO(#284): adopt pendingReviewTargetKeys from shared/autohide.ts in the queue-screen change.
   const pendingReviewTargets = useMemo(() => {
     const pending = new Set<string>();
     if (!autoHideStates) return pending;
