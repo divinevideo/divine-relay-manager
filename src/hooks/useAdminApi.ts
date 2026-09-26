@@ -69,8 +69,6 @@ export function useAdminApi() {
       adminApi.listSuspendedPubkeys(apiUrl, opts),
 
     // Server-side relay queries (replaces browser WebSocket for freshness)
-    fetchReports: () =>
-      adminApi.fetchReports(apiUrl),
     fetchReportsByTarget: (target: { event: string } | { pubkey: string }) =>
       adminApi.fetchReportsByTarget(apiUrl, target),
     fetchReportsNeedingAttention: () =>
