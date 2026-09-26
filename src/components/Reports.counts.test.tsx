@@ -38,6 +38,14 @@ const OPEN_EVENT_REPORT = report('d'.repeat(64), 1751000200, ['e', OPEN_EVENT, '
 // A target a moderator already resolved.
 const RESOLVED_EVENT = '5'.repeat(64);
 const RESOLVED_REPORT = report('f'.repeat(64), 1751000100, ['e', RESOLVED_EVENT, 'spam']);
+// Two more reports on the open post, making it one target with three reports,
+// so the Grouped and All tabs list different numbers of rows.
+const OPEN_EVENT_REPORT_2 = report('6'.repeat(64), 1751000210, ['e', OPEN_EVENT, 'spam']);
+const OPEN_EVENT_REPORT_3 = report('7'.repeat(64), 1751000220, ['e', OPEN_EVENT, 'spam']);
+
+const FEED = [PENDING_REPORT, OPEN_ACCOUNT_REPORT, OPEN_EVENT_REPORT, RESOLVED_REPORT];
+// What the needs-attention read returns. A test adds reports to it.
+let feedEvents = FEED;
 
 const WAITING_STATES = [
   { target_type: 'event', target_id: PENDING_EVENT, action: 'auto_hidden' },
@@ -70,13 +78,14 @@ let consoleError: MockInstance;
 beforeEach(() => {
   consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
   autoHideStates = WAITING_STATES;
+  feedEvents = FEED;
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input instanceof Request ? input.url : input);
     if (url.includes('/api/reports/resolved')) return jsonResponse(EMPTY_RESOLVED_PAGE);
     if (url.includes('/api/reports')) {
       return jsonResponse({
         success: true,
-        events: [PENDING_REPORT, OPEN_ACCOUNT_REPORT, OPEN_EVENT_REPORT, RESOLVED_REPORT],
+        events: feedEvents,
         truncated: false,
       });
     }
@@ -129,6 +138,38 @@ describe('counts beside the queue come from the rows it renders', () => {
     // Leaving hands the Users filter back: the open post is filtered out again.
     expect(screen.getByText('Grouped (1)')).toBeInTheDocument();
     expect(screen.queryByText(nip19.noteEncode(OPEN_EVENT))).not.toBeInTheDocument();
+  });
+
+  it('keeps a type filter chosen inside the pending-review view', async () => {
+    const user = userEvent.setup();
+    renderQueue();
+    await screen.findByText(headerStartingWith('2 pending'));
+
+    await user.click(screen.getByRole('switch', { name: /pending review/i }));
+    expect(await screen.findByText(nip19.noteEncode(PENDING_EVENT))).toBeInTheDocument();
+    // Users, chosen inside the view, is a deliberate choice.
+    await user.click(screen.getByRole('button', { name: /users/i }));
+    await waitFor(() => expect(screen.queryByText(nip19.noteEncode(PENDING_EVENT))).not.toBeInTheDocument());
+
+    await user.click(screen.getByRole('switch', { name: /pending review/i }));
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+    // Leaving keeps Users rather than handing back the All it borrowed: only
+    // the open account is listed, not the open post.
+    expect(screen.getByText('Grouped (1)')).toBeInTheDocument();
+    expect(screen.queryByText(nip19.noteEncode(OPEN_EVENT))).not.toBeInTheDocument();
+  });
+
+  it('counts the header from the rows the active tab lists', async () => {
+    feedEvents = [...FEED, OPEN_EVENT_REPORT_2, OPEN_EVENT_REPORT_3];
+    const user = userEvent.setup();
+    renderQueue();
+    await screen.findByText(headerStartingWith('2 pending'));
+
+    await user.click(screen.getByRole('tab', { name: /all \(/i }));
+    // One row per report: the open account once, the open post three times.
+    // Each row shows its target's id, and nothing else on screen does.
+    await waitFor(() => expect(screen.getAllByText(/^(note|npub)1/)).toHaveLength(4));
+    expect(screen.getByText(headerStartingWith('4 pending'))).toBeInTheDocument();
   });
 
   it('counts the All tab from the reports it lists', async () => {
