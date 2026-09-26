@@ -38,6 +38,7 @@ import { ThreadModal } from "@/components/ThreadModal";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { useAppContext } from "@/hooks/useAppContext";
+import { historyCount } from "@/lib/historyCount";
 import { extractMediaHashes, type ResolutionStatus } from "@/lib/adminApi";
 import { useMediaStatus } from "@/hooks/useMediaStatus";
 import { useDecisionLog } from "@/hooks/useDecisionLog";
@@ -70,6 +71,7 @@ function getKindLabel(kind: number): string {
 interface ReportDetailProps {
   report: NostrEvent | null;
   allReportsForTarget?: NostrEvent[];
+  allReportsForTargetTruncated?: boolean;
   allReports?: NostrEvent[];
   onDismiss?: () => void;
 }
@@ -84,7 +86,7 @@ function getReportTarget(event: NostrEvent): { type: 'event' | 'pubkey'; value: 
 }
 
 
-export function ReportDetail({ report, allReportsForTarget, allReports = [], onDismiss }: ReportDetailProps) {
+export function ReportDetail({ report, allReportsForTarget, allReportsForTargetTruncated = false, allReports = [], onDismiss }: ReportDetailProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const {
@@ -715,7 +717,7 @@ export function ReportDetail({ report, allReportsForTarget, allReports = [], onD
               <CardHeader className="py-3">
                 <CardTitle className="text-sm flex items-center gap-2 text-red-700 dark:text-red-400">
                   <Flag className="h-4 w-4" />
-                  Why This Was Reported ({allReportsForTarget.length} report{allReportsForTarget.length !== 1 ? 's' : ''})
+                  Why This Was Reported ({historyCount(allReportsForTarget.length, allReportsForTargetTruncated)} report{allReportsForTargetTruncated || allReportsForTarget.length !== 1 ? 's' : ''})
                 </CardTitle>
               </CardHeader>
               <CardContent className="py-0 pb-3 space-y-3">
