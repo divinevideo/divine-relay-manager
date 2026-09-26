@@ -1,5 +1,6 @@
 // ABOUTME: The queue reads every report that needs attention, says when that read stopped early,
-// ABOUTME: and keeps a deep-linked resolved report listed through the polls that do not carry it.
+// ABOUTME: keeps a deep-linked resolved report listed through the polls that do not carry it,
+// ABOUTME: and keeps that report reachable when the queue itself fails to load.
 
 import { act, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
@@ -9,7 +10,23 @@ import TestApp from '@/test/TestApp';
 import { EMPTY_RESOLVED_PAGE } from '@/test/resolvedHistory';
 import { Reports } from './Reports';
 
-vi.mock('@/components/ReportDetail', () => ({ ReportDetail: () => null }));
+// Renders only which report the pane opened and how many reports it was given.
+vi.mock('@/components/ReportDetail', () => ({
+  ReportDetail: ({ report, allReportsForTarget, allReports }: {
+    report: { id: string } | null;
+    allReportsForTarget?: unknown[];
+    allReports?: unknown[];
+  }) =>
+    report ? (
+      <div
+        data-testid="report-detail"
+        data-target-reports={allReportsForTarget?.length ?? 'none'}
+        data-all-reports={allReports?.length ?? 'none'}
+      >
+        {report.id}
+      </div>
+    ) : null,
+}));
 
 // Spy on the real hook to read the cadence each queue read asks for.
 vi.mock('@tanstack/react-query', async (orig) => {
@@ -42,15 +59,16 @@ function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 }
 
-function stubWorker(feed: Record<string, unknown>) {
+function stubWorker(feed: Record<string, unknown>, feedStatus = 200) {
   const counts = { feed: 0 };
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input instanceof Request ? input.url : input);
     if (url.includes('/api/reports/resolved')) return jsonResponse(EMPTY_RESOLVED_PAGE);
     if (url.includes('/api/reports?event=')) return jsonResponse({ success: true, events: [RESOLVED_REPORT] });
+    if (url.includes('/api/reports?pubkey=')) return jsonResponse({ success: true, events: [] });
     if (url.includes('/api/reports')) {
       counts.feed += 1;
-      return jsonResponse({ success: true, events: [OPEN_REPORT], truncated: false, ...feed });
+      return jsonResponse({ success: true, events: [OPEN_REPORT], truncated: false, ...feed }, feedStatus);
     }
     if (url.includes('/api/resolution-label-targets')) {
       return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
@@ -100,6 +118,20 @@ describe('the queue reads the needs-attention feed', () => {
       .find(options => (options.queryKey as unknown[])[0] === root);
     expect(optionsFor('reports')?.refetchInterval).toBe(60 * 1000);
     expect(optionsFor('resolution-state')?.refetchInterval).toBe(15 * 1000);
+  });
+
+  it('re-reads resolution labels once a minute', async () => {
+    // The label read walks every page of resolution labels, so it keeps the
+    // 60s poll D1 left it on; a moderator's own label clears through
+    // invalidation, not this poll.
+    stubWorker({});
+    renderQueue();
+    await screen.findByText(nip19.noteEncode(OPEN_EVENT));
+
+    const labelOptions = vi.mocked(useQuery).mock.calls
+      .map(([options]) => options)
+      .find(options => (options.queryKey as unknown[])[0] === 'resolution-label-targets');
+    expect(labelOptions?.refetchInterval).toBe(60 * 1000);
   });
 
   it('asks for every report that needs attention, not the newest 200', async () => {
@@ -186,6 +218,41 @@ describe('the queue reads the needs-attention feed', () => {
     );
     expect(await screen.findByText(nip19.noteEncode(LATER_EVENT))).toBeInTheDocument();
 
+    // The resolved report is listed only because the deep link turned Hide
+    // resolved off. Pinned so the row's absence below can come only from the
+    // relay key, not from the resolution filter.
+    expect(screen.getByRole('switch', { name: 'Hide resolved' })).not.toBeChecked();
     expect(screen.queryByText(nip19.noteEncode(RESOLVED_EVENT))).not.toBeInTheDocument();
+  });
+
+  it('opens a deep-linked report while the queue fails to load, and still says the queue failed', async () => {
+    // A moderator following a ticket's link during a feed outage can still act
+    // on the report the lookup found. The queue is not listed: it never
+    // loaded, and an empty or partial list would read as nothing to do.
+    stubWorker({ success: false, error: 'Relay query timed out before EOSE' }, 502);
+    window.history.pushState({}, '', `/reports?event=${RESOLVED_EVENT}`);
+    renderQueue();
+
+    const pane = await screen.findByTestId('report-detail');
+    expect(pane).toHaveTextContent(RESOLVED_REPORT.id);
+    // The pane still gets the target's reports from the lookup, so "Why This
+    // Was Reported" is not blank.
+    expect(pane).toHaveAttribute('data-target-reports', '1');
+    expect(pane).toHaveAttribute('data-all-reports', '1');
+    expect(screen.getByText(/Failed to load reports/)).toBeInTheDocument();
+    expect(screen.queryByText(nip19.noteEncode(RESOLVED_EVENT))).not.toBeInTheDocument();
+    expect(screen.queryByText('No reports found')).not.toBeInTheDocument();
+    expect(screen.queryByText(/^\d+ pending/)).not.toBeInTheDocument();
+  });
+
+  it("shows a deep link's gone pane while the queue fails to load, beside the failure", async () => {
+    // The lookup answers even when the queue does not, so its verdict on the
+    // target is shown rather than hidden behind the queue's failure.
+    stubWorker({ success: false, error: 'Relay query timed out before EOSE' }, 502);
+    window.history.pushState({}, '', `/reports?pubkey=${'c'.repeat(64)}`);
+    renderQueue();
+
+    expect(await screen.findByText('Report no longer on relay')).toBeInTheDocument();
+    expect(screen.getByText(/Failed to load reports/)).toBeInTheDocument();
   });
 });
