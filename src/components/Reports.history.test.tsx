@@ -541,3 +541,115 @@ describe('the history view keeps what is on screen in order', () => {
     await waitFor(() => expect(calls.resolved).toHaveLength(2));
   });
 });
+
+describe('loaded history survives the queue around it', () => {
+  it('keeps loaded pages through a poll of the queue', async () => {
+    const calls = stubWorker({
+      pages: {
+        first: ok(resolvedPage([H1, H2], { nextCursor: PAGE_ONE_CURSOR, done: false })),
+        [PAGE_ONE_CURSOR]: ok(resolvedPage([H3, H4], { nextCursor: null, done: true })),
+      },
+    });
+    const user = userEvent.setup();
+    const queryClient = renderQueue();
+    await openHistory(user);
+    await user.click(await screen.findByRole('button', { name: /load more/i }));
+    await screen.findByText(note(hex('5')));
+    const historyReads = calls.resolved.length;
+    const feedReads = calls.feed;
+
+    // What the feed's poll does. React Query tells the screen about the new
+    // data on a later tick, so wait one before looking: without it the checks
+    // below run against the render from before the poll and cannot see
+    // anything the poll set off.
+    await act(async () => {
+      await queryClient.refetchQueries({ queryKey: ['reports', RELAY_URL], exact: true });
+      await new Promise(resolve => setTimeout(resolve, 0));
+    });
+
+    expect(calls.feed).toBeGreaterThan(feedReads);
+    expect(screen.getByText(note(hex('5')))).toBeInTheDocument();
+    expect(calls.resolved).toHaveLength(historyReads);
+  });
+
+  it('keeps loaded pages through a Retry of a failed resolution source', async () => {
+    let decisionsFail = false;
+    const calls = stubWorker({
+      pages: {
+        first: ok(resolvedPage([H1, H2], { nextCursor: PAGE_ONE_CURSOR, done: false })),
+        [PAGE_ONE_CURSOR]: ok(resolvedPage([H3, H4], { nextCursor: null, done: true })),
+      },
+      decisions: () => (decisionsFail
+        ? jsonResponse({ success: false, error: 'cold start timeout' }, 500)
+        : jsonResponse({ success: true, resolved: [], states: [] })),
+    });
+    const user = userEvent.setup();
+    const queryClient = renderQueue();
+    await openHistory(user);
+    await user.click(await screen.findByRole('button', { name: /load more/i }));
+    await screen.findByText(note(hex('5')));
+    const historyReads = calls.resolved.length;
+
+    // The decisions read loses its data and fails, so the blocked pane
+    // replaces the list and offers Retry.
+    decisionsFail = true;
+    await act(async () => { await queryClient.resetQueries({ queryKey: ['resolution-state'] }); });
+    expect(await screen.findByText(/resolution state is unavailable/i)).toBeInTheDocument();
+
+    decisionsFail = false;
+    await user.click(screen.getByRole('button', { name: /^retry$/i }));
+
+    // Back to the list with both pages, and history was not re-read.
+    expect(await screen.findByText(note(hex('5')))).toBeInTheDocument();
+    expect(calls.resolved).toHaveLength(historyReads);
+  });
+});
+
+describe('Load more keeps the viewport on the row being read', () => {
+  const ROW_HEIGHT = 100;
+  let rects: MockInstance | undefined;
+  afterEach(() => rects?.mockRestore());
+
+  // jsdom does no layout. Lay list rows out in a column, ROW_HEIGHT each, in
+  // document order, scrolled by the viewport's scrollTop.
+  function layOutRows() {
+    const box = (top: number, height: number) =>
+      ({ top, bottom: top + height, left: 0, right: 0, width: 0, height, x: 0, y: top, toJSON: () => ({}) }) as DOMRect;
+    rects = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+      const viewport = document.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement | null;
+      if (!viewport) return box(0, 0);
+      if (this === viewport) return box(0, 300);
+      if (this instanceof HTMLElement && this.dataset.rowKey) {
+        const index = Array.from(viewport.querySelectorAll('[data-row-key]')).indexOf(this);
+        return box(index * ROW_HEIGHT - viewport.scrollTop, ROW_HEIGHT);
+      }
+      return box(0, 0);
+    });
+  }
+
+  it('keeps the row at the top of the viewport in place when older rows land above it', async () => {
+    stubWorker({
+      pages: {
+        first: ok(resolvedPage([H1, H2], { nextCursor: PAGE_ONE_CURSOR, done: false })),
+        [PAGE_ONE_CURSOR]: ok(resolvedPage([H3, H4], { nextCursor: null, done: true })),
+      },
+    });
+    const user = userEvent.setup();
+    renderQueue();
+    await openHistory(user);
+    await screen.findByText(note(hex('4')));
+    layOutRows();
+
+    // Rows: open, H1, H2, banned. Scroll so the banned post is the top row.
+    const viewport = document.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement;
+    viewport.scrollTop = 3 * ROW_HEIGHT;
+
+    await user.click(screen.getByRole('button', { name: /load more/i }));
+    await screen.findByText(note(hex('6')));
+
+    // H3 and H4 landed above the banned post, two rows further down. The
+    // viewport followed it, so it is still the row at the top.
+    expect(rowKeys()).toEqual([key('1'), key('3'), key('4'), key('5'), key('6'), key('2')]);
+    expect(viewport.scrollTop).toBe(5 * ROW_HEIGHT);
+  });
+});

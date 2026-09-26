@@ -1,7 +1,7 @@
 // ABOUTME: Displays kind 1984 reports with split-pane layout and consolidation
 // ABOUTME: Groups multiple reports on same target, shows count and all reporters
 
-import { useState, useMemo, useEffect, useRef } from "react";
+import { useState, useMemo, useEffect, useRef, useLayoutEffect } from "react";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
@@ -54,6 +54,7 @@ import { CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, RESOLUTION_READ_TIMEOUT_MS, 
 import { isConsolidatedReportResolved } from "@/lib/reportResolution";
 import { mergeReportFeeds } from "@/lib/reportFeeds";
 import { historyFooterState } from "@/lib/historyFooter";
+import { captureScrollAnchor, restoreScrollAnchor, type ScrollAnchor } from "@/lib/scrollAnchor";
 import { ResolvedHistoryFooter } from "@/components/ResolvedHistoryFooter";
 import { getReportTarget, reportTargetKey, type ReportTarget } from "../../shared/report-target";
 import { pendingReviewTargetKeys } from "../../shared/autohide";
@@ -508,9 +509,27 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     return mergeReportFeeds(reports, ...historyPages.map(page => page.events));
   }, [reports, historyView, historyPages]);
 
+  // Load more keeps the moderator's place. An older page can land above rows
+  // already on screen (ban-resolved posts from the feed sit at every depth), so
+  // the row at the top of the viewport is remembered on click and put back
+  // where it was once the new page has rendered. Browsers' own scroll anchoring
+  // is not relied on: Safari does not do it.
+  const listViewportRef = useRef<HTMLDivElement>(null);
+  const loadMoreAnchorRef = useRef<ScrollAnchor | null>(null);
+  const loadedHistoryPages = historyPages?.length ?? 0;
+  useLayoutEffect(() => {
+    const anchor = loadMoreAnchorRef.current;
+    const viewport = listViewportRef.current;
+    if (!anchor || !viewport) return;
+    loadMoreAnchorRef.current = null;
+    restoreScrollAnchor(viewport, anchor);
+  }, [loadedHistoryPages]);
+
   // fetchNextPage settles into the query's own state (isFetchNextPageError),
   // which the footer renders, so nothing here needs its promise.
   const loadMoreHistory = () => {
+    const viewport = listViewportRef.current;
+    loadMoreAnchorRef.current = viewport ? captureScrollAnchor(viewport) : null;
     history.fetchNextPage();
   };
 
@@ -1766,7 +1785,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           </div>
         </CardHeader>
         <CardContent className="p-0 flex-1 min-h-0">
-          <ScrollArea className="h-full">
+          <ScrollArea className="h-full" viewportRef={listViewportRef}>
             <div className="space-y-2 p-4 pt-0">
               {viewMode === 'consolidated' ? (
                 !consolidated || consolidated.length === 0 ? (
