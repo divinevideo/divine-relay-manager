@@ -74,11 +74,10 @@ export interface AutoHideStateRowLike {
 // first -- the order getAutoHideStates returns -- because getLatestAutoHideState
 // takes the first state transition per target as authoritative.
 //
-// The worker uses this now, to keep these targets in the queue payload. The
-// client adopts it in the queue-screen change, to split them into the
-// pending-review view; until then it still computes the same set inline
-// (Reports.tsx). Two copies would let the badge and the list it filters
-// disagree again.
+// The worker uses this to keep these targets in the needs-attention payload,
+// and the queue uses it to split them into the pending-review view. One
+// definition, so the badge and the list it labels cannot disagree about which
+// targets are waiting.
 export function pendingReviewTargetKeys(rows: readonly AutoHideStateRowLike[]): Set<string> {
   const actionsByTarget = new Map<string, string[]>();
   for (const row of rows) {
