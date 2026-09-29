@@ -371,6 +371,32 @@ describe('the history view never counts on a resolution source it lacks', () => 
     expect(screen.getByRole('button', { name: /load more/i })).toBeEnabled();
   });
 
+  it('states no count when a re-read of loaded history fails while a source is unread, and keeps Try again', async () => {
+    // A relay outage can fail the ban list and the history re-read together.
+    // The pages on screen are the last good read, but the count is taken live
+    // from them without the unread source, so it would be short.
+    let historyFails = false;
+    stubWorker({
+      bannedEventsReply: fail,
+      pages: { first: () => (historyFails ? fail() : jsonResponse(resolvedPage([H1], { nextCursor: null, done: true }))) },
+    });
+    const user = userEvent.setup();
+    const queryClient = renderQueue();
+    await user.click(await screen.findByRole('button', { name: /show the queue anyway/i }));
+    await openHistory(user);
+    const footer = await screen.findByTestId('resolved-history-footer');
+    await waitFor(() => expect(footer).toHaveTextContent("Resolved count unavailable: Banned posts couldn't be read."));
+
+    historyFails = true;
+    await act(async () => { await queryClient.refetchQueries({ queryKey: ['reports-resolved'] }); });
+
+    await waitFor(() => expect(screen.getByTestId('resolved-history-footer')).toHaveTextContent(/Couldn't refresh resolved history/));
+    const failedFooter = screen.getByTestId('resolved-history-footer');
+    expect(failedFooter).toHaveTextContent("Resolved count unavailable: Banned posts couldn't be read.");
+    expect(failedFooter).not.toHaveTextContent(/Showing \d+ resolved/);
+    expect(within(failedFooter).getByRole('button', { name: /try again/i })).toBeEnabled();
+  });
+
   it('keeps counting on a ban list whose refresh failed, under the stale banner', async () => {
     // A stale source still holds data, so the banned post is still known to be
     // resolved: the count stands, as the default view's filter does.

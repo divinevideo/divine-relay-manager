@@ -56,12 +56,21 @@ export function ResolvedHistoryFooter({ state, errorMessage, retrying = false, o
 
   const notes = state.notes.map(note => <p key={note}>{NOTE_TEXT[note]}</p>);
 
+  const countUnavailable = (sources: string[]) =>
+    `Resolved count unavailable: ${sourceNames(sources)} couldn't be read.`;
+
   // Never says the history ended or has more: that came from the read that
-  // just failed to repeat.
+  // just failed to repeat. "As loaded earlier" is true of the pages, not of
+  // the count, which is taken live from them: with a source unread it would
+  // be short, so it gives way to the same line resolutionIncomplete shows.
   if (state.kind === 'refreshFailed') {
     return (
       <div data-testid="resolved-history-footer" className="space-y-2 py-3 text-center text-xs">
-        <p className="text-muted-foreground">Showing {state.shown} resolved, as loaded earlier.</p>
+        <p className="text-muted-foreground">
+          {state.sources.length > 0
+            ? countUnavailable(state.sources)
+            : `Showing ${state.shown} resolved, as loaded earlier.`}
+        </p>
         <p className="text-destructive">Couldn't refresh resolved history{reason}</p>
         {notes}
         <Button variant="outline" size="sm" onClick={onRetry} disabled={retrying}>
@@ -91,7 +100,7 @@ export function ResolvedHistoryFooter({ state, errorMessage, retrying = false, o
   if (state.kind === 'resolutionIncomplete') {
     return (
       <div data-testid="resolved-history-footer" className="space-y-2 py-3 text-center text-xs text-muted-foreground">
-        <p>Resolved count unavailable: {sourceNames(state.sources)} couldn't be read.</p>
+        <p>{countUnavailable(state.sources)}</p>
         {state.hasMore ? loadMore(state) : notes}
       </div>
     );

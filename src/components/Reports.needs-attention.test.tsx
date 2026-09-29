@@ -85,6 +85,20 @@ function stubWorker(feed: Record<string, unknown>, feedStatus = 200) {
   return { fetchMock, counts };
 }
 
+// A worker whose feed read waits until released, then answers with the open
+// report. Every other read answers as stubWorker does.
+function stubWorkerWithHeldFeed() {
+  let release = () => {};
+  const held = new Promise<void>(r => { release = r; });
+  const { fetchMock } = stubWorker({});
+  const answer = fetchMock.getMockImplementation()!;
+  fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+    if (String(input instanceof Request ? input.url : input).includes('needs_attention=1')) await held;
+    return answer(input);
+  });
+  return { release: () => act(async () => { release(); }) };
+}
+
 function renderQueue() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, retryDelay: 0 } } });
   render(
@@ -283,5 +297,47 @@ describe('the queue reads the needs-attention feed', () => {
 
     expect(await screen.findByText(nip19.noteEncode(OPEN_EVENT))).toBeInTheDocument();
     expect(screen.queryByText(/Failed to load reports/)).not.toBeInTheDocument();
+  });
+
+  it('keeps the deep-linked report open beside the failure while Try again re-reads the feed', async () => {
+    // With no data, a re-read puts the feed back to pending with no error
+    // (query-core fetchState). The report the moderator is working in, and any
+    // dialog open in it, must not be swapped for the loading skeleton.
+    stubWorker({ success: false, error: 'Relay query timed out before EOSE' }, 502);
+    window.history.pushState({}, '', `/reports?event=${RESOLVED_EVENT}`);
+    renderQueue();
+    await screen.findByTestId('report-detail');
+    const failure = screen.getByText(/Failed to load reports/).closest('[role="alert"]') as HTMLElement;
+
+    const feed = stubWorkerWithHeldFeed();
+    await userEvent.setup().click(within(failure).getByRole('button', { name: 'Try again' }));
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Try again' })).toBeDisabled());
+    expect(screen.getByTestId('report-detail')).toHaveTextContent(RESOLVED_REPORT.id);
+    expect(screen.getByText('Failed to load reports. Trying again…')).toBeInTheDocument();
+    expect(screen.queryByTestId('reports-loading-skeleton')).not.toBeInTheDocument();
+
+    // A re-read that succeeds lists the queue, and the report stays open.
+    await feed.release();
+    expect(await screen.findByText(nip19.noteEncode(OPEN_EVENT))).toBeInTheDocument();
+    expect(screen.getByTestId('report-detail')).toHaveTextContent(RESOLVED_REPORT.id);
+    expect(screen.queryByText(/Failed to load reports/)).not.toBeInTheDocument();
+  });
+
+  it('keeps the deep-linked report open beside the failure while the poll re-reads the feed', async () => {
+    // The minute poll keeps firing on a failed feed, unasked, for as long as
+    // the outage lasts. refetchQueries stands in for it.
+    stubWorker({ success: false, error: 'Relay query timed out before EOSE' }, 502);
+    window.history.pushState({}, '', `/reports?event=${RESOLVED_EVENT}`);
+    const queryClient = renderQueue();
+    await screen.findByTestId('report-detail');
+
+    stubWorkerWithHeldFeed();
+    await act(async () => { void queryClient.refetchQueries({ queryKey: ['reports'] }); });
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Try again' })).toBeDisabled());
+    expect(screen.getByTestId('report-detail')).toHaveTextContent(RESOLVED_REPORT.id);
+    expect(screen.getByText('Failed to load reports. Trying again…')).toBeInTheDocument();
+    expect(screen.queryByTestId('reports-loading-skeleton')).not.toBeInTheDocument();
   });
 });

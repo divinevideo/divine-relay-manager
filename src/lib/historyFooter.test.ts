@@ -73,8 +73,8 @@ describe('historyFooterState', () => {
     // The pages on screen are from the last good read. Whatever that read
     // said about the end is stale once a re-read has failed.
     expect(historyFooterState({ ...base, refreshFailed: true, lastPage: { done: true, nextCursor: null } }))
-      .toEqual({ kind: 'refreshFailed', shown: 3, notes: [] });
-    expect(historyFooterState({ ...base, refreshFailed: true })).toEqual({ kind: 'refreshFailed', shown: 3, notes: [] });
+      .toEqual({ kind: 'refreshFailed', shown: 3, sources: [], notes: [] });
+    expect(historyFooterState({ ...base, refreshFailed: true })).toEqual({ kind: 'refreshFailed', shown: 3, sources: [], notes: [] });
   });
 
   describe('with a resolution source the moderator went on without', () => {
@@ -96,8 +96,9 @@ describe('historyFooterState', () => {
         .toMatchObject({ kind: 'resolutionIncomplete', hasMore: true, loadingMore: true, busy: true, loadMoreFailed: true, filterCaveat: true });
     });
 
-    it('still says first that a re-read of loaded history failed', () => {
-      expect(historyFooterState({ ...incomplete, refreshFailed: true })).toMatchObject({ kind: 'refreshFailed' });
+    it('still says first that a re-read of loaded history failed, and carries the sources so it states no count', () => {
+      expect(historyFooterState({ ...incomplete, refreshFailed: true }))
+        .toMatchObject({ kind: 'refreshFailed', sources: ['Banned posts'] });
     });
   });
 });
