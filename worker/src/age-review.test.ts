@@ -6,6 +6,7 @@ import {
   handleUpdateAgeReviewCase,
   handleGetModerationStatus,
   handleParentContact,
+  handleParentConsent,
   handleAgeReviewReplyWebhook,
   handleCreateMinorAccount,
   checkAgeReviewDeadlines,
@@ -1479,6 +1480,203 @@ describe('handleParentContact', () => {
     });
     const res = await handleParentContact(req, 'case-1', c.pubkey, makeEnv(db), corsHeaders);
     expect(res.status).toBe(400);
+  });
+});
+
+describe('handleParentConsent', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  function request(email = 'parent@example.com', type = 'video/mp4', bytes = 'clip') {
+    const form = new FormData();
+    form.set('email', email);
+    form.set('video', new File([bytes], 'consent.mp4', { type }));
+    return new Request('https://api.test/v1/minor-review-cases/case-1/parent-consent', { method: 'POST', body: form });
+  }
+
+  it('requires the caller to own an eligible case', async () => {
+    const c = makeCase({ state: 'restricted_pending_parental_consent' });
+    const db = { prepare: vi.fn().mockImplementation(() => ({ bind: vi.fn().mockReturnValue({ first: vi.fn().mockResolvedValue(null) }) })) };
+    const res = await handleParentConsent(request(), c.id, c.pubkey, makeEnv(db), corsHeaders);
+    expect(res.status).toBe(404);
+  });
+
+  it('rejects an under-13 case before reading the video', async () => {
+    const c = makeCase({ state: 'restricted_pending_parental_consent', suspected_age_band: 'under_13' });
+    const db = { prepare: vi.fn().mockImplementation(() => ({ bind: vi.fn().mockReturnValue({ first: vi.fn().mockResolvedValue(c) }) })) };
+    const res = await handleParentConsent(request(), c.id, c.pubkey, makeEnv(db), corsHeaders);
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects a terminal case and an empty video file', async () => {
+    const c = makeCase({ state: 'denied_closed' });
+    const db = { prepare: vi.fn().mockImplementation(() => ({ bind: vi.fn().mockReturnValue({ first: vi.fn().mockResolvedValue(c) }) })) };
+    expect((await handleParentConsent(request(), c.id, c.pubkey, makeEnv(db), corsHeaders)).status).toBe(400);
+    c.state = 'restricted_pending_parental_consent';
+    const form = new FormData();
+    form.set('email', 'parent@example.com');
+    form.set('video', new File([], 'empty.mp4', { type: 'video/mp4' }));
+    const empty = new Request('https://api.test/v1/minor-review-cases/case-1/parent-consent', { method: 'POST', body: form });
+    expect((await handleParentConsent(empty, c.id, c.pubkey, makeEnv(db), corsHeaders)).status).toBe(400);
+  });
+
+  it('rejects a non-video file', async () => {
+    const c = makeCase({ state: 'restricted_pending_parental_consent' });
+    const db = { prepare: vi.fn().mockImplementation(() => ({ bind: vi.fn().mockReturnValue({ first: vi.fn().mockResolvedValue(c) }) })) };
+    const raw = '--test\r\nContent-Disposition: form-data; name="video"; filename="clip.txt"\r\nContent-Type: text/plain\r\n\r\nclip\r\n--test--\r\n';
+    const nonVideo = new Request('https://api.test/v1/minor-review-cases/case-1/parent-consent', {
+      method: 'POST', headers: { 'Content-Type': 'multipart/form-data; boundary=test' }, body: raw,
+    });
+    const res = await handleParentConsent(nonVideo, c.id, c.pubkey, makeEnv(db), corsHeaders);
+    expect(res.status).toBe(415);
+  });
+
+  it('rejects invalid email, disallowed state, and declared oversize upload', async () => {
+    const c = makeCase({ state: 'restricted_pending_parental_consent' });
+    const db = { prepare: vi.fn().mockImplementation(() => ({ bind: vi.fn().mockReturnValue({ first: vi.fn().mockResolvedValue(c) }) })) };
+    expect((await handleParentConsent(request('bad-email'), c.id, c.pubkey, makeEnv(db), corsHeaders)).status).toBe(400);
+    const tooLarge = request();
+    tooLarge.headers.set('Content-Length', String(65 * 1024 * 1024));
+    expect((await handleParentConsent(tooLarge, c.id, c.pubkey, makeEnv(db), corsHeaders)).status).toBe(413);
+    c.state = 'open_reported';
+    expect((await handleParentConsent(request(), c.id, c.pubkey, makeEnv(db), corsHeaders)).status).toBe(400);
+  });
+
+  it('attaches to an existing ticket before advancing the case with CAS', async () => {
+    const c = makeCase({ state: 'restricted_pending_parental_consent', zendesk_ticket_id: 42, version: 7 });
+    const calls: string[] = [];
+    const db = { prepare: vi.fn().mockImplementation((sql: string) => ({
+      bind: vi.fn().mockImplementation((...args: unknown[]) => ({
+        first: vi.fn().mockResolvedValue(c),
+        run: vi.fn().mockImplementation(async () => {
+          calls.push(`db:${sql}`);
+          if (sql.includes("state = 'submitted_for_review'")) expect(args).toContain(7);
+          return { meta: { changes: 1 } };
+        }),
+      })),
+    })) };
+    const mockFetch = vi.fn().mockImplementation(async (url: string, init: RequestInit) => {
+      calls.push(`fetch:${url}`);
+      if (url.includes('/uploads.json')) {
+        expect(init.headers).toMatchObject({ 'Content-Type': 'video/mp4' });
+        return { ok: true, json: async () => ({ upload: { token: 'upload-token' } }) };
+      }
+      if (url.includes('/comments?')) return { ok: true, json: async () => ({ comments: [{
+        body: 'Parent consent video submitted for review [case-1]', attachments: [{ id: 7 }],
+      }] }) };
+      const ticket = JSON.parse(String(init.body));
+      expect(ticket.ticket.comment).toMatchObject({ public: false, uploads: ['upload-token'] });
+      return { ok: true };
+    });
+    vi.stubGlobal('fetch', mockFetch);
+    const res = await handleParentConsent(request(), c.id, c.pubkey, makeEnv(db, {
+      ZENDESK_SUBDOMAIN: 'test', ZENDESK_EMAIL: 'agent@test.com', ZENDESK_API_TOKEN: 'token',
+    }), corsHeaders);
+    expect(res.status).toBe(200);
+    const uploadAt = calls.findIndex(call => call.includes('/uploads.json'));
+    const ticketAt = calls.findIndex(call => call.includes('/tickets/42'));
+    const casAt = calls.findIndex(call => call.includes("state = 'submitted_for_review'"));
+    expect(uploadAt).toBeGreaterThanOrEqual(0);
+    expect(ticketAt).toBeGreaterThan(uploadAt);
+    expect(casAt).toBeGreaterThan(ticketAt);
+    expect(calls[casAt]).toContain('version = version + 1');
+  });
+
+  it('creates one ticket with a private attached video and links it', async () => {
+    const c = makeCase({ state: 'restricted_pending_parental_consent' });
+    const db = { prepare: vi.fn().mockImplementation((_sql: string) => ({
+      bind: vi.fn().mockReturnValue({ first: vi.fn().mockResolvedValue(c), run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }) }),
+    })) };
+    const mockFetch = vi.fn().mockImplementation(async (url: string, init: RequestInit) => {
+      if (url.includes('/uploads.json')) return { ok: true, json: async () => ({ upload: { token: 'upload-token' } }) };
+      if (url.includes('/comments?')) return { ok: true, json: async () => ({ comments: [{
+        body: 'Parent consent video submitted for review [case-1]', attachments: [{ id: 7 }],
+      }] }) };
+      if (url.endsWith('/tickets')) {
+        const ticket = JSON.parse(String(init.body));
+        expect(ticket.ticket.comment).toMatchObject({ public: false, uploads: ['upload-token'] });
+        return { ok: true, json: async () => ({ ticket: { id: 99 } }) };
+      }
+      throw new Error(`Unexpected Zendesk request: ${url}`);
+    });
+    vi.stubGlobal('fetch', mockFetch);
+    const res = await handleParentConsent(request(), c.id, c.pubkey, makeEnv(db, {
+      ZENDESK_SUBDOMAIN: 'test', ZENDESK_EMAIL: 'agent@test.com', ZENDESK_API_TOKEN: 'token',
+    }), corsHeaders);
+    expect(res.status).toBe(200);
+    expect(db.prepare.mock.calls.some(([sql]: string[]) => sql.includes('SET zendesk_ticket_id'))).toBe(true);
+  });
+
+  it('does not advance when the ticket comment has no attached video', async () => {
+    const c = makeCase({ state: 'restricted_pending_parental_consent', zendesk_ticket_id: 42 });
+    const db = { prepare: vi.fn().mockImplementation((_sql: string) => ({
+      bind: vi.fn().mockReturnValue({
+        first: vi.fn().mockResolvedValue(c),
+        run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+      }),
+    })) };
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes('/uploads.json')) return { ok: true, json: async () => ({ upload: { token: 'token-1' } }) };
+      if (url.includes('/comments?')) return { ok: true, json: async () => ({ comments: [] }) };
+      return { ok: true };
+    }));
+    const res = await handleParentConsent(request(), c.id, c.pubkey, makeEnv(db, {
+      ZENDESK_SUBDOMAIN: 'test', ZENDESK_EMAIL: 'agent@test.com', ZENDESK_API_TOKEN: 'token',
+    }), corsHeaders);
+    expect(res.status).toBe(503);
+    expect(db.prepare.mock.calls.some(([sql]: string[]) => sql.includes("state = 'submitted_for_review'"))).toBe(false);
+  });
+
+  it('keeps the case pending when Zendesk fails and accepts a retry after submission', async () => {
+    const c = makeCase({ state: 'restricted_pending_parental_consent', zendesk_ticket_id: 42 });
+    const db = { prepare: vi.fn().mockImplementation(() => ({ bind: vi.fn().mockReturnValue({
+      first: vi.fn().mockResolvedValue(c), run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+    }) })) };
+    const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 503 });
+    vi.stubGlobal('fetch', mockFetch);
+    const env = makeEnv(db, { ZENDESK_SUBDOMAIN: 'test', ZENDESK_EMAIL: 'agent@test.com', ZENDESK_API_TOKEN: 'token' });
+    expect((await handleParentConsent(request(), c.id, c.pubkey, env, corsHeaders)).status).toBe(503);
+    expect(db.prepare.mock.calls.some(([sql]: string[]) => sql.includes('UPDATE age_review_cases'))).toBe(false);
+    c.state = 'submitted_for_review';
+    expect((await handleParentConsent(request(), c.id, c.pubkey, env, corsHeaders)).status).toBe(200);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('advances an already-attached submission without uploading again', async () => {
+    const c = makeCase({ state: 'restricted_pending_parental_consent', version: 3 });
+    const db = { prepare: vi.fn().mockImplementation((sql: string) => ({
+      bind: vi.fn().mockReturnValue({
+        first: vi.fn().mockResolvedValue(sql.includes('FROM age_review_parent_consent_submissions')
+          ? { status: 'attached', upload_token: null, ticket_id: 42, lease_until: 0 } : c),
+        run: vi.fn().mockResolvedValue({ meta: { changes: sql.includes('INSERT OR IGNORE') ? 0 : 1 } }),
+      }),
+    })) };
+    const mockFetch = vi.fn();
+    vi.stubGlobal('fetch', mockFetch);
+    const res = await handleParentConsent(request(), c.id, c.pubkey, makeEnv(db), corsHeaders);
+    expect(res.status).toBe(200);
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(db.prepare.mock.calls.some(([sql]: string[]) => sql.includes("state = 'submitted_for_review'"))).toBe(true);
+  });
+
+  it('resumes an interrupted upload without adding a second ticket comment', async () => {
+    const c = makeCase({ state: 'restricted_pending_parental_consent', zendesk_ticket_id: 42 });
+    const db = { prepare: vi.fn().mockImplementation((sql: string) => ({
+      bind: vi.fn().mockReturnValue({
+        first: vi.fn().mockResolvedValue(sql.includes('FROM age_review_parent_consent_submissions')
+          ? { status: 'processing', upload_token: 'saved-token', ticket_id: 42, lease_until: 0 } : c),
+        run: vi.fn().mockResolvedValue({ meta: { changes: sql.includes('INSERT OR IGNORE') ? 0 : 1 } }),
+      }),
+    })) };
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ comments: [{
+      body: 'Parent consent video submitted for review [case-1]', attachments: [{ id: 7 }],
+    }] }) });
+    vi.stubGlobal('fetch', mockFetch);
+    const res = await handleParentConsent(request(), c.id, c.pubkey, makeEnv(db, {
+      ZENDESK_SUBDOMAIN: 'test', ZENDESK_EMAIL: 'agent@test.com', ZENDESK_API_TOKEN: 'token',
+    }), corsHeaders);
+    expect(res.status).toBe(200);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(mockFetch.mock.calls[0][0]).toContain('/tickets/42/comments');
   });
 });
 

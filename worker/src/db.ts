@@ -88,6 +88,17 @@ export async function ensureSchema(db: D1Database): Promise<void> {
     )
   `).run();
 
+  // One submission per case. The lease prevents concurrent requests from
+  // creating two Zendesk comments; the token lets a retry resume after a
+  // transient Zendesk or D1 failure without re-uploading the clip.
+  await db.prepare(`CREATE TABLE IF NOT EXISTS age_review_parent_consent_submissions (
+    case_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'processing',
+    upload_token TEXT,
+    ticket_id INTEGER,
+    lease_until INTEGER NOT NULL DEFAULT 0
+  )`).run();
+
   // Add columns to existing tables that were created without them
   try {
     await db.prepare(`ALTER TABLE age_review_cases ADD COLUMN zendesk_ticket_id INTEGER`).run();
