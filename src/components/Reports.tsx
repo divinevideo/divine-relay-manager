@@ -488,6 +488,23 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     [queueFeed, deepLinkedReports],
   );
 
+  // The reports query itself failing is the more fundamental problem: if the
+  // relay read is down, resolution state is beside the point, and the
+  // resolution pane's Retry can't fix it anyway. Report this first (#221) --
+  // but only full-pane when there is nothing to show. When a REFRESH fails
+  // (e.g. the worker 502s on a relay timeout), the last good list stays
+  // rendered with a stale-data warning below, so one slow poll does not look
+  // like "no reports pending".
+  //
+  // Latched on errorUpdateCount, as hasColdFailed is for resolution sources:
+  // every re-read of a feed with no data (Try again, or the minute poll) puts
+  // it back to `{error: null, status: 'pending'}`. Keyed on `error` alone,
+  // each re-read looked like a first load: the cold-load skeleton took the
+  // screen, unmounting a deep-linked report beside the failure and any dialog
+  // open in it, and the deep-link effect set a concluded lookup back to
+  // 'resolving', where it stayed. Both read this one value.
+  const queueFailedCold = !reports && (!!error || feedErrorUpdateCount > 0);
+
   // The resolved-history view: Hide resolved off, outside the pending-review
   // view. The needs-attention feed no longer carries targets the worker
   // resolved, so this view adds them from their own paged read, fetched only
@@ -1220,7 +1237,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     // do NOT gate on isFetchingBanned: ban data affects how a report is displayed,
     // not whether it exists, and gating on it flips a resolved pane back to
     // 'resolving' (and re-fires the lookup) on every background ban refetch.
-    if (isLoading) {
+    // Nor on a re-read of a feed that failed cold: the lookup already ran when
+    // the feed failed, and attemptedTargetRef keeps it from running again, so
+    // 'resolving' would never clear.
+    if (isLoading && !queueFailedCold) {
       setDeepLinkStatus('resolving');
       return;
     }
@@ -1316,7 +1336,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         setDeepLinkStatus('unavailable');
       }
     })();
-  }, [allConsolidated, searchParams, hideResolved, resolvedTargets, bannedPubkeySet, navigate, isLoading, config.relayUrl, config.apiUrl, updateConfig, queryClient, fetchReportsByTarget, relayUrl, retryNonce]);
+  }, [allConsolidated, searchParams, hideResolved, resolvedTargets, bannedPubkeySet, navigate, isLoading, queueFailedCold, config.relayUrl, config.apiUrl, updateConfig, queryClient, fetchReportsByTarget, relayUrl, retryNonce]);
 
   // Update URL when report selection changes
   const handleSelectReport = (report: NostrEvent | null) => {
@@ -1388,21 +1408,6 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       />
     );
   }
-
-  // The reports query itself failing is the more fundamental problem: if the
-  // relay read is down, resolution state is beside the point, and the
-  // resolution pane's Retry can't fix it anyway. Report this first (#221) --
-  // but only full-pane when there is nothing to show. When a REFRESH fails
-  // (e.g. the worker 502s on a relay timeout), the last good list stays
-  // rendered with a stale-data warning below, so one slow poll does not look
-  // like "no reports pending".
-  //
-  // Latched on errorUpdateCount, as hasColdFailed is for resolution sources:
-  // every re-read of a feed with no data (Try again, or the minute poll) puts
-  // it back to `{error: null, status: 'pending'}`. Keyed on `error` alone the
-  // skeleton below took the screen for each re-read, unmounting a deep-linked
-  // report beside the failure and any dialog open in it.
-  const queueFailedCold = !reports && (!!error || feedErrorUpdateCount > 0);
 
   // Wait for reports AND every gating resolution source. A source that has not
   // landed contributes nothing to resolvedTargets, so rendering here would show
