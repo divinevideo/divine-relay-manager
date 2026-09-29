@@ -35,7 +35,9 @@ export interface HistoryFooterInput {
 export type HistoryFooterState =
   | { kind: 'loading' }
   | { kind: 'failed' }
-  | { kind: 'refreshFailed'; shown: number; notes: HistoryNote[] }
+  // sources: resolution sources the moderator went on without. When any are
+  // named the count is short, so the footer states none.
+  | { kind: 'refreshFailed'; shown: number; sources: string[]; notes: HistoryNote[] }
   | {
       kind: 'resolutionIncomplete';
       sources: string[];
@@ -53,7 +55,8 @@ export type HistoryFooterState =
 // Only the worker's `done` ends history. An empty page with a cursor is more
 // history, not none; a page with no cursor that is not done is a walk that
 // could not continue, and says so. A failed re-read says so before anything
-// else: the last good read's word on the end is stale by then (#221). Next, a
+// else: the last good read's word on the end is stale by then (#221), and it
+// carries any unread source so that it states no count either. Next, a
 // resolution source the moderator went on without withholds both the count
 // and the end: rows it would resolve are listed as unresolved, so "No
 // resolved reports." could be false. The rows are real, so Load more stays.
@@ -67,7 +70,7 @@ export function historyFooterState(input: HistoryFooterInput): HistoryFooterStat
   const shown = input.resolvedRowsShown;
 
   if (input.refreshFailed) {
-    return { kind: 'refreshFailed', shown, notes };
+    return { kind: 'refreshFailed', shown, sources: input.incompleteSources, notes };
   }
   if (input.incompleteSources.length > 0) {
     const hasMore = !input.lastPage.done && input.lastPage.nextCursor !== null;
