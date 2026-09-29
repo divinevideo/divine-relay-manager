@@ -1678,6 +1678,25 @@ describe('handleParentConsent', () => {
     expect(mockFetch).toHaveBeenCalledTimes(1);
     expect(mockFetch.mock.calls[0][0]).toContain('/tickets/42/comments');
   });
+
+  it('refuses to create a second ticket after an old ambiguous create', async () => {
+    const c = makeCase({ state: 'restricted_pending_parental_consent' });
+    const db = { prepare: vi.fn().mockImplementation((sql: string) => ({
+      bind: vi.fn().mockReturnValue({
+        first: vi.fn().mockResolvedValue(sql.includes('FROM age_review_parent_consent_submissions')
+          ? { status: 'processing', upload_token: 'saved-token', ticket_id: null, lease_until: 0,
+              created_at: Math.floor(Date.now() / 1000) - 60 * 60 } : c),
+        run: vi.fn().mockResolvedValue({ meta: { changes: sql.includes('INSERT OR IGNORE') ? 0 : 1 } }),
+      }),
+    })) };
+    const mockFetch = vi.fn();
+    vi.stubGlobal('fetch', mockFetch);
+    const res = await handleParentConsent(request(), c.id, c.pubkey, makeEnv(db, {
+      ZENDESK_SUBDOMAIN: 'test', ZENDESK_EMAIL: 'agent@test.com', ZENDESK_API_TOKEN: 'token',
+    }), corsHeaders);
+    expect(res.status).toBe(503);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
 });
 
 // -- checkAgeReviewDeadlines --------------------------------------------------

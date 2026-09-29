@@ -1137,12 +1137,12 @@ export async function handleParentConsent(
   const nowSeconds = Math.floor(Date.now() / 1000);
   const leaseUntil = nowSeconds + 10 * 60;
   const inserted = await env.DB.prepare(`INSERT OR IGNORE INTO age_review_parent_consent_submissions
-    (case_id, lease_until) VALUES (?, ?)`).bind(caseId, leaseUntil).run();
-  let submission: { status: string; upload_token: string | null; ticket_id: number | null } | null = null;
+    (case_id, lease_until, created_at) VALUES (?, ?, ?)`).bind(caseId, leaseUntil, nowSeconds).run();
+  let submission: { status: string; upload_token: string | null; ticket_id: number | null; created_at: number } | null = null;
   if (inserted.meta?.changes !== 1) {
-    const prior = await env.DB.prepare(`SELECT status, upload_token, ticket_id, lease_until
+    const prior = await env.DB.prepare(`SELECT status, upload_token, ticket_id, lease_until, created_at
       FROM age_review_parent_consent_submissions WHERE case_id = ?`)
-      .bind(caseId).first<{ status: string; upload_token: string | null; ticket_id: number | null; lease_until: number }>();
+      .bind(caseId).first<{ status: string; upload_token: string | null; ticket_id: number | null; lease_until: number; created_at: number }>();
     if (!prior) return json({ success: false, error: 'Submission changed; retry' }, 409, corsHeaders);
     if (prior.status !== 'attached') {
       const lock = await env.DB.prepare(`UPDATE age_review_parent_consent_submissions
@@ -1163,6 +1163,13 @@ export async function handleParentConsent(
       if (!zendesk) throw new Error('Zendesk credentials unavailable');
       const commentBody = `Parent consent video submitted for review [${caseId}]`;
       const existingTicketId = submission?.ticket_id ?? current.zendesk_ticket_id;
+      // Ticket creation has a provider idempotency window of two hours. After
+      // 50 minutes, an uploaded token may also expire. If creation's outcome
+      // is still unknown, stop automatic retries rather than risk a second
+      // ticket. Support can reconcile the case and clear this record.
+      if (submission?.upload_token && !existingTicketId && nowSeconds - submission.created_at >= 50 * 60) {
+        throw new Error('Zendesk ticket creation outcome requires manual reconciliation');
+      }
       const hasAttachment = async (ticketId: number): Promise<boolean> => {
         const comments = await fetch(`${zendesk.baseUrl}/tickets/${ticketId}/comments?sort_order=desc&per_page=100`, {
           headers: { Authorization: `Basic ${zendesk.auth}` },
