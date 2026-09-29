@@ -6,7 +6,7 @@
 import { Miniflare } from 'miniflare';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import { ensureSchema } from '../src/db';
-import { handleUpdateAgeReviewCase, handleAgeReviewReplyWebhook } from '../src/age-review';
+import { handleUpdateAgeReviewCase, handleAgeReviewReplyWebhook, handleParentConsent } from '../src/age-review';
 import { createSubjectWithBinding } from '../src/protected-minors';
 
 let mf: Miniflare;
@@ -61,6 +61,46 @@ async function rowOf(id: string) {
 
 describe('age-review handler on real D1', () => {
   beforeEach(reset);
+
+  it('stores one consent submission and advances the case only after the ticket has an attachment', async () => {
+    const owner = 'a'.repeat(64);
+    await DB.prepare(`INSERT INTO age_review_cases
+      (id, pubkey, state, suspected_age_band, zendesk_ticket_id, deadline_at, clock_paused, version)
+      VALUES ('consent-case', ?, 'restricted_pending_parental_consent', 'age_13_15', 42, ?, 0, 2)`)
+      .bind(owner, new Date(Date.now() + 9 * 864e5).toISOString()).run();
+    const calls: string[] = [];
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.includes('/uploads.json')) return new Response(JSON.stringify({ upload: { token: 'token-1' } }), { status: 201 });
+      if (url.endsWith('/tickets/42')) return new Response('{}', { status: 200 });
+      if (url.includes('/tickets/42/comments?')) return new Response(JSON.stringify({ comments: [{
+        body: 'Parent consent video submitted for review [consent-case]', attachments: [{ id: 7 }],
+      }] }), { status: 200 });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const form = new FormData();
+    form.set('email', 'parent@example.com');
+    form.set('video', new File(['clip'], 'clip.mp4', { type: 'video/mp4' }));
+    const request = () => new Request('https://api.test/v1/minor-review-cases/consent-case/parent-consent', {
+      method: 'POST', body: form,
+    });
+    try {
+      const consentEnv = { ...env, ZENDESK_SUBDOMAIN: 'test', ZENDESK_EMAIL: 'agent@test.com', ZENDESK_API_TOKEN: 'token' };
+      expect((await handleParentConsent(request(), 'consent-case', owner, consentEnv, cors)).status).toBe(200);
+      const caseRow = await DB.prepare('SELECT state, version, clock_paused, parent_contact_email FROM age_review_cases WHERE id = ?')
+        .bind('consent-case').first<{ state: string; version: number; clock_paused: number; parent_contact_email: string }>();
+      expect(caseRow).toMatchObject({ state: 'submitted_for_review', version: 3, clock_paused: 1, parent_contact_email: 'parent@example.com' });
+      const submission = await DB.prepare('SELECT status, upload_token, lease_until FROM age_review_parent_consent_submissions WHERE case_id = ?')
+        .bind('consent-case').first<{ status: string; upload_token: string | null; lease_until: number }>();
+      expect(submission).toMatchObject({ status: 'attached', upload_token: null, lease_until: 0 });
+      expect(calls).toHaveLength(3);
+      expect((await handleParentConsent(request(), 'consent-case', owner, consentEnv, cors)).status).toBe(200);
+      expect(fetchSpy).toHaveBeenCalledTimes(3);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
 
   it('a stale expected_version is rejected with 409 and the state is unchanged', async () => {
     await insertCase('c7-stale', 'open_reported');
