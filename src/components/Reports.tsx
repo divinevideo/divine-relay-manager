@@ -468,7 +468,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // old one's data, reported as a success, so the queue listed and filtered
   // with it until the new environment answered. A failed refresh keeps the
   // last good data without it.
-  const { data: queueFeed, isLoading, error, refetch, isFetching, dataUpdatedAt } = useQuery({
+  const { data: queueFeed, isLoading, error, errorUpdateCount: feedErrorUpdateCount, refetch, isFetching, dataUpdatedAt } = useQuery({
     queryKey: ['reports', relayUrl],
     queryFn: fetchReportsNeedingAttention,
     refetchInterval: QUEUE_POLL_MS,
@@ -1389,11 +1389,26 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     );
   }
 
+  // The reports query itself failing is the more fundamental problem: if the
+  // relay read is down, resolution state is beside the point, and the
+  // resolution pane's Retry can't fix it anyway. Report this first (#221) --
+  // but only full-pane when there is nothing to show. When a REFRESH fails
+  // (e.g. the worker 502s on a relay timeout), the last good list stays
+  // rendered with a stale-data warning below, so one slow poll does not look
+  // like "no reports pending".
+  //
+  // Latched on errorUpdateCount, as hasColdFailed is for resolution sources:
+  // every re-read of a feed with no data (Try again, or the minute poll) puts
+  // it back to `{error: null, status: 'pending'}`. Keyed on `error` alone the
+  // skeleton below took the screen for each re-read, unmounting a deep-linked
+  // report beside the failure and any dialog open in it.
+  const queueFailedCold = !reports && (!!error || feedErrorUpdateCount > 0);
+
   // Wait for reports AND every gating resolution source. A source that has not
   // landed contributes nothing to resolvedTargets, so rendering here would show
   // handled work as pending, and would show auto-hidden content in the default
   // view (#221).
-  if (isLoading || blockingLoadStillBlocking.length > 0) {
+  if ((isLoading && !queueFailedCold) || blockingLoadStillBlocking.length > 0) {
     return (
       <Card className="h-[calc(100vh-200px)]">
         <CardHeader>
@@ -1421,24 +1436,20 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // keeps a cold queue failure from replacing the screen below.
   const detailPaneOpen = !!selectedReport || showDeepLinkResolving || showDeepLinkFallback;
 
-  // The reports query itself failing is the more fundamental problem: if the
-  // relay read is down, resolution state is beside the point, and the
-  // resolution pane's Retry can't fix it anyway. Report this first (#221) --
-  // but only full-pane when there is nothing to show. When a REFRESH fails
-  // (e.g. the worker 502s on a relay timeout), the last good list stays
-  // rendered with a stale-data warning below, so one slow poll does not look
-  // like "no reports pending".
-  const queueFailedCold = !!error && !reports;
   // Try again is the only way back short of the next 60s poll: the header's
-  // Refresh is not rendered in either layout. No busy state is needed: with no
-  // data the re-read puts the query back to pending, and the skeleton above
-  // takes the screen until it settles.
+  // Refresh is not rendered in either layout. During a re-read the query holds
+  // no error, so the notice says it is trying again instead of repeating the
+  // last reason, and the button waits.
   const queueLoadFailure = (
     <Alert variant="destructive">
       <AlertDescription className="space-y-2">
-        <p>Failed to load reports: {error instanceof Error ? error.message : "Unknown error"}</p>
-        <Button variant="outline" size="sm" onClick={() => refetch()}>
-          <RefreshCw className="mr-1 h-3 w-3" />
+        <p>
+          {error
+            ? `Failed to load reports: ${error instanceof Error ? error.message : "Unknown error"}`
+            : "Failed to load reports. Trying again…"}
+        </p>
+        <Button variant="outline" size="sm" onClick={() => refetch()} disabled={isFetching}>
+          <RefreshCw className={`mr-1 h-3 w-3 ${isFetching ? 'animate-spin' : ''}`} />
           Try again
         </Button>
       </AlertDescription>
