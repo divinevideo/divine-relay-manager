@@ -85,19 +85,33 @@ function stubWorker(feed: Record<string, unknown>, feedStatus = 200) {
   return { fetchMock, counts };
 }
 
-// A worker whose feed read waits until released, then answers with the open
-// report. Every other read answers as stubWorker does.
-function stubWorkerWithHeldFeed() {
+// A worker whose feed read waits until released, then answers as stubWorker
+// would (the open report, by default). Every other read answers as stubWorker does.
+function stubWorkerWithHeldFeed(feed: Record<string, unknown> = {}, feedStatus = 200) {
   let release = () => {};
   const held = new Promise<void>(r => { release = r; });
-  const { fetchMock } = stubWorker({});
+  const { fetchMock } = stubWorker(feed, feedStatus);
   const answer = fetchMock.getMockImplementation()!;
   fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
     if (String(input instanceof Request ? input.url : input).includes('needs_attention=1')) await held;
     return answer(input);
   });
-  return { release: () => act(async () => { release(); }) };
+  return { fetchMock, release: () => act(async () => { release(); }) };
 }
+
+// Fails the targeted lookup a deep link makes, so its verdict is 'unavailable'.
+function failTargetedLookup(fetchMock: ReturnType<typeof stubWorker>['fetchMock']) {
+  const answer = fetchMock.getMockImplementation()!;
+  fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+    if (String(input instanceof Request ? input.url : input).includes('/api/reports?pubkey=')) {
+      return jsonResponse({ success: false, error: 'Relay query timed out before EOSE' }, 502);
+    }
+    return answer(input);
+  });
+}
+
+const lookupCalls = (fetchMock: ReturnType<typeof stubWorker>['fetchMock']) =>
+  fetchMock.mock.calls.filter(([input]) => String(input instanceof Request ? input.url : input).includes('/api/reports?pubkey=')).length;
 
 function renderQueue() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, retryDelay: 0 } } });
@@ -339,5 +353,85 @@ describe('the queue reads the needs-attention feed', () => {
     expect(screen.getByTestId('report-detail')).toHaveTextContent(RESOLVED_REPORT.id);
     expect(screen.getByText('Failed to load reports. Trying again…')).toBeInTheDocument();
     expect(screen.queryByTestId('reports-loading-skeleton')).not.toBeInTheDocument();
+  });
+});
+
+describe("a deep link's verdict survives a re-read of a queue that failed to load", () => {
+  // The lookup answered once for this target and is not repeated, so a re-read
+  // that set the pane back to "Looking up this report…" would leave it there.
+  const MISSING_PUBKEY = 'c'.repeat(64);
+  const verdicts = [
+    { verdict: 'gone', title: 'Report no longer on relay', lookupFails: false },
+    { verdict: 'unavailable', title: 'Relay unavailable', lookupFails: true },
+  ] as const;
+
+  // The unavailable pane has a Try again of its own; this is the queue's.
+  const queueTryAgain = () =>
+    within(screen.getByText(/Failed to load reports/).closest('[role="alert"]') as HTMLElement)
+      .getByRole('button', { name: 'Try again' });
+
+  async function openVerdictBesideFailedQueue(lookupFails: boolean) {
+    const { fetchMock } = stubWorker({ success: false, error: 'Relay query timed out before EOSE' }, 502);
+    if (lookupFails) failTargetedLookup(fetchMock);
+    window.history.pushState({}, '', `/reports?pubkey=${MISSING_PUBKEY}`);
+    const queryClient = renderQueue();
+    await screen.findByText(/Failed to load reports:/);
+    return queryClient;
+  }
+
+  function heldFeed(lookupFails: boolean, ...reply: Parameters<typeof stubWorkerWithHeldFeed>) {
+    const feed = stubWorkerWithHeldFeed(...reply);
+    if (lookupFails) failTargetedLookup(feed.fetchMock);
+    return feed;
+  }
+
+  for (const { verdict, title, lookupFails } of verdicts) {
+    it(`keeps the ${verdict} pane through a Try again that lists the queue`, async () => {
+      await openVerdictBesideFailedQueue(lookupFails);
+      expect(await screen.findByText(title)).toBeInTheDocument();
+
+      const feed = heldFeed(lookupFails);
+      await userEvent.setup().click(queueTryAgain());
+      await waitFor(() => expect(queueTryAgain()).toBeDisabled());
+      expect(screen.getByText(title)).toBeInTheDocument();
+      expect(screen.queryByText(/Looking up this report/)).not.toBeInTheDocument();
+
+      await feed.release();
+      expect(await screen.findByText(nip19.noteEncode(OPEN_EVENT))).toBeInTheDocument();
+      expect(screen.getByText(title)).toBeInTheDocument();
+      expect(screen.queryByText(/Looking up this report/)).not.toBeInTheDocument();
+    });
+
+    it(`keeps the ${verdict} pane through a poll that fails again`, async () => {
+      // refetchQueries stands in for the minute poll.
+      const queryClient = await openVerdictBesideFailedQueue(lookupFails);
+      expect(await screen.findByText(title)).toBeInTheDocument();
+
+      const feed = heldFeed(lookupFails, { success: false, error: 'Relay query timed out before EOSE' }, 502);
+      await act(async () => { void queryClient.refetchQueries({ queryKey: ['reports'] }); });
+      await waitFor(() => expect(queueTryAgain()).toBeDisabled());
+      expect(screen.getByText(title)).toBeInTheDocument();
+      expect(screen.queryByText(/Looking up this report/)).not.toBeInTheDocument();
+
+      await feed.release();
+      expect(await screen.findByText(/Failed to load reports:/)).toBeInTheDocument();
+      expect(screen.getByText(title)).toBeInTheDocument();
+      expect(screen.queryByText(/Looking up this report/)).not.toBeInTheDocument();
+    });
+  }
+
+  it('still waits for a first load of the queue before looking the link up', async () => {
+    // The latch is only for a feed that has failed. On a first load the link's
+    // target may be in the feed, so the lookup waits for it.
+    const feed = stubWorkerWithHeldFeed();
+    window.history.pushState({}, '', `/reports?pubkey=${MISSING_PUBKEY}`);
+    renderQueue();
+    expect(await screen.findByTestId('reports-loading-skeleton')).toBeInTheDocument();
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+    expect(lookupCalls(feed.fetchMock)).toBe(0);
+
+    await feed.release();
+    expect(await screen.findByText('Report no longer on relay')).toBeInTheDocument();
+    expect(lookupCalls(feed.fetchMock)).toBe(1);
   });
 });
