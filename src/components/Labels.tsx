@@ -25,6 +25,7 @@ import {
 import { Tag, UserX, Clock, Filter, ChevronDown, ChevronRight, Eye, Loader2, CheckCircle, XCircle } from "lucide-react";
 import { useToast } from "@/hooks/useToast";
 import { useAdminApi } from "@/hooks/useAdminApi";
+import { banFailureToast, banSuccessNote } from "@/lib/banFeedback";
 import { LabelPublisher } from "@/components/LabelPublisher";
 import { EventContentPreview } from "@/components/EventContentPreview";
 import { UserProfilePreview } from "@/components/UserProfilePreview";
@@ -127,10 +128,10 @@ export function Labels({ relayUrl }: LabelsProps) {
   // Ban mutation with proper loading state and error handling
   const banMutation = useMutation({
     mutationFn: async ({ pubkey, reason }: { pubkey: string; reason: string }) => {
-      await banPubkey(pubkey, reason);
-      return pubkey;
+      const outcome = await banPubkey(pubkey, reason);
+      return { pubkey, outcome };
     },
-    onSuccess: async (pubkey) => {
+    onSuccess: async ({ pubkey, outcome }) => {
       queryClient.invalidateQueries({ queryKey: ['banned-users'] });
       queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
       toast({ title: "User banned", description: "Verifying..." });
@@ -148,7 +149,10 @@ export function Labels({ relayUrl }: LabelsProps) {
             ? 'Ban verified - user is in banned list'
             : 'Warning: User may not be banned',
         });
-        toast({
+        // A note means banPubkey already found this ban on the list, so it
+        // outranks a second check that can wobble under the same slow relay.
+        const note = banSuccessNote(outcome);
+        toast(note ? { title: "User banned", description: note } : {
           title: verified ? "Ban Verified" : "Verification Warning",
           description: verified
             ? "User confirmed banned on relay"
@@ -166,11 +170,7 @@ export function Labels({ relayUrl }: LabelsProps) {
       }
     },
     onError: (error: Error) => {
-      toast({
-        title: "Failed to ban user",
-        description: error.message,
-        variant: "destructive",
-      });
+      toast(banFailureToast(error));
     },
   });
 

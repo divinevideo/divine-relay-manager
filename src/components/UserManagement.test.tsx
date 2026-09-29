@@ -7,7 +7,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { UserManagement } from './UserManagement';
-import { ApiError } from '@/lib/adminApi';
+import { ApiError, BanNotConfirmedError } from '@/lib/adminApi';
+import { banSuccessNote } from '@/lib/banFeedback';
 
 const api = vi.hoisted(() => ({
   callRelayRpc: vi.fn(),
@@ -70,8 +71,11 @@ describe('UserManagement age-review guard wiring', () => {
     // Empty lists: the account is neither banned, allowed, nor suspended, so the
     // Allow button renders.
     api.callRelayRpc.mockResolvedValue([]);
-    api.banPubkey.mockResolvedValue(undefined);
+    api.banPubkey.mockResolvedValue({ unconfirmed: null });
     api.logDecision.mockResolvedValue(undefined);
+    // The post-ban background check chains .then on this; an unset mock would
+    // throw inside onSuccess, which TanStack routes to onError.
+    api.verifyPubkeyBanned.mockResolvedValue(true);
   });
 
   it('routes an allow_user refusal to the case rather than a dead-end toast', async () => {
@@ -145,6 +149,55 @@ describe('UserManagement age-review guard wiring', () => {
 
     await waitFor(() => expect(api.banPubkey).toHaveBeenCalledWith(PUBKEY, 'Account banned by moderator'));
     expect(api.callRelayRpc).not.toHaveBeenCalledWith('banpubkey', expect.anything());
+  });
+
+  async function banViaDialog() {
+    renderWithProvider();
+    fireEvent.click(await screen.findByRole('button', { name: /Add User/i }));
+    fireEvent.change(await screen.findByPlaceholderText(/hex pubkey or npub1/i), {
+      target: { value: PUBKEY },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^Ban User$/i }));
+  }
+
+  // The ban has already landed when the audit write runs, so its failure must not
+  // read as "Failed to ban user", which invites a retry of an applied ban.
+  it('reports a failed audit write after a landed ban without calling the ban failed', async () => {
+    api.logDecision.mockRejectedValue(new Error('audit down'));
+
+    await banViaDialog();
+
+    // One toast (the app shows one at a time): banned, and the audit gap named.
+    await waitFor(() =>
+      expect(toast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'User banned; audit log not recorded' }),
+      ),
+    );
+    expect(toast).not.toHaveBeenCalledWith(expect.objectContaining({ variant: 'destructive' }));
+  });
+
+  it('reports an unconfirmed ban as not confirmed, not as a destructive failure', async () => {
+    api.banPubkey.mockRejectedValue(new BanNotConfirmedError('timed out'));
+
+    await banViaDialog();
+
+    await waitFor(() =>
+      expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Ban not confirmed' })),
+    );
+    expect(toast).not.toHaveBeenCalledWith(expect.objectContaining({ variant: 'destructive' }));
+  });
+
+  it('explains what was not confirmed on a ban that landed with unconfirmed follow-ups', async () => {
+    api.banPubkey.mockResolvedValue({ unconfirmed: 'follow_ups' });
+
+    await banViaDialog();
+
+    await waitFor(() =>
+      expect(toast).toHaveBeenCalledWith(expect.objectContaining({
+        title: 'User banned successfully',
+        description: banSuccessNote({ unconfirmed: 'follow_ups' }),
+      })),
+    );
   });
 
   it('still shows an error toast for a failure that is not a guard refusal', async () => {

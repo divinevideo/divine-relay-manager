@@ -16,6 +16,7 @@ import { useToast } from "@/hooks/useToast";
 import { Tag, Plus, X, UserX } from "lucide-react";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import type { LabelParams } from "@/lib/adminApi";
+import { banFailureToast, banSuccessNote } from "@/lib/banFeedback";
 
 interface LabelPublisherProps {
   onSuccess?: () => void;
@@ -103,7 +104,10 @@ export function LabelPublisher({ onSuccess, defaultTarget, defaultLabels, banOnP
       if (result.banned) {
         queryClient.invalidateQueries({ queryKey: ['banned-users'] });
         queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
-        toast({ title: "Label published and user banned" });
+        toast({
+          title: "Label published and user banned",
+          description: result.banOutcome && banSuccessNote(result.banOutcome),
+        });
       } else {
         toast({ title: "Label published successfully" });
       }
@@ -112,11 +116,7 @@ export function LabelPublisher({ onSuccess, defaultTarget, defaultLabels, banOnP
       onSuccess?.();
     },
     onError: (error: Error) => {
-      toast({
-        title: "Failed to publish label",
-        description: error.message,
-        variant: "destructive",
-      });
+      toast(banFailureToast(error, { failure: "Failed to publish label", notConfirmed: "Label published; ban not confirmed" }));
     },
   });
 
@@ -348,14 +348,17 @@ export function LabelPublisherInline({
       if (result.banned) {
         queryClient.invalidateQueries({ queryKey: ['banned-users'] });
         queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
-        toast({ title: "Label published and user banned" });
+        toast({
+          title: "Label published and user banned",
+          description: result.banOutcome && banSuccessNote(result.banOutcome),
+        });
       } else {
         toast({ title: "Label published" });
       }
       onSuccess?.();
     },
     onError: (error: Error) => {
-      toast({ title: "Failed", description: error.message, variant: "destructive" });
+      toast(banFailureToast(error, { failure: "Failed", notConfirmed: "Label published; ban not confirmed" }));
     },
   });
 

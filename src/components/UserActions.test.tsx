@@ -3,7 +3,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { UserActions } from './UserActions';
-import { ApiError } from '@/lib/adminApi';
+import { ApiError, BanNotConfirmedError } from '@/lib/adminApi';
+import { banSuccessNote } from '@/lib/banFeedback';
 
 // Stable mocks so async-flow tests can control enqueue + status polling and
 // assert on the same fn instances.
@@ -46,7 +47,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   api.bulkModerate.mockResolvedValue({ success: true, jobId: 'job-1' });
   api.getBulkJobStatus.mockResolvedValue(doneJob('age-restrict-all'));
-  api.banPubkey.mockResolvedValue({ success: true });
+  api.banPubkey.mockResolvedValue({ unconfirmed: null });
   api.unbanPubkey.mockResolvedValue({ success: true });
   api.suspendPubkey.mockResolvedValue({ success: true });
   api.unsuspendPubkey.mockResolvedValue({ success: true });
@@ -383,10 +384,24 @@ describe('UserActions', () => {
     await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
   });
 
-  it('surfaces a ban timeout as an error toast and keeps the dialog open for retry', async () => {
-    api.banPubkey.mockRejectedValue(
-      new Error('Request to /api/moderate timed out after 30s. The action may still have applied. Re-check before retrying.'),
+  // banPubkey turns a timeout the ban list cannot confirm into BanNotConfirmedError.
+  // It may have landed, so it must not read as a destructive "Failed".
+  it('surfaces an unconfirmed ban as "not confirmed", not a failure, and keeps the dialog open', async () => {
+    api.banPubkey.mockRejectedValue(new BanNotConfirmedError('Request to /api/moderate timed out after 30s.'));
+    renderWithProvider(<UserActions pubkey={'a'.repeat(64)} />);
+    fireEvent.click(screen.getByRole('button', { name: /Ban User/i }));
+    const dialog = screen.getByRole('alertdialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Ban User' }));
+
+    await waitFor(() =>
+      expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Ban not confirmed' })),
     );
+    expect(toast).not.toHaveBeenCalledWith(expect.objectContaining({ variant: 'destructive' }));
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument();
+  });
+
+  it('keeps a refused ban a destructive failure', async () => {
+    api.banPubkey.mockRejectedValue(new ApiError('Missing pubkey for ban_pubkey', 400));
     renderWithProvider(<UserActions pubkey={'a'.repeat(64)} />);
     fireEvent.click(screen.getByRole('button', { name: /Ban User/i }));
     const dialog = screen.getByRole('alertdialog');
@@ -397,7 +412,21 @@ describe('UserActions', () => {
         expect.objectContaining({ title: 'Failed to ban user', variant: 'destructive' }),
       ),
     );
-    expect(screen.getByRole('alertdialog')).toBeInTheDocument();
+  });
+
+  it('explains what was not confirmed when the ban landed without confirmed content removal', async () => {
+    api.banPubkey.mockResolvedValue({ unconfirmed: 'removal_running' });
+    renderWithProvider(<UserActions pubkey={'a'.repeat(64)} />);
+    fireEvent.click(screen.getByRole('button', { name: /Ban User/i }));
+    const dialog = screen.getByRole('alertdialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Ban User' }));
+
+    await waitFor(() =>
+      expect(toast).toHaveBeenCalledWith(expect.objectContaining({
+        title: 'User banned from relay',
+        description: banSuccessNote({ unconfirmed: 'removal_running' }),
+      })),
+    );
   });
 
   it('shows a non-blocking toast when the audit log fails but still completes the ban', async () => {

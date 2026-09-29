@@ -46,6 +46,7 @@ import {
   getLinkedTickets,
   closeTicket,
   ApiError,
+  BanNotConfirmedError,
   type UnsignedEvent,
   type ApiResponse,
   type LabelParams,
@@ -673,6 +674,127 @@ describe('adminApi', () => {
         })
       );
     });
+
+    // The relay applies a ban before its slow content purge, so an error that
+    // is not a definite refusal may hide a ban that landed. A "failed" message
+    // then invites a retry, which the relay treats as a second enforcement.
+    describe('when the ban request does not confirm', () => {
+      const pubkey = 'a'.repeat(64);
+      const banList = (pubkeys: string[]) => ({
+        ok: true,
+        json: async () => ({ success: true, result: pubkeys.map(p => ({ pubkey: p })) }),
+      });
+      const workerError = (status: number, body: object) => ({
+        ok: false,
+        status,
+        statusText: 'error',
+        json: async () => body,
+      });
+      const UNCONFIRMED = { success: false, code: 'ban_unconfirmed', error: 'Ban not confirmed: timed out' };
+
+      afterEach(() => { vi.restoreAllMocks(); });
+
+      function ban() {
+        return banPubkey(API_URL, pubkey, 'Spam').then(
+          value => ({ value }),
+          error => ({ error }),
+        );
+      }
+      const workerOk = (body: object) => ({
+        ok: true,
+        json: async () => ({ success: true, pubkey, recorded: true, ...body }),
+      });
+
+      it('reports a relay that answered with a purge error as removal_error', async () => {
+        mockFetch.mockResolvedValueOnce(workerOk({ contentRemovalUnconfirmed: true, relayError: 'purge failed' }));
+
+        expect(await ban()).toEqual({ value: { unconfirmed: 'removal_error' } });
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+      });
+
+      it('reports a relay still working when the worker stopped waiting as removal_running', async () => {
+        mockFetch.mockResolvedValueOnce(workerOk({ contentRemovalUnconfirmed: true, relayTimedOut: true }));
+
+        expect(await ban()).toEqual({ value: { unconfirmed: 'removal_running' } });
+      });
+
+      it('reports a clean ban as fully confirmed', async () => {
+        mockFetch.mockResolvedValueOnce(workerOk({}));
+
+        expect(await ban()).toEqual({ value: { unconfirmed: null } });
+      });
+
+      // Confirmed only by our own re-check: the worker never reported its
+      // follow-ups (Keycast block, DM, human-review mark, tickets) as done.
+      it('resolves a browser timeout as banned, follow-ups unconfirmed, when the relay lists the pubkey', async () => {
+        mockFetch
+          .mockRejectedValueOnce(new DOMException('timed out', 'TimeoutError'))
+          .mockResolvedValueOnce(banList([pubkey]));
+
+        expect(await ban()).toEqual({ value: { unconfirmed: 'follow_ups' } });
+      });
+
+      // The worker answered ban_unconfirmed, so it returned before any follow-up:
+      // they did not run, which is definite rather than "may not have".
+      it('resolves a worker ban_unconfirmed as banned, follow-ups skipped, when the relay now lists the pubkey', async () => {
+        mockFetch
+          .mockResolvedValueOnce(workerError(500, UNCONFIRMED))
+          .mockResolvedValueOnce(banList([pubkey]));
+
+        expect(await ban()).toEqual({ value: { unconfirmed: 'follow_ups_skipped' } });
+      });
+
+      it('rethrows a 403 refusal (expired access) without reading the ban list', async () => {
+        mockFetch.mockResolvedValueOnce(workerError(403, { success: false, error: 'Forbidden' }));
+
+        const { error } = await ban() as { error: unknown };
+        expect(error).not.toBeInstanceOf(BanNotConfirmedError);
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+      });
+
+      // After a 30s request, the re-check must not add up to another 30s.
+      it('bounds its own ban-list re-check at 10s', async () => {
+        const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+        mockFetch
+          .mockResolvedValueOnce(workerError(500, UNCONFIRMED))
+          .mockResolvedValueOnce(banList([pubkey]));
+
+        await ban();
+
+        expect(timeoutSpy.mock.calls.map(([ms]) => ms)).toEqual([30_000, 10_000]);
+      });
+
+      it('throws BanNotConfirmedError when the relay does not list the pubkey', async () => {
+        mockFetch
+          .mockResolvedValueOnce(workerError(500, UNCONFIRMED))
+          .mockResolvedValueOnce(banList(['b'.repeat(64)]));
+
+        const { error } = await ban() as { error: unknown };
+        expect(error).toBeInstanceOf(BanNotConfirmedError);
+        expect((error as Error).message).toContain('Ban not confirmed: timed out');
+      });
+
+      it('throws BanNotConfirmedError when the ban list cannot be read', async () => {
+        mockFetch
+          .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+          .mockRejectedValueOnce(new TypeError('Failed to fetch'));
+
+        const { error } = await ban() as { error: unknown };
+        expect(error).toBeInstanceOf(BanNotConfirmedError);
+      });
+
+      // A 4xx is a refusal before anything ran (bad input, expired access), so
+      // it stays a plain failure and costs no ban-list read.
+      it('rethrows a 4xx refusal unchanged without reading the ban list', async () => {
+        mockFetch.mockResolvedValueOnce(workerError(400, { success: false, error: 'Missing pubkey for ban_pubkey' }));
+
+        const { error } = await ban() as { error: unknown };
+        expect(error).toBeInstanceOf(ApiError);
+        expect(error).not.toBeInstanceOf(BanNotConfirmedError);
+        expect((error as Error).message).toBe('Missing pubkey for ban_pubkey');
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+      });
+    });
   });
 
   describe('unbanPubkey', () => {
@@ -895,6 +1017,26 @@ describe('adminApi', () => {
   });
 
   describe('publishLabelAndBan', () => {
+    // The caller shows the ban's note, so what was left unconfirmed must reach it.
+    it('carries through what the ban left unconfirmed', async () => {
+      mockFetch
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ success: true }) })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ success: true, contentRemovalUnconfirmed: true, relayTimedOut: true }),
+        });
+
+      const result = await publishLabelAndBan(API_URL, {
+        targetType: 'pubkey',
+        targetValue: 'pubkey123',
+        namespace: 'spam',
+        labels: ['scam'],
+        shouldBan: true,
+      });
+
+      expect(result.banOutcome).toEqual({ unconfirmed: 'removal_running' });
+    });
+
     it('should publish label only when shouldBan is false', async () => {
       mockFetch.mockResolvedValue({
         ok: true,
@@ -927,7 +1069,7 @@ describe('adminApi', () => {
         shouldBan: true,
       });
 
-      expect(result).toEqual({ labelPublished: true, banned: true });
+      expect(result).toEqual({ labelPublished: true, banned: true, banOutcome: { unconfirmed: null } });
       expect(mockFetch).toHaveBeenCalledTimes(2); // Publish + ban
 
       // Check ban call

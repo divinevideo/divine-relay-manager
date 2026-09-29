@@ -6,6 +6,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { EventDetail } from './EventDetail';
+import { BanNotConfirmedError } from '@/lib/adminApi';
+import { banSuccessNote } from '@/lib/banFeedback';
 
 // The re-verify control was fixed separately (EventDetail.reverify.test.tsx).
 // This is the other hop in the same file: the verification that runs straight
@@ -29,7 +31,8 @@ const api = vi.hoisted(() => ({
 }));
 
 vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => api }));
-vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast: vi.fn() }) }));
+const toast = vi.hoisted(() => vi.fn());
+vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast }) }));
 vi.mock('@/hooks/useCurrentUser', () => ({
   useCurrentUser: () => ({
     user: { pubkey: MOD_PUBKEY },
@@ -102,7 +105,7 @@ describe('EventDetail post-ban verification', () => {
     vi.clearAllMocks();
     modStatus.isUserBanned = false;
     modStatus.isEventGone = false;
-    api.banPubkey.mockResolvedValue(undefined);
+    api.banPubkey.mockResolvedValue({ unconfirmed: null });
   });
 
   it('confirms the ban when the relay lists the pubkey', async () => {
@@ -114,6 +117,51 @@ describe('EventDetail post-ban verification', () => {
     await waitFor(() => {
       expect(screen.getByText('User ban verified - pubkey is in banned list')).toBeInTheDocument();
     });
+  });
+
+  it('reports an unconfirmed ban as not confirmed, not as a destructive failure', async () => {
+    api.banPubkey.mockRejectedValue(new BanNotConfirmedError('timed out'));
+
+    renderDetail();
+    await banTheUser();
+
+    await waitFor(() =>
+      expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Ban not confirmed' })),
+    );
+    expect(toast).not.toHaveBeenCalledWith(expect.objectContaining({ variant: 'destructive' }));
+  });
+
+  // The app shows one toast at a time, so the note rides on the final one.
+  it('keeps what the ban left unconfirmed on the final verified toast', async () => {
+    api.banPubkey.mockResolvedValue({ unconfirmed: 'removal_running' });
+    api.verifyPubkeyBanned.mockResolvedValue(true);
+
+    renderDetail();
+    await banTheUser();
+
+    await waitFor(() =>
+      expect(toast).toHaveBeenLastCalledWith(expect.objectContaining({
+        title: 'User banned',
+        description: banSuccessNote({ unconfirmed: 'removal_running' }),
+      })),
+    );
+  });
+
+  // The ban list already confirmed this ban inside banPubkey, so a second check
+  // that cannot run must not bury the note under a destructive warning.
+  it('keeps the note, not a destructive warning, when the second check cannot run', async () => {
+    api.banPubkey.mockResolvedValue({ unconfirmed: 'removal_running' });
+    api.verifyPubkeyBanned.mockResolvedValue(null);
+
+    renderDetail();
+    await banTheUser();
+
+    await waitFor(() =>
+      expect(toast).toHaveBeenLastCalledWith(expect.objectContaining({
+        description: banSuccessNote({ unconfirmed: 'removal_running' }),
+      })),
+    );
+    expect(toast).not.toHaveBeenCalledWith(expect.objectContaining({ variant: 'destructive' }));
   });
 
   it('warns about the ban list when the relay answered without the pubkey', async () => {

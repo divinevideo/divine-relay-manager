@@ -37,6 +37,7 @@ import { SceneClassification } from "@/components/SceneClassification";
 import { TranscriptAnalysis } from "@/components/TranscriptAnalysis";
 import { ReporterList } from "@/components/ReporterCard";
 import { extractMediaHashes } from "@/lib/adminApi";
+import { banFailureToast, banSuccessNote } from "@/lib/banFeedback";
 import { MediaPreview } from "@/components/MediaPreview";
 import {
   User,
@@ -433,10 +434,10 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
 
   const banMutation = useMutation({
     mutationFn: async ({ pubkey, reason }: { pubkey: string; reason: string }) => {
-      await banPubkey(pubkey, reason);
-      return pubkey;
+      const outcome = await banPubkey(pubkey, reason);
+      return { pubkey, outcome };
     },
-    onSuccess: async (pubkey) => {
+    onSuccess: async ({ pubkey, outcome }) => {
       queryClient.invalidateQueries({ queryKey: ['banned-users'] });
       // Re-reads the account lists itself, from after the action.
       moderationStatus.recheckAfterAction();
@@ -457,7 +458,10 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
               ? 'User ban verified - pubkey is in banned list'
               : 'Warning: User may not be banned - not found in banned list',
         });
-        toast({
+        // A note means banPubkey already found this ban on the list, so it
+        // outranks a second check that can wobble under the same slow relay.
+        const note = banSuccessNote(outcome);
+        toast(note ? { title: "User banned", description: note } : {
           title: verified ? "Ban Verified" : "Verification Warning",
           description: verified
             ? "User is confirmed banned on relay"
@@ -475,11 +479,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
       }
     },
     onError: (error: Error) => {
-      toast({
-        title: "Failed to ban user",
-        description: error.message,
-        variant: "destructive",
-      });
+      toast(banFailureToast(error));
     },
   });
 
