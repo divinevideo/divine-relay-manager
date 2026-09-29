@@ -618,6 +618,9 @@ describe('the history footer never mistakes a stop for an end', () => {
 
     expect(await screen.findByText(/couldn't refresh resolved history/i)).toBeInTheDocument();
     expect(screen.queryByText(/end of resolved history/i)).not.toBeInTheDocument();
+    // Every resolution source was read, so the count stands: the history row
+    // and the feed's banned post.
+    expect(screen.getByTestId('resolved-history-footer')).toHaveTextContent('Showing 2 resolved, as loaded earlier.');
     // What was loaded earlier stays listed.
     expect(screen.getByText(note(hex('3')))).toBeInTheDocument();
 
