@@ -153,3 +153,20 @@ export function getReportTargetIds(event: { tags: string[][] }): { eventId?: str
     pubkey: tags.find(t => t[0] === 'p' && isHex64(t[1]))?.[1],
   };
 }
+
+// Timeout for the four resolution reads that build the reports queue's
+// resolvedTargets, replacing adminApi's 30s API_TIMEOUT_MS for these reads.
+// On a COLD load there is no error to latch onto yet, so every escape hatch the
+// queue offers sits behind the loading skeleton: a source that times out at 30s
+// and then retries strands the moderator on a bare skeleton for a minute with
+// nothing to click, and any of the four can cause it. A 30s bound buys nothing
+// here anyway, being twice the 15s poll interval that would have recovered the
+// read on its own (#221). One-shot moderation actions still want the generous
+// default.
+//
+// Every read of the relay lists through useRelayBanLists uses it too, and
+// must: those reads share cache entries with the queue (`banned-pubkeys`,
+// `banned-events`), and the timeout applied is whichever observer happens to
+// trigger the fetch. Two values here would make the queue's cold-load bound
+// depend on which screen fetched last.
+export const RESOLUTION_READ_TIMEOUT_MS = 8_000;

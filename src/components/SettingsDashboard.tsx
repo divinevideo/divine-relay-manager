@@ -10,6 +10,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { CopyableId } from "@/components/CopyableId";
 import { useAppContext } from "@/hooks/useAppContext";
 import { useAdminApi } from "@/hooks/useAdminApi";
+import { useBannedEvents } from "@/hooks/useRelayBanLists";
 import { getCurrentEnvironment } from "@/lib/environments";
 import { normalizeAllowedKinds, type AllowedKindEntry } from "@/lib/allowedKinds";
 import {
@@ -237,11 +238,7 @@ export function SettingsDashboard() {
   const {
     data: bannedEvents,
     isLoading: bannedEventsLoading,
-  } = useQuery({
-    queryKey: ['banned-events'],
-    queryFn: () => callRelayRpc<Array<{ id: string; reason?: string }>>('listbannedevents'),
-    enabled: !!relayUrl,
-  });
+  } = useBannedEvents({ enabled: !!relayUrl });
 
   const {
     data: pendingModeration,

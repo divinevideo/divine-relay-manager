@@ -18,11 +18,13 @@ vi.mock('@/hooks/useAppContext', () => ({
 const deleteDecisions = vi.hoisted(() => vi.fn());
 const fetchResolutionState = vi.hoisted(() => vi.fn());
 const fetchResolutionLabelTargets = vi.hoisted(() => vi.fn());
+const listSuspendedPubkeys = vi.hoisted(() => vi.fn());
 vi.mock('@/lib/adminApi', async (orig) => ({
   ...(await orig<typeof import('@/lib/adminApi')>()),
   deleteDecisions,
   fetchResolutionState,
   fetchResolutionLabelTargets,
+  listSuspendedPubkeys,
 }));
 
 describe('useAdminApi', () => {
@@ -60,4 +62,16 @@ describe('useAdminApi', () => {
 
     expect(fetchResolutionLabelTargets).toHaveBeenCalledWith(API_URL, { timeoutMs: 4000 });
   });
+
+  // listSuspendedPubkeys was the one relay list read with no timeout option at
+  // all, so it gave up on a different schedule from its two siblings. It has one
+  // now, and this pins that the wrapper actually passes it on.
+  it('forwards the read timeout to the suspended-pubkeys read', () => {
+    const { result } = renderHook(() => useAdminApi());
+
+    result.current.listSuspendedPubkeys({ timeoutMs: 4000 });
+
+    expect(listSuspendedPubkeys).toHaveBeenCalledWith(API_URL, { timeoutMs: 4000 });
+  });
+
 });

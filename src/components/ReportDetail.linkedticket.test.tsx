@@ -33,10 +33,10 @@ vi.mock('@/hooks/useDecisionLog', () => ({
   useDecisionLog: () => ({ hasDecisions: false, isPendingReview: false, isDeleted: false,
     isAutoHidden: false, isAutoHideRestored: false, decisions: [], latestDecision: null, refetch: vi.fn() }),
 }));
-vi.mock('@/hooks/useModerationStatus', () => ({
-  useModerationStatus: () => ({ isUserBanned: false, isUserSuspended: false, isEventBanned: false,
-    isEventGone: false, isLoading: false, isChecking: false, checkedAt: null, recheck: vi.fn() }),
-}));
+vi.mock('@/hooks/useModerationStatus', async () => {
+  const { moderationStatusMock } = await import('@/test/moderationStatusMock');
+  return { useModerationStatus: () => moderationStatusMock() };
+});
 vi.mock('@/hooks/useBannedEvent', () => ({ useBannedEvent: () => ({ data: null, isLoading: false }) }));
 vi.mock('@/hooks/useUserSummary', () => ({ useUserSummary: () => ({ data: null, isLoading: false }) }));
 vi.mock('@/hooks/useMediaStatus', () => ({ useMediaStatus: () => ({}) }));

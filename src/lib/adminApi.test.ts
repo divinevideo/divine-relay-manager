@@ -21,6 +21,7 @@ import {
   unbanPubkey,
   listBannedPubkeys,
   listBannedEvents,
+  listSuspendedPubkeys,
   fetchReports,
   fetchReportsByTarget,
   fetchResolutionLabels,
@@ -1838,12 +1839,20 @@ describe('adminApi', () => {
       await listBannedEvents(API_URL, { timeoutMs: 8_000 });
       expect(timeoutSpy).toHaveBeenLastCalledWith(8_000);
 
+      // The report pane's third list read. It had no options parameter at all,
+      // so it waited out the 30s default. So did the pane's copies of its two
+      // siblings; only the queue's copies of those gave up at 8s.
+      stubOk({ success: true, result: [] });
+      await listSuspendedPubkeys(API_URL, { timeoutMs: 8_000 });
+      expect(timeoutSpy).toHaveBeenLastCalledWith(8_000);
+
       timeoutSpy.mockRestore();
     });
 
     it('keeps the 30s default for those same reads when no bound is passed', async () => {
       // The parameter is optional and changes nothing for callers that omit it
-      // (DebugPanel, useModerationStatus).
+      // (DebugPanel, and the list reads inside verifyPubkeyBanned and
+      // verifyPubkeyUnbanned).
       const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
 
       stubOk({ success: true, events: [] });

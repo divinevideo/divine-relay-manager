@@ -40,6 +40,10 @@ const workerInfo = vi.hoisted(() => ({ fn: vi.fn() }));
 vi.mock('@/hooks/useAdminApi', () => ({
   useAdminApi: () => ({
     callRelayRpc: rpc.fn,
+    // Banned posts are read through the shared useBannedEvents definition, which
+    // calls listBannedEvents rather than callRelayRpc('listbannedevents'). Route it
+    // to the same mock so the assertions below keep one source of relay data.
+    listBannedEvents: () => rpc.fn('listbannedevents'),
     getWorkerInfo: workerInfo.fn,
     banEvent: vi.fn(),
     restoreEvent: vi.fn(),

@@ -59,6 +59,8 @@ import {
   Loader2,
   CheckCircle,
   XCircle,
+  Ban,
+  RefreshCw,
 } from "lucide-react";
 import type { NostrEvent } from "@nostrify/nostrify";
 import { nip19 } from "nostr-tools";
@@ -387,6 +389,10 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
 
   // Get moderation status for the author and event
   const moderationStatus = useModerationStatus(event.pubkey, event.id);
+  // A ban carried over from a copy of the list that is not current is shown as
+  // last known, not in the destructive banner. Right after an Unban it can be
+  // exactly wrong. Unban stays on isUserBanned, so the undo remains reachable.
+  const userBannedConfirmed = moderationStatus.isUserBanned === true && !moderationStatus.isUserBannedStale;
 
   // Get reports against this event or user
   const { data: relatedReports } = useQuery({
@@ -432,8 +438,8 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
     },
     onSuccess: async (pubkey) => {
       queryClient.invalidateQueries({ queryKey: ['banned-users'] });
-      queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
-      moderationStatus.recheck();
+      // Re-reads the account lists itself, from after the action.
+      moderationStatus.recheckAfterAction();
       toast({ title: "User banned", description: "Verifying..." });
       setConfirmBan(false);
 
@@ -544,8 +550,8 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
     },
     onSuccess: async (pubkey) => {
       queryClient.invalidateQueries({ queryKey: ['banned-users'] });
-      queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
-      moderationStatus.recheck();
+      // Re-reads the account lists itself, from after the action.
+      moderationStatus.recheckAfterAction();
       toast({ title: "User unbanned", description: "Verifying..." });
 
       setIsVerifying(true);
@@ -797,14 +803,14 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
     <ScrollArea className="flex-1 min-h-0">
       <div className="p-4 space-y-4">
         {/* Moderation Status Banner */}
-        {(moderationStatus.isUserBanned || moderationStatus.isEventGone) && (
+        {(userBannedConfirmed || moderationStatus.isEventGone) && (
           <Alert variant="destructive" className="border-destructive/50 bg-destructive/10">
             <ShieldAlert className="h-4 w-4" />
             <AlertDescription className="flex items-center justify-between">
               <span className="font-medium">
-                {moderationStatus.isUserBanned && moderationStatus.isEventGone
+                {userBannedConfirmed && moderationStatus.isEventGone
                   ? 'This user is banned and this event has been deleted from the relay.'
-                  : moderationStatus.isUserBanned
+                  : userBannedConfirmed
                     ? 'This user is banned from the relay.'
                     : 'This event has been deleted from the relay.'}
               </span>
@@ -812,7 +818,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => handleReVerify(moderationStatus.isUserBanned ? 'ban' : 'delete')}
+                  onClick={() => handleReVerify(userBannedConfirmed ? 'ban' : 'delete')}
                   disabled={isVerifying}
                   className="h-7 text-xs"
                 >
@@ -826,6 +832,34 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
               </div>
             </AlertDescription>
           </Alert>
+        )}
+        {moderationStatus.isUserBanned === true && moderationStatus.isUserBannedStale && (
+          <div className="flex items-center gap-2 p-2 rounded bg-muted">
+            <Ban className="h-4 w-4 text-muted-foreground shrink-0" />
+            <span className="text-sm font-medium text-muted-foreground flex-1">
+              {/* Every Unban lands here while its check runs: nothing has
+                  failed to confirm the ban yet. */}
+              {moderationStatus.isUserBanChecking
+                ? 'Last known: banned. Checking now.'
+                : 'Last known: banned. The latest check could not confirm it.'}
+            </span>
+            {/* Re-check, as in the report pane: it re-runs the status check, so
+                an answer from the relay replaces "last known". The banner's
+                Re-verify only reports a result and would leave this note up.
+                Keyed on the same flag as the note, so the button does not offer
+                a Re-check beside "Checking now." while the banned list is still
+                re-reading after the live check has answered. */}
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={moderationStatus.recheck}
+              disabled={moderationStatus.isUserBanChecking}
+              className="h-6 text-xs px-2"
+            >
+              <RefreshCw className={`h-3 w-3 mr-1 ${moderationStatus.isUserBanChecking ? 'animate-spin' : ''}`} />
+              {moderationStatus.isUserBanChecking ? 'Checking...' : 'Re-check'}
+            </Button>
+          </div>
         )}
 
         {/* Verification Result */}

@@ -47,19 +47,13 @@ vi.mock('@/hooks/useAgeReviewGuardRedirect', () => ({
 const modStatus = vi.hoisted(() => ({
   isUserBanned: false as boolean | null,
   isEventGone: false,
+  recheck: vi.fn(),
+  recheckAfterAction: vi.fn(),
 }));
-vi.mock('@/hooks/useModerationStatus', () => ({
-  useModerationStatus: () => ({
-    isUserBanned: modStatus.isUserBanned,
-    isUserSuspended: false,
-    isEventBanned: false,
-    isEventGone: modStatus.isEventGone,
-    isLoading: false,
-    isChecking: false,
-    checkedAt: null,
-    recheck: vi.fn(),
-  }),
-}));
+vi.mock('@/hooks/useModerationStatus', async () => {
+  const { moderationStatusMock } = await import('@/test/moderationStatusMock');
+  return { useModerationStatus: () => moderationStatusMock({ ...modStatus }) };
+});
 
 vi.mock('@/components/HiveAIReport', () => ({ HiveAIReport: () => null }));
 vi.mock('@/components/AIDetectionReport', () => ({ AIDetectionReport: () => null }));
@@ -286,5 +280,68 @@ describe('EventDetail restore routing', () => {
       targetId: EVENT.id,
       action: 'restore_event',
     }));
+  });
+});
+
+// A ban or unban ends in the check that treats the account status from before
+// it as unconfirmed until it answers; a plain Re-check would keep the
+// pre-action status on screen as confirmed while the live check runs. A delete
+// or restore changes the post, not the account, so it runs a plain check and
+// leaves a confirmed account status as it was.
+describe('EventDetail check after each action', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    modStatus.isEventGone = false;
+    api.banPubkey.mockResolvedValue(undefined);
+    api.deleteEvent.mockResolvedValue(undefined);
+    api.unbanPubkey.mockResolvedValue(undefined);
+    api.restoreEvent.mockResolvedValue({ success: true, recorded: true, reconciled: true });
+    api.logDecision.mockResolvedValue(undefined);
+    api.verifyPubkeyBanned.mockResolvedValue(true);
+    api.verifyPubkeyUnbanned.mockResolvedValue(true);
+    api.verifyEventDeleted.mockResolvedValue(true);
+  });
+
+  async function expectAfterActionCheck() {
+    await waitFor(() => expect(modStatus.recheckAfterAction).toHaveBeenCalledTimes(1));
+    expect(modStatus.recheck).not.toHaveBeenCalled();
+  }
+
+  async function expectPlainCheck() {
+    await waitFor(() => expect(modStatus.recheck).toHaveBeenCalledTimes(1));
+    expect(modStatus.recheckAfterAction).not.toHaveBeenCalled();
+  }
+
+  it('after a ban', async () => {
+    modStatus.isUserBanned = false;
+    renderDetail();
+    await banTheUser();
+    await expectAfterActionCheck();
+  });
+
+  it('after an unban', async () => {
+    modStatus.isUserBanned = true;
+    renderDetail();
+    await act(async () => {
+      fireEvent.click(await screen.findByRole('button', { name: /^Unban User$/ }));
+    });
+    await expectAfterActionCheck();
+  });
+
+  it('after a delete', async () => {
+    modStatus.isUserBanned = false;
+    renderDetail();
+    await banTheEvent();
+    await expectPlainCheck();
+  });
+
+  it('after a restore', async () => {
+    modStatus.isUserBanned = false;
+    modStatus.isEventGone = true;
+    renderDetail();
+    await act(async () => {
+      fireEvent.click(await screen.findByRole('button', { name: /^Restore Event$/ }));
+    });
+    await expectPlainCheck();
   });
 });
