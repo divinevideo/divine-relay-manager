@@ -1360,6 +1360,198 @@ describe('relay-rpc account-state side effects', () => {
     fetchSpy.mockRestore();
   });
 
+  describe('banpubkey that errors at the relay', () => {
+    const PURGE_ERROR = 'Failed to ban pubkey: ban inserted but content purge failed';
+
+    // Relay double for a banpubkey that errors, followed by the ban-list read
+    // banPubkey makes before it reports a failure.
+    function makeBanErrorFetchSpy(banList: string[], opts: { timeout?: boolean } = {}) {
+      return vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url.includes('/api/v1/notify')) {
+          return new Response(JSON.stringify({ dm_sent: true }), { status: 200 });
+        }
+        if (url.includes('/api/admin/users/')) {
+          return new Response('', { status: 200 });
+        }
+        const { method } = JSON.parse(String(init?.body)) as { method: string };
+        if (method === 'banpubkey') {
+          if (opts.timeout) throw new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+          return new Response(JSON.stringify({ error: PURGE_ERROR }), { status: 200 });
+        }
+        if (method === 'listbannedpubkeys') {
+          return new Response(JSON.stringify({ result: banList.map(pubkey => ({ pubkey })) }), { status: 200 });
+        }
+        throw new Error(`unexpected relay method ${method}`);
+      });
+    }
+
+    // D1 double recording each statement run, so the human-review mark is observable.
+    function makeModerateEnv(opts: { failMark?: boolean } = {}) {
+      const runs: string[] = [];
+      const env = {
+        ...(makeAccountStateEnv() as unknown as Record<string, unknown>),
+        DB: {
+          prepare: (sql: string) => {
+            const run = async () => {
+              if (opts.failMark && sql.includes('moderation_targets')) throw new Error('D1 write failed');
+              runs.push(sql);
+              return { success: true, meta: { changes: 1 } };
+            };
+            return {
+              run,
+              bind: () => ({ run, first: async () => null, all: async () => ({ results: [] }) }),
+            };
+          },
+        },
+      } as never;
+      return { env, runs };
+    }
+
+    async function postModerate(testEnv: never, testCtx: ExecutionContext, pubkey = VALID_PUBKEY): Promise<Response> {
+      return worker.fetch(
+        new Request('https://api-relay-prod.divine.video/api/moderate', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Admin-Key': 'test-admin-key',
+            Origin: 'https://app.divine.video',
+          },
+          body: JSON.stringify({ action: 'ban_pubkey', pubkey, reason: 'spam' }),
+        }),
+        testEnv,
+        testCtx,
+      );
+    }
+
+    beforeEach(() => {
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+    });
+
+    it('relay-rpc reports a ban the ban list confirms as applied, and mirrors it', async () => {
+      const fetchSpy = makeBanErrorFetchSpy([VALID_PUBKEY]);
+      const waitUntil = vi.fn();
+      const testCtx = { waitUntil } as unknown as ExecutionContext;
+
+      const response = await callRelayRpc('banpubkey', [VALID_PUBKEY, 'spam'], makeAccountStateEnv(), testCtx);
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        success: true,
+        result: true,
+        contentRemovalUnconfirmed: true,
+        relayError: PURGE_ERROR,
+      });
+      await drain(waitUntil);
+      expect((await notifyBodies(fetchSpy)).map(b => b.action)).toEqual(['ACCOUNT_BANNED']);
+      expect(keycastCalls(fetchSpy).map(c => c.status)).toEqual(['banned']);
+    });
+
+    it('relay-rpc fails as ban_unconfirmed, with no mirror or DM, when the ban list lacks the pubkey', async () => {
+      const fetchSpy = makeBanErrorFetchSpy([]);
+      const waitUntil = vi.fn();
+      const testCtx = { waitUntil } as unknown as ExecutionContext;
+
+      const response = await callRelayRpc('banpubkey', [VALID_PUBKEY, 'spam'], makeAccountStateEnv(), testCtx);
+
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({
+        success: false,
+        code: 'ban_unconfirmed',
+        error: `Ban not confirmed: ${PURGE_ERROR}`,
+      });
+      expect(waitUntil).not.toHaveBeenCalled();
+      expect(keycastCalls(fetchSpy)).toEqual([]);
+    });
+
+    it('moderate reports a confirmed ban as success and records the human decision', async () => {
+      makeBanErrorFetchSpy([VALID_PUBKEY]);
+      const { env: testEnv, runs } = makeModerateEnv();
+      const testCtx = { waitUntil: vi.fn() } as unknown as ExecutionContext;
+
+      const response = await postModerate(testEnv, testCtx);
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        success: true,
+        pubkey: VALID_PUBKEY,
+        recorded: true,
+        contentRemovalUnconfirmed: true,
+        relayError: PURGE_ERROR,
+      });
+      expect(runs.some(sql => sql.includes('INSERT INTO moderation_targets'))).toBe(true);
+    });
+
+    // The UI tells "still running when we stopped waiting" apart from "the relay
+    // reported an error", so the timeout flag must survive both hops.
+    it('moderate reports a relay timeout on a confirmed ban as relayTimedOut', async () => {
+      makeBanErrorFetchSpy([VALID_PUBKEY], { timeout: true });
+      const { env: testEnv } = makeModerateEnv();
+      const testCtx = { waitUntil: vi.fn() } as unknown as ExecutionContext;
+
+      const response = await postModerate(testEnv, testCtx);
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        success: true,
+        pubkey: VALID_PUBKEY,
+        recorded: true,
+        contentRemovalUnconfirmed: true,
+        relayTimedOut: true,
+        relayError: 'The operation was aborted due to timeout',
+      });
+    });
+
+    it('moderate forwards ban_unconfirmed and records nothing when the ban is not confirmed', async () => {
+      makeBanErrorFetchSpy([]);
+      const { env: testEnv, runs } = makeModerateEnv();
+      const testCtx = { waitUntil: vi.fn() } as unknown as ExecutionContext;
+
+      const response = await postModerate(testEnv, testCtx);
+
+      expect(response.status).toBe(500);
+      expect(await response.json()).toEqual({
+        success: false,
+        code: 'ban_unconfirmed',
+        error: `Ban not confirmed: ${PURGE_ERROR}`,
+      });
+      expect(runs.some(sql => sql.includes('moderation_targets'))).toBe(false);
+    });
+
+    // A malformed pubkey never reached the relay. As a 400 the UI reports a plain
+    // failure; flattened to 500 it would read as "may have applied" and wait on
+    // a ban-list re-check for nothing.
+    it('moderate refuses a malformed pubkey with 400, without touching the relay', async () => {
+      const fetchSpy = makeFetchSpy();
+      const { env: testEnv, runs } = makeModerateEnv();
+      const testCtx = { waitUntil: vi.fn() } as unknown as ExecutionContext;
+
+      const response = await postModerate(testEnv, testCtx, 'npub1notahexpubkey');
+
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ success: false, error: 'Invalid pubkey' });
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(runs.some(sql => sql.includes('moderation_targets'))).toBe(false);
+    });
+
+    // Matches hide_event/allow_event: the ban landed, so a failed mark is
+    // surfaced and logged rather than reported as a failure that invites a retry.
+    it('moderate reports recorded:false, still 200, when the human-review mark fails', async () => {
+      makeFetchSpy();
+      const { env: testEnv } = makeModerateEnv({ failMark: true });
+      const testCtx = { waitUntil: vi.fn() } as unknown as ExecutionContext;
+
+      const response = await postModerate(testEnv, testCtx);
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ success: true, pubkey: VALID_PUBKEY, recorded: false });
+      expect(vi.mocked(console.error).mock.calls.some(call =>
+        String(call[0]).includes('ALERT') && String(call[0]).includes(VALID_PUBKEY),
+      )).toBe(true);
+    });
+  });
+
   it('allow_pubkey via /api/moderate restores the Keycast account (active)', async () => {
     const fetchSpy = makeFetchSpy();
     const waitUntil = vi.fn();

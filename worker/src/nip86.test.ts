@@ -24,6 +24,7 @@ const TEST_PUBKEY = '7e7e9c42a91bfef19fa929e5fda1b72e0ebc1a4c1141673e2794234d86a
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe('getSecretKey', () => {
@@ -199,12 +200,22 @@ describe('callNip86Rpc', () => {
     expect(mockFetch.mock.calls[0][1].signal).toBe(signal);
   });
 
-  it('returns a structured failure when the relay request rejects', async () => {
+  it('returns a structured failure, flagged as a timeout, when the relay request times out', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new DOMException('timed out', 'TimeoutError')));
 
     await expect(callNip86Rpc('listbannedevents', [], mockEnv)).resolves.toEqual({
       success: false,
       error: 'timed out',
+      timedOut: true,
+    });
+  });
+
+  it('does not flag other rejections as timeouts', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('network down')));
+
+    await expect(callNip86Rpc('listbannedevents', [], mockEnv)).resolves.toEqual({
+      success: false,
+      error: 'network down',
     });
   });
 });
@@ -282,6 +293,13 @@ describe('convenience methods', () => {
     expect(body.params).toEqual(['pubkey123', 'abuse']);
   });
 
+  it('does not re-read the ban list when the relay confirms the ban', async () => {
+    const result = await banPubkey('pubkey123', 'abuse', mockEnv);
+
+    expect(result).toEqual({ success: true, result: true });
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
   it('unbanPubkey should call unbanpubkey RPC', async () => {
     const result = await unbanPubkey('pubkey123', mockEnv);
     expect(result.success).toBe(true);
@@ -307,5 +325,150 @@ describe('convenience methods', () => {
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
     expect(body.method).toBe('unsuspendpubkey');
     expect(body.params).toEqual(['pubkey123']);
+  });
+});
+
+// The relay writes the ban before its slow snapshot and content purge, so a
+// banpubkey that errors or outlives the worker's bound has usually landed.
+// Reporting that as a plain failure invites a retry, which re-enforces under a
+// new enforcement id. banPubkey reads the ban list before it fails.
+describe('banPubkey confirm-before-failing', () => {
+  const mockEnv: Nip86Env = {
+    NOSTR_NSEC: TEST_NSEC,
+    RELAY_URL: 'wss://relay.test.com',
+    MANAGEMENT_PATH: '/',
+  };
+  const TARGET = 'ab'.repeat(32);
+  const OTHER = 'cd'.repeat(32);
+
+  /** fetch double that answers banpubkey and listbannedpubkeys independently. */
+  function relayDouble(opts: {
+    ban: () => Promise<unknown>;
+    list: () => Promise<unknown>;
+  }) {
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      const { method } = JSON.parse(init.body as string) as { method: string };
+      if (method === 'banpubkey') return opts.ban();
+      if (method === 'listbannedpubkeys') return opts.list();
+      throw new Error(`unexpected method ${method}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+  }
+  const rpcOk = (result: unknown) => async () => ({ ok: true, json: async () => ({ result }) });
+  const rpcError = (error: string) => async () => ({ ok: true, json: async () => ({ error }) });
+  const rejects = (err: Error) => async () => { throw err; };
+
+  it('reports a timed-out ban as applied when the ban list shows it', async () => {
+    relayDouble({
+      ban: rejects(new DOMException('The operation was aborted due to timeout', 'TimeoutError')),
+      list: rpcOk([{ pubkey: OTHER }, { pubkey: TARGET, reason: 'abuse' }]),
+    });
+
+    const result = await banPubkey(TARGET, 'abuse', mockEnv);
+
+    expect(result).toEqual({
+      success: true,
+      contentRemovalUnconfirmed: true,
+      relayTimedOut: true,
+      relayError: 'The operation was aborted due to timeout',
+    });
+  });
+
+  it('reports a ban whose content purge errored as applied when the ban list shows it', async () => {
+    relayDouble({
+      ban: rpcError('Failed to ban pubkey: ban inserted but content purge failed'),
+      list: rpcOk([{ pubkey: TARGET }]),
+    });
+
+    const result = await banPubkey(TARGET, 'abuse', mockEnv);
+
+    expect(result.success).toBe(true);
+    expect(result.contentRemovalUnconfirmed).toBe(true);
+    expect(result.relayError).toBe('Failed to ban pubkey: ban inserted but content purge failed');
+    // The relay answered: its purge failed, it was not still running.
+    expect(result.relayTimedOut).toBeUndefined();
+  });
+
+  // callNip86Rpc throws rather than returns when the body read fails, e.g. the
+  // bound aborting mid-body. That is the same "did it land?" question.
+  it('checks the ban list when the ban response body cannot be read', async () => {
+    relayDouble({
+      ban: async () => ({ ok: true, json: async () => { throw new DOMException('aborted', 'TimeoutError'); } }),
+      list: rpcOk([TARGET]),
+    });
+
+    const result = await banPubkey(TARGET, 'abuse', mockEnv);
+
+    // Headers had arrived, and funnelcake sends them only after the ban
+    // finished, so this is not "still working": no relayTimedOut.
+    expect(result).toEqual({ success: true, contentRemovalUnconfirmed: true, relayError: 'aborted' });
+  });
+
+  it('accepts a ban list of bare pubkey strings', async () => {
+    relayDouble({ ban: rpcError('boom'), list: rpcOk([TARGET]) });
+
+    const result = await banPubkey(TARGET, 'abuse', mockEnv);
+
+    expect(result.success).toBe(true);
+  });
+
+  it('fails as unconfirmed, keeping the relay error, when the ban list lacks the pubkey', async () => {
+    relayDouble({ ban: rpcError('Relay error: 503 Service Unavailable'), list: rpcOk([{ pubkey: OTHER }]) });
+
+    const result = await banPubkey(TARGET, 'abuse', mockEnv);
+
+    expect(result).toEqual({
+      success: false,
+      code: 'ban_unconfirmed',
+      error: 'Ban not confirmed: Relay error: 503 Service Unavailable',
+    });
+  });
+
+  it('fails as unconfirmed when the ban list cannot be read', async () => {
+    relayDouble({ ban: rpcError('boom'), list: rejects(new TypeError('network down')) });
+
+    const result = await banPubkey(TARGET, 'abuse', mockEnv);
+
+    expect(result).toEqual({ success: false, code: 'ban_unconfirmed', error: 'Ban not confirmed: boom' });
+  });
+
+  it('fails as unconfirmed when the ban list body cannot be read', async () => {
+    relayDouble({
+      ban: rpcError('boom'),
+      list: async () => ({ ok: true, json: async () => { throw new SyntaxError('Unexpected token <'); } }),
+    });
+
+    const result = await banPubkey(TARGET, 'abuse', mockEnv);
+
+    expect(result).toEqual({ success: false, code: 'ban_unconfirmed', error: 'Ban not confirmed: boom' });
+  });
+
+  it('fails as unconfirmed when the ban list read returns an RPC error', async () => {
+    relayDouble({ ban: rpcError('boom'), list: rpcError('Not authorized as admin') });
+
+    const result = await banPubkey(TARGET, 'abuse', mockEnv);
+
+    expect(result).toEqual({ success: false, code: 'ban_unconfirmed', error: 'Ban not confirmed: boom' });
+  });
+
+  it('fails as unconfirmed when the ban list is not a list', async () => {
+    relayDouble({ ban: rpcError('boom'), list: rpcOk({ pubkey: TARGET }) });
+
+    const result = await banPubkey(TARGET, 'abuse', mockEnv);
+
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('ban_unconfirmed');
+  });
+
+  // The ban already spent its own 15s bound; the check must fit inside the
+  // browser's 30s so the moderator gets this answer rather than a client timeout.
+  it('bounds the ban-list check tighter than the ban itself', async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+    relayDouble({ ban: rpcError('boom'), list: rpcOk([TARGET]) });
+
+    await banPubkey(TARGET, 'abuse', mockEnv);
+
+    expect(timeoutSpy.mock.calls.map(([ms]) => ms)).toEqual([15_000, 5_000]);
   });
 });

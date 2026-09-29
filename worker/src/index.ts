@@ -6,6 +6,8 @@ import {
   getSecretKey,
   getManagementUrl,
   callNip86Rpc,
+  banPubkey,
+  type BanPubkeyResult,
   type SecretStoreSecret,
 } from './nip86';
 import { ensureSchema } from './db';
@@ -1182,7 +1184,7 @@ async function handleModerate(
           moderatorPubkey: body.moderatorPubkey?.toLowerCase(),
         });
         if (!result.success) {
-          // Flatten to 500, matching delete_event and ban_pubkey. Neither banevent nor
+          // Flatten to 500, matching delete_event and ban_pubkey's relay failures. Neither banevent nor
           // allowevent is age-review guarded (that guard covers only suspendpubkey,
           // unsuspendpubkey and unbanpubkey), so there is no 409/503 whose code a caller
           // would need preserved -- and forwarding would relabel a transient relay 502 as
@@ -1246,19 +1248,54 @@ async function handleModerate(
           }),
         });
         const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders, ctx);
-        const rpcResult = await rpcResponse.json() as { success: boolean; error?: string };
+        const rpcResult = await rpcResponse.json() as {
+          success: boolean;
+          error?: string;
+          code?: string;
+          contentRemovalUnconfirmed?: boolean;
+          relayTimedOut?: boolean;
+          relayError?: string;
+        };
         if (!rpcResult.success) {
-          return jsonResponse({ success: false, error: rpcResult.error || 'banpubkey RPC failed' }, 500, corsHeaders);
+          // For banpubkey, handleRelayRpc answers 400 without a code only when it
+          // refused the input before calling the relay (e.g. a malformed pubkey).
+          // Keep that a 400 so the UI reports a plain failure instead of "may
+          // have applied". Everything else stays a 500 and forwards `code`:
+          // ban_unconfirmed tells the UI this ban's follow-ups did not run.
+          const refusedBeforeRelay = rpcResponse.status === 400 && !rpcResult.code;
+          return jsonResponse({
+            success: false,
+            error: rpcResult.error || 'banpubkey RPC failed',
+            ...(rpcResult.code && { code: rpcResult.code }),
+          }, refusedBeforeRelay ? 400 : 500, corsHeaders);
         }
-        if (env.DB) {
-          await markHumanAction(env.DB, 'pubkey', body.pubkey, body.action);
+        // Returned as `recorded` and logged, as hide_event/allow_event do, rather
+        // than failing the request: the ban has landed, and a retry would be a
+        // second enforcement. No UI reads `recorded` for bans yet.
+        const recorded = env.DB
+          ? await markHumanAction(env.DB, 'pubkey', body.pubkey, body.action)
+          : false;
+        if (!recorded) {
+          console.error(
+            `[handleModerate] ALERT: ban_pubkey applied at the relay but NOT recorded as ` +
+            `human-reviewed for ${body.pubkey}`,
+          );
         }
         try {
           await syncZendeskAfterAction(env, body.action, 'pubkey', body.pubkey, getPublicKey(secretKey));
         } catch (err) {
           console.error('[handleModerate] Zendesk sync error:', err);
         }
-        return jsonResponse({ success: true, pubkey: body.pubkey }, 200, corsHeaders);
+        return jsonResponse({
+          success: true,
+          pubkey: body.pubkey,
+          recorded,
+          ...(rpcResult.contentRemovalUnconfirmed && {
+            contentRemovalUnconfirmed: true,
+            ...(rpcResult.relayTimedOut && { relayTimedOut: true }),
+            relayError: rpcResult.relayError,
+          }),
+        }, 200, corsHeaders);
       } catch (error) {
         console.error('[handleModerate] ban_pubkey error:', error);
         return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Unknown error' }, 500, corsHeaders);
@@ -1300,9 +1337,10 @@ async function handleModerate(
           // (already 400 in that case) but does flip it from retryable to
           // terminal for an automated caller. Deliberate: consistency is worth
           // more than an accidental 500, and no current caller consumes this
-          // path. Only allow_pubkey forwards: delete_event and ban_pubkey still
-          // flatten to 500, because neither is guarded and so neither can
-          // produce a 409/503 whose code a caller would need.
+          // path. Only allow_pubkey forwards the whole response: delete_event
+          // flattens to 500, and ban_pubkey flattens relay failures to 500
+          // (carrying its own ban_unconfirmed code), because neither is guarded
+          // and so neither can produce a 409/503 a caller would need.
           return rpcResponse;
         }
         const rpcResult = await rpcResponse.json() as { success: boolean; error?: string };
@@ -1441,16 +1479,25 @@ async function handleRelayRpc(
   // byte-for-byte. Canonical event actions use the coordinator and persist the
   // direction that auto-hide compensation reads.
   const shouldCoordinateEvent = eventVisibilityAction && /^[0-9a-f]{64}$/.test(target);
-  const result = shouldCoordinateEvent
+  // banpubkey goes through banPubkey, which reads the ban list before it
+  // reports a failure: the relay applies the ban before its slow purge, so an
+  // error or timeout usually means "banned, content removal unconfirmed".
+  const result: BanPubkeyResult = shouldCoordinateEvent
     ? await coordinateEventVisibility(env, {
       eventId: target,
       relayAction: eventVisibilityAction,
       reason: body.params?.[1] ? String(body.params[1]) : undefined,
     })
-    : await callNip86Rpc(body.method, body.params || [], env);
+    : body.method === 'banpubkey'
+      ? await banPubkey(target, body.params?.[1] ? String(body.params[1]) : '', env)
+      : await callNip86Rpc(body.method, body.params || [], env);
 
   if (!result.success) {
-    return jsonResponse({ success: false, error: result.error }, 400, corsHeaders);
+    return jsonResponse(
+      { success: false, error: result.error, ...(result.code && { code: result.code }) },
+      400,
+      corsHeaders,
+    );
   }
 
   // Account-state side effects (all non-critical, off the response path).
@@ -1484,7 +1531,15 @@ async function handleRelayRpc(
     }
   }
 
-  return new Response(JSON.stringify({ success: true, result: 'result' in result ? result.result : true }), {
+  return new Response(JSON.stringify({
+    success: true,
+    result: 'result' in result ? result.result : true,
+    ...(result.contentRemovalUnconfirmed && {
+      contentRemovalUnconfirmed: true,
+      ...(result.relayTimedOut && { relayTimedOut: true }),
+      relayError: result.relayError,
+    }),
+  }), {
     status: 200,
     headers: { 'Content-Type': 'application/json', ...corsHeaders },
   });
