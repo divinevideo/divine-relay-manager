@@ -8,7 +8,7 @@ import { useBulkModerateJob } from "@/hooks/useBulkModerateJob";
 import { useAgeReviewGuardRedirect } from "@/hooks/useAgeReviewGuardRedirect";
 import { useToast } from "@/hooks/useToast";
 import { getKindName } from "@/lib/kindNames";
-import type { BulkJob } from "@/lib/adminApi";
+import { ApiError, type BulkJob } from "@/lib/adminApi";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
@@ -50,6 +50,11 @@ const OTHER_KINDS = [
   { value: "30023", label: "Long-form Articles (30023)" },
 ];
 
+const HIDDEN_ACCOUNT = "The relay doesn't list a banned or suspended account's content, so it can't be counted or deleted here.";
+const RERUN_SAFE = "Running it again is safe; it only picks up what's left.";
+const LOST_TRACK_TITLE = "Lost track of the bulk delete";
+const LOST_TRACK_BODY = "It may still be running on the server. Wait a minute and reopen this dialog to check before running it again.";
+
 interface BulkDeleteByKindProps {
   pubkey: string;
   onComplete?: () => void;
@@ -65,10 +70,13 @@ interface BulkDeleteByKindProps {
   isSuspended?: boolean | null;
 }
 
-// The count the moderator confirmed against when the job started.
+// What the moderator confirmed when the job started: the count and the kind.
+// The kind is kept here because a worker from before delete-kind reports a
+// finished job without one.
 interface ExpectedCount {
   count: number;
   complete: boolean;
+  kind: number;
 }
 
 const isTerminal = (status?: string): boolean => status === "done" || status === "failed";
@@ -82,25 +90,49 @@ function countIssues(failures: string[]): number {
   }, 0);
 }
 
+// The worker's failure strings in words a moderator can act on. Event ids stay
+// whole: a shortened id can't be looked up.
+function describeFailure(failure: string): string {
+  if (failure.startsWith("job:abandoned")) return "the server stopped reporting progress";
+  const event = /^event:([^:]+):(.*)$/s.exec(failure);
+  if (event) return `event ${event[1]} failed: ${event[2]}`;
+  return failure;
+}
+
 // What a finished job tells the moderator. Only a job that ran to completion
 // with no failures reads as done. A job with failures, or one that stopped
-// early, says how far it got and what went wrong.
-function describeOutcome(job: BulkJob, expected?: ExpectedCount) {
-  const kindName = getKindName(job.kind ?? 0);
+// early, says how far it got and that a re-run picks up the rest, unless the
+// account is now hidden, where a re-run would find nothing.
+function describeOutcome(job: BulkJob, expected: ExpectedCount | undefined, contentHidden: boolean) {
+  const kind = job.kind ?? expected?.kind;
+  const kindName = kind !== undefined ? `${getKindName(kind)} ` : "";
+  const deleted = job.eventsProcessed;
   const clean = job.status === "done" && job.failures.length === 0;
   if (clean) {
-    return { clean, title: "Bulk delete complete", description: `Deleted ${job.eventsProcessed} ${kindName} events` };
+    const title = "Bulk delete complete";
+    if (expected?.complete && deleted < expected.count) {
+      return {
+        clean, title,
+        description: `Deleted ${deleted} of ${expected.count} ${kindName}events. ${expected.count - deleted} were no longer listed: already deleted, or hidden because the account is now banned or suspended.`,
+      };
+    }
+    // The count lists the newest version of each edited event; the delete also
+    // removes the older versions behind it.
+    if (expected?.complete && deleted > expected.count) {
+      return { clean, title, description: `Deleted ${deleted} ${kindName}events, including older versions of edited events.` };
+    }
+    return { clean, title, description: `Deleted ${deleted} ${kindName}events` };
   }
   const total = expected ? ` of ${expected.complete ? "" : "at least "}${expected.count}` : "";
-  const deleted = `Deleted ${job.eventsProcessed}${total} ${kindName} events`;
-  const detail = job.failures.slice(0, 2).join("; ");
+  const head = `Deleted ${deleted}${total} ${kindName}events. ${contentHidden ? HIDDEN_ACCOUNT : RERUN_SAFE}`;
+  const detail = job.failures.slice(0, 2).map(describeFailure).join("; ");
   if (job.status === "failed") {
-    return { clean, title: "Bulk delete stopped early", description: `${deleted} before it stopped: ${detail}` };
+    return { clean, title: "Bulk delete stopped early", description: `${head} Reason: ${detail}` };
   }
   return {
     clean,
     title: "Bulk delete finished with issues",
-    description: `${deleted}. ${countIssues(job.failures)} failed or could not be listed: ${detail}`,
+    description: `${head} ${countIssues(job.failures)} failed or could not be listed: ${detail}`,
   };
 }
 
@@ -124,17 +156,19 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
   const statusKnownActive = isBanned === false && isSuspended === false;
 
   // Exact per-kind counts from the worker's full paged listing of the account.
+  // No retry: each attempt is a full listing, and reopening the dialog retries.
   const countsQuery = useQuery({
     queryKey: ["bulk-kind-counts", pubkey],
     queryFn: () => api.getBulkKindCounts(pubkey),
     enabled: !!pubkey && dialogOpen && !contentHidden,
     staleTime: 30_000,
+    retry: false,
   });
 
   const bulkJob = useBulkModerateJob({
     pubkey,
     onComplete: (job) => {
-      const outcome = describeOutcome(job, expectedRef.current);
+      const outcome = describeOutcome(job, expectedRef.current, contentHidden);
       toast(outcome.clean
         ? { title: outcome.title, description: outcome.description }
         : { title: outcome.title, description: outcome.description, variant: "destructive" });
@@ -153,18 +187,24 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
       if (redirectIfGuarded(error, pubkey)) return;
       toast({ title: "Bulk delete failed", description: error.message, variant: "destructive" });
     },
+    onTrackingLost: () => {
+      toast({ title: LOST_TRACK_TITLE, description: LOST_TRACK_BODY });
+    },
   });
 
   const counts = countsQuery.data;
   const selectedCount = counts ? counts.counts[selectedKind] ?? 0 : undefined;
   const isRunning = bulkJob.isRunning || starting;
   // A cut-short listing may have missed events of this kind, so it does not
-  // rule a delete out even at zero.
-  const canDelete = !!counts && (selectedCount! > 0 || !counts.complete) && !isRunning && !contentHidden;
+  // rule a delete out even at zero. A lost status poll keeps Delete off: the
+  // job may still be running.
+  const canDelete = !!counts && (selectedCount! > 0 || !counts.complete) && !isRunning
+    && !contentHidden && !bulkJob.trackingLost;
   const kindName = getKindName(parseInt(selectedKind) || 0);
   const job = bulkJob.job;
-  const outcome = job && isTerminal(job.status) && job.kind !== undefined
-    ? describeOutcome(job, expectedRef.current)
+  const expected = expectedRef.current;
+  const outcome = job && isTerminal(job.status) && (job.kind !== undefined || expected?.kind !== undefined)
+    ? describeOutcome(job, expected, contentHidden)
     : null;
 
   const handleDelete = async () => {
@@ -172,7 +212,7 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
     const kind = Number(selectedKind);
     setStarting(true);
     try {
-      expectedRef.current = { count: selectedCount ?? 0, complete: counts.complete };
+      expectedRef.current = { count: selectedCount ?? 0, complete: counts.complete, kind };
       let moderatorPubkey: string | undefined;
       try {
         moderatorPubkey = await getModeratorPubkey?.();
@@ -191,11 +231,17 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
     }
   };
 
-  const expected = expectedRef.current;
   const processed = job && !isTerminal(job.status) ? job.eventsProcessed : 0;
   const progressTotal = expected ? `${expected.complete ? "" : "at least "}${expected.count}` : "";
   const progressValue = expected && expected.count > 0 ? Math.min(100, (processed / expected.count) * 100) : 0;
-  const deleteLabel = counts ? `Delete ${selectedCount}${counts.complete ? "" : "+"} Events` : "Delete Events";
+  const deleteLabel = !counts
+    ? "Delete events"
+    : counts.complete
+      ? `Delete ${selectedCount} ${kindName} events`
+      : `Delete all ${kindName} events`;
+  const countError = countsQuery.error instanceof ApiError && countsQuery.error.code === "timeout"
+    ? "Counting this account's events took too long. Close and reopen this dialog to try again. Delete is unavailable until the count loads."
+    : `Could not count this account's events${countsQuery.error instanceof Error ? `: ${countsQuery.error.message}` : ""}. Delete is unavailable until the count loads.`;
 
   return (
     <AlertDialog open={dialogOpen} onOpenChange={setDialogOpen}>
@@ -210,7 +256,7 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
           <AlertDialogTitle>Bulk Delete Events by Kind</AlertDialogTitle>
           <AlertDialogDescription asChild>
             <div className="space-y-4">
-              <p>Select an event kind to delete all matching events from this user. Media files are not deleted.</p>
+              <p>Deletes every event of the chosen kind from this user on the relay. This cannot be undone. Media files are not deleted; use Delete All Content to remove them.</p>
 
               <div>
                 <Label htmlFor="kind-select-dialog" className="text-sm">Event Kind</Label>
@@ -237,15 +283,9 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
 
               <div className="p-3 bg-muted rounded-lg space-y-1">
                 {contentHidden ? (
-                  <p className="text-sm">
-                    The relay doesn't list a banned or suspended account's content, so it can't be counted or deleted here.
-                  </p>
+                  <p className="text-sm">{HIDDEN_ACCOUNT}</p>
                 ) : countsQuery.isError ? (
-                  <p className="text-sm text-destructive">
-                    Could not count this account's events
-                    {countsQuery.error instanceof Error ? `: ${countsQuery.error.message}` : ""}.
-                    Delete is unavailable until the count loads.
-                  </p>
+                  <p className="text-sm text-destructive">{countError}</p>
                 ) : !counts ? (
                   <div className="flex items-center gap-2 text-sm">
                     <Loader2 className="h-4 w-4 animate-spin" />
@@ -253,10 +293,14 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
                   </div>
                 ) : (
                   <>
-                    {counts.complete && selectedCount === 0 ? (
+                    {selectedCount === 0 && counts.complete ? (
                       <p className="text-sm">
                         No {kindName} events found.
                         {!statusKnownActive && " If this account is banned or suspended, its content isn't listed."}
+                      </p>
+                    ) : selectedCount === 0 ? (
+                      <p className="text-sm">
+                        None found in the part of this account that could be listed. The delete searches this kind directly and may find more.
                       </p>
                     ) : (
                       <p className="text-sm">
@@ -286,6 +330,7 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
                           key={kind}
                           onClick={() => setSelectedKind(kind)}
                           disabled={isRunning}
+                          aria-pressed={selectedKind === kind}
                           className={`text-xs px-2 py-1 rounded-full transition-colors ${
                             selectedKind === kind
                               ? 'bg-blue-600 text-white'
@@ -313,8 +358,8 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
 
               {isRunning && (
                 <div className="space-y-2">
-                  <Progress value={progressValue} />
-                  <p className="text-sm text-center text-muted-foreground">
+                  <Progress value={progressValue} aria-label="Bulk delete progress" />
+                  <p role="status" className="text-sm text-center text-muted-foreground">
                     Deleted {processed} of {progressTotal} events...
                   </p>
                   <p className="text-xs text-center text-muted-foreground">
@@ -323,7 +368,15 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
                 </div>
               )}
 
-              {!isRunning && outcome && !outcome.clean && (
+              {bulkJob.trackingLost && (
+                <div className="p-3 rounded-lg border text-sm space-y-2">
+                  <p className="font-medium">{LOST_TRACK_TITLE}</p>
+                  <p className="text-muted-foreground">{LOST_TRACK_BODY}</p>
+                  <Button variant="outline" size="sm" onClick={bulkJob.checkAgain}>Check again</Button>
+                </div>
+              )}
+
+              {!isRunning && !bulkJob.trackingLost && outcome && !outcome.clean && (
                 <div className="p-3 rounded-lg border border-destructive/50 text-sm space-y-1">
                   <p className="font-medium text-destructive">{outcome.title}</p>
                   <p className="text-muted-foreground break-words">{outcome.description}</p>

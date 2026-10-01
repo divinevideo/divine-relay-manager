@@ -200,6 +200,15 @@ describe('adminApi', () => {
       );
     });
 
+    it('marks a timeout with code "timeout", so a caller can word a slow read itself', async () => {
+      mockFetch.mockRejectedValueOnce(new DOMException('timed out', 'TimeoutError'));
+
+      const error = await getBulkKindCounts(API_URL, 'a'.repeat(64)).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(ApiError);
+      expect((error as ApiError).code).toBe('timeout');
+    });
+
     it('a write (POST) timeout says the action may still have applied', async () => {
       // A timed-out write can still land on the relay even though we stopped
       // waiting, so the moderator must re-check rather than blindly retry.

@@ -143,7 +143,9 @@ function asTimeoutApiError(err: unknown, label: string, mutates: boolean, timeou
     const tail = mutates
       ? 'The action may still have applied. Re-check before retrying.'
       : 'Could not reach the relay. Try again.';
-    return new ApiError(`${label} timed out after ${timeoutMs / 1000}s. ${tail}`);
+    // code 'timeout' lets a caller word a slow read itself: a read that ran
+    // long may have reached the relay fine, so "could not reach" isn't always so.
+    return new ApiError(`${label} timed out after ${timeoutMs / 1000}s. ${tail}`, undefined, undefined, 'timeout');
   }
   return err;
 }
