@@ -61,7 +61,7 @@ async function openAndPickReactions() {
 }
 
 function lastToast() {
-  return toast.mock.calls[toast.mock.calls.length - 1][0] as { title: string; description: string; variant?: string };
+  return toast.mock.calls[toast.mock.calls.length - 1][0] as { title: string; description: string; variant?: string; className?: string };
 }
 
 describe('BulkDeleteByKind counts', () => {
@@ -444,6 +444,7 @@ describe('BulkDeleteByKind outcomes', () => {
       title: 'Bulk delete finished with issues',
       description: `Deleted 1 of 3 Reaction events. ${RERUN} 2 failed or could not be listed: event ${EVENT_ID} failed: banevent failed; +1 more`,
       variant: 'destructive',
+      className: '[overflow-wrap:anywhere]',
     });
     // The dialog stays open with the outcome.
     const dialog = screen.getByRole('alertdialog');
@@ -466,6 +467,21 @@ describe('BulkDeleteByKind outcomes', () => {
     expect(within(dialog).queryByText(/of 800/)).not.toBeInTheDocument();
   });
 
+  // A full 64-hex id is one unbroken token. `break-word` does not lower an
+  // element's min-content width and `anywhere` does, so only `anywhere` lets
+  // the dialog's grid and the toast wrap the id at phone width instead of
+  // pushing content off-screen. (jsdom has no layout; this pins the rule, and
+  // the layout was checked in a browser at 390px.)
+  it('lets a failure detail with a full event id wrap anywhere in the dialog and the toast, never truncated', async () => {
+    await runWith({ eventsProcessed: 1, failures: [`event:${EVENT_ID}:banevent failed`] });
+
+    const detail = within(screen.getByRole('alertdialog')).getByText(new RegExp(`event ${EVENT_ID} failed`));
+    expect(detail.className).toContain('[overflow-wrap:anywhere]');
+    expect(detail.textContent).toContain(EVENT_ID);
+    expect(lastToast().className).toContain('[overflow-wrap:anywhere]');
+    expect(lastToast().description).toContain(EVENT_ID);
+  });
+
   it('counts the overflow marker when it reports how many failed', async () => {
     await runWith({ eventsProcessed: 0, failures: [`event:${EVENT_ID}:boom`, '+60 more'] });
 
@@ -479,6 +495,7 @@ describe('BulkDeleteByKind outcomes', () => {
       title: 'Bulk delete stopped early',
       description: `Deleted 1 of 3 Reaction events. ${RERUN} Reason: the server stopped reporting progress`,
       variant: 'destructive',
+      className: '[overflow-wrap:anywhere]',
     });
   });
 

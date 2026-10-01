@@ -55,6 +55,9 @@ const HIDDEN_ACCOUNT = "The relay doesn't list a banned or suspended account's c
 const RERUN_SAFE = "Running it again is safe; it only picks up what's left.";
 const LOST_TRACK_TITLE = "Lost track of the bulk delete";
 const LOST_TRACK_BODY = "It may still be running on the server. Wait a minute and reopen this dialog to check before running it again.";
+// A failure detail can carry a full 64-hex event id, which has no break
+// opportunity. Let it wrap anywhere so it stays whole on a narrow screen.
+const WRAP_IDS = "[overflow-wrap:anywhere]";
 
 interface BulkDeleteByKindProps {
   pubkey: string;
@@ -190,7 +193,7 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
       const outcome = describeOutcome(job, expected, contentHidden);
       toast(outcome.clean
         ? { title: outcome.title, description: outcome.description }
-        : { title: outcome.title, description: outcome.description, variant: "destructive" });
+        : { title: outcome.title, description: outcome.description, variant: "destructive", className: WRAP_IDS });
       queryClient.invalidateQueries({ queryKey: ["bulk-kind-counts", pubkey] });
       queryClient.invalidateQueries({ queryKey: ["user-stats"] });
       queryClient.invalidateQueries({ queryKey: ["relay-events"] });
@@ -401,7 +404,7 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
               {!isRunning && !bulkJob.trackingLost && outcome && !outcome.clean && (
                 <div className="p-3 rounded-lg border border-destructive/50 text-sm space-y-1">
                   <p className="font-medium text-destructive">{outcome.title}</p>
-                  <p className="text-muted-foreground break-words">{outcome.description}</p>
+                  <p className={`text-muted-foreground ${WRAP_IDS}`}>{outcome.description}</p>
                 </div>
               )}
             </div>
