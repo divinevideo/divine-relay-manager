@@ -170,7 +170,7 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
         // Attribution is non-critical: the job's rows fall back to the worker's key.
         console.warn("[BulkDeleteByKind] could not resolve the moderator pubkey", error);
       }
-      bulkJob.start("delete-all", {
+      bulkJob.start("delete-kind", {
         kind,
         reason: reason.trim() || `Bulk delete: kind ${kind}`,
         moderatorPubkey,

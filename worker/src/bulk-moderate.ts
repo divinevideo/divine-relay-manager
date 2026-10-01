@@ -3,6 +3,7 @@ import { syncZendeskAfterAction, type ZendeskSyncEnv } from './zendesk-sync';
 import {
   VALID_BULK_ACTIONS,
   type BulkAction,
+  type AccountBulkAction,
   type BulkModerateResult,
   type BulkJob,
   type BulkJobMessage,
@@ -138,7 +139,7 @@ async function deleteEvents(
 export async function runBulkModeration(
   env: BulkModerateEnv,
   pubkey: string,
-  action: BulkAction,
+  action: AccountBulkAction,
   reason: string,
 ): Promise<BulkModerateResult> {
   const moderatorPubkey = await getAdminPubkey(env);
@@ -305,15 +306,16 @@ export async function handleBulkModerateEnqueue(
   if (!body.action || !VALID_BULK_ACTIONS.includes(body.action as BulkAction)) {
     return json({ error: `Invalid action. Must be one of: ${VALID_BULK_ACTIONS.join(', ')}` }, 400, corsHeaders);
   }
-  if (body.kind !== undefined) {
+  // A kind-scoped delete is its own action, not delete-all plus a kind, so a
+  // worker that predates it refuses the request (unknown action) instead of
+  // running a full delete-all. Every other action refuses a kind rather than
+  // ignoring it, which would widen the job to the whole account.
+  if (body.action === 'delete-kind') {
     if (typeof body.kind !== 'number' || !Number.isSafeInteger(body.kind) || body.kind < 0) {
-      return json({ error: 'kind must be a non-negative integer' }, 400, corsHeaders);
+      return json({ error: 'delete-kind requires kind, a non-negative integer' }, 400, corsHeaders);
     }
-    // The age-restrict actions are media-only and cannot be narrowed to a kind.
-    // Refuse rather than ignore it, which would widen the job to every video.
-    if (body.action !== 'delete-all') {
-      return json({ error: 'kind is only supported for delete-all' }, 400, corsHeaders);
-    }
+  } else if (body.kind !== undefined) {
+    return json({ error: 'kind is only supported for delete-kind' }, 400, corsHeaders);
   }
   if (body.moderatorPubkey !== undefined && (typeof body.moderatorPubkey !== 'string' || !/^[0-9a-f]{64}$/.test(body.moderatorPubkey))) {
     return json({ error: 'moderatorPubkey must be a 64-char hex pubkey' }, 400, corsHeaders);
@@ -415,7 +417,7 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
     if (job.status === 'done' || job.status === 'failed') return; // idempotent: already terminal
 
     const reason = msg.reason || `Bulk ${msg.action} by moderator`;
-    const phase: BulkJobPhase = msg.phase ?? (msg.action === 'delete-all' ? 'events' : 'media');
+    const phase: BulkJobPhase = msg.phase ?? (msg.action === 'delete-all' || msg.action === 'delete-kind' ? 'events' : 'media');
     const expectedVersion = msg.version ?? 0;
     const claimedVersion = expectedVersion + 1;
 
@@ -436,6 +438,10 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
     let next: BulkJobMessage | null = null;
 
     if (phase === 'events') {
+      // Without its kind, a delete-kind page query would list every event.
+      if (msg.action === 'delete-kind' && msg.kind === undefined) {
+        throw new Error('delete-kind message arrived without a kind; refusing to list every event');
+      }
       const until = msg.cursor ? Number(msg.cursor) : undefined;
       const page = msg.eventIds
         ? {
@@ -480,7 +486,7 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
           eventIds: remainingEventIds,
           ...scope,
         };
-      } else if ((page.complete || page.nextUntil === null) && msg.kind !== undefined) {
+      } else if ((page.complete || page.nextUntil === null) && msg.action === 'delete-kind') {
         // A kind-scoped job ends with its events: no media phase and no
         // account-level Zendesk sync (each deleted event already synced its own
         // tickets in deleteEvents). The media phase deletes every video blob the
@@ -501,6 +507,9 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
         next = { jobId: msg.jobId, pubkey: msg.pubkey, action: msg.action, reason, phase: 'events', cursor: String(page.nextUntil), ...scope };
       }
     } else {
+      // The media actions below would DELETE or un-restrict every video on the
+      // account. A kind-scoped delete never gets here; fail if a message says so.
+      if (msg.action === 'delete-kind') throw new Error('delete-kind has no media phase');
       const mediaPage = msg.mediaPage ?? 0;
       const { hashes, nextCursor } = await queryUserVideosPage(msg.pubkey, env, msg.cursor);
       const mediaAction = msg.action === 'delete-all' ? 'DELETE' : msg.action === 'age-restrict-all' ? 'QUARANTINE' : 'SAFE';

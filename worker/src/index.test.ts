@@ -1934,7 +1934,7 @@ describe('bulk-moderate age-review guard', () => {
   it('refuses a kind-scoped delete the same way', async () => {
     const { env, send } = makeBulkEnv({ id: 'case-b6', state: 'submitted_for_review' });
     const response = await worker.fetch(
-      enqueueRequest({ pubkey: VALID_PUBKEY, action: 'delete-all', kind: 1 }), env, ctx,
+      enqueueRequest({ pubkey: VALID_PUBKEY, action: 'delete-kind', kind: 1 }), env, ctx,
     );
     expect(response.status).toBe(409);
     expect(send).not.toHaveBeenCalled();

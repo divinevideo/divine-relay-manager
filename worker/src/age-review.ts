@@ -22,7 +22,7 @@ import {
 } from '../../shared/age-review';
 import { runBulkModeration, type BulkModerateEnv } from './bulk-moderate';
 import { resolveZendeskCreds } from './zendesk-sync';
-import type { BulkAction } from '../../shared/bulk-moderation';
+import type { AccountBulkAction } from '../../shared/bulk-moderation';
 import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, createMinorAccount, type KeycastEnv } from './keycast-client';
 import { suspendPubkey, unsuspendPubkey, banPubkey, type BanPubkeyResult, type SecretStoreSecret } from './nip86';
 import { buildAgeReviewIdentityBlock, buildClaimedParentName, toNpub } from './report-note';
@@ -2181,7 +2181,7 @@ export async function sendDbUnavailableAlert(webhookUrl: string, environment: st
 
 async function triggerBulkModerate(
   pubkey: string,
-  action: BulkAction,
+  action: AccountBulkAction,
   reason: string,
   env: AgeReviewEnv,
 ): Promise<void> {

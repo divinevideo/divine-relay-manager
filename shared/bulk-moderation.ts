@@ -1,6 +1,12 @@
-export const VALID_BULK_ACTIONS = ['age-restrict-all', 'un-age-restrict-all', 'delete-all'] as const;
+// delete-kind deletes one event kind and nothing else. It is a separate action
+// (not delete-all plus a kind) so a worker that predates it rejects it as
+// unknown instead of running delete-all.
+export const VALID_BULK_ACTIONS = ['age-restrict-all', 'un-age-restrict-all', 'delete-all', 'delete-kind'] as const;
 
 export type BulkAction = typeof VALID_BULK_ACTIONS[number];
+
+// The whole-account actions, the only ones the synchronous path can run.
+export type AccountBulkAction = Exclude<BulkAction, 'delete-kind'>;
 
 export interface BulkModerateResult {
   success: boolean;
@@ -24,8 +30,9 @@ export type BulkJobPhase = 'events' | 'media';
 // of any size drains without hitting a single worker invocation's subrequest
 // ceiling. The first message omits phase/cursor (start); each chunk re-enqueues
 // the next with its continuation state, or finalizes the job.
-//   - phase: 'events' (delete-all only: ban per event) then 'media'
-//     (moderate each video blob). age-restrict/un-age-restrict are media-only.
+//   - phase: 'events' (delete-all and delete-kind: ban per event) then, for
+//     delete-all only, 'media' (moderate each video blob).
+//     age-restrict/un-age-restrict are media-only.
 //   - cursor: opaque continuation for the current phase -- funnelcake v2
 //     next_cursor for media, or the relay `until` timestamp (stringified) for
 //     events. Absent = start of the phase.
@@ -44,8 +51,8 @@ export interface BulkJobMessage {
   // message bounds serialized relay mutations without advancing the cursor.
   eventIds?: string[];
   version?: number;
-  // delete-all only: restrict the job to events of this one kind. A
-  // kind-scoped job has no media phase. Absent = every event, then media.
+  // delete-kind only (required there): the one event kind to delete. A
+  // delete-kind job has no media phase.
   kind?: number;
   // Attribution for the per-event decision rows. Absent = the worker's signing
   // key and no report, which is what delete-all has always written.

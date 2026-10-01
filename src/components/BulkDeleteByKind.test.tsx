@@ -25,7 +25,7 @@ const REPORT_ID = 'f'.repeat(64);
 
 function job(over: Partial<Record<string, unknown>> = {}) {
   return {
-    jobId: 'job-1', pubkey: PUBKEY, action: 'delete-all', kind: 7, status: 'done',
+    jobId: 'job-1', pubkey: PUBKEY, action: 'delete-kind', kind: 7, status: 'done',
     eventsProcessed: 3, mediaProcessed: 0, failures: [], createdAt: 't', updatedAt: 't', ...over,
   };
 }
@@ -109,7 +109,7 @@ describe('BulkDeleteByKind', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Delete 3 Events' }));
 
     await waitFor(() => expect(api.bulkModerate).toHaveBeenCalledWith(
-      PUBKEY, 'delete-all', 'spam', { kind: 7, moderatorPubkey: MODERATOR, reportId: REPORT_ID },
+      PUBKEY, 'delete-kind', 'spam', { kind: 7, moderatorPubkey: MODERATOR, reportId: REPORT_ID },
     ));
   });
 
