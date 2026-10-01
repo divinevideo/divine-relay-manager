@@ -517,6 +517,15 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
           outOfScope: 0,
         }
         : await queryRelayEventsPage(msg.pubkey, env, until ?? firstPageUntil, msg.kind);
+      // A sweep ends only because each page's next `until` is below the one it
+      // asked with. A relay that answers above `until` would repeat the page
+      // forever, each chunk refreshing updated_at so the stale heal never fires,
+      // and the queue's single consumer would stall every later bulk job. Fail
+      // the job instead, as the media phase does for a cursor that won't move.
+      const askedUntil = until ?? firstPageUntil;
+      if (isKindJob && !msg.eventIds && askedUntil !== undefined && page.nextUntil !== null && page.nextUntil >= askedUntil) {
+        throw new Error(`relay cursor did not advance for ${msg.pubkey} (asked until ${askedUntil}, got ${page.nextUntil})`);
+      }
       const startedAt = Date.now();
       const candidates = page.events.slice(0, SERIALIZED_EVENT_BATCH_SIZE);
       const ev = { processed: 0, successfulEventIds: [] as string[], failures: [] as string[] };
@@ -982,8 +991,10 @@ export async function queryRelayEventsPage(
               // (two at one second, or another coordinate's between steps) are left
               // for the next sweep.
               const shortTimes = collected.map((c) => c.createdAt).filter((t): t is number => t !== null);
-              if (kind !== undefined && isVersionedKind(kind) && shortTimes.length > 0) {
-                finish(resolve, { events: all, nextUntil: Math.min(...shortTimes) - 1, complete: false, saturated: false, outOfScope });
+              // Nothing is older than created_at 0, so a step below it ends the walk.
+              const below = Math.min(...shortTimes) - 1;
+              if (kind !== undefined && isVersionedKind(kind) && shortTimes.length > 0 && below >= 0) {
+                finish(resolve, { events: all, nextUntil: below, complete: false, saturated: false, outOfScope });
                 return;
               }
               // Partial page: the relay has no more events at or before `until`.

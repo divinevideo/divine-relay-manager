@@ -12,7 +12,7 @@ import {
   VIDEO_MAX_PAGES,
   type BulkModerateEnv,
 } from './bulk-moderate';
-import type { BulkJob, BulkJobMessage, BulkEnqueueResponse } from '../../shared/bulk-moderation';
+import { isVersionedKind, type BulkJob, type BulkJobMessage, type BulkEnqueueResponse } from '../../shared/bulk-moderation';
 import { banEvent, getAdminPubkey } from './nip86';
 import { syncZendeskAfterAction } from './zendesk-sync';
 
@@ -1605,6 +1605,165 @@ describe('handleBulkKindCounts', () => {
 // created_at <= filter.until (descending), then EOSE for that sub. Models a
 // relay that supports until-cursoring, and honors a `kinds` filter. Returns the
 // REQ filters it received so a test can assert what was asked for.
+// A Funnelcake simulator with hostile switches, adapted from the round-3
+// red-team suite. It follows deduped_read_model_projection: authors, kinds,
+// `until` and not-banned filter first, newest first, then one row per NIP-01
+// dedup key. The switches bend it the way a misbehaving relay or proxy could.
+type SimEvent = { id: string; pubkey: string; kind: number; created_at: number; d?: string };
+interface SimOpts {
+  ignoreUntil?: boolean;
+  failing?: (id: string) => boolean;
+  frames?: (events: SimEvent[]) => SimEvent[];
+  socket?: (reqIndex: number) => 'closed' | undefined;
+}
+function makeSim(store: SimEvent[], opts: SimOpts = {}) {
+  const banned = new Set<string>();
+  const banCalls: string[] = [];
+  const reqs: Array<Record<string, unknown>> = [];
+  vi.mocked(banEvent).mockImplementation(async (id: string) => {
+    banCalls.push(id);
+    if (opts.failing?.(id)) return { success: false, error: 'relay refused' };
+    banned.add(id);
+    return { success: true };
+  });
+  const keyOf = (e: SimEvent) => (isVersionedKind(e.kind) ? `${e.pubkey}|${e.kind}|${e.d ?? ''}` : e.id);
+  function query(f: Record<string, unknown>): SimEvent[] {
+    const authors = f.authors as string[] | undefined;
+    const kinds = f.kinds as number[] | undefined;
+    const until = f.until as number | undefined;
+    const rows = store
+      .filter((e) => (!authors || authors.includes(e.pubkey)) && (!kinds || kinds.includes(e.kind))
+        && (opts.ignoreUntil || until === undefined || e.created_at <= until) && !banned.has(e.id))
+      .sort((a, b) => b.created_at - a.created_at || (a.id < b.id ? 1 : -1));
+    const groups = new Map<string, SimEvent>();
+    for (const r of rows) if (!groups.has(keyOf(r))) groups.set(keyOf(r), r);
+    return [...groups.values()].slice(0, (f.limit as number | undefined) ?? 500);
+  }
+  vi.spyOn(globalThis, 'WebSocket').mockImplementation((function () {
+    const listeners = new Map<string, Array<(value?: unknown) => void>>();
+    const emit = (t: string, v?: unknown) => listeners.get(t)?.forEach((h) => h(v));
+    queueMicrotask(() => emit('open'));
+    return {
+      addEventListener: (t: string, h: (value?: unknown) => void) => listeners.set(t, [...(listeners.get(t) || []), h]),
+      send: (payload: string) => {
+        const data = JSON.parse(payload);
+        if (data[0] !== 'REQ') return;
+        const idx = reqs.length;
+        reqs.push(data[2]);
+        let out = query(data[2]);
+        if (opts.frames) out = opts.frames(out);
+        queueMicrotask(() => {
+          if (opts.socket?.(idx) === 'closed') {
+            emit('message', { data: JSON.stringify(['CLOSED', data[1], 'error: could not complete query']) });
+            return;
+          }
+          for (const e of out) {
+            const { d, ...rest } = e;
+            emit('message', { data: JSON.stringify(['EVENT', data[1], { ...rest, content: '', tags: d !== undefined ? [['d', d]] : [] }]) });
+          }
+          emit('message', { data: JSON.stringify(['EOSE', data[1]]) });
+        });
+      },
+      close: vi.fn(),
+    };
+  } as unknown as typeof WebSocket));
+  return { banCalls, reqs, query };
+}
+
+describe('delete-kind against a hostile relay', () => {
+  const P = 'a'.repeat(64);
+  const OTHER = 'b'.repeat(64);
+  const now = () => Math.floor(Date.now() / 1000);
+  let jobDb: ReturnType<typeof makeJobDb>;
+  let sent: BulkJobMessage[];
+  let env: BulkModerateEnv;
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.mocked(getAdminPubkey).mockResolvedValue('moderator-pubkey');
+    vi.mocked(banEvent).mockReset().mockResolvedValue({ success: true });
+    jobDb = makeJobDb();
+    sent = [];
+    env = { ...baseEnv(), DB: jobDb.db, BULK_QUEUE: { send: vi.fn(async (m: BulkJobMessage) => { sent.push(m); }) } as unknown as Queue<BulkJobMessage> };
+  });
+
+  async function runJob(kind: number, maxIter = 200) {
+    const res = await handleBulkModerateEnqueue(new Request('https://t/api/bulk-moderate', {
+      method: 'POST', body: JSON.stringify({ pubkey: P, action: 'delete-kind', kind }),
+    }), env, {});
+    const { jobId } = await res.json() as BulkEnqueueResponse;
+    let msg: BulkJobMessage | undefined = sent.shift();
+    let chunks = 0;
+    while (msg && chunks < maxIter) {
+      chunks++;
+      sent.length = 0;
+      await processBulkJob(msg, env);
+      msg = sent[0];
+    }
+    const job = await (await handleBulkJobStatus(jobId, env, {})).json() as BulkJob;
+    return { job, chunks, terminated: !msg };
+  }
+
+  // The walk ends only because each page's next `until` is below the one asked.
+  // A relay that answers above `until` would repeat the page forever, each
+  // chunk refreshing updated_at so the stale heal never fires.
+  describe('the cursor must advance', () => {
+    it('fails a versioned walk whose relay ignores `until` and whose one event cannot be banned', async () => {
+      makeSim([{ id: 'stuck', pubkey: P, kind: 30023, created_at: now() - 1000, d: 'x' }], { ignoreUntil: true, failing: (id) => id === 'stuck' });
+
+      const { job, chunks, terminated } = await runJob(30023);
+
+      expect(terminated).toBe(true);
+      expect(chunks).toBeLessThanOrEqual(5);
+      expect(job.status).toBe('failed');
+      expect(job.failures.some((f) => /relay cursor did not advance/.test(f))).toBe(true);
+    });
+
+    it('fails a full regular-kind page repeated by a relay that ignores `until`', async () => {
+      const t = now() - 1000;
+      makeSim(
+        Array.from({ length: 250 }, (_, i) => ({ id: `e${String(i).padStart(3, '0')}`, pubkey: P, kind: 1, created_at: t - Math.floor(i / 2) })),
+        { ignoreUntil: true, failing: () => true },
+      );
+
+      const { job, chunks, terminated } = await runJob(1);
+
+      expect(terminated).toBe(true);
+      expect(chunks).toBeLessThanOrEqual(15);
+      expect(job.status).toBe('failed');
+      expect(job.failures.some((f) => /relay cursor did not advance/.test(f))).toBe(true);
+    });
+
+    it('fails a versioned walk that keeps getting an out-of-scope event from a relay that ignores `until`', async () => {
+      const theirs: SimEvent = { id: 'theirs', pubkey: OTHER, kind: 30023, created_at: now() - 1005, d: 'y' };
+      makeSim([{ id: 'mine', pubkey: P, kind: 30023, created_at: now() - 1000, d: 'x' }, theirs], {
+        ignoreUntil: true,
+        frames: (events) => (events.some((e) => e.id === 'theirs') ? events : [...events, theirs]),
+      });
+
+      const { job, chunks, terminated } = await runJob(30023);
+
+      expect(terminated).toBe(true);
+      expect(chunks).toBeLessThanOrEqual(5);
+      expect(job.status).toBe('failed');
+      expect(job.failures.some((f) => /relay cursor did not advance/.test(f))).toBe(true);
+    });
+
+    it('ends a versioned walk at created_at 0 instead of asking for until -1', async () => {
+      const sim = makeSim([
+        { id: 'v1', pubkey: P, kind: 0, created_at: now() - 100 },
+        { id: 'v0', pubkey: P, kind: 0, created_at: 0 },
+      ]);
+
+      const { job } = await runJob(0);
+
+      expect(job.status).toBe('done');
+      expect(job.eventsProcessed).toBe(2);
+      expect(sim.reqs.every((f) => (f.until as number) >= 0)).toBe(true);
+    });
+  });
+});
+
 // A relay serving replaceable/addressable kinds the way funnelcake does: it keeps
 // every version, drops banned ids BEFORE picking the newest per coordinate, so
 // banning the newest version reveals the previous one. `coords` maps a
