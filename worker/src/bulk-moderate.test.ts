@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   runBulkModeration,
   handleBulkModerateEnqueue,
@@ -1428,14 +1428,87 @@ describe('handleBulkKindCounts', () => {
 
   // A large account must answer before the client's 30s request timeout, as a
   // lower bound the dialog already shows ("at least N"), not as an error.
-  it('stops paging at its time budget and reports the counts as incomplete', async () => {
-    const all = Array.from({ length: 1200 }, (_, i) => ({ id: `e${i}`, kind: 1, content: '', tags: [] as string[][], created_at: 1200 - i }));
-    const { filters } = mockPaginatedRelay(all);
+  // The budget is a real bound: a page that could not finish inside it (its own
+  // 10s timeout) is never started, so the answer beats the client's 30s abort.
+  describe('time budget', () => {
+    const all = Array.from({ length: 1200 }, (_, i) => ({ id: `e${i}`, pubkey: PUBKEY, kind: 1, content: '', tags: [] as string[][], created_at: 1200 - i }));
 
-    const res = await handleBulkKindCounts(PUBKEY, { RELAY_URL: 'wss://relay.test' }, {}, 0);
+    // Answers each REQ after `delayMs`; `stallFrom` (1-based) never answers that page or later.
+    function slowRelay(opts: { delayMs: number; stallFrom?: number; neverOpen?: boolean }) {
+      const filters: Array<Record<string, unknown>> = [];
+      vi.spyOn(globalThis, 'WebSocket').mockImplementation((function () {
+        const listeners = new Map<string, Array<(value?: unknown) => void>>();
+        const emit = (type: string, value?: unknown) => listeners.get(type)?.forEach((h) => h(value));
+        if (!opts.neverOpen) queueMicrotask(() => emit('open'));
+        return {
+          addEventListener: (t: string, h: (value?: unknown) => void) => listeners.set(t, [...(listeners.get(t) || []), h]),
+          send: (payload: string) => {
+            const data = JSON.parse(payload);
+            if (data[0] !== 'REQ') return;
+            filters.push(data[2]);
+            if (opts.stallFrom !== undefined && filters.length >= opts.stallFrom) return;
+            const until = data[2].until ?? Infinity;
+            const page = all.filter((e) => e.created_at <= until).slice(0, data[2].limit);
+            setTimeout(() => {
+              for (const ev of page) emit('message', { data: JSON.stringify(['EVENT', data[1], ev]) });
+              emit('message', { data: JSON.stringify(['EOSE', data[1]]) });
+            }, opts.delayMs);
+          },
+          close: vi.fn(),
+        };
+      } as unknown as typeof WebSocket));
+      return { filters };
+    }
 
-    expect(await res.json()).toEqual({ counts: { 1: 500 }, complete: false });
-    expect(filters).toHaveLength(1);
+    beforeEach(() => { vi.useFakeTimers(); });
+    afterEach(() => { vi.useRealTimers(); });
+
+    it('does not start a page that could not finish inside the budget', async () => {
+      const { filters } = slowRelay({ delayMs: 1_000 });
+
+      const pending = handleBulkKindCounts(PUBKEY, { RELAY_URL: 'wss://relay.test' }, {}, 10_500);
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      // After page 1 at t=1s, page 2 would need until t=11s: past the 10.5s budget.
+      expect(await (await pending).json()).toEqual({ counts: { 1: 500 }, complete: false });
+      expect(filters).toHaveLength(1);
+    });
+
+    it('starts the next page when it can still finish inside the budget', async () => {
+      const { filters } = slowRelay({ delayMs: 1_000 });
+
+      const pending = handleBulkKindCounts(PUBKEY, { RELAY_URL: 'wss://relay.test' }, {}, 11_500);
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      // Page 2 fits (1s + 10s < 11.5s); page 3 would not (2s + 10s >= 11.5s).
+      // Page 2 restarts at page 1's oldest second (inclusive), so one event
+      // repeats and is deduped: 500 + 499.
+      expect(await (await pending).json()).toEqual({ counts: { 1: 999 }, complete: false });
+      expect(filters).toHaveLength(2);
+    });
+
+    it('keeps the counts it has when a later page times out', async () => {
+      slowRelay({ delayMs: 0, stallFrom: 2 });
+
+      const pending = handleBulkKindCounts(PUBKEY, { RELAY_URL: 'wss://relay.test' }, {}, 60_000);
+      await vi.advanceTimersByTimeAsync(10_001);
+
+      const res = await pending;
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ counts: { 1: 500 }, complete: false });
+    });
+
+    it('times out a connection that never opens', async () => {
+      slowRelay({ delayMs: 0, neverOpen: true });
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const pending = handleBulkKindCounts(PUBKEY, { RELAY_URL: 'wss://relay.test' }, {}, 60_000);
+      await vi.advanceTimersByTimeAsync(10_001);
+      const settled = await Promise.race([pending, Promise.resolve('still pending' as const)]);
+
+      expect(settled).not.toBe('still pending');
+      expect((settled as Response).status).toBe(502);
+    });
   });
 
   it('pages a large account fully when it finishes inside the budget', async () => {
@@ -1598,6 +1671,40 @@ function mockPaginatedRelay(
 
 describe('queryRelayEvents pagination', () => {
   beforeEach(() => vi.restoreAllMocks());
+
+  // Only the time-budgeted count listing keeps a partial set on a late timeout.
+  // The synchronous delete-all path must still fail, not act on part of the account.
+  it('still rejects when a later page stalls, with no time budget', async () => {
+    vi.useFakeTimers();
+    try {
+      let reqs = 0;
+      vi.spyOn(globalThis, 'WebSocket').mockImplementation((function () {
+        const listeners = new Map<string, Array<(value?: unknown) => void>>();
+        const emit = (type: string, value?: unknown) => listeners.get(type)?.forEach((h) => h(value));
+        queueMicrotask(() => emit('open'));
+        return {
+          addEventListener: (t: string, h: (value?: unknown) => void) => listeners.set(t, [...(listeners.get(t) || []), h]),
+          send: (payload: string) => {
+            const data = JSON.parse(payload);
+            if (data[0] !== 'REQ' || ++reqs > 1) return;              // page 2 never answers
+            queueMicrotask(() => {
+              for (let i = 0; i < 500; i++) emit('message', { data: JSON.stringify(['EVENT', data[1], { id: `e${i}`, kind: 1, tags: [], created_at: 1000 - i }]) });
+              emit('message', { data: JSON.stringify(['EOSE', data[1]]) });
+            });
+          },
+          close: vi.fn(),
+        };
+      } as unknown as typeof WebSocket));
+
+      const pending = queryRelayEvents('a'.repeat(64), { RELAY_URL: 'wss://relay.test' });
+      const outcome = pending.then(() => 'resolved', (e: Error) => e.message);
+      await vi.advanceTimersByTimeAsync(10_001);
+
+      expect(await outcome).toBe('Relay query timed out before EOSE');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it('pages through >500 events via until cursor instead of rejecting', async () => {
     // 1200 events with distinct descending created_at -> 3 pages (500/500/200).

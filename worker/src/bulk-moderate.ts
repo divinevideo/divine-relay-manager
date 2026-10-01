@@ -799,11 +799,29 @@ async function collectRelayEvents<T>(
       const armTimeout = () => {
         clearTimeout(timeout);
         // Per-page: a prolific account legitimately needs many pages; only a
-        // stalled page (no EOSE within the window) is a failure.
-        timeout = setTimeout(() => finish(reject, new Error('Relay query timed out before EOSE')), RELAY_QUERY_TIMEOUT_MS);
+        // stalled page (no EOSE within the window) is a failure. Under a time
+        // budget, a page that stalls after earlier pages completed keeps what
+        // they listed and reports the listing as incomplete.
+        timeout = setTimeout(() => {
+          if (opts.budgetMs !== undefined && page > 1) {
+            incomplete = true;
+            console.warn(`[bulk-moderate] page ${page} of the listing for ${pubkey} timed out; returning a partial set`);
+            done();
+            return;
+          }
+          finish(reject, new Error('Relay query timed out before EOSE'));
+        }, RELAY_QUERY_TIMEOUT_MS);
       };
 
       const sendPage = (until?: number) => {
+        // Under a time budget, start a page only if it can finish inside it,
+        // allowing for its own timeout. Stopping here returns what is listed.
+        if (opts.budgetMs !== undefined && Date.now() - startedAt + RELAY_QUERY_TIMEOUT_MS >= opts.budgetMs) {
+          incomplete = true;
+          console.warn(`[bulk-moderate] listing for ${pubkey} stopped before page ${page + 1} to stay inside its ${opts.budgetMs}ms budget; returning a partial set`);
+          done();
+          return;
+        }
         page += 1;
         currentSub = `bulk-${Date.now()}-${page}`;
         pageEvents = 0;
@@ -815,6 +833,8 @@ async function collectRelayEvents<T>(
         ws.send(JSON.stringify(['REQ', currentSub, filter]));
       };
 
+      // Bound the connect too: until 'open', nothing else would time it out.
+      armTimeout();
       ws.addEventListener('open', () => sendPage());
 
       ws.addEventListener('message', (msg) => {
@@ -838,12 +858,6 @@ async function collectRelayEvents<T>(
               // Bound coverage rather than loop forever; surface it (not silent).
               incomplete = true;
               console.warn(`[bulk-moderate] hit RELAY_QUERY_MAX_PAGES (${RELAY_QUERY_MAX_PAGES}, ~${page * RELAY_QUERY_PAGE_SIZE} events) for ${pubkey}; returning a partial set`);
-              done();
-              return;
-            }
-            if (opts.budgetMs !== undefined && Date.now() - startedAt >= opts.budgetMs) {
-              incomplete = true;
-              console.warn(`[bulk-moderate] listing for ${pubkey} hit its ${opts.budgetMs}ms budget after ${page} page(s); returning a partial set`);
               done();
               return;
             }
