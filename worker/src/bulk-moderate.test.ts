@@ -689,6 +689,35 @@ describe('async bulk job model', () => {
     expect(JSON.parse(row.failures as string)[0]).toMatch(/Video query failed: 500/);
   });
 
+  // The reason a job failed must survive a full failure list: it is the one
+  // entry that says why the job stopped.
+  it('keeps the reason a job failed when its failure list is already full', async () => {
+    const jobId = 'job-fail-full';
+    const full = Array.from({ length: 50 }, (_, i) => `event:${i}:boom`);
+    jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', status: 'running', events_processed: 0, media_processed: 0, failures: JSON.stringify(full), failures_dropped: 3, version: 2, created_at: 't', updated_at: 't' });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('err', { status: 500 }));
+
+    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', phase: 'media', version: 2 }, mockEnv);
+
+    const job = await (await handleBulkJobStatus(jobId, mockEnv, {})).json() as BulkJob;
+    expect(job.status).toBe('failed');
+    expect(job.failures).toHaveLength(51);                              // 50 stored + "+N more"
+    expect(job.failures.some((f) => /^job:.*Video query failed: 500/.test(f))).toBe(true);
+    expect(job.failures[50]).toBe('+4 more');                           // the displaced entry is counted
+  });
+
+  it('keeps the abandonment reason when a stale job\'s failure list is already full', async () => {
+    const old = new Date(Date.now() - 31 * 60 * 1000).toISOString();
+    const full = Array.from({ length: 50 }, (_, i) => `event:${i}:boom`);
+    jobDb.rows.set('job-stale-full', { job_id: 'job-stale-full', pubkey: 'a'.repeat(64), action: 'delete-kind', status: 'running', events_processed: 0, media_processed: 0, failures: JSON.stringify(full), failures_dropped: 0, version: 2, created_at: old, updated_at: old, kind: 1 });
+
+    const job = await (await handleBulkJobStatus('job-stale-full', mockEnv, {})).json() as BulkJob;
+
+    expect(job.status).toBe('failed');
+    expect(job.failures.some((f) => /^job:abandoned/.test(f))).toBe(true);
+    expect(job.failures[50]).toBe('+1 more');
+  });
+
   it('status self-heals a stale running job to failed so the poller never hangs', async () => {
     const old = new Date(Date.now() - 31 * 60 * 1000).toISOString();
     jobDb.rows.set('job-stale', { job_id: 'job-stale', pubkey: 'a'.repeat(64), action: 'delete-all', status: 'running', events_processed: 0, media_processed: 0, failures: '[]', created_at: old, updated_at: old });

@@ -436,6 +436,17 @@ function mergeFailures(
   };
 }
 
+// Merge in the reason a job stopped. It must be visible even when the list is
+// full: it takes the last stored slot, and the entry it displaces stays counted
+// in `dropped`, which mergeFailures already raised for the overflow.
+function mergeWithReason(
+  existing: string[], existingDropped: number, reason: string,
+): { list: string[]; dropped: number } {
+  const merged = mergeFailures(existing, existingDropped, [reason]);
+  if (!merged.list.includes(reason)) merged.list = [...merged.list.slice(0, MAX_STORED_FAILURES - 1), reason];
+  return merged;
+}
+
 // Consumer: process ONE chunk of a job, persist incremental progress, then
 // re-enqueue the next chunk (carrying a continuation cursor) or finalize. One
 // chunk per invocation (max_batch_size=1) keeps any account size under the
@@ -647,10 +658,10 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
       // destructive path) and append the infra error, rather than clobbering them.
       // Guard on a non-terminal status so this can't resurrect a `done` job.
       const cur = await db.prepare('SELECT failures, failures_dropped FROM bulk_jobs WHERE job_id = ?').bind(msgJobId).first<{ failures: string; failures_dropped: number }>();
-      const merged = mergeFailures(
+      const merged = mergeWithReason(
         cur ? parseFailuresList(cur.failures) : [],
         cur ? Number(cur.failures_dropped) || 0 : 0,
-        [`job:${formatError(error)}`],
+        `job:${formatError(error)}`,
       );
       if (ownedVersion === undefined) {
         console.error('[bulk-job] failed before claiming chunk', msgJobId, error);
@@ -697,9 +708,9 @@ export async function handleBulkJobStatus(
   if ((job.status === 'pending' || job.status === 'running') && Date.parse(job.updatedAt) < Date.now() - STALE_JOB_MS) {
     // Append the abandonment note to the failures the consumer already recorded
     // (don't overwrite them), and preserve the cumulative dropped count.
-    const merged = mergeFailures(
+    const merged = mergeWithReason(
       parseFailuresList(row.failures), Number(row.failures_dropped) || 0,
-      ['job:abandoned (no terminal update; worker likely evicted mid-run)'],
+      'job:abandoned (no terminal update; worker likely evicted mid-run)',
     );
     job.status = 'failed';
     job.failures = failuresForDisplay(merged.list, merged.dropped);
