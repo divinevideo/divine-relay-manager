@@ -418,7 +418,15 @@ function mergeFailures(
   existing: string[], existingDropped: number, added: string[],
 ): { list: string[]; dropped: number } {
   const base = existing.filter((f) => !/^\+\d+ more$/.test(f));
-  const merged = base.concat(added);
+  // Store each failure once. A by-kind job's sweeps meet the same failing ban
+  // (or the same saturated second, or the same out-of-scope events) on every
+  // pass; repeats would overstate the count and crowd distinct failures out of
+  // the cap. Only stored entries can be recognised, so a repeat of one already
+  // past the cap still adds to `dropped`, which can therefore overcount.
+  // (One chunk never produces the same string twice, so only stored entries
+  // need checking.)
+  const stored = new Set(base);
+  const merged = base.concat(added.filter((f) => !stored.has(f)));
   if (merged.length <= MAX_STORED_FAILURES) {
     return { list: merged, dropped: existingDropped };
   }

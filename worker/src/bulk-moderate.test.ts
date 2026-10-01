@@ -1236,6 +1236,27 @@ describe('kind-scoped delete job', () => {
     expect(jobDb.rows.get(jobId)!.events_processed).toBe(200);
   });
 
+  // A ban that fails every time is hit again on every sweep. It is one failure,
+  // and the moderator should read it as one.
+  it('stores a failure that repeats across sweeps once', async () => {
+    vi.mocked(banEvent).mockImplementation(async (id: string) => (id === 'bad' ? { success: false, error: 'nope' } : { success: true }));
+    mockPaginatedRelay([
+      { id: 'good1', kind: 1, content: '', tags: [], created_at: 3 },
+      { id: 'bad', kind: 1, content: '', tags: [], created_at: 2 },
+      { id: 'good2', kind: 1, content: '', tags: [], created_at: 1 },
+    ], { stillListed: ['bad'] });
+    const res = await handleBulkModerateEnqueue(enqueueReq({ pubkey: PUBKEY, action: 'delete-kind', kind: 1 }), mockEnv, {});
+    const { jobId } = await res.json() as BulkEnqueueResponse;
+
+    await drain(sent[0]);
+
+    expect(vi.mocked(banEvent).mock.calls.filter((c) => c[0] === 'bad')).toHaveLength(2); // hit on both sweeps
+    const job = await (await handleBulkJobStatus(jobId, mockEnv, {})).json() as BulkJob;
+    expect(job.status).toBe('done');
+    expect(job.eventsProcessed).toBe(2);
+    expect(job.failures).toEqual(['event:bad:nope']);
+  });
+
   it('does not sweep again after a pass that banned nothing, even if bans failed', async () => {
     vi.mocked(banEvent).mockResolvedValue({ success: false, error: 'relay said no' });
     const { filters } = mockVersionedRelay({ profile: [{ id: 'p1', kind: 0, created_at: 10 }] });
@@ -1532,7 +1553,8 @@ function mockVersionedRelay(
 function mockPaginatedRelay(
   all: Array<{ id: string; kind: number; content: string; tags: string[][]; created_at: number; pubkey?: string }>,
   // `onReq` runs before each page and may add events (an account posting mid-job).
-  opts: { ignoreFilters?: boolean; onReq?: (events: typeof all) => void } = {},
+  // `stillListed`: ids whose ban fails, so the relay keeps listing them.
+  opts: { ignoreFilters?: boolean; onReq?: (events: typeof all) => void; stillListed?: string[] } = {},
 ) {
   const events = [...all];
   const filters: Array<Record<string, unknown>> = [];
@@ -1556,6 +1578,7 @@ function mockPaginatedRelay(
         const kinds = data[2].kinds as number[] | undefined;
         opts.onReq?.(events);
         const hidden = banned();
+        for (const id of opts.stillListed ?? []) hidden.delete(id);
         const sorted = events.map((e) => ({ pubkey: 'a'.repeat(64), ...e })).sort((a, b) => b.created_at - a.created_at);
         const page = sorted
           .filter((e) => e.created_at <= until && (opts.ignoreFilters || !kinds || kinds.includes(e.kind)) && !hidden.has(e.id))
