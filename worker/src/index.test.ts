@@ -196,8 +196,7 @@ describe('notifyModerationService null token', () => {
     );
 
     expect(response.status).toBe(200);
-    // banpubkey schedules two non-critical tasks: the Keycast ban and the DM.
-    expect(waitUntil).toHaveBeenCalledTimes(2);
+    // The DM runs off the response path, so wait for every registered task.
     await Promise.all(waitUntil.mock.calls.map(c => c[0]));
     expect(errorSpy).toHaveBeenCalledWith(
       '[notifyAccountState] DM notification error:',
@@ -1389,13 +1388,15 @@ describe('relay-rpc account-state side effects', () => {
     }
 
     // D1 double recording each statement run, so the human-review mark is observable.
-    function makeModerateEnv(opts: { failMark?: boolean } = {}) {
+    function makeModerateEnv(opts: { failMark?: boolean; holdMark?: Promise<void>; onMark?: () => void } = {}) {
       const runs: string[] = [];
       const env = {
         ...(makeAccountStateEnv() as unknown as Record<string, unknown>),
         DB: {
           prepare: (sql: string) => {
             const run = async () => {
+              if (sql.includes('moderation_targets')) opts.onMark?.();
+              if (opts.holdMark && sql.includes('moderation_targets')) await opts.holdMark;
               if (opts.failMark && sql.includes('moderation_targets')) throw new Error('D1 write failed');
               runs.push(sql);
               return { success: true, meta: { changes: 1 } };
@@ -1431,6 +1432,62 @@ describe('relay-rpc account-state side effects', () => {
       vi.spyOn(console, 'log').mockImplementation(() => {});
     });
 
+    // A slow ban now usually succeeds, so its follow-ups start late. If the
+    // client gives up or the tab closes, Cloudflare may cancel unregistered
+    // work, so the whole ban (relay call, list read, follow-ups) is registered
+    // with waitUntil before it waits on the relay, and still awaited.
+    it.each(['relay-rpc', 'moderate'] as const)(
+      '%s keeps a ban alive past a client disconnect while the relay is still answering',
+      async (route) => {
+        let releaseRelay!: () => void;
+        const relayAnswered = new Promise<void>(resolve => { releaseRelay = resolve; });
+        vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+          await relayAnswered;
+          return new Response(JSON.stringify({ result: true }), { status: 200 });
+        });
+        const waitUntil = vi.fn();
+        const testCtx = { waitUntil } as unknown as ExecutionContext;
+
+        const pending = route === 'relay-rpc'
+          ? callRelayRpc('banpubkey', [VALID_PUBKEY, 'spam'], makeAccountStateEnv(), testCtx)
+          : postModerate(makeModerateEnv().env, testCtx);
+        await new Promise(resolve => setTimeout(resolve, 0));
+
+        expect(waitUntil).toHaveBeenCalled();
+        releaseRelay();
+        expect((await pending).status).toBe(200);
+      },
+    );
+
+    // The relay call's own keep-alive settles once the relay answers, so the
+    // moderate route must keep its later follow-ups (here the human-review
+    // mark) alive too.
+    it('moderate keeps its own follow-ups alive past a disconnect, not just the relay call', async () => {
+      makeFetchSpy();
+      let releaseMark!: () => void;
+      const holdMark = new Promise<void>(resolve => { releaseMark = resolve; });
+      let markReached!: () => void;
+      const reachedMark = new Promise<void>(resolve => { markReached = resolve; });
+      const { env: testEnv, runs } = makeModerateEnv({ holdMark, onMark: () => markReached() });
+      const waitUntil = vi.fn();
+      const testCtx = { waitUntil } as unknown as ExecutionContext;
+
+      const pending = postModerate(testEnv, testCtx);
+      // By now the relay call and its own keep-alive are done; only the held
+      // human-review mark (and anything waiting on it) can still be pending.
+      await reachedMark;
+
+      const registered = Promise.all(waitUntil.mock.calls.map(c => c[0]));
+      const allSettledWithMarkHeld = await Promise.race([
+        registered.then(() => true),
+        new Promise(resolve => setTimeout(() => resolve(false), 20)),
+      ]);
+      expect(allSettledWithMarkHeld).toBe(false);
+      releaseMark();
+      expect((await pending).status).toBe(200);
+      expect(runs.some(sql => sql.includes('moderation_targets'))).toBe(true);
+    });
+
     it('relay-rpc reports a ban the ban list confirms as applied, and mirrors it', async () => {
       const fetchSpy = makeBanErrorFetchSpy([VALID_PUBKEY]);
       const waitUntil = vi.fn();
@@ -1463,7 +1520,8 @@ describe('relay-rpc account-state side effects', () => {
         code: 'ban_unconfirmed',
         error: `Ban not confirmed: ${PURGE_ERROR}`,
       });
-      expect(waitUntil).not.toHaveBeenCalled();
+      await drain(waitUntil);
+      expect(await notifyBodies(fetchSpy)).toEqual([]);
       expect(keycastCalls(fetchSpy)).toEqual([]);
     });
 
