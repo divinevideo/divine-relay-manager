@@ -1510,6 +1510,18 @@ describe('handleBulkKindCounts', () => {
       expect(filters).toHaveLength(1);
     });
 
+    it('does not start a page that would end exactly at the budget', async () => {
+      const { filters } = slowRelay({ delayMs: 1_000 });
+
+      const pending = handleBulkKindCounts(PUBKEY, { RELAY_URL: 'wss://relay.test' }, {}, 11_000);
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      // Page 2 would start at 1s and could run to 1s + 10s = 11s: exactly the
+      // budget, which leaves no room to answer before it. It is not started.
+      expect(await (await pending).json()).toEqual({ counts: { 1: 500 }, complete: false });
+      expect(filters).toHaveLength(1);
+    });
+
     it('starts the next page when it can still finish inside the budget', async () => {
       const { filters } = slowRelay({ delayMs: 1_000 });
 
