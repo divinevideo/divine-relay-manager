@@ -144,7 +144,10 @@ function describeOutcome(job: BulkJob, expected: ExpectedCount | undefined, cont
   const head = `Deleted ${deleted}${ofTotal(expected, deleted)} ${kindName}events. ${contentHidden ? HIDDEN_ACCOUNT : RERUN_SAFE}`;
   const detail = job.failures.slice(0, 2).map(describeFailure).join("; ");
   if (job.status === "failed") {
-    return { clean, title: "Bulk delete stopped early", description: `${head} Reason: ${detail}` };
+    // Why it stopped is its `job:` entry, which follows any per-event failures
+    // (the last stored slot in a full list).
+    const stop = job.failures.find((failure) => parseFailure(failure).type === "job");
+    return { clean, title: "Bulk delete stopped early", description: `${head} Reason: ${stop ? describeFailure(stop) : detail}` };
   }
   return {
     clean,

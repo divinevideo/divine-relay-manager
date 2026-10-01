@@ -513,6 +513,23 @@ describe('BulkDeleteByKind outcomes', () => {
     });
   });
 
+  // The worker records why a job stopped as its `job:` entry, after any per-event
+  // failures and in the last slot of a full list.
+  it.each([
+    ['after earlier failures', [`event:${EVENT_ID}:relay refused`, `event:${'2'.repeat(64)}:relay refused`, 'job:Relay query timed out before EOSE']],
+    ['in a full list', [...Array.from({ length: 49 }, (_, i) => `event:${i}:relay refused`), 'job:Relay query timed out before EOSE', '+12 more']],
+  ])('gives a stopped job\'s own stop reason as its Reason, %s', async (_label, failures) => {
+    await runWith({ status: 'failed', eventsProcessed: 1, failures });
+
+    expect(lastToast().description).toBe(`Deleted 1 of 3 Reaction events. ${RERUN} Reason: Relay query timed out before EOSE`);
+  });
+
+  it('falls back to its first failures for a stopped job with no stop reason recorded', async () => {
+    await runWith({ status: 'failed', eventsProcessed: 1, failures: [`event:${EVENT_ID}:relay refused`] });
+
+    expect(lastToast().description).toBe(`Deleted 1 of 3 Reaction events. ${RERUN} Reason: event ${EVENT_ID} failed: relay refused`);
+  });
+
   it('uses "at least" for the total when the count was not exact', async () => {
     api.getBulkKindCounts.mockResolvedValue({ counts: { 7: 3 }, complete: false });
     api.getBulkJobStatus.mockResolvedValue(job({ status: 'failed', eventsProcessed: 1, failures: ['job:boom'] }));
