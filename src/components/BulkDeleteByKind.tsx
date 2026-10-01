@@ -385,7 +385,8 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
                 <div className="space-y-2">
                   <Progress value={progressValue} aria-label="Bulk delete progress" />
                   <p role="status" className="text-sm text-center text-muted-foreground">
-                    Deleted {processed}{ofTotal(expected, processed)} events...
+                    {/* While a start is in flight, `expected` still belongs to the previous job. */}
+                    Deleted {processed}{ofTotal(starting ? undefined : expected, processed)} events...
                   </p>
                   <p className="text-xs text-center text-muted-foreground">
                     The delete runs on the server; closing this dialog does not stop it.

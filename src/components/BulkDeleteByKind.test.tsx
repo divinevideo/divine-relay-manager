@@ -467,6 +467,20 @@ describe('BulkDeleteByKind outcomes', () => {
     expect(within(dialog).queryByText(/of 800/)).not.toBeInTheDocument();
   });
 
+  // While a second start is in flight, the first job's count belongs to no job
+  // the status line describes.
+  it('does not name the previous job\'s count while a second start is pending', async () => {
+    await runWith({ eventsProcessed: 2, failures: [`event:${EVENT_ID}:banevent failed`] });
+    let resolveStart: (value: unknown) => void = () => {};
+    api.bulkModerate.mockReturnValue(new Promise((resolve) => { resolveStart = resolve; }));
+
+    fireEvent.click(screen.getByRole('button', { name: /Text Note \(800\)/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Delete 800 Text Note events' }));
+
+    expect(await screen.findByRole('status')).toHaveTextContent(/^Deleted 0 events\.\.\.$/);
+    resolveStart({ success: true, jobId: 'job-2' });
+  });
+
   // A full 64-hex id is one unbroken token. `break-word` does not lower an
   // element's min-content width and `anywhere` does, so only `anywhere` lets
   // the dialog's grid and the toast wrap the id at phone width instead of
