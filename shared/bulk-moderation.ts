@@ -85,8 +85,8 @@ interface BulkJobMessageFields {
   // how many events this sweep has deleted so far. A sweep that deleted
   // anything is followed by another, because banning the newest version of a
   // replaceable or addressable event makes the previous version visible.
-  pass?: number;
-  passDeleted?: number;
+  sweep?: number;
+  sweepDeleted?: number;
   // delete-kind only: the job's sweep ceiling (unix seconds), fixed at enqueue
   // and used as `until` on the first page of every sweep.
   sweepUntil?: number;

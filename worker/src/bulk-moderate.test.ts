@@ -496,6 +496,20 @@ describe('async bulk job model', () => {
     expect(job.failures[50]).toBe('+200 more');                  // 250 total - 50 stored, not erased
   });
 
+  it('stores a failure once when one chunk produces it twice', async () => {
+    // Two videos backed by one blob: the page lists its hash twice, and both
+    // moderate calls fail the same way.
+    mockUserVideos([{ sha256: hashA }, { sha256: hashA }]);
+    (mockEnv.MODERATION_API as unknown as { fetch: ReturnType<typeof vi.fn> }).fetch =
+      vi.fn().mockResolvedValue(new Response('nope', { status: 500 }));
+    const jobId = 'job-repeat-1';
+    jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, created_at: 't', updated_at: 't' });
+
+    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all' }, mockEnv);
+
+    expect(JSON.parse(jobDb.rows.get(jobId)!.failures as string)).toEqual([`media:${hashA}:Moderation service returned 500`]);
+  });
+
   it('media-only job chunks across multiple messages until done', async () => {
     // 250 videos => pages of 100/100/50 across 3 messages. Proves chunking: the
     // all-in-one consumer would finish in a single message.
@@ -536,6 +550,43 @@ describe('async bulk job model', () => {
     expect(row.status).toBe('done');
     expect(row.events_processed).toBe(30);
     expect(row.media_processed).toBe(1);
+  });
+
+  it('bans with the moderator\'s reason in every chunk, not only the first', async () => {
+    vi.mocked(banEvent).mockResolvedValue({ success: true });
+    vi.mocked(banEvent).mockClear();
+    mockPaginatedRelay(Array.from({ length: 30 }, (_, i) => ({ id: `r${i}`, kind: 1, content: '', tags: [] as string[][], created_at: 30 - i })));
+    mockUserVideos([]);
+    const jobId = 'job-reason';
+    jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'delete-all', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, version: 0, created_at: 't', updated_at: 't' });
+
+    let msg: BulkJobMessage | undefined = { jobId, pubkey: 'a'.repeat(64), action: 'delete-all', reason: 'spam wave' };
+    let iterations = 0;
+    while (msg && iterations++ < 10) { sent.length = 0; await processBulkJob(msg, mockEnv); msg = sent[0]; }
+
+    expect(iterations).toBe(3);
+    expect(vi.mocked(banEvent)).toHaveBeenCalledTimes(30);
+    expect(vi.mocked(banEvent).mock.calls.every((c) => c[1] === 'spam wave')).toBe(true);
+  });
+
+  it('ends the events phase on a page it cannot page past, instead of walking on with no cursor', async () => {
+    // A full page with no created_at to step from, and only 5 of its events in
+    // scope, so this one chunk handles them all and leaves no ids behind.
+    vi.mocked(banEvent).mockResolvedValue({ success: true });
+    mockRelay(Array.from({ length: 200 }, (_, i) => ({
+      id: `nocursor-${i}`, kind: 1, tags: [] as string[][], ...(i < 5 ? {} : { pubkey: 'b'.repeat(64) }),
+    })));
+    const jobId = 'job-no-cursor';
+    jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'delete-all', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, version: 0, created_at: 't', updated_at: 't' });
+
+    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'delete-all' }, mockEnv);
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ phase: 'media' });
+    expect(sent[0].cursor).toBeUndefined();
+    expect(JSON.parse(jobDb.rows.get(jobId)!.failures as string)).toContain(
+      `enumeration:${'a'.repeat(64)}:relay could not be fully paginated; some events may be unprocessed`,
+    );
   });
 
   it('stops between concurrency waves when the event budget is exhausted', async () => {
@@ -1048,7 +1099,7 @@ describe('kind-scoped delete job', () => {
     const { messages } = await drain(sent[0]);
     expect(filters.every((f) => !('kinds' in f))).toBe(true);
     expect(messages.every((m) => !('kind' in m))).toBe(true);
-    expect(messages.every((m) => !('pass' in m) && !('passDeleted' in m) && !('sweepUntil' in m))).toBe(true); // no sweeps
+    expect(messages.every((m) => !('sweep' in m) && !('sweepDeleted' in m) && !('sweepUntil' in m))).toBe(true); // no sweeps
     const row = jobDb.rows.get(jobId)!;
     expect(row.status).toBe('done');
     expect(row.events_processed).toBe(60);        // every kind
@@ -1120,7 +1171,7 @@ describe('kind-scoped delete job', () => {
   });
 
   // Replaceable and addressable kinds keep older versions; banning the newest
-  // makes the previous one visible, so one cursor pass leaves events up.
+  // makes the previous one visible, so one cursor walk leaves events up.
   it('walks a replaceable kind\'s versions within one sweep, then confirms with an empty one', async () => {
     const { filters } = mockVersionedRelay({
       profile: [{ id: 'p3', kind: 0, created_at: 30 }, { id: 'p2', kind: 0, created_at: 20 }, { id: 'p1', kind: 0, created_at: 10 }],
@@ -1138,7 +1189,7 @@ describe('kind-scoped delete job', () => {
     expect(JSON.parse(row.failures as string)).toEqual([]);
     // Sweep 0 walks down the history (until 29, 19, 9) to an empty page; sweep 1 confirms.
     expect(filters.map((f) => f.until)).toEqual([expect.any(Number), 29, 19, 9, expect.any(Number)]);
-    expect(messages.map((m) => m.pass)).toEqual([0, 0, 0, 1]);
+    expect(messages.map((m) => m.sweep)).toEqual([0, 0, 0, 1]);
   });
 
   // One ceiling for the whole job, fixed at enqueue: start + 300s, past
@@ -1241,10 +1292,10 @@ describe('kind-scoped delete job', () => {
     expect(row.status).toBe('done');
     expect(row.events_processed).toBe(25);
     expect(JSON.parse(row.failures as string)).toEqual([]);
-    expect(Math.max(...messages.map((m) => m.pass ?? 0))).toBe(1);   // one walking sweep + one confirming
+    expect(Math.max(...messages.map((m) => m.sweep ?? 0))).toBe(1);   // one walking sweep + one confirming
   });
 
-  it('stops at the pass bound when bans do not take effect, so the job never reads as clean', async () => {
+  it('stops at the sweep bound when bans do not take effect, so the job never reads as clean', async () => {
     mockVersionedRelay(
       { profile: [{ id: 'v1', kind: 0, created_at: 20 }, { id: 'v0', kind: 0, created_at: 10 }] },
       { bansIneffective: true },
@@ -1258,11 +1309,11 @@ describe('kind-scoped delete job', () => {
     expect(row.status).toBe('done');
     expect(row.events_processed).toBe(40);                           // 2 per sweep x 20 sweeps
     expect(JSON.parse(row.failures as string)).toEqual([
-      `enumeration:${PUBKEY}:still finding events after 20 passes; older versions may remain`,
+      `enumeration:${PUBKEY}:still finding events after 20 sweeps; older versions may remain`,
     ]);
   });
 
-  it('finishes a regular kind after one confirming empty pass', async () => {
+  it('finishes a regular kind after one confirming empty sweep', async () => {
     const { filters } = mockPaginatedRelay(mixedEvents());
     const res = await handleBulkModerateEnqueue(enqueueReq({ pubkey: PUBKEY, action: 'delete-kind', kind: 1 }), mockEnv, {});
     const { jobId } = await res.json() as BulkEnqueueResponse;
@@ -1270,9 +1321,9 @@ describe('kind-scoped delete job', () => {
     const { messages } = await drain(sent[0]);
 
     expect(vi.mocked(banEvent)).toHaveBeenCalledTimes(30);
-    expect(filters).toHaveLength(2);                                 // the pass, then the empty confirmation
+    expect(filters).toHaveLength(2);                                 // the sweep, then the empty confirmation
     // The eventIds continuation carries the sweep's number and running total.
-    expect(messages.map((m) => [m.pass, m.passDeleted])).toEqual([[0, 20], [1, undefined]]);
+    expect(messages.map((m) => [m.sweep, m.sweepDeleted])).toEqual([[0, 20], [1, 0]]);
     expect(jobDb.rows.get(jobId)!.status).toBe('done');
     expect(JSON.parse(jobDb.rows.get(jobId)!.failures as string)).toEqual([]);
   });
@@ -1287,7 +1338,7 @@ describe('kind-scoped delete job', () => {
     const { messages } = await drain(sent[0], 30);
 
     const cursorPage = messages.find((m) => m.cursor === '999' && !m.eventIds);
-    expect(cursorPage).toMatchObject({ pass: 0, passDeleted: 200 });
+    expect(cursorPage).toMatchObject({ sweep: 0, sweepDeleted: 200 });
     expect(filters.map((f) => f.until)).toEqual([expect.any(Number), 999, expect.any(Number)]);
     expect(filters[2].until).toBeGreaterThan(1000);                 // a fresh sweep, not a continuation
     expect(jobDb.rows.get(jobId)!.events_processed).toBe(200);
@@ -1314,7 +1365,7 @@ describe('kind-scoped delete job', () => {
     expect(job.failures).toEqual(['event:bad:nope']);
   });
 
-  it('does not sweep again after a pass that banned nothing, even if bans failed', async () => {
+  it('does not sweep again after a sweep that banned nothing, even if bans failed', async () => {
     vi.mocked(banEvent).mockResolvedValue({ success: false, error: 'relay said no' });
     const { filters } = mockVersionedRelay({ profile: [{ id: 'p1', kind: 0, created_at: 10 }] });
     const res = await handleBulkModerateEnqueue(enqueueReq({ pubkey: PUBKEY, action: 'delete-kind', kind: 0 }), mockEnv, {});

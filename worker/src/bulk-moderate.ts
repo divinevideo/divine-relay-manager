@@ -41,7 +41,7 @@ const SERIALIZED_EVENT_BATCH_SIZE = 20;
 // the previous one deleted something, which for a replaceable or addressable
 // kind can reveal an older version. The count is the deepest edit history of
 // any one coordinate; hitting the bound is recorded as a failure.
-const MAX_KIND_SWEEP_PASSES = 20;
+const MAX_KIND_SWEEPS = 20;
 // A delete-kind job's sweeps all start from one ceiling, fixed at enqueue as the
 // start time plus this margin. Funnelcake accepts created_at up to 60s ahead,
 // so the margin takes in posts stamped slightly in the future. Re-reading "now"
@@ -439,13 +439,11 @@ function mergeFailures(
   const base = existing.filter((f) => parseOverflowMarker(f) === null);
   // Store each failure once. A by-kind job's sweeps meet the same failing ban
   // (or the same saturated second, or the same out-of-scope events) on every
-  // pass; repeats would overstate the count and crowd distinct failures out of
+  // sweep; repeats would overstate the count and crowd distinct failures out of
   // the cap. Only stored entries can be recognised, so a repeat of one already
   // past the cap still adds to `dropped`, which can therefore overcount.
-  // (One chunk never produces the same string twice, so only stored entries
-  // need checking.)
   const stored = new Set(base);
-  const merged = base.concat(added.filter((f) => !stored.has(f)));
+  const merged = base.concat([...new Set(added)].filter((f) => !stored.has(f)));
   if (merged.length <= MAX_STORED_FAILURES) {
     return { list: merged, dropped: existingDropped };
   }
@@ -520,6 +518,11 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
     // Set when a delete-kind job's final sweep read from its ceiling, found
     // nothing and recorded nothing: that read disproves earlier gap warnings.
     let disproveListingGaps = false;
+    // The job's next message. Every continuation names the job, its author,
+    // action and reason; `fields` is what this one carries on from here.
+    const continuation = (fields: Omit<BulkJobMessage, 'jobId' | 'kindJobId' | 'pubkey' | 'action' | 'reason'>): BulkJobMessage => ({
+      ...bulkJobIdField(msg.action, row.job_id), pubkey: msg.pubkey, action: msg.action, reason, ...fields,
+    });
 
     if (phase === 'events') {
       // Without its kind, a delete-kind page query would list every event.
@@ -531,7 +534,8 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
       // Every sweep's first page starts from the job's fixed ceiling. Naming
       // `until` explicitly also keeps a kind-0 + authors REQ off funnelcake's
       // profile cache, which can hand back versions this job already banned.
-      const firstPageUntil = ceiling;
+      // delete-all has no ceiling, so its first page names no `until`.
+      const askedUntil = until ?? ceiling;
       const page = msg.eventIds
         ? {
           events: msg.eventIds.map(id => ({ id, kind: 0, content: '', tags: [] })),
@@ -540,7 +544,7 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
           saturated: false,
           outOfScope: 0,
         }
-        : await queryRelayEventsPage(msg.pubkey, env, until ?? firstPageUntil, msg.kind);
+        : await queryRelayEventsPage(msg.pubkey, env, askedUntil, msg.kind);
       // The events phase (a delete-kind sweep, or delete-all's walk) ends only
       // because each page's next `until` is below the one it asked with. A relay
       // that answers above `until` would repeat the page forever, each chunk
@@ -548,32 +552,35 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
       // single consumer would stall every later bulk job. Fail the job instead,
       // as the media phase does for a cursor that won't move. (delete-all's first
       // page names no `until`, so the check starts from its second.)
-      const askedUntil = until ?? firstPageUntil;
       if (!msg.eventIds && askedUntil !== undefined && page.nextUntil !== null && page.nextUntil >= askedUntil) {
         throw new Error(`relay cursor did not advance for ${msg.pubkey} (asked until ${askedUntil}, got ${page.nextUntil})`);
       }
+      // No page follows this one in the listing. For leftover ids, that means
+      // the page they came from was the listing's last.
+      const pageEnded = page.complete || page.nextUntil === null;
       const startedAt = Date.now();
       const candidates = page.events.slice(0, SERIALIZED_EVENT_BATCH_SIZE);
+      const attribution: DecisionAttribution = { moderatorPubkey: msg.moderatorPubkey, reportId: msg.reportId };
       const ev = { processed: 0, successfulEventIds: [] as string[], failures: [] as string[] };
       let attempted = 0;
       while (attempted < candidates.length) {
         if (attempted > 0 && Date.now() - startedAt >= EVENT_BATCH_BUDGET_MS) break;
         const wave = candidates.slice(attempted, attempted + BULK_ACTION_CONCURRENCY);
-        const waveResult = await deleteEvents(env, wave, reason, moderatorPubkey, scope);
+        const waveResult = await deleteEvents(env, wave, reason, moderatorPubkey, attribution);
         ev.processed += waveResult.processed;
         ev.successfulEventIds.push(...waveResult.successfulEventIds);
         ev.failures.push(...waveResult.failures);
         attempted += wave.length;
       }
       const remainingEventIds = page.events.slice(attempted).map(event => event.id);
-      const pass = msg.pass ?? 0;
+      const sweep = msg.sweep ?? 0;
       // These count successful ban calls, not distinct events. A ban the relay
       // is slow to reflect (the event still listed on the next sweep) is banned
       // and counted again then, with another decision row. Accepted: the
       // 20-sweep bound caps the repeats, and a lag that outlasts it is reported.
-      const passDeleted = (msg.passDeleted ?? 0) + ev.processed;
+      const sweepDeleted = (msg.sweepDeleted ?? 0) + ev.processed;
       // Within a sweep, continuations carry its number and running total.
-      const sweep = isKindJob ? { pass, passDeleted } : {};
+      const sweepFields = isKindJob ? { sweep, sweepDeleted } : {};
       eventsDelta = ev.processed;
       chunkFailures.push(...ev.failures);
       if (page.outOfScope > 0) chunkFailures.push(outOfScopeWarning(msg.pubkey, page.outOfScope));
@@ -586,18 +593,14 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
         chunkFailures.push(unpaginatedGapWarning(msg.pubkey, 'some events may be unprocessed'));
       }
       if (remainingEventIds.length > 0) {
-        next = {
-          ...bulkJobIdField(msg.action, row.job_id),
-          pubkey: msg.pubkey,
-          action: msg.action,
-          reason,
+        next = continuation({
           phase: 'events',
           cursor: page.nextUntil === null ? undefined : String(page.nextUntil),
           eventIds: remainingEventIds,
           ...scope,
-          ...sweep,
-        };
-      } else if ((page.complete || page.nextUntil === null) && isKindJob) {
+          ...sweepFields,
+        });
+      } else if (pageEnded && isKindJob) {
         // End of a sweep. Funnelcake keeps every version of a replaceable or
         // addressable event and drops banned ids before it picks the newest per
         // coordinate, so banning the newest makes the previous one visible. A
@@ -613,7 +616,7 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
         // narrowed to a kind, and a blob is content-addressed, so one file can
         // back events of a kind the moderator chose to keep. The by-kind dialog
         // never touched media; Delete All Content is the path that removes it.
-        if (passDeleted === 0) {
+        if (sweepDeleted === 0) {
           next = null;
           // This chunk was the sweep's whole first page and it was empty: nothing
           // of this kind is listed at or below the ceiling, so earlier sweeps'
@@ -621,25 +624,23 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
           // records no failure except an out-of-scope one, which keeps them.)
           disproveListingGaps = !msg.cursor && !msg.eventIds && page.events.length === 0
             && page.outOfScope === 0;
-        } else if (pass + 1 >= MAX_KIND_SWEEP_PASSES) {
-          chunkFailures.push(enumerationWarning(msg.pubkey, `still finding events after ${MAX_KIND_SWEEP_PASSES} passes; older versions may remain`));
+        } else if (sweep + 1 >= MAX_KIND_SWEEPS) {
+          chunkFailures.push(enumerationWarning(msg.pubkey, `still finding events after ${MAX_KIND_SWEEPS} sweeps; older versions may remain`));
           next = null;
         } else {
-          next = {
-            ...bulkJobIdField(msg.action, row.job_id), pubkey: msg.pubkey, action: msg.action, reason,
-            phase: 'events', ...scope, pass: pass + 1,
-          };
+          // A new sweep from the top, with its own running total.
+          next = continuation({ phase: 'events', ...scope, sweep: sweep + 1, sweepDeleted: 0 });
         }
-      } else if (page.complete || page.nextUntil === null) {
+      } else if (pageEnded) {
         // Events done: one pubkey-level zendesk sync (gated on the job's CUMULATIVE
         // successes, not just this final chunk's -- the last chunk is often an empty
         // short page), then move to the media phase.
         if (job.eventsProcessed + ev.processed > 0) {
           await syncZendeskAfterAction(env, 'delete_event', 'pubkey', msg.pubkey, moderatorPubkey);
         }
-        next = { ...bulkJobIdField(msg.action, row.job_id), pubkey: msg.pubkey, action: msg.action, reason, phase: 'media' };
+        next = continuation({ phase: 'media' });
       } else {
-        next = { ...bulkJobIdField(msg.action, row.job_id), pubkey: msg.pubkey, action: msg.action, reason, phase: 'events', cursor: String(page.nextUntil), ...scope, ...sweep };
+        next = continuation({ phase: 'events', cursor: String(page.nextUntil), ...scope, ...sweepFields });
       }
     } else {
       // The media actions below would DELETE or un-restrict every video on the
@@ -668,7 +669,7 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
         if (mediaPage + 1 >= VIDEO_MAX_PAGES) {
           throw new Error(`Video enumeration exceeded ${VIDEO_MAX_PAGES} pages for ${msg.pubkey}; cursor is not terminating`);
         }
-        next = { ...bulkJobIdField(msg.action, row.job_id), pubkey: msg.pubkey, action: msg.action, reason, phase: 'media', cursor: nextCursor, mediaPage: mediaPage + 1 };
+        next = continuation({ phase: 'media', cursor: nextCursor, mediaPage: mediaPage + 1 });
       } else {
         next = null;
       }

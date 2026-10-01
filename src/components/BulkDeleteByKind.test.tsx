@@ -429,11 +429,11 @@ describe('BulkDeleteByKind outcomes', () => {
   it('shows the dialog\'s account-scoped enumeration failures without the prefix', async () => {
     await runWith({
       eventsProcessed: 3,
-      failures: [`enumeration:${PUBKEY}:still finding events after 20 passes; older versions may remain`],
+      failures: [`enumeration:${PUBKEY}:still finding events after 20 sweeps; older versions may remain`],
     });
 
     expect(lastToast().description).toBe(
-      `Deleted 3 of 3 Reaction events. ${RERUN} 1 failed or could not be listed: still finding events after 20 passes; older versions may remain`,
+      `Deleted 3 of 3 Reaction events. ${RERUN} 1 failed or could not be listed: still finding events after 20 sweeps; older versions may remain`,
     );
   });
 
