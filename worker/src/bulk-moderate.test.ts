@@ -215,6 +215,19 @@ describe('queryRelayEventsPage', () => {
     expect(page.complete).toBe(false);
     expect(page.nextUntil).toBe(999);                       // strictly past the saturated second
   });
+  it('keeps out-of-scope events off a full page while still paging by them', async () => {
+    // A relay ignoring `authors`: every 10th event is someone else's.
+    const all = Array.from({ length: 250 }, (_, i) => ({
+      id: `e${i}`, kind: 1, content: '', tags: [] as string[][], created_at: 250 - i,
+      ...(i % 10 === 0 ? { pubkey: 'b'.repeat(64) } : {}),
+    }));
+    mockPaginatedRelay(all);
+    const page = await queryRelayEventsPage('a'.repeat(64), { RELAY_URL: 'wss://relay.test' });
+    expect(page.nextUntil).toBe(all[199].created_at);              // pagination still uses the whole page
+    expect(page.outOfScope).toBe(20);
+    expect(page.events).toHaveLength(199 - 20);                     // boundary deferred, others dropped
+    expect(page.events.some((e) => Number(e.id.slice(1)) % 10 === 0)).toBe(false);
+  });
   it('signals completion on a short final page', async () => {
     const all = Array.from({ length: 50 }, (_, i) => ({ id: `e${i}`, kind: 1, content: '', tags: [] as string[][], created_at: 50 - i }));
     mockPaginatedRelay(all);
@@ -739,6 +752,7 @@ describe('kind-scoped delete job', () => {
     ['string', '1'],
     ['null', null],
     ['unsafe integer', 2 ** 53],
+    ['above the NIP-01 range', 65536],
     ['object', { kind: 1 }],
   ])('enqueue rejects a %s kind with a 400 and enqueues nothing', async (_label, kind) => {
     const res = await handleBulkModerateEnqueue(enqueueReq({ pubkey: PUBKEY, action: 'delete-kind', kind }), mockEnv, {});
@@ -775,10 +789,68 @@ describe('kind-scoped delete job', () => {
     expect(sent).toHaveLength(0);
   });
 
-  it('fails a delete-kind message that lost its kind instead of deleting every event', async () => {
+  it('enqueue accepts the top of the NIP-01 kind range', async () => {
+    const res = await handleBulkModerateEnqueue(enqueueReq({ pubkey: PUBKEY, action: 'delete-kind', kind: 65535 }), mockEnv, {});
+    expect(res.status).toBe(200);
+  });
+
+  // The claimed row, not the queue message, says what a chunk may touch.
+  it.each([
+    ['action', { action: 'delete-all' }],
+    ['pubkey', { pubkey: 'b'.repeat(64) }],
+    ['kind', { kind: 7 }],
+  ])('fails closed when the message %s disagrees with its job row', async (_label, override) => {
+    const ws = vi.spyOn(globalThis, 'WebSocket');
+    const jobId = 'job-mismatch';
+    jobDb.rows.set(jobId, { job_id: jobId, pubkey: PUBKEY, action: 'delete-kind', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, version: 0, created_at: 't', updated_at: 't', kind: 1 });
+    const msg = { kindJobId: jobId, jobId: jobId, pubkey: PUBKEY, action: 'delete-kind', kind: 1, version: 0, ...override } as unknown as BulkJobMessage;
+    // A delete-all action reads its id from jobId; carry both so the row is found either way.
+
+    await processBulkJob(msg, mockEnv);
+
+    expect(ws).not.toHaveBeenCalled();
+    expect(vi.mocked(banEvent)).not.toHaveBeenCalled();
+    const row = jobDb.rows.get(jobId)!;
+    expect(row.status).toBe('failed');
+    expect(JSON.parse(row.failures as string)).toEqual([
+      'job:message does not match its job row (action, pubkey or kind); refusing to act on it',
+    ]);
+  });
+
+  it('a delete-all row still accepts its own kindless messages', async () => {
+    mockPaginatedRelay(mixedEvents().slice(0, 2));
+    const jobId = 'job-all-ok';
+    jobDb.rows.set(jobId, { job_id: jobId, pubkey: PUBKEY, action: 'delete-all', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, version: 0, created_at: 't', updated_at: 't', kind: null });
+
+    await drain({ jobId, pubkey: PUBKEY, action: 'delete-all', version: 0 });
+
+    expect(jobDb.rows.get(jobId)!.status).toBe('done');
+    expect(vi.mocked(banEvent)).toHaveBeenCalledTimes(2);
+  });
+
+  it('drops events outside the requested author or kind before banning, and records it', async () => {
+    mockPaginatedRelay([
+      { id: 'mine', kind: 1, content: '', tags: [], created_at: 3 },
+      { id: 'other-kind', kind: 7, content: '', tags: [], created_at: 2 },
+      { id: 'other-author', kind: 1, content: '', tags: [], created_at: 1, pubkey: 'b'.repeat(64) },
+    ], { ignoreFilters: true });
+    const res = await handleBulkModerateEnqueue(enqueueReq({ pubkey: PUBKEY, action: 'delete-kind', kind: 1 }), mockEnv, {});
+    const { jobId } = await res.json() as BulkEnqueueResponse;
+
+    await drain(sent[0]);
+
+    expect(vi.mocked(banEvent).mock.calls.map((c) => c[0])).toEqual(['mine']);
+    const row = jobDb.rows.get(jobId)!;
+    expect(row.events_processed).toBe(1);
+    expect(JSON.parse(row.failures as string)).toContain(
+      `enumeration:${PUBKEY}:relay returned 2 event(s) outside the requested author or kind; ignored them`,
+    );
+  });
+
+  it('fails a delete-kind job whose row and message both lost the kind, instead of deleting every event', async () => {
     mockPaginatedRelay(mixedEvents());
     const jobId = 'job-kindless';
-    jobDb.rows.set(jobId, { job_id: jobId, pubkey: PUBKEY, action: 'delete-kind', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, version: 0, created_at: 't', updated_at: 't', kind: 1 });
+    jobDb.rows.set(jobId, { job_id: jobId, pubkey: PUBKEY, action: 'delete-kind', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, version: 0, created_at: 't', updated_at: 't', kind: null });
 
     await drain({ kindJobId: jobId, pubkey: PUBKEY, action: 'delete-kind', version: 0 });
 
@@ -1037,7 +1109,7 @@ describe('kind-scoped delete job', () => {
 
   it('records a cut-short listing as a failure, so the job never reads as complete', async () => {
     // A full page with no usable created_at: the cursor cannot advance.
-    const noTimes = Array.from({ length: 200 }, (_, i) => ({ id: `x${i}`, kind: 1, content: '', tags: [] as string[][] }));
+    const noTimes = Array.from({ length: 200 }, (_, i) => ({ id: `x${i}`, kind: 1, pubkey: PUBKEY, content: '', tags: [] as string[][] }));
     vi.spyOn(globalThis, 'WebSocket').mockImplementation((function () {
       const listeners = new Map<string, Array<(value?: unknown) => void>>();
       const emit = (type: string, value?: unknown) => listeners.get(type)?.forEach((h) => h(value));
@@ -1222,8 +1294,11 @@ function mockVersionedRelay(coords: Record<string, Array<{ id: string; kind: num
 
 // Like a real relay, it stops listing an event once banEvent has been called for
 // it (counting only calls made after this mock was installed).
-function mockPaginatedRelay(all: Array<{ id: string; kind: number; content: string; tags: string[][]; created_at: number }>) {
-  const sorted = [...all].sort((a, b) => b.created_at - a.created_at);
+function mockPaginatedRelay(
+  all: Array<{ id: string; kind: number; content: string; tags: string[][]; created_at: number; pubkey?: string }>,
+  opts: { ignoreFilters?: boolean } = {},
+) {
+  const sorted = [...all].map((e) => ({ pubkey: 'a'.repeat(64), ...e })).sort((a, b) => b.created_at - a.created_at);
   const filters: Array<Record<string, unknown>> = [];
   const banStart = vi.mocked(banEvent).mock.calls.length;
   const banned = () => {
@@ -1245,7 +1320,7 @@ function mockPaginatedRelay(all: Array<{ id: string; kind: number; content: stri
         const kinds = data[2].kinds as number[] | undefined;
         const hidden = banned();
         const page = sorted
-          .filter((e) => e.created_at <= until && (!kinds || kinds.includes(e.kind)) && !hidden.has(e.id))
+          .filter((e) => e.created_at <= until && (opts.ignoreFilters || !kinds || kinds.includes(e.kind)) && !hidden.has(e.id))
           .slice(0, limit);
         queueMicrotask(() => {
           for (const ev of page) emit('message', { data: JSON.stringify(['EVENT', sub, ev]) });

@@ -318,8 +318,11 @@ export async function handleBulkModerateEnqueue(
   // running a full delete-all. Every other action refuses a kind rather than
   // ignoring it, which would widen the job to the whole account.
   if (body.action === 'delete-kind') {
-    if (typeof body.kind !== 'number' || !Number.isSafeInteger(body.kind) || body.kind < 0) {
-      return json({ error: 'delete-kind requires kind, a non-negative integer' }, 400, corsHeaders);
+    // NIP-01 kinds are 0-65535. Above that, funnelcake returns nothing (a clean
+    // "done" with 0 deleted), and a relay that truncates to u16 would delete a
+    // different kind.
+    if (typeof body.kind !== 'number' || !Number.isSafeInteger(body.kind) || body.kind < 0 || body.kind > 65535) {
+      return json({ error: 'delete-kind requires kind, an integer from 0 to 65535' }, 400, corsHeaders);
     }
   } else if (body.kind !== undefined) {
     return json({ error: 'kind is only supported for delete-kind' }, 400, corsHeaders);
@@ -437,6 +440,14 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
     if (!claim.meta?.changes) return;
     ownedVersion = claimedVersion;
 
+    // The claimed row, not the queue message, says what this chunk may touch.
+    // A message that disagrees with it on action, author or kind is corrupt or
+    // misrouted; fail the job before any relay or ban call.
+    const rowKind = row.kind === null || row.kind === undefined ? undefined : Number(row.kind);
+    if (msg.action !== row.action || msg.pubkey !== row.pubkey || msg.kind !== rowKind) {
+      throw new Error('message does not match its job row (action, pubkey or kind); refusing to act on it');
+    }
+
     const moderatorPubkey = await getAdminPubkey(env);
     const scope = jobScope(msg);
 
@@ -462,6 +473,7 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
           nextUntil: until ?? null,
           complete: until === undefined,
           saturated: false,
+          outOfScope: 0,
         }
         : await queryRelayEventsPage(msg.pubkey, env, until ?? firstPageUntil, msg.kind);
       const startedAt = Date.now();
@@ -484,6 +496,9 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
       const sweep = isKindJob ? { pass, passDeleted } : {};
       eventsDelta = ev.processed;
       chunkFailures.push(...ev.failures);
+      if (page.outOfScope > 0) {
+        chunkFailures.push(`enumeration:${msg.pubkey}:relay returned ${page.outOfScope} event(s) outside the requested author or kind; ignored them`);
+      }
       if (page.saturated) {
         // More than EVENT_CHUNK_SIZE events share one timestamp; an `until` cursor
         // can't subdivide a second, so some at it may be unprocessed. Surface it.
@@ -665,7 +680,7 @@ export async function handleBulkJobStatus(
   return json(job, 200, corsHeaders);
 }
 
-type RawRelayEvent = { id: string; kind: number; content?: string; tags: string[][]; created_at?: number };
+type RawRelayEvent = { id: string; pubkey?: string; kind: number; content?: string; tags: string[][]; created_at?: number };
 
 export async function queryRelayEvents(
   pubkey: string,
@@ -846,13 +861,16 @@ export async function queryRelayEventsPage(
   env: Pick<BulkModerateEnv, 'RELAY_URL'>,
   until?: number,
   kind?: number,
-): Promise<{ events: RelayEventSummary[]; nextUntil: number | null; complete: boolean; saturated: boolean }> {
-  type Page = { events: RelayEventSummary[]; nextUntil: number | null; complete: boolean; saturated: boolean };
+): Promise<{ events: RelayEventSummary[]; nextUntil: number | null; complete: boolean; saturated: boolean; outOfScope: number }> {
+  type Page = { events: RelayEventSummary[]; nextUntil: number | null; complete: boolean; saturated: boolean; outOfScope: number };
   return new Promise((resolve, reject) => {
     try {
       const ws = new WebSocket(env.RELAY_URL);
       let resolved = false;
-      const collected: Array<{ summary: RelayEventSummary; createdAt: number | null }> = [];
+      // `inScope` is false for an event the relay returned outside the requested
+      // author or kind. It still counts toward the page's size and timestamps (the
+      // relay's pagination), but it is never handed to the caller to ban.
+      const collected: Array<{ summary: RelayEventSummary; createdAt: number | null; inScope: boolean }> = [];
       const subId = `bulk-page-${Date.now()}`;
       const timeout = setTimeout(() => finish(reject, new Error('Relay query timed out before EOSE')), RELAY_QUERY_TIMEOUT_MS);
       const finish = (fn: ((v: Page) => void) | ((e: Error) => void), value: Page | Error) => {
@@ -872,23 +890,25 @@ export async function queryRelayEventsPage(
         try {
           const data = JSON.parse((msg as MessageEvent).data as string);
           if (data[0] === 'EVENT' && data[1] === subId) {
-            const e = data[2] as { id: string; kind: number; content?: string; tags: string[][]; created_at?: number };
+            const e = data[2] as RawRelayEvent;
             collected.push({
               summary: { id: e.id, kind: e.kind, content: e.content || '', tags: e.tags },
               createdAt: typeof e.created_at === 'number' ? e.created_at : null,
+              inScope: e.pubkey === pubkey && (kind === undefined || e.kind === kind),
             });
           } else if (data[0] === 'EOSE' && data[1] === subId) {
             ws.send(JSON.stringify(['CLOSE', subId]));
-            const all = collected.map((c) => c.summary);
+            const outOfScope = collected.filter((c) => !c.inScope).length;
+            const all = collected.filter((c) => c.inScope).map((c) => c.summary);
             if (collected.length < EVENT_CHUNK_SIZE) {
               // Partial page: the relay has no more events at or before `until`.
-              finish(resolve, { events: all, nextUntil: null, complete: true, saturated: false });
+              finish(resolve, { events: all, nextUntil: null, complete: true, saturated: false, outOfScope });
               return;
             }
             const times = collected.map((c) => c.createdAt).filter((t): t is number => t !== null);
             if (times.length === 0) {
               // Full page with no usable created_at: cannot advance the cursor.
-              finish(resolve, { events: all, nextUntil: null, complete: false, saturated: false });
+              finish(resolve, { events: all, nextUntil: null, complete: false, saturated: false, outOfScope });
               return;
             }
             const oldest = Math.min(...times);
@@ -897,15 +917,15 @@ export async function queryRelayEventsPage(
               // Entire full page is one second -> more events at it were cut off and
               // an `until` cursor can't subdivide. Process this page, step strictly
               // past, and surface the unavoidable gap.
-              finish(resolve, { events: all, nextUntil: oldest - 1, complete: false, saturated: true });
+              finish(resolve, { events: all, nextUntil: oldest - 1, complete: false, saturated: true, outOfScope });
               return;
             }
             // Multi-second full page: defer the boundary (oldest) second to the next
             // chunk so we never process or skip a partial second at the cut.
             const kept = collected
-              .filter((c) => c.createdAt === null || c.createdAt > oldest)
+              .filter((c) => c.inScope && (c.createdAt === null || c.createdAt > oldest))
               .map((c) => c.summary);
-            finish(resolve, { events: kept, nextUntil: oldest, complete: false, saturated: false });
+            finish(resolve, { events: kept, nextUntil: oldest, complete: false, saturated: false, outOfScope });
           }
         } catch { /* ignore malformed frames */ }
       });

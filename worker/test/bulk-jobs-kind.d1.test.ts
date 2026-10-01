@@ -86,8 +86,8 @@ describe('bulk_jobs kind column on a real D1', () => {
     const { jobId } = await (await handleBulkModerateEnqueue(req, env, {})).json() as BulkEnqueueResponse;
 
     const relayEvents = [
-      { id: '1'.repeat(64), kind: 7, content: '', tags: [], created_at: 2 },
-      { id: '2'.repeat(64), kind: 7, content: '', tags: [], created_at: 1 },
+      { id: '1'.repeat(64), pubkey: PUBKEY, kind: 7, content: '', tags: [], created_at: 2 },
+      { id: '2'.repeat(64), pubkey: PUBKEY, kind: 7, content: '', tags: [], created_at: 1 },
     ];
     vi.spyOn(globalThis, 'WebSocket').mockImplementation((function () {
       const listeners = new Map<string, Array<(value?: unknown) => void>>();
