@@ -1345,6 +1345,8 @@ describe('relay-rpc account-state side effects', () => {
       testCtx,
     );
     expect(response.status).toBe(200);
+    // No DB in this env, so the human-review mark cannot have been recorded.
+    expect((await response.json() as { recorded: boolean }).recorded).toBe(false);
     await drain(waitUntil);
 
     // handleModerate's ban_pubkey routes through handleRelayRpc; only the helper
@@ -1522,6 +1524,18 @@ describe('relay-rpc account-state side effects', () => {
     // A malformed pubkey never reached the relay. As a 400 the UI reports a plain
     // failure; flattened to 500 it would read as "may have applied" and wait on
     // a ban-list re-check for nothing.
+    it('moderate passes a relay 4xx refusal through as 400, without a code', async () => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('', { status: 403, statusText: 'Forbidden' }));
+      const { env: testEnv, runs } = makeModerateEnv();
+      const testCtx = { waitUntil: vi.fn() } as unknown as ExecutionContext;
+
+      const response = await postModerate(testEnv, testCtx);
+
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ success: false, error: 'Relay error: 403 Forbidden' });
+      expect(runs.some(sql => sql.includes('moderation_targets'))).toBe(false);
+    });
+
     it('moderate refuses a malformed pubkey with 400, without touching the relay', async () => {
       const fetchSpy = makeFetchSpy();
       const { env: testEnv, runs } = makeModerateEnv();

@@ -38,6 +38,8 @@ export interface Nip86RpcResult {
   error?: string;
   /** We stopped waiting: the relay had not answered within the bound. */
   timedOut?: true;
+  /** HTTP status of a non-OK relay response. */
+  httpStatus?: number;
 }
 
 // AbortSignal.timeout rejects with a DOMException named TimeoutError. Checked by
@@ -173,6 +175,7 @@ export async function callNip86Rpc(
     return {
       success: false,
       error: `Relay error: ${response.status} ${response.statusText}`,
+      httpStatus: response.status,
     };
   }
 
@@ -216,9 +219,10 @@ export async function allowEvent(
 }
 
 /**
- * Result of a pubkey ban. Every failure carries `code: 'ban_unconfirmed'`:
- * a relay error or timeout does not rule out that the ban applied, and the
- * rare failure before any request (e.g. a missing key) is reported the same way.
+ * Result of a pubkey ban. A failure carries `code: 'ban_unconfirmed'` unless
+ * the relay refused the request with a 4xx, which rules out that it applied.
+ * A relay error or timeout does not, and the rare failure before any request
+ * (e.g. a missing key) is reported as unconfirmed too.
  */
 export interface BanPubkeyResult extends Nip86RpcResult {
   /**
@@ -267,6 +271,12 @@ export async function banPubkey(
   if (result.success) return result;
 
   const relayError = result.error || 'banpubkey failed';
+  // Funnelcake answers 4xx only before dispatching the ban (NIP-98 auth, the
+  // admin check, an unreadable body), so nothing applied. A plain failure: the
+  // ban-list read would be refused the same way.
+  if (result.httpStatus !== undefined && result.httpStatus >= 400 && result.httpStatus < 500) {
+    return { success: false, error: relayError };
+  }
   if (await isPubkeyOnBanList(pubkey, env)) {
     console.error(
       `[banPubkey] ALERT: banpubkey reported "${relayError}" but ${pubkey} is on the ban list; ` +

@@ -24,7 +24,17 @@ import { runBulkModeration, type BulkModerateEnv } from './bulk-moderate';
 import { resolveZendeskCreds } from './zendesk-sync';
 import type { BulkAction } from '../../shared/bulk-moderation';
 import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, createMinorAccount, type KeycastEnv } from './keycast-client';
-import { suspendPubkey, unsuspendPubkey, banPubkey, type SecretStoreSecret } from './nip86';
+import { suspendPubkey, unsuspendPubkey, banPubkey, type BanPubkeyResult, type SecretStoreSecret } from './nip86';
+
+// banPubkey reports a ban that landed while its content purge errored or timed
+// out as success, which is right for a moderator's Ban button. Deny and expiry
+// exist to purge the account's posts, so for them that leg is not done: keep
+// it failed, with the reason, so "Enforcement incomplete" still surfaces.
+function requirePurge(result: BanPubkeyResult): { success: boolean; error?: string } {
+  return result.contentRemovalUnconfirmed
+    ? { success: false, error: `Ban applied; content removal not confirmed: ${result.relayError}` }
+    : result;
+}
 import { buildAgeReviewIdentityBlock, buildClaimedParentName, toNpub } from './report-note';
 import {
   clearSubject,
@@ -527,7 +537,7 @@ export async function handleUpdateAgeReviewCase(
     const relayLeg = await runStatusLeg('Relay', () =>
       enteredRestrictedState ? suspendPubkey(existing.pubkey, 'age_review', env)
       : clearedCase ? unsuspendPubkey(existing.pubkey, env)
-      : deniedCase ? banPubkey(existing.pubkey, 'age_review_denied', env)
+      : deniedCase ? banPubkey(existing.pubkey, 'age_review_denied', env).then(requirePurge)
       : undefined);
     relay = relayLeg.status;
     relayError = relayLeg.error;
@@ -2012,7 +2022,7 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
     // purge the user's events at the relay (one-way) -- the case is closed
     // by deadline, matching the deny outcome. Best-effort; logged on failure.
     try {
-      const relayBan = await banPubkey(row.pubkey, 'age_review_expired', env);
+      const relayBan = requirePurge(await banPubkey(row.pubkey, 'age_review_expired', env));
       if (relayBan.success) {
         console.log('[age-review] Relay banpubkey sent for expired case');
       } else {

@@ -405,6 +405,37 @@ describe('banPubkey confirm-before-failing', () => {
     expect(result).toEqual({ success: true, contentRemovalUnconfirmed: true, relayError: 'aborted' });
   });
 
+  // Funnelcake answers 4xx only before dispatch (auth, admin check, bad body),
+  // so nothing applied: a plain failure, with no ban-list read that would fail
+  // the same way and turn every ban during a key mismatch into "not confirmed".
+  it.each([
+    [400, 'Bad Request'],
+    [401, 'Unauthorized'],
+    [403, 'Forbidden'],
+  ])('reports a relay %i refusal as a plain failure without reading the ban list', async (status, statusText) => {
+    const fetchMock = relayDouble({
+      ban: async () => ({ ok: false, status, statusText }),
+      list: rpcOk([TARGET]),
+    });
+
+    const result = await banPubkey(TARGET, 'abuse', mockEnv);
+
+    expect(result).toEqual({ success: false, error: `Relay error: ${status} ${statusText}` });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('still checks the ban list after a gateway 5xx', async () => {
+    relayDouble({
+      ban: async () => ({ ok: false, status: 504, statusText: 'Gateway Timeout' }),
+      list: rpcOk([TARGET]),
+    });
+
+    const result = await banPubkey(TARGET, 'abuse', mockEnv);
+
+    expect(result.success).toBe(true);
+    expect(result.relayError).toBe('Relay error: 504 Gateway Timeout');
+  });
+
   it('accepts a ban list of bare pubkey strings', async () => {
     relayDouble({ ban: rpcError('boom'), list: rpcOk([TARGET]) });
 

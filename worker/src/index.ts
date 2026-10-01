@@ -1257,17 +1257,18 @@ async function handleModerate(
           relayError?: string;
         };
         if (!rpcResult.success) {
-          // For banpubkey, handleRelayRpc answers 400 without a code only when it
-          // refused the input before calling the relay (e.g. a malformed pubkey).
+          // For banpubkey, handleRelayRpc answers 400 without a code only for a
+          // refusal that rules out the ban applying: input it rejected (e.g. a
+          // malformed pubkey) or a relay 4xx (e.g. an admin-key mismatch).
           // Keep that a 400 so the UI reports a plain failure instead of "may
           // have applied". Everything else stays a 500 and forwards `code`:
           // ban_unconfirmed tells the UI this ban's follow-ups did not run.
-          const refusedBeforeRelay = rpcResponse.status === 400 && !rpcResult.code;
+          const refusedOutright = rpcResponse.status === 400 && !rpcResult.code;
           return jsonResponse({
             success: false,
             error: rpcResult.error || 'banpubkey RPC failed',
             ...(rpcResult.code && { code: rpcResult.code }),
-          }, refusedBeforeRelay ? 400 : 500, corsHeaders);
+          }, refusedOutright ? 400 : 500, corsHeaders);
         }
         // Returned as `recorded` and logged, as hide_event/allow_event do, rather
         // than failing the request: the ban has landed, and a retry would be a
