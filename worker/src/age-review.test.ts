@@ -1122,6 +1122,55 @@ describe('Relay pubkey enforcement wiring', () => {
     expect(body.enforcement.relay).toBe('failed');
   });
 
+  // Deny exists to purge the account's posts. banPubkey reports a ban that
+  // landed while its purge errored or timed out as success, so the relay leg
+  // must not read as done: the moderator keeps the "Enforcement incomplete"
+  // warning, with the reason.
+  it('reports a deny whose content removal was not confirmed as an incomplete relay leg', async () => {
+    vi.mocked(banPubkey).mockResolvedValueOnce({
+      success: true,
+      contentRemovalUnconfirmed: true,
+      relayError: 'Failed to ban pubkey: ban inserted but content purge failed',
+    });
+    const c = makeCase({ state: 'restricted_pending_user_response' });
+    const db = dbReturning(c, { ...c, state: 'denied_closed' });
+    const req = new Request('https://api.test/api/age-review/cases/case-1', {
+      method: 'PATCH', body: JSON.stringify({ state: 'denied_closed' }),
+    });
+
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
+    const body = await res.json() as { success: boolean; enforcement: { relay: string; relayError?: string } };
+
+    expect(res.status).toBe(207);
+    expect(body.enforcement.relay).toBe('failed');
+    expect(body.enforcement.relayError).toBe(
+      'Ban applied; content removal not confirmed: Failed to ban pubkey: ban inserted but content purge failed',
+    );
+  });
+
+  it('logs an expiry ban whose content removal was not confirmed, rather than as sent', async () => {
+    vi.mocked(banPubkey).mockResolvedValueOnce({ success: true, contentRemovalUnconfirmed: true, relayError: 'timed out' });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const expiredCase = makeCase({ state: 'restricted_pending_user_response', deadline_at: new Date(Date.now() - 1000).toISOString() });
+    const db = {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        first: vi.fn().mockResolvedValue(null),
+        bind: vi.fn().mockReturnValue({
+          all: vi.fn().mockResolvedValue({ results: sql.includes('+2 days') ? [] : [expiredCase] }),
+          first: vi.fn().mockResolvedValue(null),
+          run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+        }),
+      })),
+    };
+
+    await checkAgeReviewDeadlines(makeEnv(db));
+
+    expect(errorSpy.mock.calls.some(call =>
+      String(call[0]).includes('content removal not confirmed') && String(call[0]).includes('timed out'),
+    )).toBe(true);
+    errorSpy.mockRestore();
+  });
+
   it('cron auto-close bans the pubkey at the relay on expiry', async () => {
     const expiredCase = makeCase({ state: 'restricted_pending_user_response', deadline_at: new Date(Date.now() - 1000).toISOString() });
     const db = {

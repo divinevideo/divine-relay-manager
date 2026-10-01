@@ -58,6 +58,10 @@ export interface ApiResponse<T = unknown> {
   recorded?: boolean;
   reconciled?: boolean;
   reconciliationError?: string;
+  /** ban_pubkey: the ban is in effect but the relay did not confirm content removal. */
+  contentRemovalUnconfirmed?: boolean;
+  /** ban_pubkey, with contentRemovalUnconfirmed: the relay had not answered when the worker stopped waiting. */
+  relayTimedOut?: boolean;
 }
 
 interface InfoResponse {
@@ -262,10 +266,6 @@ export async function restoreEvent(
   return moderateAction(apiUrl, { action: 'allow_event', eventId, moderatorPubkey, reason });
 }
 
-export async function banPubkeyViaModerate(apiUrl: string, pubkey: string, reason?: string): Promise<ApiResponse> {
-  return moderateAction(apiUrl, { action: 'ban_pubkey', pubkey, reason });
-}
-
 export async function allowPubkey(apiUrl: string, pubkey: string): Promise<ApiResponse> {
   return moderateAction(apiUrl, { action: 'allow_pubkey', pubkey });
 }
@@ -316,10 +316,89 @@ export async function callRelayRpc<T = unknown>(
   return data.result as T;
 }
 
+/**
+ * A ban that is in effect. `unconfirmed` names the part that was not confirmed:
+ * - removal_error: the relay call failed without timing out (a purge, gateway or
+ *   network error, or an unreadable response); content removal is unconfirmed
+ * - removal_running: the relay had not answered when the worker stopped waiting;
+ *   content removal may be unfinished
+ * - follow_ups_unknown: only our own re-check found the ban after our request timed out,
+ *   dropped, or failed without the worker's ban_unconfirmed code (e.g. an
+ *   uncaught 5xx), so the worker never reported its follow-ups (Keycast login
+ *   block, user notice, ticket closure) as done; they may or may not have run
+ * - follow_ups_not_run: the worker answered ban_unconfirmed, which it does
+ *   before any follow-up, and our re-check then found the ban: they did not run
+ */
+export interface BanOutcome {
+  unconfirmed: 'removal_error' | 'removal_running' | 'follow_ups_unknown' | 'follow_ups_not_run' | null;
+}
+
+// Our own ban-list re-check runs after a request that may have used its full
+// 30s, so it gets a tighter bound than a normal call.
+const BAN_RECHECK_TIMEOUT_MS = 10_000;
+
+/**
+ * A ban that may or may not have applied: the request failed in a way that
+ * does not rule it out, and the relay's ban list did not show it either.
+ * Distinct from a failure so the UI never tells a moderator a ban that may
+ * have landed "failed" and invites a retry.
+ */
+export class BanNotConfirmedError extends ApiError {
+  constructor(detail: string) {
+    super(`Re-check the account before retrying. (${detail})`);
+    this.name = 'BanNotConfirmedError';
+  }
+}
+
 // Route account bans through the moderation endpoint so worker-side follow-up
 // (human-review state and linked Zendesk ticket closure) runs after the relay RPC.
-export async function banPubkey(apiUrl: string, pubkey: string, reason?: string): Promise<void> {
-  await moderateAction(apiUrl, { action: 'ban_pubkey', pubkey, reason: reason || 'Banned via admin' });
+//
+// The relay applies a ban before its slow content purge, so a timeout or 5xx
+// can hide a ban that landed, and a retry is a second enforcement rather than
+// a no-op. Anything but a 4xx refusal is checked against the ban list before
+// it is reported. The worker already did this once; checking again here also
+// covers our own 30s timeout and a dropped connection.
+export async function banPubkey(apiUrl: string, pubkey: string, reason?: string): Promise<BanOutcome> {
+  // Checked here rather than left to apiRequest: with nothing sent, nothing can
+  // have applied, so this must stay a plain failure and not reach the re-check.
+  if (!apiUrl) {
+    throw new ApiError('No relay selected. Go to Settings to choose an environment.');
+  }
+  try {
+    const data = await moderateAction(apiUrl, { action: 'ban_pubkey', pubkey, reason: reason || 'Banned via admin' });
+    if (data.contentRemovalUnconfirmed !== true) return { unconfirmed: null };
+    return { unconfirmed: data.relayTimedOut === true ? 'removal_running' : 'removal_error' };
+  } catch (error) {
+    const refused = error instanceof ApiError
+      && error.statusCode !== undefined && error.statusCode >= 400 && error.statusCode < 500;
+    if (refused) throw error;
+    if (await isPubkeyOnBanList(apiUrl, pubkey)) {
+      const workerSkippedFollowUps = error instanceof ApiError && error.code === 'ban_unconfirmed';
+      return { unconfirmed: workerSkippedFollowUps ? 'follow_ups_not_run' : 'follow_ups_unknown' };
+    }
+    throw new BanNotConfirmedError(banFailureReason(error));
+  }
+}
+
+// The worker's ban_unconfirmed message and our own timeout copy already say
+// "not confirmed" / "re-check", which the toast also says. Keep only the
+// underlying reason. If either copy changes, this stops trimming, harmlessly.
+function banFailureReason(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message
+    .replace(/^Ban not confirmed: /, '')
+    .replace(/ The action may still have applied\. Re-check before retrying\.$/, '');
+}
+
+// No settle delay, unlike verifyPubkeyBanned: the ban request already ran for
+// as long as it did. An unreadable list answers false, leaving the failure.
+async function isPubkeyOnBanList(apiUrl: string, pubkey: string): Promise<boolean> {
+  try {
+    const list = await listBannedPubkeys(apiUrl, { timeoutMs: BAN_RECHECK_TIMEOUT_MS });
+    return list.some(entry => entry.pubkey === pubkey);
+  } catch {
+    return false;
+  }
 }
 
 export async function banEvent(apiUrl: string, eventId: string, reason?: string): Promise<void> {
@@ -557,21 +636,35 @@ export async function publishLabel(apiUrl: string, params: LabelParams): Promise
   });
 }
 
+export interface LabelAndBanResult {
+  labelPublished: boolean;
+  banned: boolean;
+  banOutcome?: BanOutcome;
+  /** Set when the label published but the ban then failed or was not confirmed. */
+  banError?: Error;
+}
+
 // Combined action: publish label and optionally ban
 export async function publishLabelAndBan(
   apiUrl: string,
   params: LabelParams & { shouldBan?: boolean }
-): Promise<{ labelPublished: boolean; banned: boolean }> {
-  const result = { labelPublished: false, banned: false };
+): Promise<LabelAndBanResult> {
+  const result: LabelAndBanResult = { labelPublished: false, banned: false };
 
   // Publish the label first
   await publishLabel(apiUrl, params);
   result.labelPublished = true;
 
-  // Optionally ban the pubkey
+  // Optionally ban the pubkey. A ban failure is returned, not thrown: the label
+  // is already out, so reporting the whole call as failed would invite a retry
+  // that publishes it twice.
   if (params.shouldBan && params.targetType === 'pubkey') {
-    await banPubkey(apiUrl, params.targetValue, `Labeled: ${params.labels.join(', ')}`);
-    result.banned = true;
+    try {
+      result.banOutcome = await banPubkey(apiUrl, params.targetValue, `Labeled: ${params.labels.join(', ')}`);
+      result.banned = true;
+    } catch (error) {
+      result.banError = error instanceof Error ? error : new Error(String(error));
+    }
   }
 
   return result;

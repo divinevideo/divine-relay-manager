@@ -7,6 +7,7 @@ import { useAdminApi } from '@/hooks/useAdminApi';
 import { useAgeReviewGuardRedirect } from '@/hooks/useAgeReviewGuardRedirect';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { UNDERAGE_REPORT_CATEGORY } from '@/lib/constants';
+import { banFailureToast, banSuccessNote, refreshAfterUnconfirmedBan } from '@/lib/banFeedback';
 import { useBulkModerateJob } from '@/hooks/useBulkModerateJob';
 import { ConfirmDialog } from './ConfirmDialog';
 import { useNavigate } from 'react-router-dom';
@@ -119,9 +120,12 @@ export function UserActions({
   // authoritative request (so a logout/switch mid-request can't retarget it) and
   // reused across the action. Waits for the in-flight identity, attributes or
   // falls back to null, and never blocks the action.
+  // `note` rides on the audit warning because the app shows one toast at a
+  // time: the warning would otherwise replace a note the action just showed.
   const logAudit = (
     moderator: Promise<string | undefined>,
     params: Parameters<typeof api.logDecision>[0],
+    note?: string,
   ) =>
     void moderator.then((moderatorPubkey) =>
       api.logDecision({ ...params, moderatorPubkey })
@@ -131,7 +135,7 @@ export function UserActions({
       })
       .catch((e) => {
         console.warn('[UserActions] audit log failed', e);
-        toast({ title: 'Action applied; audit log not recorded' });
+        toast({ title: 'Action applied; audit log not recorded', description: note });
       }));
 
   const suspendUserMutation = useMutation({
@@ -179,20 +183,22 @@ export function UserActions({
   const banUserMutation = useMutation({
     mutationFn: async () => {
       const moderator = getModeratorPubkey(); // capture before the authoritative request
-      await api.banPubkey(pubkey, 'Banned by moderator');
+      const outcome = await api.banPubkey(pubkey, 'Banned by moderator');
       logAudit(moderator, {
         targetType: 'pubkey',
         targetId: pubkey,
         action: 'ban_user',
         reason: 'Banned by moderator',
-      });
+      }, banSuccessNote(outcome));
+      return outcome;
     },
-    onSuccess: () => {
-      toast({ title: 'User banned from relay' });
+    onSuccess: (outcome) => {
+      toast({ title: 'User banned from relay', description: banSuccessNote(outcome) });
       onActionComplete?.({ accountStatusChanged: true });
     },
     onError: (error: Error) => {
-      toast({ title: 'Failed to ban user', description: error.message, variant: 'destructive' });
+      refreshAfterUnconfirmedBan(error, queryClient);
+      toast(banFailureToast(error));
     },
   });
 

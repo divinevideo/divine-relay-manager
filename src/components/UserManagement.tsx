@@ -24,6 +24,7 @@ import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { UserDisplayName } from "@/components/UserIdentifier";
 import { CopyableId } from "@/components/CopyableId";
 import type { BannedPubkeyEntry } from "@/lib/adminApi";
+import { banFailureToast, banSuccessNote, refreshAfterUnconfirmedBan } from "@/lib/banFeedback";
 
 interface UserManagementProps {
   selectedPubkey?: string;
@@ -87,20 +88,31 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
   const banUserMutation = useMutation({
     mutationFn: async ({ pubkey, reason }: { pubkey: string; reason?: string }) => {
       const moderator = getModeratorPubkey(); // snapshot identity at action start
-      await banPubkey(pubkey, reason || 'Account banned by moderator');
-      // Log to D1 for audit trail
-      await logDecision({
-        targetType: 'pubkey',
-        targetId: pubkey,
-        action: 'ban_user',
-        reason: reason || 'Banned via User Management',
-        moderatorPubkey: await moderator,
-      });
-      return pubkey;
+      const outcome = await banPubkey(pubkey, reason || 'Account banned by moderator');
+      // Log to D1 for audit trail. The ban has already landed, so a failed write
+      // must not fail the mutation: that would read as "Failed to ban user" and
+      // invite a retry of an applied ban.
+      let auditRecorded = true;
+      try {
+        await logDecision({
+          targetType: 'pubkey',
+          targetId: pubkey,
+          action: 'ban_user',
+          reason: reason || 'Banned via User Management',
+          moderatorPubkey: await moderator,
+        });
+      } catch (e) {
+        console.warn('[UserManagement] audit log failed', e);
+        auditRecorded = false;
+      }
+      return { pubkey, outcome, auditRecorded };
     },
-    onSuccess: async (pubkey) => {
+    onSuccess: async ({ pubkey, outcome, auditRecorded }) => {
       invalidateUserQueries();
-      toast({ title: "User banned successfully" });
+      toast({
+        title: auditRecorded ? "User banned successfully" : "User banned; audit log not recorded",
+        description: banSuccessNote(outcome),
+      });
       setIsAddDialogOpen(false);
       setNewPubkey("");
       setNewReason("");
@@ -114,11 +126,8 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
       });
     },
     onError: (error: Error) => {
-      toast({
-        title: "Failed to ban user",
-        description: error.message,
-        variant: "destructive"
-      });
+      refreshAfterUnconfirmedBan(error, queryClient);
+      toast(banFailureToast(error));
     },
   });
 

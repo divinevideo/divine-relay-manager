@@ -5,6 +5,11 @@ import { finalizeEvent, nip19, getPublicKey } from 'nostr-tools';
 import { coordinateEventVisibility } from './event-visibility';
 
 const NIP86_RPC_TIMEOUT_MS = 15_000;
+// Follow-up read after a banpubkey that errored or timed out. It runs after
+// the ban has already used its full bound, so 15s + 5s leaves room inside the
+// browser's 30s API bound. Later steps (e.g. the Zendesk sync) can still push
+// a request past it; the browser then re-checks the ban list itself.
+const BAN_CONFIRM_TIMEOUT_MS = 5_000;
 
 /**
  * Secrets Store secret object (for account-level secrets)
@@ -31,6 +36,16 @@ export interface Nip86RpcResult {
   success: boolean;
   result?: unknown;
   error?: string;
+  /** We stopped waiting: the relay had not answered within the bound. */
+  timedOut?: true;
+  /** HTTP status of a non-OK relay response. */
+  httpStatus?: number;
+}
+
+// AbortSignal.timeout rejects with a DOMException named TimeoutError. Checked by
+// name rather than instanceof Error, which DOMException need not satisfy.
+function isTimeout(error: unknown): boolean {
+  return (error as { name?: unknown } | null)?.name === 'TimeoutError';
 }
 
 /**
@@ -93,7 +108,8 @@ export function getManagementUrl(env: Pick<Nip86Env, 'RELAY_URL' | 'MANAGEMENT_P
 export async function callNip86Rpc(
   method: string,
   params: (string | number | undefined)[],
-  env: Nip86Env
+  env: Nip86Env,
+  timeoutMs: number = NIP86_RPC_TIMEOUT_MS,
 ): Promise<Nip86RpcResult> {
   const secretKey = await getSecretKey(env);
   const httpUrl = getManagementUrl(env);
@@ -145,12 +161,13 @@ export async function callNip86Rpc(
       method: 'POST',
       headers,
       body: payload,
-      signal: AbortSignal.timeout(NIP86_RPC_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (error) {
     return {
       success: false,
       error: error instanceof Error ? error.message : 'Relay request failed',
+      ...(isTimeout(error) && { timedOut: true as const }),
     };
   }
 
@@ -158,6 +175,7 @@ export async function callNip86Rpc(
     return {
       success: false,
       error: `Relay error: ${response.status} ${response.statusText}`,
+      httpStatus: response.status,
     };
   }
 
@@ -201,14 +219,98 @@ export async function allowEvent(
 }
 
 /**
- * Ban a pubkey on the relay
+ * Result of a pubkey ban. A failure carries `code: 'ban_unconfirmed'` unless
+ * the relay refused the request with a 4xx, which rules out that it applied.
+ * A relay error or timeout does not, and the rare failure before any request
+ * (e.g. a missing key) is reported as unconfirmed too.
+ */
+export interface BanPubkeyResult extends Nip86RpcResult {
+  /**
+   * The relay errored or did not answer in time, but its ban list shows the
+   * pubkey. The ban is in effect; its content removal was not confirmed.
+   */
+  contentRemovalUnconfirmed?: true;
+  /**
+   * With contentRemovalUnconfirmed: the relay had not answered when we
+   * stopped waiting. Absent means the call failed some other way (a relay or
+   * gateway error, a network error, an unreadable response).
+   */
+  relayTimedOut?: true;
+  /** The banpubkey error that the ban-list read overrode. */
+  relayError?: string;
+  code?: 'ban_unconfirmed';
+}
+
+/**
+ * Ban a pubkey on the relay.
+ *
+ * Funnelcake writes the ban before capturing the export snapshot and purging
+ * content, which can take far longer than our bound, and it reports a purge
+ * error as a failed ban although "the ban itself remains in effect". So when
+ * banpubkey errors or times out we read the ban list before failing. Treating
+ * a landed ban as failed is not a harmless false alarm: the relay keys a ban
+ * by the NIP-98 auth event id, which is new on every call, so a retry is a
+ * second enforcement (new banned_at, a new export snapshot taken after the
+ * purge, and the purge run again).
  */
 export async function banPubkey(
   pubkey: string,
   reason: string,
   env: Nip86Env
-): Promise<Nip86RpcResult> {
-  return callNip86Rpc('banpubkey', [pubkey, reason], env);
+): Promise<BanPubkeyResult> {
+  let result: Nip86RpcResult;
+  try {
+    result = await callNip86Rpc('banpubkey', [pubkey, reason], env);
+  } catch (error) {
+    // callNip86Rpc throws, rather than returns, in two cases, neither of them
+    // "still working": the response body could not be read (headers had
+    // arrived, and funnelcake sends them only once the ban has run), or it
+    // failed before sending anything (e.g. a missing signing key).
+    result = { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+  if (result.success) return result;
+
+  const relayError = result.error || 'banpubkey failed';
+  // Funnelcake answers 4xx only before dispatching the ban (NIP-98 auth, the
+  // admin check, an unreadable body), so nothing applied. A plain failure: the
+  // ban-list read would be refused the same way.
+  if (result.httpStatus !== undefined && result.httpStatus >= 400 && result.httpStatus < 500) {
+    return { success: false, error: relayError };
+  }
+  if (await isPubkeyOnBanList(pubkey, env)) {
+    console.error(
+      `[banPubkey] ALERT: banpubkey reported "${relayError}" but ${pubkey} is on the ban list; ` +
+      'treating the ban as applied. Content removal was not confirmed.',
+    );
+    return {
+      success: true,
+      contentRemovalUnconfirmed: true,
+      ...(result.timedOut && { relayTimedOut: true as const }),
+      relayError,
+    };
+  }
+  return { success: false, code: 'ban_unconfirmed', error: `Ban not confirmed: ${relayError}` };
+}
+
+/**
+ * Whether the relay's ban list includes the pubkey. Any failure to read it
+ * answers false: callers use this only to upgrade a failure to a success, so
+ * an unreadable list must leave the failure standing.
+ */
+async function isPubkeyOnBanList(pubkey: string, env: Nip86Env): Promise<boolean> {
+  let list: Nip86RpcResult;
+  try {
+    list = await callNip86Rpc('listbannedpubkeys', [], env, BAN_CONFIRM_TIMEOUT_MS);
+  } catch (error) {
+    console.error('[banPubkey] Ban-list read failed:', error);
+    return false;
+  }
+  // An RPC error carries no result, so this also covers a failed read.
+  if (!Array.isArray(list.result)) return false;
+  // NIP-86 returns { pubkey, reason? } objects; accept bare strings as well.
+  return list.result.some(entry =>
+    (typeof entry === 'string' ? entry : (entry as { pubkey?: unknown } | null)?.pubkey) === pubkey,
+  );
 }
 
 /**

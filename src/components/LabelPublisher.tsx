@@ -15,7 +15,26 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { useToast } from "@/hooks/useToast";
 import { Tag, Plus, X, UserX } from "lucide-react";
 import { useAdminApi } from "@/hooks/useAdminApi";
-import type { LabelParams } from "@/lib/adminApi";
+import type { LabelAndBanResult, LabelParams } from "@/lib/adminApi";
+import { banFailureToast, banSuccessNote } from "@/lib/banFeedback";
+
+// The label is out before the ban runs, so a ban problem is reported against
+// the ban, never as a failed publish: a retry would publish the label twice.
+function labelAndBanToast(result: LabelAndBanResult, labelOnlyTitle: string) {
+  if (result.banError) {
+    return banFailureToast(result.banError, {
+      failure: 'Label published; ban failed',
+      notConfirmed: 'Label published; ban not confirmed',
+    });
+  }
+  if (result.banned) {
+    return {
+      title: 'Label published and user banned',
+      description: result.banOutcome && banSuccessNote(result.banOutcome),
+    };
+  }
+  return { title: labelOnlyTitle };
+}
 
 interface LabelPublisherProps {
   onSuccess?: () => void;
@@ -100,13 +119,11 @@ export function LabelPublisher({ onSuccess, defaultTarget, defaultLabels, banOnP
     },
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['labels'] });
-      if (result.banned) {
+      if (result.banned || result.banError) {
         queryClient.invalidateQueries({ queryKey: ['banned-users'] });
         queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
-        toast({ title: "Label published and user banned" });
-      } else {
-        toast({ title: "Label published successfully" });
       }
+      toast(labelAndBanToast(result, "Label published successfully"));
       setIsOpen(false);
       resetForm();
       onSuccess?.();
@@ -345,13 +362,11 @@ export function LabelPublisherInline({
     },
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['labels'] });
-      if (result.banned) {
+      if (result.banned || result.banError) {
         queryClient.invalidateQueries({ queryKey: ['banned-users'] });
         queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
-        toast({ title: "Label published and user banned" });
-      } else {
-        toast({ title: "Label published" });
       }
+      toast(labelAndBanToast(result, "Label published"));
       onSuccess?.();
     },
     onError: (error: Error) => {

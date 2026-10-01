@@ -6,6 +6,9 @@ import {
   getSecretKey,
   getManagementUrl,
   callNip86Rpc,
+  banPubkey,
+  type BanPubkeyResult,
+  type Nip86RpcResult,
   type SecretStoreSecret,
 } from './nip86';
 import { ensureSchema } from './db';
@@ -803,7 +806,9 @@ export default {
       if (path.startsWith('/api/age-review/cases/') && request.method === 'PATCH') {
         if (env.DB) await ensureSchemaOnce(env.DB);
         const caseId = path.replace('/api/age-review/cases/', '');
-        return handleUpdateAgeReviewCase(request, caseId, env, corsHeaders);
+        // Deny also waits for ban confirmation before its remaining enforcement
+        // legs. Keep those legs alive if the moderator disconnects mid-request.
+        return surviveDisconnect(handleUpdateAgeReviewCase(request, caseId, env, corsHeaders), ctx);
       }
       if (path === '/api/age-review/create-minor-account' && request.method === 'POST') {
         if (env.DB) await ensureSchemaOnce(env.DB);
@@ -1198,11 +1203,12 @@ async function handleModerate(
           moderatorPubkey: body.moderatorPubkey?.toLowerCase(),
         });
         if (!result.success) {
-          // Flatten to 500, matching delete_event and ban_pubkey. Neither banevent nor
-          // allowevent is age-review guarded (that guard covers only suspendpubkey,
-          // unsuspendpubkey and unbanpubkey), so there is no 409/503 whose code a caller
-          // would need preserved -- and forwarding would relabel a transient relay 502 as
-          // a terminal 400, which retrying clients read as "do not retry".
+          // Flatten to 500, matching delete_event, and ban_pubkey for anything but an
+          // outright refusal. Neither banevent nor allowevent is age-review guarded
+          // (that guard covers only suspendpubkey, unsuspendpubkey and unbanpubkey),
+          // so there is no 409/503 whose code a caller would need preserved -- and
+          // forwarding would relabel a transient relay 502 as a terminal 400, which
+          // retrying clients read as "do not retry".
           return jsonResponse(
             { success: false, error: result.error || `${isHide ? 'banevent' : 'allowevent'} RPC failed` },
             500,
@@ -1252,33 +1258,64 @@ async function handleModerate(
       if (!body.pubkey) {
         return jsonResponse({ success: false, error: 'Missing pubkey for ban_pubkey' }, 400, corsHeaders);
       }
-      try {
-        const rpcRequest = new Request(request.url.replace(/\/api\/moderate$/, '/api/relay-rpc'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            method: 'banpubkey',
-            params: [body.pubkey, body.reason || ''],
-          }),
-        });
-        const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders, ctx);
-        const rpcResult = await rpcResponse.json() as { success: boolean; error?: string };
-        if (!rpcResult.success) {
-          return jsonResponse({ success: false, error: rpcResult.error || 'banpubkey RPC failed' }, 500, corsHeaders);
-        }
-        if (env.DB) {
-          await markHumanAction(env.DB, 'pubkey', body.pubkey, body.action);
-        }
+      const pubkey = body.pubkey;
+      // The follow-ups below (human-review mark, ticket sync) start only after a
+      // ban that may have taken 20s; keep them alive if the moderator's browser
+      // gives up first.
+      return surviveDisconnect((async () => {
         try {
-          await syncZendeskAfterAction(env, body.action, 'pubkey', body.pubkey, getPublicKey(secretKey));
-        } catch (err) {
-          console.error('[handleModerate] Zendesk sync error:', err);
+          const rpcRequest = new Request(request.url.replace(/\/api\/moderate$/, '/api/relay-rpc'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              method: 'banpubkey',
+              params: [pubkey, body.reason || ''],
+            }),
+          });
+          const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders, ctx);
+          const rpcResult = await rpcResponse.json() as BanPubkeyResult;
+          if (!rpcResult.success) {
+            // For banpubkey, handleRelayRpc answers 400 without a code only for a
+            // refusal that rules out the ban applying: input it rejected (e.g. a
+            // malformed pubkey) or a relay 4xx (e.g. an admin-key mismatch).
+            // Keep that a 400 so the UI reports a plain failure instead of "may
+            // have applied". Everything else stays a 500 and forwards `code`:
+            // ban_unconfirmed tells the UI this ban's follow-ups did not run.
+            const refusedOutright = rpcResponse.status === 400 && !rpcResult.code;
+            return jsonResponse({
+              success: false,
+              error: rpcResult.error || 'banpubkey RPC failed',
+              ...(rpcResult.code && { code: rpcResult.code }),
+            }, refusedOutright ? 400 : 500, corsHeaders);
+          }
+          // markHumanAction swallows its own errors and returns false. Surface
+          // that as `recorded` and alert, as hide_event/allow_event do; no UI
+          // reads `recorded` for bans yet.
+          const recorded = env.DB
+            ? await markHumanAction(env.DB, 'pubkey', pubkey, body.action)
+            : false;
+          if (!recorded) {
+            console.error(
+              `[handleModerate] ALERT: ban_pubkey applied at the relay but NOT recorded as ` +
+              `human-reviewed for ${pubkey}`,
+            );
+          }
+          try {
+            await syncZendeskAfterAction(env, body.action, 'pubkey', pubkey, getPublicKey(secretKey));
+          } catch (err) {
+            console.error('[handleModerate] Zendesk sync error:', err);
+          }
+          return jsonResponse({
+            success: true,
+            pubkey,
+            recorded,
+            ...unconfirmedRemovalFields(rpcResult),
+          }, 200, corsHeaders);
+        } catch (error) {
+          console.error('[handleModerate] ban_pubkey error:', error);
+          return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Unknown error' }, 500, corsHeaders);
         }
-        return jsonResponse({ success: true, pubkey: body.pubkey }, 200, corsHeaders);
-      } catch (error) {
-        console.error('[handleModerate] ban_pubkey error:', error);
-        return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Unknown error' }, 500, corsHeaders);
-      }
+      })(), ctx);
     }
 
     case 'allow_pubkey': {
@@ -1316,9 +1353,11 @@ async function handleModerate(
           // (already 400 in that case) but does flip it from retryable to
           // terminal for an automated caller. Deliberate: consistency is worth
           // more than an accidental 500, and no current caller consumes this
-          // path. Only allow_pubkey forwards: delete_event and ban_pubkey still
-          // flatten to 500, because neither is guarded and so neither can
-          // produce a 409/503 whose code a caller would need.
+          // path. Only allow_pubkey forwards the whole response: delete_event
+          // flattens to 500, and ban_pubkey keeps an outright refusal at 400 and
+          // flattens every other failure to 500 (forwarding ban_unconfirmed),
+          // because neither is guarded and so neither can produce a 409/503 a
+          // caller would need.
           return rpcResponse;
         }
         const rpcResult = await rpcResponse.json() as { success: boolean; error?: string };
@@ -1345,17 +1384,54 @@ async function handleModerate(
   }
 }
 
+/**
+ * Await `work` for the response, and also register it with waitUntil so a
+ * client that disconnects (a browser timeout, a closed tab) cannot cancel it
+ * partway. Still awaited, so its result and failures reach the caller.
+ */
+function surviveDisconnect<T>(work: Promise<T>, ctx?: ExecutionContext): Promise<T> {
+  ctx?.waitUntil(work.catch(() => {}));
+  return work;
+}
+
+type RelayRpcBody = {
+  method: string;
+  params?: (string | number | undefined)[];
+};
+
+type RelayRpcResult = Nip86RpcResult & Partial<BanPubkeyResult>;
+
+// "Banned, but content removal unconfirmed", copied from a ban result onto a
+// response. Empty for a clean ban.
+function unconfirmedRemovalFields(result: Partial<BanPubkeyResult>) {
+  return result.contentRemovalUnconfirmed
+    ? {
+      contentRemovalUnconfirmed: true as const,
+      ...(result.relayTimedOut && { relayTimedOut: true as const }),
+      relayError: result.relayError,
+    }
+    : {};
+}
+
 async function handleRelayRpc(
   request: Request,
   env: Env,
   corsHeaders: Record<string, string>,
   ctx?: ExecutionContext
 ): Promise<Response> {
-  const body = (await request.json()) as {
-    method: string;
-    params?: (string | number | undefined)[];
-  };
+  const body = (await request.json()) as RelayRpcBody;
+  const response = runRelayRpc(body, env, corsHeaders, ctx);
+  // A slow banpubkey now usually ends in success, so its Keycast mirror and DM
+  // are registered late; keep the whole ban alive if the caller gives up first.
+  return body.method === 'banpubkey' ? surviveDisconnect(response, ctx) : response;
+}
 
+async function runRelayRpc(
+  body: RelayRpcBody,
+  env: Env,
+  corsHeaders: Record<string, string>,
+  ctx?: ExecutionContext
+): Promise<Response> {
   if (!body.method) {
     return jsonResponse({ success: false, error: 'Missing method' }, 400, corsHeaders);
   }
@@ -1457,16 +1533,27 @@ async function handleRelayRpc(
   // byte-for-byte. Canonical event actions use the coordinator and persist the
   // direction that auto-hide compensation reads.
   const shouldCoordinateEvent = eventVisibilityAction && /^[0-9a-f]{64}$/.test(target);
-  const result = shouldCoordinateEvent
+  // banpubkey goes through banPubkey, which reads the ban list before it
+  // reports a failure: the relay applies the ban before its slow purge, so an
+  // error or timeout usually means "banned, content removal unconfirmed".
+  // Every RPC result here is a Nip86RpcResult; only banpubkey adds the
+  // optional fields of RelayRpcResult.
+  const result: RelayRpcResult = shouldCoordinateEvent
     ? await coordinateEventVisibility(env, {
       eventId: target,
       relayAction: eventVisibilityAction,
       reason: body.params?.[1] ? String(body.params[1]) : undefined,
     })
-    : await callNip86Rpc(body.method, body.params || [], env);
+    : body.method === 'banpubkey'
+      ? await banPubkey(target, body.params?.[1] ? String(body.params[1]) : '', env)
+      : await callNip86Rpc(body.method, body.params || [], env);
 
   if (!result.success) {
-    return jsonResponse({ success: false, error: result.error }, 400, corsHeaders);
+    return jsonResponse(
+      { success: false, error: result.error, ...(result.code && { code: result.code }) },
+      400,
+      corsHeaders,
+    );
   }
 
   // Account-state side effects (all non-critical, off the response path).
@@ -1500,7 +1587,11 @@ async function handleRelayRpc(
     }
   }
 
-  return new Response(JSON.stringify({ success: true, result: 'result' in result ? result.result : true }), {
+  return new Response(JSON.stringify({
+    success: true,
+    result: 'result' in result ? result.result : true,
+    ...unconfirmedRemovalFields(result),
+  }), {
     status: 200,
     headers: { 'Content-Type': 'application/json', ...corsHeaders },
   });
