@@ -73,6 +73,8 @@ const emptyStats = (over: Record<string, unknown> = {}) => ({
     authoredContentIncomplete: false,
     labelsIncomplete: false,
     reportsIncomplete: false,
+    reportsTruncated: false,
+    labelsTruncated: false,
     ...over,
   },
   isError: false, isFetching: false, refetch: vi.fn(),
