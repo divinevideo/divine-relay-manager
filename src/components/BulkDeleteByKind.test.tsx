@@ -411,7 +411,7 @@ describe('BulkDeleteByKind outcomes', () => {
   it('drops "of Y" from a partial outcome that deleted more than the count', async () => {
     await runWith({ status: 'failed', eventsProcessed: 5, failures: ['job:boom'] });
 
-    expect(lastToast().description).toBe(`Deleted 5 Reaction events. ${RERUN} Reason: job:boom`);
+    expect(lastToast().description).toBe(`Deleted 5 Reaction events. ${RERUN} Reason: boom`);
   });
 
   it('drops "of at least 0" from a partial outcome against an incomplete zero', async () => {
@@ -423,7 +423,7 @@ describe('BulkDeleteByKind outcomes', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Delete all Video (Addressable) events' }));
     await waitFor(() => expect(toast).toHaveBeenCalled());
 
-    expect(lastToast().description).toBe(`Deleted 0 Video (Addressable) events. ${RERUN} Reason: job:boom`);
+    expect(lastToast().description).toBe(`Deleted 0 Video (Addressable) events. ${RERUN} Reason: boom`);
   });
 
   it('shows the dialog\'s account-scoped enumeration failures without the prefix', async () => {
@@ -506,7 +506,7 @@ describe('BulkDeleteByKind outcomes', () => {
     rerender(<QueryClientProvider client={qc}><BulkDeleteByKind pubkey={PUBKEY} isBanned={true} /></QueryClientProvider>);
 
     await waitFor(() => expect(toast).toHaveBeenCalled(), { timeout: 4000 });
-    expect(lastToast().description).toBe(`Deleted 1 of 3 Reaction events. ${HIDDEN} Reason: job:boom`);
+    expect(lastToast().description).toBe(`Deleted 1 of 3 Reaction events. ${HIDDEN} Reason: boom`);
   });
 
   it('names the started kind when the finished job does not report one (an older worker)', async () => {

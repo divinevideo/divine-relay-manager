@@ -95,6 +95,9 @@ function countIssues(failures: string[]): number {
 // whole: a shortened id can't be looked up.
 function describeFailure(failure: string): string {
   if (failure.startsWith("job:abandoned")) return "the server stopped reporting progress";
+  // Any other reason the job stopped, without its prefix.
+  const jobReason = /^job:(.*)$/s.exec(failure);
+  if (jobReason) return jobReason[1];
   // The account is already the dialog's subject, so drop its pubkey prefix.
   const enumeration = /^enumeration:[^:]+:(.*)$/s.exec(failure);
   if (enumeration) return enumeration[1];
