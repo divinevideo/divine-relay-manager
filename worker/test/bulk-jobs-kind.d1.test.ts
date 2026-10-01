@@ -15,6 +15,7 @@ import {
   type BulkModerateEnv,
 } from '../src/bulk-moderate';
 import type { BulkJob, BulkJobMessage, BulkEnqueueResponse } from '../../shared/bulk-moderation';
+import { banEvent } from '../src/nip86';
 
 vi.mock('../src/nip86', () => ({
   getAdminPubkey: vi.fn().mockResolvedValue('f'.repeat(64)),
@@ -98,7 +99,9 @@ describe('bulk_jobs kind column on a real D1', () => {
           const data = JSON.parse(payload);
           if (data[0] !== 'REQ') return;
           queueMicrotask(() => {
-            for (const ev of relayEvents) emit('message', { data: JSON.stringify(['EVENT', data[1], ev]) });
+            // Like the relay, stop listing an event once it is banned.
+            const banned = new Set(vi.mocked(banEvent).mock.calls.map((c) => c[0]));
+            for (const ev of relayEvents.filter((e) => !banned.has(e.id))) emit('message', { data: JSON.stringify(['EVENT', data[1], ev]) });
             emit('message', { data: JSON.stringify(['EOSE', data[1]]) });
           });
         },
@@ -106,7 +109,10 @@ describe('bulk_jobs kind column on a real D1', () => {
       };
     } as unknown as typeof WebSocket));
 
-    await processBulkJob(sent[0], env);
+    // Drain: the sweep that deletes both, then the empty sweep that confirms it.
+    for (let next = sent.shift(), n = 0; next && n < 10; next = sent.shift(), n++) {
+      await processBulkJob(next, env);
+    }
 
     const job = await (await handleBulkJobStatus(jobId, env, {})).json() as BulkJob;
     expect(job).toMatchObject({ status: 'done', kind: 7, eventsProcessed: 2, failures: [] });

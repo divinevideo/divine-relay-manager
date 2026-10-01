@@ -74,6 +74,12 @@ interface BulkJobMessageFields {
   // delete-kind only (required there): the one event kind to delete. A
   // delete-kind job has no media phase.
   kind?: number;
+  // delete-kind only: which sweep of the kind this is (0 = the first), and
+  // how many events this sweep has deleted so far. A sweep that deleted
+  // anything is followed by another, because banning the newest version of a
+  // replaceable or addressable event makes the previous version visible.
+  pass?: number;
+  passDeleted?: number;
   // Attribution for the per-event decision rows. Absent = the worker's signing
   // key and no report, which is what delete-all has always written.
   moderatorPubkey?: string;

@@ -27,6 +27,11 @@ const EVENT_BATCH_BUDGET_MS = 4 * 60 * 1000;
 // max_concurrency=1 prevents multiple bulk consumers from building a gate
 // backlog; bounded batches reduce continuation loss and Queue overhead.
 const SERIALIZED_EVENT_BATCH_SIZE = 20;
+// Upper bound on delete-kind sweeps. Each sweep after the first exists because
+// the previous one deleted something, which for a replaceable or addressable
+// kind can reveal an older version. The count is the deepest edit history of
+// any one coordinate; hitting the bound is recorded as a failure.
+const MAX_KIND_SWEEP_PASSES = 20;
 
 export interface BulkModerateEnv extends Nip86Env, ZendeskSyncEnv {
   DB?: D1Database;
@@ -445,7 +450,12 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
       if (msg.action === 'delete-kind' && msg.kind === undefined) {
         throw new Error('delete-kind message arrived without a kind; refusing to list every event');
       }
+      const isKindJob = msg.action === 'delete-kind';
       const until = msg.cursor ? Number(msg.cursor) : undefined;
+      // A sweep's first page names `until` (now) explicitly: funnelcake serves a
+      // kind-0 + authors REQ with no `until` from its profile cache, which can
+      // hand back versions this job already banned.
+      const firstPageUntil = isKindJob ? Math.floor(Date.now() / 1000) : undefined;
       const page = msg.eventIds
         ? {
           events: msg.eventIds.map(id => ({ id, kind: 0, content: '', tags: [] })),
@@ -453,7 +463,7 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
           complete: until === undefined,
           saturated: false,
         }
-        : await queryRelayEventsPage(msg.pubkey, env, until, msg.kind);
+        : await queryRelayEventsPage(msg.pubkey, env, until ?? firstPageUntil, msg.kind);
       const startedAt = Date.now();
       const candidates = page.events.slice(0, SERIALIZED_EVENT_BATCH_SIZE);
       const ev = { processed: 0, successfulEventIds: [] as string[], failures: [] as string[] };
@@ -468,6 +478,10 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
         attempted += wave.length;
       }
       const remainingEventIds = page.events.slice(attempted).map(event => event.id);
+      const pass = msg.pass ?? 0;
+      const passDeleted = (msg.passDeleted ?? 0) + ev.processed;
+      // Within a sweep, continuations carry its number and running total.
+      const sweep = isKindJob ? { pass, passDeleted } : {};
       eventsDelta = ev.processed;
       chunkFailures.push(...ev.failures);
       if (page.saturated) {
@@ -488,8 +502,17 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
           cursor: page.nextUntil === null ? undefined : String(page.nextUntil),
           eventIds: remainingEventIds,
           ...scope,
+          ...sweep,
         };
-      } else if ((page.complete || page.nextUntil === null) && msg.action === 'delete-kind') {
+      } else if ((page.complete || page.nextUntil === null) && isKindJob) {
+        // End of a sweep. Funnelcake keeps every version of a replaceable or
+        // addressable event and drops banned ids before it picks the newest per
+        // coordinate, so banning the newest makes the previous one visible. A
+        // sweep that deleted anything is therefore followed by a fresh one from
+        // the top; the job ends when a sweep deletes nothing. For a regular
+        // kind that costs one empty confirming sweep. A sweep whose bans all
+        // failed also ends it: the events stay listed and would only fail again.
+        //
         // A kind-scoped job ends with its events: no media phase and no
         // account-level Zendesk sync (each deleted event already synced its own
         // tickets in deleteEvents). The media phase deletes every video blob the
@@ -497,7 +520,17 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
         // narrowed to a kind, and a blob is content-addressed, so one file can
         // back events of a kind the moderator chose to keep. The by-kind dialog
         // never touched media; Delete All Content is the path that removes it.
-        next = null;
+        if (passDeleted === 0) {
+          next = null;
+        } else if (pass + 1 >= MAX_KIND_SWEEP_PASSES) {
+          chunkFailures.push(`enumeration:${msg.pubkey}:still finding events after ${MAX_KIND_SWEEP_PASSES} passes; older versions may remain`);
+          next = null;
+        } else {
+          next = {
+            ...bulkJobIdField(msg.action, row.job_id), pubkey: msg.pubkey, action: msg.action, reason,
+            phase: 'events', ...scope, pass: pass + 1,
+          };
+        }
       } else if (page.complete || page.nextUntil === null) {
         // Events done: one pubkey-level zendesk sync (gated on the job's CUMULATIVE
         // successes, not just this final chunk's -- the last chunk is often an empty
@@ -507,7 +540,7 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
         }
         next = { ...bulkJobIdField(msg.action, row.job_id), pubkey: msg.pubkey, action: msg.action, reason, phase: 'media' };
       } else {
-        next = { ...bulkJobIdField(msg.action, row.job_id), pubkey: msg.pubkey, action: msg.action, reason, phase: 'events', cursor: String(page.nextUntil), ...scope };
+        next = { ...bulkJobIdField(msg.action, row.job_id), pubkey: msg.pubkey, action: msg.action, reason, phase: 'events', cursor: String(page.nextUntil), ...scope, ...sweep };
       }
     } else {
       // The media actions below would DELETE or un-restrict every video on the

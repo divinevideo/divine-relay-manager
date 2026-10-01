@@ -811,6 +811,7 @@ describe('kind-scoped delete job', () => {
     const { messages } = await drain(sent[0]);
     expect(filters.every((f) => !('kinds' in f))).toBe(true);
     expect(messages.every((m) => !('kind' in m))).toBe(true);
+    expect(messages.every((m) => !('pass' in m) && !('passDeleted' in m))).toBe(true); // no sweeps
     const row = jobDb.rows.get(jobId)!;
     expect(row.status).toBe('done');
     expect(row.events_processed).toBe(60);        // every kind
@@ -881,6 +882,104 @@ describe('kind-scoped delete job', () => {
     expect(row.media_processed).toBe(1);
   });
 
+  // Replaceable and addressable kinds keep older versions; banning the newest
+  // makes the previous one visible, so one cursor pass leaves events up.
+  it('sweeps again until a pass finds nothing, deleting older versions a ban revealed', async () => {
+    const { filters } = mockVersionedRelay({
+      profile: [{ id: 'p3', kind: 0, created_at: 30 }, { id: 'p2', kind: 0, created_at: 20 }, { id: 'p1', kind: 0, created_at: 10 }],
+      article: [{ id: 'a2', kind: 30023, created_at: 25 }, { id: 'a1', kind: 30023, created_at: 15 }],
+    });
+    const res = await handleBulkModerateEnqueue(enqueueReq({ pubkey: PUBKEY, action: 'delete-kind', kind: 0 }), mockEnv, {});
+    const { jobId } = await res.json() as BulkEnqueueResponse;
+
+    const { messages } = await drain(sent[0]);
+
+    expect(vi.mocked(banEvent).mock.calls.map((c) => c[0])).toEqual(['p3', 'p2', 'p1']);
+    const row = jobDb.rows.get(jobId)!;
+    expect(row.status).toBe('done');
+    expect(row.events_processed).toBe(3);
+    expect(JSON.parse(row.failures as string)).toEqual([]);
+    expect(filters).toHaveLength(4);                                 // 3 passes that found one each + 1 empty
+    expect(messages.map((m) => m.pass)).toEqual([1, 2, 3]);
+  });
+
+  it('starts every sweep from an explicit until, so a cached listing cannot be served', async () => {
+    const { filters } = mockVersionedRelay({ profile: [{ id: 'p2', kind: 0, created_at: 20 }, { id: 'p1', kind: 0, created_at: 10 }] });
+    const now = 1_900_000_000_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      await handleBulkModerateEnqueue(enqueueReq({ pubkey: PUBKEY, action: 'delete-kind', kind: 0 }), mockEnv, {});
+      await drain(sent[0]);
+    } finally {
+      nowSpy.mockRestore();
+    }
+
+    expect(filters).toHaveLength(3);
+    expect(filters.every((f) => f.until === Math.floor(now / 1000))).toBe(true);
+  });
+
+  it('stops at the pass bound and records it, so the job never reads as clean', async () => {
+    // 25 versions of one profile: every pass reveals another.
+    mockVersionedRelay({ profile: Array.from({ length: 25 }, (_, i) => ({ id: `v${i}`, kind: 0, created_at: 100 - i })) });
+    const res = await handleBulkModerateEnqueue(enqueueReq({ pubkey: PUBKEY, action: 'delete-kind', kind: 0 }), mockEnv, {});
+    const { jobId } = await res.json() as BulkEnqueueResponse;
+
+    await drain(sent[0], 60);
+
+    const row = jobDb.rows.get(jobId)!;
+    expect(row.status).toBe('done');
+    expect(row.events_processed).toBe(20);
+    expect(JSON.parse(row.failures as string)).toEqual([
+      `enumeration:${PUBKEY}:still finding events after 20 passes; older versions may remain`,
+    ]);
+  });
+
+  it('finishes a regular kind after one confirming empty pass', async () => {
+    const { filters } = mockPaginatedRelay(mixedEvents());
+    const res = await handleBulkModerateEnqueue(enqueueReq({ pubkey: PUBKEY, action: 'delete-kind', kind: 1 }), mockEnv, {});
+    const { jobId } = await res.json() as BulkEnqueueResponse;
+
+    const { messages } = await drain(sent[0]);
+
+    expect(vi.mocked(banEvent)).toHaveBeenCalledTimes(30);
+    expect(filters).toHaveLength(2);                                 // the pass, then the empty confirmation
+    // The eventIds continuation carries the sweep's number and running total.
+    expect(messages.map((m) => [m.pass, m.passDeleted])).toEqual([[0, 20], [1, undefined]]);
+    expect(jobDb.rows.get(jobId)!.status).toBe('done');
+    expect(JSON.parse(jobDb.rows.get(jobId)!.failures as string)).toEqual([]);
+  });
+
+  it('sweeps again when a sweep deleted events in earlier chunks but its last page was empty', async () => {
+    // 200 events in one second: a saturated page, then a cursor page past that
+    // second that comes back empty. The sweep still deleted 200.
+    const { filters } = mockPaginatedRelay(Array.from({ length: 200 }, (_, i) => ({ id: `s${i}`, kind: 1, content: '', tags: [] as string[][], created_at: 1000 })));
+    const res = await handleBulkModerateEnqueue(enqueueReq({ pubkey: PUBKEY, action: 'delete-kind', kind: 1 }), mockEnv, {});
+    const { jobId } = await res.json() as BulkEnqueueResponse;
+
+    const { messages } = await drain(sent[0], 30);
+
+    const cursorPage = messages.find((m) => m.cursor === '999' && !m.eventIds);
+    expect(cursorPage).toMatchObject({ pass: 0, passDeleted: 200 });
+    expect(filters.map((f) => f.until)).toEqual([expect.any(Number), 999, expect.any(Number)]);
+    expect(filters[2].until).toBeGreaterThan(1000);                 // a fresh sweep, not a continuation
+    expect(jobDb.rows.get(jobId)!.events_processed).toBe(200);
+  });
+
+  it('does not sweep again after a pass that banned nothing, even if bans failed', async () => {
+    vi.mocked(banEvent).mockResolvedValue({ success: false, error: 'relay said no' });
+    const { filters } = mockVersionedRelay({ profile: [{ id: 'p1', kind: 0, created_at: 10 }] });
+    const res = await handleBulkModerateEnqueue(enqueueReq({ pubkey: PUBKEY, action: 'delete-kind', kind: 0 }), mockEnv, {});
+    const { jobId } = await res.json() as BulkEnqueueResponse;
+
+    await drain(sent[0]);
+
+    // A failed ban leaves the event listed; another pass would only fail again.
+    expect(filters).toHaveLength(1);
+    const row = jobDb.rows.get(jobId)!;
+    expect(row.status).toBe('done');
+    expect(JSON.parse(row.failures as string)).toEqual(['event:p1:relay said no']);
+  });
+
   it('deletes only events of the kind, across pages, carrying the kind on every continuation', async () => {
     const { filters } = mockPaginatedRelay(mixedEvents());
     const res = await handleBulkModerateEnqueue(enqueueReq({ pubkey: PUBKEY, action: 'delete-kind', kind: 1 }), mockEnv, {});
@@ -949,7 +1048,7 @@ describe('kind-scoped delete job', () => {
           const data = JSON.parse(payload);
           if (data[0] !== 'REQ') return;
           queueMicrotask(() => {
-            for (const ev of noTimes) emit('message', { data: JSON.stringify(['EVENT', data[1], ev]) });
+            for (const ev of noTimes.filter((e) => !vi.mocked(banEvent).mock.calls.some((c) => c[0] === e.id))) emit('message', { data: JSON.stringify(['EVENT', data[1], ev]) });
             emit('message', { data: JSON.stringify(['EOSE', data[1]]) });
           });
         },
@@ -1085,9 +1184,52 @@ describe('handleBulkKindCounts', () => {
 // created_at <= filter.until (descending), then EOSE for that sub. Models a
 // relay that supports until-cursoring, and honors a `kinds` filter. Returns the
 // REQ filters it received so a test can assert what was asked for.
+// A relay serving replaceable/addressable kinds the way funnelcake does: it keeps
+// every version, drops banned ids BEFORE picking the newest per coordinate, so
+// banning the newest version reveals the previous one. `coords` maps a
+// coordinate to its versions; created_at orders them.
+function mockVersionedRelay(coords: Record<string, Array<{ id: string; kind: number; created_at: number }>>) {
+  const filters: Array<Record<string, unknown>> = [];
+  const banStart = vi.mocked(banEvent).mock.calls.length;
+  vi.spyOn(globalThis, 'WebSocket').mockImplementation((function () {
+    const listeners = new Map<string, Array<(value?: unknown) => void>>();
+    const emit = (type: string, value?: unknown) => listeners.get(type)?.forEach((h) => h(value));
+    queueMicrotask(() => emit('open'));
+    return {
+      addEventListener: (t: string, h: (value?: unknown) => void) => listeners.set(t, [...(listeners.get(t) || []), h]),
+      send: (payload: string) => {
+        const data = JSON.parse(payload);
+        if (data[0] !== 'REQ') return;
+        const f = data[2];
+        filters.push(f);
+        const banned = new Set(vi.mocked(banEvent).mock.calls.slice(banStart).map((c) => c[0]));
+        const visible = Object.values(coords)
+          .map((versions) => versions.filter((v) => !banned.has(v.id)).sort((a, b) => b.created_at - a.created_at)[0])
+          .filter((v): v is { id: string; kind: number; created_at: number } => !!v)
+          .filter((v) => v.created_at <= (f.until ?? Infinity) && (!f.kinds || f.kinds.includes(v.kind)))
+          .sort((a, b) => b.created_at - a.created_at)
+          .slice(0, f.limit ?? 500);
+        queueMicrotask(() => {
+          for (const v of visible) emit('message', { data: JSON.stringify(['EVENT', data[1], { ...v, pubkey: 'a'.repeat(64), content: '', tags: [] }]) });
+          emit('message', { data: JSON.stringify(['EOSE', data[1]]) });
+        });
+      },
+      close: vi.fn(),
+    };
+  } as unknown as typeof WebSocket));
+  return { filters };
+}
+
+// Like a real relay, it stops listing an event once banEvent has been called for
+// it (counting only calls made after this mock was installed).
 function mockPaginatedRelay(all: Array<{ id: string; kind: number; content: string; tags: string[][]; created_at: number }>) {
   const sorted = [...all].sort((a, b) => b.created_at - a.created_at);
   const filters: Array<Record<string, unknown>> = [];
+  const banStart = vi.mocked(banEvent).mock.calls.length;
+  const banned = () => {
+    const calls = vi.mocked(banEvent).mock.calls;
+    return new Set(calls.slice(calls.length < banStart ? 0 : banStart).map((c) => c[0]));
+  };
   vi.spyOn(globalThis, 'WebSocket').mockImplementation((function () {
     const listeners = new Map<string, Array<(value?: unknown) => void>>();
     const emit = (type: string, value?: unknown) => listeners.get(type)?.forEach((h) => h(value));
@@ -1101,8 +1243,9 @@ function mockPaginatedRelay(all: Array<{ id: string; kind: number; content: stri
         const until = data[2].until ?? Infinity;
         const limit = data[2].limit ?? 500;
         const kinds = data[2].kinds as number[] | undefined;
+        const hidden = banned();
         const page = sorted
-          .filter((e) => e.created_at <= until && (!kinds || kinds.includes(e.kind)))
+          .filter((e) => e.created_at <= until && (!kinds || kinds.includes(e.kind)) && !hidden.has(e.id))
           .slice(0, limit);
         queueMicrotask(() => {
           for (const ev of page) emit('message', { data: JSON.stringify(['EVENT', sub, ev]) });
