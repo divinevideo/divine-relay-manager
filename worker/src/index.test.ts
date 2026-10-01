@@ -1985,7 +1985,7 @@ describe('bulk-moderate kind-counts route', () => {
           if (data[0] !== 'REQ') return;
           filters.push(data[2]);
           queueMicrotask(() => {
-            emit('message', { data: JSON.stringify(['EVENT', data[1], { id: 'e1', kind: 22, tags: [], created_at: 2 }]) });
+            emit('message', { data: JSON.stringify(['EVENT', data[1], { id: 'e1', pubkey: VALID_PUBKEY, kind: 22, tags: [], created_at: 2 }]) });
             emit('message', { data: JSON.stringify(['EOSE', data[1]]) });
           });
         },

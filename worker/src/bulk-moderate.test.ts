@@ -29,7 +29,8 @@ const hashA = 'a'.repeat(64);
 const hashB = 'b'.repeat(64);
 const hashC = 'c'.repeat(64);
 
-function mockRelay(events: Array<{ id: string; kind: number; content?: string; tags: string[][] }>) {
+// Events default to the test account's pubkey: a relay always sends one (NIP-01).
+function mockRelay(events: Array<{ id: string; kind: number; content?: string; tags: string[][]; pubkey?: string }>) {
   vi.spyOn(globalThis, 'WebSocket').mockImplementation((function () {
     const listeners = new Map<string, Array<(value?: unknown) => void>>();
     let subId = 'bulk-test';
@@ -38,7 +39,7 @@ function mockRelay(events: Array<{ id: string; kind: number; content?: string; t
       listeners.get('open')?.forEach((handler) => handler());
       for (const event of events) {
         listeners.get('message')?.forEach((handler) => handler({
-          data: JSON.stringify(['EVENT', subId, event]),
+          data: JSON.stringify(['EVENT', subId, { pubkey: 'a'.repeat(64), ...event }]),
         }));
       }
       listeners.get('message')?.forEach((handler) => handler({
@@ -320,6 +321,24 @@ describe('runBulkModeration', () => {
     mockUserVideos([{ sha256: hashA }]);
     await runBulkModeration(mockEnv, 'a'.repeat(64), 'un-age-restrict-all', 'r');
     expect(moderationActionFor(mockEnv, hashA)).toBe('SAFE');
+  });
+
+  // The synchronous delete-all (age review) must ban only the account's own
+  // events, whatever the relay sends.
+  it('delete-all does not ban events of another author the relay returns, and records them', async () => {
+    mockPaginatedRelay([
+      { id: 'mine', kind: 1, content: '', tags: [], created_at: 2 },
+      { id: 'theirs', kind: 1, content: '', tags: [], created_at: 1, pubkey: 'b'.repeat(64) },
+    ]);
+    vi.mocked(banEvent).mockClear();
+
+    const result = await runBulkModeration(mockEnv, 'a'.repeat(64), 'delete-all', 'r');
+
+    expect(vi.mocked(banEvent).mock.calls.map((c) => c[0])).toEqual(['mine']);
+    expect(result.eventsProcessed).toBe(1);
+    expect(result.failures).toContain(
+      `enumeration:${'a'.repeat(64)}:relay returned 1 event(s) outside the requested author or kind; ignored them`,
+    );
   });
 
   it('delete-all bans events from the relay (WS) and DELETEs media hashes from the REST API', async () => {
@@ -1579,6 +1598,18 @@ describe('handleBulkKindCounts', () => {
 
   it('defaults to a 20s budget, under the client\'s 30s request timeout', () => {
     expect(KIND_COUNT_BUDGET_MS).toBe(20_000);
+  });
+
+  it('does not count events of another author the relay returns', async () => {
+    mockPaginatedRelay([
+      { id: 'mine', kind: 1, content: '', tags: [], created_at: 2 },
+      { id: 'theirs', kind: 7, content: '', tags: [], created_at: 1, pubkey: 'b'.repeat(64) },
+    ]);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const res = await handleBulkKindCounts(PUBKEY, { RELAY_URL: 'wss://relay.test' }, {});
+
+    expect(await res.json()).toEqual({ counts: { 1: 1 }, complete: true });
   });
 
   it('counts every event by kind across pages and says the listing is complete', async () => {

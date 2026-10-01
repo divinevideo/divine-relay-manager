@@ -162,10 +162,13 @@ export async function runBulkModeration(
   if (action === 'delete-all') {
     // Events come from the relay (WebSocket, paginated) for the event IDs;
     // media hashes from the funnelcake REST API (dedup-correct, all videos).
-    const [{ events, complete }, mediaHashes] = await Promise.all([
+    const [{ events, complete, outOfScope }, mediaHashes] = await Promise.all([
       queryRelayEvents(pubkey, env),
       queryUserMediaHashes(pubkey, env),
     ]);
+    if (outOfScope > 0) {
+      result.failures.push(`enumeration:${pubkey}:relay returned ${outOfScope} event(s) outside the requested author or kind; ignored them`);
+    }
     if (!complete) {
       result.failures.push(`enumeration:${pubkey}:relay could not be fully paginated; actioned a partial set`);
     }
@@ -761,7 +764,7 @@ type RawRelayEvent = { id: string; pubkey?: string; kind: number; content?: stri
 export async function queryRelayEvents(
   pubkey: string,
   env: Pick<BulkModerateEnv, 'RELAY_URL'>,
-): Promise<{ events: RelayEventSummary[]; complete: boolean }> {
+): Promise<{ events: RelayEventSummary[]; complete: boolean; outOfScope: number }> {
   return collectRelayEvents(pubkey, env, (event) => ({
     id: event.id, kind: event.kind, content: event.content || '', tags: event.tags,
   }));
@@ -784,7 +787,9 @@ export async function countRelayEventKinds(
   // the delete look at the same events: one never counts what the other
   // can't reach.
   const until = Math.floor(Date.now() / 1000) + KIND_SWEEP_CEILING_MARGIN_S;
-  const { events: kinds, complete } = await collectRelayEvents(pubkey, env, (event) => event.kind, { budgetMs, until });
+  const { events: kinds, complete, outOfScope } = await collectRelayEvents(pubkey, env, (event) => event.kind, { budgetMs, until });
+  // Not counted; the response has no failure list, so note it in the log.
+  if (outOfScope > 0) console.warn(`[bulk-moderate] kind counts for ${pubkey}: relay returned ${outOfScope} event(s) of another author; not counted`);
   const counts: Record<string, number> = {};
   for (const kind of kinds) counts[kind] = (counts[kind] ?? 0) + 1;
   return { counts, complete };
@@ -812,7 +817,8 @@ export async function handleBulkKindCounts(
 
 // Pages through every event an author has (until cursoring, deduped by id) and
 // keeps `project(event)` for each. `complete` is false when the listing was cut
-// short (page bound, or a second too full to page past).
+// short (page bound, or a second too full to page past). An event of another
+// author is never kept, only counted in `outOfScope`, whatever the relay sends.
 //
 // `budgetMs`, when given, stops paging once that much time has passed and
 // reports the listing as incomplete. `until`, when given, caps the first page.
@@ -821,8 +827,8 @@ async function collectRelayEvents<T>(
   env: Pick<BulkModerateEnv, 'RELAY_URL'>,
   project: (event: RawRelayEvent) => T,
   opts: { budgetMs?: number; until?: number } = {},
-): Promise<{ events: T[]; complete: boolean }> {
-  type Result = { events: T[]; complete: boolean };
+): Promise<{ events: T[]; complete: boolean; outOfScope: number }> {
+  type Result = { events: T[]; complete: boolean; outOfScope: number };
   const startedAt = Date.now();
   return new Promise((resolve, reject) => {
     try {
@@ -844,7 +850,8 @@ async function collectRelayEvents<T>(
         ws.close();
         (fn as (value: Result | Error) => void)(value);
       };
-      const done = () => finish(resolve, { events: Array.from(byId.values()), complete: !incomplete });
+      let outOfScope = 0;        // events of another author the relay returned; never kept
+      const done = () => finish(resolve, { events: Array.from(byId.values()), complete: !incomplete, outOfScope });
 
       const armTimeout = () => {
         clearTimeout(timeout);
@@ -893,7 +900,11 @@ async function collectRelayEvents<T>(
           if (data[0] === 'EVENT' && data[1] === currentSub) {
             const event = data[2] as RawRelayEvent;
             pageEvents += 1;
-            if (!byId.has(event.id)) {
+            // Still counts toward the page's size and timestamps (the relay's
+            // pagination), but is never kept for a caller to ban or count.
+            if (event.pubkey !== pubkey) {
+              outOfScope += 1;
+            } else if (!byId.has(event.id)) {
               byId.set(event.id, project(event));
             }
             if (typeof event.created_at === 'number' && event.created_at < pageOldest) pageOldest = event.created_at;
