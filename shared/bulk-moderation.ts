@@ -39,8 +39,28 @@ export type BulkJobPhase = 'events' | 'media';
 //   - mediaPage: 0-based page index for the media phase, incremented each chunk.
 //     Bounds the media phase on PAGES FETCHED (not items moderated), so a cursor
 //     that advances forever while moderation fails still terminates. Absent = 0.
-export interface BulkJobMessage {
-  jobId: string;
+//   - jobId / kindJobId: the bulk_jobs row. A delete-kind message carries it as
+//     kindJobId and never as jobId. A consumer from before delete-kind looks the
+//     job up by msg.jobId; with none, its D1 bind throws inside its try before
+//     any relay or media call, and it acks the message having done nothing. So a
+//     worker rollback while a delete-kind job drains cannot run it as a whole-
+//     account job. Every other action keeps jobId, the shape already in queues.
+export type BulkJobMessage = BulkJobMessageFields & (
+  | { jobId: string; kindJobId?: never }
+  | { kindJobId: string; jobId?: never }
+);
+
+// The bulk_jobs id a message refers to, from the field its action uses.
+export function bulkJobIdOf(msg: BulkJobMessage): string | undefined {
+  return msg.action === 'delete-kind' ? msg.kindJobId : msg.jobId;
+}
+
+// The id field for a message of this action (see BulkJobMessage).
+export function bulkJobIdField(action: BulkAction, jobId: string): { jobId: string } | { kindJobId: string } {
+  return action === 'delete-kind' ? { kindJobId: jobId } : { jobId };
+}
+
+interface BulkJobMessageFields {
   pubkey: string;
   action: BulkAction;
   reason?: string;

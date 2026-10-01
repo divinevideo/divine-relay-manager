@@ -724,7 +724,7 @@ describe('kind-scoped delete job', () => {
     expect(res.status).toBe(200);
     const { jobId } = await res.json() as BulkEnqueueResponse;
     expect(jobDb.rows.get(jobId)?.kind).toBe(34236);
-    expect(sent[0]).toMatchObject({ jobId, action: 'delete-kind', kind: 34236 });
+    expect(sent[0]).toMatchObject({ kindJobId: jobId, action: 'delete-kind', kind: 34236 });
   });
 
   it('enqueue accepts kind 0', async () => {
@@ -780,7 +780,7 @@ describe('kind-scoped delete job', () => {
     const jobId = 'job-kindless';
     jobDb.rows.set(jobId, { job_id: jobId, pubkey: PUBKEY, action: 'delete-kind', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, version: 0, created_at: 't', updated_at: 't', kind: 1 });
 
-    await drain({ jobId, pubkey: PUBKEY, action: 'delete-kind', version: 0 });
+    await drain({ kindJobId: jobId, pubkey: PUBKEY, action: 'delete-kind', version: 0 });
 
     expect(vi.mocked(banEvent)).not.toHaveBeenCalled();
     const row = jobDb.rows.get(jobId)!;
@@ -792,7 +792,7 @@ describe('kind-scoped delete job', () => {
     const jobId = 'job-kind-media';
     jobDb.rows.set(jobId, { job_id: jobId, pubkey: PUBKEY, action: 'delete-kind', status: 'running', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, version: 0, created_at: 't', updated_at: 't', kind: 1 });
 
-    await drain({ jobId, pubkey: PUBKEY, action: 'delete-kind', kind: 1, phase: 'media', version: 0 });
+    await drain({ kindJobId: jobId, pubkey: PUBKEY, action: 'delete-kind', kind: 1, phase: 'media', version: 0 });
 
     const moderateFetch = (mockEnv.MODERATION_API as unknown as { fetch: ReturnType<typeof vi.fn> }).fetch;
     expect(moderateFetch).not.toHaveBeenCalled();
@@ -816,6 +816,69 @@ describe('kind-scoped delete job', () => {
     expect(row.events_processed).toBe(60);        // every kind
     expect(row.media_processed).toBe(1);          // media phase still runs
     expect(vi.mocked(syncZendeskAfterAction)).toHaveBeenCalledWith(mockEnv, 'delete_event', 'pubkey', PUBKEY, 'moderator-pubkey');
+  });
+
+  // A consumer from before delete-kind looks a job up by msg.jobId. delete-kind
+  // messages never carry one, so that lookup fails inside its try before any
+  // relay or media call. delete-all keeps today's shape for jobs already queued.
+  it('carries a delete-kind job id as kindJobId, never jobId, on every message', async () => {
+    mockPaginatedRelay(mixedEvents());
+    const res = await handleBulkModerateEnqueue(enqueueReq({ pubkey: PUBKEY, action: 'delete-kind', kind: 1 }), mockEnv, {});
+    const { jobId } = await res.json() as BulkEnqueueResponse;
+    const first = sent[0];
+
+    const { messages } = await drain(first);
+
+    expect(messages.length).toBeGreaterThan(0);
+    for (const m of [first, ...messages]) {
+      expect('jobId' in m).toBe(false);
+      expect(m.kindJobId).toBe(jobId);
+    }
+  });
+
+  it('keeps the jobId shape for delete-all on every message', async () => {
+    mockPaginatedRelay(mixedEvents());
+    const res = await handleBulkModerateEnqueue(enqueueReq({ pubkey: PUBKEY, action: 'delete-all' }), mockEnv, {});
+    const { jobId } = await res.json() as BulkEnqueueResponse;
+    const first = sent[0];
+
+    const { messages } = await drain(first);
+
+    expect(messages.some((m) => m.phase === 'media')).toBe(true);
+    for (const m of [first, ...messages]) {
+      expect('kindJobId' in m).toBe(false);
+      expect(m.jobId).toBe(jobId);
+    }
+  });
+
+  it('drains a delete-all job queued by the worker from before this change', async () => {
+    // Exactly what c190582's enqueue sends, against a row from its schema (no kind column).
+    mockPaginatedRelay(mixedEvents());
+    const jobId = 'pre-deploy-job';
+    jobDb.rows.set(jobId, { job_id: jobId, pubkey: PUBKEY, action: 'delete-all', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, version: 0, created_at: 't', updated_at: 't' });
+
+    await drain({ jobId, pubkey: PUBKEY, action: 'delete-all', reason: 'Bulk delete-all by moderator', version: 0 });
+
+    const row = jobDb.rows.get(jobId)!;
+    expect(row.status).toBe('done');
+    expect(row.events_processed).toBe(60);
+    expect(row.media_processed).toBe(1);
+  });
+
+  it('resumes a delete-all continuation queued by the worker from before this change', async () => {
+    mockPaginatedRelay(mixedEvents());
+    const jobId = 'pre-deploy-continuation';
+    jobDb.rows.set(jobId, { job_id: jobId, pubkey: PUBKEY, action: 'delete-all', status: 'running', events_processed: 20, media_processed: 0, failures: '[]', failures_dropped: 0, version: 1, created_at: 't', updated_at: 't' });
+
+    await drain({
+      jobId, pubkey: PUBKEY, action: 'delete-all', reason: 'Bulk delete-all by moderator',
+      phase: 'events', eventIds: ['note0', 'react1'], version: 1,
+    });
+
+    const row = jobDb.rows.get(jobId)!;
+    expect(row.status).toBe('done');
+    expect(vi.mocked(banEvent).mock.calls.map((c) => c[0])).toEqual(expect.arrayContaining(['note0', 'react1']));
+    expect(row.media_processed).toBe(1);
   });
 
   it('deletes only events of the kind, across pages, carrying the kind on every continuation', async () => {
@@ -846,7 +909,7 @@ describe('kind-scoped delete job', () => {
     const jobId = 'job-kind-pages';
     jobDb.rows.set(jobId, { job_id: jobId, pubkey: PUBKEY, action: 'delete-kind', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, version: 0, created_at: 't', updated_at: 't', kind: 1 });
 
-    await drain({ jobId, pubkey: PUBKEY, action: 'delete-kind', kind: 1, version: 0 }, 60);
+    await drain({ kindJobId: jobId, pubkey: PUBKEY, action: 'delete-kind', kind: 1, version: 0 }, 60);
 
     expect(filters.some((f) => typeof f.until === 'number')).toBe(true);
     expect(filters.every((f) => JSON.stringify(f.kinds) === '[1]')).toBe(true);
@@ -896,7 +959,7 @@ describe('kind-scoped delete job', () => {
     const jobId = 'job-kind-cut';
     jobDb.rows.set(jobId, { job_id: jobId, pubkey: PUBKEY, action: 'delete-kind', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, version: 0, created_at: 't', updated_at: 't', kind: 1 });
 
-    await drain({ jobId, pubkey: PUBKEY, action: 'delete-kind', kind: 1, version: 0 }, 30);
+    await drain({ kindJobId: jobId, pubkey: PUBKEY, action: 'delete-kind', kind: 1, version: 0 }, 30);
 
     const res = await handleBulkJobStatus(jobId, mockEnv, {});
     const job = await res.json() as BulkJob;

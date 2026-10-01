@@ -10,6 +10,8 @@ import {
   type BulkJobPhase,
   type BulkEnqueueResponse,
   type BulkKindCounts,
+  bulkJobIdOf,
+  bulkJobIdField,
 } from '../../shared/bulk-moderation';
 import { deriveFunnelcakeApiUrl } from './funnelcake-proxy';
 
@@ -344,7 +346,7 @@ export async function handleBulkModerateEnqueue(
 
   try {
     await env.BULK_QUEUE.send({
-      jobId, pubkey: body.pubkey, action, reason, version: 0,
+      ...bulkJobIdField(action, jobId), pubkey: body.pubkey, action, reason, version: 0,
       ...jobScope({
         kind,
         moderatorPubkey: body.moderatorPubkey as string | undefined,
@@ -408,10 +410,11 @@ function mergeFailures(
 export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv): Promise<void> {
   if (!env.DB) throw new Error('bulk_jobs storage (D1) is not bound');
   const db = env.DB;
+  const msgJobId = bulkJobIdOf(msg);
   let ownedVersion: number | undefined;
   try {
     await ensureBulkJobsTable(db);
-    const row = await db.prepare('SELECT * FROM bulk_jobs WHERE job_id = ?').bind(msg.jobId).first<BulkJobRow>();
+    const row = await db.prepare('SELECT * FROM bulk_jobs WHERE job_id = ?').bind(msgJobId).first<BulkJobRow>();
     if (!row) return;                                          // unknown job: nothing to do
     const job = rowToBulkJob(row);
     if (job.status === 'done' || job.status === 'failed') return; // idempotent: already terminal
@@ -425,7 +428,7 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
     // deliveries change zero rows and cannot repeat work or fork continuations.
     const claim = await db.prepare(
       `UPDATE bulk_jobs SET status = ?, updated_at = ?, version = version + 1 WHERE version = ? AND job_id = ? AND status IN ('pending','running')`
-    ).bind('running', new Date().toISOString(), expectedVersion, msg.jobId).run();
+    ).bind('running', new Date().toISOString(), expectedVersion, msgJobId).run();
     if (!claim.meta?.changes) return;
     ownedVersion = claimedVersion;
 
@@ -477,7 +480,7 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
       }
       if (remainingEventIds.length > 0) {
         next = {
-          jobId: msg.jobId,
+          ...bulkJobIdField(msg.action, row.job_id),
           pubkey: msg.pubkey,
           action: msg.action,
           reason,
@@ -502,9 +505,9 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
         if (job.eventsProcessed + ev.processed > 0) {
           await syncZendeskAfterAction(env, 'delete_event', 'pubkey', msg.pubkey, moderatorPubkey);
         }
-        next = { jobId: msg.jobId, pubkey: msg.pubkey, action: msg.action, reason, phase: 'media' };
+        next = { ...bulkJobIdField(msg.action, row.job_id), pubkey: msg.pubkey, action: msg.action, reason, phase: 'media' };
       } else {
-        next = { jobId: msg.jobId, pubkey: msg.pubkey, action: msg.action, reason, phase: 'events', cursor: String(page.nextUntil), ...scope };
+        next = { ...bulkJobIdField(msg.action, row.job_id), pubkey: msg.pubkey, action: msg.action, reason, phase: 'events', cursor: String(page.nextUntil), ...scope };
       }
     } else {
       // The media actions below would DELETE or un-restrict every video on the
@@ -533,7 +536,7 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
         if (mediaPage + 1 >= VIDEO_MAX_PAGES) {
           throw new Error(`Video enumeration exceeded ${VIDEO_MAX_PAGES} pages for ${msg.pubkey}; cursor is not terminating`);
         }
-        next = { jobId: msg.jobId, pubkey: msg.pubkey, action: msg.action, reason, phase: 'media', cursor: nextCursor, mediaPage: mediaPage + 1 };
+        next = { ...bulkJobIdField(msg.action, row.job_id), pubkey: msg.pubkey, action: msg.action, reason, phase: 'media', cursor: nextCursor, mediaPage: mediaPage + 1 };
       } else {
         next = null;
       }
@@ -556,7 +559,7 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
       merged.dropped,
       new Date().toISOString(),
       claimedVersion,
-      msg.jobId,
+      msgJobId,
     ).run();
 
     if (next && wrote.meta?.changes) await env.BULK_QUEUE!.send(next);
@@ -565,20 +568,20 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
       // Preserve per-item failures earlier chunks recorded (forensic detail on a
       // destructive path) and append the infra error, rather than clobbering them.
       // Guard on a non-terminal status so this can't resurrect a `done` job.
-      const cur = await db.prepare('SELECT failures, failures_dropped FROM bulk_jobs WHERE job_id = ?').bind(msg.jobId).first<{ failures: string; failures_dropped: number }>();
+      const cur = await db.prepare('SELECT failures, failures_dropped FROM bulk_jobs WHERE job_id = ?').bind(msgJobId).first<{ failures: string; failures_dropped: number }>();
       const merged = mergeFailures(
         cur ? parseFailuresList(cur.failures) : [],
         cur ? Number(cur.failures_dropped) || 0 : 0,
         [`job:${formatError(error)}`],
       );
       if (ownedVersion === undefined) {
-        console.error('[bulk-job] failed before claiming chunk', msg.jobId, error);
+        console.error('[bulk-job] failed before claiming chunk', msgJobId, error);
         return;
       }
       await db.prepare(`UPDATE bulk_jobs SET status = ?, failures = ?, failures_dropped = ?, updated_at = ? WHERE version = ? AND job_id = ? AND status = 'running'`)
-        .bind('failed', JSON.stringify(merged.list), merged.dropped, new Date().toISOString(), ownedVersion, msg.jobId).run();
+        .bind('failed', JSON.stringify(merged.list), merged.dropped, new Date().toISOString(), ownedVersion, msgJobId).run();
     } catch (writeErr) {
-      console.error('[bulk-job] failed to record terminal state for', msg.jobId, writeErr);
+      console.error('[bulk-job] failed to record terminal state for', msgJobId, writeErr);
     }
   }
 }
