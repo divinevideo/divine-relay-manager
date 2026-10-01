@@ -283,6 +283,31 @@ describe('UserActions', () => {
     expect(screen.getByRole('button', { name: /Suspend User/i })).toBeEnabled();
   });
 
+  // The bulk gate is "anything pending, or tracking lost": an account action
+  // in flight keeps the bulk buttons off too, not only a lost job.
+  it.each([
+    ['Suspend', false, () => api.suspendPubkey, (): void => {
+      fireEvent.click(screen.getByRole('button', { name: /^Suspend User/i }));
+    }],
+    ['Unban', true, () => api.unbanPubkey, (): void => {
+      fireEvent.click(screen.getByRole('button', { name: /Unban User/i }));
+    }],
+    ['Ban', false, () => api.banPubkey, (): void => {
+      fireEvent.click(screen.getByRole('button', { name: /Ban User/i }));
+      const dialog = screen.getByRole('alertdialog');
+      fireEvent.click(within(dialog).getByRole('button', { name: /Ban User/i }));
+    }],
+  ] as const)('keeps the bulk buttons off while %s is pending', async (_label, isBanned, call, act) => {
+    call().mockReturnValue(new Promise(() => {}));                    // never settles
+    renderWithProvider(<UserActions pubkey={PUBKEY} isBanned={isBanned} />);
+
+    act();
+
+    await waitFor(() => expect(call()).toHaveBeenCalled());
+    expect(screen.getByRole('button', { name: /Age Restrict All/i, hidden: true })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Delete All Content/i, hidden: true })).toBeDisabled();
+  });
+
   it('keeps Unban available while tracking is lost', async () => {
     api.getBulkJobStatus.mockRejectedValue(new Error('Network connection lost'));
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
