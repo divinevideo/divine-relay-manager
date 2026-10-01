@@ -261,18 +261,36 @@ describe('UserActions', () => {
     expect(onActionComplete).toHaveBeenCalledTimes(1);
   });
 
-  it('surfaces a persistent status-poll failure (worker unreachable) and re-enables the buttons', async () => {
+  // A failed status poll is a read that went unanswered, not a failed job: the
+  // job may still be running, so the buttons stay off until a check settles it.
+  it('reports a lost status poll as lost track, not failed, and keeps the buttons off', async () => {
     api.getBulkJobStatus.mockRejectedValue(new Error('Network connection lost'));
     renderWithProvider(<UserActions pubkey={PUBKEY} />);
 
     fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
 
-    await waitFor(() =>
-      expect(toast).toHaveBeenCalledWith(
-        expect.objectContaining({ title: 'Bulk action failed', variant: 'destructive' }),
-      ),
-    );
-    // Not stuck polling/disabled: the button returns to its idle label.
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({
+      title: 'Lost track of the bulk action',
+      description: 'It may still be running on the server. Wait a minute and check again before running it again.',
+    }));
+    expect(toast).not.toHaveBeenCalledWith(expect.objectContaining({ title: 'Bulk action failed' }));
+    expect(screen.getByText('Lost track of the bulk action')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Age Restrict All/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Delete All Content/i })).toBeDisabled();
+  });
+
+  it('"Check again" re-reads the job and settles it', async () => {
+    api.getBulkJobStatus.mockRejectedValueOnce(new Error('Network connection lost'));
+    api.getBulkJobStatus.mockResolvedValue(doneJob('age-restrict-all'));
+    const onActionComplete = vi.fn();
+    renderWithProvider(<UserActions pubkey={PUBKEY} onActionComplete={onActionComplete} />);
+    fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
+    const checkAgain = await screen.findByRole('button', { name: 'Check again' });
+
+    fireEvent.click(checkAgain);
+
+    await waitFor(() => expect(onActionComplete).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText('Lost track of the bulk action')).not.toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole('button', { name: /^Age Restrict All$/i })).toBeEnabled());
   });
 
