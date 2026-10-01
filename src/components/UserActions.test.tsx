@@ -277,6 +277,29 @@ describe('UserActions', () => {
     expect(screen.getByText('Lost track of the bulk action')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Age Restrict All/i })).toBeDisabled();
     expect(screen.getByRole('button', { name: /Delete All Content/i })).toBeDisabled();
+    // Only the bulk buttons: Ban is the severe-action escape hatch, and the
+    // account actions don't race a bulk job.
+    expect(screen.getByRole('button', { name: /Ban User/i })).toBeEnabled();
+    expect(screen.getByRole('button', { name: /Suspend User/i })).toBeEnabled();
+  });
+
+  it('keeps Unban available while tracking is lost', async () => {
+    api.getBulkJobStatus.mockRejectedValue(new Error('Network connection lost'));
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const tree = (isBanned: boolean) => (
+      <QueryClientProvider client={qc}>
+        <TooltipProvider><UserActions pubkey={PUBKEY} isBanned={isBanned} /></TooltipProvider>
+      </QueryClientProvider>
+    );
+    const { rerender } = render(tree(false));
+    fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
+    await screen.findByText('Lost track of the bulk action');
+
+    // The account is banned meanwhile (same mount, same lost job).
+    rerender(tree(true));
+
+    expect(screen.getByText('Lost track of the bulk action')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Unban User/i })).toBeEnabled();
   });
 
   it('"Check again" re-reads the job and settles it', async () => {

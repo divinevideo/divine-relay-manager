@@ -275,10 +275,13 @@ export function UserActions({
     },
   });
 
-  // Lost tracking keeps the buttons off like a running job: a second bulk job
-  // could start under one that is still going.
   const anyPending = suspendUserMutation.isPending || unsuspendUserMutation.isPending ||
-    banUserMutation.isPending || unbanUserMutation.isPending || bulkJob.isRunning || bulkJob.trackingLost;
+    banUserMutation.isPending || unbanUserMutation.isPending || bulkJob.isRunning;
+  // Lost tracking keeps only the bulk buttons (and Delete All Content's confirm,
+  // which their disabled trigger can't open) off: a second bulk job could start
+  // under one that is still going. Ban, Suspend and Unban stay on their usual
+  // rule; Ban is the severe-action escape hatch.
+  const bulkBlocked = anyPending || bulkJob.trackingLost;
 
   // A default-parameter value applies to `undefined`, not to `null`, so a caller
   // that passes an explicit null keeps it and lands here.
@@ -374,7 +377,7 @@ export function UserActions({
           <Tooltip>
             <TooltipTrigger asChild>
               <Button variant="outline" className="border-orange-500 text-orange-600 hover:bg-orange-50"
-                onClick={() => { bulkModeratorRef.current = getModeratorPubkey(); bulkJob.start('age-restrict-all'); }} disabled={anyPending}>
+                onClick={() => { bulkModeratorRef.current = getModeratorPubkey(); bulkJob.start('age-restrict-all'); }} disabled={bulkBlocked}>
                 <ShieldAlert className="h-4 w-4 mr-1" />
                 {bulkJob.runningAction === 'age-restrict-all' ? 'Restricting...' : 'Age Restrict All'}
               </Button>
@@ -384,7 +387,7 @@ export function UserActions({
 
           <ConfirmDialog
             trigger={
-              <Button variant="destructive" disabled={anyPending}>
+              <Button variant="destructive" disabled={bulkBlocked}>
                 <Trash2 className="h-4 w-4 mr-1" />
                 {bulkJob.runningAction === 'delete-all' ? 'Deleting...' : 'Delete All Content'}
               </Button>
