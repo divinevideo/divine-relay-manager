@@ -126,3 +126,80 @@ export interface BulkKindCounts {
 // (KIND_COUNT_BUDGET_MS) must finish inside it, or the dialog gets a timeout
 // instead of a lower bound it can show.
 export const KIND_COUNTS_REQUEST_TIMEOUT_MS = 30_000;
+
+// A job's `failures` are strings the worker writes and the by-kind dialog reads
+// back. Both sides build and parse them only through these, so a reworded
+// message can't silently stop the other side from recognising it:
+//   event:<event id>:<error>       one event that could not be deleted
+//   enumeration:<pubkey>:<warning> something about listing the account
+//   job:<reason>                   why the job stopped
+//   +<N> more                      N more failures past the stored cap
+// Event ids and pubkeys are hex, so the first colon after one ends it; an error
+// or warning may contain colons of its own.
+
+const OVERFLOW_MARKER = /^\+(\d+) more$/;
+
+export function formatOverflowMarker(dropped: number): string {
+  return `+${dropped} more`;
+}
+
+// The count an overflow marker stands for, or null for any other string.
+export function parseOverflowMarker(failure: string): number | null {
+  const match = OVERFLOW_MARKER.exec(failure);
+  return match ? Number(match[1]) : null;
+}
+
+export function eventFailure(eventId: string, error: string): string {
+  return `event:${eventId}:${error}`;
+}
+
+export function enumerationWarning(pubkey: string, warning: string): string {
+  return `enumeration:${pubkey}:${warning}`;
+}
+
+export function jobFailure(reason: string): string {
+  return `job:${reason}`;
+}
+
+// Written by the status endpoint's stale-job heal.
+export const ABANDONED_REASON = 'abandoned (no terminal update; worker likely evicted mid-run)';
+
+export type ParsedFailure =
+  | { type: 'overflow'; count: number }
+  | { type: 'event'; id: string; error: string }
+  | { type: 'enumeration'; pubkey: string; warning: string }
+  | { type: 'job'; reason: string; abandoned: boolean }
+  | { type: 'other'; text: string };
+
+export function parseFailure(failure: string): ParsedFailure {
+  const count = parseOverflowMarker(failure);
+  if (count !== null) return { type: 'overflow', count };
+  const job = /^job:(.*)$/s.exec(failure);
+  if (job) return { type: 'job', reason: job[1], abandoned: job[1].startsWith('abandoned') };
+  const enumeration = /^enumeration:([^:]+):(.*)$/s.exec(failure);
+  if (enumeration) return { type: 'enumeration', pubkey: enumeration[1], warning: enumeration[2] };
+  const event = /^event:([^:]+):(.*)$/s.exec(failure);
+  if (event) return { type: 'event', id: event[1], error: event[2] };
+  return { type: 'other', text: failure };
+}
+
+// The two warnings that say a listing may have missed events, as opposed to
+// the out-of-scope and sweep-bound ones. A later listing that finds nothing can
+// disprove them; isListingGapWarning recognises them for that.
+const SAME_SECOND = 'events share one timestamp';
+const UNPAGINATED = 'relay could not be fully paginated';
+
+export function sameSecondGapWarning(pubkey: string, pageSize: number): string {
+  return enumerationWarning(pubkey, `more than ${pageSize} ${SAME_SECOND}; some at that second may be unprocessed`);
+}
+
+// `consequence` says what the caller did with the partial listing.
+export function unpaginatedGapWarning(pubkey: string, consequence: string): string {
+  return enumerationWarning(pubkey, `${UNPAGINATED}; ${consequence}`);
+}
+
+export function isListingGapWarning(failure: string): boolean {
+  const parsed = parseFailure(failure);
+  if (parsed.type !== 'enumeration') return false;
+  return new RegExp(`^more than \\d+ ${SAME_SECOND}`).test(parsed.warning) || parsed.warning.startsWith(UNPAGINATED);
+}

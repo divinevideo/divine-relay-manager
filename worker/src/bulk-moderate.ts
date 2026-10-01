@@ -13,6 +13,15 @@ import {
   bulkJobIdOf,
   bulkJobIdField,
   isVersionedKind,
+  ABANDONED_REASON,
+  enumerationWarning,
+  eventFailure,
+  formatOverflowMarker,
+  isListingGapWarning,
+  jobFailure,
+  parseOverflowMarker,
+  sameSecondGapWarning,
+  unpaginatedGapWarning,
 } from '../../shared/bulk-moderation';
 import { deriveFunnelcakeApiUrl } from './funnelcake-proxy';
 
@@ -89,6 +98,11 @@ async function moderateMediaHashes(
   return { processed, failures };
 }
 
+// The relay sent events outside the requested author or kind; none were acted on.
+function outOfScopeWarning(pubkey: string, count: number): string {
+  return enumerationWarning(pubkey, `relay returned ${count} event(s) outside the requested author or kind; ignored them`);
+}
+
 // Who the per-event decision rows name. A job that carries neither falls back
 // to the worker's signing key and no report.
 interface DecisionAttribution {
@@ -131,7 +145,7 @@ async function deleteEvents(
       processed++;
       successfulEventIds.push(event.id);
     } catch (error) {
-      failures.push(`event:${event.id}:${formatError(error)}`);
+      failures.push(eventFailure(event.id, formatError(error)));
     }
   });
   // The decision rows name the requesting moderator when the job carries one;
@@ -172,12 +186,8 @@ export async function runBulkModeration(
       queryRelayEvents(pubkey, env),
       queryUserMediaHashes(pubkey, env),
     ]);
-    if (outOfScope > 0) {
-      result.failures.push(`enumeration:${pubkey}:relay returned ${outOfScope} event(s) outside the requested author or kind; ignored them`);
-    }
-    if (!complete) {
-      result.failures.push(`enumeration:${pubkey}:relay could not be fully paginated; actioned a partial set`);
-    }
+    if (outOfScope > 0) result.failures.push(outOfScopeWarning(pubkey, outOfScope));
+    if (!complete) result.failures.push(unpaginatedGapWarning(pubkey, 'actioned a partial set'));
     const ev = await deleteEvents(env, events, reason, moderatorPubkey);
     result.eventsProcessed = ev.processed;
     result.failures.push(...ev.failures);
@@ -259,14 +269,14 @@ interface BulkJobRow {
 // marker); the overflow count lives in its own `failures_dropped` column so it
 // survives across chunks. Render the "+N more" marker only for display/the API.
 function failuresForDisplay(list: string[], dropped: number): string[] {
-  return dropped > 0 ? list.concat(`+${dropped} more`) : list;
+  return dropped > 0 ? list.concat(formatOverflowMarker(dropped)) : list;
 }
 
 function parseFailuresList(raw: string): string[] {
   try {
     const parsed = JSON.parse(raw) as string[];
     // Defensive: never let a previously-stored synthetic marker re-enter the list.
-    return parsed.filter((f) => !/^\+\d+ more$/.test(f));
+    return parsed.filter((f) => parseOverflowMarker(f) === null);
   } catch {
     return [];
   }
@@ -426,7 +436,7 @@ const MAX_STORED_FAILURES = 50;
 function mergeFailures(
   existing: string[], existingDropped: number, added: string[],
 ): { list: string[]; dropped: number } {
-  const base = existing.filter((f) => !/^\+\d+ more$/.test(f));
+  const base = existing.filter((f) => parseOverflowMarker(f) === null);
   // Store each failure once. A by-kind job's sweeps meet the same failing ban
   // (or the same saturated second, or the same out-of-scope events) on every
   // pass; repeats would overstate the count and crowd distinct failures out of
@@ -443,12 +453,6 @@ function mergeFailures(
     list: merged.slice(0, MAX_STORED_FAILURES),
     dropped: existingDropped + (merged.length - MAX_STORED_FAILURES),
   };
-}
-
-// The two enumeration warnings that say a listing may have missed events, as
-// opposed to the out-of-scope and sweep-bound ones.
-function isListingGapWarning(failure: string): boolean {
-  return /^enumeration:[^:]+:(more than \d+ events share one timestamp|relay could not be fully paginated)/.test(failure);
 }
 
 // Merge in the reason a job stopped. It must be visible even when the list is
@@ -572,16 +576,14 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
       const sweep = isKindJob ? { pass, passDeleted } : {};
       eventsDelta = ev.processed;
       chunkFailures.push(...ev.failures);
-      if (page.outOfScope > 0) {
-        chunkFailures.push(`enumeration:${msg.pubkey}:relay returned ${page.outOfScope} event(s) outside the requested author or kind; ignored them`);
-      }
+      if (page.outOfScope > 0) chunkFailures.push(outOfScopeWarning(msg.pubkey, page.outOfScope));
       if (page.saturated) {
         // More than EVENT_CHUNK_SIZE events share one timestamp; an `until` cursor
         // can't subdivide a second, so some at it may be unprocessed. Surface it.
-        chunkFailures.push(`enumeration:${msg.pubkey}:more than ${EVENT_CHUNK_SIZE} events share one timestamp; some at that second may be unprocessed`);
+        chunkFailures.push(sameSecondGapWarning(msg.pubkey, EVENT_CHUNK_SIZE));
       }
       if (!page.complete && page.nextUntil === null) {
-        chunkFailures.push(`enumeration:${msg.pubkey}:relay could not be fully paginated; some events may be unprocessed`);
+        chunkFailures.push(unpaginatedGapWarning(msg.pubkey, 'some events may be unprocessed'));
       }
       if (remainingEventIds.length > 0) {
         next = {
@@ -620,7 +622,7 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
           disproveListingGaps = !msg.cursor && !msg.eventIds && page.events.length === 0
             && page.outOfScope === 0;
         } else if (pass + 1 >= MAX_KIND_SWEEP_PASSES) {
-          chunkFailures.push(`enumeration:${msg.pubkey}:still finding events after ${MAX_KIND_SWEEP_PASSES} passes; older versions may remain`);
+          chunkFailures.push(enumerationWarning(msg.pubkey, `still finding events after ${MAX_KIND_SWEEP_PASSES} passes; older versions may remain`));
           next = null;
         } else {
           next = {
@@ -705,7 +707,7 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
       const merged = mergeWithReason(
         cur ? parseFailuresList(cur.failures) : [],
         cur ? Number(cur.failures_dropped) || 0 : 0,
-        `job:${formatError(error)}`,
+        jobFailure(formatError(error)),
       );
       if (ownedVersion === undefined) {
         console.error('[bulk-job] failed before claiming chunk', msgJobId, error);
@@ -754,7 +756,7 @@ export async function handleBulkJobStatus(
     // (don't overwrite them), and preserve the cumulative dropped count.
     const merged = mergeWithReason(
       parseFailuresList(row.failures), Number(row.failures_dropped) || 0,
-      'job:abandoned (no terminal update; worker likely evicted mid-run)',
+      jobFailure(ABANDONED_REASON),
     );
     job.status = 'failed';
     job.failures = failuresForDisplay(merged.list, merged.dropped);

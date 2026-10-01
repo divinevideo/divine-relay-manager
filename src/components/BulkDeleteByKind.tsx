@@ -9,7 +9,7 @@ import { useAgeReviewGuardRedirect } from "@/hooks/useAgeReviewGuardRedirect";
 import { useToast } from "@/hooks/useToast";
 import { getKindName } from "@/lib/kindNames";
 import { ApiError, type BulkJob } from "@/lib/adminApi";
-import { isVersionedKind } from "../../shared/bulk-moderation";
+import { isVersionedKind, parseFailure, parseOverflowMarker } from "../../shared/bulk-moderation";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
@@ -87,25 +87,25 @@ interface ExpectedCount {
 // Each stored failure is one problem, except the "+N more" overflow marker,
 // which stands for N of them.
 function countIssues(failures: string[]): number {
-  return failures.reduce((n, failure) => {
-    const more = /^\+(\d+) more$/.exec(failure);
-    return n + (more ? Number(more[1]) : 1);
-  }, 0);
+  return failures.reduce((n, failure) => n + (parseOverflowMarker(failure) ?? 1), 0);
 }
 
 // The worker's failure strings in words a moderator can act on. Event ids stay
 // whole: a shortened id can't be looked up.
 function describeFailure(failure: string): string {
-  if (failure.startsWith("job:abandoned")) return "the server stopped reporting progress";
-  // Any other reason the job stopped, without its prefix.
-  const jobReason = /^job:(.*)$/s.exec(failure);
-  if (jobReason) return jobReason[1];
-  // The account is already the dialog's subject, so drop its pubkey prefix.
-  const enumeration = /^enumeration:[^:]+:(.*)$/s.exec(failure);
-  if (enumeration) return enumeration[1];
-  const event = /^event:([^:]+):(.*)$/s.exec(failure);
-  if (event) return `event ${event[1]} failed: ${event[2]}`;
-  return failure;
+  const parsed = parseFailure(failure);
+  switch (parsed.type) {
+    case "job":
+      // An abandoned job in words; any other reason the job stopped, as given.
+      return parsed.abandoned ? "the server stopped reporting progress" : parsed.reason;
+    case "enumeration":
+      // The account is already the dialog's subject, so drop its pubkey.
+      return parsed.warning;
+    case "event":
+      return `event ${parsed.id} failed: ${parsed.error}`;
+    default:
+      return failure;
+  }
 }
 
 // " of Y" (or " of at least Y") after a deleted count, or nothing where it would
