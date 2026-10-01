@@ -91,6 +91,75 @@ describe('BulkDeleteByKind', () => {
     expect(screen.getByRole('button', { name: 'Delete 0 Events' })).toBeDisabled();
   });
 
+  // The relay hides every event of a banned or suspended account from REQ, so
+  // its listing reads as empty. That must never look like "no events".
+  it.each([
+    ['banned', { isBanned: true, isSuspended: false }],
+    ['suspended', { isBanned: false, isSuspended: true }],
+  ])('for a %s account, says its content cannot be listed and disables Delete', async (_label, status) => {
+    renderDialog(status);
+    fireEvent.click(screen.getByRole('button', { name: /Bulk Delete by Kind/i }));
+
+    expect(await screen.findByText(
+      /The relay doesn't list a banned or suspended account's content, so it can't be counted or deleted here/,
+    )).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Delete/ })).toBeDisabled();
+    expect(screen.queryByText(/Found/)).not.toBeInTheDocument();
+    expect(api.getBulkKindCounts).not.toHaveBeenCalled();
+  });
+
+  it('disables Delete when the account turns out to be banned after counts loaded', async () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const { rerender } = render(
+      <QueryClientProvider client={qc}><BulkDeleteByKind pubkey={PUBKEY} isBanned={null} /></QueryClientProvider>,
+    );
+    await openAndPickReactions();
+    expect(screen.getByRole('button', { name: 'Delete 3 Events' })).toBeEnabled();
+
+    rerender(<QueryClientProvider client={qc}><BulkDeleteByKind pubkey={PUBKEY} isBanned={true} /></QueryClientProvider>);
+
+    expect(screen.getByText(/can't be counted or deleted here/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Delete/ })).toBeDisabled();
+  });
+
+  it('does not present zero as a confirmed absence when the account status is unknown', async () => {
+    renderDialog({ isBanned: null, isSuspended: null });
+    fireEvent.click(screen.getByRole('button', { name: /Bulk Delete by Kind/i }));
+    await screen.findByRole('button', { name: /Reaction \(3\)/ });
+
+    // Default kind (34235) has none in a complete listing.
+    expect(screen.getByText(/No .* events found/)).toHaveTextContent(
+      "No Video (Addressable) events found. If this account is banned or suspended, its content isn't listed.",
+    );
+    expect(screen.queryByText(/Found 0/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Delete 0 Events' })).toBeDisabled();
+  });
+
+  it('treats a status it was not given as unknown', async () => {
+    renderDialog();
+    fireEvent.click(screen.getByRole('button', { name: /Bulk Delete by Kind/i }));
+    await screen.findByRole('button', { name: /Reaction \(3\)/ });
+
+    expect(screen.getByText(/If this account is banned or suspended, its content isn't listed/)).toBeInTheDocument();
+  });
+
+  it('keeps the caveat when only one of the two statuses is known', async () => {
+    renderDialog({ isBanned: false, isSuspended: null });
+    fireEvent.click(screen.getByRole('button', { name: /Bulk Delete by Kind/i }));
+    await screen.findByRole('button', { name: /Reaction \(3\)/ });
+
+    expect(screen.getByText(/If this account is banned or suspended, its content isn't listed/)).toBeInTheDocument();
+  });
+
+  it('reports zero plainly for an account known to be neither banned nor suspended', async () => {
+    renderDialog({ isBanned: false, isSuspended: false });
+    fireEvent.click(screen.getByRole('button', { name: /Bulk Delete by Kind/i }));
+    await screen.findByRole('button', { name: /Reaction \(3\)/ });
+
+    expect(screen.getByText(/No .* events found/)).toHaveTextContent('No Video (Addressable) events found.');
+    expect(screen.queryByText(/banned or suspended/)).not.toBeInTheDocument();
+  });
+
   it('says so and keeps Delete disabled when the count fails', async () => {
     api.getBulkKindCounts.mockRejectedValue(new Error('relay down'));
     renderDialog();

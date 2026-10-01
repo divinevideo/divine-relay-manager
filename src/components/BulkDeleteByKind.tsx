@@ -58,6 +58,11 @@ interface BulkDeleteByKindProps {
   /** Snapshot the acting moderator's pubkey, resolved once at job start so a
    *  logout/switch mid-delete can't retarget the attribution (#178). */
   getModeratorPubkey?: () => Promise<string | undefined>;
+  /** Account status where the caller already has it: true, false, or
+   *  null/undefined when unknown. The relay hides a banned or suspended
+   *  account's events from every listing, so its counts read as zero. */
+  isBanned?: boolean | null;
+  isSuspended?: boolean | null;
 }
 
 // The count the moderator confirmed against when the job started.
@@ -99,7 +104,7 @@ function describeOutcome(job: BulkJob, expected?: ExpectedCount) {
   };
 }
 
-export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPubkey }: BulkDeleteByKindProps) {
+export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPubkey, isBanned, isSuspended }: BulkDeleteByKindProps) {
   const api = useAdminApi();
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -112,12 +117,17 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
   // so a second click in that gap cannot start a second job.
   const [starting, setStarting] = useState(false);
   const expectedRef = useRef<ExpectedCount>();
+  // Funnelcake drops banned and suspended authors from every REQ, and the
+  // worker lists anonymously, so for those accounts there is nothing to count or
+  // delete here. Only a known-active account's zero is a real absence.
+  const contentHidden = isBanned === true || isSuspended === true;
+  const statusKnownActive = isBanned === false && isSuspended === false;
 
   // Exact per-kind counts from the worker's full paged listing of the account.
   const countsQuery = useQuery({
     queryKey: ["bulk-kind-counts", pubkey],
     queryFn: () => api.getBulkKindCounts(pubkey),
-    enabled: !!pubkey && dialogOpen,
+    enabled: !!pubkey && dialogOpen && !contentHidden,
     staleTime: 30_000,
   });
 
@@ -150,7 +160,7 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
   const isRunning = bulkJob.isRunning || starting;
   // A cut-short listing may have missed events of this kind, so it does not
   // rule a delete out even at zero.
-  const canDelete = !!counts && (selectedCount! > 0 || !counts.complete) && !isRunning;
+  const canDelete = !!counts && (selectedCount! > 0 || !counts.complete) && !isRunning && !contentHidden;
   const kindName = getKindName(parseInt(selectedKind) || 0);
   const job = bulkJob.job;
   const outcome = job && isTerminal(job.status) && job.kind !== undefined
@@ -226,7 +236,11 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
               </div>
 
               <div className="p-3 bg-muted rounded-lg space-y-1">
-                {countsQuery.isError ? (
+                {contentHidden ? (
+                  <p className="text-sm">
+                    The relay doesn't list a banned or suspended account's content, so it can't be counted or deleted here.
+                  </p>
+                ) : countsQuery.isError ? (
                   <p className="text-sm text-destructive">
                     Could not count this account's events
                     {countsQuery.error instanceof Error ? `: ${countsQuery.error.message}` : ""}.
@@ -239,9 +253,16 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
                   </div>
                 ) : (
                   <>
-                    <p className="text-sm">
-                      Found <strong>{counts.complete ? selectedCount : `at least ${selectedCount}`}</strong> {kindName} events to delete
-                    </p>
+                    {counts.complete && selectedCount === 0 ? (
+                      <p className="text-sm">
+                        No {kindName} events found.
+                        {!statusKnownActive && " If this account is banned or suspended, its content isn't listed."}
+                      </p>
+                    ) : (
+                      <p className="text-sm">
+                        Found <strong>{counts.complete ? selectedCount : `at least ${selectedCount}`}</strong> {kindName} events to delete
+                      </p>
+                    )}
                     {!counts.complete && (
                       <p className="text-xs text-muted-foreground">
                         This account's events could not be listed in full, so these counts are a lower bound.

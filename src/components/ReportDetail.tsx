@@ -1352,6 +1352,8 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                         pubkey={context.reportedUser.pubkey}
                         reportId={report?.id}
                         getModeratorPubkey={getModeratorPubkey}
+                        isBanned={isUserBanned}
+                        isSuspended={moderationStatus.isUserSuspended}
                         onComplete={handleActionComplete}
                       />
                     </div>
