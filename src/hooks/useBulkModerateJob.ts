@@ -8,7 +8,7 @@ import type { BulkAction, BulkJob, BulkModerateOptions } from '@/lib/adminApi';
 
 const POLL_INTERVAL_MS = 1500;
 
-const isTerminal = (status?: string): boolean => status === 'done' || status === 'failed';
+export const isTerminal = (status?: string): boolean => status === 'done' || status === 'failed';
 
 // Optional per-job settings. `reason` defaults to "Bulk <action> by moderator";
 // the rest scopes or attributes the job (see BulkModerateOptions).

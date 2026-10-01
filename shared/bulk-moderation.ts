@@ -121,3 +121,8 @@ export interface BulkKindCounts {
   counts: Record<string, number>;
   complete: boolean;
 }
+
+// How long the dialog waits for the kind counts. The worker's listing budget
+// (KIND_COUNT_BUDGET_MS) must finish inside it, or the dialog gets a timeout
+// instead of a lower bound it can show.
+export const KIND_COUNTS_REQUEST_TIMEOUT_MS = 30_000;

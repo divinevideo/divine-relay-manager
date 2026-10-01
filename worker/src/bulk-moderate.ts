@@ -40,6 +40,12 @@ const MAX_KIND_SWEEP_PASSES = 20;
 // an account that keeps posting force every sweep non-empty.
 const KIND_SWEEP_CEILING_MARGIN_S = 300;
 
+// The ceiling a delete-kind job (or the kind count, which must see the same
+// events) takes from now.
+function kindSweepCeiling(): number {
+  return Math.floor(Date.now() / 1000) + KIND_SWEEP_CEILING_MARGIN_S;
+}
+
 export interface BulkModerateEnv extends Nip86Env, ZendeskSyncEnv {
   DB?: D1Database;
   MODERATION_API?: Fetcher;
@@ -377,7 +383,7 @@ export async function handleBulkModerateEnqueue(
       ...bulkJobIdField(action, jobId), pubkey: body.pubkey, action, reason, version: 0,
       ...jobScope({
         kind,
-        sweepUntil: action === 'delete-kind' ? Math.floor(Date.now() / 1000) + KIND_SWEEP_CEILING_MARGIN_S : undefined,
+        sweepUntil: action === 'delete-kind' ? kindSweepCeiling() : undefined,
         moderatorPubkey: body.moderatorPubkey as string | undefined,
         reportId: body.reportId as string | undefined,
       }),
@@ -499,7 +505,7 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
     // without one gets one computed now, and it is carried on every continuation
     // like an enqueue-time ceiling, so later sweeps don't re-read "now".
     const ceiling = msg.action === 'delete-kind'
-      ? msg.sweepUntil ?? Math.floor(Date.now() / 1000) + KIND_SWEEP_CEILING_MARGIN_S
+      ? msg.sweepUntil ?? kindSweepCeiling()
       : undefined;
     const scope = jobScope({ ...msg, sweepUntil: ceiling });
 
@@ -771,8 +777,9 @@ export async function queryRelayEvents(
 }
 
 // Time budget for the kind-counts listing. The dialog's request gives up after
-// 30s, and a large account can need more pages than that; stopping here returns
-// a lower bound ("at least N") instead of a timeout the dialog can't use.
+// KIND_COUNTS_REQUEST_TIMEOUT_MS, and a large account can need more pages than
+// that; stopping here returns a lower bound ("at least N") instead of a timeout
+// the dialog can't use.
 export const KIND_COUNT_BUDGET_MS = 20_000;
 
 // Per-kind counts for one author, from the same paged listing the synchronous
@@ -787,7 +794,7 @@ export async function countRelayEventKinds(
   // Listed under the same ceiling a delete-kind job would use, so the count and
   // the delete look at the same events: one never counts what the other
   // can't reach.
-  const until = Math.floor(Date.now() / 1000) + KIND_SWEEP_CEILING_MARGIN_S;
+  const until = kindSweepCeiling();
   const { events: kinds, complete, outOfScope } = await collectRelayEvents(pubkey, env, (event) => event.kind, { budgetMs, until });
   // Not counted; the response has no failure list, so note it in the log.
   if (outOfScope > 0) console.warn(`[bulk-moderate] kind counts for ${pubkey}: relay returned ${outOfScope} event(s) of another author; not counted`);

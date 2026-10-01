@@ -4,7 +4,7 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAdminApi } from "@/hooks/useAdminApi";
-import { useBulkModerateJob } from "@/hooks/useBulkModerateJob";
+import { isTerminal, useBulkModerateJob } from "@/hooks/useBulkModerateJob";
 import { useAgeReviewGuardRedirect } from "@/hooks/useAgeReviewGuardRedirect";
 import { useToast } from "@/hooks/useToast";
 import { getKindName } from "@/lib/kindNames";
@@ -53,6 +53,7 @@ const OTHER_KINDS = [
 
 const HIDDEN_ACCOUNT = "The relay doesn't list a banned or suspended account's content, so it can't be counted or deleted here.";
 const RERUN_SAFE = "Running it again is safe; it only picks up what's left.";
+// Differs from UserActions' approved lost-track copy on purpose: this one names the dialog.
 const LOST_TRACK_TITLE = "Lost track of the bulk delete";
 const LOST_TRACK_BODY = "It may still be running on the server. Wait a minute and reopen this dialog to check before running it again.";
 // A failure detail can carry a full 64-hex event id, which has no break
@@ -82,8 +83,6 @@ interface ExpectedCount {
   complete: boolean;
   kind: number;
 }
-
-const isTerminal = (status?: string): boolean => status === "done" || status === "failed";
 
 // Each stored failure is one problem, except the "+N more" overflow marker,
 // which stands for N of them.

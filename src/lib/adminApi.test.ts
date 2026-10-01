@@ -53,6 +53,7 @@ import {
   type ModerationAction,
   type MediaStatusAction,
 } from './adminApi';
+import { KIND_COUNTS_REQUEST_TIMEOUT_MS } from '../../shared/bulk-moderation';
 
 // Mock fetch globally
 const mockFetch = vi.fn();
@@ -207,6 +208,8 @@ describe('adminApi', () => {
 
       expect(error).toBeInstanceOf(ApiError);
       expect((error as ApiError).code).toBe('timeout');
+      // The worker's count budget is checked against this same constant.
+      expect((error as ApiError).message).toContain(`after ${KIND_COUNTS_REQUEST_TIMEOUT_MS / 1000}s`);
     });
 
     it('a write (POST) timeout says the action may still have applied', async () => {

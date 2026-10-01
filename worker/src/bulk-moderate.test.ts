@@ -12,7 +12,7 @@ import {
   VIDEO_MAX_PAGES,
   type BulkModerateEnv,
 } from './bulk-moderate';
-import { isVersionedKind, type BulkJob, type BulkJobMessage, type BulkEnqueueResponse } from '../../shared/bulk-moderation';
+import { isVersionedKind, KIND_COUNTS_REQUEST_TIMEOUT_MS, type BulkJob, type BulkJobMessage, type BulkEnqueueResponse } from '../../shared/bulk-moderation';
 import { banEvent, getAdminPubkey } from './nip86';
 import { syncZendeskAfterAction } from './zendesk-sync';
 
@@ -1596,8 +1596,9 @@ describe('handleBulkKindCounts', () => {
     expect(await res.json()).toEqual({ counts: { 1: 1200 }, complete: true });
   });
 
-  it('defaults to a 20s budget, under the client\'s 30s request timeout', () => {
+  it('defaults to a 20s budget, under the client\'s request timeout', () => {
     expect(KIND_COUNT_BUDGET_MS).toBe(20_000);
+    expect(KIND_COUNT_BUDGET_MS).toBeLessThan(KIND_COUNTS_REQUEST_TIMEOUT_MS);
   });
 
   it('does not count events of another author the relay returns', async () => {

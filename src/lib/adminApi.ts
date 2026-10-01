@@ -11,6 +11,7 @@ import {
   type BulkJobStatus,
   type BulkEnqueueResponse,
   type BulkKindCounts,
+  KIND_COUNTS_REQUEST_TIMEOUT_MS,
 } from "../../shared/bulk-moderation";
 import { extractMediaHashes as extractSharedMediaHashes } from "../../shared/media-hashes";
 import type { AgeReviewCaseResponse } from "../../shared/age-review";
@@ -1530,7 +1531,10 @@ export async function getBulkJobStatus(apiUrl: string, jobId: string): Promise<B
 // Per-kind event counts for an account, from a full relay listing. When
 // `complete` is false the counts are a lower bound.
 export async function getBulkKindCounts(apiUrl: string, pubkey: string): Promise<BulkKindCounts> {
-  return apiRequest<BulkKindCounts>(apiUrl, `/api/bulk-moderate/kind-counts?pubkey=${encodeURIComponent(pubkey)}`, 'GET');
+  return apiRequest<BulkKindCounts>(
+    apiUrl, `/api/bulk-moderate/kind-counts?pubkey=${encodeURIComponent(pubkey)}`, 'GET', undefined,
+    { timeoutMs: KIND_COUNTS_REQUEST_TIMEOUT_MS },
+  );
 }
 
 // Delete media (convenience wrapper)

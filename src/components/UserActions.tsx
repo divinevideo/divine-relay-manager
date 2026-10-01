@@ -13,6 +13,7 @@ import { ConfirmDialog } from './ConfirmDialog';
 import { useNavigate } from 'react-router-dom';
 import { UserX, UserCheck, ShieldAlert, Trash2, Pause, Play, ArrowRight } from 'lucide-react';
 
+// Approved wording; BulkDeleteByKind keeps its own dialog-specific variant on purpose.
 const LOST_TRACK_TITLE = 'Lost track of the bulk action';
 const LOST_TRACK_BODY = 'It may still be running on the server. Wait a minute and check again before running it again.';
 
