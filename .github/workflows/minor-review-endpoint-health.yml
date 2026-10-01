@@ -7,10 +7,10 @@
 # found only by manually root-causing a mobile report). This check makes
 # that failure mode alert instead of hide.
 #
-# What it probes (the relay-manager workers, where these endpoints live --
-# NOT api.divine.video, see #108), on both production and staging:
+# What it probes on both Worker hosts and the canonical mobile API host:
 #   GET  /v1/account/moderation-status                      -> expect 401
 #   POST /v1/minor-review-cases/<id>/parent-contact         -> expect 401
+#   POST /v1/minor-review-cases/<id>/parent-consent         -> expect 401
 #
 # Why "401 + NIP-98 marker" is the healthy signal: the endpoints require
 # NIP-98 user auth and reject an unauthenticated probe with the worker's
@@ -25,9 +25,7 @@
 #   401 + marker -- healthy: endpoint routed, NIP-98 auth answering
 #   401 without marker -- generic admin fallback: the route did NOT match
 #          (removed/renamed/method drift). The #108-class failure.
-#   404 -- cannot happen unauth under /v1 on these hosts today (unmatched
-#          /v1 paths fall to the 401 fallback); will matter for the
-#          api.divine.video target (#173)
+#   404 -- canonical routing missed the Worker, or a route disappeared
 #   302 -- CF Access got applied to /v1 paths (devices would be locked out)
 #   200 -- auth layer removed/bypassed (worst case: unauthenticated reads)
 #   403 -- the NIP-98 handler's status contract changed (mobile clients
@@ -49,10 +47,6 @@
 # -- mobile devices must reach /v1, so this is by design. If the staging
 # probe starts seeing 302, someone extended the Access app over /v1 and
 # staging devices are locked out.
-#
-# TODO(#173): when the api.divine.video ingress route lands, add
-# https://api.divine.video as a third BASE_URL probe target so coverage
-# for pre-fix app installs is monitored too.
 #
 # Alerting -- know the limits:
 #   - A failed run turns red, and GitHub emails ONLY the user who last
@@ -147,9 +141,11 @@ jobs:
 
           for BASE_URL in \
             "https://api-relay-prod.divine.video" \
-            "https://api-relay-staging.divine.video"; do
+            "https://api-relay-staging.divine.video" \
+            "https://api.divine.video"; do
             probe GET  "/v1/account/moderation-status"
             probe POST "/v1/minor-review-cases/synthetic-check/parent-contact"
+            probe POST "/v1/minor-review-cases/synthetic-check/parent-consent"
           done
 
           if [ -n "$FAILURES" ]; then

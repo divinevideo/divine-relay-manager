@@ -69,6 +69,20 @@ function makeRelayRpcEnv(serviceApiToken: string | { get: () => Promise<string> 
 }
 
 describe('relay manager cors', () => {
+  it('routes parent-consent through NIP-98 and answers its preflight', async () => {
+    const url = 'https://api-relay-prod.divine.video/v1/minor-review-cases/synthetic-check/parent-consent';
+    const preflight = await worker.fetch(new Request(url, {
+      method: 'OPTIONS',
+      headers: { Origin: 'https://app.divine.video', 'Access-Control-Request-Method': 'POST' },
+    }), env, ctx);
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get('Access-Control-Allow-Origin')).toBe('https://app.divine.video');
+
+    const response = await worker.fetch(new Request(url, { method: 'POST' }), env, ctx);
+    expect(response.status).toBe(401);
+    expect(await response.text()).toContain('expected: Nostr');
+  });
+
   it('echoes app origin on preflight', async () => {
     const response = await worker.fetch(
       new Request('https://api-relay-prod.divine.video/api/info', {

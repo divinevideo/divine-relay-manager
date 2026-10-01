@@ -1034,6 +1034,245 @@ export async function handleParentContact(
   return json({ success: true }, 200, corsHeaders);
 }
 
+// Zendesk rejects ticket attachments above 50 MB. Leave 2 MB for multipart
+// overhead, and count the request stream before formData() can retain an
+// unbounded upload in Worker memory. Mobile must compress a 60-second clip
+// below this provider limit before enabling its recording flag.
+const PARENT_CONSENT_BODY_LIMIT = 52_000_000;
+const PARENT_CONSENT_VIDEO_LIMIT = 50_000_000;
+
+export async function handleParentConsent(
+  request: Request,
+  caseId: string,
+  userPubkey: string,
+  env: AgeReviewEnv,
+  corsHeaders: Record<string, string>,
+): Promise<Response> {
+  if (!env.DB) return json({ success: false, error: 'Database not configured' }, 500, corsHeaders);
+
+  let current = await env.DB.prepare('SELECT * FROM age_review_cases WHERE id = ? AND pubkey = ?')
+    .bind(caseId, userPubkey).first<AgeReviewCase>();
+  if (!current) return json({ success: false, error: 'Case not found' }, 404, corsHeaders);
+  // A successful retry must not re-upload the video or add another comment.
+  if (current.state === 'submitted_for_review') return json({ success: true }, 200, corsHeaders);
+  if (TERMINAL_STATES.includes(current.state as AgeReviewState)) {
+    return json({ success: false, error: 'Case is already closed' }, 400, corsHeaders);
+  }
+  if (current.suspected_age_band === 'under_13') {
+    return json({ success: false, error: 'Under-13 cases require support review only' }, 400, corsHeaders);
+  }
+  if (!VALID_TRANSITIONS[current.state as AgeReviewState]?.includes('submitted_for_review')) {
+    return json({ success: false, error: `Cannot submit parent consent from state '${current.state}'` }, 400, corsHeaders);
+  }
+  if (!request.headers.get('Content-Type')?.toLowerCase().startsWith('multipart/form-data;')) {
+    return json({ success: false, error: 'multipart/form-data is required' }, 400, corsHeaders);
+  }
+  const declaredLength = Number(request.headers.get('Content-Length'));
+  if (Number.isFinite(declaredLength) && declaredLength > PARENT_CONSENT_BODY_LIMIT) {
+    return json({ success: false, error: 'Consent upload exceeds 52 MB' }, 413, corsHeaders);
+  }
+  if (!request.body) return json({ success: false, error: 'email and video are required' }, 400, corsHeaders);
+
+  let bytes = 0;
+  let prefix = '';
+  let videoHeaderChecked = false;
+  const headerDecoder = new TextDecoder('latin1');
+  const reader = request.body.getReader();
+  const leadingChunks: Uint8Array[] = [];
+  while (!videoHeaderChecked && prefix.length < 64 * 1024) {
+    const next = await reader.read();
+    if (next.done) break;
+    bytes += next.value.byteLength;
+    if (bytes > PARENT_CONSENT_BODY_LIMIT) {
+      await reader.cancel();
+      return json({ success: false, error: 'Consent upload exceeds 52 MB' }, 413, corsHeaders);
+    }
+    leadingChunks.push(next.value);
+    prefix += headerDecoder.decode(next.value.subarray(0, Math.max(0, 64 * 1024 - prefix.length)), { stream: true });
+    const header = prefix.match(/Content-Disposition:[^\r\n]*\bname="video"[^\r\n]*\r\n([\s\S]*?)\r\n\r\n/i);
+    if (header) {
+      videoHeaderChecked = true;
+      const mime = header[1].match(/(?:^|\r\n)Content-Type:\s*([^\r\n]+)/i)?.[1]?.trim();
+      if (!mime?.toLowerCase().startsWith('video/')) {
+        await reader.cancel();
+        return json({ success: false, error: 'video/* content type is required' }, 415, corsHeaders);
+      }
+    }
+  }
+  if (!videoHeaderChecked) {
+    await reader.cancel();
+    return json({ success: false, error: 'A video file part is required' }, 400, corsHeaders);
+  }
+  const boundedBody = new ReadableStream<Uint8Array>({
+    start(controller) { for (const chunk of leadingChunks) controller.enqueue(chunk); },
+    async pull(controller) {
+      const next = await reader.read();
+      if (next.done) { controller.close(); return; }
+      bytes += next.value.byteLength;
+      if (bytes > PARENT_CONSENT_BODY_LIMIT) {
+        await reader.cancel();
+        controller.error(new Error('parent-consent-body-too-large'));
+        return;
+      }
+      controller.enqueue(next.value);
+    },
+    cancel(reason) { return reader.cancel(reason); },
+  });
+  let form: FormData;
+  try {
+    form = await new Response(boundedBody, { headers: { 'Content-Type': request.headers.get('Content-Type')! } }).formData();
+  } catch (error) {
+    if (bytes > PARENT_CONSENT_BODY_LIMIT) {
+      return json({ success: false, error: 'Consent upload exceeds 52 MB' }, 413, corsHeaders);
+    }
+    console.error('[age-review] Invalid parent consent multipart body:', error);
+    return json({ success: false, error: 'Invalid multipart body' }, 400, corsHeaders);
+  }
+
+  const email = form.get('email');
+  if (typeof email !== 'string' || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) || email.length > 254) {
+    return json({ success: false, error: 'Invalid email format' }, 400, corsHeaders);
+  }
+  const video = form.get('video') as File | string | null;
+  if (!(video instanceof File) || video.size === 0) {
+    return json({ success: false, error: 'A non-empty video file is required' }, 400, corsHeaders);
+  }
+  if (!video.type.toLowerCase().startsWith('video/')) {
+    return json({ success: false, error: 'video/* content type is required' }, 415, corsHeaders);
+  }
+  if (video.size > PARENT_CONSENT_VIDEO_LIMIT) {
+    return json({ success: false, error: 'Consent video exceeds Zendesk\'s 50 MB limit' }, 413, corsHeaders);
+  }
+
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const leaseUntil = nowSeconds + 10 * 60;
+  const inserted = await env.DB.prepare(`INSERT OR IGNORE INTO age_review_parent_consent_submissions
+    (case_id, lease_until, created_at) VALUES (?, ?, ?)`).bind(caseId, leaseUntil, nowSeconds).run();
+  let submission: { status: string; upload_token: string | null; ticket_id: number | null; created_at: number } | null = null;
+  if (inserted.meta?.changes !== 1) {
+    const prior = await env.DB.prepare(`SELECT status, upload_token, ticket_id, lease_until, created_at
+      FROM age_review_parent_consent_submissions WHERE case_id = ?`)
+      .bind(caseId).first<{ status: string; upload_token: string | null; ticket_id: number | null; lease_until: number; created_at: number }>();
+    if (!prior) return json({ success: false, error: 'Submission changed; retry' }, 409, corsHeaders);
+    if (prior.status !== 'attached') {
+      const lock = await env.DB.prepare(`UPDATE age_review_parent_consent_submissions
+        SET lease_until = ? WHERE case_id = ? AND status = 'processing' AND lease_until < ?`)
+        .bind(leaseUntil, caseId, nowSeconds).run();
+      if (lock.meta?.changes !== 1) {
+        return json({ success: false, error: 'Consent submission is already in progress; retry' }, 409, corsHeaders);
+      }
+    }
+    submission = prior;
+  }
+
+  // The reviewer must have the attachment before the case advances. A failed
+  // Zendesk call leaves the case eligible for the parent to retry.
+  try {
+    if (submission?.status !== 'attached') {
+      const zendesk = await getZendeskClientConfig(env);
+      if (!zendesk) throw new Error('Zendesk credentials unavailable');
+      const commentBody = `Parent consent video submitted for review [${caseId}]`;
+      const existingTicketId = submission?.ticket_id ?? current.zendesk_ticket_id;
+      // Ticket creation has a provider idempotency window of two hours. After
+      // 50 minutes, an uploaded token may also expire. If creation's outcome
+      // is still unknown, stop automatic retries rather than risk a second
+      // ticket. Support can reconcile the case and clear this record.
+      if (submission?.upload_token && !existingTicketId && nowSeconds - submission.created_at >= 50 * 60) {
+        throw new Error('Zendesk ticket creation outcome requires manual reconciliation');
+      }
+      const hasAttachment = async (ticketId: number): Promise<boolean> => {
+        const comments = await fetch(`${zendesk.baseUrl}/tickets/${ticketId}/comments?sort_order=desc&per_page=100`, {
+          headers: { Authorization: `Basic ${zendesk.auth}` },
+        });
+        if (!comments.ok) throw new Error(`Zendesk comment lookup failed: ${comments.status}`);
+        const data = await comments.json() as { comments?: Array<{ body?: string; plain_body?: string; attachments?: unknown[] }> };
+        return !!data.comments?.some(comment =>
+          ((comment.body?.includes(commentBody) || comment.plain_body?.includes(commentBody))
+            && !!comment.attachments?.length));
+      };
+      let alreadyAttached = false;
+      // A previous call may have attached the clip and then lost its D1 reply.
+      // Check the ticket before using the saved, single-use upload token.
+      if (submission?.upload_token && existingTicketId) {
+        alreadyAttached = await hasAttachment(existingTicketId);
+      }
+
+      if (!alreadyAttached) {
+        let attachedTicketId = existingTicketId;
+        let token = submission?.upload_token;
+        if (!token) {
+          const extension = video.type === 'video/quicktime' ? 'mov' : video.type === 'video/webm' ? 'webm' : 'mp4';
+          const upload = await fetch(`${zendesk.baseUrl}/uploads.json?filename=parent-consent.${extension}`, {
+            method: 'POST',
+            headers: { Authorization: `Basic ${zendesk.auth}`, 'Content-Type': video.type },
+            body: video,
+          });
+          if (!upload.ok) throw new Error(`Zendesk upload failed: ${upload.status}`);
+          const uploadData = await upload.json() as { upload?: { token?: string } };
+          token = uploadData.upload?.token;
+          if (!token) throw new Error('Zendesk upload returned no token');
+          await env.DB.prepare(`UPDATE age_review_parent_consent_submissions SET upload_token = ? WHERE case_id = ?`)
+            .bind(token, caseId).run();
+        }
+
+        if (existingTicketId) {
+          const attached = await fetch(`${zendesk.baseUrl}/tickets/${existingTicketId}`, {
+            method: 'PUT',
+            headers: { Authorization: `Basic ${zendesk.auth}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ticket: { comment: { body: commentBody, public: false, uploads: [token] } } }),
+          });
+          if (!attached.ok) throw new Error(`Zendesk attachment comment failed: ${attached.status}`);
+        } else {
+          const ticketId = await createAgeReviewTicket(caseId, email, current.suspected_age_band as AgeBand,
+            current.deadline_at, env, current, token);
+          if (!ticketId) throw new Error('Zendesk ticket was not linked');
+          attachedTicketId = ticketId;
+          await env.DB.prepare(`UPDATE age_review_parent_consent_submissions SET ticket_id = ? WHERE case_id = ?`)
+            .bind(ticketId, caseId).run();
+        }
+        if (!attachedTicketId || !(await hasAttachment(attachedTicketId))) {
+          throw new Error('Zendesk did not show the consent video on the ticket');
+        }
+      }
+      const marked = await env.DB.prepare(`UPDATE age_review_parent_consent_submissions
+        SET status = 'attached', upload_token = NULL, lease_until = 0 WHERE case_id = ?`)
+        .bind(caseId).run();
+      if (marked.meta?.changes !== 1) throw new Error('D1 did not record attached consent video');
+    }
+  } catch (error) {
+    console.error('[age-review] Failed to attach parent consent video:', error);
+    try {
+      await env.DB.prepare(`UPDATE age_review_parent_consent_submissions SET lease_until = 0
+        WHERE case_id = ? AND status = 'processing'`).bind(caseId).run();
+    } catch (releaseError) {
+      console.error('[age-review] Failed to release parent consent retry lease:', releaseError);
+    }
+    return json({ success: false, error: 'Could not attach consent video; retry' }, 503, corsHeaders);
+  }
+
+  for (let attempt = 0; attempt < 2 && current; attempt++) {
+    if (current.state === 'submitted_for_review') return json({ success: true }, 200, corsHeaders);
+    if (!VALID_TRANSITIONS[current.state as AgeReviewState]?.includes('submitted_for_review')) {
+      return json({ success: false, error: 'Case changed during submission' }, 409, corsHeaders);
+    }
+    const now = new Date();
+    const deadline = current.deadline_at ? new Date(current.deadline_at) : null;
+    const remainingDays = current.clock_paused
+      ? current.remaining_days_when_paused
+      : deadline ? Math.max(0, (deadline.getTime() - now.getTime()) / (24 * 60 * 60 * 1000)) : DEADLINE_DAYS;
+    const result = await env.DB.prepare(`
+      UPDATE age_review_cases SET parent_contact_email = ?, state = 'submitted_for_review',
+        clock_paused = 1, clock_paused_at = ?, remaining_days_when_paused = ?,
+        updated_at = datetime('now'), version = version + 1
+      WHERE id = ? AND pubkey = ? AND version = ?
+    `).bind(email, now.toISOString(), remainingDays, caseId, userPubkey, current.version).run();
+    if (result.meta?.changes === 1) return json({ success: true }, 200, corsHeaders);
+    current = await env.DB.prepare('SELECT * FROM age_review_cases WHERE id = ? AND pubkey = ?')
+      .bind(caseId, userPubkey).first<AgeReviewCase>();
+  }
+  return json({ success: false, error: 'Case changed during submission; retry' }, 409, corsHeaders);
+}
+
 // ---------------------------------------------------------------------------
 // Zendesk integration
 // ---------------------------------------------------------------------------
@@ -1430,13 +1669,14 @@ async function createAgeReviewTicket(
   deadlineAt: string | null,
   env: AgeReviewEnv,
   identity: AgeReviewCaseIdentity & { pubkey?: string } = {},
-): Promise<void> {
+  uploadToken?: string,
+): Promise<number | null> {
   const zendesk = await getZendeskClientConfig(env);
   if (!zendesk) {
     console.warn('[age-review] Missing Zendesk credentials, skipping ticket creation');
-    return;
+    return null;
   }
-  if (!env.DB) return;
+  if (!env.DB) return null;
 
   const subject = `Age review: parental verification needed [${caseId}]`;
   const outreachBody = buildParentOutreachBody(identity, env.NIP05_DOMAIN);
@@ -1447,11 +1687,14 @@ async function createAgeReviewTicket(
     headers: {
       'Authorization': `Basic ${zendesk.auth}`,
       'Content-Type': 'application/json',
+      ...(uploadToken ? { 'Idempotency-Key': `parent-consent-${caseId}` } : {}),
     },
     body: JSON.stringify({
       ticket: {
         subject,
-        comment: { html_body: outreachBody, public: true },
+        comment: uploadToken
+          ? { body: `Parent consent video submitted for review [${caseId}]`, public: false, uploads: [uploadToken] }
+          : { html_body: outreachBody, public: true },
         // The address alone. Zendesk renders this into the To: header of every
         // outbound mail, and this ticket's first message goes to an address the
         // teen supplied that nobody has verified -- so it must not carry the
@@ -1471,6 +1714,14 @@ async function createAgeReviewTicket(
 
   const data = await res.json() as { ticket?: { id: number; requester_id?: number } };
   if (data.ticket?.id) {
+    if (uploadToken) {
+      // Record the ticket before the older case link write. If that second D1
+      // operation fails, a retry resumes against this ticket instead of
+      // creating another one.
+      const recorded = await env.DB.prepare(`UPDATE age_review_parent_consent_submissions
+        SET ticket_id = ? WHERE case_id = ?`).bind(data.ticket.id, caseId).run();
+      if (recorded.meta?.changes !== 1) throw new Error('Could not record Zendesk consent ticket');
+    }
     await env.DB.prepare(
       'UPDATE age_review_cases SET zendesk_ticket_id = ? WHERE id = ?'
     ).bind(data.ticket.id, caseId).run();
@@ -1487,6 +1738,7 @@ async function createAgeReviewTicket(
     identity,
     zendesk,
   });
+  return data.ticket?.id ?? null;
 }
 
 /**

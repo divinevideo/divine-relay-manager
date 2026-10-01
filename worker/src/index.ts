@@ -31,6 +31,7 @@ import {
   handleCreateMinorAccount,
   handleGetModerationStatus,
   handleParentContact,
+  handleParentConsent,
   handleAgeReviewReplyWebhook,
   checkAgeReviewDeadlines,
   sendDbUnavailableAlert,
@@ -486,6 +487,15 @@ export default {
         const caseId = path.replace('/v1/minor-review-cases/', '').replace('/parent-contact', '');
         if (!caseId) return jsonResponse({ success: false, error: 'Invalid caseId' }, 400, corsHeaders);
         return handleParentContact(request, caseId, authResult.pubkey, env, corsHeaders);
+      }
+
+      if (path.startsWith('/v1/minor-review-cases/') && path.endsWith('/parent-consent') && request.method === 'POST') {
+        const authResult = await verifyNip98Auth(request, request.url, getNip98AllowedHosts(env));
+        if (!authResult.valid || !authResult.pubkey) return jsonResponse({ success: false, error: authResult.error ?? 'Unauthorized' }, 401, corsHeaders);
+        const caseId = path.slice('/v1/minor-review-cases/'.length, -'/parent-consent'.length);
+        if (!caseId || caseId.includes('/')) return jsonResponse({ success: false, error: 'Invalid caseId' }, 400, corsHeaders);
+        if (env.DB) await ensureSchemaOnce(env.DB);
+        return handleParentConsent(request, caseId, authResult.pubkey, env, corsHeaders);
       }
 
       // All other /api/* endpoints require admin access (CF Access or API key)
