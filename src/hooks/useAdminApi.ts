@@ -39,8 +39,6 @@ export function useAdminApi() {
       adminApi.hideEvent(apiUrl, eventId, reason),
     restoreEvent: (eventId: string, moderatorPubkey?: string, reason?: string) =>
       adminApi.restoreEvent(apiUrl, eventId, moderatorPubkey, reason),
-    banPubkeyViaModerate: (pubkey: string, reason?: string) =>
-      adminApi.banPubkeyViaModerate(apiUrl, pubkey, reason),
     banPubkey: (pubkey: string, reason?: string) =>
       adminApi.banPubkey(apiUrl, pubkey, reason),
     allowPubkey: (pubkey: string) =>

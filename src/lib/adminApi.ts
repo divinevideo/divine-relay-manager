@@ -266,10 +266,6 @@ export async function restoreEvent(
   return moderateAction(apiUrl, { action: 'allow_event', eventId, moderatorPubkey, reason });
 }
 
-export async function banPubkeyViaModerate(apiUrl: string, pubkey: string, reason?: string): Promise<ApiResponse> {
-  return moderateAction(apiUrl, { action: 'ban_pubkey', pubkey, reason });
-}
-
 export async function allowPubkey(apiUrl: string, pubkey: string): Promise<ApiResponse> {
   return moderateAction(apiUrl, { action: 'allow_pubkey', pubkey });
 }
@@ -326,15 +322,15 @@ export async function callRelayRpc<T = unknown>(
  *   network error, or an unreadable response); content removal is unconfirmed
  * - removal_running: the relay had not answered when the worker stopped waiting;
  *   content removal may be unfinished
- * - follow_ups: only our own re-check found the ban after our request timed out,
+ * - follow_ups_unknown: only our own re-check found the ban after our request timed out,
  *   dropped, or failed without the worker's ban_unconfirmed code (e.g. an
  *   uncaught 5xx), so the worker never reported its follow-ups (Keycast login
  *   block, user notice, ticket closure) as done; they may or may not have run
- * - follow_ups_skipped: the worker answered ban_unconfirmed, which it does
+ * - follow_ups_not_run: the worker answered ban_unconfirmed, which it does
  *   before any follow-up, and our re-check then found the ban: they did not run
  */
 export interface BanOutcome {
-  unconfirmed: 'removal_error' | 'removal_running' | 'follow_ups' | 'follow_ups_skipped' | null;
+  unconfirmed: 'removal_error' | 'removal_running' | 'follow_ups_unknown' | 'follow_ups_not_run' | null;
 }
 
 // Our own ban-list re-check runs after a request that may have used its full
@@ -378,7 +374,7 @@ export async function banPubkey(apiUrl: string, pubkey: string, reason?: string)
     if (refused) throw error;
     if (await isPubkeyOnBanList(apiUrl, pubkey)) {
       const workerSkippedFollowUps = error instanceof ApiError && error.code === 'ban_unconfirmed';
-      return { unconfirmed: workerSkippedFollowUps ? 'follow_ups_skipped' : 'follow_ups' };
+      return { unconfirmed: workerSkippedFollowUps ? 'follow_ups_not_run' : 'follow_ups_unknown' };
     }
     throw new BanNotConfirmedError(banFailureReason(error));
   }
@@ -640,6 +636,14 @@ export async function publishLabel(apiUrl: string, params: LabelParams): Promise
   });
 }
 
+export interface LabelAndBanResult {
+  labelPublished: boolean;
+  banned: boolean;
+  banOutcome?: BanOutcome;
+  /** Set when the label published but the ban then failed or was not confirmed. */
+  banError?: Error;
+}
+
 // Combined action: publish label and optionally ban
 export async function publishLabelAndBan(
   apiUrl: string,
@@ -664,14 +668,6 @@ export async function publishLabelAndBan(
   }
 
   return result;
-}
-
-export interface LabelAndBanResult {
-  labelPublished: boolean;
-  banned: boolean;
-  banOutcome?: BanOutcome;
-  /** Set when the label published but the ban then failed or was not confirmed. */
-  banError?: Error;
 }
 
 // Moderation resolution statuses

@@ -417,7 +417,7 @@ describe('UserActions', () => {
   // The app shows one toast at a time, and whether the audit warning lands
   // before or after the ban toast depends on timing, so both carry the note.
   it('keeps the ban note on the audit warning when the audit log fails', async () => {
-    api.banPubkey.mockResolvedValue({ unconfirmed: 'follow_ups_skipped' });
+    api.banPubkey.mockResolvedValue({ unconfirmed: 'follow_ups_not_run' });
     api.logDecision.mockRejectedValue(new Error('audit down'));
     renderWithProvider(<UserActions pubkey={'a'.repeat(64)} />);
     fireEvent.click(screen.getByRole('button', { name: /Ban User/i }));
@@ -427,7 +427,7 @@ describe('UserActions', () => {
     await waitFor(() =>
       expect(toast).toHaveBeenCalledWith(expect.objectContaining({
         title: expect.stringMatching(/audit log not recorded/i),
-        description: banSuccessNote({ unconfirmed: 'follow_ups_skipped' }),
+        description: banSuccessNote({ unconfirmed: 'follow_ups_not_run' }),
       })),
     );
   });

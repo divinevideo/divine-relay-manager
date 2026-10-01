@@ -25,11 +25,11 @@ const NOTES: Record<NonNullable<BanOutcome['unconfirmed']>, string> = {
   removal_running:
     "The ban is in effect. The relay hadn't finished removing their content when we stopped waiting, so " +
     'some may remain. You may want to check their content again in a few minutes.',
-  follow_ups:
+  follow_ups_unknown:
     "The ban is in effect, but the server didn't finish its follow-up steps (login block, notice to the user, " +
     'ticket closure) before we stopped waiting, so they may not have happened. You may want to check the ' +
     'account in a few minutes.',
-  follow_ups_skipped:
+  follow_ups_not_run:
     "The ban is in effect, but the server couldn't confirm it in time, so its follow-up steps (login block, " +
     'notice to the user, ticket closure) did not run. Let T&S Engineering know so they can be applied.',
 };

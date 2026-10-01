@@ -44,8 +44,8 @@ describe('banSuccessNote', () => {
   it.each([
     ['removal_error', "we couldn't confirm their content was removed"],
     ['removal_running', "hadn't finished removing their content"],
-    ['follow_ups', 'may not have happened'],
-    ['follow_ups_skipped', 'did not run'],
+    ['follow_ups_unknown', 'may not have happened'],
+    ['follow_ups_not_run', 'did not run'],
   ] as const)('explains %s', (unconfirmed, phrase) => {
     const note = banSuccessNote({ unconfirmed });
 
@@ -58,14 +58,14 @@ describe('banSuccessNote', () => {
   // will not run by themselves, so those route to a person instead.
   it.each([
     ['removal_running', true],
-    ['follow_ups', true],
+    ['follow_ups_unknown', true],
     ['removal_error', false],
-    ['follow_ups_skipped', false],
+    ['follow_ups_not_run', false],
   ] as const)('%s suggests checking back later: %s', (unconfirmed, suggests) => {
     expect(banSuccessNote({ unconfirmed })?.includes('in a few minutes')).toBe(suggests);
   });
 
   it('routes skipped follow-ups to T&S Engineering', () => {
-    expect(banSuccessNote({ unconfirmed: 'follow_ups_skipped' })).toContain('Let T&S Engineering know');
+    expect(banSuccessNote({ unconfirmed: 'follow_ups_not_run' })).toContain('Let T&S Engineering know');
   });
 });

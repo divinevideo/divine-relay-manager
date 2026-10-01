@@ -12,7 +12,6 @@ import {
   deleteEvent,
   hideEvent,
   restoreEvent,
-  banPubkeyViaModerate,
   allowPubkey,
   callRelayRpc,
   banEvent,
@@ -473,28 +472,6 @@ describe('adminApi', () => {
     });
   });
 
-  describe('banPubkeyViaModerate', () => {
-    it('should call moderateAction with ban_pubkey action', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ success: true }),
-      });
-
-      await banPubkeyViaModerate(API_URL, 'pubkey123', 'Spam bot');
-
-      expect(mockFetch).toHaveBeenCalledWith(
-        expect.stringContaining('/api/moderate'),
-        expect.objectContaining({
-          body: JSON.stringify({
-            action: 'ban_pubkey',
-            pubkey: 'pubkey123',
-            reason: 'Spam bot',
-          }),
-        })
-      );
-    });
-  });
-
   describe('allowPubkey', () => {
     it('should call moderateAction with allow_pubkey action', async () => {
       mockFetch.mockResolvedValueOnce({
@@ -731,7 +708,7 @@ describe('adminApi', () => {
           .mockRejectedValueOnce(new DOMException('timed out', 'TimeoutError'))
           .mockResolvedValueOnce(banList([pubkey]));
 
-        expect(await ban()).toEqual({ value: { unconfirmed: 'follow_ups' } });
+        expect(await ban()).toEqual({ value: { unconfirmed: 'follow_ups_unknown' } });
       });
 
       // The worker answered ban_unconfirmed, so it returned before any follow-up:
@@ -741,7 +718,7 @@ describe('adminApi', () => {
           .mockResolvedValueOnce(workerError(500, UNCONFIRMED))
           .mockResolvedValueOnce(banList([pubkey]));
 
-        expect(await ban()).toEqual({ value: { unconfirmed: 'follow_ups_skipped' } });
+        expect(await ban()).toEqual({ value: { unconfirmed: 'follow_ups_not_run' } });
       });
 
       it('rethrows a 403 refusal (expired access) without reading the ban list', async () => {

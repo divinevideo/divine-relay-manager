@@ -191,14 +191,14 @@ describe('UserManagement age-review guard wiring', () => {
   });
 
   it('explains what was not confirmed on a ban that landed with unconfirmed follow-ups', async () => {
-    api.banPubkey.mockResolvedValue({ unconfirmed: 'follow_ups' });
+    api.banPubkey.mockResolvedValue({ unconfirmed: 'follow_ups_unknown' });
 
     await banViaDialog();
 
     await waitFor(() =>
       expect(toast).toHaveBeenCalledWith(expect.objectContaining({
         title: 'User banned successfully',
-        description: banSuccessNote({ unconfirmed: 'follow_ups' }),
+        description: banSuccessNote({ unconfirmed: 'follow_ups_unknown' }),
       })),
     );
   });
