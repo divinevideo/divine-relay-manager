@@ -1357,7 +1357,7 @@ describe('kind-scoped delete job', () => {
     expect(row.media_processed).toBe(0);
   });
 
-  it('records a cut-short listing as a failure, so the job never reads as complete', async () => {
+  it('records a cut-short listing as a gap, until a confirming sweep finds nothing left', async () => {
     // A full page with no usable created_at: the cursor cannot advance.
     const noTimes = Array.from({ length: 200 }, (_, i) => ({ id: `x${i}`, kind: 1, pubkey: PUBKEY, content: '', tags: [] as string[][] }));
     vi.spyOn(globalThis, 'WebSocket').mockImplementation((function () {
@@ -1380,12 +1380,19 @@ describe('kind-scoped delete job', () => {
     const jobId = 'job-kind-cut';
     jobDb.rows.set(jobId, { job_id: jobId, pubkey: PUBKEY, action: 'delete-kind', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, version: 0, created_at: 't', updated_at: 't', kind: 1 });
 
-    await drain({ kindJobId: jobId, pubkey: PUBKEY, action: 'delete-kind', kind: 1, version: 0 }, 30);
+    // The first chunk cannot page past its full, untimed page: it records the gap.
+    sent.length = 0;
+    await processBulkJob({ kindJobId: jobId, pubkey: PUBKEY, action: 'delete-kind', kind: 1, version: 0 }, mockEnv);
+    expect(JSON.parse(jobDb.rows.get(jobId)!.failures as string).some((f: string) => /could not be fully paginated/.test(f))).toBe(true);
 
-    const res = await handleBulkJobStatus(jobId, mockEnv, {});
-    const job = await res.json() as BulkJob;
+    await drain(sent[0], 30);
+
+    // Every event was deleted and the final sweep, read from the ceiling, found
+    // nothing: the gap is disproved and the job ends clean.
+    const job = await (await handleBulkJobStatus(jobId, mockEnv, {})).json() as BulkJob;
     expect(job.status).toBe('done');
-    expect(job.failures.some((f) => /could not be fully paginated/.test(f))).toBe(true);
+    expect(job.eventsProcessed).toBe(200);
+    expect(job.failures).toEqual([]);
   });
 
   it('status reports the kind for a kind-scoped job and omits it otherwise', async () => {
@@ -1818,6 +1825,69 @@ describe('delete-kind against a hostile relay', () => {
 
       expect(job).toMatchObject({ status: 'done', eventsProcessed: 1, failures: [] });
       expect(counts.status).toBe(200);
+    });
+
+    // A gap warning from an earlier sweep ("some may be unprocessed") is
+    // disproved by a final sweep that read from the ceiling and found nothing.
+    it('ends clean when later sweeps delete everything an earlier sweep warned about', async () => {
+      const t = now() - 100;
+      const sim = makeSim(Array.from({ length: 450 }, (_, i) => ({ id: `s${String(i).padStart(4, '0')}`, pubkey: P, kind: 1, created_at: t })));
+
+      const { job } = await runJob(1);
+
+      expect(sim.query({ authors: [P], kinds: [1] })).toHaveLength(0);
+      expect(job.status).toBe('done');
+      expect(job.eventsProcessed).toBe(450);
+      expect(job.failures).toEqual([]);
+    });
+
+    it('keeps a gap warning recorded on the final sweep itself', async () => {
+      const t = now() - 100;
+      // Every ban fails: the one sweep is also the last, and its warning stands.
+      makeSim(Array.from({ length: 250 }, (_, i) => ({ id: `s${String(i).padStart(4, '0')}`, pubkey: P, kind: 1, created_at: t })), { failing: () => true });
+
+      const { job } = await runJob(1);
+
+      expect(job.status).toBe('done');
+      expect(job.failures.some((f) => /share one timestamp/.test(f))).toBe(true);
+    });
+
+    it('keeps earlier ban failures and out-of-scope warnings while dropping the disproved gap warning', async () => {
+      const t = now() - 100;
+      const store: SimEvent[] = Array.from({ length: 250 }, (_, i) => ({ id: `s${String(i).padStart(4, '0')}`, pubkey: P, kind: 1, created_at: t }));
+      let refusedOnce = false;
+      let firstPage = true;
+      makeSim(store, {
+        failing: (id) => (id === 's0249' && !refusedOnce ? (refusedOnce = true) : false), // fails once, then works
+        frames: (events) => {
+          if (!firstPage) return events;
+          firstPage = false;
+          return [...events, { id: 'theirs', pubkey: OTHER, kind: 1, created_at: t }];
+        },
+      });
+
+      const { job } = await runJob(1);
+
+      expect(job.status).toBe('done');
+      expect(job.failures).toEqual([
+        'event:s0249:relay refused',
+        `enumeration:${P}:relay returned 1 event(s) outside the requested author or kind; ignored them`,
+      ]);
+    });
+
+    it('keeps earlier gap warnings when the final sweep itself saw out-of-scope events', async () => {
+      const t = now() - 100;
+      const theirs: SimEvent = { id: 'theirs', pubkey: OTHER, kind: 1, created_at: t };
+      makeSim(
+        Array.from({ length: 250 }, (_, i) => ({ id: `s${String(i).padStart(4, '0')}`, pubkey: P, kind: 1, created_at: t })),
+        { frames: (events) => [...events, theirs] },                 // on every page, the last included
+      );
+
+      const { job } = await runJob(1);
+
+      expect(job.status).toBe('done');
+      expect(job.failures.some((f) => /share one timestamp/.test(f))).toBe(true);
+      expect(job.failures.some((f) => /outside the requested author or kind/.test(f))).toBe(true);
     });
 
     it('ends a versioned walk at created_at 0 instead of asking for until -1', async () => {

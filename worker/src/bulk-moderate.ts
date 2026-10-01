@@ -436,6 +436,12 @@ function mergeFailures(
   };
 }
 
+// The two enumeration warnings that say a listing may have missed events, as
+// opposed to the out-of-scope and sweep-bound ones.
+function isListingGapWarning(failure: string): boolean {
+  return /^enumeration:[^:]+:(more than \d+ events share one timestamp|relay could not be fully paginated)/.test(failure);
+}
+
 // Merge in the reason a job stopped. It must be visible even when the list is
 // full: it takes the last stored slot, and the entry it displaces stays counted
 // in `dropped`, which mergeFailures already raised for the overflow.
@@ -492,6 +498,9 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
     let mediaDelta = 0;
     const chunkFailures: string[] = [];
     let next: BulkJobMessage | null = null;
+    // Set when a delete-kind job's final sweep read from its ceiling, found
+    // nothing and recorded nothing: that read disproves earlier gap warnings.
+    let disproveListingGaps = false;
 
     if (phase === 'events') {
       // Without its kind, a delete-kind page query would list every event.
@@ -587,6 +596,12 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
         // never touched media; Delete All Content is the path that removes it.
         if (passDeleted === 0) {
           next = null;
+          // This chunk was the sweep's whole first page and it was empty: nothing
+          // of this kind is listed at or below the ceiling, so earlier sweeps'
+          // "some may be unprocessed" warnings no longer hold. (An empty page
+          // records no failure except an out-of-scope one, which keeps them.)
+          disproveListingGaps = !msg.cursor && !msg.eventIds && page.events.length === 0
+            && page.outOfScope === 0;
         } else if (pass + 1 >= MAX_KIND_SWEEP_PASSES) {
           chunkFailures.push(`enumeration:${msg.pubkey}:still finding events after ${MAX_KIND_SWEEP_PASSES} passes; older versions may remain`);
           next = null;
@@ -643,6 +658,9 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
     const status = next ? 'running' : 'done';
     if (next) next.version = claimedVersion;
     const merged = mergeFailures(parseFailuresList(row.failures), Number(row.failures_dropped) || 0, chunkFailures);
+    // Only gap warnings go; ban failures and out-of-scope warnings stand. One
+    // that had already overflowed the cap stays counted in `dropped`.
+    if (disproveListingGaps) merged.list = merged.list.filter((f) => !isListingGapWarning(f));
     // Guard the terminal write on the status we claimed (`running`), and only
     // enqueue the next chunk if this write actually landed. If a concurrent or
     // duplicate chunk already moved the row to a terminal state, changes is 0 and
