@@ -3,6 +3,7 @@ import { finalizeEvent, generateSecretKey } from 'nostr-tools';
 import worker from './index';
 import { LABEL_PAGE_SIZE } from './resolution-labels';
 import * as ageReview from './age-review';
+import { relayFake } from './test-helpers/relay-fake';
 
 const env = {
   ALLOWED_ORIGINS: 'https://app.divine.video,https://*.openvine-app.pages.dev',
@@ -1973,31 +1974,13 @@ describe('bulk-moderate kind-counts route', () => {
   });
 
   it('returns the per-kind counts for the pubkey in the query string', async () => {
-    const filters: unknown[] = [];
-    vi.spyOn(globalThis, 'WebSocket').mockImplementation((function () {
-      const listeners = new Map<string, Array<(value?: unknown) => void>>();
-      const emit = (type: string, value?: unknown) => listeners.get(type)?.forEach((h) => h(value));
-      queueMicrotask(() => emit('open'));
-      return {
-        addEventListener: (t: string, h: (value?: unknown) => void) => listeners.set(t, [...(listeners.get(t) || []), h]),
-        send: (payload: string) => {
-          const data = JSON.parse(payload);
-          if (data[0] !== 'REQ') return;
-          filters.push(data[2]);
-          queueMicrotask(() => {
-            emit('message', { data: JSON.stringify(['EVENT', data[1], { id: 'e1', pubkey: VALID_PUBKEY, kind: 22, tags: [], created_at: 2 }]) });
-            emit('message', { data: JSON.stringify(['EOSE', data[1]]) });
-          });
-        },
-        close: vi.fn(),
-      };
-    } as unknown as typeof WebSocket));
+    const { reqs } = relayFake([{ id: 'e1', pubkey: VALID_PUBKEY, kind: 22, created_at: 2 }]);
 
     const response = await worker.fetch(countsRequest(VALID_PUBKEY), env, ctx);
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ counts: { 22: 1 }, complete: true });
-    expect(filters).toEqual([expect.objectContaining({ authors: [VALID_PUBKEY] })]);
+    expect(reqs).toEqual([expect.objectContaining({ authors: [VALID_PUBKEY] })]);
   });
 });
 
