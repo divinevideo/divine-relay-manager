@@ -297,6 +297,17 @@ describe('GET /api/reports single-target lookups', () => {
     expect(body.events.map(e => e.id)).toEqual([id(1)]);
   });
 
+  it('says a lookup was cut short when it stops before the relay runs out', async () => {
+    // The client turns this flag into an "N+" count, and into "unavailable"
+    // rather than "gone" when nothing came back. The lookup's page bounds are
+    // not injectable, so stop it the cheap way: a full page sharing one second
+    // leaves the cursor nowhere to go.
+    stubRelay(Array.from({ length: REPORTS_PAGE_SIZE + 1 }, (_, i) => report(i, 1_760_000_000, [['p', P1]])));
+    const body = await (await get(`/api/reports?pubkey=${P1}`)).json() as { events: RelayEvent[]; truncated: boolean };
+    expect(body.truncated).toBe(true);
+    expect(body.events).toHaveLength(REPORTS_PAGE_SIZE);
+  });
+
   it('fails a lookup whose page is unconfirmed', async () => {
     stubRelay([report(1, 100, [['p', P1]])], { closeKind: 1984 });
     expect((await get(`/api/reports?pubkey=${P1}`)).status).toBe(502);
