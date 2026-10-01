@@ -492,7 +492,13 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
     }
 
     const moderatorPubkey = await getAdminPubkey(env);
-    const scope = jobScope(msg);
+    // A delete-kind job's ceiling (see KIND_SWEEP_CEILING_MARGIN_S). A message
+    // without one gets one computed now, and it is carried on every continuation
+    // like an enqueue-time ceiling, so later sweeps don't re-read "now".
+    const ceiling = msg.action === 'delete-kind'
+      ? msg.sweepUntil ?? Math.floor(Date.now() / 1000) + KIND_SWEEP_CEILING_MARGIN_S
+      : undefined;
+    const scope = jobScope({ ...msg, sweepUntil: ceiling });
 
     let eventsDelta = 0;
     let mediaDelta = 0;
@@ -509,14 +515,10 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
       }
       const isKindJob = msg.action === 'delete-kind';
       const until = msg.cursor ? Number(msg.cursor) : undefined;
-      // Every sweep's first page starts from the job's fixed ceiling (see
-      // KIND_SWEEP_CEILING_MARGIN_S). Naming `until` explicitly also keeps a
-      // kind-0 + authors REQ off funnelcake's profile cache, which can hand back
-      // versions this job already banned. A message without a ceiling gets one
-      // computed now.
-      const firstPageUntil = isKindJob
-        ? msg.sweepUntil ?? Math.floor(Date.now() / 1000) + KIND_SWEEP_CEILING_MARGIN_S
-        : undefined;
+      // Every sweep's first page starts from the job's fixed ceiling. Naming
+      // `until` explicitly also keeps a kind-0 + authors REQ off funnelcake's
+      // profile cache, which can hand back versions this job already banned.
+      const firstPageUntil = ceiling;
       const page = msg.eventIds
         ? {
           events: msg.eventIds.map(id => ({ id, kind: 0, content: '', tags: [] })),

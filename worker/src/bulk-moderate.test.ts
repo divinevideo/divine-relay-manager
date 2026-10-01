@@ -1188,18 +1188,27 @@ describe('kind-scoped delete job', () => {
     expect(JSON.parse(row.failures as string)).toEqual([]);
   });
 
-  it('falls back to now + 300s for a delete-kind message that carries no ceiling', async () => {
-    const { filters } = mockPaginatedRelay([]);
+  // The fallback is computed once and carried forward like an enqueue-time
+  // ceiling: re-reading "now" for each sweep is what the ceiling exists to stop.
+  it('falls back to one ceiling of now + 300s for a message without one, and carries it on', async () => {
+    const { filters } = mockVersionedRelay({ profile: [{ id: 'p2', kind: 0, created_at: 20 }, { id: 'p1', kind: 0, created_at: 10 }] });
     const jobId = 'job-no-ceiling';
-    jobDb.rows.set(jobId, { job_id: jobId, pubkey: PUBKEY, action: 'delete-kind', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, version: 0, created_at: 't', updated_at: 't', kind: 1 });
-    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1_900_000_000_000);
+    jobDb.rows.set(jobId, { job_id: jobId, pubkey: PUBKEY, action: 'delete-kind', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, version: 0, created_at: 't', updated_at: 't', kind: 0 });
+    let clock = 1_900_000_000_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => (clock += 7_000)); // time moves on
+    let messages: BulkJobMessage[] = [];
     try {
-      await drain({ kindJobId: jobId, pubkey: PUBKEY, action: 'delete-kind', kind: 1, version: 0 });
+      ({ messages } = await drain({ kindJobId: jobId, pubkey: PUBKEY, action: 'delete-kind', kind: 0, version: 0 }));
     } finally {
       nowSpy.mockRestore();
     }
 
-    expect(filters.map((f) => f.until)).toEqual([1_900_000_000 + 300]);
+    const ceiling = filters[0].until as number;
+    expect(ceiling).toBeGreaterThanOrEqual(1_900_000_000 + 300);
+    expect(filters.map((f) => f.until)).toEqual([ceiling, 19, 9, ceiling]);   // two sweeps, one ceiling
+    expect(messages.length).toBeGreaterThan(0);
+    expect(messages.every((m) => m.sweepUntil === ceiling)).toBe(true);
+    expect(jobDb.rows.get(jobId)!.status).toBe('done');
   });
 
   it('deletes a 25-version history in one clean run', async () => {
