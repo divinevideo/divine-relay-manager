@@ -1614,7 +1614,9 @@ interface SimOpts {
   ignoreUntil?: boolean;
   failing?: (id: string) => boolean;
   frames?: (events: SimEvent[]) => SimEvent[];
-  socket?: (reqIndex: number) => 'closed' | undefined;
+  // 'closed' answers CLOSED for the REQ; 'closed-other' first sends a CLOSED for
+  // some other subscription, then answers normally.
+  socket?: (reqIndex: number) => 'closed' | 'closed-other' | undefined;
 }
 function makeSim(store: SimEvent[], opts: SimOpts = {}) {
   const banned = new Set<string>();
@@ -1656,6 +1658,9 @@ function makeSim(store: SimEvent[], opts: SimOpts = {}) {
           if (opts.socket?.(idx) === 'closed') {
             emit('message', { data: JSON.stringify(['CLOSED', data[1], 'error: could not complete query']) });
             return;
+          }
+          if (opts.socket?.(idx) === 'closed-other') {
+            emit('message', { data: JSON.stringify(['CLOSED', 'someone-else', 'error: not yours']) });
           }
           for (const e of out) {
             const { d, ...rest } = e;
@@ -1774,6 +1779,45 @@ describe('delete-kind against a hostile relay', () => {
       const { job } = await runJob(1);
 
       expect(job.failures).toEqual(['event:bad:relay refused']);
+    });
+
+    // Funnelcake answers a failed query with CLOSED. That is the relay's
+    // answer, not silence: fail at once, with its reason, not after 10s.
+    it('fails a delete-kind job at once, with the relay\'s reason, when a page is CLOSED', async () => {
+      makeSim([{ id: 'e', pubkey: P, kind: 1, created_at: now() - 1000 }], { socket: () => 'closed' });
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        const { job } = await runJob(1);                      // no timer advanced: a 10s wait would hang
+
+        expect(job.status).toBe('failed');
+        expect(job.failures).toEqual(['job:Relay closed the query: error: could not complete query']);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('returns a 502 at once, with the relay\'s reason, when the count listing is CLOSED', async () => {
+      makeSim([{ id: 'e', pubkey: P, kind: 1, created_at: now() - 1000 }], { socket: () => 'closed' });
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        const res = await handleBulkKindCounts(P, env, {});   // no timer advanced
+
+        expect(res.status).toBe(502);
+        expect(await res.json()).toEqual({ error: 'Relay closed the query: error: could not complete query' });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('ignores a CLOSED for another subscription', async () => {
+      makeSim([{ id: 'e', pubkey: P, kind: 1, created_at: now() - 1000 }], { socket: () => 'closed-other' });
+
+      const { job } = await runJob(1);
+      const counts = await handleBulkKindCounts(P, env, {});
+
+      expect(job).toMatchObject({ status: 'done', eventsProcessed: 1, failures: [] });
+      expect(counts.status).toBe(200);
     });
 
     it('ends a versioned walk at created_at 0 instead of asking for until -1', async () => {

@@ -867,6 +867,10 @@ async function collectRelayEvents<T>(
               byId.set(event.id, project(event));
             }
             if (typeof event.created_at === 'number' && event.created_at < pageOldest) pageOldest = event.created_at;
+          } else if (data[0] === 'CLOSED' && data[1] === currentSub) {
+            // The relay refused or failed the query: fail now, with its reason,
+            // rather than wait out the page timeout and report a timeout.
+            finish(reject, new Error(`Relay closed the query: ${String(data[2] ?? 'no reason given')}`));
           } else if (data[0] === 'EOSE' && data[1] === currentSub) {
             ws.send(JSON.stringify(['CLOSE', currentSub]));
             // Last page reached: a partial page means the relay has no more events.
@@ -985,6 +989,9 @@ export async function queryRelayEventsPage(
               createdAt: typeof e.created_at === 'number' ? e.created_at : null,
               inScope: e.pubkey === pubkey && (kind === undefined || e.kind === kind),
             });
+          } else if (data[0] === 'CLOSED' && data[1] === subId) {
+            // As in collectRelayEvents: the relay's refusal fails the page now.
+            finish(reject, new Error(`Relay closed the query: ${String(data[2] ?? 'no reason given')}`));
           } else if (data[0] === 'EOSE' && data[1] === subId) {
             ws.send(JSON.stringify(['CLOSE', subId]));
             const outOfScope = collected.filter((c) => !c.inScope).length;
