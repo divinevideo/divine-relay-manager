@@ -8,6 +8,7 @@ import {
   type BulkJobMessage,
   type BulkJobPhase,
   type BulkEnqueueResponse,
+  type BulkKindCounts,
 } from '../../shared/bulk-moderation';
 import { deriveFunnelcakeApiUrl } from './funnelcake-proxy';
 
@@ -67,8 +68,15 @@ async function moderateMediaHashes(
   return { processed, failures };
 }
 
+// Who the per-event decision rows name. A job that carries neither falls back
+// to the worker's signing key and no report.
+interface DecisionAttribution {
+  moderatorPubkey?: string;
+  reportId?: string;
+}
+
 async function writeDecisionBatch(
-  env: BulkModerateEnv, eventIds: string[], reason: string, moderatorPubkey: string,
+  env: BulkModerateEnv, eventIds: string[], reason: string, moderatorPubkey: string, reportId: string | null,
 ): Promise<void> {
   if (!env.DB || eventIds.length === 0) return;
   // Non-critical audit write (the relay deletes already happened): log and
@@ -76,8 +84,8 @@ async function writeDecisionBatch(
   try {
     await env.DB.batch(
       eventIds.map((eventId) => env.DB!.prepare(
-        `INSERT INTO moderation_decisions (target_type, target_id, action, reason, moderator_pubkey, created_at) VALUES (?, ?, ?, ?, ?, datetime('now'))`
-      ).bind('event', eventId, 'delete_event', reason, moderatorPubkey))
+        `INSERT INTO moderation_decisions (target_type, target_id, action, reason, moderator_pubkey, report_id, created_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`
+      ).bind('event', eventId, 'delete_event', reason, moderatorPubkey, reportId))
     );
   } catch (error) {
     console.error('[bulk-moderate] decision-log batch insert failed (non-critical):', formatError(error));
@@ -86,6 +94,7 @@ async function writeDecisionBatch(
 
 async function deleteEvents(
   env: BulkModerateEnv, events: RelayEventSummary[], reason: string, moderatorPubkey: string,
+  attribution: DecisionAttribution = {},
 ): Promise<{ processed: number; successfulEventIds: string[]; failures: string[] }> {
   let processed = 0;
   const successfulEventIds: string[] = [];
@@ -104,7 +113,12 @@ async function deleteEvents(
       failures.push(`event:${event.id}:${formatError(error)}`);
     }
   });
-  await writeDecisionBatch(env, successfulEventIds, reason, moderatorPubkey);
+  // The decision rows name the requesting moderator when the job carries one;
+  // the Zendesk sync below stays on the worker's key, as handleModerate does.
+  await writeDecisionBatch(
+    env, successfulEventIds, reason,
+    attribution.moderatorPubkey ?? moderatorPubkey, attribution.reportId ?? null,
+  );
   await runWithConcurrency(successfulEventIds, BULK_ACTION_CONCURRENCY, async (eventId) => {
     await syncZendeskAfterAction(env, 'delete_event', 'event', eventId, moderatorPubkey);
   });
@@ -186,7 +200,8 @@ export async function ensureBulkJobsTable(db: D1Database): Promise<void> {
       failures_dropped INTEGER NOT NULL DEFAULT 0,
       version INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
+      updated_at TEXT NOT NULL,
+      kind INTEGER
     )`
   ).run();
   // Defensive add for a bulk_jobs table created before failures_dropped existed
@@ -194,6 +209,9 @@ export async function ensureBulkJobsTable(db: D1Database): Promise<void> {
   await db.prepare('ALTER TABLE bulk_jobs ADD COLUMN failures_dropped INTEGER NOT NULL DEFAULT 0')
     .run().catch(() => {});
   await db.prepare('ALTER TABLE bulk_jobs ADD COLUMN version INTEGER NOT NULL DEFAULT 0')
+    .run().catch(() => {});
+  // NULL for every job that is not kind-scoped, including all existing rows.
+  await db.prepare('ALTER TABLE bulk_jobs ADD COLUMN kind INTEGER')
     .run().catch(() => {});
   bulkSchemaReady = true;
 }
@@ -210,6 +228,7 @@ interface BulkJobRow {
   version: number;
   created_at: string;
   updated_at: string;
+  kind: number | null;
 }
 
 // `failures[]` stores a capped raw list (<= MAX_STORED_FAILURES, no synthetic
@@ -235,12 +254,26 @@ function rowToBulkJob(row: BulkJobRow): BulkJob {
     jobId: row.job_id,
     pubkey: row.pubkey,
     action: row.action as BulkJob['action'],
+    ...(row.kind !== null && row.kind !== undefined ? { kind: Number(row.kind) } : {}),
     status: row.status as BulkJob['status'],
     eventsProcessed: Number(row.events_processed) || 0,
     mediaProcessed: Number(row.media_processed) || 0,
     failures: failuresForDisplay(parseFailuresList(row.failures), dropped),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+// The optional per-job fields every event-phase message must carry, so a
+// continuation resumes with the same kind and attribution. The media phase uses
+// neither (a kind-scoped job never reaches it, and it writes no decision rows).
+// Fields that are absent stay absent, which keeps a plain delete-all message
+// unchanged.
+function jobScope(src: Pick<BulkJobMessage, 'kind' | 'moderatorPubkey' | 'reportId'>): Pick<BulkJobMessage, 'kind' | 'moderatorPubkey' | 'reportId'> {
+  return {
+    ...(src.kind !== undefined ? { kind: src.kind } : {}),
+    ...(src.moderatorPubkey !== undefined ? { moderatorPubkey: src.moderatorPubkey } : {}),
+    ...(src.reportId !== undefined ? { reportId: src.reportId } : {}),
   };
 }
 
@@ -252,9 +285,13 @@ export async function handleBulkModerateEnqueue(
   env: BulkModerateEnv,
   corsHeaders: Record<string, string>,
 ): Promise<Response> {
-  let body: { pubkey?: string; action?: string; reason?: string };
+  type EnqueueBody = {
+    pubkey?: string; action?: string; reason?: string;
+    kind?: unknown; moderatorPubkey?: unknown; reportId?: unknown;
+  };
+  let body: EnqueueBody;
   try {
-    body = await request.json() as { pubkey?: string; action?: string; reason?: string };
+    body = await request.json() as EnqueueBody;
   } catch {
     return json({ error: 'Malformed JSON body' }, 400, corsHeaders);
   }
@@ -268,6 +305,22 @@ export async function handleBulkModerateEnqueue(
   if (!body.action || !VALID_BULK_ACTIONS.includes(body.action as BulkAction)) {
     return json({ error: `Invalid action. Must be one of: ${VALID_BULK_ACTIONS.join(', ')}` }, 400, corsHeaders);
   }
+  if (body.kind !== undefined) {
+    if (typeof body.kind !== 'number' || !Number.isSafeInteger(body.kind) || body.kind < 0) {
+      return json({ error: 'kind must be a non-negative integer' }, 400, corsHeaders);
+    }
+    // The age-restrict actions are media-only and cannot be narrowed to a kind.
+    // Refuse rather than ignore it, which would widen the job to every video.
+    if (body.action !== 'delete-all') {
+      return json({ error: 'kind is only supported for delete-all' }, 400, corsHeaders);
+    }
+  }
+  if (body.moderatorPubkey !== undefined && (typeof body.moderatorPubkey !== 'string' || !/^[0-9a-f]{64}$/.test(body.moderatorPubkey))) {
+    return json({ error: 'moderatorPubkey must be a 64-char hex pubkey' }, 400, corsHeaders);
+  }
+  if (body.reportId !== undefined && (typeof body.reportId !== 'string' || !/^[0-9a-f]{64}$/.test(body.reportId))) {
+    return json({ error: 'reportId must be a 64-char hex event id' }, 400, corsHeaders);
+  }
   if (!env.DB) {
     return json({ error: 'bulk_jobs storage (D1) is not bound' }, 500, corsHeaders);
   }
@@ -277,17 +330,25 @@ export async function handleBulkModerateEnqueue(
 
   const action = body.action as BulkAction;
   const reason = body.reason || `Bulk ${action} by moderator`;
+  const kind = body.kind as number | undefined;
   const jobId = crypto.randomUUID();
   const now = new Date().toISOString();
 
   await ensureBulkJobsTable(env.DB);
   await env.DB.prepare(
-    `INSERT INTO bulk_jobs (job_id, pubkey, action, status, events_processed, media_processed, failures, failures_dropped, version, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).bind(jobId, body.pubkey, action, 'pending', 0, 0, '[]', 0, 0, now, now).run();
+    `INSERT INTO bulk_jobs (job_id, pubkey, action, status, events_processed, media_processed, failures, failures_dropped, version, created_at, updated_at, kind)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(jobId, body.pubkey, action, 'pending', 0, 0, '[]', 0, 0, now, now, kind ?? null).run();
 
   try {
-    await env.BULK_QUEUE.send({ jobId, pubkey: body.pubkey, action, reason, version: 0 });
+    await env.BULK_QUEUE.send({
+      jobId, pubkey: body.pubkey, action, reason, version: 0,
+      ...jobScope({
+        kind,
+        moderatorPubkey: body.moderatorPubkey as string | undefined,
+        reportId: body.reportId as string | undefined,
+      }),
+    });
   } catch (error) {
     // Roll back the orphaned pending row so it can't linger unprocessed.
     await env.DB.prepare('DELETE FROM bulk_jobs WHERE job_id = ?').bind(jobId).run().catch(() => {});
@@ -367,6 +428,7 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
     ownedVersion = claimedVersion;
 
     const moderatorPubkey = await getAdminPubkey(env);
+    const scope = jobScope(msg);
 
     let eventsDelta = 0;
     let mediaDelta = 0;
@@ -382,7 +444,7 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
           complete: until === undefined,
           saturated: false,
         }
-        : await queryRelayEventsPage(msg.pubkey, env, until);
+        : await queryRelayEventsPage(msg.pubkey, env, until, msg.kind);
       const startedAt = Date.now();
       const candidates = page.events.slice(0, SERIALIZED_EVENT_BATCH_SIZE);
       const ev = { processed: 0, successfulEventIds: [] as string[], failures: [] as string[] };
@@ -390,7 +452,7 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
       while (attempted < candidates.length) {
         if (attempted > 0 && Date.now() - startedAt >= EVENT_BATCH_BUDGET_MS) break;
         const wave = candidates.slice(attempted, attempted + BULK_ACTION_CONCURRENCY);
-        const waveResult = await deleteEvents(env, wave, reason, moderatorPubkey);
+        const waveResult = await deleteEvents(env, wave, reason, moderatorPubkey, scope);
         ev.processed += waveResult.processed;
         ev.successfulEventIds.push(...waveResult.successfulEventIds);
         ev.failures.push(...waveResult.failures);
@@ -416,7 +478,17 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
           phase: 'events',
           cursor: page.nextUntil === null ? undefined : String(page.nextUntil),
           eventIds: remainingEventIds,
+          ...scope,
         };
+      } else if ((page.complete || page.nextUntil === null) && msg.kind !== undefined) {
+        // A kind-scoped job ends with its events: no media phase and no
+        // account-level Zendesk sync (each deleted event already synced its own
+        // tickets in deleteEvents). The media phase deletes every video blob the
+        // account has, because funnelcake's per-user video listing cannot be
+        // narrowed to a kind, and a blob is content-addressed, so one file can
+        // back events of a kind the moderator chose to keep. The by-kind dialog
+        // never touched media; Delete All Content is the path that removes it.
+        next = null;
       } else if (page.complete || page.nextUntil === null) {
         // Events done: one pubkey-level zendesk sync (gated on the job's CUMULATIVE
         // successes, not just this final chunk's -- the last chunk is often an empty
@@ -426,7 +498,7 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
         }
         next = { jobId: msg.jobId, pubkey: msg.pubkey, action: msg.action, reason, phase: 'media' };
       } else {
-        next = { jobId: msg.jobId, pubkey: msg.pubkey, action: msg.action, reason, phase: 'events', cursor: String(page.nextUntil) };
+        next = { jobId: msg.jobId, pubkey: msg.pubkey, action: msg.action, reason, phase: 'events', cursor: String(page.nextUntil), ...scope };
       }
     } else {
       const mediaPage = msg.mediaPage ?? 0;
@@ -548,16 +620,62 @@ export async function handleBulkJobStatus(
   return json(job, 200, corsHeaders);
 }
 
+type RawRelayEvent = { id: string; kind: number; content?: string; tags: string[][]; created_at?: number };
+
 export async function queryRelayEvents(
   pubkey: string,
   env: Pick<BulkModerateEnv, 'RELAY_URL'>,
 ): Promise<{ events: RelayEventSummary[]; complete: boolean }> {
-  type Result = { events: RelayEventSummary[]; complete: boolean };
+  return collectRelayEvents(pubkey, env, (event) => ({
+    id: event.id, kind: event.kind, content: event.content || '', tags: event.tags,
+  }));
+}
+
+// Exact per-kind counts for one author, from the same full paged listing the
+// synchronous bulk path uses. Keeps only each event's kind, so a prolific
+// account's content and tags are never held in memory.
+export async function countRelayEventKinds(
+  pubkey: string,
+  env: Pick<BulkModerateEnv, 'RELAY_URL'>,
+): Promise<BulkKindCounts> {
+  const { events: kinds, complete } = await collectRelayEvents(pubkey, env, (event) => event.kind);
+  const counts: Record<string, number> = {};
+  for (const kind of kinds) counts[kind] = (counts[kind] ?? 0) + 1;
+  return { counts, complete };
+}
+
+// GET /api/bulk-moderate/kind-counts?pubkey=: the by-kind delete dialog's
+// breakdown. A failed listing is a 502, never an empty (zero) count.
+export async function handleBulkKindCounts(
+  pubkey: string | null,
+  env: Pick<BulkModerateEnv, 'RELAY_URL'>,
+  corsHeaders: Record<string, string>,
+): Promise<Response> {
+  if (!pubkey || !/^[0-9a-f]{64}$/.test(pubkey)) {
+    return json({ error: 'Valid 64-char hex pubkey required' }, 400, corsHeaders);
+  }
+  try {
+    return json(await countRelayEventKinds(pubkey, env), 200, corsHeaders);
+  } catch (error) {
+    console.error('[bulk-moderate] kind counts failed for', pubkey, error);
+    return json({ error: `Could not list this account's events: ${formatError(error)}` }, 502, corsHeaders);
+  }
+}
+
+// Pages through every event an author has (until cursoring, deduped by id) and
+// keeps `project(event)` for each. `complete` is false when the listing was cut
+// short (page bound, or a second too full to page past).
+async function collectRelayEvents<T>(
+  pubkey: string,
+  env: Pick<BulkModerateEnv, 'RELAY_URL'>,
+  project: (event: RawRelayEvent) => T,
+): Promise<{ events: T[]; complete: boolean }> {
+  type Result = { events: T[]; complete: boolean };
   return new Promise((resolve, reject) => {
     try {
       const ws = new WebSocket(env.RELAY_URL);
       let resolved = false;
-      const byId = new Map<string, RelayEventSummary>(); // dedup across pages (until boundary overlaps)
+      const byId = new Map<string, T>(); // dedup across pages (until boundary overlaps)
       let page = 0;
       let currentSub = '';
       let pageEvents = 0;        // events seen in the current page
@@ -600,10 +718,10 @@ export async function queryRelayEvents(
         try {
           const data = JSON.parse(msg.data as string);
           if (data[0] === 'EVENT' && data[1] === currentSub) {
-            const event = data[2] as { id: string; kind: number; content?: string; tags: string[][]; created_at?: number };
+            const event = data[2] as RawRelayEvent;
             pageEvents += 1;
             if (!byId.has(event.id)) {
-              byId.set(event.id, { id: event.id, kind: event.kind, content: event.content || '', tags: event.tags });
+              byId.set(event.id, project(event));
             }
             if (typeof event.created_at === 'number' && event.created_at < pageOldest) pageOldest = event.created_at;
           } else if (data[0] === 'EOSE' && data[1] === currentSub) {
@@ -676,10 +794,13 @@ export async function queryRelayEvents(
 // second, so we process this page, step past (oldest - 1), and set
 // `saturated: true` so the consumer SURFACES the gap (never silent). Matches the
 // synchronous queryRelayEvents progress-guard behavior.
+//
+// `kind` narrows the REQ to that one event kind (a kind-scoped delete job).
 export async function queryRelayEventsPage(
   pubkey: string,
   env: Pick<BulkModerateEnv, 'RELAY_URL'>,
   until?: number,
+  kind?: number,
 ): Promise<{ events: RelayEventSummary[]; nextUntil: number | null; complete: boolean; saturated: boolean }> {
   type Page = { events: RelayEventSummary[]; nextUntil: number | null; complete: boolean; saturated: boolean };
   return new Promise((resolve, reject) => {
@@ -697,7 +818,8 @@ export async function queryRelayEventsPage(
         (fn as (value: Page | Error) => void)(value);
       };
       ws.addEventListener('open', () => {
-        const filter: { authors: string[]; limit: number; until?: number } = { authors: [pubkey], limit: EVENT_CHUNK_SIZE };
+        const filter: { authors: string[]; kinds?: number[]; limit: number; until?: number } = { authors: [pubkey], limit: EVENT_CHUNK_SIZE };
+        if (kind !== undefined) filter.kinds = [kind];
         if (until !== undefined) filter.until = until;
         ws.send(JSON.stringify(['REQ', subId, filter]));
       });

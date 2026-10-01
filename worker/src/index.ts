@@ -38,7 +38,7 @@ import {
   updateAgeReviewConfig,
 } from './age-review';
 import { handleAccountStatus } from './account-status';
-import { handleBulkModerateEnqueue, handleBulkJobStatus, processBulkJob } from './bulk-moderate';
+import { handleBulkModerateEnqueue, handleBulkJobStatus, handleBulkKindCounts, processBulkJob } from './bulk-moderate';
 import type { BulkJobMessage } from '../../shared/bulk-moderation';
 import { ensureZendeskTable, addZendeskInternalNote, syncZendeskAfterAction, getLinkedTickets, closeTicketById } from './zendesk-sync';
 import { buildReportNote, parseKind0Profile, type ReportedProfile } from './report-note';
@@ -757,6 +757,11 @@ export default {
       const bulkStatusMatch = path.match(/^\/api\/bulk-moderate\/status\/([^/]+)$/);
       if (bulkStatusMatch && request.method === 'GET') {
         return handleBulkJobStatus(decodeURIComponent(bulkStatusMatch[1]), env, corsHeaders);
+      }
+
+      // Exact per-kind event counts for an account (the by-kind delete dialog).
+      if (path === '/api/bulk-moderate/kind-counts' && request.method === 'GET') {
+        return handleBulkKindCounts(url.searchParams.get('pubkey'), env, corsHeaders);
       }
 
       // Age review config

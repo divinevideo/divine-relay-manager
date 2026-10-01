@@ -44,12 +44,20 @@ export interface BulkJobMessage {
   // message bounds serialized relay mutations without advancing the cursor.
   eventIds?: string[];
   version?: number;
+  // delete-all only: restrict the job to events of this one kind. A
+  // kind-scoped job has no media phase. Absent = every event, then media.
+  kind?: number;
+  // Attribution for the per-event decision rows. Absent = the worker's signing
+  // key and no report, which is what delete-all has always written.
+  moderatorPubkey?: string;
+  reportId?: string;
 }
 
 export interface BulkJob {
   jobId: string;
   pubkey: string;
   action: BulkAction;
+  kind?: number;
   status: BulkJobStatus;
   eventsProcessed: number;
   mediaProcessed: number;
@@ -61,4 +69,12 @@ export interface BulkJob {
 export interface BulkEnqueueResponse {
   success: boolean;
   jobId: string;
+}
+
+// Per-kind event counts for one author, from a full paged relay listing.
+// `complete` is false when the listing was cut short, so the counts are a
+// lower bound.
+export interface BulkKindCounts {
+  counts: Record<string, number>;
+  complete: boolean;
 }

@@ -1931,6 +1931,15 @@ describe('bulk-moderate age-review guard', () => {
     errorSpy.mockRestore();
   });
 
+  it('refuses a kind-scoped delete the same way', async () => {
+    const { env, send } = makeBulkEnv({ id: 'case-b6', state: 'submitted_for_review' });
+    const response = await worker.fetch(
+      enqueueRequest({ pubkey: VALID_PUBKEY, action: 'delete-all', kind: 1 }), env, ctx,
+    );
+    expect(response.status).toBe(409);
+    expect(send).not.toHaveBeenCalled();
+  });
+
   it('leaves validation to the handler: malformed pubkey is a 400, not a guard error', async () => {
     const { env, send } = makeBulkEnv({ id: 'case-b5', state: 'restricted_pending_user_response' });
     const response = await worker.fetch(
@@ -1938,6 +1947,57 @@ describe('bulk-moderate age-review guard', () => {
     );
     expect(response.status).toBe(400);
     expect(send).not.toHaveBeenCalled();
+  });
+});
+
+describe('bulk-moderate kind-counts route', () => {
+  const VALID_PUBKEY = 'abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234';
+  const env = {
+    ALLOWED_ORIGINS: 'https://app.divine.video',
+    RELAY_URL: 'wss://relay.divine.video',
+    ADMIN_API_KEY: 'test-admin-key',
+    NOSTR_NSEC: TEST_NSEC,
+  } as never;
+
+  function countsRequest(pubkey: string, headers: Record<string, string> = { 'X-Admin-Key': 'test-admin-key' }): Request {
+    return new Request(`https://api-relay-prod.divine.video/api/bulk-moderate/kind-counts?pubkey=${pubkey}`, {
+      headers: { Origin: 'https://app.divine.video', ...headers },
+    });
+  }
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it('requires admin auth (401 without an admin key)', async () => {
+    const response = await worker.fetch(countsRequest(VALID_PUBKEY, {}), env, ctx);
+    expect(response.status).toBe(401);
+  });
+
+  it('returns the per-kind counts for the pubkey in the query string', async () => {
+    const filters: unknown[] = [];
+    vi.spyOn(globalThis, 'WebSocket').mockImplementation((function () {
+      const listeners = new Map<string, Array<(value?: unknown) => void>>();
+      const emit = (type: string, value?: unknown) => listeners.get(type)?.forEach((h) => h(value));
+      queueMicrotask(() => emit('open'));
+      return {
+        addEventListener: (t: string, h: (value?: unknown) => void) => listeners.set(t, [...(listeners.get(t) || []), h]),
+        send: (payload: string) => {
+          const data = JSON.parse(payload);
+          if (data[0] !== 'REQ') return;
+          filters.push(data[2]);
+          queueMicrotask(() => {
+            emit('message', { data: JSON.stringify(['EVENT', data[1], { id: 'e1', kind: 22, tags: [], created_at: 2 }]) });
+            emit('message', { data: JSON.stringify(['EOSE', data[1]]) });
+          });
+        },
+        close: vi.fn(),
+      };
+    } as unknown as typeof WebSocket));
+
+    const response = await worker.fetch(countsRequest(VALID_PUBKEY), env, ctx);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ counts: { 22: 1 }, complete: true });
+    expect(filters).toEqual([expect.objectContaining({ authors: [VALID_PUBKEY] })]);
   });
 });
 

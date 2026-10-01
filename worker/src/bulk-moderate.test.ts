@@ -7,11 +7,13 @@ import {
   queryRelayEvents,
   queryUserVideosPage,
   queryRelayEventsPage,
+  handleBulkKindCounts,
   VIDEO_MAX_PAGES,
   type BulkModerateEnv,
 } from './bulk-moderate';
 import type { BulkJob, BulkJobMessage, BulkEnqueueResponse } from '../../shared/bulk-moderation';
 import { banEvent, getAdminPubkey } from './nip86';
+import { syncZendeskAfterAction } from './zendesk-sync';
 
 vi.mock('./nip86', () => ({
   getAdminPubkey: vi.fn().mockResolvedValue('moderator-pubkey'),
@@ -84,15 +86,19 @@ function mockUserVideos(videos: Array<{ sha256: string }>) {
 // and reports meta.changes, so the consumer's sticky-status guards are exercised.
 function makeJobDb() {
   const rows = new Map<string, Record<string, unknown>>();
+  // Statements passed to DB.batch (the per-chunk decision-log writes).
+  const batched: Array<{ sql: string; binds: unknown[] }> = [];
   const db = {
     prepare(sql: string) {
       let binds: unknown[] = [];
       const stmt = {
+        sql,
+        get binds() { return binds; },
         bind(...args: unknown[]) { binds = args; return stmt; },
         async run() {
           if (/^\s*INSERT INTO bulk_jobs/i.test(sql)) {
-            const [job_id, pubkey, action, status, events_processed, media_processed, failures, failures_dropped, version, created_at, updated_at] = binds;
-            rows.set(job_id as string, { job_id, pubkey, action, status, events_processed, media_processed, failures, failures_dropped, version, created_at, updated_at });
+            const [job_id, pubkey, action, status, events_processed, media_processed, failures, failures_dropped, version, created_at, updated_at, kind] = binds;
+            rows.set(job_id as string, { job_id, pubkey, action, status, events_processed, media_processed, failures, failures_dropped, version, created_at, updated_at, kind: kind ?? null });
             return { success: true, meta: { changes: 1 } };
           }
           if (/^\s*UPDATE bulk_jobs/i.test(sql)) {
@@ -132,9 +138,12 @@ function makeJobDb() {
       };
       return stmt;
     },
-    batch: async () => [],
+    batch: async (stmts: Array<{ sql: string; binds: unknown[] }>) => {
+      batched.push(...stmts.map((st) => ({ sql: st.sql, binds: st.binds })));
+      return [];
+    },
   };
-  return { db: db as unknown as D1Database, rows };
+  return { db: db as unknown as D1Database, rows, batched };
 }
 
 function baseEnv(): BulkModerateEnv {
@@ -659,11 +668,315 @@ describe('async bulk job model', () => {
   });
 });
 
+describe('kind-scoped delete job', () => {
+  const PUBKEY = 'a'.repeat(64);
+  const MODERATOR = 'd'.repeat(64);
+  const REPORT_ID = 'e'.repeat(64);
+  let mockEnv: BulkModerateEnv;
+  let jobDb: ReturnType<typeof makeJobDb>;
+  let sent: BulkJobMessage[];
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.mocked(getAdminPubkey).mockResolvedValue('moderator-pubkey');
+    vi.mocked(banEvent).mockReset().mockResolvedValue({ success: true });
+    vi.mocked(syncZendeskAfterAction).mockClear();
+    mockUserVideos([{ sha256: hashA }]);
+    jobDb = makeJobDb();
+    sent = [];
+    mockEnv = {
+      ...baseEnv(),
+      DB: jobDb.db,
+      BULK_QUEUE: { send: vi.fn(async (m: BulkJobMessage) => { sent.push(m); }) } as unknown as Queue<BulkJobMessage>,
+    };
+  });
+
+  function enqueueReq(body: object): Request {
+    return new Request('https://test/api/bulk-moderate', { method: 'POST', body: JSON.stringify(body) });
+  }
+
+  async function drain(first: BulkJobMessage, max = 20): Promise<{ iterations: number; messages: BulkJobMessage[] }> {
+    const messages: BulkJobMessage[] = [];
+    let msg: BulkJobMessage | undefined = first;
+    let iterations = 0;
+    while (msg && iterations++ < max) {
+      sent.length = 0;
+      await processBulkJob(msg, mockEnv);
+      msg = sent[0];
+      if (msg) messages.push(msg);
+    }
+    return { iterations, messages };
+  }
+
+  // 30 kind-1 notes interleaved with 30 kind-7 reactions, one per second.
+  function mixedEvents() {
+    return Array.from({ length: 60 }, (_, i) => ({
+      id: `${i % 2 === 0 ? 'note' : 'react'}${i}`,
+      kind: i % 2 === 0 ? 1 : 7,
+      content: '',
+      tags: [] as string[][],
+      created_at: 60 - i,
+    }));
+  }
+
+  it('enqueue stores the kind on the job row and the queue message', async () => {
+    const res = await handleBulkModerateEnqueue(enqueueReq({ pubkey: PUBKEY, action: 'delete-all', kind: 34236 }), mockEnv, {});
+    expect(res.status).toBe(200);
+    const { jobId } = await res.json() as BulkEnqueueResponse;
+    expect(jobDb.rows.get(jobId)?.kind).toBe(34236);
+    expect(sent[0]).toMatchObject({ jobId, action: 'delete-all', kind: 34236 });
+  });
+
+  it('enqueue accepts kind 0', async () => {
+    const res = await handleBulkModerateEnqueue(enqueueReq({ pubkey: PUBKEY, action: 'delete-all', kind: 0 }), mockEnv, {});
+    expect(res.status).toBe(200);
+    expect(sent[0].kind).toBe(0);
+  });
+
+  it.each([
+    ['negative', -1],
+    ['fractional', 1.5],
+    ['string', '1'],
+    ['null', null],
+    ['unsafe integer', 2 ** 53],
+    ['object', { kind: 1 }],
+  ])('enqueue rejects a %s kind with a 400 and enqueues nothing', async (_label, kind) => {
+    const res = await handleBulkModerateEnqueue(enqueueReq({ pubkey: PUBKEY, action: 'delete-all', kind }), mockEnv, {});
+    expect(res.status).toBe(400);
+    expect(sent).toHaveLength(0);
+    expect(jobDb.rows.size).toBe(0);
+  });
+
+  it('enqueue rejects a kind on a non-delete action instead of widening it to every video', async () => {
+    const res = await handleBulkModerateEnqueue(enqueueReq({ pubkey: PUBKEY, action: 'age-restrict-all', kind: 1 }), mockEnv, {});
+    expect(res.status).toBe(400);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('delete-all without a kind is unchanged: no kind on the row, the message, or the relay filter', async () => {
+    const res = await handleBulkModerateEnqueue(enqueueReq({ pubkey: PUBKEY, action: 'delete-all' }), mockEnv, {});
+    const { jobId } = await res.json() as BulkEnqueueResponse;
+    expect(jobDb.rows.get(jobId)?.kind).toBeNull();
+    expect('kind' in sent[0]).toBe(false);
+
+    const { filters } = mockPaginatedRelay(mixedEvents());
+    const { messages } = await drain(sent[0]);
+    expect(filters.every((f) => !('kinds' in f))).toBe(true);
+    expect(messages.every((m) => !('kind' in m))).toBe(true);
+    const row = jobDb.rows.get(jobId)!;
+    expect(row.status).toBe('done');
+    expect(row.events_processed).toBe(60);        // every kind
+    expect(row.media_processed).toBe(1);          // media phase still runs
+    expect(vi.mocked(syncZendeskAfterAction)).toHaveBeenCalledWith(mockEnv, 'delete_event', 'pubkey', PUBKEY, 'moderator-pubkey');
+  });
+
+  it('deletes only events of the kind, across pages, carrying the kind on every continuation', async () => {
+    const { filters } = mockPaginatedRelay(mixedEvents());
+    const res = await handleBulkModerateEnqueue(enqueueReq({ pubkey: PUBKEY, action: 'delete-all', kind: 1 }), mockEnv, {});
+    const { jobId } = await res.json() as BulkEnqueueResponse;
+
+    const { messages } = await drain(sent[0]);
+
+    expect(filters.length).toBeGreaterThan(0);
+    expect(filters.every((f) => JSON.stringify(f.kinds) === '[1]')).toBe(true);
+    expect(messages.length).toBeGreaterThan(0);               // more than one chunk
+    expect(messages.every((m) => m.kind === 1)).toBe(true);   // resumable with the kind
+    const banned = vi.mocked(banEvent).mock.calls.map((c) => c[0]);
+    expect(banned).toHaveLength(30);
+    expect(banned.every((id) => id.startsWith('note'))).toBe(true);
+    const row = jobDb.rows.get(jobId)!;
+    expect(row.status).toBe('done');
+    expect(row.events_processed).toBe(30);
+    expect(JSON.parse(row.failures as string)).toEqual([]);
+  });
+
+  it('pages a kind past one relay page using the until cursor', async () => {
+    // 450 kind-1 events (more than two relay pages) interleaved with 450 kind-7
+    // events, all at distinct seconds.
+    const many = Array.from({ length: 900 }, (_, i) => ({ id: `n${i}`, kind: i % 2 === 0 ? 1 : 7, content: '', tags: [] as string[][], created_at: 900 - i }));
+    const { filters } = mockPaginatedRelay(many);
+    const jobId = 'job-kind-pages';
+    jobDb.rows.set(jobId, { job_id: jobId, pubkey: PUBKEY, action: 'delete-all', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, version: 0, created_at: 't', updated_at: 't', kind: 1 });
+
+    await drain({ jobId, pubkey: PUBKEY, action: 'delete-all', kind: 1, version: 0 }, 60);
+
+    expect(filters.some((f) => typeof f.until === 'number')).toBe(true);
+    expect(filters.every((f) => JSON.stringify(f.kinds) === '[1]')).toBe(true);
+    expect(jobDb.rows.get(jobId)!.events_processed).toBe(450);
+    expect(jobDb.rows.get(jobId)!.status).toBe('done');
+  });
+
+  it('does not touch media or resolve account-level tickets for a kind-scoped delete', async () => {
+    mockPaginatedRelay(mixedEvents());
+    const res = await handleBulkModerateEnqueue(enqueueReq({ pubkey: PUBKEY, action: 'delete-all', kind: 7 }), mockEnv, {});
+    const { jobId } = await res.json() as BulkEnqueueResponse;
+
+    const { messages } = await drain(sent[0]);
+
+    expect(messages.every((m) => m.phase !== 'media')).toBe(true);
+    const fetchCalls = vi.mocked(globalThis.fetch).mock.calls.map((c) => String(c[0]));
+    expect(fetchCalls.some((u) => u.includes('/videos'))).toBe(false);
+    const moderateFetch = (mockEnv.MODERATION_API as unknown as { fetch: ReturnType<typeof vi.fn> }).fetch;
+    expect(moderateFetch).not.toHaveBeenCalled();
+    expect(vi.mocked(syncZendeskAfterAction)).not.toHaveBeenCalledWith(mockEnv, 'delete_event', 'pubkey', PUBKEY, expect.anything());
+    const row = jobDb.rows.get(jobId)!;
+    expect(row.status).toBe('done');
+    expect(row.events_processed).toBe(30);
+    expect(row.media_processed).toBe(0);
+  });
+
+  it('records a cut-short listing as a failure, so the job never reads as complete', async () => {
+    // A full page with no usable created_at: the cursor cannot advance.
+    const noTimes = Array.from({ length: 200 }, (_, i) => ({ id: `x${i}`, kind: 1, content: '', tags: [] as string[][] }));
+    vi.spyOn(globalThis, 'WebSocket').mockImplementation((function () {
+      const listeners = new Map<string, Array<(value?: unknown) => void>>();
+      const emit = (type: string, value?: unknown) => listeners.get(type)?.forEach((h) => h(value));
+      queueMicrotask(() => emit('open'));
+      return {
+        addEventListener: (t: string, h: (value?: unknown) => void) => listeners.set(t, [...(listeners.get(t) || []), h]),
+        send: (payload: string) => {
+          const data = JSON.parse(payload);
+          if (data[0] !== 'REQ') return;
+          queueMicrotask(() => {
+            for (const ev of noTimes) emit('message', { data: JSON.stringify(['EVENT', data[1], ev]) });
+            emit('message', { data: JSON.stringify(['EOSE', data[1]]) });
+          });
+        },
+        close: vi.fn(),
+      };
+    } as unknown as typeof WebSocket));
+    const jobId = 'job-kind-cut';
+    jobDb.rows.set(jobId, { job_id: jobId, pubkey: PUBKEY, action: 'delete-all', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, version: 0, created_at: 't', updated_at: 't', kind: 1 });
+
+    await drain({ jobId, pubkey: PUBKEY, action: 'delete-all', kind: 1, version: 0 }, 30);
+
+    const res = await handleBulkJobStatus(jobId, mockEnv, {});
+    const job = await res.json() as BulkJob;
+    expect(job.status).toBe('done');
+    expect(job.failures.some((f) => /could not be fully paginated/.test(f))).toBe(true);
+  });
+
+  it('status reports the kind for a kind-scoped job and omits it otherwise', async () => {
+    jobDb.rows.set('job-k', { job_id: 'job-k', pubkey: PUBKEY, action: 'delete-all', status: 'running', events_processed: 1, media_processed: 0, failures: '[]', failures_dropped: 0, version: 1, created_at: 't', updated_at: new Date().toISOString(), kind: 22 });
+    jobDb.rows.set('job-all', { job_id: 'job-all', pubkey: PUBKEY, action: 'delete-all', status: 'running', events_processed: 1, media_processed: 0, failures: '[]', failures_dropped: 0, version: 1, created_at: 't', updated_at: new Date().toISOString(), kind: null });
+
+    const kindJob = await (await handleBulkJobStatus('job-k', mockEnv, {})).json() as BulkJob;
+    const allJob = await (await handleBulkJobStatus('job-all', mockEnv, {})).json() as BulkJob;
+
+    expect(kindJob.kind).toBe(22);
+    expect('kind' in allJob).toBe(false);
+  });
+
+  it('attributes decision rows to the requesting moderator and report', async () => {
+    mockPaginatedRelay(mixedEvents().slice(0, 4));
+    await handleBulkModerateEnqueue(enqueueReq({
+      pubkey: PUBKEY, action: 'delete-all', kind: 1, reason: 'spam', moderatorPubkey: MODERATOR, reportId: REPORT_ID,
+    }), mockEnv, {});
+
+    await drain(sent[0]);
+
+    const decisionRows = jobDb.batched.filter((b) => /INSERT INTO moderation_decisions/.test(b.sql));
+    expect(decisionRows).toHaveLength(2);
+    for (const row of decisionRows) {
+      expect(row.sql).toMatch(/report_id/);
+      expect(row.binds).toEqual(['event', expect.stringMatching(/^note/), 'delete_event', 'spam', MODERATOR, REPORT_ID]);
+    }
+  });
+
+  it('carries the moderator and report on every continuation', async () => {
+    mockPaginatedRelay(mixedEvents());
+    await handleBulkModerateEnqueue(enqueueReq({
+      pubkey: PUBKEY, action: 'delete-all', kind: 1, moderatorPubkey: MODERATOR, reportId: REPORT_ID,
+    }), mockEnv, {});
+
+    const { messages } = await drain(sent[0]);
+
+    expect(messages.length).toBeGreaterThan(0);
+    expect(messages.every((m) => m.moderatorPubkey === MODERATOR && m.reportId === REPORT_ID)).toBe(true);
+    const decisionRows = jobDb.batched.filter((b) => /INSERT INTO moderation_decisions/.test(b.sql));
+    expect(decisionRows).toHaveLength(30);
+    expect(decisionRows.every((r) => r.binds[4] === MODERATOR && r.binds[5] === REPORT_ID)).toBe(true);
+  });
+
+  it('falls back to the worker signer with no report when the caller names no moderator', async () => {
+    mockPaginatedRelay(mixedEvents().slice(0, 2));
+    await handleBulkModerateEnqueue(enqueueReq({ pubkey: PUBKEY, action: 'delete-all' }), mockEnv, {});
+
+    await drain(sent[0]);
+
+    const decisionRows = jobDb.batched.filter((b) => /INSERT INTO moderation_decisions/.test(b.sql));
+    expect(decisionRows.length).toBeGreaterThan(0);
+    expect(decisionRows.every((r) => r.binds[4] === 'moderator-pubkey' && r.binds[5] === null)).toBe(true);
+  });
+
+  it.each([
+    ['moderatorPubkey', { moderatorPubkey: 'not-hex' }],
+    ['reportId', { reportId: 'not-hex' }],
+  ])('enqueue rejects a malformed %s with a 400', async (_label, extra) => {
+    const res = await handleBulkModerateEnqueue(enqueueReq({ pubkey: PUBKEY, action: 'delete-all', kind: 1, ...extra }), mockEnv, {});
+    expect(res.status).toBe(400);
+    expect(sent).toHaveLength(0);
+  });
+});
+
+describe('handleBulkKindCounts', () => {
+  const PUBKEY = 'a'.repeat(64);
+  beforeEach(() => vi.restoreAllMocks());
+
+  it('counts every event by kind across pages and says the listing is complete', async () => {
+    // 1200 events over three relay pages: 800 kind 1, 400 kind 7.
+    const all = Array.from({ length: 1200 }, (_, i) => ({ id: `e${i}`, kind: i % 3 === 0 ? 7 : 1, content: '', tags: [] as string[][], created_at: 1200 - i }));
+    const { filters } = mockPaginatedRelay(all);
+
+    const res = await handleBulkKindCounts(PUBKEY, { RELAY_URL: 'wss://relay.test' }, {});
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ counts: { 1: 800, 7: 400 }, complete: true });
+    expect(filters.length).toBeGreaterThan(1);
+  });
+
+  it('says the listing is incomplete when the relay cannot be fully paginated', async () => {
+    const all = Array.from({ length: 600 }, (_, i) => ({ id: `e${i}`, kind: 1, content: '', tags: [] as string[][], created_at: 1000 }));
+    mockPaginatedRelay(all);
+
+    const res = await handleBulkKindCounts(PUBKEY, { RELAY_URL: 'wss://relay.test' }, {});
+
+    const body = await res.json() as { counts: Record<string, number>; complete: boolean };
+    expect(body.complete).toBe(false);
+    expect(body.counts[1]).toBe(500);
+  });
+
+  it('returns 400 for a missing or malformed pubkey', async () => {
+    expect((await handleBulkKindCounts(null, { RELAY_URL: 'wss://relay.test' }, {})).status).toBe(400);
+    expect((await handleBulkKindCounts('xyz', { RELAY_URL: 'wss://relay.test' }, {})).status).toBe(400);
+  });
+
+  it('returns 502 when the relay listing fails, not an empty count', async () => {
+    vi.spyOn(globalThis, 'WebSocket').mockImplementation((function () {
+      const listeners = new Map<string, Array<(value?: unknown) => void>>();
+      queueMicrotask(() => listeners.get('error')?.forEach((h) => h()));
+      return {
+        addEventListener: (t: string, h: (value?: unknown) => void) => listeners.set(t, [...(listeners.get(t) || []), h]),
+        send: vi.fn(),
+        close: vi.fn(),
+      };
+    } as unknown as typeof WebSocket));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const res = await handleBulkKindCounts(PUBKEY, { RELAY_URL: 'wss://relay.test' }, {});
+
+    expect(res.status).toBe(502);
+    expect(await res.json()).not.toHaveProperty('counts');
+  });
+});
+
 // Paginating mock relay: responds to each REQ with up to `limit` events whose
 // created_at <= filter.until (descending), then EOSE for that sub. Models a
-// relay that supports until-cursoring.
+// relay that supports until-cursoring, and honors a `kinds` filter. Returns the
+// REQ filters it received so a test can assert what was asked for.
 function mockPaginatedRelay(all: Array<{ id: string; kind: number; content: string; tags: string[][]; created_at: number }>) {
   const sorted = [...all].sort((a, b) => b.created_at - a.created_at);
+  const filters: Array<Record<string, unknown>> = [];
   vi.spyOn(globalThis, 'WebSocket').mockImplementation((function () {
     const listeners = new Map<string, Array<(value?: unknown) => void>>();
     const emit = (type: string, value?: unknown) => listeners.get(type)?.forEach((h) => h(value));
@@ -673,9 +986,13 @@ function mockPaginatedRelay(all: Array<{ id: string; kind: number; content: stri
         const data = JSON.parse(payload);
         if (data[0] !== 'REQ') return; // ignore CLOSE
         const sub = data[1];
+        filters.push(data[2]);
         const until = data[2].until ?? Infinity;
         const limit = data[2].limit ?? 500;
-        const page = sorted.filter((e) => e.created_at <= until).slice(0, limit);
+        const kinds = data[2].kinds as number[] | undefined;
+        const page = sorted
+          .filter((e) => e.created_at <= until && (!kinds || kinds.includes(e.kind)))
+          .slice(0, limit);
         queueMicrotask(() => {
           for (const ev of page) emit('message', { data: JSON.stringify(['EVENT', sub, ev]) });
           emit('message', { data: JSON.stringify(['EOSE', sub]) });
@@ -686,6 +1003,7 @@ function mockPaginatedRelay(all: Array<{ id: string; kind: number; content: stri
     queueMicrotask(() => emit('open'));
     return sock;
   } as unknown as typeof WebSocket));
+  return { filters };
 }
 
 describe('queryRelayEvents pagination', () => {
