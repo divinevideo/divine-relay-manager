@@ -770,14 +770,15 @@ export async function queryRelayEvents(
   }));
 }
 
-// Exact per-kind counts for one author, from the same full paged listing the
-// synchronous bulk path uses. Keeps only each event's kind, so a prolific
-// account's content and tags are never held in memory.
 // Time budget for the kind-counts listing. The dialog's request gives up after
 // 30s, and a large account can need more pages than that; stopping here returns
 // a lower bound ("at least N") instead of a timeout the dialog can't use.
 export const KIND_COUNT_BUDGET_MS = 20_000;
 
+// Per-kind counts for one author, from the same paged listing the synchronous
+// bulk path uses; a lower bound when `complete` is false (time budget, page
+// bound, or a second too full to page past). Keeps only each event's kind, so
+// a prolific account's content and tags are never held in memory.
 export async function countRelayEventKinds(
   pubkey: string,
   env: Pick<BulkModerateEnv, 'RELAY_URL'>,
@@ -980,10 +981,18 @@ async function collectRelayEvents<T>(
 // The one unavoidable case: a SINGLE second holding more than EVENT_CHUNK_SIZE
 // events (min === max on a full page). An `until` cursor cannot subdivide a
 // second, so we process this page, step past (oldest - 1), and set
-// `saturated: true` so the consumer SURFACES the gap (never silent). Matches the
-// synchronous queryRelayEvents progress-guard behavior.
+// `saturated: true` so the consumer SURFACES the gap (never silent). This is the
+// same step collectRelayEvents' progress guard takes.
 //
-// `kind` narrows the REQ to that one event kind (a kind-scoped delete job).
+// `kind` narrows the REQ to that one event kind (a kind-scoped delete job). For
+// a replaceable or addressable kind the relay lists only each coordinate's
+// newest version, so a short page is not the end: the page steps strictly below
+// its oldest event (`complete: false`) and an empty page ends the walk.
+//
+// Whatever the relay sends, the page holds each event id once, and an event
+// outside the requested author or kind is never returned to be banned; it is
+// only counted in `outOfScope`, and still counts toward the page's size and
+// timestamps, which are the relay's pagination.
 export async function queryRelayEventsPage(
   pubkey: string,
   env: Pick<BulkModerateEnv, 'RELAY_URL'>,

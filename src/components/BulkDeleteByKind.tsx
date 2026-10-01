@@ -177,7 +177,8 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
   const contentHidden = isBanned === true || isSuspended === true;
   const statusKnownActive = isBanned === false && isSuspended === false;
 
-  // Exact per-kind counts from the worker's full paged listing of the account.
+  // Per-kind counts from the worker's paged listing of the account; a lower
+  // bound when `complete` is false.
   // No retry: each attempt is a full listing, and reopening the dialog retries.
   const countsQuery = useQuery({
     queryKey: ["bulk-kind-counts", pubkey],

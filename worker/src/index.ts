@@ -721,8 +721,8 @@ export default {
         // case must not run out of band (age-restrict half-enforces without
         // advancing the case, un-age-restrict lifts restrictions the case
         // imposed, delete-all and delete-kind destroy evidence the review may
-        // need). Refuse
-        // and route to the case; Ban remains the severe-action escape hatch.
+        // need). Refuse and route to the case; Ban remains the severe-action
+        // escape hatch.
         // Peeks at the body on a clone so malformed/invalid requests still get
         // the handler's own 400s. Two accepted edges: (1) the guard runs
         // before action validation, so a well-formed pubkey with an open case
@@ -760,7 +760,8 @@ export default {
         return handleBulkJobStatus(decodeURIComponent(bulkStatusMatch[1]), env, corsHeaders);
       }
 
-      // Exact per-kind event counts for an account (the by-kind delete dialog).
+      // Per-kind event counts for an account, from a paged listing (the by-kind
+      // delete dialog). A lower bound when `complete` is false.
       if (path === '/api/bulk-moderate/kind-counts' && request.method === 'GET') {
         return handleBulkKindCounts(url.searchParams.get('pubkey'), env, corsHeaders);
       }

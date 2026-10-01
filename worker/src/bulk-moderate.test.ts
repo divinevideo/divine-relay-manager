@@ -1660,14 +1660,10 @@ describe('handleBulkKindCounts', () => {
   });
 });
 
-// Paginating mock relay: responds to each REQ with up to `limit` events whose
-// created_at <= filter.until (descending), then EOSE for that sub. Models a
-// relay that supports until-cursoring, and honors a `kinds` filter. Returns the
-// REQ filters it received so a test can assert what was asked for.
-// A Funnelcake simulator with hostile switches, adapted from the round-3
-// red-team suite. It follows deduped_read_model_projection: authors, kinds,
-// `until` and not-banned filter first, newest first, then one row per NIP-01
-// dedup key. The switches bend it the way a misbehaving relay or proxy could.
+// A Funnelcake simulator with hostile switches. It follows
+// deduped_read_model_projection: authors, kinds, `until` and not-banned filter
+// first, newest first, then one row per NIP-01 dedup key. The switches bend it
+// the way a misbehaving relay or proxy could.
 type SimEvent = { id: string; pubkey: string; kind: number; created_at: number; d?: string };
 interface SimOpts {
   ignoreUntil?: boolean;
@@ -2040,6 +2036,10 @@ function mockVersionedRelay(
   return { filters };
 }
 
+// Paginating mock relay: responds to each REQ with up to `limit` events whose
+// created_at <= filter.until (descending), then EOSE for that sub. Models a
+// relay that supports until-cursoring, and honors a `kinds` filter. Returns the
+// REQ filters it received so a test can assert what was asked for.
 // Like a real relay, it stops listing an event once banEvent has been called for
 // it (counting only calls made after this mock was installed).
 function mockPaginatedRelay(
