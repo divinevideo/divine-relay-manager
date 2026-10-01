@@ -1711,9 +1711,11 @@ describe('delete-kind against a hostile relay', () => {
     env = { ...baseEnv(), DB: jobDb.db, BULK_QUEUE: { send: vi.fn(async (m: BulkJobMessage) => { sent.push(m); }) } as unknown as Queue<BulkJobMessage> };
   });
 
-  async function runJob(kind: number, maxIter = 200) {
+  // `kind` null runs a delete-all job instead.
+  async function runJob(kind: number | null, maxIter = 200) {
+    const body = kind === null ? { pubkey: P, action: 'delete-all' } : { pubkey: P, action: 'delete-kind', kind };
     const res = await handleBulkModerateEnqueue(new Request('https://t/api/bulk-moderate', {
-      method: 'POST', body: JSON.stringify({ pubkey: P, action: 'delete-kind', kind }),
+      method: 'POST', body: JSON.stringify(body),
     }), env, {});
     const { jobId } = await res.json() as BulkEnqueueResponse;
     let msg: BulkJobMessage | undefined = sent.shift();
@@ -1916,6 +1918,26 @@ describe('delete-kind against a hostile relay', () => {
       expect(await res.json()).toEqual({ counts: { 1: 2 }, complete: true });
       expect(sim.reqs[0].until).toBeGreaterThanOrEqual(now() + 300 - 1);
       expect(sim.reqs[0].until).toBeLessThanOrEqual(now() + 300);
+    });
+
+    // delete-all pages the same way and runs on the same single-consumer queue,
+    // so a relay that ignores `until` must not loop it forever either.
+    it('fails a delete-all job whose relay ignores `until` and repeats a full page of failing bans', async () => {
+      const t = now() - 1000;
+      const sim = makeSim(
+        Array.from({ length: 250 }, (_, i) => ({ id: `e${String(i).padStart(3, '0')}`, pubkey: P, kind: 1, created_at: t - Math.floor(i / 2) })),
+        { ignoreUntil: true, failing: () => true },
+      );
+      const moderate = (env.MODERATION_API as unknown as { fetch: ReturnType<typeof vi.fn> }).fetch;
+
+      const { job, chunks, terminated } = await runJob(null);
+
+      expect(terminated).toBe(true);
+      expect(chunks).toBeLessThanOrEqual(15);
+      expect(job.status).toBe('failed');
+      expect(job.failures.some((f) => /relay cursor did not advance/.test(f))).toBe(true);
+      expect(moderate).not.toHaveBeenCalled();                        // never reached the media phase
+      expect(sim.reqs.every((f) => !('kinds' in f))).toBe(true);
     });
 
     it('ends a versioned walk at created_at 0 instead of asking for until -1', async () => {

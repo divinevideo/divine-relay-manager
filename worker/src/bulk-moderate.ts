@@ -526,13 +526,15 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
           outOfScope: 0,
         }
         : await queryRelayEventsPage(msg.pubkey, env, until ?? firstPageUntil, msg.kind);
-      // A sweep ends only because each page's next `until` is below the one it
-      // asked with. A relay that answers above `until` would repeat the page
-      // forever, each chunk refreshing updated_at so the stale heal never fires,
-      // and the queue's single consumer would stall every later bulk job. Fail
-      // the job instead, as the media phase does for a cursor that won't move.
+      // The events phase (a delete-kind sweep, or delete-all's walk) ends only
+      // because each page's next `until` is below the one it asked with. A relay
+      // that answers above `until` would repeat the page forever, each chunk
+      // refreshing updated_at so the stale heal never fires, and the queue's
+      // single consumer would stall every later bulk job. Fail the job instead,
+      // as the media phase does for a cursor that won't move. (delete-all's first
+      // page names no `until`, so the check starts from its second.)
       const askedUntil = until ?? firstPageUntil;
-      if (isKindJob && !msg.eventIds && askedUntil !== undefined && page.nextUntil !== null && page.nextUntil >= askedUntil) {
+      if (!msg.eventIds && askedUntil !== undefined && page.nextUntil !== null && page.nextUntil >= askedUntil) {
         throw new Error(`relay cursor did not advance for ${msg.pubkey} (asked until ${askedUntil}, got ${page.nextUntil})`);
       }
       const startedAt = Date.now();
