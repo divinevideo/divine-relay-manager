@@ -450,6 +450,22 @@ describe('BulkDeleteByKind outcomes', () => {
     expect(within(dialog).getByText('Bulk delete finished with issues')).toBeInTheDocument();
   });
 
+  // The outcome panel describes one job: its count can't come from a later
+  // attempt that never became a job.
+  it('keeps the first job\'s count in its outcome when a second start fails', async () => {
+    await runWith({ eventsProcessed: 2, failures: [`event:${EVENT_ID}:banevent failed`] });
+    const dialog = screen.getByRole('alertdialog');
+    expect(within(dialog).getByText(/^Deleted 2 of 3 Reaction events\./)).toBeInTheDocument();
+    api.bulkModerate.mockRejectedValue(new Error('queue down'));
+
+    fireEvent.click(screen.getByRole('button', { name: /Text Note \(800\)/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Delete 800 Text Note events' }));
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Bulk delete failed' })));
+
+    expect(within(dialog).getByText(/^Deleted 2 of 3 Reaction events\./)).toBeInTheDocument();
+    expect(within(dialog).queryByText(/of 800/)).not.toBeInTheDocument();
+  });
+
   it('counts the overflow marker when it reports how many failed', async () => {
     await runWith({ eventsProcessed: 0, failures: [`event:${EVENT_ID}:boom`, '+60 more'] });
 

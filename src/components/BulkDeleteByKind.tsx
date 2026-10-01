@@ -1,7 +1,7 @@
 // ABOUTME: Bulk delete all events of a specific kind from a user
 // ABOUTME: Runs as the worker's async bulk-moderate job; counts come from a full relay listing
 
-import { useRef, useState } from "react";
+import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { useBulkModerateJob } from "@/hooks/useBulkModerateJob";
@@ -163,7 +163,11 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
   // True while the moderator's identity resolves, before the enqueue is pending,
   // so a second click in that gap cannot start a second job.
   const [starting, setStarting] = useState(false);
-  const expectedRef = useRef<ExpectedCount>();
+  // What the moderator confirmed for the job the hook holds. It is set only
+  // once that job's enqueue succeeds, so a later attempt that never became a
+  // job leaves it alone, and an outcome never mixes one job with another
+  // attempt's count.
+  const [expected, setExpected] = useState<ExpectedCount>();
   // Funnelcake drops banned and suspended authors from every REQ, and the
   // worker lists anonymously, so for those accounts there is nothing to count or
   // delete here. Only a known-active account's zero is a real absence.
@@ -183,7 +187,7 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
   const bulkJob = useBulkModerateJob({
     pubkey,
     onComplete: (job) => {
-      const outcome = describeOutcome(job, expectedRef.current, contentHidden);
+      const outcome = describeOutcome(job, expected, contentHidden);
       toast(outcome.clean
         ? { title: outcome.title, description: outcome.description }
         : { title: outcome.title, description: outcome.description, variant: "destructive" });
@@ -217,7 +221,6 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
     && !contentHidden && !bulkJob.trackingLost;
   const kindName = getKindName(parseInt(selectedKind) || 0);
   const job = bulkJob.job;
-  const expected = expectedRef.current;
   const outcome = job && isTerminal(job.status) && (job.kind !== undefined || expected?.kind !== undefined)
     ? describeOutcome(job, expected, contentHidden)
     : null;
@@ -227,7 +230,7 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
     const kind = Number(selectedKind);
     setStarting(true);
     try {
-      expectedRef.current = { count: selectedCount ?? 0, complete: counts.complete, kind };
+      const confirmed = { count: selectedCount ?? 0, complete: counts.complete, kind };
       let moderatorPubkey: string | undefined;
       try {
         moderatorPubkey = await getModeratorPubkey?.();
@@ -235,12 +238,17 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
         // Attribution is non-critical: the job's rows fall back to the worker's key.
         console.warn("[BulkDeleteByKind] could not resolve the moderator pubkey", error);
       }
-      bulkJob.start("delete-kind", {
-        kind,
-        reason: reason.trim() || `Bulk delete: kind ${kind}`,
-        moderatorPubkey,
-        reportId,
-      });
+      try {
+        await bulkJob.startAsync("delete-kind", {
+          kind,
+          reason: reason.trim() || `Bulk delete: kind ${kind}`,
+          moderatorPubkey,
+          reportId,
+        });
+        setExpected(confirmed);
+      } catch {
+        // The hook's onError has reported it; the previous job's outcome stands.
+      }
     } finally {
       setStarting(false);
     }
