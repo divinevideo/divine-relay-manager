@@ -32,8 +32,8 @@ vi.mock('@/hooks/useCurrentUser', () => ({
 
 // The related-reports read is capped at 50 per filter. Returning exactly 50
 // here means a bare `relatedReports.length` in the dialog would read "50",
-// while the account's true history (userStats) is 80 -- the contradiction I2
-// exists to remove.
+// while the account's true history (userStats) is 80 -- the contradiction these
+// tests exist to prevent.
 function relatedReportEvents(count: number, pTagValue: string): NostrEvent[] {
   return Array.from({ length: count }, (_, i) => ({
     id: i.toString(16).padStart(64, '0'),

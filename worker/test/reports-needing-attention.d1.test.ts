@@ -442,7 +442,7 @@ describe('GET /api/reports/resolved', () => {
   });
 
   it('ignores a fractional created_at when choosing the next cursor', async () => {
-    // M1: a non-integer created_at must not become next_cursor, since the
+    // A non-integer created_at must not become next_cursor, since the
     // cursor is re-sent as `cursor=<n>` and rejected by the whole-seconds check.
     stubRelay([
       report(1, 90.5, [['e', E(1)]]),
@@ -455,7 +455,7 @@ describe('GET /api/reports/resolved', () => {
   });
 
   it('says done, with no cursor, when stepping back within second 0', async () => {
-    // M1: a full page all in second 0 cannot step to -1, which the whole-seconds
+    // A full page all in second 0 cannot step to -1, which the whole-seconds
     // check would reject. There is nothing older than second 0, so this is the
     // end, and the skip that produced it is still reported.
     stubRelay(Array.from({ length: 3 }, (_, i) => report(i, 0, [['e', E(i)]])));

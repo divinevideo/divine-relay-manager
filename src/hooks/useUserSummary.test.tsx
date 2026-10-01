@@ -1,6 +1,6 @@
 // ABOUTME: Tests useUserSummary's request body — specifically that it caps the
 // ABOUTME: reports/labels sent to the AI summarizer, independent of how much
-// ABOUTME: history useUserStats now reads (#reports-queue-completeness).
+// ABOUTME: history useUserStats now reads (#284).
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, waitFor } from '@testing-library/react';
