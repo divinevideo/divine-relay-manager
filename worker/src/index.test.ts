@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { finalizeEvent, generateSecretKey } from 'nostr-tools';
 import worker from './index';
 import { LABEL_PAGE_SIZE } from './resolution-labels';
+import * as ageReview from './age-review';
 
 const env = {
   ALLOWED_ORIGINS: 'https://app.divine.video,https://*.openvine-app.pages.dev',
@@ -11,6 +12,35 @@ const env = {
 const TEST_NSEC = 'nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5';
 
 const ctx = {} as ExecutionContext;
+
+describe('age-review update lifetime', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('keeps pending enforcement alive while still awaiting its response', async () => {
+    let finish!: (response: Response) => void;
+    const enforcement = new Promise<Response>(resolve => { finish = resolve; });
+    vi.spyOn(ageReview, 'handleUpdateAgeReviewCase').mockReturnValue(enforcement);
+    const waitUntil = vi.fn();
+    const pending = worker.fetch(new Request('https://worker.test/api/age-review/cases/test-case', {
+      method: 'PATCH',
+      headers: { 'X-Admin-Key': 'test-admin-key', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state: 'denied' }),
+    }), { ALLOWED_ORIGINS: 'https://app.divine.video', ADMIN_API_KEY: 'test-admin-key' } as never,
+    { waitUntil } as unknown as ExecutionContext);
+
+    await vi.waitFor(() => expect(waitUntil).toHaveBeenCalledTimes(1));
+    let keptAliveFinished = false;
+    const keptAlive = waitUntil.mock.calls[0][0].then(() => { keptAliveFinished = true; });
+    await Promise.resolve();
+    expect(keptAliveFinished).toBe(false);
+
+    const response = new Response(JSON.stringify({ success: true }), { status: 200 });
+    finish(response);
+    expect(await pending).toBe(response);
+    await keptAlive;
+    expect(keptAliveFinished).toBe(true);
+  });
+});
 
 function makeModerateMediaEnv(serviceApiToken: string | { get: () => Promise<string> }) {
   return {
