@@ -772,7 +772,11 @@ export async function countRelayEventKinds(
   env: Pick<BulkModerateEnv, 'RELAY_URL'>,
   budgetMs: number = KIND_COUNT_BUDGET_MS,
 ): Promise<BulkKindCounts> {
-  const { events: kinds, complete } = await collectRelayEvents(pubkey, env, (event) => event.kind, { budgetMs });
+  // Listed under the same ceiling a delete-kind job would use, so the count and
+  // the delete look at the same events: one never counts what the other
+  // can't reach.
+  const until = Math.floor(Date.now() / 1000) + KIND_SWEEP_CEILING_MARGIN_S;
+  const { events: kinds, complete } = await collectRelayEvents(pubkey, env, (event) => event.kind, { budgetMs, until });
   const counts: Record<string, number> = {};
   for (const kind of kinds) counts[kind] = (counts[kind] ?? 0) + 1;
   return { counts, complete };
@@ -803,12 +807,12 @@ export async function handleBulkKindCounts(
 // short (page bound, or a second too full to page past).
 //
 // `budgetMs`, when given, stops paging once that much time has passed and
-// reports the listing as incomplete.
+// reports the listing as incomplete. `until`, when given, caps the first page.
 async function collectRelayEvents<T>(
   pubkey: string,
   env: Pick<BulkModerateEnv, 'RELAY_URL'>,
   project: (event: RawRelayEvent) => T,
-  opts: { budgetMs?: number } = {},
+  opts: { budgetMs?: number; until?: number } = {},
 ): Promise<{ events: T[]; complete: boolean }> {
   type Result = { events: T[]; complete: boolean };
   const startedAt = Date.now();
@@ -873,7 +877,7 @@ async function collectRelayEvents<T>(
 
       // Bound the connect too: until 'open', nothing else would time it out.
       armTimeout();
-      ws.addEventListener('open', () => sendPage());
+      ws.addEventListener('open', () => sendPage(opts.until));
 
       ws.addEventListener('message', (msg) => {
         try {

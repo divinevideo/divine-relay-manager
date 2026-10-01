@@ -1890,6 +1890,22 @@ describe('delete-kind against a hostile relay', () => {
       expect(job.failures.some((f) => /outside the requested author or kind/.test(f))).toBe(true);
     });
 
+    // The count and the delete must agree on what they look at: the delete
+    // never reaches past its ceiling, so the count must not either.
+    it('counts only events at or below the ceiling the delete would use', async () => {
+      const sim = makeSim([
+        { id: 'old', pubkey: P, kind: 1, created_at: now() - 1000 },
+        { id: 'soon', pubkey: P, kind: 1, created_at: now() + 30 },
+        { id: 'far', pubkey: P, kind: 1, created_at: now() + 3600 },
+      ]);
+
+      const res = await handleBulkKindCounts(P, env, {});
+
+      expect(await res.json()).toEqual({ counts: { 1: 2 }, complete: true });
+      expect(sim.reqs[0].until).toBeGreaterThanOrEqual(now() + 300 - 1);
+      expect(sim.reqs[0].until).toBeLessThanOrEqual(now() + 300);
+    });
+
     it('ends a versioned walk at created_at 0 instead of asking for until -1', async () => {
       const sim = makeSim([
         { id: 'v1', pubkey: P, kind: 0, created_at: now() - 100 },
