@@ -9,6 +9,7 @@ import { useAgeReviewGuardRedirect } from "@/hooks/useAgeReviewGuardRedirect";
 import { useToast } from "@/hooks/useToast";
 import { getKindName } from "@/lib/kindNames";
 import { ApiError, type BulkJob } from "@/lib/adminApi";
+import { isVersionedKind } from "../../shared/bulk-moderation";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
@@ -94,9 +95,20 @@ function countIssues(failures: string[]): number {
 // whole: a shortened id can't be looked up.
 function describeFailure(failure: string): string {
   if (failure.startsWith("job:abandoned")) return "the server stopped reporting progress";
+  // The account is already the dialog's subject, so drop its pubkey prefix.
+  const enumeration = /^enumeration:[^:]+:(.*)$/s.exec(failure);
+  if (enumeration) return enumeration[1];
   const event = /^event:([^:]+):(.*)$/s.exec(failure);
   if (event) return `event ${event[1]} failed: ${event[2]}`;
   return failure;
+}
+
+// " of Y" (or " of at least Y") after a deleted count, or nothing where it would
+// read as nonsense: past the count ("20 of 1", a sweep also deletes older
+// versions and later posts), or against an incomplete zero ("of at least 0").
+function ofTotal(expected: ExpectedCount | undefined, deleted: number): string {
+  if (!expected || deleted > expected.count || (!expected.complete && expected.count === 0)) return "";
+  return ` of ${expected.complete ? "" : "at least "}${expected.count}`;
 }
 
 // What a finished job tells the moderator. Only a job that ran to completion
@@ -117,14 +129,14 @@ function describeOutcome(job: BulkJob, expected: ExpectedCount | undefined, cont
       };
     }
     // The count lists the newest version of each edited event; the delete also
-    // removes the older versions behind it.
-    if (expected?.complete && deleted > expected.count) {
+    // removes the older versions behind it. Only replaceable and addressable
+    // kinds have versions; for others the extra were posted after the count.
+    if (expected?.complete && deleted > expected.count && kind !== undefined && isVersionedKind(kind)) {
       return { clean, title, description: `Deleted ${deleted} ${kindName}events, including older versions of edited events.` };
     }
     return { clean, title, description: `Deleted ${deleted} ${kindName}events` };
   }
-  const total = expected ? ` of ${expected.complete ? "" : "at least "}${expected.count}` : "";
-  const head = `Deleted ${deleted}${total} ${kindName}events. ${contentHidden ? HIDDEN_ACCOUNT : RERUN_SAFE}`;
+  const head = `Deleted ${deleted}${ofTotal(expected, deleted)} ${kindName}events. ${contentHidden ? HIDDEN_ACCOUNT : RERUN_SAFE}`;
   const detail = job.failures.slice(0, 2).map(describeFailure).join("; ");
   if (job.status === "failed") {
     return { clean, title: "Bulk delete stopped early", description: `${head} Reason: ${detail}` };
@@ -232,7 +244,6 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
   };
 
   const processed = job && !isTerminal(job.status) ? job.eventsProcessed : 0;
-  const progressTotal = expected ? `${expected.complete ? "" : "at least "}${expected.count}` : "";
   const progressValue = expected && expected.count > 0 ? Math.min(100, (processed / expected.count) * 100) : 0;
   const deleteLabel = !counts
     ? "Delete events"
@@ -360,7 +371,7 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
                 <div className="space-y-2">
                   <Progress value={progressValue} aria-label="Bulk delete progress" />
                   <p role="status" className="text-sm text-center text-muted-foreground">
-                    Deleted {processed} of {progressTotal} events...
+                    Deleted {processed}{ofTotal(expected, processed)} events...
                   </p>
                   <p className="text-xs text-center text-muted-foreground">
                     The delete runs on the server; closing this dialog does not stop it.

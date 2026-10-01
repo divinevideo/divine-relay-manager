@@ -298,6 +298,30 @@ describe('BulkDeleteByKind running a job', () => {
   });
 });
 
+describe('BulkDeleteByKind progress past the count', () => {
+  it('drops "of Y" from the progress line once more than the count are deleted', async () => {
+    api.getBulkJobStatus.mockResolvedValue(job({ status: 'running', eventsProcessed: 5 }));
+    renderDialog();
+    await openAndPickReactions();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete 3 Reaction events' }));
+
+    expect(await screen.findByRole('status')).toHaveTextContent('Deleted 5 events...');
+  });
+
+  it('drops "of at least 0" from the progress line against an incomplete zero', async () => {
+    api.getBulkKindCounts.mockResolvedValue({ counts: { 1: 800 }, complete: false });
+    api.getBulkJobStatus.mockResolvedValue(job({ kind: 34235, status: 'running', eventsProcessed: 2 }));
+    renderDialog();
+    open();
+    await screen.findByRole('button', { name: /Text Note \(800\+\)/ });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete all Video (Addressable) events' }));
+
+    expect(await screen.findByRole('status')).toHaveTextContent('Deleted 2 events...');
+  });
+});
+
 describe('BulkDeleteByKind lost track of the job', () => {
   const LOST_BODY = 'It may still be running on the server. Wait a minute and reopen this dialog to check before running it again.';
 
@@ -360,13 +384,57 @@ describe('BulkDeleteByKind outcomes', () => {
     });
   });
 
-  it('counts older versions as part of a clean job that deleted more than the count', async () => {
+  it('reports a clean job on a regular kind that deleted more than the count plainly', async () => {
     await runWith({ eventsProcessed: 5 });
+
+    // Kind 7 has no versions; the extra were posted after the count.
+    expect(lastToast()).toEqual({ title: 'Bulk delete complete', description: 'Deleted 5 Reaction events' });
+  });
+
+  it('counts older versions in a clean job on a replaceable kind that deleted more than the count', async () => {
+    api.getBulkKindCounts.mockResolvedValue({ counts: { 0: 1, 7: 3 }, complete: true });
+    api.getBulkJobStatus.mockResolvedValue(job({ kind: 0, eventsProcessed: 4 }));
+    renderDialog();
+    open();
+    fireEvent.click(await screen.findByRole('button', { name: /Profile Metadata \(1\)/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Delete 1 Profile Metadata events' }));
+    await waitFor(() => expect(toast).toHaveBeenCalled());
 
     expect(lastToast()).toEqual({
       title: 'Bulk delete complete',
-      description: 'Deleted 5 Reaction events, including older versions of edited events.',
+      description: 'Deleted 4 Profile Metadata events, including older versions of edited events.',
     });
+  });
+
+  // "Deleted 20 of 1" reads as nonsense: past the count, or against an
+  // incomplete zero, the total is left off.
+  it('drops "of Y" from a partial outcome that deleted more than the count', async () => {
+    await runWith({ status: 'failed', eventsProcessed: 5, failures: ['job:boom'] });
+
+    expect(lastToast().description).toBe(`Deleted 5 Reaction events. ${RERUN} Reason: job:boom`);
+  });
+
+  it('drops "of at least 0" from a partial outcome against an incomplete zero', async () => {
+    api.getBulkKindCounts.mockResolvedValue({ counts: { 1: 800 }, complete: false });
+    api.getBulkJobStatus.mockResolvedValue(job({ kind: 34235, status: 'failed', eventsProcessed: 0, failures: ['job:boom'] }));
+    renderDialog();
+    open();
+    await screen.findByRole('button', { name: /Text Note \(800\+\)/ });
+    fireEvent.click(screen.getByRole('button', { name: 'Delete all Video (Addressable) events' }));
+    await waitFor(() => expect(toast).toHaveBeenCalled());
+
+    expect(lastToast().description).toBe(`Deleted 0 Video (Addressable) events. ${RERUN} Reason: job:boom`);
+  });
+
+  it('shows the dialog\'s account-scoped enumeration failures without the prefix', async () => {
+    await runWith({
+      eventsProcessed: 3,
+      failures: [`enumeration:${PUBKEY}:still finding events after 20 passes; older versions may remain`],
+    });
+
+    expect(lastToast().description).toBe(
+      `Deleted 3 of 3 Reaction events. ${RERUN} 1 failed or could not be listed: still finding events after 20 passes; older versions may remain`,
+    );
   });
 
   it('reports a job that finished with failures without saying it is done, and says a re-run is safe', async () => {
