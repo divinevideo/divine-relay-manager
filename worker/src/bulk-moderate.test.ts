@@ -1749,6 +1749,33 @@ describe('delete-kind against a hostile relay', () => {
       expect(job.failures.some((f) => /relay cursor did not advance/.test(f))).toBe(true);
     });
 
+    it('bans and counts each event once when the relay repeats every frame', async () => {
+      const t = now() - 10_000;
+      const sim = makeSim(
+        Array.from({ length: 700 }, (_, i) => ({ id: `e${String(i).padStart(4, '0')}`, pubkey: P, kind: 1, created_at: t - i })),
+        { frames: (events) => [...events, ...events] },
+      );
+
+      const { job } = await runJob(1);
+
+      expect(job.status).toBe('done');
+      expect(sim.banCalls).toHaveLength(700);
+      expect(new Set(sim.banCalls).size).toBe(700);
+      expect(job.eventsProcessed).toBe(700);
+      expect(jobDb.batched.filter((b) => /INSERT INTO moderation_decisions/.test(b.sql))).toHaveLength(700);
+    });
+
+    it('stores a failing ban in a repeated frame once', async () => {
+      makeSim([{ id: 'bad', pubkey: P, kind: 1, created_at: now() - 1000 }], {
+        failing: () => true,
+        frames: (events) => [...events, ...events],
+      });
+
+      const { job } = await runJob(1);
+
+      expect(job.failures).toEqual(['event:bad:relay refused']);
+    });
+
     it('ends a versioned walk at created_at 0 instead of asking for until -1', async () => {
       const sim = makeSim([
         { id: 'v1', pubkey: P, kind: 0, created_at: now() - 100 },

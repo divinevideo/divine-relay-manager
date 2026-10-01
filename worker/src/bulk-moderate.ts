@@ -954,6 +954,7 @@ export async function queryRelayEventsPage(
       // author or kind. It still counts toward the page's size and timestamps (the
       // relay's pagination), but it is never handed to the caller to ban.
       const collected: Array<{ summary: RelayEventSummary; createdAt: number | null; inScope: boolean }> = [];
+      const seenIds = new Set<string>();
       const subId = `bulk-page-${Date.now()}`;
       const timeout = setTimeout(() => finish(reject, new Error('Relay query timed out before EOSE')), RELAY_QUERY_TIMEOUT_MS);
       const finish = (fn: ((v: Page) => void) | ((e: Error) => void), value: Page | Error) => {
@@ -974,6 +975,11 @@ export async function queryRelayEventsPage(
           const data = JSON.parse((msg as MessageEvent).data as string);
           if (data[0] === 'EVENT' && data[1] === subId) {
             const e = data[2] as RawRelayEvent;
+            // One entry per event id, as collectRelayEvents keeps with byId: a
+            // relay that repeats a frame must not get the event banned and
+            // counted twice.
+            if (seenIds.has(e.id)) return;
+            seenIds.add(e.id);
             collected.push({
               summary: { id: e.id, kind: e.kind, content: e.content || '', tags: e.tags },
               createdAt: typeof e.created_at === 'number' ? e.created_at : null,
