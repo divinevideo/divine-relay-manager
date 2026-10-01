@@ -229,6 +229,41 @@ describe('queryRelayEventsPage', () => {
     expect(page.events).toHaveLength(199 - 20);                     // boundary deferred, others dropped
     expect(page.events.some((e) => Number(e.id.slice(1)) % 10 === 0)).toBe(false);
   });
+  // A replaceable or addressable kind lists only the newest unbanned version of
+  // each coordinate, so a short page of it says nothing about older versions.
+  it.each([
+    ['replaceable (0)', 0],
+    ['replaceable (3)', 3],
+    ['replaceable (10002)', 10002],
+    ['addressable (30023)', 30023],
+    ['addressable (39999)', 39999],
+  ])('treats a short non-empty page of a %s kind as non-final, stepping below its oldest event', async (_label, kind) => {
+    mockPaginatedRelay([
+      { id: 'n', kind, content: '', tags: [], created_at: 50 },
+      { id: 'o', kind, content: '', tags: [], created_at: 40 },
+    ]);
+    const page = await queryRelayEventsPage('a'.repeat(64), { RELAY_URL: 'wss://relay.test' }, 100, kind);
+    expect(page.events).toHaveLength(2);
+    expect(page.complete).toBe(false);
+    expect(page.nextUntil).toBe(39);
+  });
+  it.each([
+    ['regular (1)', 1],
+    ['ephemeral-adjacent (9999)', 9999],
+    ['ephemeral (20000)', 20000],
+    ['after addressable (40000)', 40000],
+  ])('keeps a short page of a %s kind final', async (_label, kind) => {
+    mockPaginatedRelay([{ id: 'n', kind, content: '', tags: [], created_at: 50 }]);
+    const page = await queryRelayEventsPage('a'.repeat(64), { RELAY_URL: 'wss://relay.test' }, 100, kind);
+    expect(page.complete).toBe(true);
+    expect(page.nextUntil).toBeNull();
+  });
+  it('ends a replaceable kind\'s walk on an empty page', async () => {
+    mockPaginatedRelay([]);
+    const page = await queryRelayEventsPage('a'.repeat(64), { RELAY_URL: 'wss://relay.test' }, 100, 0);
+    expect(page.complete).toBe(true);
+    expect(page.nextUntil).toBeNull();
+  });
   it('signals completion on a short final page', async () => {
     const all = Array.from({ length: 50 }, (_, i) => ({ id: `e${i}`, kind: 1, content: '', tags: [] as string[][], created_at: 50 - i }));
     mockPaginatedRelay(all);
@@ -1037,7 +1072,7 @@ describe('kind-scoped delete job', () => {
 
   // Replaceable and addressable kinds keep older versions; banning the newest
   // makes the previous one visible, so one cursor pass leaves events up.
-  it('sweeps again until a pass finds nothing, deleting older versions a ban revealed', async () => {
+  it('walks a replaceable kind\'s versions within one sweep, then confirms with an empty one', async () => {
     const { filters } = mockVersionedRelay({
       profile: [{ id: 'p3', kind: 0, created_at: 30 }, { id: 'p2', kind: 0, created_at: 20 }, { id: 'p1', kind: 0, created_at: 10 }],
       article: [{ id: 'a2', kind: 30023, created_at: 25 }, { id: 'a1', kind: 30023, created_at: 15 }],
@@ -1052,8 +1087,9 @@ describe('kind-scoped delete job', () => {
     expect(row.status).toBe('done');
     expect(row.events_processed).toBe(3);
     expect(JSON.parse(row.failures as string)).toEqual([]);
-    expect(filters).toHaveLength(4);                                 // 3 passes that found one each + 1 empty
-    expect(messages.map((m) => m.pass)).toEqual([1, 2, 3]);
+    // Sweep 0 walks down the history (until 29, 19, 9) to an empty page; sweep 1 confirms.
+    expect(filters.map((f) => f.until)).toEqual([expect.any(Number), 29, 19, 9, expect.any(Number)]);
+    expect(messages.map((m) => m.pass)).toEqual([0, 0, 0, 1]);
   });
 
   it('starts every sweep from an explicit until, so a cached listing cannot be served', async () => {
@@ -1067,21 +1103,37 @@ describe('kind-scoped delete job', () => {
       nowSpy.mockRestore();
     }
 
-    expect(filters).toHaveLength(3);
-    expect(filters.every((f) => f.until === Math.floor(now / 1000))).toBe(true);
+    // Each sweep's first page names `until`; the walk then steps below each version.
+    expect(filters.map((f) => f.until)).toEqual([Math.floor(now / 1000), 19, 9, Math.floor(now / 1000)]);
   });
 
-  it('stops at the pass bound and records it, so the job never reads as clean', async () => {
-    // 25 versions of one profile: every pass reveals another.
+  it('deletes a 25-version history in one clean run', async () => {
     mockVersionedRelay({ profile: Array.from({ length: 25 }, (_, i) => ({ id: `v${i}`, kind: 0, created_at: 100 - i })) });
     const res = await handleBulkModerateEnqueue(enqueueReq({ pubkey: PUBKEY, action: 'delete-kind', kind: 0 }), mockEnv, {});
     const { jobId } = await res.json() as BulkEnqueueResponse;
 
-    await drain(sent[0], 60);
+    const { messages } = await drain(sent[0], 80);
 
     const row = jobDb.rows.get(jobId)!;
     expect(row.status).toBe('done');
-    expect(row.events_processed).toBe(20);
+    expect(row.events_processed).toBe(25);
+    expect(JSON.parse(row.failures as string)).toEqual([]);
+    expect(Math.max(...messages.map((m) => m.pass ?? 0))).toBe(1);   // one walking sweep + one confirming
+  });
+
+  it('stops at the pass bound when bans do not take effect, so the job never reads as clean', async () => {
+    mockVersionedRelay(
+      { profile: [{ id: 'v1', kind: 0, created_at: 20 }, { id: 'v0', kind: 0, created_at: 10 }] },
+      { bansIneffective: true },
+    );
+    const res = await handleBulkModerateEnqueue(enqueueReq({ pubkey: PUBKEY, action: 'delete-kind', kind: 0 }), mockEnv, {});
+    const { jobId } = await res.json() as BulkEnqueueResponse;
+
+    await drain(sent[0], 200);
+
+    const row = jobDb.rows.get(jobId)!;
+    expect(row.status).toBe('done');
+    expect(row.events_processed).toBe(40);                           // 2 per sweep x 20 sweeps
     expect(JSON.parse(row.failures as string)).toEqual([
       `enumeration:${PUBKEY}:still finding events after 20 passes; older versions may remain`,
     ]);
@@ -1126,8 +1178,9 @@ describe('kind-scoped delete job', () => {
 
     await drain(sent[0]);
 
-    // A failed ban leaves the event listed; another pass would only fail again.
-    expect(filters).toHaveLength(1);
+    // A failed ban leaves the event listed; another sweep would only fail again.
+    // The one sweep walks below it (until 9) to an empty page, and no sweep follows.
+    expect(filters.map((f) => f.until)).toEqual([expect.any(Number), 9]);
     const row = jobDb.rows.get(jobId)!;
     expect(row.status).toBe('done');
     expect(JSON.parse(row.failures as string)).toEqual(['event:p1:relay said no']);
@@ -1367,7 +1420,10 @@ describe('handleBulkKindCounts', () => {
 // every version, drops banned ids BEFORE picking the newest per coordinate, so
 // banning the newest version reveals the previous one. `coords` maps a
 // coordinate to its versions; created_at orders them.
-function mockVersionedRelay(coords: Record<string, Array<{ id: string; kind: number; created_at: number }>>) {
+function mockVersionedRelay(
+  coords: Record<string, Array<{ id: string; kind: number; created_at: number }>>,
+  opts: { bansIneffective?: boolean } = {},
+) {
   const filters: Array<Record<string, unknown>> = [];
   const banStart = vi.mocked(banEvent).mock.calls.length;
   vi.spyOn(globalThis, 'WebSocket').mockImplementation((function () {
@@ -1381,11 +1437,17 @@ function mockVersionedRelay(coords: Record<string, Array<{ id: string; kind: num
         if (data[0] !== 'REQ') return;
         const f = data[2];
         filters.push(f);
-        const banned = new Set(vi.mocked(banEvent).mock.calls.slice(banStart).map((c) => c[0]));
+        // `bansIneffective`: a relay where a ban never hides its event.
+        const banned = new Set(opts.bansIneffective ? [] : vi.mocked(banEvent).mock.calls.slice(banStart).map((c) => c[0]));
         const visible = Object.values(coords)
-          .map((versions) => versions.filter((v) => !banned.has(v.id)).sort((a, b) => b.created_at - a.created_at)[0])
+          // `until` and the ban filter apply before the newest-per-coordinate
+          // pick, as in funnelcake's inner WHERE, so a lower `until` reveals an
+          // older version even while the newer one is still listed.
+          .map((versions) => versions
+            .filter((v) => !banned.has(v.id) && v.created_at <= (f.until ?? Infinity))
+            .sort((a, b) => b.created_at - a.created_at)[0])
           .filter((v): v is { id: string; kind: number; created_at: number } => !!v)
-          .filter((v) => v.created_at <= (f.until ?? Infinity) && (!f.kinds || f.kinds.includes(v.kind)))
+          .filter((v) => !f.kinds || f.kinds.includes(v.kind))
           .sort((a, b) => b.created_at - a.created_at)
           .slice(0, f.limit ?? 500);
         queueMicrotask(() => {

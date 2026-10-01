@@ -5,6 +5,13 @@ export const VALID_BULK_ACTIONS = ['age-restrict-all', 'un-age-restrict-all', 'd
 
 export type BulkAction = typeof VALID_BULK_ACTIONS[number];
 
+// Kinds a relay keeps older versions of: replaceable (0, 3, 10000-19999) and
+// addressable (30000-39999), per NIP-01. A listing of one shows only the newest
+// version of each coordinate, so deleting it can reveal the one before.
+export function isVersionedKind(kind: number): boolean {
+  return kind === 0 || kind === 3 || (kind >= 10000 && kind < 20000) || (kind >= 30000 && kind < 40000);
+}
+
 // The whole-account actions, the only ones the synchronous path can run.
 export type AccountBulkAction = Exclude<BulkAction, 'delete-kind'>;
 

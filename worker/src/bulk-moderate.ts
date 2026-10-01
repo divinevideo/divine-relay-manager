@@ -12,6 +12,7 @@ import {
   type BulkKindCounts,
   bulkJobIdOf,
   bulkJobIdField,
+  isVersionedKind,
 } from '../../shared/bulk-moderation';
 import { deriveFunnelcakeApiUrl } from './funnelcake-proxy';
 
@@ -927,6 +928,17 @@ export async function queryRelayEventsPage(
             const outOfScope = collected.filter((c) => !c.inScope).length;
             const all = collected.filter((c) => c.inScope).map((c) => c.summary);
             if (collected.length < EVENT_CHUNK_SIZE) {
+              // For a replaceable or addressable kind the relay lists only the
+              // newest version of each coordinate, so a short page is not the end:
+              // older versions sit below it. Step strictly under its oldest event
+              // and keep walking; an empty page ends the walk. Versions this skips
+              // (two at one second, or another coordinate's between steps) are left
+              // for the next sweep.
+              const shortTimes = collected.map((c) => c.createdAt).filter((t): t is number => t !== null);
+              if (kind !== undefined && isVersionedKind(kind) && shortTimes.length > 0) {
+                finish(resolve, { events: all, nextUntil: Math.min(...shortTimes) - 1, complete: false, saturated: false, outOfScope });
+                return;
+              }
               // Partial page: the relay has no more events at or before `until`.
               finish(resolve, { events: all, nextUntil: null, complete: true, saturated: false, outOfScope });
               return;
