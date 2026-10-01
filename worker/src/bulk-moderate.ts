@@ -701,11 +701,17 @@ export async function queryRelayEvents(
 // Exact per-kind counts for one author, from the same full paged listing the
 // synchronous bulk path uses. Keeps only each event's kind, so a prolific
 // account's content and tags are never held in memory.
+// Time budget for the kind-counts listing. The dialog's request gives up after
+// 30s, and a large account can need more pages than that; stopping here returns
+// a lower bound ("at least N") instead of a timeout the dialog can't use.
+export const KIND_COUNT_BUDGET_MS = 20_000;
+
 export async function countRelayEventKinds(
   pubkey: string,
   env: Pick<BulkModerateEnv, 'RELAY_URL'>,
+  budgetMs: number = KIND_COUNT_BUDGET_MS,
 ): Promise<BulkKindCounts> {
-  const { events: kinds, complete } = await collectRelayEvents(pubkey, env, (event) => event.kind);
+  const { events: kinds, complete } = await collectRelayEvents(pubkey, env, (event) => event.kind, { budgetMs });
   const counts: Record<string, number> = {};
   for (const kind of kinds) counts[kind] = (counts[kind] ?? 0) + 1;
   return { counts, complete };
@@ -717,27 +723,34 @@ export async function handleBulkKindCounts(
   pubkey: string | null,
   env: Pick<BulkModerateEnv, 'RELAY_URL'>,
   corsHeaders: Record<string, string>,
+  budgetMs: number = KIND_COUNT_BUDGET_MS,
 ): Promise<Response> {
   if (!pubkey || !/^[0-9a-f]{64}$/.test(pubkey)) {
     return json({ error: 'Valid 64-char hex pubkey required' }, 400, corsHeaders);
   }
   try {
-    return json(await countRelayEventKinds(pubkey, env), 200, corsHeaders);
+    return json(await countRelayEventKinds(pubkey, env, budgetMs), 200, corsHeaders);
   } catch (error) {
     console.error('[bulk-moderate] kind counts failed for', pubkey, error);
-    return json({ error: `Could not list this account's events: ${formatError(error)}` }, 502, corsHeaders);
+    // Only the cause: the dialog supplies its own "Could not count..." lead-in.
+    return json({ error: formatError(error) }, 502, corsHeaders);
   }
 }
 
 // Pages through every event an author has (until cursoring, deduped by id) and
 // keeps `project(event)` for each. `complete` is false when the listing was cut
 // short (page bound, or a second too full to page past).
+//
+// `budgetMs`, when given, stops paging once that much time has passed and
+// reports the listing as incomplete.
 async function collectRelayEvents<T>(
   pubkey: string,
   env: Pick<BulkModerateEnv, 'RELAY_URL'>,
   project: (event: RawRelayEvent) => T,
+  opts: { budgetMs?: number } = {},
 ): Promise<{ events: T[]; complete: boolean }> {
   type Result = { events: T[]; complete: boolean };
+  const startedAt = Date.now();
   return new Promise((resolve, reject) => {
     try {
       const ws = new WebSocket(env.RELAY_URL);
@@ -802,6 +815,12 @@ async function collectRelayEvents<T>(
               // Bound coverage rather than loop forever; surface it (not silent).
               incomplete = true;
               console.warn(`[bulk-moderate] hit RELAY_QUERY_MAX_PAGES (${RELAY_QUERY_MAX_PAGES}, ~${page * RELAY_QUERY_PAGE_SIZE} events) for ${pubkey}; returning a partial set`);
+              done();
+              return;
+            }
+            if (opts.budgetMs !== undefined && Date.now() - startedAt >= opts.budgetMs) {
+              incomplete = true;
+              console.warn(`[bulk-moderate] listing for ${pubkey} hit its ${opts.budgetMs}ms budget after ${page} page(s); returning a partial set`);
               done();
               return;
             }

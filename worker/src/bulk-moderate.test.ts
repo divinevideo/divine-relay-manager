@@ -8,6 +8,7 @@ import {
   queryUserVideosPage,
   queryRelayEventsPage,
   handleBulkKindCounts,
+  KIND_COUNT_BUDGET_MS,
   VIDEO_MAX_PAGES,
   type BulkModerateEnv,
 } from './bulk-moderate';
@@ -1285,6 +1286,31 @@ describe('handleBulkKindCounts', () => {
   const PUBKEY = 'a'.repeat(64);
   beforeEach(() => vi.restoreAllMocks());
 
+  // A large account must answer before the client's 30s request timeout, as a
+  // lower bound the dialog already shows ("at least N"), not as an error.
+  it('stops paging at its time budget and reports the counts as incomplete', async () => {
+    const all = Array.from({ length: 1200 }, (_, i) => ({ id: `e${i}`, kind: 1, content: '', tags: [] as string[][], created_at: 1200 - i }));
+    const { filters } = mockPaginatedRelay(all);
+
+    const res = await handleBulkKindCounts(PUBKEY, { RELAY_URL: 'wss://relay.test' }, {}, 0);
+
+    expect(await res.json()).toEqual({ counts: { 1: 500 }, complete: false });
+    expect(filters).toHaveLength(1);
+  });
+
+  it('pages a large account fully when it finishes inside the budget', async () => {
+    const all = Array.from({ length: 1200 }, (_, i) => ({ id: `e${i}`, kind: 1, content: '', tags: [] as string[][], created_at: 1200 - i }));
+    mockPaginatedRelay(all);
+
+    const res = await handleBulkKindCounts(PUBKEY, { RELAY_URL: 'wss://relay.test' }, {}, 60_000);
+
+    expect(await res.json()).toEqual({ counts: { 1: 1200 }, complete: true });
+  });
+
+  it('defaults to a 20s budget, under the client\'s 30s request timeout', () => {
+    expect(KIND_COUNT_BUDGET_MS).toBe(20_000);
+  });
+
   it('counts every event by kind across pages and says the listing is complete', async () => {
     // 1200 events over three relay pages: 800 kind 1, 400 kind 7.
     const all = Array.from({ length: 1200 }, (_, i) => ({ id: `e${i}`, kind: i % 3 === 0 ? 7 : 1, content: '', tags: [] as string[][], created_at: 1200 - i }));
@@ -1328,7 +1354,8 @@ describe('handleBulkKindCounts', () => {
     const res = await handleBulkKindCounts(PUBKEY, { RELAY_URL: 'wss://relay.test' }, {});
 
     expect(res.status).toBe(502);
-    expect(await res.json()).not.toHaveProperty('counts');
+    // The dialog adds its own "Could not count..." lead-in; the worker sends only the cause.
+    expect(await res.json()).toEqual({ error: 'Relay query failed' });
   });
 });
 
