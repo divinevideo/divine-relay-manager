@@ -33,6 +33,12 @@ const SERIALIZED_EVENT_BATCH_SIZE = 20;
 // kind can reveal an older version. The count is the deepest edit history of
 // any one coordinate; hitting the bound is recorded as a failure.
 const MAX_KIND_SWEEP_PASSES = 20;
+// A delete-kind job's sweeps all start from one ceiling, fixed at enqueue as the
+// start time plus this margin. Funnelcake accepts created_at up to 60s ahead,
+// so the margin takes in posts stamped slightly in the future. Re-reading "now"
+// for each sweep let such posts slip past the final, confirming sweep and let
+// an account that keeps posting force every sweep non-empty.
+const KIND_SWEEP_CEILING_MARGIN_S = 300;
 
 export interface BulkModerateEnv extends Nip86Env, ZendeskSyncEnv {
   DB?: D1Database;
@@ -278,9 +284,12 @@ function rowToBulkJob(row: BulkJobRow): BulkJob {
 // neither (a kind-scoped job never reaches it, and it writes no decision rows).
 // Fields that are absent stay absent, which keeps a plain delete-all message
 // unchanged.
-function jobScope(src: Pick<BulkJobMessage, 'kind' | 'moderatorPubkey' | 'reportId'>): Pick<BulkJobMessage, 'kind' | 'moderatorPubkey' | 'reportId'> {
+function jobScope(
+  src: Pick<BulkJobMessage, 'kind' | 'moderatorPubkey' | 'reportId' | 'sweepUntil'>,
+): Pick<BulkJobMessage, 'kind' | 'moderatorPubkey' | 'reportId' | 'sweepUntil'> {
   return {
     ...(src.kind !== undefined ? { kind: src.kind } : {}),
+    ...(src.sweepUntil !== undefined ? { sweepUntil: src.sweepUntil } : {}),
     ...(src.moderatorPubkey !== undefined ? { moderatorPubkey: src.moderatorPubkey } : {}),
     ...(src.reportId !== undefined ? { reportId: src.reportId } : {}),
   };
@@ -365,6 +374,7 @@ export async function handleBulkModerateEnqueue(
       ...bulkJobIdField(action, jobId), pubkey: body.pubkey, action, reason, version: 0,
       ...jobScope({
         kind,
+        sweepUntil: action === 'delete-kind' ? Math.floor(Date.now() / 1000) + KIND_SWEEP_CEILING_MARGIN_S : undefined,
         moderatorPubkey: body.moderatorPubkey as string | undefined,
         reportId: body.reportId as string | undefined,
       }),
@@ -471,10 +481,14 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
       }
       const isKindJob = msg.action === 'delete-kind';
       const until = msg.cursor ? Number(msg.cursor) : undefined;
-      // A sweep's first page names `until` (now) explicitly: funnelcake serves a
-      // kind-0 + authors REQ with no `until` from its profile cache, which can
-      // hand back versions this job already banned.
-      const firstPageUntil = isKindJob ? Math.floor(Date.now() / 1000) : undefined;
+      // Every sweep's first page starts from the job's fixed ceiling (see
+      // KIND_SWEEP_CEILING_MARGIN_S). Naming `until` explicitly also keeps a
+      // kind-0 + authors REQ off funnelcake's profile cache, which can hand back
+      // versions this job already banned. A message without a ceiling gets one
+      // computed now.
+      const firstPageUntil = isKindJob
+        ? msg.sweepUntil ?? Math.floor(Date.now() / 1000) + KIND_SWEEP_CEILING_MARGIN_S
+        : undefined;
       const page = msg.eventIds
         ? {
           events: msg.eventIds.map(id => ({ id, kind: 0, content: '', tags: [] })),

@@ -994,12 +994,13 @@ describe('kind-scoped delete job', () => {
     const { jobId } = await res.json() as BulkEnqueueResponse;
     expect(jobDb.rows.get(jobId)?.kind).toBeNull();
     expect('kind' in sent[0]).toBe(false);
+    expect('sweepUntil' in sent[0]).toBe(false);
 
     const { filters } = mockPaginatedRelay(mixedEvents());
     const { messages } = await drain(sent[0]);
     expect(filters.every((f) => !('kinds' in f))).toBe(true);
     expect(messages.every((m) => !('kind' in m))).toBe(true);
-    expect(messages.every((m) => !('pass' in m) && !('passDeleted' in m))).toBe(true); // no sweeps
+    expect(messages.every((m) => !('pass' in m) && !('passDeleted' in m) && !('sweepUntil' in m))).toBe(true); // no sweeps
     const row = jobDb.rows.get(jobId)!;
     expect(row.status).toBe('done');
     expect(row.events_processed).toBe(60);        // every kind
@@ -1092,19 +1093,84 @@ describe('kind-scoped delete job', () => {
     expect(messages.map((m) => m.pass)).toEqual([0, 0, 0, 1]);
   });
 
-  it('starts every sweep from an explicit until, so a cached listing cannot be served', async () => {
+  // One ceiling for the whole job, fixed at enqueue: start + 300s, past
+  // funnelcake's 60s future-skew allowance.
+  it('starts every sweep from one ceiling fixed at enqueue, carried on every message', async () => {
     const { filters } = mockVersionedRelay({ profile: [{ id: 'p2', kind: 0, created_at: 20 }, { id: 'p1', kind: 0, created_at: 10 }] });
-    const now = 1_900_000_000_000;
-    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(now);
+    let clock = 1_900_000_000_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => (clock += 7_000)); // time moves on
+    let messages: BulkJobMessage[] = [];
+    let first: BulkJobMessage;
+    let ceiling = 0;
     try {
+      ceiling = Math.floor((clock + 7_000) / 1000) + 300;
       await handleBulkModerateEnqueue(enqueueReq({ pubkey: PUBKEY, action: 'delete-kind', kind: 0 }), mockEnv, {});
-      await drain(sent[0]);
+      first = sent[0];
+      ({ messages } = await drain(first));
     } finally {
       nowSpy.mockRestore();
     }
 
-    // Each sweep's first page names `until`; the walk then steps below each version.
-    expect(filters.map((f) => f.until)).toEqual([Math.floor(now / 1000), 19, 9, Math.floor(now / 1000)]);
+    expect(filters.map((f) => f.until)).toEqual([ceiling, 19, 9, ceiling]);
+    expect([first!, ...messages].every((m) => m.sweepUntil === ceiling)).toBe(true);
+  });
+
+  it('bans an event stamped inside the relay\'s future-skew window', async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    mockPaginatedRelay([
+      { id: 'future', kind: 1, content: '', tags: [], created_at: nowSec + 30 },
+      { id: 'past', kind: 1, content: '', tags: [], created_at: nowSec - 10 },
+    ]);
+    const res = await handleBulkModerateEnqueue(enqueueReq({ pubkey: PUBKEY, action: 'delete-kind', kind: 1 }), mockEnv, {});
+    const { jobId } = await res.json() as BulkEnqueueResponse;
+
+    await drain(sent[0]);
+
+    expect(vi.mocked(banEvent).mock.calls.map((c) => c[0]).sort()).toEqual(['future', 'past']);
+    expect(jobDb.rows.get(jobId)!.status).toBe('done');
+  });
+
+  it('does not let an account posting during the job extend it past the ceiling', async () => {
+    let clock = 1_900_000_000_000;
+    const startSec = Math.floor(clock / 1000);
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    let posts = 0;
+    // Before every page the account posts again, stamped "now", and 400s pass.
+    const { filters } = mockPaginatedRelay([], {
+      onReq: (events) => {
+        events.push({ id: `post${posts++}`, kind: 1, content: '', tags: [], created_at: Math.floor(clock / 1000) });
+        clock += 400_000;
+      },
+    });
+    let jobId = '';
+    try {
+      const res = await handleBulkModerateEnqueue(enqueueReq({ pubkey: PUBKEY, action: 'delete-kind', kind: 1 }), mockEnv, {});
+      ({ jobId } = await res.json() as BulkEnqueueResponse);
+      await drain(sent[0], 60);
+    } finally {
+      nowSpy.mockRestore();
+    }
+
+    // post0 (at the start) is inside the ceiling; every later post is after it.
+    expect(vi.mocked(banEvent).mock.calls.map((c) => c[0])).toEqual(['post0']);
+    expect(filters.map((f) => f.until)).toEqual([startSec + 300, startSec + 300]);
+    const row = jobDb.rows.get(jobId)!;
+    expect(row.status).toBe('done');
+    expect(JSON.parse(row.failures as string)).toEqual([]);
+  });
+
+  it('falls back to now + 300s for a delete-kind message that carries no ceiling', async () => {
+    const { filters } = mockPaginatedRelay([]);
+    const jobId = 'job-no-ceiling';
+    jobDb.rows.set(jobId, { job_id: jobId, pubkey: PUBKEY, action: 'delete-kind', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, version: 0, created_at: 't', updated_at: 't', kind: 1 });
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1_900_000_000_000);
+    try {
+      await drain({ kindJobId: jobId, pubkey: PUBKEY, action: 'delete-kind', kind: 1, version: 0 });
+    } finally {
+      nowSpy.mockRestore();
+    }
+
+    expect(filters.map((f) => f.until)).toEqual([1_900_000_000 + 300]);
   });
 
   it('deletes a 25-version history in one clean run', async () => {
@@ -1465,9 +1531,10 @@ function mockVersionedRelay(
 // it (counting only calls made after this mock was installed).
 function mockPaginatedRelay(
   all: Array<{ id: string; kind: number; content: string; tags: string[][]; created_at: number; pubkey?: string }>,
-  opts: { ignoreFilters?: boolean } = {},
+  // `onReq` runs before each page and may add events (an account posting mid-job).
+  opts: { ignoreFilters?: boolean; onReq?: (events: typeof all) => void } = {},
 ) {
-  const sorted = [...all].map((e) => ({ pubkey: 'a'.repeat(64), ...e })).sort((a, b) => b.created_at - a.created_at);
+  const events = [...all];
   const filters: Array<Record<string, unknown>> = [];
   const banStart = vi.mocked(banEvent).mock.calls.length;
   const banned = () => {
@@ -1487,7 +1554,9 @@ function mockPaginatedRelay(
         const until = data[2].until ?? Infinity;
         const limit = data[2].limit ?? 500;
         const kinds = data[2].kinds as number[] | undefined;
+        opts.onReq?.(events);
         const hidden = banned();
+        const sorted = events.map((e) => ({ pubkey: 'a'.repeat(64), ...e })).sort((a, b) => b.created_at - a.created_at);
         const page = sorted
           .filter((e) => e.created_at <= until && (opts.ignoreFilters || !kinds || kinds.includes(e.kind)) && !hidden.has(e.id))
           .slice(0, limit);

@@ -87,6 +87,9 @@ interface BulkJobMessageFields {
   // replaceable or addressable event makes the previous version visible.
   pass?: number;
   passDeleted?: number;
+  // delete-kind only: the job's sweep ceiling (unix seconds), fixed at enqueue
+  // and used as `until` on the first page of every sweep.
+  sweepUntil?: number;
   // Attribution for the per-event decision rows. Absent = the worker's signing
   // key and no report, which is what delete-all has always written.
   moderatorPubkey?: string;
