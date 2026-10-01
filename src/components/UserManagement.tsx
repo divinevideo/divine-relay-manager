@@ -24,7 +24,7 @@ import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { UserDisplayName } from "@/components/UserIdentifier";
 import { CopyableId } from "@/components/CopyableId";
 import type { BannedPubkeyEntry } from "@/lib/adminApi";
-import { banFailureToast, banSuccessNote } from "@/lib/banFeedback";
+import { banFailureToast, banSuccessNote, refreshAfterUnconfirmedBan } from "@/lib/banFeedback";
 
 interface UserManagementProps {
   selectedPubkey?: string;
@@ -126,6 +126,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
       });
     },
     onError: (error: Error) => {
+      refreshAfterUnconfirmedBan(error, queryClient);
       toast(banFailureToast(error));
     },
   });

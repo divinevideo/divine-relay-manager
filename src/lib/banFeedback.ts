@@ -1,7 +1,16 @@
 // ABOUTME: Toast copy shared by every account-ban button
 // ABOUTME: Keeps "may have landed" distinct from "failed" so moderators don't retry a ban
 
+import type { QueryClient } from '@tanstack/react-query';
 import { BanNotConfirmedError, type BanOutcome } from './adminApi';
+
+// "Ban not confirmed" tells the moderator to re-check the account, so drop the
+// cached ban lists that would otherwise still show the state from before the click.
+export function refreshAfterUnconfirmedBan(error: Error, queryClient: QueryClient): void {
+  if (!(error instanceof BanNotConfirmedError)) return;
+  queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
+  queryClient.invalidateQueries({ queryKey: ['banned-users'] });
+}
 
 // Each note states what is certain (the ban is on the relay's list) and why the
 // rest is not. Nothing here promises that unfinished work will finish: once the

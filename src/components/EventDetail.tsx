@@ -37,7 +37,7 @@ import { SceneClassification } from "@/components/SceneClassification";
 import { TranscriptAnalysis } from "@/components/TranscriptAnalysis";
 import { ReporterList } from "@/components/ReporterCard";
 import { extractMediaHashes } from "@/lib/adminApi";
-import { banFailureToast, banSuccessNote } from "@/lib/banFeedback";
+import { banFailureToast, banSuccessNote, refreshAfterUnconfirmedBan } from "@/lib/banFeedback";
 import { MediaPreview } from "@/components/MediaPreview";
 import {
   User,
@@ -479,6 +479,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
       }
     },
     onError: (error: Error) => {
+      refreshAfterUnconfirmedBan(error, queryClient);
       toast(banFailureToast(error));
     },
   });

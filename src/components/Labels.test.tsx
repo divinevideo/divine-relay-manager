@@ -6,7 +6,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Labels } from './Labels';
 import { BanNotConfirmedError } from '@/lib/adminApi';
-import { banSuccessNote } from '@/lib/banFeedback';
+import { banFailureToast, banSuccessNote } from '@/lib/banFeedback';
 
 const PUBKEY = 'a'.repeat(64);
 
@@ -60,14 +60,17 @@ describe('Labels ban', () => {
   });
 
   it('reports an unconfirmed ban as not confirmed, not as a destructive failure', async () => {
-    api.banPubkey.mockRejectedValue(new BanNotConfirmedError('timed out'));
+    const notConfirmed = new BanNotConfirmedError('timed out');
+    api.banPubkey.mockRejectedValue(notConfirmed);
+    const invalidate = vi.spyOn(QueryClient.prototype, 'invalidateQueries');
 
     await banFromLabels();
 
-    await waitFor(() =>
-      expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Ban not confirmed' })),
-    );
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(banFailureToast(notConfirmed)));
     expect(toast).not.toHaveBeenCalledWith(expect.objectContaining({ variant: 'destructive' }));
+    // The toast asks for a re-check; the ban lists must not be the stale ones.
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['banned-pubkeys'] });
+    invalidate.mockRestore();
   });
 
   it('keeps what the ban left unconfirmed on the final toast', async () => {

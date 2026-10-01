@@ -326,8 +326,9 @@ export async function callRelayRpc<T = unknown>(
  *   network error, or an unreadable response); content removal is unconfirmed
  * - removal_running: the relay had not answered when the worker stopped waiting;
  *   content removal may be unfinished
- * - follow_ups: only our own re-check found the ban after our request timed out
- *   or dropped, so the worker never reported its follow-ups (Keycast login
+ * - follow_ups: only our own re-check found the ban after our request timed out,
+ *   dropped, or failed without the worker's ban_unconfirmed code (e.g. an
+ *   uncaught 5xx), so the worker never reported its follow-ups (Keycast login
  *   block, user notice, ticket closure) as done; they may or may not have run
  * - follow_ups_skipped: the worker answered ban_unconfirmed, which it does
  *   before any follow-up, and our re-check then found the ban: they did not run
@@ -362,6 +363,11 @@ export class BanNotConfirmedError extends ApiError {
 // it is reported. The worker already did this once; checking again here also
 // covers our own 30s timeout and a dropped connection.
 export async function banPubkey(apiUrl: string, pubkey: string, reason?: string): Promise<BanOutcome> {
+  // Checked here rather than left to apiRequest: with nothing sent, nothing can
+  // have applied, so this must stay a plain failure and not reach the re-check.
+  if (!apiUrl) {
+    throw new ApiError('No relay selected. Go to Settings to choose an environment.');
+  }
   try {
     const data = await moderateAction(apiUrl, { action: 'ban_pubkey', pubkey, reason: reason || 'Banned via admin' });
     if (data.contentRemovalUnconfirmed !== true) return { unconfirmed: null };
@@ -374,8 +380,18 @@ export async function banPubkey(apiUrl: string, pubkey: string, reason?: string)
       const workerSkippedFollowUps = error instanceof ApiError && error.code === 'ban_unconfirmed';
       return { unconfirmed: workerSkippedFollowUps ? 'follow_ups_skipped' : 'follow_ups' };
     }
-    throw new BanNotConfirmedError(error instanceof Error ? error.message : String(error));
+    throw new BanNotConfirmedError(banFailureReason(error));
   }
+}
+
+// The worker's ban_unconfirmed message and our own timeout copy already say
+// "not confirmed" / "re-check", which the toast also says. Keep only the
+// underlying reason. If either copy changes, this stops trimming, harmlessly.
+function banFailureReason(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message
+    .replace(/^Ban not confirmed: /, '')
+    .replace(/ The action may still have applied\. Re-check before retrying\.$/, '');
 }
 
 // No settle delay, unlike verifyPubkeyBanned: the ban request already ran for
@@ -628,23 +644,34 @@ export async function publishLabel(apiUrl: string, params: LabelParams): Promise
 export async function publishLabelAndBan(
   apiUrl: string,
   params: LabelParams & { shouldBan?: boolean }
-): Promise<{ labelPublished: boolean; banned: boolean; banOutcome?: BanOutcome }> {
-  const result: { labelPublished: boolean; banned: boolean; banOutcome?: BanOutcome } = {
-    labelPublished: false,
-    banned: false,
-  };
+): Promise<LabelAndBanResult> {
+  const result: LabelAndBanResult = { labelPublished: false, banned: false };
 
   // Publish the label first
   await publishLabel(apiUrl, params);
   result.labelPublished = true;
 
-  // Optionally ban the pubkey
+  // Optionally ban the pubkey. A ban failure is returned, not thrown: the label
+  // is already out, so reporting the whole call as failed would invite a retry
+  // that publishes it twice.
   if (params.shouldBan && params.targetType === 'pubkey') {
-    result.banOutcome = await banPubkey(apiUrl, params.targetValue, `Labeled: ${params.labels.join(', ')}`);
-    result.banned = true;
+    try {
+      result.banOutcome = await banPubkey(apiUrl, params.targetValue, `Labeled: ${params.labels.join(', ')}`);
+      result.banned = true;
+    } catch (error) {
+      result.banError = error instanceof Error ? error : new Error(String(error));
+    }
   }
 
   return result;
+}
+
+export interface LabelAndBanResult {
+  labelPublished: boolean;
+  banned: boolean;
+  banOutcome?: BanOutcome;
+  /** Set when the label published but the ban then failed or was not confirmed. */
+  banError?: Error;
 }
 
 // Moderation resolution statuses

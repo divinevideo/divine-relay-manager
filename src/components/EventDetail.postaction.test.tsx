@@ -7,7 +7,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { EventDetail } from './EventDetail';
 import { BanNotConfirmedError } from '@/lib/adminApi';
-import { banSuccessNote } from '@/lib/banFeedback';
+import { banFailureToast, banSuccessNote } from '@/lib/banFeedback';
 
 // The re-verify control was fixed separately (EventDetail.reverify.test.tsx).
 // This is the other hop in the same file: the verification that runs straight
@@ -120,15 +120,18 @@ describe('EventDetail post-ban verification', () => {
   });
 
   it('reports an unconfirmed ban as not confirmed, not as a destructive failure', async () => {
-    api.banPubkey.mockRejectedValue(new BanNotConfirmedError('timed out'));
+    const notConfirmed = new BanNotConfirmedError('timed out');
+    api.banPubkey.mockRejectedValue(notConfirmed);
+    const invalidate = vi.spyOn(QueryClient.prototype, 'invalidateQueries');
 
     renderDetail();
     await banTheUser();
 
-    await waitFor(() =>
-      expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Ban not confirmed' })),
-    );
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(banFailureToast(notConfirmed)));
     expect(toast).not.toHaveBeenCalledWith(expect.objectContaining({ variant: 'destructive' }));
+    // The toast asks for a re-check; the ban lists must not be the stale ones.
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['banned-pubkeys'] });
+    invalidate.mockRestore();
   });
 
   // The app shows one toast at a time, so the note rides on the final one.

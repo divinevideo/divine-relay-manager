@@ -8,7 +8,7 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { UserManagement } from './UserManagement';
 import { ApiError, BanNotConfirmedError } from '@/lib/adminApi';
-import { banSuccessNote } from '@/lib/banFeedback';
+import { banFailureToast, banSuccessNote } from '@/lib/banFeedback';
 
 const api = vi.hoisted(() => ({
   callRelayRpc: vi.fn(),
@@ -177,14 +177,17 @@ describe('UserManagement age-review guard wiring', () => {
   });
 
   it('reports an unconfirmed ban as not confirmed, not as a destructive failure', async () => {
-    api.banPubkey.mockRejectedValue(new BanNotConfirmedError('timed out'));
+    const notConfirmed = new BanNotConfirmedError('timed out');
+    api.banPubkey.mockRejectedValue(notConfirmed);
+    const invalidate = vi.spyOn(QueryClient.prototype, 'invalidateQueries');
 
     await banViaDialog();
 
-    await waitFor(() =>
-      expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Ban not confirmed' })),
-    );
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(banFailureToast(notConfirmed)));
     expect(toast).not.toHaveBeenCalledWith(expect.objectContaining({ variant: 'destructive' }));
+    // The toast asks for a re-check; the ban lists must not be the stale ones.
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['banned-pubkeys'] });
+    invalidate.mockRestore();
   });
 
   it('explains what was not confirmed on a ban that landed with unconfirmed follow-ups', async () => {

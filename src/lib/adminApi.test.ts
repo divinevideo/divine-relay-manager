@@ -771,7 +771,29 @@ describe('adminApi', () => {
 
         const { error } = await ban() as { error: unknown };
         expect(error).toBeInstanceOf(BanNotConfirmedError);
-        expect((error as Error).message).toContain('Ban not confirmed: timed out');
+        // The toast title already says "Ban not confirmed"; the detail keeps
+        // only the underlying reason.
+        expect((error as Error).message).toBe('Re-check the account before retrying. (timed out)');
+      });
+
+      it('drops the repeated re-check advice from a timed-out request', async () => {
+        mockFetch
+          .mockRejectedValueOnce(new DOMException('timed out', 'TimeoutError'))
+          .mockResolvedValueOnce(banList([]));
+
+        const { error } = await ban() as { error: unknown };
+        expect((error as Error).message).toBe(
+          'Re-check the account before retrying. (Request to /api/moderate timed out after 30s.)',
+        );
+      });
+
+      // Nothing was sent, so nothing can have applied: a plain failure.
+      it('fails plainly, without a re-check, when no relay is selected', async () => {
+        const error = await banPubkey('', pubkey, 'Spam').catch(e => e);
+
+        expect(error).toBeInstanceOf(ApiError);
+        expect(error).not.toBeInstanceOf(BanNotConfirmedError);
+        expect(mockFetch).not.toHaveBeenCalled();
       });
 
       it('throws BanNotConfirmedError when the ban list cannot be read', async () => {
@@ -1017,6 +1039,40 @@ describe('adminApi', () => {
   });
 
   describe('publishLabelAndBan', () => {
+    // The label is already published when the ban runs, so a ban failure must
+    // not read as the whole call failing (a retry would duplicate the label).
+    it('returns a ban failure after the label published instead of throwing it', async () => {
+      const refusal = { ok: false, status: 400, statusText: 'Bad Request', json: async () => ({ success: false, error: 'Invalid pubkey' }) };
+      mockFetch
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ success: true }) })
+        .mockResolvedValueOnce(refusal);
+
+      const result = await publishLabelAndBan(API_URL, {
+        targetType: 'pubkey',
+        targetValue: 'npub1typedin',
+        namespace: 'spam',
+        labels: ['scam'],
+        shouldBan: true,
+      });
+
+      expect(result.labelPublished).toBe(true);
+      expect(result.banned).toBe(false);
+      expect(result.banError).toBeInstanceOf(ApiError);
+      expect(result.banError?.message).toBe('Invalid pubkey');
+    });
+
+    it('still throws when the label itself fails to publish', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 500, statusText: 'Server Error', json: async () => ({ error: 'relay down' }) });
+
+      await expect(publishLabelAndBan(API_URL, {
+        targetType: 'pubkey',
+        targetValue: 'a'.repeat(64),
+        namespace: 'spam',
+        labels: ['scam'],
+        shouldBan: true,
+      })).rejects.toThrow('relay down');
+    });
+
     // The caller shows the ban's note, so what was left unconfirmed must reach it.
     it('carries through what the ban left unconfirmed', async () => {
       mockFetch

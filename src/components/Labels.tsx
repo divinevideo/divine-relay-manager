@@ -25,7 +25,7 @@ import {
 import { Tag, UserX, Clock, Filter, ChevronDown, ChevronRight, Eye, Loader2, CheckCircle, XCircle } from "lucide-react";
 import { useToast } from "@/hooks/useToast";
 import { useAdminApi } from "@/hooks/useAdminApi";
-import { banFailureToast, banSuccessNote } from "@/lib/banFeedback";
+import { banFailureToast, banSuccessNote, refreshAfterUnconfirmedBan } from "@/lib/banFeedback";
 import { LabelPublisher } from "@/components/LabelPublisher";
 import { EventContentPreview } from "@/components/EventContentPreview";
 import { UserProfilePreview } from "@/components/UserProfilePreview";
@@ -170,6 +170,7 @@ export function Labels({ relayUrl }: LabelsProps) {
       }
     },
     onError: (error: Error) => {
+      refreshAfterUnconfirmedBan(error, queryClient);
       toast(banFailureToast(error));
     },
   });
