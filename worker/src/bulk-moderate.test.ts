@@ -679,6 +679,86 @@ describe('async bulk job model', () => {
     expect(res.status).toBe(500);
     expect([...jobDb.rows.values()].some((r) => r.status === 'pending')).toBe(false); // no orphan row
   });
+
+  it('enqueue returns a clear 500 and sends nothing when D1 is not bound', async () => {
+    const res = await handleBulkModerateEnqueue(enqueueReq({ pubkey: 'a'.repeat(64), action: 'delete-all' }), { ...mockEnv, DB: undefined }, {});
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: 'bulk_jobs storage (D1) is not bound' });
+    expect(sent).toHaveLength(0);
+  });
+
+  it('enqueue returns a clear 500 and sends nothing when writing the job row throws', async () => {
+    const prepare = jobDb.db.prepare.bind(jobDb.db);
+    const db = {
+      ...jobDb.db,
+      prepare(sql: string) {
+        const statement = prepare(sql);
+        if (/^\s*INSERT INTO bulk_jobs/i.test(sql)) {
+          return { bind: () => ({ run: async () => { throw new Error('D1_ERROR: database is locked'); } }) };
+        }
+        return statement;
+      },
+    } as unknown as D1Database;
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const res = await handleBulkModerateEnqueue(enqueueReq({ pubkey: 'a'.repeat(64), action: 'delete-kind', kind: 1 }), { ...mockEnv, DB: db }, {});
+
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: 'Failed to record the bulk moderation job' });
+    expect(sent).toHaveLength(0);
+    expect(errorSpy).toHaveBeenCalledWith('[bulk-moderate] job insert failed', expect.any(Error));
+  });
+
+  it('status heals a stale delete-kind job to failed and still reports its kind', async () => {
+    const old = new Date(Date.now() - 31 * 60 * 1000).toISOString();
+    jobDb.rows.set('job-stale-kind', { job_id: 'job-stale-kind', pubkey: 'a'.repeat(64), action: 'delete-kind', status: 'running', events_processed: 4, media_processed: 0, failures: '[]', failures_dropped: 0, version: 3, created_at: old, updated_at: old, kind: 34236 });
+
+    const job = await (await handleBulkJobStatus('job-stale-kind', mockEnv, {})).json() as BulkJob;
+
+    expect(job).toMatchObject({ status: 'failed', action: 'delete-kind', kind: 34236, eventsProcessed: 4 });
+    expect(job.failures[0]).toMatch(/abandoned/);
+    expect(jobDb.rows.get('job-stale-kind')!.status).toBe('failed');
+  });
+
+  // A relay connection that drops mid-walk must fail the job with what it got
+  // through, never finish it as if the listing had ended.
+  it.each([
+    ['socket error', 'error', 'job:Relay query failed'],
+    ['close before EOSE', 'close', 'job:Relay query closed before EOSE'],
+  ])('a delete-kind job fails, keeping its progress, when a later relay page hits a %s', async (_label, how, expected) => {
+    // Page 1: a full multi-second page of 200; page 2 (the cursor continuation) drops.
+    const pageOne = Array.from({ length: 200 }, (_, i) => ({ id: `w${i}`, pubkey: 'a'.repeat(64), kind: 1, content: '', tags: [], created_at: 1000 - i }));
+    let reqs = 0;
+    vi.spyOn(globalThis, 'WebSocket').mockImplementation((function () {
+      const listeners = new Map<string, Array<(value?: unknown) => void>>();
+      const emit = (type: string, value?: unknown) => listeners.get(type)?.forEach((h) => h(value));
+      queueMicrotask(() => emit('open'));
+      return {
+        addEventListener: (t: string, h: (value?: unknown) => void) => listeners.set(t, [...(listeners.get(t) || []), h]),
+        send: (payload: string) => {
+          const data = JSON.parse(payload);
+          if (data[0] !== 'REQ') return;
+          reqs += 1;
+          queueMicrotask(() => {
+            if (reqs > 1) { emit(how); return; }
+            for (const ev of pageOne) emit('message', { data: JSON.stringify(['EVENT', data[1], ev]) });
+            emit('message', { data: JSON.stringify(['EOSE', data[1]]) });
+          });
+        },
+        close: vi.fn(),
+      };
+    } as unknown as typeof WebSocket));
+    const res = await handleBulkModerateEnqueue(enqueueReq({ pubkey: 'a'.repeat(64), action: 'delete-kind', kind: 1 }), mockEnv, {});
+    const { jobId } = await res.json() as BulkEnqueueResponse;
+
+    let msg: BulkJobMessage | undefined = sent[0];
+    for (let n = 0; msg && n < 30; n++) { sent.length = 0; await processBulkJob(msg, mockEnv); msg = sent[0]; }
+
+    const job = await (await handleBulkJobStatus(jobId, mockEnv, {})).json() as BulkJob;
+    expect(job.status).toBe('failed');
+    expect(job.eventsProcessed).toBe(199);                          // page 1, boundary second deferred
+    expect(job.failures).toEqual([expected]);
+  });
 });
 
 describe('kind-scoped delete job', () => {

@@ -346,11 +346,18 @@ export async function handleBulkModerateEnqueue(
   const jobId = crypto.randomUUID();
   const now = new Date().toISOString();
 
-  await ensureBulkJobsTable(env.DB);
-  await env.DB.prepare(
-    `INSERT INTO bulk_jobs (job_id, pubkey, action, status, events_processed, media_processed, failures, failures_dropped, version, created_at, updated_at, kind)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).bind(jobId, body.pubkey, action, 'pending', 0, 0, '[]', 0, 0, now, now, kind ?? null).run();
+  // No job row means no job: nothing is enqueued, and the caller gets a JSON
+  // 500 it can show, not an unhandled throw.
+  try {
+    await ensureBulkJobsTable(env.DB);
+    await env.DB.prepare(
+      `INSERT INTO bulk_jobs (job_id, pubkey, action, status, events_processed, media_processed, failures, failures_dropped, version, created_at, updated_at, kind)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(jobId, body.pubkey, action, 'pending', 0, 0, '[]', 0, 0, now, now, kind ?? null).run();
+  } catch (error) {
+    console.error('[bulk-moderate] job insert failed', error);
+    return json({ error: 'Failed to record the bulk moderation job' }, 500, corsHeaders);
+  }
 
   try {
     await env.BULK_QUEUE.send({
