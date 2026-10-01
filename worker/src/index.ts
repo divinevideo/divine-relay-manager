@@ -720,7 +720,8 @@ export default {
         // Age-review guard: bulk content actions on an account with an open
         // case must not run out of band (age-restrict half-enforces without
         // advancing the case, un-age-restrict lifts restrictions the case
-        // imposed, delete-all destroys evidence the review may need). Refuse
+        // imposed, delete-all and delete-kind destroy evidence the review may
+        // need). Refuse
         // and route to the case; Ban remains the severe-action escape hatch.
         // Peeks at the body on a clone so malformed/invalid requests still get
         // the handler's own 400s. Two accepted edges: (1) the guard runs
@@ -736,7 +737,7 @@ export default {
         // direction, which taken alone would cover it. Bulk is partitioned by
         // blast radius instead. A refused bulk job is one moderator's click
         // failing loudly in the UI, with no automated caller behind it, so an
-        // outage that blocks all three actions stops content moderation
+        // outage that blocks all four actions stops content moderation
         // wholesale for a human who has no other route -- whereas a refused
         // reversal only defers restoring an account that stays held meanwhile.
         // If bulk ever becomes reachable from automation, revisit this: the

@@ -1495,8 +1495,9 @@ export async function createMinorAccount(
 // Bulk moderation
 export { VALID_BULK_ACTIONS, type BulkAction, type BulkModerateResult, type BulkJob, type BulkJobStatus, type BulkKindCounts };
 
-// Optional job scope: `kind` narrows a delete-all to one event kind, and the
-// moderator and report attribute the job's per-event decision rows.
+// Optional job scope: `kind` is required for delete-kind (the one event kind it
+// deletes) and rejected for every other action. The moderator and report
+// attribute the job's per-event decision rows.
 export interface BulkModerateOptions {
   kind?: number;
   moderatorPubkey?: string;
