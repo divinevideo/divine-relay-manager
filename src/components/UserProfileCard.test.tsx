@@ -64,6 +64,8 @@ function stats(recentPosts: NostrEvent[]): UserStats {
     authoredContentIncomplete: false,
     labelsIncomplete: false,
     reportsIncomplete: false,
+    reportsTruncated: false,
+    labelsTruncated: false,
     relayIncomplete: false,
   };
 }
@@ -126,6 +128,43 @@ describe('UserProfileCard', () => {
 
     rerender(<UserProfileCard pubkey={PUBKEY} stats={stats(RECENT)} />);
     expect(screen.queryByRole('button', { name: /view activity/i })).not.toBeInTheDocument();
+  });
+
+  it('does not print a failed report read as zero', () => {
+    render(<UserProfileCard pubkey={PUBKEY} stats={{ ...stats(RECENT), reportsIncomplete: true }} />);
+    expect(screen.getByText('reports unavailable')).toBeInTheDocument();
+    expect(screen.queryByText('0 reports')).not.toBeInTheDocument();
+  });
+
+  it('does not print a failed label read as zero', () => {
+    render(<UserProfileCard pubkey={PUBKEY} stats={{ ...stats(RECENT), labelsIncomplete: true }} />);
+    expect(screen.getByText('labels unavailable')).toBeInTheDocument();
+    expect(screen.queryByText('0 labels')).not.toBeInTheDocument();
+  });
+
+  it('marks a report count that is a floor, not a total', () => {
+    render(<UserProfileCard pubkey={PUBKEY} stats={{ ...stats(RECENT), reportCount: 991, reportsTruncated: true }} />);
+    expect(screen.getByText('991+ reports')).toBeInTheDocument();
+  });
+
+  it('marks a label count that is a floor, not a total', () => {
+    render(<UserProfileCard pubkey={PUBKEY} stats={{ ...stats(RECENT), labelCount: 991, labelsTruncated: true }} />);
+    expect(screen.getByText('991+ labels')).toBeInTheDocument();
+  });
+
+  it('marks a per-label badge count as a floor when the label walk was truncated', () => {
+    const label = (l: string, idByte: string) => post(1985, '', idByte, [['l', l]]);
+    render(
+      <UserProfileCard
+        pubkey={PUBKEY}
+        stats={{
+          ...stats(RECENT),
+          existingLabels: [label('spam', '1'), label('spam', '2')],
+          labelsTruncated: true,
+        }}
+      />
+    );
+    expect(screen.getByText('spam (2+)')).toBeInTheDocument();
   });
 });
 

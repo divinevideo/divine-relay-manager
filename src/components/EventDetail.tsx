@@ -38,6 +38,7 @@ import { TranscriptAnalysis } from "@/components/TranscriptAnalysis";
 import { ReporterList } from "@/components/ReporterCard";
 import { extractMediaHashes } from "@/lib/adminApi";
 import { banFailureToast, banSuccessNote, refreshAfterUnconfirmedBan } from "@/lib/banFeedback";
+import { historyCount, historyStat } from "@/lib/historyCount";
 import { MediaPreview } from "@/components/MediaPreview";
 import {
   User,
@@ -728,21 +729,26 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
                     </span>
                     <span className="flex items-center gap-1">
                       <Flag className="h-3 w-3" />
-                      {userStats.data.reportCount} reports
+                      {historyStat(userStats.data.reportCount, userStats.data.reportsTruncated, userStats.data.reportsIncomplete, 'reports')}
                     </span>
                     <span className="flex items-center gap-1">
                       <Tag className="h-3 w-3" />
-                      {userStats.data.labelCount} labels
+                      {historyStat(userStats.data.labelCount, userStats.data.labelsTruncated, userStats.data.labelsIncomplete, 'labels')}
                     </span>
                   </div>
                 )}
 
                 {/* Related Reports Summary */}
-                {relatedReports && relatedReports.length > 0 && (
+                {/* Reads the same source as the stats row above (userStats.reportCount), not
+                    relatedReports: that read is capped at 50 per filter, so on a heavily
+                    reported account it disagreed with the full-history count above it. */}
+                {userStats.data && (userStats.data.reportsIncomplete || userStats.data.reportCount > 0) && (
                   <div className="p-2 bg-destructive/10 border border-destructive/20 rounded text-xs">
                     <span className="font-medium text-destructive">
                       <AlertTriangle className="h-3 w-3 inline mr-1" />
-                      This user has {relatedReports.length} report{relatedReports.length !== 1 ? 's' : ''} against them
+                      {userStats.data.reportsIncomplete
+                        ? 'Report history unavailable'
+                        : `This user has ${historyCount(userStats.data.reportCount, userStats.data.reportsTruncated)} report${userStats.data.reportsTruncated || userStats.data.reportCount !== 1 ? 's' : ''} against them`}
                     </span>
                   </div>
                 )}
@@ -929,11 +935,11 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
                 </span>
                 <span className="flex items-center gap-1">
                   <Flag className="h-3 w-3" />
-                  {userStats.data.reportCount} reports
+                  {historyStat(userStats.data.reportCount, userStats.data.reportsTruncated, userStats.data.reportsIncomplete, 'reports')}
                 </span>
                 <span className="flex items-center gap-1">
                   <Tag className="h-3 w-3" />
-                  {userStats.data.labelCount} labels
+                  {historyStat(userStats.data.labelCount, userStats.data.labelsTruncated, userStats.data.labelsIncomplete, 'labels')}
                 </span>
               </div>
             )}
