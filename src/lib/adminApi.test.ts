@@ -42,6 +42,7 @@ import {
   getAgeReviewCaseCounts,
   bulkModerate,
   getBulkJobStatus,
+  getBulkKindCounts,
   getLinkedTickets,
   closeTicket,
   ApiError,
@@ -1879,6 +1880,51 @@ describe('adminApi', () => {
       });
 
       await expect(bulkModerate(API_URL, 'a'.repeat(64), 'delete-all')).rejects.toThrow('queue down');
+    });
+
+    it('sends the kind and attribution for a kind-scoped delete', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, jobId: 'job-9' }) });
+
+      await bulkModerate(API_URL, 'a'.repeat(64), 'delete-all', 'spam', {
+        kind: 7, moderatorPubkey: 'd'.repeat(64), reportId: 'e'.repeat(64),
+      });
+
+      const body = JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string);
+      expect(body).toEqual({
+        pubkey: 'a'.repeat(64), action: 'delete-all', reason: 'spam',
+        kind: 7, moderatorPubkey: 'd'.repeat(64), reportId: 'e'.repeat(64),
+      });
+    });
+
+    it('sends no kind for a plain delete-all', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, jobId: 'job-9' }) });
+
+      await bulkModerate(API_URL, 'a'.repeat(64), 'delete-all', 'r');
+
+      const body = JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string);
+      expect(body).toEqual({ pubkey: 'a'.repeat(64), action: 'delete-all', reason: 'r' });
+    });
+  });
+
+  describe('getBulkKindCounts', () => {
+    it('GETs the per-kind counts for a pubkey', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ counts: { 7: 3 }, complete: false }) });
+
+      const res = await getBulkKindCounts(API_URL, 'a'.repeat(64));
+
+      expect(res).toEqual({ counts: { 7: 3 }, complete: false });
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining(`/api/bulk-moderate/kind-counts?pubkey=${'a'.repeat(64)}`),
+        expect.objectContaining({ method: 'GET' }),
+      );
+    });
+
+    it('throws when the listing fails rather than returning zero counts', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false, status: 502, statusText: 'Bad Gateway', json: async () => ({ error: 'relay down' }),
+      });
+
+      await expect(getBulkKindCounts(API_URL, 'a'.repeat(64))).rejects.toThrow('relay down');
     });
   });
 

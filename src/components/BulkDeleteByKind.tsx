@@ -1,12 +1,14 @@
 // ABOUTME: Bulk delete all events of a specific kind from a user
-// ABOUTME: Queries events by kind+author then deletes them with progress tracking
+// ABOUTME: Runs as the worker's async bulk-moderate job; counts come from a full relay listing
 
-import { useState, useMemo } from "react";
-import { useNostr } from "@nostrify/react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAdminApi } from "@/hooks/useAdminApi";
+import { useBulkModerateJob } from "@/hooks/useBulkModerateJob";
+import { useAgeReviewGuardRedirect } from "@/hooks/useAgeReviewGuardRedirect";
 import { useToast } from "@/hooks/useToast";
 import { getKindName } from "@/lib/kindNames";
+import type { BulkJob } from "@/lib/adminApi";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
@@ -29,8 +31,7 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { Input } from "@/components/ui/input";
-import { Trash2, Loader2, AlertTriangle } from "lucide-react";
-import type { NostrEvent } from "@nostrify/nostrify";
+import { Trash2, Loader2 } from "lucide-react";
 
 // Video kinds per NIP-71
 const VIDEO_KINDS = [
@@ -52,292 +53,145 @@ const OTHER_KINDS = [
 interface BulkDeleteByKindProps {
   pubkey: string;
   onComplete?: () => void;
-  variant?: "button" | "inline";
-  /** Log a moderation decision for each deleted event */
-  logDecision?: (params: {
-    targetType: string;
-    targetId: string;
-    action: string;
-    reason?: string;
-    reportId?: string;
-    moderatorPubkey?: string;
-  }) => Promise<void>;
-  /** Report ID for decision logging */
+  /** Report the delete is taken from, recorded on each decision row */
   reportId?: string;
   /** Snapshot the acting moderator's pubkey, resolved once at job start so a
    *  logout/switch mid-delete can't retarget the attribution (#178). */
   getModeratorPubkey?: () => Promise<string | undefined>;
 }
 
-export function BulkDeleteByKind({ pubkey, onComplete, variant = "button", logDecision, reportId, getModeratorPubkey }: BulkDeleteByKindProps) {
-  const { nostr } = useNostr();
-  const { deleteEvent } = useAdminApi();
+// The count the moderator confirmed against when the job started.
+interface ExpectedCount {
+  count: number;
+  complete: boolean;
+}
+
+const isTerminal = (status?: string): boolean => status === "done" || status === "failed";
+
+// Each stored failure is one problem, except the "+N more" overflow marker,
+// which stands for N of them.
+function countIssues(failures: string[]): number {
+  return failures.reduce((n, failure) => {
+    const more = /^\+(\d+) more$/.exec(failure);
+    return n + (more ? Number(more[1]) : 1);
+  }, 0);
+}
+
+// What a finished job tells the moderator. Only a job that ran to completion
+// with no failures reads as done. A job with failures, or one that stopped
+// early, says how far it got and what went wrong.
+function describeOutcome(job: BulkJob, expected?: ExpectedCount) {
+  const kindName = getKindName(job.kind ?? 0);
+  const clean = job.status === "done" && job.failures.length === 0;
+  if (clean) {
+    return { clean, title: "Bulk delete complete", description: `Deleted ${job.eventsProcessed} ${kindName} events` };
+  }
+  const total = expected ? ` of ${expected.complete ? "" : "at least "}${expected.count}` : "";
+  const deleted = `Deleted ${job.eventsProcessed}${total} ${kindName} events`;
+  const detail = job.failures.slice(0, 2).join("; ");
+  if (job.status === "failed") {
+    return { clean, title: "Bulk delete stopped early", description: `${deleted} before it stopped: ${detail}` };
+  }
+  return {
+    clean,
+    title: "Bulk delete finished with issues",
+    description: `${deleted}. ${countIssues(job.failures)} failed or could not be listed: ${detail}`,
+  };
+}
+
+export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPubkey }: BulkDeleteByKindProps) {
+  const api = useAdminApi();
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const redirectIfGuarded = useAgeReviewGuardRedirect();
 
   const [selectedKind, setSelectedKind] = useState<string>("34235"); // Default to Addressable Video
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [deleteProgress, setDeleteProgress] = useState(0);
-  const [deletedCount, setDeletedCount] = useState(0);
   const [reason, setReason] = useState("");
+  // True while the moderator's identity resolves, before the enqueue is pending,
+  // so a second click in that gap cannot start a second job.
+  const [starting, setStarting] = useState(false);
+  const expectedRef = useRef<ExpectedCount>();
 
-  // Query ALL events from this user to show kind breakdown
-  const { data: allUserEvents } = useQuery({
-    queryKey: ['user-all-events', pubkey],
-    queryFn: async ({ signal }) => {
-      const timeout = AbortSignal.timeout(10000);
-      const combinedSignal = AbortSignal.any([signal, timeout]);
-      const events = await nostr.query(
-        [{ authors: [pubkey], limit: 500 }],
-        { signal: combinedSignal }
-      );
-      return events;
-    },
+  // Exact per-kind counts from the worker's full paged listing of the account.
+  const countsQuery = useQuery({
+    queryKey: ["bulk-kind-counts", pubkey],
+    queryFn: () => api.getBulkKindCounts(pubkey),
     enabled: !!pubkey && dialogOpen,
+    staleTime: 30_000,
   });
 
-  // Group events by kind for the summary
-  const kindCounts = useMemo(() => {
-    if (!allUserEvents) return new Map<number, number>();
-    const counts = new Map<number, number>();
-    for (const event of allUserEvents) {
-      counts.set(event.kind, (counts.get(event.kind) || 0) + 1);
-    }
-    return counts;
-  }, [allUserEvents]);
-
-  // Query events of selected kind from this user
-  const { data: events, isLoading: loadingEvents, error: queryError } = useQuery({
-    queryKey: ['bulk-delete-events', pubkey, selectedKind],
-    queryFn: async ({ signal }) => {
-      const kind = parseInt(selectedKind);
-      if (isNaN(kind)) return [];
-
-      const timeout = AbortSignal.timeout(10000);
-      const combinedSignal = AbortSignal.any([signal, timeout]);
-
-      const events = await nostr.query(
-        [{ kinds: [kind], authors: [pubkey], limit: 500 }],
-        { signal: combinedSignal }
-      );
-
-      return events;
-    },
-    enabled: !!pubkey && !!selectedKind,
-  });
-
-  // Debug: log query errors
-  if (queryError) {
-    console.error('[BulkDeleteByKind] Query error:', queryError);
-  }
-
-  // Bulk delete mutation
-  const bulkDeleteMutation = useMutation({
-    mutationFn: async (eventsToDelete: NostrEvent[]) => {
-      const total = eventsToDelete.length;
-      let deleted = 0;
-      const errors: string[] = [];
-      const deleteReason = reason.trim() || `Bulk delete: kind ${selectedKind}`;
-      // Snapshot the moderator once at job start; a logout/switch mid-delete must
-      // not retarget the per-event attribution. Kept as a promise (awaited inside
-      // the loop, resolving once) so the first delete isn't blocked on identity.
-      const moderatorPromise = getModeratorPubkey ? getModeratorPubkey() : Promise.resolve(undefined);
-
-      for (const event of eventsToDelete) {
-        try {
-          await deleteEvent(event.id, deleteReason);
-          // Log decision for audit trail
-          if (logDecision) {
-            try {
-              await logDecision({
-                targetType: 'event',
-                targetId: event.id,
-                action: 'delete_event',
-                reason: deleteReason,
-                reportId,
-                moderatorPubkey: await moderatorPromise,
-              });
-            } catch (e) {
-              console.warn(`Failed to log decision for ${event.id}:`, e);
-            }
-          }
-          deleted++;
-          setDeletedCount(deleted);
-          setDeleteProgress((deleted / total) * 100);
-        } catch (error) {
-          errors.push(event.id);
-          console.error(`Failed to delete event ${event.id}:`, error);
-        }
+  const bulkJob = useBulkModerateJob({
+    pubkey,
+    onComplete: (job) => {
+      const outcome = describeOutcome(job, expectedRef.current);
+      toast(outcome.clean
+        ? { title: outcome.title, description: outcome.description }
+        : { title: outcome.title, description: outcome.description, variant: "destructive" });
+      queryClient.invalidateQueries({ queryKey: ["bulk-kind-counts", pubkey] });
+      queryClient.invalidateQueries({ queryKey: ["user-stats"] });
+      queryClient.invalidateQueries({ queryKey: ["relay-events"] });
+      if (outcome.clean) {
+        setReason("");
+        setDialogOpen(false);
       }
-
-      return { deleted, errors, total };
-    },
-    onSuccess: (result) => {
-      const kindName = getKindName(parseInt(selectedKind));
-
-      if (result.errors.length === 0) {
-        toast({
-          title: "Bulk delete complete",
-          description: `Deleted ${result.deleted} ${kindName} events`,
-        });
-      } else {
-        toast({
-          title: "Bulk delete completed with errors",
-          description: `Deleted ${result.deleted}/${result.total} events. ${result.errors.length} failed.`,
-          variant: "destructive",
-        });
-      }
-
-      // Reset state
-      setDeleteProgress(0);
-      setDeletedCount(0);
-      setReason("");
-      setDialogOpen(false);
-
-      // Invalidate queries
-      queryClient.invalidateQueries({ queryKey: ['bulk-delete-events'] });
-      queryClient.invalidateQueries({ queryKey: ['user-stats'] });
-      queryClient.invalidateQueries({ queryKey: ['relay-events'] });
-
       onComplete?.();
     },
     onError: (error) => {
-      toast({
-        title: "Bulk delete failed",
-        description: error instanceof Error ? error.message : "Unknown error",
-        variant: "destructive",
-      });
-      setDeleteProgress(0);
-      setDeletedCount(0);
+      // Like Delete All Content, the worker refuses a bulk job on an account
+      // with an open age-review case; send the moderator to the case.
+      if (redirectIfGuarded(error, pubkey)) return;
+      toast({ title: "Bulk delete failed", description: error.message, variant: "destructive" });
     },
   });
 
-  const handleDelete = () => {
-    if (events && events.length > 0) {
-      bulkDeleteMutation.mutate(events);
+  const counts = countsQuery.data;
+  const selectedCount = counts ? counts.counts[selectedKind] ?? 0 : undefined;
+  const isRunning = bulkJob.isRunning || starting;
+  // A cut-short listing may have missed events of this kind, so it does not
+  // rule a delete out even at zero.
+  const canDelete = !!counts && (selectedCount! > 0 || !counts.complete) && !isRunning;
+  const kindName = getKindName(parseInt(selectedKind) || 0);
+  const job = bulkJob.job;
+  const outcome = job && isTerminal(job.status) && job.kind !== undefined
+    ? describeOutcome(job, expectedRef.current)
+    : null;
+
+  const handleDelete = async () => {
+    if (!counts) return;
+    const kind = Number(selectedKind);
+    setStarting(true);
+    try {
+      expectedRef.current = { count: selectedCount ?? 0, complete: counts.complete };
+      let moderatorPubkey: string | undefined;
+      try {
+        moderatorPubkey = await getModeratorPubkey?.();
+      } catch (error) {
+        // Attribution is non-critical: the job's rows fall back to the worker's key.
+        console.warn("[BulkDeleteByKind] could not resolve the moderator pubkey", error);
+      }
+      bulkJob.start("delete-all", {
+        kind,
+        reason: reason.trim() || `Bulk delete: kind ${kind}`,
+        moderatorPubkey,
+        reportId,
+      });
+    } finally {
+      setStarting(false);
     }
   };
 
-  const eventCount = events?.length || 0;
-  const kindName = getKindName(parseInt(selectedKind) || 0);
-  const isDeleting = bulkDeleteMutation.isPending;
+  const expected = expectedRef.current;
+  const processed = job && !isTerminal(job.status) ? job.eventsProcessed : 0;
+  const progressTotal = expected ? `${expected.complete ? "" : "at least "}${expected.count}` : "";
+  const progressValue = expected && expected.count > 0 ? Math.min(100, (processed / expected.count) * 100) : 0;
+  const deleteLabel = counts ? `Delete ${selectedCount}${counts.complete ? "" : "+"} Events` : "Delete Events";
 
-  if (variant === "inline") {
-    return (
-      <div className="space-y-3">
-        <div className="flex items-end gap-2">
-          <div className="flex-1">
-            <Label htmlFor="kind-select" className="text-xs text-muted-foreground">
-              Delete all events of kind
-            </Label>
-            <Select value={selectedKind} onValueChange={setSelectedKind} disabled={isDeleting}>
-              <SelectTrigger id="kind-select" className="mt-1">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <div className="px-2 py-1 text-xs font-medium text-muted-foreground">Video Events</div>
-                {VIDEO_KINDS.map(kind => (
-                  <SelectItem key={kind.value} value={kind.value}>
-                    {kind.label}
-                  </SelectItem>
-                ))}
-                <div className="px-2 py-1 text-xs font-medium text-muted-foreground border-t mt-1 pt-1">Other</div>
-                {OTHER_KINDS.map(kind => (
-                  <SelectItem key={kind.value} value={kind.value}>
-                    {kind.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          <AlertDialog open={dialogOpen} onOpenChange={setDialogOpen}>
-            <AlertDialogTrigger asChild>
-              <Button
-                variant="destructive"
-                size="sm"
-                disabled={loadingEvents || eventCount === 0 || isDeleting}
-              >
-                {loadingEvents ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <>
-                    <Trash2 className="h-4 w-4 mr-1" />
-                    Delete {eventCount}
-                  </>
-                )}
-              </Button>
-            </AlertDialogTrigger>
-            <AlertDialogContent>
-              <AlertDialogHeader>
-                <AlertDialogTitle className="flex items-center gap-2">
-                  <AlertTriangle className="h-5 w-5 text-destructive" />
-                  Delete {eventCount} Events?
-                </AlertDialogTitle>
-                <AlertDialogDescription asChild>
-                  <div className="space-y-3">
-                    <p>
-                      This will permanently delete <strong>{eventCount} {kindName}</strong> events
-                      from this user on the relay.
-                    </p>
-                    <div>
-                      <Label htmlFor="inline-bulk-reason" className="text-sm">Reason</Label>
-                      <Input
-                        id="inline-bulk-reason"
-                        placeholder="e.g. Spam content, policy violation..."
-                        value={reason}
-                        onChange={(e) => setReason(e.target.value)}
-                        disabled={isDeleting}
-                        className="mt-1"
-                      />
-                    </div>
-                    {isDeleting && (
-                      <div className="space-y-2">
-                        <Progress value={deleteProgress} />
-                        <p className="text-sm text-center">
-                          Deleted {deletedCount} of {eventCount} events...
-                        </p>
-                      </div>
-                    )}
-                  </div>
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel disabled={isDeleting}>Cancel</AlertDialogCancel>
-                <AlertDialogAction
-                  onClick={handleDelete}
-                  disabled={isDeleting}
-                  className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                >
-                  {isDeleting ? (
-                    <>
-                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                      Deleting...
-                    </>
-                  ) : (
-                    `Delete ${eventCount} Events`
-                  )}
-                </AlertDialogAction>
-              </AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
-        </div>
-
-        {eventCount === 0 && !loadingEvents && (
-          <p className="text-xs text-muted-foreground">
-            No {kindName} events found for this user
-          </p>
-        )}
-      </div>
-    );
-  }
-
-  // Button variant (can be placed anywhere)
   return (
     <AlertDialog open={dialogOpen} onOpenChange={setDialogOpen}>
       <AlertDialogTrigger asChild>
         <Button variant="outline" size="sm">
-          <Trash2 className="h-4 w-4 mr-2" />
+          {isRunning ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Trash2 className="h-4 w-4 mr-2" />}
           Bulk Delete by Kind
         </Button>
       </AlertDialogTrigger>
@@ -346,11 +200,11 @@ export function BulkDeleteByKind({ pubkey, onComplete, variant = "button", logDe
           <AlertDialogTitle>Bulk Delete Events by Kind</AlertDialogTitle>
           <AlertDialogDescription asChild>
             <div className="space-y-4">
-              <p>Select an event kind to delete all matching events from this user.</p>
+              <p>Select an event kind to delete all matching events from this user. Media files are not deleted.</p>
 
               <div>
                 <Label htmlFor="kind-select-dialog" className="text-sm">Event Kind</Label>
-                <Select value={selectedKind} onValueChange={setSelectedKind} disabled={isDeleting}>
+                <Select value={selectedKind} onValueChange={setSelectedKind} disabled={isRunning}>
                   <SelectTrigger id="kind-select-dialog" className="mt-1">
                     <SelectValue />
                   </SelectTrigger>
@@ -371,39 +225,53 @@ export function BulkDeleteByKind({ pubkey, onComplete, variant = "button", logDe
                 </Select>
               </div>
 
-              <div className="p-3 bg-muted rounded-lg">
-                {loadingEvents ? (
+              <div className="p-3 bg-muted rounded-lg space-y-1">
+                {countsQuery.isError ? (
+                  <p className="text-sm text-destructive">
+                    Could not count this account's events
+                    {countsQuery.error instanceof Error ? `: ${countsQuery.error.message}` : ""}.
+                    Delete is unavailable until the count loads.
+                  </p>
+                ) : !counts ? (
                   <div className="flex items-center gap-2 text-sm">
                     <Loader2 className="h-4 w-4 animate-spin" />
                     Counting events...
                   </div>
                 ) : (
-                  <p className="text-sm">
-                    Found <strong>{eventCount}</strong> {kindName} events to delete
-                  </p>
+                  <>
+                    <p className="text-sm">
+                      Found <strong>{counts.complete ? selectedCount : `at least ${selectedCount}`}</strong> {kindName} events to delete
+                    </p>
+                    {!counts.complete && (
+                      <p className="text-xs text-muted-foreground">
+                        This account's events could not be listed in full, so these counts are a lower bound.
+                      </p>
+                    )}
+                  </>
                 )}
               </div>
 
               {/* Show kind breakdown */}
-              {kindCounts.size > 0 && (
+              {counts && Object.keys(counts.counts).length > 0 && (
                 <div className="p-3 bg-blue-50 dark:bg-blue-950/30 rounded-lg border border-blue-200 dark:border-blue-800">
                   <p className="text-xs font-medium text-blue-800 dark:text-blue-200 mb-2">
                     This user has events of these kinds:
                   </p>
                   <div className="flex flex-wrap gap-1">
-                    {Array.from(kindCounts.entries())
+                    {Object.entries(counts.counts)
                       .sort((a, b) => b[1] - a[1])
                       .map(([kind, count]) => (
                         <button
                           key={kind}
-                          onClick={() => setSelectedKind(kind.toString())}
+                          onClick={() => setSelectedKind(kind)}
+                          disabled={isRunning}
                           className={`text-xs px-2 py-1 rounded-full transition-colors ${
-                            selectedKind === kind.toString()
+                            selectedKind === kind
                               ? 'bg-blue-600 text-white'
                               : 'bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200 hover:bg-blue-200 dark:hover:bg-blue-800'
                           }`}
                         >
-                          {getKindName(kind)} ({count})
+                          {getKindName(Number(kind))} ({count}{counts.complete ? "" : "+"})
                         </button>
                       ))}
                   </div>
@@ -417,36 +285,50 @@ export function BulkDeleteByKind({ pubkey, onComplete, variant = "button", logDe
                   placeholder="e.g. Spam content, policy violation..."
                   value={reason}
                   onChange={(e) => setReason(e.target.value)}
-                  disabled={isDeleting}
+                  disabled={isRunning}
                   className="mt-1"
                 />
               </div>
 
-              {isDeleting && (
+              {isRunning && (
                 <div className="space-y-2">
-                  <Progress value={deleteProgress} />
+                  <Progress value={progressValue} />
                   <p className="text-sm text-center text-muted-foreground">
-                    Deleted {deletedCount} of {eventCount} events...
+                    Deleted {processed} of {progressTotal} events...
                   </p>
+                  <p className="text-xs text-center text-muted-foreground">
+                    The delete runs on the server; closing this dialog does not stop it.
+                  </p>
+                </div>
+              )}
+
+              {!isRunning && outcome && !outcome.clean && (
+                <div className="p-3 rounded-lg border border-destructive/50 text-sm space-y-1">
+                  <p className="font-medium text-destructive">{outcome.title}</p>
+                  <p className="text-muted-foreground break-words">{outcome.description}</p>
                 </div>
               )}
             </div>
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
-          <AlertDialogCancel disabled={isDeleting}>Cancel</AlertDialogCancel>
+          <AlertDialogCancel>{isRunning ? "Close" : "Cancel"}</AlertDialogCancel>
           <AlertDialogAction
-            onClick={handleDelete}
-            disabled={isDeleting || eventCount === 0 || loadingEvents}
+            onClick={(e) => {
+              // Keep the dialog open so it can show the job's progress.
+              e.preventDefault();
+              void handleDelete();
+            }}
+            disabled={!canDelete}
             className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
           >
-            {isDeleting ? (
+            {isRunning ? (
               <>
                 <Loader2 className="h-4 w-4 mr-2 animate-spin" />
                 Deleting...
               </>
             ) : (
-              `Delete ${eventCount} Events`
+              deleteLabel
             )}
           </AlertDialogAction>
         </AlertDialogFooter>
