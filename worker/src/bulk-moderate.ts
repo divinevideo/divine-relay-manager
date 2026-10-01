@@ -550,6 +550,10 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
       }
       const remainingEventIds = page.events.slice(attempted).map(event => event.id);
       const pass = msg.pass ?? 0;
+      // These count successful ban calls, not distinct events. A ban the relay
+      // is slow to reflect (the event still listed on the next sweep) is banned
+      // and counted again then, with another decision row. Accepted: the
+      // 20-sweep bound caps the repeats, and a lag that outlasts it is reported.
       const passDeleted = (msg.passDeleted ?? 0) + ev.processed;
       // Within a sweep, continuations carry its number and running total.
       const sweep = isKindJob ? { pass, passDeleted } : {};
