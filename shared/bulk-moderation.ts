@@ -1,4 +1,7 @@
-export const VALID_BULK_ACTIONS = ['age-restrict-all', 'un-age-restrict-all', 'delete-all'] as const;
+// age-restrict-all is the age-review withhold (hides a suspected minor's videos
+// from everyone but the owner). age-gate-all is the moderator's "Age Restrict All"
+// (puts the videos behind the 18+ gate). Keep them separate: #290.
+export const VALID_BULK_ACTIONS = ['age-restrict-all', 'age-gate-all', 'un-age-restrict-all', 'delete-all'] as const;
 
 export type BulkAction = typeof VALID_BULK_ACTIONS[number];
 

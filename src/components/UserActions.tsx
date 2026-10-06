@@ -359,9 +359,9 @@ export function UserActions({
           <Tooltip>
             <TooltipTrigger asChild>
               <Button variant="outline" className="border-orange-500 text-orange-600 hover:bg-orange-50"
-                onClick={() => { bulkModeratorRef.current = getModeratorPubkey(); bulkJob.start('age-restrict-all'); }} disabled={anyPending}>
+                onClick={() => { bulkModeratorRef.current = getModeratorPubkey(); bulkJob.start('age-gate-all'); }} disabled={anyPending}>
                 <ShieldAlert className="h-4 w-4 mr-1" />
-                {bulkJob.runningAction === 'age-restrict-all' ? 'Restricting...' : 'Age Restrict All'}
+                {bulkJob.runningAction === 'age-gate-all' ? 'Restricting...' : 'Age Restrict All'}
               </Button>
             </TooltipTrigger>
             <TooltipContent><p>Age-restrict all media from this user. Can be reversed.</p></TooltipContent>

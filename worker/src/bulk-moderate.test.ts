@@ -258,6 +258,17 @@ describe('runBulkModeration', () => {
     expect(result.mediaProcessed).toBe(250);
   });
 
+  it('age-gate-all sends AGE_RESTRICTED (18+ gate) for EVERY video, not QUARANTINE (#290)', async () => {
+    // The Users-page "Age Restrict All" button: viewers who pass the age gate
+    // still see the videos. Must not reuse the age-review withhold.
+    mockUserVideos([{ sha256: hashA }, { sha256: hashB }]);
+    const result = await runBulkModeration(mockEnv, 'a'.repeat(64), 'age-gate-all', 'r');
+    expect(result.success).toBe(true);
+    expect(result.mediaProcessed).toBe(2);
+    expect(moderationActionFor(mockEnv, hashA)).toBe('AGE_RESTRICTED');
+    expect(moderationActionFor(mockEnv, hashB)).toBe('AGE_RESTRICTED');
+  });
+
   it('un-age-restrict-all sends SAFE (restore) for media', async () => {
     mockUserVideos([{ sha256: hashA }]);
     await runBulkModeration(mockEnv, 'a'.repeat(64), 'un-age-restrict-all', 'r');
@@ -344,6 +355,28 @@ describe('async bulk job model', () => {
     expect(jobDb.rows.get(body.jobId)?.status).toBe('pending'); // row created, not yet run
     expect(sent).toHaveLength(1);
     expect(sent[0]).toMatchObject({ jobId: body.jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', version: 0 });
+  });
+
+  it('enqueue accepts age-gate-all (#290)', async () => {
+    const res = await handleBulkModerateEnqueue(enqueueReq({ pubkey: 'a'.repeat(64), action: 'age-gate-all' }), mockEnv, {});
+    expect(res.status).toBe(200);
+    expect(sent[0]).toMatchObject({ action: 'age-gate-all' });
+  });
+
+  it('queued age-gate-all media chunks send AGE_RESTRICTED (#290)', async () => {
+    const jobId = 'job-gate-1';
+    jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'age-gate-all', status: 'running', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, created_at: 't', updated_at: 't' });
+    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'age-gate-all', phase: 'media' }, mockEnv);
+    expect(moderationActionFor(mockEnv, hashA)).toBe('AGE_RESTRICTED');
+    expect(moderationActionFor(mockEnv, hashB)).toBe('AGE_RESTRICTED');
+  });
+
+  it('queued age-restrict-all media chunks still send QUARANTINE (age-review withhold survives a deploy) (#290)', async () => {
+    const jobId = 'job-withhold-1';
+    jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', status: 'running', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, created_at: 't', updated_at: 't' });
+    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', phase: 'media' }, mockEnv);
+    expect(moderationActionFor(mockEnv, hashA)).toBe('QUARANTINE');
+    expect(moderationActionFor(mockEnv, hashB)).toBe('QUARANTINE');
   });
 
   it('enqueue validates the action/pubkey and does NOT enqueue on a bad request', async () => {

@@ -48,6 +48,22 @@ function json(data: unknown, status: number, corsHeaders: Record<string, string>
   });
 }
 
+// The media action each bulk action sends. Exhaustive over BulkAction so a new
+// action cannot silently fall through to SAFE.
+//   age-restrict-all -> QUARANTINE: the age-review withhold. QUARANTINE maps to
+//     blossom Restricted (404 to everyone but the owner, reversible).
+//     AGE_RESTRICTED would serve the bytes to any signed-in viewer, so it must
+//     never be used to hide a minor's content.
+//   age-gate-all -> AGE_RESTRICTED: the moderator's "Age Restrict All", the same
+//     18+ gate the single-video Age Restrict applies (#290).
+//   un-age-restrict-all -> SAFE: restore.
+const BULK_MEDIA_ACTION: Record<BulkAction, 'QUARANTINE' | 'AGE_RESTRICTED' | 'SAFE' | 'DELETE'> = {
+  'age-restrict-all': 'QUARANTINE',
+  'age-gate-all': 'AGE_RESTRICTED',
+  'un-age-restrict-all': 'SAFE',
+  'delete-all': 'DELETE',
+};
+
 // Per-item chunk helpers, shared by the synchronous runBulkModeration (age-review)
 // and the chunked queue consumer (processBulkJob).
 
@@ -146,18 +162,15 @@ export async function runBulkModeration(
     if (ev.successfulEventIds.length > 0) {
       await syncZendeskAfterAction(env, 'delete_event', 'pubkey', pubkey, moderatorPubkey);
     }
-    const media = await moderateMediaHashes(env, mediaHashes, 'DELETE', reason);
+    const media = await moderateMediaHashes(env, mediaHashes, BULK_MEDIA_ACTION[action], reason);
     result.mediaProcessed = media.processed;
     result.failures.push(...media.failures);
   } else {
-    // age-restrict-all / un-age-restrict-all are media-only.
-    // QUARANTINE -> RESTRICT -> blossom Restricted (404s to everyone but the owner,
-    // reversible). 'AGE_RESTRICTED' would serve full bytes to any signed-in viewer,
-    // so it must NOT be used to hide a minor's content. Clear sends 'SAFE'.
+    // age-restrict-all / age-gate-all / un-age-restrict-all are media-only;
+    // see BULK_MEDIA_ACTION for what each sends.
     const mediaHashes = await queryUserMediaHashes(pubkey, env);
     result.eventsProcessed = mediaHashes.length; // one video == one event for video kinds
-    const mediaAction = action === 'age-restrict-all' ? 'QUARANTINE' : 'SAFE';
-    const media = await moderateMediaHashes(env, mediaHashes, mediaAction, reason);
+    const media = await moderateMediaHashes(env, mediaHashes, BULK_MEDIA_ACTION[action], reason);
     result.mediaProcessed = media.processed;
     result.failures.push(...media.failures);
   }
@@ -431,8 +444,7 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
     } else {
       const mediaPage = msg.mediaPage ?? 0;
       const { hashes, nextCursor } = await queryUserVideosPage(msg.pubkey, env, msg.cursor);
-      const mediaAction = msg.action === 'delete-all' ? 'DELETE' : msg.action === 'age-restrict-all' ? 'QUARANTINE' : 'SAFE';
-      const media = await moderateMediaHashes(env, hashes, mediaAction, reason);
+      const media = await moderateMediaHashes(env, hashes, BULK_MEDIA_ACTION[msg.action], reason);
       mediaDelta = media.processed;
       chunkFailures.push(...media.failures);
       // Parity with the synchronous path: for media-only actions one video == one
