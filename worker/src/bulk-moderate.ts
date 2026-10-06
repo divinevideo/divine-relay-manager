@@ -314,7 +314,7 @@ export async function handleBulkModerateEnqueue(
     return json({ error: 'Request body must be a JSON object' }, 400, corsHeaders);
   }
 
-  if (!body.pubkey || !/^[0-9a-f]{64}$/.test(body.pubkey)) {
+  if (typeof body.pubkey !== 'string' || !/^[0-9a-f]{64}$/.test(body.pubkey)) {
     return json({ error: 'Valid 64-char hex pubkey required' }, 400, corsHeaders);
   }
   if (!body.action || !VALID_BULK_ACTIONS.includes(body.action as BulkAction)) {

@@ -436,6 +436,10 @@ describe('async bulk job model', () => {
     expect(bad.status).toBe(400);
     const badAction = await handleBulkModerateEnqueue(enqueueReq({ pubkey: 'a'.repeat(64), action: 'nope' }), mockEnv, {});
     expect(badAction.status).toBe(400);
+    // An array stringifies to a matching hex string, and would slip past the
+    // age-review guard's string check in index.ts.
+    const arrayPubkey = await handleBulkModerateEnqueue(enqueueReq({ pubkey: ['a'.repeat(64)], action: 'age-gate-all' }), mockEnv, {});
+    expect(arrayPubkey.status).toBe(400);
     expect(sent).toHaveLength(0);
   });
 
