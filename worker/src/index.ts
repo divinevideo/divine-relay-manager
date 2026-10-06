@@ -39,7 +39,7 @@ import {
 } from './age-review';
 import { handleAccountStatus } from './account-status';
 import { handleBulkModerateEnqueue, handleBulkJobStatus, processBulkJob } from './bulk-moderate';
-import type { BulkJobMessage } from '../../shared/bulk-moderation';
+import type { BulkAction, BulkJobMessage } from '../../shared/bulk-moderation';
 import { ensureZendeskTable, addZendeskInternalNote, syncZendeskAfterAction, getLinkedTickets, closeTicketById } from './zendesk-sync';
 import { buildReportNote, parseKind0Profile, type ReportedProfile } from './report-note';
 import { queryRelay, withTimeout, ENRICHMENT_TIMEOUT_MS } from './relay-profile';
@@ -51,6 +51,27 @@ import { readResolutionLabelTargets } from './resolution-labels';
 import { runRetentionDisposal } from './retention';
 
 const COORDINATED_AUTO_HIDE_ACTIONS = new Set<string>(AUTO_HIDE_STATE_ACTIONS);
+
+// What the /api/bulk-moderate age-review guard does when the case lookup itself
+// fails (no DB binding, or a thrown query). Exhaustive over BulkAction so a new
+// action has to choose.
+//   Fail open (false) for the actions that only add restriction or delete. A
+//   refused bulk job is one moderator's click failing, with no automated caller
+//   behind it, so refusing them during an outage stops content moderation for a
+//   human who has no other route.
+//   Fail closed (true) for the actions that loosen a hold: un-age-restrict-all
+//   lifts a withhold, and age-gate-all swaps it for an 18+ gate that serves a
+//   suspected minor's videos to signed-in viewers (#290). Unchecked, either can
+//   expose a minor while reporting success. The cost is a "try again" while the
+//   lookup is down; Delete All, and Ban (unguarded), still work.
+// If bulk ever becomes reachable from automation, revisit the fail-open rows:
+// that reasoning is about who is on the other end.
+const BULK_GUARD_FAILS_CLOSED: Record<BulkAction, boolean> = {
+  'age-restrict-all': false,
+  'delete-all': false,
+  'age-gate-all': true,
+  'un-age-restrict-all': true,
+};
 
 let schemaReady = false;
 async function ensureSchemaOnce(db: D1Database): Promise<void> {
@@ -732,27 +753,17 @@ export default {
         // enqueue-time only — a case opened while a chunked job is already
         // draining does not abort it (aborting mid-job would leave
         // half-applied state; the job was legitimate when it started).
-        // No `failClosed` here, deliberately, and NOT because bulk has no
-        // loosening action: `un-age-restrict-all` lifts restrictions this very
-        // case imposed, and `age-gate-all` loosens its withhold to an 18+ gate.
-        // The guard's docstring argues fail-closed by direction, which taken
-        // alone would cover both. Bulk is partitioned by
-        // blast radius instead. A refused bulk job is one moderator's click
-        // failing loudly in the UI, with no automated caller behind it, so an
-        // outage that blocks all four actions stops content moderation
-        // wholesale for a human who has no other route -- whereas a refused
-        // loosening only defers it on an account that stays held meanwhile.
-        // The cost of failing open: during an outage, Age Restrict All on an
-        // open case can swap a withhold for the 18+ gate.
-        // If bulk ever becomes reachable from automation, revisit this: the
-        // reasoning is about who is on the other end, not about the actions.
-        let peeked: { pubkey?: string } | undefined;
+        // When the case lookup itself fails, BULK_GUARD_FAILS_CLOSED decides
+        // per action; see its comment.
+        let peeked: { pubkey?: string; action?: string } | undefined;
         try {
-          peeked = await request.clone().json() as { pubkey?: string };
+          peeked = await request.clone().json() as { pubkey?: string; action?: string };
         } catch { /* not JSON; the handler returns the 400 */ }
         if (typeof peeked?.pubkey === 'string') {
+          const failClosed = BULK_GUARD_FAILS_CLOSED[peeked.action as BulkAction] === true;
           const guarded = await ageReviewActiveGuard(peeked.pubkey, env, corsHeaders,
-            'This account is under age review. Content enforcement runs through the Age Review flow.');
+            'This account is under age review. Content enforcement runs through the Age Review flow.',
+            { failClosed });
           if (guarded) return guarded;
         }
         return handleBulkModerateEnqueue(request, env, corsHeaders);
