@@ -166,10 +166,6 @@ export async function handleGetAgeReviewCase(
   return json({ success: true, case: row }, 200, corsHeaders);
 }
 
-// Lives in age-review-lookup.ts so bulk-moderate.ts can share it; re-exported
-// here for existing importers.
-export { getActiveAgeReviewCase };
-
 /**
  * Refuse-and-route guard shared by the interactive enforcement endpoints
  * (relay-rpc suspend/unsuspend/unban, bulk-moderate enqueue): if the pubkey has
