@@ -21,6 +21,7 @@ import {
   FUNNEL_ZENDESK_QUERIES,
 } from '../../shared/age-review';
 import { runBulkModeration, type BulkModerateEnv } from './bulk-moderate';
+import { getActiveAgeReviewCase } from './age-review-lookup';
 import { resolveZendeskCreds } from './zendesk-sync';
 import type { BulkAction } from '../../shared/bulk-moderation';
 import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, createMinorAccount, type KeycastEnv } from './keycast-client';
@@ -165,23 +166,9 @@ export async function handleGetAgeReviewCase(
   return json({ success: true, case: row }, 200, corsHeaders);
 }
 
-/**
- * Returns the single active (non-terminal) age-review case for a pubkey, or
- * null. ReportWatcher guarantees at most one active case per pubkey, so this is
- * unambiguous. Shared by the by-pubkey lookup endpoint and the relay-RPC guard.
- */
-export async function getActiveAgeReviewCase(
-  pubkey: string,
-  env: AgeReviewEnv,
-): Promise<AgeReviewCase | null> {
-  if (!env.DB) return null;
-  const row = await env.DB.prepare(`
-    SELECT * FROM age_review_cases
-    WHERE pubkey = ? AND state NOT IN (${TERMINAL_STATES.map(() => '?').join(',')})
-    LIMIT 1
-  `).bind(pubkey, ...TERMINAL_STATES).first<AgeReviewCase>();
-  return row ?? null;
-}
+// Lives in age-review-lookup.ts so bulk-moderate.ts can share it; re-exported
+// here for existing importers.
+export { getActiveAgeReviewCase };
 
 /**
  * Refuse-and-route guard shared by the interactive enforcement endpoints

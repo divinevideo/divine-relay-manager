@@ -9,7 +9,7 @@ import {
   type BulkJobPhase,
   type BulkEnqueueResponse,
 } from '../../shared/bulk-moderation';
-import { TERMINAL_STATES } from '../../shared/age-review';
+import { getActiveAgeReviewCase } from './age-review-lookup';
 import { deriveFunnelcakeApiUrl } from './funnelcake-proxy';
 
 const BULK_ACTION_CONCURRENCY = 5;
@@ -74,8 +74,9 @@ const BULK_MEDIA_ACTION: Record<BulkAction, 'QUARANTINE' | 'AGE_RESTRICTED' | 'S
 //   true: un-age-restrict-all lifts a withhold, and age-gate-all swaps it for an
 //     18+ gate that serves a suspected minor's videos to signed-in viewers
 //     (#290). Unchecked, either can expose a minor while reporting success. The
-//     cost is a "try again" (or a stopped job) while a case is open or the
-//     lookup is down; Delete All, and Ban (unguarded), still work.
+//     cost: while the lookup is down, these get a "try again" (503) and a
+//     running job stops, but Delete All and Ban (unguarded) still work. With a
+//     case open, every bulk action is routed to the case (409) regardless.
 //   false: the actions that only add restriction or delete. A refused bulk job
 //     is one moderator's click failing, with no automated caller behind it, so
 //     refusing these during an outage stops content moderation for a human who
@@ -87,19 +88,6 @@ export const LOOSENS_AGE_REVIEW_HOLD: Record<BulkAction, boolean> = {
   'age-gate-all': true,
   'un-age-restrict-all': true,
 };
-
-// True when the pubkey has a non-terminal age-review case. Mirrors
-// getActiveAgeReviewCase in age-review.ts, which can't be imported here:
-// age-review.ts imports this module (runBulkModeration). Throws on a failed
-// lookup; callers fail closed.
-async function hasOpenAgeReviewCase(db: D1Database, pubkey: string): Promise<boolean> {
-  const row = await db.prepare(`
-    SELECT id FROM age_review_cases
-    WHERE pubkey = ? AND state NOT IN (${TERMINAL_STATES.map(() => '?').join(',')})
-    LIMIT 1
-  `).bind(pubkey, ...TERMINAL_STATES).first();
-  return row != null;
-}
 
 // Per-item chunk helpers, shared by the synchronous runBulkModeration (age-review)
 // and the chunked queue consumer (processBulkJob).
@@ -424,7 +412,7 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
     if (LOOSENS_AGE_REVIEW_HOLD[msg.action]) {
       let open: boolean;
       try {
-        open = await hasOpenAgeReviewCase(db, msg.pubkey);
+        open = (await getActiveAgeReviewCase(msg.pubkey, env)) !== null;
       } catch (error) {
         throw new Error(`stopped: could not check age-review status for ${msg.pubkey} (${formatError(error)}); no further videos were changed`);
       }

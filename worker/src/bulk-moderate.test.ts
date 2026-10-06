@@ -82,8 +82,11 @@ function mockUserVideos(videos: Array<{ sha256: string }>) {
 // positional-SET UPDATE, and SELECT-by-job_id statements the async path uses.
 // Honors a `status IN (...)` / `status = '...'` guard in the UPDATE WHERE clause
 // and reports meta.changes, so the consumer's sticky-status guards are exercised.
-// `ageReview` answers the consumer's open-case lookup on age_review_cases.
-function makeJobDb(ageReview: { openCase?: boolean; lookupThrows?: boolean } = {}) {
+// `ageReview` answers the consumer's open-case lookup on age_review_cases: an
+// open case exists only for `openCaseFor`, so a lookup bound to the wrong
+// pubkey finds nothing. The query itself is pinned against real SQLite in
+// test/age-review-lookup.d1.test.ts.
+function makeJobDb(ageReview: { openCaseFor?: string; lookupThrows?: boolean } = {}) {
   const rows = new Map<string, Record<string, unknown>>();
   const db = {
     prepare(sql: string) {
@@ -132,7 +135,7 @@ function makeJobDb(ageReview: { openCase?: boolean; lookupThrows?: boolean } = {
         async first() {
           if (/age_review_cases/i.test(sql)) {
             if (ageReview.lookupThrows) throw new Error('D1 unavailable');
-            return ageReview.openCase ? { id: 'case-open', state: 'open_reported' } : null;
+            return binds[0] === ageReview.openCaseFor ? { id: 'case-open', pubkey: binds[0], state: 'open_reported' } : null;
           }
           return rows.get(binds[0] as string) ?? null;
         },
@@ -395,7 +398,7 @@ describe('async bulk job model', () => {
   // age-review case opens must stop, or its later chunks would overwrite the
   // case's withhold with the 18+ gate (or SAFE) (#290).
   describe.each([
-    ['an open age-review case', { openCase: true }],
+    ['an open age-review case', { openCaseFor: 'a'.repeat(64) }],
     ['a failed case lookup', { lookupThrows: true }],
   ])('a loosening job that meets %s mid-run', (_label, ageReview) => {
     it.each(['age-gate-all', 'un-age-restrict-all'] as const)('%s stops as failed and sends nothing', async (action) => {
@@ -413,8 +416,18 @@ describe('async bulk job model', () => {
     });
   });
 
+  it('a loosening job still runs when the open age-review case is on a different account', async () => {
+    jobDb = makeJobDb({ openCaseFor: 'b'.repeat(64) });
+    mockEnv = { ...mockEnv, DB: jobDb.db };
+    const jobId = 'job-gate-other-case';
+    jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'age-gate-all', status: 'running', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, created_at: 't', updated_at: 't' });
+    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'age-gate-all', phase: 'media' }, mockEnv);
+    expect(moderationActionFor(mockEnv, hashA)).toBe('AGE_RESTRICTED');
+    expect(jobDb.rows.get(jobId)?.status).toBe('done');
+  });
+
   it('a withhold job (age-restrict-all) still runs when an age-review case is open', async () => {
-    jobDb = makeJobDb({ openCase: true });
+    jobDb = makeJobDb({ openCaseFor: 'a'.repeat(64) });
     mockEnv = { ...mockEnv, DB: jobDb.db };
     const jobId = 'job-withhold-open-case';
     jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', status: 'running', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, created_at: 't', updated_at: 't' });
