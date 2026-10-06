@@ -28,7 +28,7 @@ export type BulkJobPhase = 'events' | 'media';
 // ceiling. The first message omits phase/cursor (start); each chunk re-enqueues
 // the next with its continuation state, or finalizes the job.
 //   - phase: 'events' (delete-all only: ban per event) then 'media'
-//     (moderate each video blob). age-restrict/un-age-restrict are media-only.
+//     (moderate each video blob). The other actions are media-only.
 //   - cursor: opaque continuation for the current phase -- funnelcake v2
 //     next_cursor for media, or the relay `until` timestamp (stringified) for
 //     events. Absent = start of the phase.

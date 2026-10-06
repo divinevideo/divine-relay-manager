@@ -246,8 +246,13 @@ producer/consumer). No data cleanup required.
 
 Before rolling the worker back past #290, drain `age-gate-all` jobs first: an older
 worker reads that action as unknown and sends SAFE, un-restricting the account's
-media mid-job. Roll back only when this returns no rows:
+media mid-job. Roll back only when this returns no rows (rows idle past 30 minutes,
+the worker's `STALE_JOB_MS`, have stalled with nothing queued, so they are excluded):
 
-```sql
-SELECT job_id FROM bulk_jobs WHERE action = 'age-gate-all' AND status IN ('pending', 'running');
+```bash
+npx wrangler d1 execute divine-moderation-decisions-prod --remote --command \
+  "SELECT job_id FROM bulk_jobs WHERE action = 'age-gate-all' AND status IN ('pending', 'running') AND updated_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 minutes');"
 ```
+
+Roll the frontend back with it. An older worker refuses `age-gate-all` with a 400
+("Invalid action"), so the new UI's "Age Restrict All" fails until the two match.
