@@ -720,8 +720,10 @@ export default {
         // Age-review guard: bulk content actions on an account with an open
         // case must not run out of band (age-restrict half-enforces without
         // advancing the case, un-age-restrict lifts restrictions the case
-        // imposed, delete-all destroys evidence the review may need). Refuse
-        // and route to the case; Ban remains the severe-action escape hatch.
+        // imposed, age-gate-all swaps the case's withhold for an 18+ gate that
+        // serves the videos to signed-in viewers (#290), delete-all destroys
+        // evidence the review may need). Refuse and route to the case; Ban
+        // remains the severe-action escape hatch.
         // Peeks at the body on a clone so malformed/invalid requests still get
         // the handler's own 400s. Two accepted edges: (1) the guard runs
         // before action validation, so a well-formed pubkey with an open case
@@ -731,14 +733,17 @@ export default {
         // draining does not abort it (aborting mid-job would leave
         // half-applied state; the job was legitimate when it started).
         // No `failClosed` here, deliberately, and NOT because bulk has no
-        // reversal: `un-age-restrict-all` is one, and it lifts restrictions this
-        // very case imposed. The guard's docstring argues fail-closed by
-        // direction, which taken alone would cover it. Bulk is partitioned by
+        // loosening action: `un-age-restrict-all` lifts restrictions this very
+        // case imposed, and `age-gate-all` loosens its withhold to an 18+ gate.
+        // The guard's docstring argues fail-closed by direction, which taken
+        // alone would cover both. Bulk is partitioned by
         // blast radius instead. A refused bulk job is one moderator's click
         // failing loudly in the UI, with no automated caller behind it, so an
-        // outage that blocks all three actions stops content moderation
+        // outage that blocks all four actions stops content moderation
         // wholesale for a human who has no other route -- whereas a refused
-        // reversal only defers restoring an account that stays held meanwhile.
+        // loosening only defers it on an account that stays held meanwhile.
+        // The cost of failing open: during an outage, Age Restrict All on an
+        // open case can swap a withhold for the 18+ gate.
         // If bulk ever becomes reachable from automation, revisit this: the
         // reasoning is about who is on the other end, not about the actions.
         let peeked: { pubkey?: string } | undefined;

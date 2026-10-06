@@ -233,7 +233,9 @@ negotiation, so order matters and the gap should be minimized:
 - `npx wrangler queues list` shows the prod queue with a consumer attached.
 - Run one bulk action on a small test account; confirm `{jobId}` returns, a queue-consumer
   log line fires (`npx wrangler tail`), the job row reaches `done` with non-zero counts,
-  and Blossom shows the media Restricted/Deleted.
+  and Blossom shows the media in the state the action sets: Age Restrict All ->
+  AgeRestricted (18+ gate), Delete All -> Deleted. The age-review withhold
+  (`age-restrict-all`) sets Restricted.
 - `bulk_jobs` table is created on demand in the prod D1 (`divine-moderation-decisions-prod`).
 
 ### Rollback
@@ -241,3 +243,11 @@ negotiation, so order matters and the gap should be minimized:
 Revert the worker deploy (`wrangler rollback` or redeploy the prior version). The
 `bulk_jobs` table and the queue persist but go inert (the old build has no
 producer/consumer). No data cleanup required.
+
+Before rolling the worker back past #290, drain `age-gate-all` jobs first: an older
+worker reads that action as unknown and sends SAFE, un-restricting the account's
+media mid-job. Roll back only when this returns no rows:
+
+```sql
+SELECT job_id FROM bulk_jobs WHERE action = 'age-gate-all' AND status IN ('pending', 'running');
+```

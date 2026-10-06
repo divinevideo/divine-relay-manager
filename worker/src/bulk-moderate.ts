@@ -135,8 +135,10 @@ async function deleteEvents(
 // Scope note: because this runs in one invocation, a very large account can still
 // hit the Workers per-invocation subrequest/CPU ceiling and land `failed` here
 // (BULK_ACTION_CONCURRENCY changes parallelism, not the total subrequest count).
-// That is acceptable for age-review (it fails visibly on the case; the moderator
-// re-runs from the chunked Users-page path).
+// It fails visibly on the case. There is no moderator re-run path for the
+// withhold: the Users-page "Age Restrict All" sends age-gate-all (the 18+ gate),
+// which would serve a minor's videos to signed-in viewers, so never use it to
+// finish a failed age-review restriction (#290).
 export async function runBulkModeration(
   env: BulkModerateEnv,
   pubkey: string,

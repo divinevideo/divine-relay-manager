@@ -371,7 +371,7 @@ describe('async bulk job model', () => {
     expect(moderationActionFor(mockEnv, hashB)).toBe('AGE_RESTRICTED');
   });
 
-  it('queued age-restrict-all media chunks still send QUARANTINE (age-review withhold survives a deploy) (#290)', async () => {
+  it('queued age-restrict-all media chunks still send QUARANTINE (the withhold is not repointed at the 18+ gate) (#290)', async () => {
     const jobId = 'job-withhold-1';
     jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', status: 'running', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, created_at: 't', updated_at: 't' });
     await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', phase: 'media' }, mockEnv);
