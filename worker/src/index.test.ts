@@ -1899,6 +1899,17 @@ describe('bulk-moderate age-review guard', () => {
     expect(send).not.toHaveBeenCalled();
   });
 
+  it('refuses age-gate-all the same way (the 18+ gate must not replace a case\'s withhold) (#290)', async () => {
+    const { env, send } = makeBulkEnv({ id: 'case-b7', state: 'restricted_pending_user_response' });
+    const response = await worker.fetch(
+      enqueueRequest({ pubkey: VALID_PUBKEY, action: 'age-gate-all' }), env, ctx,
+    );
+    expect(response.status).toBe(409);
+    const body = await response.json() as { code: string };
+    expect(body.code).toBe('age_review_active');
+    expect(send).not.toHaveBeenCalled();
+  });
+
   it('refuses delete-all the same way (no destructive job on an open case)', async () => {
     const { env, send } = makeBulkEnv({ id: 'case-b2', state: 'submitted_for_review' });
     const response = await worker.fetch(
@@ -1920,16 +1931,19 @@ describe('bulk-moderate age-review guard', () => {
     expect(send).toHaveBeenCalledTimes(1);
   });
 
-  it('fails open when the case lookup throws (transient D1 error must not block moderation)', async () => {
-    const { env, send } = makeBulkEnv({ id: 'case-b4', state: 'restricted_pending_user_response' }, { lookupThrows: true });
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const response = await worker.fetch(
-      enqueueRequest({ pubkey: VALID_PUBKEY, action: 'age-restrict-all' }), env, ctx,
-    );
-    expect(response.status).toBe(200);
-    expect(send).toHaveBeenCalledTimes(1);
-    errorSpy.mockRestore();
-  });
+  it.each(['age-restrict-all', 'delete-all'])(
+    'fails open for %s when the case lookup throws (transient D1 error must not block moderation)',
+    async (action) => {
+      const { env, send } = makeBulkEnv({ id: 'case-b4', state: 'restricted_pending_user_response' }, { lookupThrows: true });
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const response = await worker.fetch(
+        enqueueRequest({ pubkey: VALID_PUBKEY, action }), env, ctx,
+      );
+      expect(response.status).toBe(200);
+      expect(send).toHaveBeenCalledTimes(1);
+      errorSpy.mockRestore();
+    },
+  );
 
   // The loosening actions fail closed instead: unchecked, age-gate-all would
   // swap a suspected minor's withhold for an 18+ gate that serves the videos to

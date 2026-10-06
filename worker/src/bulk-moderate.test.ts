@@ -82,7 +82,8 @@ function mockUserVideos(videos: Array<{ sha256: string }>) {
 // positional-SET UPDATE, and SELECT-by-job_id statements the async path uses.
 // Honors a `status IN (...)` / `status = '...'` guard in the UPDATE WHERE clause
 // and reports meta.changes, so the consumer's sticky-status guards are exercised.
-function makeJobDb() {
+// `ageReview` answers the consumer's open-case lookup on age_review_cases.
+function makeJobDb(ageReview: { openCase?: boolean; lookupThrows?: boolean } = {}) {
   const rows = new Map<string, Record<string, unknown>>();
   const db = {
     prepare(sql: string) {
@@ -128,7 +129,13 @@ function makeJobDb() {
           }
           return { success: true, meta: { changes: 0 } }; // CREATE TABLE / ALTER TABLE
         },
-        async first() { return rows.get(binds[0] as string) ?? null; },
+        async first() {
+          if (/age_review_cases/i.test(sql)) {
+            if (ageReview.lookupThrows) throw new Error('D1 unavailable');
+            return ageReview.openCase ? { id: 'case-open', state: 'open_reported' } : null;
+          }
+          return rows.get(binds[0] as string) ?? null;
+        },
       };
       return stmt;
     },
@@ -151,13 +158,17 @@ function baseEnv(): BulkModerateEnv {
   };
 }
 
+// The action sent for a blob, from EVERY call for it: a second call (say a
+// trailing SAFE after the gate) shows up as `MULTIPLE:...` instead of hiding
+// behind the first match.
 function moderationActionFor(env: BulkModerateEnv, sha256: string): string | undefined {
   const fetchMock = vi.mocked((env.MODERATION_API as unknown as { fetch: ReturnType<typeof vi.fn> }).fetch);
-  for (const call of fetchMock.mock.calls) {
-    const body = JSON.parse((call[1] as RequestInit).body as string);
-    if (body.sha256 === sha256) return body.action;
-  }
-  return undefined;
+  const actions = fetchMock.mock.calls
+    .map((call) => JSON.parse((call[1] as RequestInit).body as string))
+    .filter((body) => body.sha256 === sha256)
+    .map((body) => body.action as string);
+  if (actions.length > 1) return `MULTIPLE:${actions.join(',')}`;
+  return actions[0];
 }
 
 describe('queryUserVideosPage', () => {
@@ -369,6 +380,47 @@ describe('async bulk job model', () => {
     await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'age-gate-all', phase: 'media' }, mockEnv);
     expect(moderationActionFor(mockEnv, hashA)).toBe('AGE_RESTRICTED');
     expect(moderationActionFor(mockEnv, hashB)).toBe('AGE_RESTRICTED');
+    expect(jobDb.rows.get(jobId)).toMatchObject({ status: 'done', media_processed: 2 });
+  });
+
+  it('queued un-age-restrict-all media chunks send SAFE', async () => {
+    const jobId = 'job-unrestrict-1';
+    jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'un-age-restrict-all', status: 'running', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, created_at: 't', updated_at: 't' });
+    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'un-age-restrict-all', phase: 'media' }, mockEnv);
+    expect(moderationActionFor(mockEnv, hashA)).toBe('SAFE');
+    expect(moderationActionFor(mockEnv, hashB)).toBe('SAFE');
+  });
+
+  // The enqueue guard runs once. A loosening job still draining when an
+  // age-review case opens must stop, or its later chunks would overwrite the
+  // case's withhold with the 18+ gate (or SAFE) (#290).
+  describe.each([
+    ['an open age-review case', { openCase: true }],
+    ['a failed case lookup', { lookupThrows: true }],
+  ])('a loosening job that meets %s mid-run', (_label, ageReview) => {
+    it.each(['age-gate-all', 'un-age-restrict-all'] as const)('%s stops as failed and sends nothing', async (action) => {
+      jobDb = makeJobDb(ageReview);
+      mockEnv = { ...mockEnv, DB: jobDb.db };
+      const jobId = `job-race-${action}`;
+      jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action, status: 'running', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, version: 1, created_at: 't', updated_at: 't' });
+      await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action, phase: 'media', cursor: '1', mediaPage: 1, version: 1 }, mockEnv);
+      expect(moderationActionFor(mockEnv, hashA)).toBeUndefined();
+      expect(moderationActionFor(mockEnv, hashB)).toBeUndefined();
+      expect(sent).toHaveLength(0);
+      const row = jobDb.rows.get(jobId)!;
+      expect(row.status).toBe('failed');
+      expect(String(row.failures)).toMatch(/^\["job:stopped: .*age.review/);
+    });
+  });
+
+  it('a withhold job (age-restrict-all) still runs when an age-review case is open', async () => {
+    jobDb = makeJobDb({ openCase: true });
+    mockEnv = { ...mockEnv, DB: jobDb.db };
+    const jobId = 'job-withhold-open-case';
+    jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', status: 'running', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, created_at: 't', updated_at: 't' });
+    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', phase: 'media' }, mockEnv);
+    expect(moderationActionFor(mockEnv, hashA)).toBe('QUARANTINE');
+    expect(jobDb.rows.get(jobId)?.status).toBe('done');
   });
 
   it('queued age-restrict-all media chunks still send QUARANTINE (the withhold is not repointed at the 18+ gate) (#290)', async () => {

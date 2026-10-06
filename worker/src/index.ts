@@ -38,7 +38,7 @@ import {
   updateAgeReviewConfig,
 } from './age-review';
 import { handleAccountStatus } from './account-status';
-import { handleBulkModerateEnqueue, handleBulkJobStatus, processBulkJob } from './bulk-moderate';
+import { handleBulkModerateEnqueue, handleBulkJobStatus, processBulkJob, LOOSENS_AGE_REVIEW_HOLD } from './bulk-moderate';
 import type { BulkAction, BulkJobMessage } from '../../shared/bulk-moderation';
 import { ensureZendeskTable, addZendeskInternalNote, syncZendeskAfterAction, getLinkedTickets, closeTicketById } from './zendesk-sync';
 import { buildReportNote, parseKind0Profile, type ReportedProfile } from './report-note';
@@ -51,27 +51,6 @@ import { readResolutionLabelTargets } from './resolution-labels';
 import { runRetentionDisposal } from './retention';
 
 const COORDINATED_AUTO_HIDE_ACTIONS = new Set<string>(AUTO_HIDE_STATE_ACTIONS);
-
-// What the /api/bulk-moderate age-review guard does when the case lookup itself
-// fails (no DB binding, or a thrown query). Exhaustive over BulkAction so a new
-// action has to choose.
-//   Fail open (false) for the actions that only add restriction or delete. A
-//   refused bulk job is one moderator's click failing, with no automated caller
-//   behind it, so refusing them during an outage stops content moderation for a
-//   human who has no other route.
-//   Fail closed (true) for the actions that loosen a hold: un-age-restrict-all
-//   lifts a withhold, and age-gate-all swaps it for an 18+ gate that serves a
-//   suspected minor's videos to signed-in viewers (#290). Unchecked, either can
-//   expose a minor while reporting success. The cost is a "try again" while the
-//   lookup is down; Delete All, and Ban (unguarded), still work.
-// If bulk ever becomes reachable from automation, revisit the fail-open rows:
-// that reasoning is about who is on the other end.
-const BULK_GUARD_FAILS_CLOSED: Record<BulkAction, boolean> = {
-  'age-restrict-all': false,
-  'delete-all': false,
-  'age-gate-all': true,
-  'un-age-restrict-all': true,
-};
 
 let schemaReady = false;
 async function ensureSchemaOnce(db: D1Database): Promise<void> {
@@ -750,17 +729,20 @@ export default {
         // before action validation, so a well-formed pubkey with an open case
         // gets this 409 even if the action name is invalid — accurate, since
         // every bulk action on that account is refused; (2) the check is
-        // enqueue-time only — a case opened while a chunked job is already
-        // draining does not abort it (aborting mid-job would leave
-        // half-applied state; the job was legitimate when it started).
-        // When the case lookup itself fails, BULK_GUARD_FAILS_CLOSED decides
-        // per action; see its comment.
+        // enqueue-time only for the actions that add restriction or delete — a
+        // case opened while such a job is draining does not abort it (aborting
+        // mid-job would leave half-applied state; the job was legitimate when
+        // it started). Loosening jobs are different: processBulkJob re-checks
+        // before every chunk and stops them, since their later chunks would
+        // overwrite the case's withhold (#290).
+        // When the case lookup itself fails, LOOSENS_AGE_REVIEW_HOLD
+        // (bulk-moderate.ts) decides per action whether to refuse.
         let peeked: { pubkey?: string; action?: string } | undefined;
         try {
           peeked = await request.clone().json() as { pubkey?: string; action?: string };
         } catch { /* not JSON; the handler returns the 400 */ }
         if (typeof peeked?.pubkey === 'string') {
-          const failClosed = BULK_GUARD_FAILS_CLOSED[peeked.action as BulkAction] === true;
+          const failClosed = LOOSENS_AGE_REVIEW_HOLD[peeked.action as BulkAction] === true;
           const guarded = await ageReviewActiveGuard(peeked.pubkey, env, corsHeaders,
             'This account is under age review. Content enforcement runs through the Age Review flow.',
             { failClosed });

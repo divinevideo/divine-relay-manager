@@ -531,7 +531,7 @@ describe('Keycast suspension wiring', () => {
     vi.mocked(clearVerifiedMinor).mockClear().mockResolvedValue({ success: true });
   });
 
-  it('calls suspendUser when transitioning to restricted_pending_user_response', async () => {
+  it('calls suspendUser and withholds media (age-restrict-all) when transitioning to restricted_pending_user_response', async () => {
     vi.mocked(runBulkModeration).mockClear();
     const reviewCase = makeCase({ state: 'under_moderator_review' });
     const updatedCase = { ...reviewCase, state: 'restricted_pending_user_response' as const };

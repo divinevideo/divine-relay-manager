@@ -213,7 +213,7 @@ export async function getActiveAgeReviewCase(
  * `failClosed` is opt-in PER CALL SITE, not a property of the guard. Two call
  * sites pass it today: relay-rpc's reversals, and bulk-moderate's loosening
  * actions (age-gate-all, un-age-restrict-all). The rest of bulk deliberately
- * fails open; see BULK_GUARD_FAILS_CLOSED in index.ts.
+ * fails open; see LOOSENS_AGE_REVIEW_HOLD in bulk-moderate.ts.
  */
 export async function ageReviewActiveGuard(
   pubkey: string,

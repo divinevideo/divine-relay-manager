@@ -114,6 +114,19 @@ describe('UserActions', () => {
     );
   });
 
+  it('shows "try again" and stays put when the age-review check could not run (503)', async () => {
+    // No case to route to: the worker could not look one up, so the moderator
+    // gets the server's actionable message instead of a hand-off (#290).
+    const message = 'Could not check age-review status. Try again.';
+    api.bulkModerate.mockRejectedValue(new ApiError(message, 503, 'Service Unavailable', 'age_review_check_failed'));
+    renderWithProvider(<UserActions pubkey={PUBKEY} />);
+    fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Bulk action failed', description: message, variant: 'destructive' }),
+    ));
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
   it('routes a guard-blocked Delete All (confirm-dialog path) to Age Review too', async () => {
     // Same enqueue.onError as the direct path, but through ConfirmDialog's
     // startAsync: the rejection must not surface as a failure or crash the
