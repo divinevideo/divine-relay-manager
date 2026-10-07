@@ -173,6 +173,18 @@ const RESULT_LEVEL: Record<MediaAction, MediaLevel> = {
 
 type MediaDecision = 'change' | 'leave' | 'disagree';
 
+// How strictly a level withholds a blob, for comparing the two sources.
+// Blocked and deleted both serve nothing.
+const STRICTNESS: Record<MediaLevel, number> = { open: 0, gated: 1, hidden: 2, blocked: 3, deleted: 3 };
+
+// True when viewers are being served the blob more openly than the record
+// says: blossom serves it to everyone (open) or to anyone signed in (gated),
+// and the record is stricter. Hidden is owner-only, so a hidden blob the record
+// calls blocked exposes nothing beyond its owner.
+function servedMoreOpenlyThanRecorded(blossom: MediaLevel, moderation: MediaLevel): boolean {
+  return (blossom === 'open' || blossom === 'gated') && STRICTNESS[moderation] > STRICTNESS[blossom];
+}
+
 // How the two status sources combine. blossom is what viewers are served;
 // moderation-service is the recorded decision. They drift: blossom's admin UI
 // never reports to moderation-service, moderation-service records an action
@@ -181,8 +193,10 @@ type MediaDecision = 'change' | 'leave' | 'disagree';
 //
 //   blossom does not allow the action -> leave it alone (counted). What viewers
 //     get is already at least as strict as the action, or for SAFE there is
-//     nothing hidden to undo, so leaving it exposes nothing. The common case is
-//     a blob gated or blocked in blossom's admin UI.
+//     nothing hidden to undo, so the action has nothing to do. The common case
+//     is a blob gated or blocked in blossom's admin UI. Except when viewers are
+//     served it more openly than the record says: then it is a disagree, so the
+//     exposure reaches a moderator whichever action happened to find it.
 //   both allow it -> change it.
 //   blossom allows it, and the record already shows the action's own result ->
 //     change it. The record got ahead of blossom (its blossom call failed);
@@ -200,7 +214,9 @@ type MediaDecision = 'change' | 'leave' | 'disagree';
 //     fails and a person looks.
 function decideMediaChange(mediaAction: MediaAction, blossom: MediaLevel, moderation: MediaLevel): MediaDecision {
   const allowed = MAY_CHANGE_FROM[mediaAction];
-  if (!allowed.includes(blossom)) return 'leave';
+  if (!allowed.includes(blossom)) {
+    return servedMoreOpenlyThanRecorded(blossom, moderation) ? 'disagree' : 'leave';
+  }
   if (allowed.includes(moderation)) return 'change';
   if (mediaAction !== 'SAFE' && moderation === RESULT_LEVEL[mediaAction]) return 'change';
   if (mediaAction === 'SAFE' && (moderation === 'open' || moderation === 'gated')) return 'leave';

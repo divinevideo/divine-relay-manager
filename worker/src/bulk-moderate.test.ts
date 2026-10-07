@@ -434,6 +434,47 @@ describe('bulk actions never weaken a stronger decision (#291)', () => {
   });
 
   it.each([
+    ['age-gate-all', 'age_restricted', 'quarantine'],
+    ['age-gate-all', 'age_restricted', 'permanent_ban'],
+    ['age-gate-all', 'age_restricted', 'delete'],
+    ['un-age-restrict-all', 'active', 'age_restricted'],
+    ['un-age-restrict-all', 'active', 'quarantine'],
+    ['un-age-restrict-all', 'active', 'permanent_ban'],
+    ['un-age-restrict-all', 'age_restricted', 'quarantine'],
+  ] as const)('%s fails, naming both, when blossom serves a file as %s that moderation-service records as %s', async (action, blossom, recorded) => {
+    // The action would leave this file alone, but viewers are being served it
+    // more openly than the record says. That is an exposure a moderator has to
+    // see, whichever action surfaced it.
+    mockUserVideos([{ sha256: hashA }]);
+    blossomStatus.set(hashA, blossom);
+    moderationStatus.set(hashA, recorded);
+    const result = await runBulkModeration(mockEnv, 'a'.repeat(64), action, 'r');
+    expect(moderationActionFor(mockEnv, hashA)).toBeUndefined();
+    expect(result.failures).toEqual([
+      expect.stringMatching(new RegExp(`^media:${hashA}:.*blossom ${blossom}.*moderation-service ${recorded}`)),
+    ]);
+    expect(result.mediaSkipped).toBe(0);
+  });
+
+  it('re-running Age Restrict All on an account that is already 18+ is a quiet skip, not a failure', async () => {
+    for (const hash of [hashA, hashB, hashC]) {
+      blossomStatus.set(hash, 'age_restricted');
+      moderationStatus.set(hash, 'age_restricted');
+    }
+    const result = await runBulkModeration(mockEnv, 'a'.repeat(64), 'age-gate-all', 'r');
+    expect(result).toMatchObject({ success: true, failures: [], mediaProcessed: 0, mediaSkipped: 3 });
+  });
+
+  it("age review's hide leaves alone a file blossom hides that the record has as blocked (only the owner can see it)", async () => {
+    mockUserVideos([{ sha256: hashA }]);
+    blossomStatus.set(hashA, 'restricted');
+    moderationStatus.set(hashA, 'permanent_ban');
+    const result = await runBulkModeration(mockEnv, 'a'.repeat(64), 'age-restrict-all', 'r');
+    expect(moderationActionFor(mockEnv, hashA)).toBeUndefined();
+    expect(result).toMatchObject({ success: true, failures: [], mediaSkipped: 1 });
+  });
+
+  it.each([
     ['restricted (hidden)', 'restricted'],
     ['deleted', 'deleted'],
     ['already age_restricted', 'age_restricted'],
