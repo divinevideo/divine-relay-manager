@@ -373,10 +373,11 @@ describe('runBulkModeration', () => {
 describe('bulk actions never weaken a stronger decision (#291)', () => {
   // Every bulk action reads each blob's current status from BOTH blossom (what
   // viewers are served; its admin UI never tells moderation-service) and
-  // moderation-service (current for decisions routed through it; blossom's own
-  // read can be up to 5 minutes stale in another POP), and acts only when both
-  // allow it. A moderator-blocked video stays in funnelcake's public list, so
-  // without this Age Restrict All turned Banned into AgeRestricted.
+  // moderation-service (the recorded decision; blossom's own read can be up to
+  // 5 minutes stale in another POP), then changes it, leaves it alone, or fails
+  // naming both (decideMediaChange). A moderator-blocked video stays in
+  // funnelcake's public list, so without this Age Restrict All turned Banned
+  // into AgeRestricted.
   let mockEnv: BulkModerateEnv;
 
   beforeEach(() => {
@@ -410,7 +411,9 @@ describe('bulk actions never weaken a stronger decision (#291)', () => {
   });
 
   it.each([
+    ['age-gate-all', 'quarantine'],
     ['age-gate-all', 'permanent_ban'],
+    ['age-gate-all', 'delete'],
     ['age-restrict-all', 'permanent_ban'],
     ['age-restrict-all', 'delete'],
     ['delete-all', 'permanent_ban'],
@@ -431,17 +434,15 @@ describe('bulk actions never weaken a stronger decision (#291)', () => {
   });
 
   it.each([
-    ['blossom restricted (hidden)', 'restricted', undefined],
-    ['blossom deleted', 'deleted', undefined],
-    ['blossom already age_restricted', 'age_restricted', undefined],
-    ['moderation-service quarantine', undefined, 'quarantine'],
-    ['moderation-service delete', undefined, 'delete'],
-  ])('Age Restrict All skips a file that is %s', async (_label, blossom, moderation) => {
-    if (blossom) blossomStatus.set(hashA, blossom);
-    if (moderation) moderationStatus.set(hashA, moderation);
-    await runBulkModeration(mockEnv, 'a'.repeat(64), 'age-gate-all', 'r');
+    ['restricted (hidden)', 'restricted'],
+    ['deleted', 'deleted'],
+    ['already age_restricted', 'age_restricted'],
+  ])('Age Restrict All leaves alone a file blossom has as %s', async (_label, blossom) => {
+    blossomStatus.set(hashA, blossom);
+    const result = await runBulkModeration(mockEnv, 'a'.repeat(64), 'age-gate-all', 'r');
     expect(moderationActionFor(mockEnv, hashA)).toBeUndefined();
     expect(moderationActionFor(mockEnv, hashB)).toBe('AGE_RESTRICTED');
+    expect(result).toMatchObject({ success: true, failures: [], mediaSkipped: 1 });
   });
 
   it('Age Restrict All acts on pending, safe and review files', async () => {
@@ -454,15 +455,18 @@ describe('bulk actions never weaken a stronger decision (#291)', () => {
     expect(moderationActionFor(mockEnv, hashC)).toBe('AGE_RESTRICTED');
   });
 
-  it("age review's hide tightens an 18+ file but leaves blocked and deleted files alone", async () => {
+  it("age review's hide tightens an 18+ file and leaves blocked and deleted files alone", async () => {
     blossomStatus.set(hashA, 'age_restricted');
     moderationStatus.set(hashA, 'age_restricted');
     blossomStatus.set(hashB, 'banned');
+    moderationStatus.set(hashB, 'permanent_ban');
+    blossomStatus.set(hashC, 'deleted');
     moderationStatus.set(hashC, 'delete');
-    await runBulkModeration(mockEnv, 'a'.repeat(64), 'age-restrict-all', 'r');
+    const result = await runBulkModeration(mockEnv, 'a'.repeat(64), 'age-restrict-all', 'r');
     expect(moderationActionFor(mockEnv, hashA)).toBe('QUARANTINE');
     expect(moderationActionFor(mockEnv, hashB)).toBeUndefined();
     expect(moderationActionFor(mockEnv, hashC)).toBeUndefined();
+    expect(result).toMatchObject({ success: true, failures: [], mediaSkipped: 2 });
   });
 
   it("age review's un-hide restores only hidden files, never blocked, 18+ or open ones", async () => {

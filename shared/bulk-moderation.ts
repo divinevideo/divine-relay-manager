@@ -8,9 +8,9 @@ export type BulkAction = typeof VALID_BULK_ACTIONS[number];
 export interface BulkModerateResult {
   success: boolean;
   eventsProcessed: number;
-  // Media changed. Media left alone because its current status already met or
-  // beat the action (see MAY_CHANGE_FROM in worker/src/bulk-moderate.ts) is
-  // mediaSkipped, and is not a failure.
+  // Media changed. Media the action left alone on purpose (see
+  // decideMediaChange in worker/src/bulk-moderate.ts) is mediaSkipped, and is
+  // not a failure.
   mediaProcessed: number;
   mediaSkipped: number;
   failures: string[];
