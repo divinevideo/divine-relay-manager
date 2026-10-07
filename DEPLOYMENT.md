@@ -244,21 +244,34 @@ Revert the worker deploy (`wrangler rollback` or redeploy the prior version). Th
 `bulk_jobs` table and the queue persist but go inert (the old build has no
 producer/consumer). No data cleanup required.
 
-Rolling back past #290 takes this order, because an older worker reads
-`age-gate-all` as unknown and sends SAFE, un-restricting the account's media:
+Rolling back past #290 takes extra steps, because an older worker reads
+`age-gate-all` as unknown and sends SAFE, un-restricting the account's media. Stop
+those jobs rather than waiting for them: both workers only pick up a job that is
+still `pending` or `running`, so a job marked `failed` sends nothing more, even if
+its next message is still in the queue.
 
-1. **Roll the frontend back first.** The older UI sends `age-restrict-all`, which
-   the current worker still handles. A tab still showing the newer UI keeps
-   sending `age-gate-all` until it reloads, so ask moderators to reload.
-2. **Wait until no `age-gate-all` job is still running.** Rows idle past 30
-   minutes (the worker's `STALE_JOB_MS`) have stalled with nothing queued, so
-   they are excluded:
+1. **Roll the frontend back** and ask moderators to reload. The older UI sends
+   `age-restrict-all`, which every worker handles; a tab still showing the newer
+   UI keeps sending `age-gate-all` until it reloads.
+2. **Note the time, list the unfinished `age-gate-all` jobs, and stop them.**
+   Those accounts are part-way gated; finish them by hand afterwards with
+   single-video Age Restrict (the older Users-page button hides instead).
 
    ```bash
    npx wrangler d1 execute divine-moderation-decisions-prod --remote --command \
-     "SELECT job_id FROM bulk_jobs WHERE action = 'age-gate-all' AND status IN ('pending', 'running') AND updated_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 minutes');"
+     "SELECT job_id, pubkey FROM bulk_jobs WHERE action = 'age-gate-all' AND status IN ('pending', 'running');"
+   npx wrangler d1 execute divine-moderation-decisions-prod --remote --command \
+     "UPDATE bulk_jobs SET status = 'failed', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE action = 'age-gate-all' AND status IN ('pending', 'running');"
    ```
 
-3. **Roll the worker back** as soon as that returns no rows. From then on the
-   older worker refuses `age-gate-all` at enqueue with a 400 ("Invalid action"),
-   so a stale tab's click fails instead of reaching the queue.
+3. **Roll the worker back.** From then on it refuses `age-gate-all` at enqueue
+   with a 400 ("Invalid action").
+4. **Repeat step 2**, then check for jobs a stale tab queued between steps 2 and 3
+   (replace `<step-2 time>` with a UTC time a minute before you ran step 2, in
+   the stored format `YYYY-MM-DDTHH:MM:SS.000Z`). For any row, the older worker
+   may have un-restricted that account's media: re-gate it by hand.
+
+   ```bash
+   npx wrangler d1 execute divine-moderation-decisions-prod --remote --command \
+     "SELECT job_id, pubkey, status FROM bulk_jobs WHERE action = 'age-gate-all' AND created_at >= '<step-2 time>';"
+   ```
