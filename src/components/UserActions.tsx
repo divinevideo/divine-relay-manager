@@ -229,6 +229,11 @@ export function UserActions({
     pubkey,
     onComplete: (job) => {
       const partial = job.status === 'failed' || job.failures.length > 0;
+      // Files the worker left alone because a decision it must not override was
+      // already in place (#291). Absent from a worker that predates the count.
+      const leftAlone = job.mediaSkipped
+        ? `${job.mediaSkipped} file(s) left as they were (already restricted, blocked or deleted).`
+        : undefined;
       if (partial) {
         const counts = `${job.mediaProcessed} media across ${job.eventsProcessed} events`;
         const detail = job.failures.length
@@ -236,12 +241,12 @@ export function UserActions({
           : `${counts}. The job did not complete cleanly.`;
         toast({
           title: `Bulk ${job.action === 'delete-all' ? 'delete' : 'age-restrict'} finished with issues`,
-          description: detail,
+          description: leftAlone ? `${detail} ${leftAlone}` : detail,
           variant: 'destructive',
         });
       } else {
         const verb = job.action === 'delete-all' ? 'Deleted' : 'Age-restricted';
-        toast({ title: `${verb} ${job.mediaProcessed} media file(s) across ${job.eventsProcessed} events` });
+        toast({ title: `${verb} ${job.mediaProcessed} media file(s) across ${job.eventsProcessed} events`, description: leftAlone });
       }
       // Non-critical audit log; never block the action. Attribute to the
       // moderator snapshotted at job START (not now), so a mid-job logout/switch

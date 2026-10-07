@@ -8,7 +8,11 @@ export type BulkAction = typeof VALID_BULK_ACTIONS[number];
 export interface BulkModerateResult {
   success: boolean;
   eventsProcessed: number;
+  // Media changed. Media left alone because its current status already met or
+  // beat the action (see MAY_CHANGE_FROM in worker/src/bulk-moderate.ts) is
+  // mediaSkipped, and is not a failure.
   mediaProcessed: number;
+  mediaSkipped: number;
   failures: string[];
 }
 
@@ -56,6 +60,8 @@ export interface BulkJob {
   status: BulkJobStatus;
   eventsProcessed: number;
   mediaProcessed: number;
+  // Optional because a worker older than #291 does not send it.
+  mediaSkipped?: number;
   failures: string[];
   createdAt: string;
   updatedAt: string;

@@ -387,15 +387,47 @@ describe('bulk actions never weaken a stronger decision (#291)', () => {
     mockEnv = baseEnv();
   });
 
-  it('Age Restrict All gates an open file but skips one blocked in blossom or in moderation-service', async () => {
+  it('Age Restrict All gates an open file and quietly leaves a blocked one alone', async () => {
     blossomStatus.set(hashB, 'banned');
-    moderationStatus.set(hashC, 'permanent_ban'); // blossom still says active (stale POP)
+    moderationStatus.set(hashB, 'permanent_ban');
     const result = await runBulkModeration(mockEnv, 'a'.repeat(64), 'age-gate-all', 'r');
     expect(moderationActionFor(mockEnv, hashA)).toBe('AGE_RESTRICTED');
     expect(moderationActionFor(mockEnv, hashB)).toBeUndefined();
+    // A stronger decision left in place on purpose is not a failure, but it is
+    // counted so the moderator can see it.
+    expect(result).toMatchObject({ success: true, failures: [], mediaProcessed: 2, mediaSkipped: 1 });
+  });
+
+  it('Age Restrict All quietly leaves alone a file blossom already serves more strictly than moderation-service records', async () => {
+    // Gated or blocked in blossom's admin UI, which never tells moderation-service.
+    // What viewers get is already at least as strict, so nothing is exposed.
+    blossomStatus.set(hashB, 'age_restricted');
+    blossomStatus.set(hashC, 'banned');
+    const result = await runBulkModeration(mockEnv, 'a'.repeat(64), 'age-gate-all', 'r');
+    expect(moderationActionFor(mockEnv, hashB)).toBeUndefined();
     expect(moderationActionFor(mockEnv, hashC)).toBeUndefined();
-    // A skip leaves a stronger decision in place on purpose; it is not a failure.
-    expect(result).toMatchObject({ success: true, failures: [], mediaProcessed: 1 });
+    expect(result).toMatchObject({ success: true, failures: [], mediaSkipped: 2 });
+  });
+
+  it.each([
+    ['age-gate-all', 'permanent_ban'],
+    ['age-restrict-all', 'permanent_ban'],
+    ['age-restrict-all', 'delete'],
+    ['delete-all', 'permanent_ban'],
+  ] as const)('%s fails, naming both statuses, when blossom serves a file that moderation-service records as %s', async (action, recorded) => {
+    // Either the block just landed and blossom's read is stale, or someone
+    // unblocked it in blossom's admin UI and the record is stale. Acting could
+    // undo a fresh block; skipping quietly could leave a minor's video public.
+    // A person has to look.
+    mockRelay([]);
+    moderationStatus.set(hashA, recorded);
+    const result = await runBulkModeration(mockEnv, 'a'.repeat(64), action, 'r');
+    expect(moderationActionFor(mockEnv, hashA)).toBeUndefined();
+    expect(result.success).toBe(false);
+    expect(result.failures).toEqual([
+      expect.stringMatching(new RegExp(`^media:${hashA}:.*blossom active.*moderation-service ${recorded}`)),
+    ]);
+    expect(result.mediaSkipped).toBe(0);
   });
 
   it.each([
@@ -446,14 +478,36 @@ describe('bulk actions never weaken a stronger decision (#291)', () => {
     expect(moderationActionFor(mockEnv, hashC)).toBeUndefined();
   });
 
+  it("age review's un-hide leaves an open file alone (nothing to undo)", async () => {
+    mockUserVideos([{ sha256: hashA }]);
+    moderationStatus.set(hashA, 'review'); // open in both
+    const result = await runBulkModeration(mockEnv, 'a'.repeat(64), 'un-age-restrict-all', 'r');
+    expect(moderationActionFor(mockEnv, hashA)).toBeUndefined();
+    expect(result).toMatchObject({ success: true, mediaSkipped: 1 });
+  });
+
   it("Delete All's media phase leaves a blocked file alone (keeps the evidence)", async () => {
     mockRelay([]);
     blossomStatus.set(hashA, 'banned');
+    moderationStatus.set(hashA, 'permanent_ban');
     blossomStatus.set(hashB, 'restricted');
+    moderationStatus.set(hashB, 'quarantine');
+    blossomStatus.set(hashC, 'age_restricted');
+    moderationStatus.set(hashC, 'age_restricted');
     await runBulkModeration(mockEnv, 'a'.repeat(64), 'delete-all', 'r');
     expect(moderationActionFor(mockEnv, hashA)).toBeUndefined();
     expect(moderationActionFor(mockEnv, hashB)).toBe('DELETE');
     expect(moderationActionFor(mockEnv, hashC)).toBe('DELETE');
+  });
+
+  it('Delete All leaves an already-deleted file alone', async () => {
+    mockRelay([]);
+    mockUserVideos([{ sha256: hashA }]);
+    blossomStatus.set(hashA, 'deleted');
+    moderationStatus.set(hashA, 'delete');
+    const result = await runBulkModeration(mockEnv, 'a'.repeat(64), 'delete-all', 'r');
+    expect(moderationActionFor(mockEnv, hashA)).toBeUndefined();
+    expect(result.mediaSkipped).toBe(1);
   });
 
   it.each([
@@ -501,8 +555,24 @@ describe('bulk actions never weaken a stronger decision (#291)', () => {
     expect(moderationActionFor(mockEnv, hashA)).toBe('AGE_RESTRICTED');
     expect(moderationActionFor(mockEnv, hashB)).toBeUndefined();
     // media_processed counts files actually changed (hashA and hashC); the
-    // skipped blocked file is not one.
-    expect(jobDb.rows.get(jobId)).toMatchObject({ status: 'done', media_processed: 2, failures: '[]' });
+    // blocked file left alone is counted separately.
+    expect(jobDb.rows.get(jobId)).toMatchObject({ status: 'done', media_processed: 2, media_skipped: 1, failures: '[]' });
+    const status = await handleBulkJobStatus(jobId, mockEnv, {});
+    expect(await status.json()).toMatchObject({ mediaProcessed: 2, mediaSkipped: 1 });
+  });
+
+  it('queued skips add up across chunks', async () => {
+    const jobDb = makeJobDb();
+    mockEnv = {
+      ...mockEnv,
+      DB: jobDb.db,
+      BULK_QUEUE: { send: vi.fn(async () => {}) } as unknown as Queue<BulkJobMessage>,
+    };
+    blossomStatus.set(hashA, 'banned');
+    const jobId = 'job-gate-skip-2';
+    jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'age-gate-all', status: 'running', events_processed: 0, media_processed: 4, media_skipped: 2, failures: '[]', failures_dropped: 0, created_at: 't', updated_at: 't' });
+    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'age-gate-all', phase: 'media' }, mockEnv);
+    expect(jobDb.rows.get(jobId)).toMatchObject({ media_processed: 6, media_skipped: 3 });
   });
 });
 

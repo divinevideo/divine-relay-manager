@@ -232,6 +232,36 @@ describe('UserActions', () => {
     expect(screen.queryByText(/Delete All Content/i)).not.toBeInTheDocument();
   });
 
+  it('tells the moderator how many files were left as they were (#291)', async () => {
+    api.getBulkJobStatus.mockResolvedValue(doneJob('age-gate-all', { mediaSkipped: 3 }));
+    renderWithProvider(<UserActions pubkey={PUBKEY} />);
+    fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({
+      title: expect.stringMatching(/Age-restricted 2 media file\(s\)/i),
+      description: '3 file(s) left as they were (already restricted, blocked or deleted).',
+    })));
+  });
+
+  it('says nothing about files left alone when there were none, or the worker predates the count', async () => {
+    renderWithProvider(<UserActions pubkey={PUBKEY} />); // doneJob has no mediaSkipped
+    fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({
+      title: expect.stringMatching(/Age-restricted 2 media file\(s\)/i),
+    })));
+    const call = vi.mocked(toast).mock.calls.find(([arg]) => /Age-restricted/.test(String(arg.title)));
+    expect(call?.[0].description).toBeUndefined();
+  });
+
+  it('includes files left alone in a finished-with-issues report too', async () => {
+    api.getBulkJobStatus.mockResolvedValue(doneJob('age-gate-all', { mediaSkipped: 1, failures: ['media:x:boom'] }));
+    renderWithProvider(<UserActions pubkey={PUBKEY} />);
+    fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({
+      title: expect.stringMatching(/finished with issues/i),
+      description: expect.stringContaining('1 file(s) left as they were'),
+    })));
+  });
+
   it('age-restrict enqueues, polls to completion, toasts the result, and calls onActionComplete', async () => {
     api.getBulkJobStatus.mockResolvedValue(doneJob('age-gate-all'));
     const onActionComplete = vi.fn();

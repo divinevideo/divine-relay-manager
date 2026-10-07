@@ -100,9 +100,10 @@ export const LOOSENS_AGE_REVIEW_HOLD: Record<BulkAction, boolean> = {
 // viewer passes, or Delete All destroying a blocked file kept as evidence (#291).
 // Nothing downstream refuses that: moderation-service records whatever action
 // it is sent and blossom writes the status unconditionally. And the account's
-// video list does not exclude blocked files, because a media block never
-// reaches funnelcake. So each blob's current status is read before it is
-// changed, and the change is made only when it is allowed from that status.
+// video list does not exclude blocked files: a media block does not reach
+// funnelcake today (its blocked-media sync job is not scheduled). So each blob's
+// current status is read before it is changed, and the change is made only when
+// it is allowed from that status.
 //
 // Strength of a blob's current state, as either status source reports it.
 type MediaLevel = 'open' | 'gated' | 'hidden' | 'blocked' | 'deleted';
@@ -135,9 +136,24 @@ const MODERATION_LEVEL = new Map<string, MediaLevel>([
   ['delete', 'deleted'],
 ]);
 
-// The current states each media action may change. A blob is changed only when
-// BOTH sources report one of these; anything else is left alone. Blocked is in
-// no row: no bulk action touches a blocked blob.
+// The current states each media action may change. Blocked is in no row: no
+// bulk action touches a blocked blob. How the two sources combine:
+//   both allow it            -> change the blob.
+//   blossom does not         -> leave it alone and count it. What viewers are
+//                               served is already at least as strict as the
+//                               action (or, for SAFE, there is nothing hidden
+//                               to undo), so leaving it exposes nothing. This
+//                               is the common case for a blob gated or blocked
+//                               in blossom's admin UI, which moderation-service
+//                               never hears about.
+//   blossom allows it, moderation-service does not -> a failure naming both. The
+//                               blob is being served more openly than the record
+//                               says: either a block just landed and blossom's
+//                               read is stale, or someone unblocked it in
+//                               blossom's admin UI and the record is stale.
+//                               Acting could undo a fresh block; skipping
+//                               quietly could leave a minor's video public. A
+//                               person has to look.
 //   AGE_RESTRICTED (Age Restrict All): only from open. Skips hidden and
 //     blocked (that would loosen them) and already-gated (nothing to do).
 //   QUARANTINE (age review's hide): from open or gated. Tightening an 18+ blob
@@ -162,7 +178,9 @@ const MAY_CHANGE_FROM: Record<MediaAction, readonly MediaLevel[]> = {
 
 const STATUS_READ_TIMEOUT_MS = 10000;
 
-async function readBlossomLevel(sha256: string, env: BulkModerateEnv, secret: string): Promise<MediaLevel> {
+interface MediaStatus { raw: string; level: MediaLevel }
+
+async function readBlossomStatus(sha256: string, env: BulkModerateEnv, secret: string): Promise<MediaStatus> {
   const response = await fetch(`https://${env.CDN_DOMAIN || 'media.divine.video'}/admin/api/blob/${sha256}`, {
     headers: { Authorization: `Bearer ${secret}` },
     signal: AbortSignal.timeout(STATUS_READ_TIMEOUT_MS),
@@ -171,12 +189,15 @@ async function readBlossomLevel(sha256: string, env: BulkModerateEnv, secret: st
   const { status } = await response.json() as { status?: unknown };
   const level = typeof status === 'string' ? BLOSSOM_LEVEL.get(status) : undefined;
   if (!level) throw new Error(`blossom returned unrecognised status ${JSON.stringify(status)}`);
-  return level;
+  return { raw: status as string, level };
 }
 
-async function readModerationLevel(sha256: string, env: BulkModerateEnv): Promise<MediaLevel> {
-  // Same routing as callModerateMedia: the service binding when bound (its
-  // host is ignored), else the public moderation API URL.
+async function readModerationStatus(sha256: string, env: BulkModerateEnv): Promise<MediaStatus> {
+  // The service binding when bound, like callModerateMedia (its host is
+  // ignored). Without one, reads go to MODERATION_SERVICE_URL like
+  // handleModerateMedia's check-result read, while callModerateMedia writes to
+  // MODERATION_ADMIN_URL. Every config sets the two to the same host; if they
+  // ever diverge, this reads one deployment's record and writes another's.
   let response: Response;
   if (env.MODERATION_API) {
     response = await env.MODERATION_API.fetch(`https://moderation-api.divine.video/check-result/${sha256}`, {
@@ -193,26 +214,33 @@ async function readModerationLevel(sha256: string, env: BulkModerateEnv): Promis
   const { status } = await response.json() as { status?: unknown };
   const level = typeof status === 'string' ? MODERATION_LEVEL.get(status) : undefined;
   if (!level) throw new Error(`moderation-service returned unrecognised status ${JSON.stringify(status)}`);
-  return level;
+  return { raw: status as string, level };
 }
 
-// True when both sources allow `mediaAction` from the blob's current state.
-// Throws when either cannot be read: an unreadable status is never treated as
-// open, so the blob is skipped and reported rather than changed blind.
+// True to change the blob, false to leave it alone (see MAY_CHANGE_FROM). Throws,
+// leaving the blob unchanged and reported, when either status cannot be read
+// (an unreadable status is never treated as open) or when blossom serves it
+// more openly than moderation-service records.
 async function mayChangeMedia(
   sha256: string, mediaAction: MediaAction, env: BulkModerateEnv, blossomSecret: string | null,
 ): Promise<boolean> {
+  let blossom: MediaStatus;
+  let moderation: MediaStatus;
   try {
     if (!blossomSecret) throw new Error('BLOSSOM_WEBHOOK_SECRET not configured');
-    const [blossom, moderation] = await Promise.all([
-      readBlossomLevel(sha256, env, blossomSecret),
-      readModerationLevel(sha256, env),
+    [blossom, moderation] = await Promise.all([
+      readBlossomStatus(sha256, env, blossomSecret),
+      readModerationStatus(sha256, env),
     ]);
-    const allowed = MAY_CHANGE_FROM[mediaAction];
-    return allowed.includes(blossom) && allowed.includes(moderation);
   } catch (error) {
     throw new Error(`could not read current status, left unchanged: ${formatError(error)}`);
   }
+  const allowed = MAY_CHANGE_FROM[mediaAction];
+  if (!allowed.includes(blossom.level)) return false;
+  if (allowed.includes(moderation.level)) return true;
+  throw new Error(
+    `status sources disagree (blossom ${blossom.raw}, moderation-service ${moderation.raw}), left unchanged`,
+  );
 }
 
 // Per-item chunk helpers, shared by the synchronous runBulkModeration (age-review)
@@ -220,19 +248,19 @@ async function mayChangeMedia(
 
 async function moderateMediaHashes(
   env: BulkModerateEnv, hashes: string[], mediaAction: MediaAction, reason: string,
-): Promise<{ processed: number; failures: string[] }> {
+): Promise<{ processed: number; skipped: number; failures: string[] }> {
   let processed = 0;
-  let leftAlone = 0;
+  let skipped = 0;
   const failures: string[] = [];
   const blossomSecret = typeof env.BLOSSOM_WEBHOOK_SECRET === 'string'
     ? env.BLOSSOM_WEBHOOK_SECRET
     : (await env.BLOSSOM_WEBHOOK_SECRET?.get()) ?? null;
   await runWithConcurrency(hashes, BULK_ACTION_CONCURRENCY, async (sha256) => {
     try {
-      // A stronger decision is left in place on purpose: not a failure, and not
-      // counted as processed (processed means changed).
+      // Left alone on purpose: not a failure, and not processed (processed
+      // means changed). Counted so the moderator sees it.
       if (!(await mayChangeMedia(sha256, mediaAction, env, blossomSecret))) {
-        leftAlone++;
+        skipped++;
         return;
       }
       await callModerateMedia(sha256, mediaAction, reason, env);
@@ -241,10 +269,7 @@ async function moderateMediaHashes(
       failures.push(`media:${sha256}:${formatError(error)}`);
     }
   });
-  if (leftAlone > 0) {
-    console.log(`[bulk-moderate] ${mediaAction}: left ${leftAlone} blob(s) unchanged (a stronger decision is already in place)`);
-  }
-  return { processed, failures };
+  return { processed, skipped, failures };
 }
 
 async function writeDecisionBatch(
@@ -313,7 +338,7 @@ export async function runBulkModeration(
   reason: string,
 ): Promise<BulkModerateResult> {
   const moderatorPubkey = await getAdminPubkey(env);
-  const result: BulkModerateResult = { success: true, eventsProcessed: 0, mediaProcessed: 0, failures: [] };
+  const result: BulkModerateResult = { success: true, eventsProcessed: 0, mediaProcessed: 0, mediaSkipped: 0, failures: [] };
 
   if (action === 'delete-all') {
     // Events come from the relay (WebSocket, paginated) for the event IDs;
@@ -333,6 +358,7 @@ export async function runBulkModeration(
     }
     const media = await moderateMediaHashes(env, mediaHashes, BULK_MEDIA_ACTION[action], reason);
     result.mediaProcessed = media.processed;
+    result.mediaSkipped = media.skipped;
     result.failures.push(...media.failures);
   } else {
     // age-restrict-all / age-gate-all / un-age-restrict-all are media-only;
@@ -341,6 +367,7 @@ export async function runBulkModeration(
     result.eventsProcessed = mediaHashes.length; // one video == one event for video kinds
     const media = await moderateMediaHashes(env, mediaHashes, BULK_MEDIA_ACTION[action], reason);
     result.mediaProcessed = media.processed;
+    result.mediaSkipped = media.skipped;
     result.failures.push(...media.failures);
   }
 
@@ -367,6 +394,7 @@ export async function ensureBulkJobsTable(db: D1Database): Promise<void> {
       failures TEXT NOT NULL DEFAULT '[]',
       failures_dropped INTEGER NOT NULL DEFAULT 0,
       version INTEGER NOT NULL DEFAULT 0,
+      media_skipped INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )`
@@ -376,6 +404,8 @@ export async function ensureBulkJobsTable(db: D1Database): Promise<void> {
   await db.prepare('ALTER TABLE bulk_jobs ADD COLUMN failures_dropped INTEGER NOT NULL DEFAULT 0')
     .run().catch(() => {});
   await db.prepare('ALTER TABLE bulk_jobs ADD COLUMN version INTEGER NOT NULL DEFAULT 0')
+    .run().catch(() => {});
+  await db.prepare('ALTER TABLE bulk_jobs ADD COLUMN media_skipped INTEGER NOT NULL DEFAULT 0')
     .run().catch(() => {});
   bulkSchemaReady = true;
 }
@@ -390,6 +420,7 @@ interface BulkJobRow {
   failures: string;
   failures_dropped: number;
   version: number;
+  media_skipped?: number; // absent on rows read before the column was added
   created_at: string;
   updated_at: string;
 }
@@ -420,6 +451,7 @@ function rowToBulkJob(row: BulkJobRow): BulkJob {
     status: row.status as BulkJob['status'],
     eventsProcessed: Number(row.events_processed) || 0,
     mediaProcessed: Number(row.media_processed) || 0,
+    mediaSkipped: Number(row.media_skipped) || 0,
     failures: failuresForDisplay(parseFailuresList(row.failures), dropped),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -567,6 +599,7 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
 
     let eventsDelta = 0;
     let mediaDelta = 0;
+    let skippedDelta = 0;
     const chunkFailures: string[] = [];
     let next: BulkJobMessage | null = null;
 
@@ -630,6 +663,7 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
       const { hashes, nextCursor } = await queryUserVideosPage(msg.pubkey, env, msg.cursor);
       const media = await moderateMediaHashes(env, hashes, BULK_MEDIA_ACTION[msg.action], reason);
       mediaDelta = media.processed;
+      skippedDelta = media.skipped;
       chunkFailures.push(...media.failures);
       // Parity with the synchronous path: for media-only actions one video == one
       // event, so the UI's "across N events" stays meaningful (delete-all counts
@@ -662,11 +696,12 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
     // duplicate chunk already moved the row to a terminal state, changes is 0 and
     // we must NOT send `next` (that would fork the chunk chain).
     const wrote = await db.prepare(
-      `UPDATE bulk_jobs SET status = ?, events_processed = ?, media_processed = ?, failures = ?, failures_dropped = ?, updated_at = ? WHERE version = ? AND job_id = ? AND status = 'running'`
+      `UPDATE bulk_jobs SET status = ?, events_processed = ?, media_processed = ?, media_skipped = ?, failures = ?, failures_dropped = ?, updated_at = ? WHERE version = ? AND job_id = ? AND status = 'running'`
     ).bind(
       status,
       job.eventsProcessed + eventsDelta,
       job.mediaProcessed + mediaDelta,
+      (job.mediaSkipped ?? 0) + skippedDelta,
       JSON.stringify(merged.list),
       merged.dropped,
       new Date().toISOString(),
