@@ -244,15 +244,21 @@ Revert the worker deploy (`wrangler rollback` or redeploy the prior version). Th
 `bulk_jobs` table and the queue persist but go inert (the old build has no
 producer/consumer). No data cleanup required.
 
-Before rolling the worker back past #290, drain `age-gate-all` jobs first: an older
-worker reads that action as unknown and sends SAFE, un-restricting the account's
-media mid-job. Roll back only when this returns no rows (rows idle past 30 minutes,
-the worker's `STALE_JOB_MS`, have stalled with nothing queued, so they are excluded):
+Rolling back past #290 takes this order, because an older worker reads
+`age-gate-all` as unknown and sends SAFE, un-restricting the account's media:
 
-```bash
-npx wrangler d1 execute divine-moderation-decisions-prod --remote --command \
-  "SELECT job_id FROM bulk_jobs WHERE action = 'age-gate-all' AND status IN ('pending', 'running') AND updated_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 minutes');"
-```
+1. **Roll the frontend back first.** The older UI sends `age-restrict-all`, which
+   the current worker still handles. A tab still showing the newer UI keeps
+   sending `age-gate-all` until it reloads, so ask moderators to reload.
+2. **Wait until no `age-gate-all` job is still running.** Rows idle past 30
+   minutes (the worker's `STALE_JOB_MS`) have stalled with nothing queued, so
+   they are excluded:
 
-Roll the frontend back with it. An older worker refuses `age-gate-all` with a 400
-("Invalid action"), so the new UI's "Age Restrict All" fails until the two match.
+   ```bash
+   npx wrangler d1 execute divine-moderation-decisions-prod --remote --command \
+     "SELECT job_id FROM bulk_jobs WHERE action = 'age-gate-all' AND status IN ('pending', 'running') AND updated_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 minutes');"
+   ```
+
+3. **Roll the worker back** as soon as that returns no rows. From then on the
+   older worker refuses `age-gate-all` at enqueue with a 400 ("Invalid action"),
+   so a stale tab's click fails instead of reaching the queue.
