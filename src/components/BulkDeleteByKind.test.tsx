@@ -478,7 +478,9 @@ describe('BulkDeleteByKind outcomes', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Delete 800 Text Note events' }));
 
     expect(await screen.findByRole('status')).toHaveTextContent(/^Deleted 0 events\.\.\.$/);
+    api.getBulkJobStatus.mockResolvedValue(job({ status: 'running', eventsProcessed: 0 }));
     resolveStart({ success: true, jobId: 'job-2' });
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(/^Deleted 0 of 800 events\.\.\.$/));
   });
 
   // A full 64-hex id is one unbroken token. `break-word` does not lower an
