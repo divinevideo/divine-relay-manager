@@ -231,12 +231,22 @@ negotiation, so order matters and the gap should be minimized:
 ### Post-deploy verification
 
 - `npx wrangler queues list` shows the prod queue with a consumer attached.
-- Run one bulk action on a small test account; confirm `{jobId}` returns, a queue-consumer
+- **Use a throwaway test account for the checks below, in either environment.**
+  Staging's worker points at production's moderation service and media server
+  (`MODERATION_ADMIN_URL` and `CDN_DOMAIN` in `wrangler.staging.toml`), so a bulk
+  action run from staging changes real production media.
+- Run one bulk action on that account; confirm `{jobId}` returns, a queue-consumer
   log line fires (`npx wrangler tail`), the job row reaches `done` with non-zero counts,
   and Blossom shows the media in the state the action sets: Age Restrict All ->
   AgeRestricted (18+ gate), Delete All -> Deleted. The age-review withhold
   (`age-restrict-all`) sets Restricted.
-- `bulk_jobs` table is created on demand in the prod D1 (`divine-moderation-decisions-prod`).
+- Bulk actions read each file's status from Blossom first, so the worker needs
+  `BLOSSOM_WEBHOOK_SECRET` (prod and staging bind it). Without it every file fails
+  with "could not read current status".
+- Block one of the test account's videos, then run Age Restrict All: the blocked
+  video stays Banned in Blossom, and the result message counts it as left as it was.
+- `bulk_jobs` table is created on demand in the prod D1 (`divine-moderation-decisions-prod`),
+  and its `media_skipped` column is added on demand to an existing table.
 
 ### Rollback
 
