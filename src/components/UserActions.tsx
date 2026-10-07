@@ -364,7 +364,7 @@ export function UserActions({
                 {bulkJob.runningAction === 'age-gate-all' ? 'Restricting...' : 'Age Restrict All'}
               </Button>
             </TooltipTrigger>
-            <TooltipContent><p>Age-restrict all media from this user. Can be reversed.</p></TooltipContent>
+            <TooltipContent><p>Put all of this user's videos behind the 18+ gate. Undo one video at a time with Remove Restriction.</p></TooltipContent>
           </Tooltip>
 
           <ConfirmDialog

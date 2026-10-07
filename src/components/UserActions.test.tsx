@@ -103,6 +103,17 @@ describe('UserActions', () => {
     expect(api.bulkModerate).toHaveBeenCalledWith(PUBKEY, 'age-gate-all', expect.any(String));
   });
 
+  it('Age Restrict All tooltip names the 18+ gate and the per-video undo (#290)', async () => {
+    // The old "Age-restrict ... Can be reversed." was vague enough to hide the
+    // hide-vs-gate mix-up, and promised an undo-all that does not exist.
+    renderWithProvider(<UserActions pubkey={PUBKEY} />);
+    fireEvent.focus(screen.getByRole('button', { name: /Age Restrict All/i }));
+    const tips = await screen.findAllByText(
+      "Put all of this user's videos behind the 18+ gate. Undo one video at a time with Remove Restriction.",
+    );
+    expect(tips.length).toBeGreaterThan(0);
+  });
+
   it('routes to Age Review when a bulk action is guard-blocked (age_review_active)', async () => {
     api.bulkModerate.mockRejectedValue(new ApiError('under age review', 409, 'Conflict', 'age_review_active'));
     renderWithProvider(<UserActions pubkey={PUBKEY} />);
