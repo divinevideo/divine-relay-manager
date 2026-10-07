@@ -2058,8 +2058,8 @@ async function handleGetDecisions(
 // against a target carrying tens of labels.
 //
 // Subrequests are not the constraint: this is Workers Paid, so the budget is
-// 1000/request and even the two-filter worst case spends ~102 (two sockets plus
-// two full pages of bans).
+// 10,000/request (Cloudflare's Workers limits page) and even the two-filter
+// worst case spends ~102 (two sockets plus two full pages of bans).
 //
 // A full page is reported as an incomplete cleanup rather than assumed
 // complete, so a target somehow past the cap still gets cleared over successive

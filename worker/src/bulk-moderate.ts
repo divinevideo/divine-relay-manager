@@ -139,8 +139,8 @@ const MODERATION_LEVEL = new Map<string, MediaLevel>([
 // The current states each media action may change. Blocked is in no row: no
 // bulk action touches a blocked blob. How the two sources combine is in
 // decideMediaChange.
-//   AGE_RESTRICTED (Age Restrict All): only from open. Skips hidden and
-//     blocked (that would loosen them) and already-gated (nothing to do).
+//   AGE_RESTRICTED (Age Restrict All): only from open. Skips hidden, blocked
+//     and deleted (that would loosen them) and already-gated (nothing to do).
 //   QUARANTINE (age review's hide): from open or gated. Tightening an 18+ blob
 //     to hidden is the point of the withhold.
 //   SAFE (age review's un-hide on clear): only from hidden, so it never acts
