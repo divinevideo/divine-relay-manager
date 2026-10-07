@@ -1,7 +1,7 @@
 // ABOUTME: The resolved-history view: read a page at a time, listed with the queue, honest about where it stops.
 // ABOUTME: Pins the footer's states, its resolved count, and how loaded pages combine with the feed.
 
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import { QueryClient } from '@tanstack/react-query';
@@ -694,24 +694,6 @@ describe('the history view keeps what is on screen in order', () => {
     expect(after).toEqual([key('1'), key('3'), key('4'), key('6'), key('2')]);
   });
 
-  it('fixes the sort control to Newest First while history is listed, and gives it back after', async () => {
-    stubWorker({ pages: { first: ok(resolvedPage([H1], { nextCursor: null, done: true })) } });
-    const user = userEvent.setup();
-    renderQueue();
-    await screen.findByText(note(hex('1')));
-    expect(screen.getByRole('combobox')).not.toBeDisabled();
-
-    await openHistory(user);
-    expect(await screen.findByText(/newest first while resolved history is shown/i)).toBeInTheDocument();
-    expect(screen.getByRole('combobox')).toBeDisabled();
-    // The control shows the order the list is actually in.
-    expect(screen.getByRole('combobox')).toHaveTextContent('Newest First');
-
-    await user.click(screen.getByRole('switch', { name: /hide resolved/i }));
-    expect(screen.getByRole('combobox')).not.toBeDisabled();
-    expect(screen.getByRole('combobox')).toHaveTextContent('Most Reports');
-  });
-
   it('re-reads loaded history when the moderator refreshes', async () => {
     // Another moderator's resolutions reach loaded history only when it is re-read.
     const calls = stubWorker({ pages: { first: ok(resolvedPage([H1], { nextCursor: null, done: true })) } });
@@ -724,6 +706,91 @@ describe('the history view keeps what is on screen in order', () => {
     await user.click(screen.getByTitle(/last updated|refresh/i));
 
     await waitFor(() => expect(calls.resolved).toHaveLength(2));
+  });
+});
+
+describe('the sort in the history view', () => {
+  // Radix Select scrolls the chosen option into view, which jsdom lacks.
+  beforeEach(() => { window.HTMLElement.prototype.scrollIntoView = vi.fn(); });
+
+  const SORT_NOTE = (n: number) =>
+    `Sorted among the ${n} resolved loaded so far. Load more can add rows anywhere in this order.`;
+  const twoPages = () => stubWorker({
+    pages: {
+      first: ok(resolvedPage([H1, H2], { nextCursor: PAGE_ONE_CURSOR, done: false })),
+      [PAGE_ONE_CURSOR]: ok(resolvedPage([H3, H4], { nextCursor: null, done: true })),
+    },
+  });
+  const sortControl = () => screen.getByRole('combobox');
+  async function chooseSort(name: string) {
+    fireEvent.click(sortControl());
+    fireEvent.click(await screen.findByRole('option', { name }));
+    await waitFor(() => expect(sortControl()).toHaveTextContent(name));
+  }
+
+  it('switches to Newest First on entering the history view, and leaves the control usable', async () => {
+    twoPages();
+    const user = userEvent.setup();
+    renderQueue();
+    await screen.findByText(note(hex('1')));
+    expect(sortControl()).toHaveTextContent('Most Reports');
+
+    await openHistory(user);
+
+    await waitFor(() => expect(sortControl()).toHaveTextContent('Newest First'));
+    expect(sortControl()).not.toBeDisabled();
+    expect(screen.queryByText(/newest first while resolved history is shown/i)).not.toBeInTheDocument();
+  });
+
+  it('says what a different sort is sorted among while more history remains', async () => {
+    twoPages();
+    const user = userEvent.setup();
+    renderQueue();
+    await openHistory(user);
+    // H1, H2 and the banned post: the count the footer states.
+    await screen.findByText('Showing 3 resolved. More further back.');
+
+    await chooseSort('Most Reports');
+
+    expect(await screen.findByText(SORT_NOTE(3))).toBeInTheDocument();
+  });
+
+  it('says nothing about the sort under Newest First', async () => {
+    twoPages();
+    const user = userEvent.setup();
+    renderQueue();
+    await openHistory(user);
+    await screen.findByText('Showing 3 resolved. More further back.');
+
+    expect(screen.queryByText(/sorted among the/i)).not.toBeInTheDocument();
+  });
+
+  it('says nothing about the sort once history has been read to its end', async () => {
+    stubWorker({ pages: { first: ok(resolvedPage([H1, H2], { nextCursor: null, done: true })) } });
+    const user = userEvent.setup();
+    renderQueue();
+    await openHistory(user);
+    await screen.findByText('Showing 3 resolved. End of resolved history.');
+
+    await chooseSort('Most Reports');
+
+    expect(screen.queryByText(/sorted among the/i)).not.toBeInTheDocument();
+  });
+
+  it('gives back the sort chosen before entering, whatever was picked inside', async () => {
+    twoPages();
+    const user = userEvent.setup();
+    renderQueue();
+    await screen.findByText(note(hex('1')));
+    await chooseSort('Oldest First');
+
+    await openHistory(user);
+    await waitFor(() => expect(sortControl()).toHaveTextContent('Newest First'));
+    await chooseSort('Most Reports');
+
+    await user.click(screen.getByRole('switch', { name: /hide resolved/i }));
+
+    await waitFor(() => expect(sortControl()).toHaveTextContent('Oldest First'));
   });
 });
 
@@ -836,5 +903,41 @@ describe('Load more keeps the viewport on the row being read', () => {
     // viewport followed it, so it is still the row at the top.
     expect(rowKeys()).toEqual([key('1'), key('3'), key('4'), key('5'), key('6'), key('2')]);
     expect(viewport.scrollTop).toBe(5 * ROW_HEIGHT);
+  });
+
+  it('keeps the row being read in place under Most Reports, when a page lands rows above it', async () => {
+    window.HTMLElement.prototype.scrollIntoView = vi.fn();
+    // Page two brings a post with two reports. Under "Most reports" it sorts
+    // to the top, above every row already listed.
+    const X1 = eventReport(hex('7'), hex('8'), 1751000300);
+    const X2 = eventReport(hex('7'), hex('0'), 1751000200);
+    stubWorker({
+      pages: {
+        first: ok(resolvedPage([H1, H2], { nextCursor: PAGE_ONE_CURSOR, done: false })),
+        [PAGE_ONE_CURSOR]: ok(resolvedPage([X1, X2], { nextCursor: null, done: true })),
+      },
+    });
+    const user = userEvent.setup();
+    renderQueue();
+    await openHistory(user);
+    await screen.findByText(note(hex('4')));
+    fireEvent.click(screen.getByRole('combobox'));
+    fireEvent.click(await screen.findByRole('option', { name: 'Most Reports' }));
+    await waitFor(() => expect(screen.getByRole('combobox')).toHaveTextContent('Most Reports'));
+    layOutRows();
+
+    // Rows, one report each, newest first among equals: open, H1, H2, banned.
+    // Scroll so H2 is the top row.
+    expect(rowKeys()).toEqual([key('1'), key('3'), key('4'), key('2')]);
+    const viewport = document.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement;
+    viewport.scrollTop = 2 * ROW_HEIGHT;
+
+    await user.click(screen.getByRole('button', { name: /load more/i }));
+    await screen.findByText(note(hex('7')));
+
+    // The two-report post landed first, one row above H2's old place. The
+    // viewport followed H2, so it is still the row at the top.
+    expect(rowKeys()).toEqual([key('7'), key('1'), key('3'), key('4'), key('2')]);
+    expect(viewport.scrollTop).toBe(3 * ROW_HEIGHT);
   });
 });

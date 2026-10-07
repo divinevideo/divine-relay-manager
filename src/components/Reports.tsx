@@ -465,12 +465,27 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // resolved, so this view adds them from their own paged read, fetched only
   // while the view is open.
   const historyView = !hideResolved && !showPendingReview;
-  // In the history view the list is newest first, whatever the sort control
-  // says. Loading an older page must not change the order of rows already on
-  // screen (spec: relative order holds, the viewport stays put), and only a
-  // newest-first order guarantees that: under "Most reports" an older page adds
-  // reports to a target and moves it.
-  const effectiveSort: SortOption = historyView ? 'newest' : sortBy;
+  // The history view opens on Newest First, the one order a loaded page cannot
+  // rearrange: an older page lands below every row already shown. The control
+  // stays usable. Under any other order an older page can add rows anywhere,
+  // or move a target it adds reports to, and a note under the control says the
+  // sort covers only what is loaded; the scroll anchor keeps the row being read
+  // in place either way. Leaving the view hands back the sort chosen before
+  // entering it, whatever was picked inside. Adjusted while rendering rather
+  // than in an effect, so the list never renders a frame in the old order.
+  const [historySort, setHistorySort] = useState<{ inHistory: boolean; before: SortOption | null }>({
+    inHistory: false,
+    before: null,
+  });
+  if (historySort.inHistory !== historyView) {
+    if (historyView) {
+      setHistorySort({ inHistory: true, before: sortBy });
+      setSortBy('newest');
+    } else {
+      setHistorySort({ inHistory: false, before: null });
+      if (historySort.before !== null) setSortBy(historySort.before);
+    }
+  }
   const history = useResolvedHistory(relayUrl, historyView);
   const historyPages = history.data?.pages;
   // What the list is built from: the feed plus deep-linked reports, plus
@@ -994,7 +1009,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
     // Apply sorting
     items.sort((a, b) => {
-      switch (effectiveSort) {
+      switch (sortBy) {
         case 'reports':
           // Most reports first, then by date
           if (b.reports.length !== a.reports.length) {
@@ -1034,7 +1049,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     });
 
     return items;
-  }, [allConsolidated, hideResolved, showPendingReview, resolvedTargets, bannedPubkeySet, switchMembership, filterCategory, filterTargetType, effectiveSort]);
+  }, [allConsolidated, hideResolved, showPendingReview, resolvedTargets, bannedPubkeySet, switchMembership, filterCategory, filterTargetType, sortBy]);
 
   const authorByTarget = useMemo(() => new Map(
     allConsolidated.map(c => [reportTargetKey(c.target), c.authorPubkey]),
@@ -1098,7 +1113,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
     // Apply sorting
     items.sort((a, b) => {
-      switch (effectiveSort) {
+      switch (sortBy) {
         case 'newest':
           return b.created_at - a.created_at;
         case 'oldest':
@@ -1116,7 +1131,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     });
 
     return items;
-  }, [listReports, hideResolved, showPendingReview, resolvedTargets, bannedPubkeySet, authorByTarget, switchMembership, filterCategory, filterTargetType, effectiveSort]);
+  }, [listReports, hideResolved, showPendingReview, resolvedTargets, bannedPubkeySet, authorByTarget, switchMembership, filterCategory, filterTargetType, sortBy]);
 
   const uniqueTargets = consolidated.length;
   const filteredReportsCount = filteredReports.length;
@@ -1177,6 +1192,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // been read to its end. While it is loading, failed, cut short or has more,
   // the footer below says so, and the list must not read as empty (#186, #221).
   const listEmptyIsFinal = !historyView || footerState.kind === 'ended';
+  // The note under the sort control, while a sort other than Newest First
+  // orders a history that has more pages to load. Shown only where the footer
+  // states its count ('more'), so the note's number is the footer's: not once
+  // history has ended, and not while a count is withheld for an unread source
+  // or a failed re-read.
+  const showSortScopeNote = historyView && sortBy !== 'newest' && footerState.kind === 'more';
 
   // Sync selected report with URL
   useEffect(() => {
@@ -1757,13 +1778,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
             <div className="flex items-center gap-2">
               <ArrowUpDown className="h-3 w-3 text-muted-foreground shrink-0" />
               <Select
-                value={effectiveSort}
+                value={sortBy}
                 onValueChange={(v) => setSortBy(v as SortOption)}
-                disabled={historyView}
               >
                 <SelectTrigger
                   className="h-8 text-xs flex-1"
-                  aria-describedby={historyView ? 'sort-fixed-reason' : undefined}
+                  aria-describedby={showSortScopeNote ? 'sort-scope-note' : undefined}
                 >
                   <SelectValue />
                 </SelectTrigger>
@@ -1776,10 +1796,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                 </SelectContent>
               </Select>
             </div>
-            {/* Say why the control is inert, as the Hide resolved switch does. */}
-            {historyView && (
-              <span id="sort-fixed-reason" className="text-[10px] italic opacity-70">
-                Newest first while resolved history is shown
+            {/* Sorted history covers only the pages loaded so far. */}
+            {showSortScopeNote && (
+              <span id="sort-scope-note" className="text-[10px] italic opacity-70">
+                Sorted among the {resolvedRowsShown} resolved loaded so far. Load more can add rows anywhere in this order.
               </span>
             )}
 
