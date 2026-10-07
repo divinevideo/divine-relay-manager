@@ -240,15 +240,18 @@ negotiation, so order matters and the gap should be minimized:
 
 ### Rollback
 
-Revert the worker deploy (`wrangler rollback` or redeploy the prior version). The
-`bulk_jobs` table and the queue persist but go inert (the old build has no
-producer/consumer). No data cleanup required.
+Rolling back to a build from before this async job model: revert the worker
+deploy (`wrangler rollback` or redeploy the prior version). The `bulk_jobs` table
+and the queue persist but go inert (that build has no producer/consumer). No data
+cleanup required.
 
-Rolling back past #290 takes extra steps, because an older worker reads
-`age-gate-all` as unknown and sends SAFE, un-restricting the account's media. Stop
-those jobs rather than waiting for them: both workers only pick up a job that is
-still `pending` or `running`, so a job marked `failed` sends nothing more, even if
-its next message is still in the queue.
+Rolling back past #290 (to any build that has the job model but not
+`age-gate-all`): do not revert the worker first. Follow the steps below in order,
+because an older worker reads `age-gate-all` as unknown and sends SAFE,
+un-restricting the account's media. Stop those jobs rather than waiting for them:
+both workers only pick up a job that is still `pending` or `running`, so a job
+marked `failed` sends nothing more, even if its next message is still in the
+queue.
 
 1. **Roll the frontend back** and ask moderators to reload. The older UI sends
    `age-restrict-all`, which every worker handles; a tab still showing the newer
@@ -266,7 +269,8 @@ its next message is still in the queue.
 
 3. **Roll the worker back.** From then on it refuses `age-gate-all` at enqueue
    with a 400 ("Invalid action").
-4. **Repeat step 2**, then check for jobs a stale tab queued between steps 2 and 3
+4. **Run step 2's two commands again** (keep the time you noted the first time),
+   then check for jobs a stale tab queued between steps 2 and 3
    (replace `<step-2 time>` with a UTC time a minute before you ran step 2, in
    the stored format `YYYY-MM-DDTHH:MM:SS.000Z`). For any row, the older worker
    may have un-restricted that account's media: re-gate it by hand.
