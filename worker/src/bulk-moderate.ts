@@ -33,6 +33,10 @@ export interface BulkModerateEnv extends Nip86Env, ZendeskSyncEnv {
   // Explicit Funnelcake REST API URL; derived from RELAY_URL when unset.
   FUNNELCAKE_API_URL?: string;
   BULK_QUEUE?: Queue<BulkJobMessage>;
+  // Current-status reads before each change (see mayChangeMedia).
+  MODERATION_SERVICE_URL?: string;
+  CDN_DOMAIN?: string;
+  BLOSSOM_WEBHOOK_SECRET?: string | { get(): Promise<string> };
 }
 
 interface RelayEventSummary {
@@ -58,7 +62,9 @@ function json(data: unknown, status: number, corsHeaders: Record<string, string>
 //   age-gate-all -> AGE_RESTRICTED: the moderator's "Age Restrict All", the same
 //     18+ gate the single-video Age Restrict applies (#290).
 //   un-age-restrict-all -> SAFE: restore.
-const BULK_MEDIA_ACTION: Record<BulkAction, 'QUARANTINE' | 'AGE_RESTRICTED' | 'SAFE' | 'DELETE'> = {
+type MediaAction = 'QUARANTINE' | 'AGE_RESTRICTED' | 'SAFE' | 'DELETE';
+
+const BULK_MEDIA_ACTION: Record<BulkAction, MediaAction> = {
   'age-restrict-all': 'QUARANTINE',
   'age-gate-all': 'AGE_RESTRICTED',
   'un-age-restrict-all': 'SAFE',
@@ -89,22 +95,155 @@ export const LOOSENS_AGE_REVIEW_HOLD: Record<BulkAction, boolean> = {
   'un-age-restrict-all': true,
 };
 
+// A bulk action must never weaken a stronger decision already on a blob: Age
+// Restrict All turning a moderator's block into an 18+ gate that any signed-in
+// viewer passes, or Delete All destroying a blocked file kept as evidence (#291).
+// Nothing downstream refuses that: moderation-service records whatever action
+// it is sent and blossom writes the status unconditionally. And the account's
+// video list does not exclude blocked files, because a media block never
+// reaches funnelcake. So each blob's current status is read before it is
+// changed, and the change is made only when it is allowed from that status.
+//
+// Strength of a blob's current state, as either status source reports it.
+type MediaLevel = 'open' | 'gated' | 'hidden' | 'blocked' | 'deleted';
+
+// blossom's BlobStatus, from GET /admin/api/blob/{sha256} (divine-blossom
+// blossom-core/src/types.rs). This is what viewers are actually served, and the
+// only place a status set in blossom's own admin UI shows up: that UI never
+// tells moderation-service.
+const BLOSSOM_LEVEL = new Map<string, MediaLevel>([
+  ['active', 'open'],
+  ['pending', 'open'],
+  ['age_restricted', 'gated'],
+  ['restricted', 'hidden'],
+  ['banned', 'blocked'],
+  ['deleted', 'deleted'],
+]);
+
+// moderation-service's recorded decision, from GET /check-result/{sha256}
+// ('unknown' when it has none). Read too because blossom caches status for 5
+// minutes per POP and a change only clears the cache in its own POP, so
+// blossom's answer can be stale right after a block made through
+// moderation-service, which this record reflects at once.
+const MODERATION_LEVEL = new Map<string, MediaLevel>([
+  ['unknown', 'open'],
+  ['safe', 'open'],
+  ['review', 'open'],
+  ['age_restricted', 'gated'],
+  ['quarantine', 'hidden'],
+  ['permanent_ban', 'blocked'],
+  ['delete', 'deleted'],
+]);
+
+// The current states each media action may change. A blob is changed only when
+// BOTH sources report one of these; anything else is left alone. Blocked is in
+// no row: no bulk action touches a blocked blob.
+//   AGE_RESTRICTED (Age Restrict All): only from open. Skips hidden and
+//     blocked (that would loosen them) and already-gated (nothing to do).
+//   QUARANTINE (age review's hide): from open or gated. Tightening an 18+ blob
+//     to hidden is the point of the withhold.
+//   SAFE (age review's un-hide on clear): only from hidden, so it can never
+//     un-gate an 18+ blob or unblock a blocked one. It can still un-hide a
+//     blob some other decision hid; restricting it to the blobs age review
+//     hid is #293.
+//   DELETE (Delete All's media phase): from open, gated or hidden.
+//
+// Still a check-then-write: a change landing between the read and the write is
+// not caught, and a block made in blossom's admin UI in another POP within the
+// last 5 minutes can read as open. Closing both needs blossom to make the write
+// itself conditional (divinevideo/divine-blossom#306); until then this is the
+// strongest guard available from here.
+const MAY_CHANGE_FROM: Record<MediaAction, readonly MediaLevel[]> = {
+  AGE_RESTRICTED: ['open'],
+  QUARANTINE: ['open', 'gated'],
+  SAFE: ['hidden'],
+  DELETE: ['open', 'gated', 'hidden'],
+};
+
+const STATUS_READ_TIMEOUT_MS = 10000;
+
+async function readBlossomLevel(sha256: string, env: BulkModerateEnv, secret: string): Promise<MediaLevel> {
+  const response = await fetch(`https://${env.CDN_DOMAIN || 'media.divine.video'}/admin/api/blob/${sha256}`, {
+    headers: { Authorization: `Bearer ${secret}` },
+    signal: AbortSignal.timeout(STATUS_READ_TIMEOUT_MS),
+  });
+  if (!response.ok) throw new Error(`blossom returned ${response.status}`);
+  const { status } = await response.json() as { status?: unknown };
+  const level = typeof status === 'string' ? BLOSSOM_LEVEL.get(status) : undefined;
+  if (!level) throw new Error(`blossom returned unrecognised status ${JSON.stringify(status)}`);
+  return level;
+}
+
+async function readModerationLevel(sha256: string, env: BulkModerateEnv): Promise<MediaLevel> {
+  // Same routing as callModerateMedia: the service binding when bound (its
+  // host is ignored), else the public moderation API URL.
+  let response: Response;
+  if (env.MODERATION_API) {
+    response = await env.MODERATION_API.fetch(`https://moderation-api.divine.video/check-result/${sha256}`, {
+      signal: AbortSignal.timeout(STATUS_READ_TIMEOUT_MS),
+    });
+  } else if (env.MODERATION_SERVICE_URL) {
+    response = await fetch(`${env.MODERATION_SERVICE_URL}/check-result/${sha256}`, {
+      signal: AbortSignal.timeout(STATUS_READ_TIMEOUT_MS),
+    });
+  } else {
+    throw new Error('no moderation service configured');
+  }
+  if (!response.ok) throw new Error(`moderation-service returned ${response.status}`);
+  const { status } = await response.json() as { status?: unknown };
+  const level = typeof status === 'string' ? MODERATION_LEVEL.get(status) : undefined;
+  if (!level) throw new Error(`moderation-service returned unrecognised status ${JSON.stringify(status)}`);
+  return level;
+}
+
+// True when both sources allow `mediaAction` from the blob's current state.
+// Throws when either cannot be read: an unreadable status is never treated as
+// open, so the blob is skipped and reported rather than changed blind.
+async function mayChangeMedia(
+  sha256: string, mediaAction: MediaAction, env: BulkModerateEnv, blossomSecret: string | null,
+): Promise<boolean> {
+  try {
+    if (!blossomSecret) throw new Error('BLOSSOM_WEBHOOK_SECRET not configured');
+    const [blossom, moderation] = await Promise.all([
+      readBlossomLevel(sha256, env, blossomSecret),
+      readModerationLevel(sha256, env),
+    ]);
+    const allowed = MAY_CHANGE_FROM[mediaAction];
+    return allowed.includes(blossom) && allowed.includes(moderation);
+  } catch (error) {
+    throw new Error(`could not read current status, left unchanged: ${formatError(error)}`);
+  }
+}
+
 // Per-item chunk helpers, shared by the synchronous runBulkModeration (age-review)
 // and the chunked queue consumer (processBulkJob).
 
 async function moderateMediaHashes(
-  env: BulkModerateEnv, hashes: string[], mediaAction: string, reason: string,
+  env: BulkModerateEnv, hashes: string[], mediaAction: MediaAction, reason: string,
 ): Promise<{ processed: number; failures: string[] }> {
   let processed = 0;
+  let leftAlone = 0;
   const failures: string[] = [];
+  const blossomSecret = typeof env.BLOSSOM_WEBHOOK_SECRET === 'string'
+    ? env.BLOSSOM_WEBHOOK_SECRET
+    : (await env.BLOSSOM_WEBHOOK_SECRET?.get()) ?? null;
   await runWithConcurrency(hashes, BULK_ACTION_CONCURRENCY, async (sha256) => {
     try {
+      // A stronger decision is left in place on purpose: not a failure, and not
+      // counted as processed (processed means changed).
+      if (!(await mayChangeMedia(sha256, mediaAction, env, blossomSecret))) {
+        leftAlone++;
+        return;
+      }
       await callModerateMedia(sha256, mediaAction, reason, env);
       processed++;
     } catch (error) {
       failures.push(`media:${sha256}:${formatError(error)}`);
     }
   });
+  if (leftAlone > 0) {
+    console.log(`[bulk-moderate] ${mediaAction}: left ${leftAlone} blob(s) unchanged (a stronger decision is already in place)`);
+  }
   return { processed, failures };
 }
 
@@ -160,6 +299,9 @@ async function deleteEvents(
 // Scope note: because this runs in one invocation, a very large account can still
 // hit the Workers per-invocation subrequest/CPU ceiling and land `failed` here
 // (BULK_ACTION_CONCURRENCY changes parallelism, not the total subrequest count).
+// Each blob costs three subrequests (two status reads and the write; see
+// mayChangeMedia), so at the paid plan's 10,000 per invocation the ceiling is
+// roughly 3,300 videos.
 // It fails visibly on the case. There is no moderator re-run path for the
 // withhold: the Users-page "Age Restrict All" sends age-gate-all (the 18+ gate),
 // which would serve a minor's videos to signed-in viewers, so never use it to

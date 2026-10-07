@@ -26,6 +26,17 @@ const hashA = 'a'.repeat(64);
 const hashB = 'b'.repeat(64);
 const hashC = 'c'.repeat(64);
 
+// Current status per blob, as the two status reads report it before a bulk
+// action changes anything (#291). Unset means a blob blossom serves as active
+// and moderation-service has no decision for, i.e. nothing stronger to protect.
+// A number makes that read fail with the HTTP status.
+const blossomStatus = new Map<string, string | number>();
+const moderationStatus = new Map<string, string | number>();
+beforeEach(() => {
+  blossomStatus.clear();
+  moderationStatus.clear();
+});
+
 function mockRelay(events: Array<{ id: string; kind: number; content?: string; tags: string[][] }>) {
   vi.spyOn(globalThis, 'WebSocket').mockImplementation((function () {
     const listeners = new Map<string, Array<(value?: unknown) => void>>();
@@ -73,6 +84,12 @@ function mockUserVideos(videos: Array<{ sha256: string }>) {
       const page = videos.slice(offset, offset + limit);
       const next = offset + limit < videos.length ? String(offset + limit) : null;
       return new Response(JSON.stringify({ data: page, pagination: { next_cursor: next, has_more: next !== null } }), { status: 200 });
+    }
+    if (url.pathname.startsWith('/admin/api/blob/')) {
+      const sha256 = url.pathname.slice('/admin/api/blob/'.length);
+      const status = blossomStatus.get(sha256) ?? 'active';
+      if (typeof status === 'number') return new Response('err', { status });
+      return new Response(JSON.stringify({ sha256, status }), { status: 200 });
     }
     return new Response('not found', { status: 404 });
   }) as typeof fetch);
@@ -152,8 +169,19 @@ function baseEnv(): BulkModerateEnv {
     NOSTR_NSEC: 'nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5',
     RELAY_URL: 'wss://relay.test',
     MODERATION_API: {
-      fetch: vi.fn().mockResolvedValue(new Response(null, { status: 200 })),
+      fetch: vi.fn(async (input: RequestInfo | URL) => {
+        const url = new URL(String(input));
+        if (url.pathname.startsWith('/check-result/')) {
+          const sha256 = url.pathname.slice('/check-result/'.length);
+          const status = moderationStatus.get(sha256) ?? 'unknown';
+          if (typeof status === 'number') return new Response('err', { status });
+          return new Response(JSON.stringify({ sha256, status }), { status: 200 });
+        }
+        return new Response(null, { status: 200 });
+      }),
     } as unknown as Fetcher,
+    BLOSSOM_WEBHOOK_SECRET: 'test-blossom-secret',
+    CDN_DOMAIN: 'media.test',
     DB: {
       prepare: vi.fn().mockReturnValue({ bind: vi.fn().mockReturnThis() }),
       batch: vi.fn().mockResolvedValue([]),
@@ -167,6 +195,7 @@ function baseEnv(): BulkModerateEnv {
 function moderationActionFor(env: BulkModerateEnv, sha256: string): string | undefined {
   const fetchMock = vi.mocked((env.MODERATION_API as unknown as { fetch: ReturnType<typeof vi.fn> }).fetch);
   const actions = fetchMock.mock.calls
+    .filter((call) => typeof (call[1] as RequestInit | undefined)?.body === 'string') // writes, not status reads
     .map((call) => JSON.parse((call[1] as RequestInit).body as string))
     .filter((body) => body.sha256 === sha256)
     .map((body) => body.action as string);
@@ -283,8 +312,10 @@ describe('runBulkModeration', () => {
     expect(moderationActionFor(mockEnv, hashB)).toBe('AGE_RESTRICTED');
   });
 
-  it('un-age-restrict-all sends SAFE (restore) for media', async () => {
+  it('un-age-restrict-all sends SAFE (restore) for hidden media', async () => {
     mockUserVideos([{ sha256: hashA }]);
+    blossomStatus.set(hashA, 'restricted');
+    moderationStatus.set(hashA, 'quarantine');
     await runBulkModeration(mockEnv, 'a'.repeat(64), 'un-age-restrict-all', 'r');
     expect(moderationActionFor(mockEnv, hashA)).toBe('SAFE');
   });
@@ -339,6 +370,142 @@ describe('runBulkModeration', () => {
   });
 });
 
+describe('bulk actions never weaken a stronger decision (#291)', () => {
+  // Every bulk action reads each blob's current status from BOTH blossom (what
+  // viewers are served; its admin UI never tells moderation-service) and
+  // moderation-service (current for decisions routed through it; blossom's own
+  // read can be up to 5 minutes stale in another POP), and acts only when both
+  // allow it. A moderator-blocked video stays in funnelcake's public list, so
+  // without this Age Restrict All turned Banned into AgeRestricted.
+  let mockEnv: BulkModerateEnv;
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.mocked(getAdminPubkey).mockResolvedValue('moderator-pubkey');
+    vi.mocked(banEvent).mockResolvedValue({ success: true });
+    mockUserVideos([{ sha256: hashA }, { sha256: hashB }, { sha256: hashC }]);
+    mockEnv = baseEnv();
+  });
+
+  it('Age Restrict All gates an open file but skips one blocked in blossom or in moderation-service', async () => {
+    blossomStatus.set(hashB, 'banned');
+    moderationStatus.set(hashC, 'permanent_ban'); // blossom still says active (stale POP)
+    const result = await runBulkModeration(mockEnv, 'a'.repeat(64), 'age-gate-all', 'r');
+    expect(moderationActionFor(mockEnv, hashA)).toBe('AGE_RESTRICTED');
+    expect(moderationActionFor(mockEnv, hashB)).toBeUndefined();
+    expect(moderationActionFor(mockEnv, hashC)).toBeUndefined();
+    // A skip leaves a stronger decision in place on purpose; it is not a failure.
+    expect(result).toMatchObject({ success: true, failures: [], mediaProcessed: 1 });
+  });
+
+  it.each([
+    ['blossom restricted (hidden)', 'restricted', undefined],
+    ['blossom deleted', 'deleted', undefined],
+    ['blossom already age_restricted', 'age_restricted', undefined],
+    ['moderation-service quarantine', undefined, 'quarantine'],
+    ['moderation-service delete', undefined, 'delete'],
+  ])('Age Restrict All skips a file that is %s', async (_label, blossom, moderation) => {
+    if (blossom) blossomStatus.set(hashA, blossom);
+    if (moderation) moderationStatus.set(hashA, moderation);
+    await runBulkModeration(mockEnv, 'a'.repeat(64), 'age-gate-all', 'r');
+    expect(moderationActionFor(mockEnv, hashA)).toBeUndefined();
+    expect(moderationActionFor(mockEnv, hashB)).toBe('AGE_RESTRICTED');
+  });
+
+  it('Age Restrict All acts on pending, safe and review files', async () => {
+    blossomStatus.set(hashA, 'pending');
+    moderationStatus.set(hashB, 'safe');
+    moderationStatus.set(hashC, 'review');
+    await runBulkModeration(mockEnv, 'a'.repeat(64), 'age-gate-all', 'r');
+    expect(moderationActionFor(mockEnv, hashA)).toBe('AGE_RESTRICTED');
+    expect(moderationActionFor(mockEnv, hashB)).toBe('AGE_RESTRICTED');
+    expect(moderationActionFor(mockEnv, hashC)).toBe('AGE_RESTRICTED');
+  });
+
+  it("age review's hide tightens an 18+ file but leaves blocked and deleted files alone", async () => {
+    blossomStatus.set(hashA, 'age_restricted');
+    moderationStatus.set(hashA, 'age_restricted');
+    blossomStatus.set(hashB, 'banned');
+    moderationStatus.set(hashC, 'delete');
+    await runBulkModeration(mockEnv, 'a'.repeat(64), 'age-restrict-all', 'r');
+    expect(moderationActionFor(mockEnv, hashA)).toBe('QUARANTINE');
+    expect(moderationActionFor(mockEnv, hashB)).toBeUndefined();
+    expect(moderationActionFor(mockEnv, hashC)).toBeUndefined();
+  });
+
+  it("age review's un-hide restores only hidden files, never blocked, 18+ or open ones", async () => {
+    blossomStatus.set(hashA, 'restricted');
+    moderationStatus.set(hashA, 'quarantine');
+    blossomStatus.set(hashB, 'banned');
+    moderationStatus.set(hashB, 'quarantine'); // stale record; blossom is banned
+    blossomStatus.set(hashC, 'age_restricted');
+    moderationStatus.set(hashC, 'age_restricted'); // both agree: 18+, not hidden
+    await runBulkModeration(mockEnv, 'a'.repeat(64), 'un-age-restrict-all', 'r');
+    expect(moderationActionFor(mockEnv, hashA)).toBe('SAFE');
+    expect(moderationActionFor(mockEnv, hashB)).toBeUndefined();
+    expect(moderationActionFor(mockEnv, hashC)).toBeUndefined();
+  });
+
+  it("Delete All's media phase leaves a blocked file alone (keeps the evidence)", async () => {
+    mockRelay([]);
+    blossomStatus.set(hashA, 'banned');
+    blossomStatus.set(hashB, 'restricted');
+    await runBulkModeration(mockEnv, 'a'.repeat(64), 'delete-all', 'r');
+    expect(moderationActionFor(mockEnv, hashA)).toBeUndefined();
+    expect(moderationActionFor(mockEnv, hashB)).toBe('DELETE');
+    expect(moderationActionFor(mockEnv, hashC)).toBe('DELETE');
+  });
+
+  it.each([
+    ['blossom read fails', () => { blossomStatus.set(hashA, 500); }],
+    ['moderation-service read fails', () => { moderationStatus.set(hashA, 503); }],
+    ['blossom reports a status this code does not know', () => { blossomStatus.set(hashA, 'quarantined'); }],
+    ['moderation-service reports a status this code does not know', () => { moderationStatus.set(hashA, 'flagged'); }],
+  ])('skips a file and records a failure when %s', async (_label, arrange) => {
+    arrange();
+    const result = await runBulkModeration(mockEnv, 'a'.repeat(64), 'age-gate-all', 'r');
+    expect(moderationActionFor(mockEnv, hashA)).toBeUndefined();
+    expect(moderationActionFor(mockEnv, hashB)).toBe('AGE_RESTRICTED');
+    expect(result.success).toBe(false);
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0]).toMatch(new RegExp(`^media:${hashA}:.*current status`));
+  });
+
+  it('skips every file and records failures when the blossom key is not configured', async () => {
+    mockEnv = { ...mockEnv, BLOSSOM_WEBHOOK_SECRET: undefined };
+    const result = await runBulkModeration(mockEnv, 'a'.repeat(64), 'age-gate-all', 'r');
+    expect(moderationActionFor(mockEnv, hashA)).toBeUndefined();
+    expect(result.failures).toHaveLength(3);
+  });
+
+  it("reads blossom's admin status for the blob with the webhook key", async () => {
+    await runBulkModeration(mockEnv, 'a'.repeat(64), 'age-gate-all', 'r');
+    const blobReads = vi.mocked(globalThis.fetch).mock.calls
+      .filter((call) => String(call[0]).includes('/admin/api/blob/'));
+    expect(blobReads.map((call) => String(call[0]))).toContain(`https://media.test/admin/api/blob/${hashA}`);
+    const headers = new Headers((blobReads[0][1] as RequestInit).headers);
+    expect(headers.get('Authorization')).toBe('Bearer test-blossom-secret');
+  });
+
+  it('queued Age Restrict All chunks skip a blocked file too', async () => {
+    const jobDb = makeJobDb();
+    mockEnv = {
+      ...mockEnv,
+      DB: jobDb.db,
+      BULK_QUEUE: { send: vi.fn(async () => {}) } as unknown as Queue<BulkJobMessage>,
+    };
+    blossomStatus.set(hashB, 'banned');
+    const jobId = 'job-gate-skip-1';
+    jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'age-gate-all', status: 'running', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, created_at: 't', updated_at: 't' });
+    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'age-gate-all', phase: 'media' }, mockEnv);
+    expect(moderationActionFor(mockEnv, hashA)).toBe('AGE_RESTRICTED');
+    expect(moderationActionFor(mockEnv, hashB)).toBeUndefined();
+    // media_processed counts files actually changed (hashA and hashC); the
+    // skipped blocked file is not one.
+    expect(jobDb.rows.get(jobId)).toMatchObject({ status: 'done', media_processed: 2, failures: '[]' });
+  });
+});
+
 describe('async bulk job model', () => {
   let mockEnv: BulkModerateEnv;
   let jobDb: ReturnType<typeof makeJobDb>;
@@ -386,7 +553,11 @@ describe('async bulk job model', () => {
     expect(jobDb.rows.get(jobId)).toMatchObject({ status: 'done', media_processed: 2 });
   });
 
-  it('queued un-age-restrict-all media chunks send SAFE', async () => {
+  it('queued un-age-restrict-all media chunks send SAFE for hidden media', async () => {
+    for (const hash of [hashA, hashB]) {
+      blossomStatus.set(hash, 'restricted');
+      moderationStatus.set(hash, 'quarantine');
+    }
     const jobId = 'job-unrestrict-1';
     jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'un-age-restrict-all', status: 'running', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, created_at: 't', updated_at: 't' });
     await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'un-age-restrict-all', phase: 'media' }, mockEnv);
