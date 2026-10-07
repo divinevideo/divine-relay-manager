@@ -232,19 +232,20 @@ negotiation, so order matters and the gap should be minimized:
 
 - `npx wrangler queues list` shows the prod queue with a consumer attached.
 - **Use a throwaway test account for the checks below, in either environment.**
-  Staging's worker points at production's moderation service and media server
-  (`MODERATION_ADMIN_URL` and `CDN_DOMAIN` in `wrangler.staging.toml`), so a bulk
-  action run from staging changes real production media.
-- Run one bulk action on that account; confirm `{jobId}` returns, a queue-consumer
-  log line fires (`npx wrangler tail`), the job row reaches `done` with non-zero counts,
-  and Blossom shows the media in the state the action sets: Age Restrict All ->
-  AgeRestricted (18+ gate), Delete All -> Deleted. The age-review withhold
-  (`age-restrict-all`) sets Restricted.
+  Staging's worker uses production's moderation service and media server (its
+  `MODERATION_API` service binding and `CDN_DOMAIN` in `wrangler.staging.toml` are
+  the same as prod's), so a bulk action run from staging changes real production
+  media.
+- On a fresh test account, block one video first (Block Media on a report about it,
+  or the file's page in moderation-service's admin), then run Age Restrict All.
+  Confirm `{jobId}` returns, a queue-consumer log line fires (`npx wrangler tail`),
+  and the job row reaches `done`. In Blossom the blocked video stays Banned and the
+  others become AgeRestricted (18+ gate), and the result message counts 1 file left
+  as it was. Delete All sets Deleted; the age-review withhold (`age-restrict-all`)
+  sets Restricted.
 - Bulk actions read each file's status from Blossom first, so the worker needs
   `BLOSSOM_WEBHOOK_SECRET` (prod and staging bind it). Without it every file fails
   with "could not read current status".
-- Block one of the test account's videos, then run Age Restrict All: the blocked
-  video stays Banned in Blossom, and the result message counts it as left as it was.
 - `bulk_jobs` table is created on demand in the prod D1 (`divine-moderation-decisions-prod`),
   and its `media_skipped` column is added on demand to an existing table.
 
