@@ -242,6 +242,18 @@ describe('UserActions', () => {
     })));
   });
 
+  it('Delete All says files it left alone were already blocked or deleted', async () => {
+    api.getBulkJobStatus.mockResolvedValue(doneJob('delete-all', { mediaSkipped: 2 }));
+    renderWithProvider(<UserActions pubkey={PUBKEY} />);
+    fireEvent.click(screen.getByRole('button', { name: /Delete All Content/i }));
+    const dialog = screen.getByRole('alertdialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Confirm Delete' }));
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({
+      title: expect.stringMatching(/Deleted 2 media file\(s\)/i),
+      description: '2 file(s) left as they were (already blocked or deleted).',
+    })));
+  });
+
   it('says nothing about files left alone when there were none, or the worker predates the count', async () => {
     renderWithProvider(<UserActions pubkey={PUBKEY} />); // doneJob has no mediaSkipped
     fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));

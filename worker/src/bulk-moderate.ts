@@ -137,23 +137,8 @@ const MODERATION_LEVEL = new Map<string, MediaLevel>([
 ]);
 
 // The current states each media action may change. Blocked is in no row: no
-// bulk action touches a blocked blob. How the two sources combine:
-//   both allow it            -> change the blob.
-//   blossom does not         -> leave it alone and count it. What viewers are
-//                               served is already at least as strict as the
-//                               action (or, for SAFE, there is nothing hidden
-//                               to undo), so leaving it exposes nothing. This
-//                               is the common case for a blob gated or blocked
-//                               in blossom's admin UI, which moderation-service
-//                               never hears about.
-//   blossom allows it, moderation-service does not -> a failure naming both. The
-//                               blob is being served more openly than the record
-//                               says: either a block just landed and blossom's
-//                               read is stale, or someone unblocked it in
-//                               blossom's admin UI and the record is stale.
-//                               Acting could undo a fresh block; skipping
-//                               quietly could leave a minor's video public. A
-//                               person has to look.
+// bulk action touches a blocked blob. How the two sources combine is in
+// decideMediaChange.
 //   AGE_RESTRICTED (Age Restrict All): only from open. Skips hidden and
 //     blocked (that would loosen them) and already-gated (nothing to do).
 //   QUARANTINE (age review's hide): from open or gated. Tightening an 18+ blob
@@ -175,6 +160,50 @@ const MAY_CHANGE_FROM: Record<MediaAction, readonly MediaLevel[]> = {
   SAFE: ['hidden'],
   DELETE: ['open', 'gated', 'hidden'],
 };
+
+// The state each action leaves a blob in.
+const RESULT_LEVEL: Record<MediaAction, MediaLevel> = {
+  AGE_RESTRICTED: 'gated',
+  QUARANTINE: 'hidden',
+  SAFE: 'open',
+  DELETE: 'deleted',
+};
+
+type MediaDecision = 'change' | 'leave' | 'disagree';
+
+// How the two status sources combine. blossom is what viewers are served;
+// moderation-service is the recorded decision. They drift: blossom's admin UI
+// never reports to moderation-service, moderation-service records an action
+// even when its call to blossom fails, and blossom's read can be up to 5
+// minutes stale in another POP.
+//
+//   blossom does not allow the action -> leave it alone (counted). What viewers
+//     get is already at least as strict as the action, or for SAFE there is
+//     nothing hidden to undo, so leaving it exposes nothing. The common case is
+//     a blob gated or blocked in blossom's admin UI.
+//   both allow it -> change it.
+//   blossom allows it, and the record already shows the action's own result ->
+//     change it. The record got ahead of blossom (its blossom call failed);
+//     sending the action again cannot weaken anything, since blossom's status
+//     already passed. Tightening actions only: for SAFE that record is "open",
+//     handled below.
+//   SAFE, blossom hidden, record open or gated -> leave it alone (counted). The
+//     hide came from somewhere other than a recorded hide (blossom's admin UI),
+//     so it is not age review's to undo; restricting un-hide to what age review
+//     hid is #293.
+//   otherwise -> disagree: the record is stricter than what blossom serves.
+//     Either a block just landed and blossom's read is stale, or it was lifted
+//     in blossom's admin UI and the record is stale. Acting could undo a fresh
+//     block, and leaving it quietly could leave a minor's video public, so it
+//     fails and a person looks.
+function decideMediaChange(mediaAction: MediaAction, blossom: MediaLevel, moderation: MediaLevel): MediaDecision {
+  const allowed = MAY_CHANGE_FROM[mediaAction];
+  if (!allowed.includes(blossom)) return 'leave';
+  if (allowed.includes(moderation)) return 'change';
+  if (mediaAction !== 'SAFE' && moderation === RESULT_LEVEL[mediaAction]) return 'change';
+  if (mediaAction === 'SAFE' && (moderation === 'open' || moderation === 'gated')) return 'leave';
+  return 'disagree';
+}
 
 const STATUS_READ_TIMEOUT_MS = 10000;
 
@@ -217,10 +246,9 @@ async function readModerationStatus(sha256: string, env: BulkModerateEnv): Promi
   return { raw: status as string, level };
 }
 
-// True to change the blob, false to leave it alone (see MAY_CHANGE_FROM). Throws,
-// leaving the blob unchanged and reported, when either status cannot be read
-// (an unreadable status is never treated as open) or when blossom serves it
-// more openly than moderation-service records.
+// True to change the blob, false to leave it alone (see decideMediaChange).
+// Throws, leaving the blob unchanged and reported, when either status cannot be
+// read (an unreadable status is never treated as open) or the two disagree.
 async function mayChangeMedia(
   sha256: string, mediaAction: MediaAction, env: BulkModerateEnv, blossomSecret: string | null,
 ): Promise<boolean> {
@@ -235,12 +263,13 @@ async function mayChangeMedia(
   } catch (error) {
     throw new Error(`could not read current status, left unchanged: ${formatError(error)}`);
   }
-  const allowed = MAY_CHANGE_FROM[mediaAction];
-  if (!allowed.includes(blossom.level)) return false;
-  if (allowed.includes(moderation.level)) return true;
-  throw new Error(
-    `status sources disagree (blossom ${blossom.raw}, moderation-service ${moderation.raw}), left unchanged`,
-  );
+  const decision = decideMediaChange(mediaAction, blossom.level, moderation.level);
+  if (decision === 'disagree') {
+    throw new Error(
+      `status sources disagree (blossom ${blossom.raw}, moderation-service ${moderation.raw}), left unchanged`,
+    );
+  }
+  return decision === 'change';
 }
 
 // Per-item chunk helpers, shared by the synchronous runBulkModeration (age-review)

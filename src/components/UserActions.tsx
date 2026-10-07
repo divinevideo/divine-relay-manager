@@ -231,8 +231,9 @@ export function UserActions({
       const partial = job.status === 'failed' || job.failures.length > 0;
       // Files the worker left alone because a decision it must not override was
       // already in place (#291). Absent from a worker that predates the count.
+      // Delete All deletes restricted files, so it only leaves blocked and deleted ones.
       const leftAlone = job.mediaSkipped
-        ? `${job.mediaSkipped} file(s) left as they were (already restricted, blocked or deleted).`
+        ? `${job.mediaSkipped} file(s) left as they were (already ${job.action === 'delete-all' ? 'blocked or deleted' : 'restricted, blocked or deleted'}).`
         : undefined;
       if (partial) {
         const counts = `${job.mediaProcessed} media across ${job.eventsProcessed} events`;

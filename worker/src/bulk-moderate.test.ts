@@ -478,6 +478,52 @@ describe('bulk actions never weaken a stronger decision (#291)', () => {
     expect(moderationActionFor(mockEnv, hashC)).toBeUndefined();
   });
 
+  it.each([
+    ['age-restrict-all', 'quarantine', 'QUARANTINE'],
+    ['age-gate-all', 'age_restricted', 'AGE_RESTRICTED'],
+    ['delete-all', 'delete', 'DELETE'],
+  ] as const)('%s re-sends when moderation-service already records %s but blossom still serves the file', async (action, recorded, sent) => {
+    // moderation-service records an action even when its call to blossom fails
+    // (it returns 502). Re-sending cannot weaken anything: blossom's own status
+    // already passed the check. Refusing would fail on every retry and leave
+    // the file public.
+    mockRelay([]);
+    mockUserVideos([{ sha256: hashA }]);
+    moderationStatus.set(hashA, recorded);
+    const result = await runBulkModeration(mockEnv, 'a'.repeat(64), action, 'r');
+    expect(moderationActionFor(mockEnv, hashA)).toBe(sent);
+    expect(result).toMatchObject({ success: true, failures: [] });
+  });
+
+  it.each([
+    ['unknown'],
+    ['safe'],
+    ['age_restricted'],
+  ])("age review's un-hide leaves alone a file hidden in blossom whose record is %s (not age review's to undo)", async (recorded) => {
+    // Hidden in blossom's admin UI or by some other path that never reached
+    // moderation-service. Un-hiding only what age review hid is #293.
+    mockUserVideos([{ sha256: hashA }]);
+    blossomStatus.set(hashA, 'restricted');
+    moderationStatus.set(hashA, recorded);
+    const result = await runBulkModeration(mockEnv, 'a'.repeat(64), 'un-age-restrict-all', 'r');
+    expect(moderationActionFor(mockEnv, hashA)).toBeUndefined();
+    expect(result).toMatchObject({ success: true, failures: [], mediaSkipped: 1 });
+  });
+
+  it.each([
+    ['permanent_ban'],
+    ['delete'],
+  ])("age review's un-hide fails, naming both, when blossom shows hidden but the record is %s", async (recorded) => {
+    mockUserVideos([{ sha256: hashA }]);
+    blossomStatus.set(hashA, 'restricted');
+    moderationStatus.set(hashA, recorded);
+    const result = await runBulkModeration(mockEnv, 'a'.repeat(64), 'un-age-restrict-all', 'r');
+    expect(moderationActionFor(mockEnv, hashA)).toBeUndefined();
+    expect(result.failures).toEqual([
+      expect.stringMatching(new RegExp(`^media:${hashA}:.*blossom restricted.*moderation-service ${recorded}`)),
+    ]);
+  });
+
   it("age review's un-hide leaves an open file alone (nothing to undo)", async () => {
     mockUserVideos([{ sha256: hashA }]);
     moderationStatus.set(hashA, 'review'); // open in both
