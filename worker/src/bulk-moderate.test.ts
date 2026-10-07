@@ -505,7 +505,7 @@ describe('bulk actions never weaken a stronger decision (#291)', () => {
     ['age_restricted'],
   ])("age review's un-hide leaves alone a file hidden in blossom whose record is %s (not age review's to undo)", async (recorded) => {
     // Hidden in blossom's admin UI or by some other path that never reached
-    // moderation-service. Un-hiding only what age review hid is #293.
+    // moderation-service. Un-hiding only what age review hid is #295.
     mockUserVideos([{ sha256: hashA }]);
     blossomStatus.set(hashA, 'restricted');
     moderationStatus.set(hashA, recorded);

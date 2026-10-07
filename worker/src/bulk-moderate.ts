@@ -143,10 +143,12 @@ const MODERATION_LEVEL = new Map<string, MediaLevel>([
 //     blocked (that would loosen them) and already-gated (nothing to do).
 //   QUARANTINE (age review's hide): from open or gated. Tightening an 18+ blob
 //     to hidden is the point of the withhold.
-//   SAFE (age review's un-hide on clear): only from hidden, so it can never
-//     un-gate an 18+ blob or unblock a blocked one. It can still un-hide a
-//     blob some other decision hid; restricting it to the blobs age review
-//     hid is #293.
+//   SAFE (age review's un-hide on clear): only from hidden, so it never acts
+//     on a blob that is currently 18+ or blocked. It does not know what the
+//     blob was before the hide: a blob that was 18+ and then hidden by the
+//     review comes back fully open, and a blob some other decision hid can
+//     be un-hidden too. Restoring only what the review hid, to its previous
+//     status, is #295.
 //   DELETE (Delete All's media phase): from open, gated or hidden.
 //
 // Still a check-then-write: a change landing between the read and the write is
@@ -190,7 +192,7 @@ type MediaDecision = 'change' | 'leave' | 'disagree';
 //   SAFE, blossom hidden, record open or gated -> leave it alone (counted). The
 //     hide came from somewhere other than a recorded hide (blossom's admin UI),
 //     so it is not age review's to undo; restricting un-hide to what age review
-//     hid is #293.
+//     hid is #295.
 //   otherwise -> disagree: the record is stricter than what blossom serves.
 //     Either a block just landed and blossom's read is stale, or it was lifted
 //     in blossom's admin UI and the record is stale. Acting could undo a fresh
