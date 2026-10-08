@@ -9,14 +9,14 @@ import { ReportedListCard } from './ReportedListCard';
 // Full-length hex, never truncated.
 const AUTHOR = 'a'.repeat(64);
 
-function listEvent(kind: number, tags: string[][]): NostrEvent {
+function listEvent(kind: number, tags: string[][], content = ''): NostrEvent {
   return {
     id: 'e'.repeat(64),
     pubkey: AUTHOR,
     created_at: 1751000000,
     kind,
     tags,
-    content: '',
+    content,
     sig: 'b'.repeat(128),
   };
 }
@@ -63,6 +63,29 @@ describe('ReportedListCard', () => {
 
     expect(screen.getByText('untitled-crew')).toBeInTheDocument();
     expect(screen.getByText('0 people')).toBeInTheDocument();
+  });
+
+  it('falls back to the d tag when the title is only whitespace', () => {
+    render(<ReportedListCard event={listEvent(30000, [['d', 'crew'], ['title', '   ']])} />);
+
+    expect(screen.getByText('crew')).toBeInTheDocument();
+  });
+
+  it('says the count leaves out private items when the list has encrypted content', () => {
+    render(
+      <ReportedListCard
+        event={listEvent(30005, [['d', 'faves'], ['title', 'Faves']], 'encrypted-payload')}
+      />,
+    );
+
+    expect(screen.getByText('0 videos')).toBeInTheDocument();
+    expect(screen.getByText(/private items not shown/i)).toBeInTheDocument();
+  });
+
+  it('does not mention private items for a list with no encrypted content', () => {
+    render(<ReportedListCard event={listEvent(30005, [['d', 'faves'], ['title', 'Faves']])} />);
+
+    expect(screen.queryByText(/private items/i)).not.toBeInTheDocument();
   });
 
   it('says so when the list has no description', () => {
