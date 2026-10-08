@@ -733,7 +733,17 @@ describe('async bulk job model', () => {
     ['an open age-review case', { openCaseFor: 'a'.repeat(64) }],
     ['a failed case lookup', { lookupThrows: true }],
   ])('a loosening job that meets %s mid-run', (_label, ageReview) => {
-    it.each(['age-gate-all', 'un-age-restrict-all'] as const)('%s stops as failed and sends nothing', async (action) => {
+    // Each file starts where the action would change it (open for the 18+
+    // gate, hidden for un-hide), so "sends nothing" can only come from the
+    // stop. On open files un-hide sends nothing anyway, stop or no stop.
+    it.each([
+      ['age-gate-all', 'active', 'unknown'],
+      ['un-age-restrict-all', 'restricted', 'quarantine'],
+    ] as const)('%s stops as failed and sends nothing', async (action, blossom, recorded) => {
+      for (const hash of [hashA, hashB]) {
+        blossomStatus.set(hash, blossom);
+        moderationStatus.set(hash, recorded);
+      }
       jobDb = makeJobDb(ageReview);
       mockEnv = { ...mockEnv, DB: jobDb.db };
       const jobId = `job-race-${action}`;
