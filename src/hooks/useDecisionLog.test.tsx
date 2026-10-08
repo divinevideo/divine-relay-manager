@@ -89,4 +89,18 @@ describe('useDecisionLog handling decisions', () => {
 
     expect(result.current.hasHandlingDecisions).toBe(true);
   });
+
+  it('names the newest handling decision, not a skip logged after it', async () => {
+    getDecisions.mockResolvedValue([
+      { action: 'auto_hide_skipped' },
+      { action: 'reviewed' },
+      { action: 'mark_ok' },
+    ]);
+
+    const { result } = renderHook(() => useDecisionLog('event-id'), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    expect(result.current.latestDecision?.action).toBe('auto_hide_skipped');
+    expect(result.current.latestHandlingDecision?.action).toBe('reviewed');
+  });
 });

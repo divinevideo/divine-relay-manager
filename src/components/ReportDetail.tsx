@@ -188,6 +188,8 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   const isUserBanned = moderationStatus.isUserBanned;
   const isEventDeleted = moderationStatus.isEventGone;
   const isResolved = decisionLog.hasHandlingDecisions || pubkeyDecisionLog.hasHandlingDecisions || isUserBanned || isEventDeleted;
+  // The banner names what handled the report, not a skip logged after it.
+  const lastHandlingDecision = decisionLog.latestHandlingDecision || pubkeyDecisionLog.latestHandlingDecision;
 
   // Auto-hide specific status
   const isPendingReview = decisionLog.isPendingReview;
@@ -645,11 +647,11 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
           )}
 
           {/* Decision log banner - show when there's a recorded moderation action (but not pending review) */}
-          {isResolved && !isPendingReview && (decisionLog.latestDecision || pubkeyDecisionLog.latestDecision) && (
+          {isResolved && !isPendingReview && lastHandlingDecision && (
             <div className="bg-green-50 dark:bg-green-950/30 border border-green-200 dark:border-green-800 rounded-lg px-3 py-2 flex items-center gap-2">
               <CheckCircle className="h-4 w-4 text-green-600 shrink-0" />
               <p className="text-sm text-green-700 dark:text-green-400">
-                Last action: {(decisionLog.latestDecision || pubkeyDecisionLog.latestDecision)?.action.replace(/_/g, ' ')} on {new Date((decisionLog.latestDecision || pubkeyDecisionLog.latestDecision)?.created_at || '').toLocaleDateString()}
+                Last action: {lastHandlingDecision.action.replace(/_/g, ' ')} on {new Date(lastHandlingDecision.created_at || '').toLocaleDateString()}
               </p>
             </div>
           )}

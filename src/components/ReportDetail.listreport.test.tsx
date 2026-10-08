@@ -57,6 +57,9 @@ vi.mock('@/hooks/useDecisionLog', () => ({
   useDecisionLog: () => ({
     hasDecisions: decisionRows.value.length > 0,
     hasHandlingDecisions: decisionRows.handling,
+    latestHandlingDecision: decisionRows.handling
+      ? decisionRows.value.find(row => !row.action.startsWith('auto_hide_'))
+      : undefined,
     isPendingReview: false,
     isDeleted: false,
     isAutoHidden: false,
@@ -133,6 +136,23 @@ describe('ReportDetail for a reported list', () => {
     status.value = moderationStatusMock({ isUserBanned: false, isEventGone: false });
     decisionRows.value = [];
     decisionRows.handling = false;
+  });
+
+  it("names the moderator's action, not a list report's skip logged after it", () => {
+    decisionRows.value = [
+      {
+        id: 2,
+        action: 'auto_hide_skipped',
+        reason: 'NS-harassment: list report, human review',
+        created_at: '2026-10-08T13:00:00Z',
+      },
+      { id: 1, action: 'mark_ok', reason: null, created_at: '2026-10-08T12:00:00Z' },
+    ];
+    decisionRows.handling = true;
+
+    renderDetail();
+
+    expect(screen.getByText(/Last action: mark ok/)).toBeInTheDocument();
   });
 
   describe('after its auto-hide was skipped', () => {
