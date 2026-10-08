@@ -19,6 +19,7 @@ import {
   TERMINAL_STATES,
   defaultResolutionForBand,
 } from '../../shared/age-review';
+import { getReportedList } from '../../shared/list-report';
 import { getUserStatus, type KeycastEnv } from './keycast-client';
 import { fetchAccountIdentity } from './relay-profile';
 
@@ -899,6 +900,21 @@ export class ReportWatcher implements DurableObject {
     const tier = config.tiers.find(t => t.categories.includes(category));
     if (!tier) {
       console.log(`[ReportWatcher] Category '${category}' not in any auto-hide tier, skipping`);
+      return;
+    }
+
+    // List reports go to human review, never to an automatic hide. Divine
+    // clients name the reported list in an `a` tag (see shared/list-report).
+    if (getReportedList(event)) {
+      console.log(`[ReportWatcher] List report for ${targetEventId}, leaving it to human review`);
+      await this.logDecision({
+        targetType: 'event',
+        targetId: targetEventId,
+        action: AUTO_HIDE_ACTION.skipped,
+        reason: `${category}: list report, human review`,
+        reportId: event.id,
+        reporterPubkey: event.pubkey,
+      });
       return;
     }
 
