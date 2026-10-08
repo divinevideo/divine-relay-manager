@@ -237,7 +237,10 @@ negotiation, so order matters and the gap should be minimized:
   the same as prod's), so a bulk action run from staging changes real production
   media.
 - On a fresh test account, block one video first (Block Media on a report about it,
-  or the file's page in moderation-service's admin), then run Age Restrict All.
+  or the file's page in moderation-service's admin), wait five minutes, then run
+  Age Restrict All. Blossom caches a file's status for up to five minutes per
+  location, so a run straight after the block can read the blocked video as active
+  and report a status disagreement for it instead of leaving it alone.
   Confirm `{jobId}` returns, a queue-consumer log line fires (`npx wrangler tail`),
   and the job row reaches `done`. In Blossom the blocked video stays Banned and the
   others become AgeRestricted (18+ gate), and the result message counts 1 file left
