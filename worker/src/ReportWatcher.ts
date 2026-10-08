@@ -907,6 +907,11 @@ export class ReportWatcher implements DurableObject {
     // clients name the reported list in an `a` tag (see shared/list-report).
     if (getReportedList(event)) {
       console.log(`[ReportWatcher] List report for ${targetEventId}, leaving it to human review`);
+      // A category in the immediate tier would have hidden a video on this one
+      // report, so the list report raises an alert instead of waiting silently.
+      if (isImmediateAutoHideTier(tier)) {
+        console.error(`[ALERT] [ReportWatcher] Immediate-tier list report for ${targetEventId} (${category}) needs human review`);
+      }
       await this.logDecision({
         targetType: 'event',
         targetId: targetEventId,

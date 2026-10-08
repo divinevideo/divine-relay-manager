@@ -1511,6 +1511,7 @@ describe('ReportWatcher', () => {
     const LIST_AUTHOR = 'f'.repeat(64);
 
     it('sends a list report to human review instead of auto-hiding it', async () => {
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
       await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
       await new Promise(resolve => setTimeout(resolve, 10));
 
@@ -1536,6 +1537,12 @@ describe('ReportWatcher', () => {
         .bind.mock.calls.flat();
       expect(bindArgs).toContain(AUTO_HIDE_ACTION.skipped);
       expect(bindArgs).toContain('sexual_minors: list report, human review');
+      // The category would have hidden a video on this one report, so the
+      // skip raises an alert rather than waiting silently in the queue.
+      expect(consoleError).toHaveBeenCalledWith(
+        expect.stringMatching(/^\[ALERT\].*list report.*sexual_minors/),
+      );
+      consoleError.mockRestore();
     });
 
     it('sends a list report to human review when its coordinate is uppercase hex', async () => {
@@ -2435,6 +2442,7 @@ describe('ReportWatcher', () => {
     });
 
     it('never auto-hides a list report, even once enough people report it', async () => {
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
       const countResult = createMockDbResult();
       countResult.first = vi.fn().mockResolvedValue({ count: 2 });
       mockDb.prepare = vi.fn().mockImplementation((sql: string) => {
@@ -2454,6 +2462,13 @@ describe('ReportWatcher', () => {
       await new Promise(resolve => setTimeout(resolve, 50));
 
       expect(mockFetch).not.toHaveBeenCalled();
+      // Threshold-tier categories wait for review without an alert. Filtered
+      // to list-report alerts: earlier tests' async work can log others here.
+      const listAlerts = consoleError.mock.calls
+        .map(([message]) => String(message))
+        .filter(message => message.startsWith('[ALERT]') && message.includes('list report'));
+      expect(listAlerts).toEqual([]);
+      consoleError.mockRestore();
     });
 
     it('should not require trusted client for threshold tier by default', async () => {
