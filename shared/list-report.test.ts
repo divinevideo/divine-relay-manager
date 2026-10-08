@@ -23,9 +23,16 @@ describe('getReportedList', () => {
     expect(getReportedList({ tags: [['a', `34236:${AUTHOR}:clip`]] })).toBeNull();
   });
 
-  it('ignores a coordinate whose pubkey is not 64 lowercase hex', () => {
-    expect(getReportedList({ tags: [['a', `30005:${'A'.repeat(64)}:faves`]] })).toBeNull();
+  it('ignores a coordinate whose pubkey is not 64 hex characters', () => {
     expect(getReportedList({ tags: [['a', `30005:${'a'.repeat(63)}:faves`]] })).toBeNull();
+    expect(getReportedList({ tags: [['a', `30005:${'g'.repeat(64)}:faves`]] })).toBeNull();
+  });
+
+  // A false miss sends a list report to auto-hide, the outcome this module
+  // exists to prevent; a false match only costs a moderator a look.
+  it('recognizes a coordinate whose pubkey is uppercase hex, as lowercase', () => {
+    expect(getReportedList({ tags: [['a', `30005:${'A'.repeat(64)}:faves`]] }))
+      .toEqual({ kind: LIST_KIND.videos, pubkey: AUTHOR, d: 'faves' });
   });
 
   it.each(['3e4', ' 30005', '30005 ', '030005', '0x7535', '+30005', '30005.0', ''])(

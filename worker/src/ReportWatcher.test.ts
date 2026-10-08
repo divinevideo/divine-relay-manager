@@ -1538,6 +1538,30 @@ describe('ReportWatcher', () => {
       expect(bindArgs).toContain('sexual_minors: list report, human review');
     });
 
+    it('sends a list report to human review when its coordinate is uppercase hex', async () => {
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const ws = getLastMockWebSocket();
+      ws!.simulateMessage(JSON.stringify(['EVENT', 'auto-hide-reports', {
+        id: 'list_report_uppercase',
+        pubkey: 'reporter_pubkey',
+        kind: 1984,
+        content: 'List report',
+        tags: [
+          ['e', 'list_event_id'],
+          ['p', LIST_AUTHOR],
+          ['a', `30005:${LIST_AUTHOR.toUpperCase()}:faves`],
+          ['report', 'sexual_minors'],
+          ['client', 'diVine'],
+        ],
+        created_at: Math.floor(Date.now() / 1000),
+      }]));
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
     it('still auto-hides a report whose a tag names something other than a list', async () => {
       await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
       await new Promise(resolve => setTimeout(resolve, 10));

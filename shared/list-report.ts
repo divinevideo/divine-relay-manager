@@ -23,7 +23,9 @@ export interface ReportedList {
 }
 
 const LIST_KINDS: ReadonlySet<number> = new Set(Object.values(LIST_KIND));
-const HEX_PUBKEY = /^[0-9a-f]{64}$/;
+// Case-insensitive, like isHex64 in the frontend: a client that emits uppercase
+// hex still named a list, and missing it would send the report to auto-hide.
+const HEX_PUBKEY = /^[0-9a-f]{64}$/i;
 // A kind is a plain decimal integer. Number() alone also accepts `3e4`,
 // `0x7535`, ` 30005` and `030005`, none of which name a kind in a coordinate.
 const DECIMAL_KIND = /^(0|[1-9]\d*)$/;
@@ -47,7 +49,7 @@ export function getReportedList(report: { tags: string[][] }): ReportedList | nu
     const kind = Number(kindText);
     const pubkey = tag[1].slice(first + 1, second);
     if (!DECIMAL_KIND.test(kindText) || !isListKind(kind) || !HEX_PUBKEY.test(pubkey)) continue;
-    return { kind, pubkey, d: tag[1].slice(second + 1) };
+    return { kind, pubkey: pubkey.toLowerCase(), d: tag[1].slice(second + 1) };
   }
   return null;
 }
