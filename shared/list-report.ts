@@ -24,6 +24,9 @@ export interface ReportedList {
 
 const LIST_KINDS: ReadonlySet<number> = new Set(Object.values(LIST_KIND));
 const HEX_PUBKEY = /^[0-9a-f]{64}$/;
+// A kind is a plain decimal integer. Number() alone also accepts `3e4`,
+// `0x7535`, ` 30005` and `030005`, none of which name a kind in a coordinate.
+const DECIMAL_KIND = /^(0|[1-9]\d*)$/;
 
 /** Whether an event kind is one of the Divine list kinds. */
 export function isListKind(kind: number): kind is ListKind {
@@ -40,9 +43,10 @@ export function getReportedList(report: { tags: string[][] }): ReportedList | nu
     const first = tag[1].indexOf(':');
     const second = first < 0 ? -1 : tag[1].indexOf(':', first + 1);
     if (second < 0) continue;
-    const kind = Number(tag[1].slice(0, first));
+    const kindText = tag[1].slice(0, first);
+    const kind = Number(kindText);
     const pubkey = tag[1].slice(first + 1, second);
-    if (!isListKind(kind) || !HEX_PUBKEY.test(pubkey)) continue;
+    if (!DECIMAL_KIND.test(kindText) || !isListKind(kind) || !HEX_PUBKEY.test(pubkey)) continue;
     return { kind, pubkey, d: tag[1].slice(second + 1) };
   }
   return null;

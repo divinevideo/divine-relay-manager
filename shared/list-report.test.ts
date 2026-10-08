@@ -28,6 +28,13 @@ describe('getReportedList', () => {
     expect(getReportedList({ tags: [['a', `30005:${'a'.repeat(63)}:faves`]] })).toBeNull();
   });
 
+  it.each(['3e4', ' 30005', '30005 ', '030005', '0x7535', '+30005', '30005.0', ''])(
+    'ignores a kind prefix that is not a plain decimal integer: %j',
+    (prefix) => {
+      expect(getReportedList({ tags: [['a', `${prefix}:${AUTHOR}:faves`]] })).toBeNull();
+    },
+  );
+
   it('ignores a coordinate with no d separator', () => {
     expect(getReportedList({ tags: [['a', `30005:${AUTHOR}`]] })).toBeNull();
   });
