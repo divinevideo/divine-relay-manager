@@ -510,17 +510,20 @@ describe('bulk actions never weaken a stronger decision (#291)', () => {
     expect(result).toMatchObject({ success: true, failures: [], mediaSkipped: 2 });
   });
 
-  it("age review's un-hide restores only hidden files, never blocked, 18+ or open ones", async () => {
+  it("age review's un-hide restores only hidden files and quietly leaves blocked and 18+ ones", async () => {
     blossomStatus.set(hashA, 'restricted');
     moderationStatus.set(hashA, 'quarantine');
     blossomStatus.set(hashB, 'banned');
     moderationStatus.set(hashB, 'quarantine'); // stale record; blossom is banned
     blossomStatus.set(hashC, 'age_restricted');
     moderationStatus.set(hashC, 'age_restricted'); // both agree: 18+, not hidden
-    await runBulkModeration(mockEnv, 'a'.repeat(64), 'un-age-restrict-all', 'r');
+    const result = await runBulkModeration(mockEnv, 'a'.repeat(64), 'un-age-restrict-all', 'r');
     expect(moderationActionFor(mockEnv, hashA)).toBe('SAFE');
     expect(moderationActionFor(mockEnv, hashB)).toBeUndefined();
     expect(moderationActionFor(mockEnv, hashC)).toBeUndefined();
+    // Skips, not failures: a failure here would fail the case's clear step on
+    // every retry for any account with a blocked or 18+ video.
+    expect(result).toMatchObject({ success: true, failures: [], mediaProcessed: 1, mediaSkipped: 2 });
   });
 
   it.each([
