@@ -266,7 +266,8 @@ When a moderation action completes, `handleModerate()` triggers side effects:
 ### ReportWatcher (Durable Object)
 
 - Maintains persistent WebSocket to relay, subscribes to kind 1984 (report) events
-- Auto-hides reported content when: category matches high-priority list AND client tag is from a trusted app AND target hasn't been human-reviewed
+- Auto-hides reported content when: category matches high-priority list AND client tag is from a trusted app AND target hasn't been human-reviewed AND the report does not name a Divine list
+- Never auto-hides a list report: one whose `a` tag is a `30000` or `30005` coordinate (`shared/list-report.ts`). It logs `auto_hide_skipped` ("list report, human review") and leaves the list to a moderator. This check runs before the trusted-client gate, so it applies to every tier
 - Dedup: checks `moderation_decisions` table before acting
 - Health check: cron trigger every 5 minutes, internal heartbeat every 30 seconds
 - Known limitation: same-second concurrent reports can bypass dedup (idempotent, no user impact)
