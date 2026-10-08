@@ -284,7 +284,13 @@ queue.
    then check for jobs a stale tab queued between steps 2 and 3
    (replace `<step-2 time>` with a UTC time a minute before you ran step 2, in
    the stored format `YYYY-MM-DDTHH:MM:SS.000Z`). For any row, the older worker
-   may have un-restricted that account's media: re-gate it by hand.
+   may have un-restricted that account's media, including files previously
+   blocked or hidden. Restore each file's prior restriction from pre-rollback
+   state or verified moderation history; applying the 18+ gate to everything
+   is not enough. The current moderation record may already reflect the
+   rollback's un-restrict action, so do not use it alone to infer the prior
+   decision. If that decision cannot be established, keep the file withheld
+   until a moderator determines the appropriate restriction.
 
    ```bash
    npx wrangler d1 execute divine-moderation-decisions-prod --remote --command \
