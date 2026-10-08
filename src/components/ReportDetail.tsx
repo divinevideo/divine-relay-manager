@@ -54,6 +54,8 @@ import { CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, getReportCategory } from "@/
 import { KIND_NAMES } from "@/lib/kindNames";
 import { Flag, CheckCircle, History, Ban, ShieldX, Link2, User, FileText, Repeat2, FileCode, RefreshCw, EyeOff, Eye } from "lucide-react";
 import { CopyableId, CopyableTags } from "@/components/CopyableId";
+import { ReportedListCard } from "@/components/ReportedListCard";
+import { LIST_KIND, isListKind } from "../../shared/list-report";
 import type { NostrEvent } from "@nostrify/nostrify";
 
 function getKindLabel(kind: number): string {
@@ -65,6 +67,8 @@ function getKindLabel(kind: number): string {
   if (kind === 1) return 'Note';
   if (isRepostKind(kind)) return 'Repost';
   if (kind === 0) return 'Profile';
+  if (kind === LIST_KIND.people) return 'People List';
+  if (kind === LIST_KIND.videos) return 'Video List';
   return entry.name;
 }
 
@@ -877,6 +881,11 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                 isRechecking={moderationStatus.isChecking}
               />
             </>
+          )}
+
+          {/* A list's content is empty or encrypted, so summarize it from its tags */}
+          {displayEvent && isListKind(displayEvent.kind) && (
+            <ReportedListCard event={displayEvent} />
           )}
 
           {/* Repost Original Content - show when the reported event is a repost */}
