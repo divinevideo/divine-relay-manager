@@ -55,10 +55,11 @@ import { KIND_NAMES } from "@/lib/kindNames";
 import { Flag, CheckCircle, History, Ban, ShieldX, Link2, User, FileText, Repeat2, FileCode, RefreshCw, EyeOff, Eye } from "lucide-react";
 import { CopyableId, CopyableTags } from "@/components/CopyableId";
 import { ReportedListCard } from "@/components/ReportedListCard";
-import { LIST_KIND, isListKind } from "../../shared/list-report";
+import { LIST_KIND_LABEL, isListKind } from "../../shared/list-report";
 import type { NostrEvent } from "@nostrify/nostrify";
 
 function getKindLabel(kind: number): string {
+  if (isListKind(kind)) return LIST_KIND_LABEL[kind];
   const entry = KIND_NAMES[kind];
   if (!entry) return `Event (kind ${kind})`;
   // Use short, moderator-friendly names
@@ -67,8 +68,6 @@ function getKindLabel(kind: number): string {
   if (kind === 1) return 'Note';
   if (isRepostKind(kind)) return 'Repost';
   if (kind === 0) return 'Profile';
-  if (kind === LIST_KIND.people) return 'People List';
-  if (kind === LIST_KIND.videos) return 'Video List';
   return entry.name;
 }
 

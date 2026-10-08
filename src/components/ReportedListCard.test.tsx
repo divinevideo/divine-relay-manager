@@ -35,7 +35,7 @@ describe('ReportedListCard', () => {
       />,
     );
 
-    expect(screen.getByText('Video list')).toBeInTheDocument();
+    expect(screen.getByText('Video List')).toBeInTheDocument();
     expect(screen.getByText('Best skate clips')).toBeInTheDocument();
     expect(screen.getByText('Only the good ones')).toBeInTheDocument();
     expect(screen.getByText('2 videos')).toBeInTheDocument();
@@ -54,7 +54,7 @@ describe('ReportedListCard', () => {
       />,
     );
 
-    expect(screen.getByText('People list')).toBeInTheDocument();
+    expect(screen.getByText('People List')).toBeInTheDocument();
     expect(screen.getByText('3 people')).toBeInTheDocument();
   });
 

@@ -4,7 +4,7 @@
 import type { NostrEvent } from '@nostrify/nostrify';
 import { List } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { LIST_KIND } from '../../shared/list-report';
+import { LIST_KIND, LIST_KIND_LABEL, isListKind } from '../../shared/list-report';
 
 function firstTagValue(event: NostrEvent, name: string): string | undefined {
   return event.tags.find((tag) => tag[0] === name)?.[1]?.trim() || undefined;
@@ -28,7 +28,7 @@ function sizeLabel(event: NostrEvent): string {
 export function ReportedListCard({ event }: { event: NostrEvent }) {
   const title = firstTagValue(event, 'title') || firstTagValue(event, 'd') || 'Untitled list';
   const description = firstTagValue(event, 'description');
-  const kindLabel = event.kind === LIST_KIND.people ? 'People list' : 'Video list';
+  const kindLabel = isListKind(event.kind) ? LIST_KIND_LABEL[event.kind] : `Kind ${event.kind}`;
 
   return (
     <Card

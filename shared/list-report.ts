@@ -16,6 +16,12 @@ export const LIST_KIND = {
 
 export type ListKind = (typeof LIST_KIND)[keyof typeof LIST_KIND];
 
+/** What a moderator calls each list kind, in the report heading and on the card. */
+export const LIST_KIND_LABEL: Record<ListKind, string> = {
+  [LIST_KIND.people]: 'People List',
+  [LIST_KIND.videos]: 'Video List',
+};
+
 export interface ReportedList {
   kind: ListKind;
   pubkey: string;
