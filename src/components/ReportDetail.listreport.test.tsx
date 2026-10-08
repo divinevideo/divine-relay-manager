@@ -48,15 +48,21 @@ vi.mock('@/hooks/useCurrentUser', () => ({
 vi.mock('@/hooks/useAppContext', () => ({
   useAppContext: () => ({ config: { relayUrl: 'wss://relay.example' } }),
 }));
+// The decision log the reported list's id returns. Empty by default.
+const decisionRows = vi.hoisted(() => ({
+  value: [] as { id: number; action: string; reason: string | null; created_at: string }[],
+  handling: false,
+}));
 vi.mock('@/hooks/useDecisionLog', () => ({
   useDecisionLog: () => ({
-    hasDecisions: false,
+    hasDecisions: decisionRows.value.length > 0,
+    hasHandlingDecisions: decisionRows.handling,
     isPendingReview: false,
     isDeleted: false,
     isAutoHidden: false,
     isAutoHideRestored: false,
-    decisions: [],
-    latestDecision: null,
+    decisions: decisionRows.value,
+    latestDecision: decisionRows.value[0] ?? null,
     refetch: vi.fn(),
   }),
 }));
@@ -125,6 +131,35 @@ describe('ReportDetail for a reported list', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     status.value = moderationStatusMock({ isUserBanned: false, isEventGone: false });
+    decisionRows.value = [];
+    decisionRows.handling = false;
+  });
+
+  describe('after its auto-hide was skipped', () => {
+    beforeEach(() => {
+      decisionRows.value = [{
+        id: 1,
+        action: 'auto_hide_skipped',
+        reason: 'NS-harassment: list report, human review',
+        created_at: '2026-10-08T12:00:00Z',
+      }];
+      decisionRows.handling = false;
+    });
+
+    it('does not present the report as already handled', () => {
+      renderDetail();
+
+      expect(screen.queryByText(/Already Handled/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/Last action:/)).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Reopen' })).not.toBeInTheDocument();
+    });
+
+    it('still shows the skip in the decision history', () => {
+      renderDetail();
+
+      expect(screen.getByText(/Decision History/)).toBeInTheDocument();
+      expect(screen.getByText('auto hide skipped')).toBeInTheDocument();
+    });
   });
 
   it('names the list type in the reported-content heading', () => {

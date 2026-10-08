@@ -187,7 +187,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // D1 decisions are audit log only, not status indicators
   const isUserBanned = moderationStatus.isUserBanned;
   const isEventDeleted = moderationStatus.isEventGone;
-  const isResolved = decisionLog.hasDecisions || pubkeyDecisionLog.hasDecisions || isUserBanned || isEventDeleted;
+  const isResolved = decisionLog.hasHandlingDecisions || pubkeyDecisionLog.hasHandlingDecisions || isUserBanned || isEventDeleted;
 
   // Auto-hide specific status
   const isPendingReview = decisionLog.isPendingReview;
@@ -322,7 +322,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
             title: "Reopened, but resolution labels could not all be cleared",
             description: "Some may remain, so this report may stay hidden.",
             variant: "destructive" as const,
-            // The decisions ARE gone on this path, so hasDecisions goes false
+            // The decisions ARE gone on this path, so hasHandlingDecisions goes false
             // and the Reopen button unmounts. Retrying is the right advice and
             // the cleanup is idempotent, so the retry has to come with it, and
             // it does not expire on a timer.
@@ -816,7 +816,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
               <CardHeader className="py-3">
                 <CardTitle className="text-sm flex items-center gap-2 text-green-700 dark:text-green-400">
                   <History className="h-4 w-4" />
-                  Already Handled ({decisionLog.decisions.length} action{decisionLog.decisions.length !== 1 ? 's' : ''})
+                  {decisionLog.hasHandlingDecisions ? 'Already Handled' : 'Decision History'} ({decisionLog.decisions.length} action{decisionLog.decisions.length !== 1 ? 's' : ''})
                 </CardTitle>
               </CardHeader>
               <CardContent className="py-0 pb-3">
@@ -1280,7 +1280,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
             {/* Resolution actions - dismiss or reopen */}
             <div className="flex flex-wrap gap-2">
               {/* Reopen: only when there are decisions to undo */}
-              {(decisionLog.hasDecisions || pubkeyDecisionLog.hasDecisions) && !isUserBanned && !isEventDeleted && (
+              {(decisionLog.hasHandlingDecisions || pubkeyDecisionLog.hasHandlingDecisions) && !isUserBanned && !isEventDeleted && (
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button

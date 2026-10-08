@@ -59,3 +59,34 @@ describe('useDecisionLog auto-hide state', () => {
     expect(result.current.isAutoHideRestoreFailed).toBe(true);
   });
 });
+
+describe('useDecisionLog handling decisions', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('does not count a skipped or pending auto-hide as handling the report', async () => {
+    getDecisions.mockResolvedValue([
+      { action: 'auto_hide_skipped' },
+      { action: 'auto_hide_pending' },
+    ]);
+
+    const { result } = renderHook(() => useDecisionLog('event-id'), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    expect(result.current.hasDecisions).toBe(true);
+    expect(result.current.hasHandlingDecisions).toBe(false);
+  });
+
+  it('counts a moderator decision beside a skipped auto-hide', async () => {
+    getDecisions.mockResolvedValue([
+      { action: 'reviewed' },
+      { action: 'auto_hide_skipped' },
+    ]);
+
+    const { result } = renderHook(() => useDecisionLog('event-id'), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    expect(result.current.hasHandlingDecisions).toBe(true);
+  });
+});

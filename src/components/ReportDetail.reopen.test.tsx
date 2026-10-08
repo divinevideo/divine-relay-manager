@@ -50,9 +50,11 @@ vi.mock('@/hooks/useAppContext', () => ({
   useAppContext: () => ({ config: { relayUrl: 'wss://relay.example' } }),
 }));
 
-// The report has decisions (so Reopen renders) and is neither banned nor gone.
+// The report has handling decisions (so Reopen renders) and is neither banned
+// nor gone.
 const decisionLog = vi.hoisted(() => ({
   hasDecisions: true,
+  hasHandlingDecisions: true,
   isPendingReview: false,
   isDeleted: false,
   isAutoHidden: false,
@@ -314,7 +316,7 @@ describe('ReportDetail reopen reporting', () => {
     // what it was asked. Naming the relay as the culprit would send a moderator
     // chasing a relay problem that is not there.
     expect(text).not.toMatch(/the relay did not/i);
-    // The decisions ARE deleted on this path, so hasDecisions goes false and
+    // The decisions ARE deleted on this path, so hasHandlingDecisions goes false and
     // the Reopen button unmounts. Telling a moderator to retry without giving
     // them the means is a dead end, so the retry rides on the toast -- and it
     // must not expire on a timer, since nothing else can reach this action
