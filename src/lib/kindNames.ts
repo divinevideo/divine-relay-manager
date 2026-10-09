@@ -65,6 +65,7 @@ export const KIND_NAMES: Record<number, { name: string; description: string; nip
   30002: { name: 'Relay Sets', description: 'Relay list sets', nip: 'NIP-51' },
   30003: { name: 'Bookmark Sets', description: 'Bookmark categories', nip: 'NIP-51' },
   30004: { name: 'Curation Sets', description: 'Curated content sets', nip: 'NIP-51' },
+  30005: { name: 'Video Curation Sets', description: 'Curated video sets (Divine video lists)', nip: 'NIP-51' },
   30008: { name: 'Profile Badges', description: 'Badges on profile', nip: 'NIP-58' },
   30009: { name: 'Badge Definition', description: 'Define a badge', nip: 'NIP-58' },
   30015: { name: 'Interest Sets', description: 'Interest categories', nip: 'NIP-51' },

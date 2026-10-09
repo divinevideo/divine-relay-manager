@@ -20,7 +20,8 @@ The app deploys under the name `divine-relay-admin`.
   dashboard, protected-minor visibility, minor-account onboarding, and keycast integration.
 - **Auto-hide** — a `ReportWatcher` Durable Object holds a persistent relay subscription to
   kind-1984 events and auto-hides high-priority reports from trusted apps unless a human has
-  already reviewed the target.
+  already reviewed the target. Reports against a Divine list (people or video) are never
+  auto-hidden; they are left to a moderator.
 - **Media preview** — extracts media URLs from events and, when direct load fails, falls back
   to an authenticated Blossom admin proxy so moderators can view blocked content.
 - **AI context** — Hive AI and AI-detection reports, transcript analysis, scene
