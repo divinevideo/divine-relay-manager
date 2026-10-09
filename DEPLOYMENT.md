@@ -250,7 +250,12 @@ negotiation, so order matters and the gap should be minimized:
   `BLOSSOM_WEBHOOK_SECRET` (prod and staging bind it). Without it every file fails
   with "could not read current status".
 - `bulk_jobs` table is created on demand in the prod D1 (`divine-moderation-decisions-prod`),
-  and its `media_skipped` column is added on demand to an existing table.
+  and its `media_skipped` and `kind` columns are added on demand to an existing table.
+- **Delete by kind (#289).** Open Bulk Delete by Kind on a throwaway account, check
+  that its per-kind counts match the account, delete one kind, and confirm the job
+  row reaches `done`. Delete by kind touches only the relay of the environment it
+  runs in, never media, so unlike the Age Restrict All check, a staging run does
+  not change production files.
 
 ### Rollback
 
@@ -258,6 +263,29 @@ Rolling back to a build from before this async job model: revert the worker
 deploy (`wrangler rollback` or redeploy the prior version). The `bulk_jobs` table
 and the queue persist but go inert (that build has no producer/consumer). No data
 cleanup required.
+
+Rolling back past #289 (to any build without delete by kind): either order is
+safe.
+
+- **Worker first:** the newer dialog gets a 404 from
+  `GET /api/bulk-moderate/kind-counts`, so it shows the count error and keeps
+  Delete off, and a `delete-kind` enqueue gets a 400.
+- **Frontend first:** the older dialog deletes event by event from the browser,
+  against any worker.
+
+Either way, stop the unfinished `delete-kind` jobs after the worker rollback. The
+older worker acknowledges their queued messages and does nothing, and only a
+status read marks a stale job failed, which the older dialog never makes, so
+those rows would otherwise stay `running`. Note the listed (pubkey, kind) pairs:
+each account is part-way through deleting that kind. Re-run those deletes after
+the roll-forward.
+
+```bash
+npx wrangler d1 execute divine-moderation-decisions-prod --remote --command \
+  "SELECT job_id, pubkey, kind FROM bulk_jobs WHERE action = 'delete-kind' AND status IN ('pending', 'running');"
+npx wrangler d1 execute divine-moderation-decisions-prod --remote --command \
+  "UPDATE bulk_jobs SET status = 'failed', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE action = 'delete-kind' AND status IN ('pending', 'running');"
+```
 
 Rolling back past #290 (to any build that has the job model but not
 `age-gate-all`): do not revert the worker first. Follow the steps below in order,
@@ -283,6 +311,11 @@ queue.
 
 3. **Roll the worker back.** From then on it refuses `age-gate-all` at enqueue
    with a 400 ("Invalid action").
+   If the target build also predates #289, list and stop the unfinished
+   `delete-kind` jobs here too, with the two commands under "Rolling back past
+   #289" above, and note their (pubkey, kind) pairs to re-run after the
+   roll-forward.
+
 4. **Run step 2's two commands again** (keep the time you noted the first time),
    then check for jobs a stale tab queued between steps 2 and 3
    (replace `<step-2 time>` with a UTC time a minute before you ran step 2, in
