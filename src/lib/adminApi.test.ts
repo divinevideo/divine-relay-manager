@@ -1897,13 +1897,13 @@ describe('adminApi', () => {
     it('sends the kind and attribution for a kind-scoped delete', async () => {
       mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, jobId: 'job-9' }) });
 
-      await bulkModerate(API_URL, 'a'.repeat(64), 'delete-all', 'spam', {
+      await bulkModerate(API_URL, 'a'.repeat(64), 'delete-kind', 'spam', {
         kind: 7, moderatorPubkey: 'd'.repeat(64), reportId: 'e'.repeat(64),
       });
 
       const body = JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string);
       expect(body).toEqual({
-        pubkey: 'a'.repeat(64), action: 'delete-all', reason: 'spam',
+        pubkey: 'a'.repeat(64), action: 'delete-kind', reason: 'spam',
         kind: 7, moderatorPubkey: 'd'.repeat(64), reportId: 'e'.repeat(64),
       });
     });

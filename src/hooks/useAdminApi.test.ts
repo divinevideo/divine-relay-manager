@@ -78,15 +78,15 @@ describe('useAdminApi', () => {
     expect(listSuspendedPubkeys).toHaveBeenCalledWith(API_URL, { timeoutMs: 4000 });
   });
 
-  // A dropped kind would turn a by-kind delete into a delete of the whole
-  // account, media included.
+  // A dropped kind gets the by-kind delete refused (400); a dropped moderator or
+  // report loses the attribution.
   it('forwards the kind and attribution to the bulk enqueue', () => {
     const { result } = renderHook(() => useAdminApi());
     const options = { kind: 7, moderatorPubkey: 'd'.repeat(64), reportId: 'e'.repeat(64) };
 
-    result.current.bulkModerate('abc', 'delete-all', 'spam', options);
+    result.current.bulkModerate('abc', 'delete-kind', 'spam', options);
 
-    expect(bulkModerate).toHaveBeenCalledWith(API_URL, 'abc', 'delete-all', 'spam', options);
+    expect(bulkModerate).toHaveBeenCalledWith(API_URL, 'abc', 'delete-kind', 'spam', options);
   });
 
   it('forwards the pubkey to the kind-count read', () => {
