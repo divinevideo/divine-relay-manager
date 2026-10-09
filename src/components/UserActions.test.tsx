@@ -400,6 +400,30 @@ describe('UserActions', () => {
     expect(screen.getByRole('button', { name: /Unban User/i })).toBeEnabled();
   });
 
+  // A finished job's status can be read again later (a refocused tab once it
+  // is stale), and that read can fail. The job is over, so that is not lost
+  // tracking, and the bulk buttons stay usable.
+  it('does not report lost track when a finished job\'s later status read fails', async () => {
+    api.getBulkJobStatus.mockResolvedValue(doneJob('age-gate-all'));
+    const onActionComplete = vi.fn();
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <TooltipProvider><UserActions pubkey={PUBKEY} onActionComplete={onActionComplete} /></TooltipProvider>
+      </QueryClientProvider>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
+    await waitFor(() => expect(onActionComplete).toHaveBeenCalledTimes(1));
+
+    api.getBulkJobStatus.mockRejectedValue(new Error('Network connection lost'));
+    await qc.refetchQueries({ queryKey: ['bulk-job'] });
+    await waitFor(() => expect(qc.getQueryState(['bulk-job', PUBKEY, 'job-1'])?.status).toBe('error'));
+
+    expect(screen.queryByText('Lost track of the bulk action')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Age Restrict All$/i })).toBeEnabled();
+    expect(screen.getByRole('button', { name: /Delete All Content/i })).toBeEnabled();
+  });
+
   it('"Check again" re-reads the job and settles it', async () => {
     api.getBulkJobStatus.mockRejectedValueOnce(new Error('Network connection lost'));
     api.getBulkJobStatus.mockResolvedValue(doneJob('age-gate-all'));
