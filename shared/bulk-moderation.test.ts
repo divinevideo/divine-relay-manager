@@ -6,6 +6,7 @@ import {
   formatOverflowMarker,
   isListingGapWarning,
   jobFailure,
+  mediaFailure,
   parseFailure,
   parseOverflowMarker,
   sameSecondGapWarning,
@@ -30,6 +31,17 @@ describe('bulk failure strings', () => {
     });
   });
 
+  it('round-trips a media failure, including the status-check failures (#291)', () => {
+    const sha256 = 'f'.repeat(64);
+    for (const error of [
+      'Moderation service returned 500',
+      'could not read current status, left unchanged: blossom returned 500',
+      'status sources disagree (blossom active, moderation-service permanent_ban), left unchanged',
+    ]) {
+      expect(parseFailure(mediaFailure(sha256, error))).toEqual({ type: 'media', sha256, error });
+    }
+  });
+
   it('round-trips an enumeration warning', () => {
     expect(parseFailure(enumerationWarning(PUBKEY, 'relay returned 2 event(s); ignored them'))).toEqual({
       type: 'enumeration', pubkey: PUBKEY, warning: 'relay returned 2 event(s); ignored them',
@@ -50,7 +62,7 @@ describe('bulk failure strings', () => {
   });
 
   it('leaves any other string as it is', () => {
-    expect(parseFailure('media:abc:boom')).toEqual({ type: 'other', text: 'media:abc:boom' });
+    expect(parseFailure('blob:abc:boom')).toEqual({ type: 'other', text: 'blob:abc:boom' });
   });
 
   it('recognises both listing-gap warnings it builds, and nothing else', () => {

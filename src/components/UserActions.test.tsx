@@ -36,7 +36,7 @@ vi.mock('@/hooks/useCurrentUser', () => ({
 
 const PUBKEY = 'a'.repeat(64);
 
-function doneJob(action: 'age-restrict-all' | 'delete-all', over: Partial<Record<string, unknown>> = {}) {
+function doneJob(action: 'age-gate-all' | 'delete-all', over: Partial<Record<string, unknown>> = {}) {
   return {
     jobId: 'job-1', pubkey: PUBKEY, action, status: 'done',
     eventsProcessed: 3, mediaProcessed: 2, failures: [], createdAt: 't', updatedAt: 't', ...over,
@@ -46,7 +46,7 @@ function doneJob(action: 'age-restrict-all' | 'delete-all', over: Partial<Record
 beforeEach(() => {
   vi.clearAllMocks();
   api.bulkModerate.mockResolvedValue({ success: true, jobId: 'job-1' });
-  api.getBulkJobStatus.mockResolvedValue(doneJob('age-restrict-all'));
+  api.getBulkJobStatus.mockResolvedValue(doneJob('age-gate-all'));
   api.banPubkey.mockResolvedValue({ unconfirmed: null });
   api.unbanPubkey.mockResolvedValue({ success: true });
   api.suspendPubkey.mockResolvedValue({ success: true });
@@ -96,6 +96,24 @@ describe('UserActions', () => {
     expect(screen.getByRole('button', { name: /Delete All Content/i })).toBeInTheDocument();
   });
 
+  it('Age Restrict All age-gates the account (age-gate-all), not the age-review withhold (#290)', async () => {
+    renderWithProvider(<UserActions pubkey={PUBKEY} />);
+    fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
+    await waitFor(() => expect(api.bulkModerate).toHaveBeenCalled());
+    expect(api.bulkModerate).toHaveBeenCalledWith(PUBKEY, 'age-gate-all', expect.any(String));
+  });
+
+  it('Age Restrict All tooltip names the 18+ gate and the per-video undo (#290)', async () => {
+    // The old "Age-restrict ... Can be reversed." was vague enough to hide the
+    // hide-vs-gate mix-up, and promised an undo-all that does not exist.
+    renderWithProvider(<UserActions pubkey={PUBKEY} />);
+    fireEvent.focus(screen.getByRole('button', { name: /Age Restrict All/i }));
+    const tips = await screen.findAllByText(
+      "Put all of this user's videos behind the 18+ gate. Undo one video at a time with Remove Restriction.",
+    );
+    expect(tips.length).toBeGreaterThan(0);
+  });
+
   it('routes to Age Review when a bulk action is guard-blocked (age_review_active)', async () => {
     api.bulkModerate.mockRejectedValue(new ApiError('under age review', 409, 'Conflict', 'age_review_active'));
     renderWithProvider(<UserActions pubkey={PUBKEY} />);
@@ -105,6 +123,19 @@ describe('UserActions', () => {
     expect(toast).not.toHaveBeenCalledWith(
       expect.objectContaining({ title: 'Bulk action failed' }),
     );
+  });
+
+  it('shows "try again" and stays put when the age-review check could not run (503)', async () => {
+    // No case to route to: the worker could not look one up, so the moderator
+    // gets the server's actionable message instead of a hand-off (#290).
+    const message = 'Could not check age-review status. Try again.';
+    api.bulkModerate.mockRejectedValue(new ApiError(message, 503, 'Service Unavailable', 'age_review_check_failed'));
+    renderWithProvider(<UserActions pubkey={PUBKEY} />);
+    fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Bulk action failed', description: message, variant: 'destructive' }),
+    ));
+    expect(navigate).not.toHaveBeenCalled();
   });
 
   it('routes a guard-blocked Delete All (confirm-dialog path) to Age Review too', async () => {
@@ -201,15 +232,57 @@ describe('UserActions', () => {
     expect(screen.queryByText(/Delete All Content/i)).not.toBeInTheDocument();
   });
 
+  it('tells the moderator how many files were left as they were (#291)', async () => {
+    api.getBulkJobStatus.mockResolvedValue(doneJob('age-gate-all', { mediaSkipped: 3 }));
+    renderWithProvider(<UserActions pubkey={PUBKEY} />);
+    fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({
+      title: expect.stringMatching(/Age-restricted 2 media file\(s\)/i),
+      description: '3 file(s) left as they were (already restricted, blocked or deleted).',
+    })));
+  });
+
+  it('Delete All says files it left alone were already blocked or deleted', async () => {
+    api.getBulkJobStatus.mockResolvedValue(doneJob('delete-all', { mediaSkipped: 2 }));
+    renderWithProvider(<UserActions pubkey={PUBKEY} />);
+    fireEvent.click(screen.getByRole('button', { name: /Delete All Content/i }));
+    const dialog = screen.getByRole('alertdialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Confirm Delete' }));
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({
+      title: expect.stringMatching(/Deleted 2 media file\(s\)/i),
+      description: '2 file(s) left as they were (already blocked or deleted).',
+    })));
+  });
+
+  it('says nothing about files left alone when there were none, or the worker predates the count', async () => {
+    renderWithProvider(<UserActions pubkey={PUBKEY} />); // doneJob has no mediaSkipped
+    fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({
+      title: expect.stringMatching(/Age-restricted 2 media file\(s\)/i),
+    })));
+    const call = vi.mocked(toast).mock.calls.find(([arg]) => /Age-restricted/.test(String(arg.title)));
+    expect(call?.[0].description).toBeUndefined();
+  });
+
+  it('includes files left alone in a finished-with-issues report too', async () => {
+    api.getBulkJobStatus.mockResolvedValue(doneJob('age-gate-all', { mediaSkipped: 1, failures: ['media:x:boom'] }));
+    renderWithProvider(<UserActions pubkey={PUBKEY} />);
+    fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({
+      title: expect.stringMatching(/finished with issues/i),
+      description: expect.stringContaining('1 file(s) left as they were'),
+    })));
+  });
+
   it('age-restrict enqueues, polls to completion, toasts the result, and calls onActionComplete', async () => {
-    api.getBulkJobStatus.mockResolvedValue(doneJob('age-restrict-all'));
+    api.getBulkJobStatus.mockResolvedValue(doneJob('age-gate-all'));
     const onActionComplete = vi.fn();
     renderWithProvider(<UserActions pubkey={PUBKEY} onActionComplete={onActionComplete} />);
 
     fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
 
     await waitFor(() =>
-      expect(api.bulkModerate).toHaveBeenCalledWith(PUBKEY, 'age-restrict-all', expect.any(String)),
+      expect(api.bulkModerate).toHaveBeenCalledWith(PUBKEY, 'age-gate-all', expect.any(String)),
     );
     await waitFor(() => expect(api.getBulkJobStatus).toHaveBeenCalledWith('job-1'));
     await waitFor(() => expect(onActionComplete).toHaveBeenCalledTimes(1));
@@ -219,7 +292,7 @@ describe('UserActions', () => {
   });
 
   it('reports a partial/failed job with a destructive toast', async () => {
-    api.getBulkJobStatus.mockResolvedValue(doneJob('age-restrict-all', { status: 'failed', failures: ['media:x:boom'] }));
+    api.getBulkJobStatus.mockResolvedValue(doneJob('age-gate-all', { status: 'failed', failures: ['media:x:boom'] }));
     renderWithProvider(<UserActions pubkey={PUBKEY} />);
 
     fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
@@ -247,8 +320,8 @@ describe('UserActions', () => {
   it('polls through running -> done and fires onComplete exactly once', async () => {
     // First poll returns running (no toast yet), second returns done.
     api.getBulkJobStatus
-      .mockResolvedValueOnce(doneJob('age-restrict-all', { status: 'running', mediaProcessed: 0, eventsProcessed: 0 }))
-      .mockResolvedValue(doneJob('age-restrict-all'));
+      .mockResolvedValueOnce(doneJob('age-gate-all', { status: 'running', mediaProcessed: 0, eventsProcessed: 0 }))
+      .mockResolvedValue(doneJob('age-gate-all'));
     const onActionComplete = vi.fn();
     renderWithProvider(<UserActions pubkey={PUBKEY} onActionComplete={onActionComplete} />);
 
@@ -329,7 +402,7 @@ describe('UserActions', () => {
 
   it('"Check again" re-reads the job and settles it', async () => {
     api.getBulkJobStatus.mockRejectedValueOnce(new Error('Network connection lost'));
-    api.getBulkJobStatus.mockResolvedValue(doneJob('age-restrict-all'));
+    api.getBulkJobStatus.mockResolvedValue(doneJob('age-gate-all'));
     const onActionComplete = vi.fn();
     renderWithProvider(<UserActions pubkey={PUBKEY} onActionComplete={onActionComplete} />);
     fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
@@ -349,7 +422,7 @@ describe('UserActions', () => {
     // reports terminal. Verifies the removal of the 10-minute give-up.
     vi.useFakeTimers();
     try {
-      api.getBulkJobStatus.mockResolvedValue(doneJob('age-restrict-all', { status: 'running', mediaProcessed: 0, eventsProcessed: 0 }));
+      api.getBulkJobStatus.mockResolvedValue(doneJob('age-gate-all', { status: 'running', mediaProcessed: 0, eventsProcessed: 0 }));
       renderWithProvider(<UserActions pubkey={PUBKEY} />);
       fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
       await vi.advanceTimersByTimeAsync(2000); // enqueue resolves, job running
@@ -367,7 +440,7 @@ describe('UserActions', () => {
 
   it('detaches from an in-flight job when the selected user changes (no stale running state)', async () => {
     // Job for user A keeps polling (never terminal).
-    api.getBulkJobStatus.mockResolvedValue(doneJob('age-restrict-all', { status: 'running', mediaProcessed: 0, eventsProcessed: 0 }));
+    api.getBulkJobStatus.mockResolvedValue(doneJob('age-gate-all', { status: 'running', mediaProcessed: 0, eventsProcessed: 0 }));
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
     const Wrapper = ({ pk }: { pk: string }) => (
       <QueryClientProvider client={qc}>

@@ -38,8 +38,8 @@ import {
   updateAgeReviewConfig,
 } from './age-review';
 import { handleAccountStatus } from './account-status';
-import { handleBulkModerateEnqueue, handleBulkJobStatus, handleBulkKindCounts, processBulkJob } from './bulk-moderate';
-import type { BulkJobMessage } from '../../shared/bulk-moderation';
+import { handleBulkModerateEnqueue, handleBulkJobStatus, handleBulkKindCounts, processBulkJob, LOOSENS_AGE_REVIEW_HOLD } from './bulk-moderate';
+import type { BulkAction, BulkJobMessage } from '../../shared/bulk-moderation';
 import { ensureZendeskTable, addZendeskInternalNote, syncZendeskAfterAction, getLinkedTickets, closeTicketById } from './zendesk-sync';
 import { buildReportNote, parseKind0Profile, type ReportedProfile } from './report-note';
 import { queryRelay, withTimeout, ENRICHMENT_TIMEOUT_MS } from './relay-profile';
@@ -720,35 +720,32 @@ export default {
         // Age-review guard: bulk content actions on an account with an open
         // case must not run out of band (age-restrict half-enforces without
         // advancing the case, un-age-restrict lifts restrictions the case
-        // imposed, delete-all and delete-kind destroy evidence the review may
-        // need). Refuse and route to the case; Ban remains the severe-action
-        // escape hatch.
+        // imposed, age-gate-all swaps the case's withhold for an 18+ gate that
+        // serves the videos to signed-in viewers (#290), delete-all and
+        // delete-kind destroy evidence the review may need). Refuse and route to
+        // the case; Ban remains the severe-action escape hatch.
         // Peeks at the body on a clone so malformed/invalid requests still get
         // the handler's own 400s. Two accepted edges: (1) the guard runs
         // before action validation, so a well-formed pubkey with an open case
         // gets this 409 even if the action name is invalid — accurate, since
         // every bulk action on that account is refused; (2) the check is
-        // enqueue-time only — a case opened while a chunked job is already
-        // draining does not abort it (aborting mid-job would leave
-        // half-applied state; the job was legitimate when it started).
-        // No `failClosed` here, deliberately, and NOT because bulk has no
-        // reversal: `un-age-restrict-all` is one, and it lifts restrictions this
-        // very case imposed. The guard's docstring argues fail-closed by
-        // direction, which taken alone would cover it. Bulk is partitioned by
-        // blast radius instead. A refused bulk job is one moderator's click
-        // failing loudly in the UI, with no automated caller behind it, so an
-        // outage that blocks all four actions stops content moderation
-        // wholesale for a human who has no other route -- whereas a refused
-        // reversal only defers restoring an account that stays held meanwhile.
-        // If bulk ever becomes reachable from automation, revisit this: the
-        // reasoning is about who is on the other end, not about the actions.
-        let peeked: { pubkey?: string } | undefined;
+        // enqueue-time only for the actions that add restriction or delete — a
+        // case opened while such a job is draining does not abort it (aborting
+        // mid-job would leave half-applied state; the job was legitimate when
+        // it started). Loosening jobs are different: processBulkJob re-checks
+        // before every chunk and stops them, since their later chunks would
+        // overwrite the case's withhold (#290).
+        // When the case lookup itself fails, LOOSENS_AGE_REVIEW_HOLD
+        // (bulk-moderate.ts) decides per action whether to refuse.
+        let peeked: { pubkey?: string; action?: string } | undefined;
         try {
-          peeked = await request.clone().json() as { pubkey?: string };
+          peeked = await request.clone().json() as { pubkey?: string; action?: string };
         } catch { /* not JSON; the handler returns the 400 */ }
         if (typeof peeked?.pubkey === 'string') {
+          const failClosed = LOOSENS_AGE_REVIEW_HOLD[peeked.action as BulkAction] === true;
           const guarded = await ageReviewActiveGuard(peeked.pubkey, env, corsHeaders,
-            'This account is under age review. Content enforcement runs through the Age Review flow.');
+            'This account is under age review. Content enforcement runs through the Age Review flow.',
+            { failClosed });
           if (guarded) return guarded;
         }
         return handleBulkModerateEnqueue(request, env, corsHeaders);
@@ -2067,8 +2064,8 @@ async function handleGetDecisions(
 // against a target carrying tens of labels.
 //
 // Subrequests are not the constraint: this is Workers Paid, so the budget is
-// 1000/request and even the two-filter worst case spends ~102 (two sockets plus
-// two full pages of bans).
+// 10,000/request (Cloudflare's Workers limits page) and even the two-filter
+// worst case spends ~102 (two sockets plus two full pages of bans).
 //
 // A full page is reported as an incomplete cleanup rather than assumed
 // complete, so a target somehow past the cap still gets cleared over successive

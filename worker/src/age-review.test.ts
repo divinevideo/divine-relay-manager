@@ -25,6 +25,7 @@ import type { AgeReviewCase, MinorReviewResponseDeadline } from '../../shared/ag
 import { deriveResponseClock, FUNNEL_ZENDESK_QUERIES, toUtcIso } from '../../shared/age-review';
 import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, createMinorAccount } from './keycast-client';
 import { suspendPubkey, unsuspendPubkey, banPubkey } from './nip86';
+import { runBulkModeration } from './bulk-moderate';
 
 vi.mock('./keycast-client', () => ({
   suspendUser: vi.fn().mockResolvedValue({ success: true }),
@@ -530,7 +531,8 @@ describe('Keycast suspension wiring', () => {
     vi.mocked(clearVerifiedMinor).mockClear().mockResolvedValue({ success: true });
   });
 
-  it('calls suspendUser when transitioning to restricted_pending_user_response', async () => {
+  it('calls suspendUser and withholds media (age-restrict-all) when transitioning to restricted_pending_user_response', async () => {
+    vi.mocked(runBulkModeration).mockClear();
     const reviewCase = makeCase({ state: 'under_moderator_review' });
     const updatedCase = { ...reviewCase, state: 'restricted_pending_user_response' as const };
 
@@ -555,13 +557,18 @@ describe('Keycast suspension wiring', () => {
       body: JSON.stringify({ state: 'restricted_pending_user_response' }),
     });
     const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
-    const body = await res.json() as { success: boolean; keycastUpdated: boolean };
+    const body = await res.json() as { success: boolean; keycastUpdated: boolean; bulkActionTriggered?: string };
 
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
     expect(body.keycastUpdated).toBe(true);
     expect(suspendUser).toHaveBeenCalledOnce();
     expect(suspendUser).toHaveBeenCalledWith(reviewCase.pubkey, 'age_review', expect.objectContaining({ DB: expect.anything() }));
+    // The withhold, not the moderator's 18+ gate: age-gate-all would serve a
+    // suspected minor's videos to any signed-in viewer (#290).
+    expect(runBulkModeration).toHaveBeenCalledOnce();
+    expect(runBulkModeration).toHaveBeenCalledWith(expect.anything(), reviewCase.pubkey, 'age-restrict-all', expect.any(String));
+    expect(body.bulkActionTriggered).toBe('age-restrict-all');
   });
 
   it('calls unsuspendUser when transitioning to cleared', async () => {

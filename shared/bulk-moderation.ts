@@ -1,7 +1,10 @@
+// age-restrict-all is the age-review withhold (hides a suspected minor's videos
+// from everyone but the owner). age-gate-all is the moderator's "Age Restrict All"
+// (puts the videos behind the 18+ gate). Keep them separate: #290.
 // delete-kind deletes one event kind and nothing else. It is a separate action
 // (not delete-all plus a kind) so a worker that predates it rejects it as
 // unknown instead of running delete-all.
-export const VALID_BULK_ACTIONS = ['age-restrict-all', 'un-age-restrict-all', 'delete-all', 'delete-kind'] as const;
+export const VALID_BULK_ACTIONS = ['age-restrict-all', 'age-gate-all', 'un-age-restrict-all', 'delete-all', 'delete-kind'] as const;
 
 export type BulkAction = typeof VALID_BULK_ACTIONS[number];
 
@@ -18,7 +21,11 @@ export type AccountBulkAction = Exclude<BulkAction, 'delete-kind'>;
 export interface BulkModerateResult {
   success: boolean;
   eventsProcessed: number;
+  // Media changed. Media the action left alone on purpose (see
+  // decideMediaChange in worker/src/bulk-moderate.ts) is mediaSkipped, and is
+  // not a failure.
   mediaProcessed: number;
+  mediaSkipped: number;
   failures: string[];
 }
 
@@ -38,8 +45,8 @@ export type BulkJobPhase = 'events' | 'media';
 // ceiling. The first message omits phase/cursor (start); each chunk re-enqueues
 // the next with its continuation state, or finalizes the job.
 //   - phase: 'events' (delete-all and delete-kind: ban per event) then, for
-//     delete-all only, 'media' (moderate each video blob).
-//     age-restrict/un-age-restrict are media-only.
+//     delete-all only, 'media' (moderate each video blob). The other actions
+//     are media-only.
 //   - cursor: opaque continuation for the current phase -- funnelcake v2
 //     next_cursor for media, or the relay `until` timestamp (stringified) for
 //     events. Absent = start of the phase.
@@ -104,6 +111,8 @@ export interface BulkJob {
   status: BulkJobStatus;
   eventsProcessed: number;
   mediaProcessed: number;
+  // Optional because a worker older than #291 does not send it.
+  mediaSkipped?: number;
   failures: string[];
   createdAt: string;
   updatedAt: string;
@@ -131,11 +140,14 @@ export const KIND_COUNTS_REQUEST_TIMEOUT_MS = 30_000;
 // back. Both sides build and parse them only through these, so a reworded
 // message can't silently stop the other side from recognising it:
 //   event:<event id>:<error>       one event that could not be deleted
+//   media:<sha256>:<error>         one file that could not be changed, or was
+//                                  left unchanged because its status could not
+//                                  be read or its two sources disagree (#291)
 //   enumeration:<pubkey>:<warning> something about listing the account
 //   job:<reason>                   why the job stopped
 //   +<N> more                      N more failures past the stored cap
-// Event ids and pubkeys are hex, so the first colon after one ends it; an error
-// or warning may contain colons of its own.
+// Event ids, sha256s and pubkeys are hex, so the first colon after one ends
+// it; an error or warning may contain colons of its own.
 
 const OVERFLOW_MARKER = /^\+(\d+) more$/;
 
@@ -153,6 +165,10 @@ export function eventFailure(eventId: string, error: string): string {
   return `event:${eventId}:${error}`;
 }
 
+export function mediaFailure(sha256: string, error: string): string {
+  return `media:${sha256}:${error}`;
+}
+
 export function enumerationWarning(pubkey: string, warning: string): string {
   return `enumeration:${pubkey}:${warning}`;
 }
@@ -167,6 +183,7 @@ export const ABANDONED_REASON = 'abandoned (no terminal update; worker likely ev
 export type ParsedFailure =
   | { type: 'overflow'; count: number }
   | { type: 'event'; id: string; error: string }
+  | { type: 'media'; sha256: string; error: string }
   | { type: 'enumeration'; pubkey: string; warning: string }
   | { type: 'job'; reason: string; abandoned: boolean }
   | { type: 'other'; text: string };
@@ -180,6 +197,8 @@ export function parseFailure(failure: string): ParsedFailure {
   if (enumeration) return { type: 'enumeration', pubkey: enumeration[1], warning: enumeration[2] };
   const event = /^event:([^:]+):(.*)$/s.exec(failure);
   if (event) return { type: 'event', id: event[1], error: event[2] };
+  const media = /^media:([^:]+):(.*)$/s.exec(failure);
+  if (media) return { type: 'media', sha256: media[1], error: media[2] };
   return { type: 'other', text: failure };
 }
 

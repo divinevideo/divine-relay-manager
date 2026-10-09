@@ -8,6 +8,7 @@ import { NRelay1 } from "@nostrify/nostrify";
 import { fetchFunnelcakeEvent } from "@/lib/funnelcakeApi";
 import { isRepostKind } from "@/lib/nip18";
 import { buildThreadReplyFilters } from "@/lib/threadFilters";
+import { isListKind } from "../../shared/list-report";
 
 export type FetchSource = 'rest' | 'local-relay' | 'external-relay' | 'banned-fallback';
 
@@ -152,8 +153,9 @@ export function useThread(
       if (rootTag) ancestorIds.push(rootTag[1]);
       if (replyTag && replyTag[1] !== rootTag?.[1]) ancestorIds.push(replyTag[1]);
 
-      // Fallback for events without NIP-10 markers: use positional e-tags
-      if (ancestorIds.length === 0) {
+      // Fallback for events without NIP-10 markers: use positional e-tags.
+      // Not for a list: its e tags are its items, never a parent post.
+      if (ancestorIds.length === 0 && !isListKind(event.kind)) {
         const eTags = event.tags.filter(t => t[0] === 'e');
         if (eTags.length > 0) {
           ancestorIds.push(eTags[0][1]);

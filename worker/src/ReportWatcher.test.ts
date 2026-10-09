@@ -3,6 +3,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ReportWatcher, type ReportWatcherEnv, type ReportEvent, type ReportWatcherStatus, type AutoHideConfig } from './ReportWatcher';
+import { AUTO_HIDE_ACTION } from '../../shared/autohide';
 
 vi.mock('./relay-profile', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./relay-profile')>();
@@ -1506,6 +1507,92 @@ describe('ReportWatcher', () => {
       expect(body.params[0]).toBe('target_event_id_12345');
     });
 
+    // A list report goes to human review. Full-length hex, never truncated.
+    const LIST_AUTHOR = 'f'.repeat(64);
+
+    it('sends a list report to human review instead of auto-hiding it', async () => {
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const ws = getLastMockWebSocket();
+      ws!.simulateMessage(JSON.stringify(['EVENT', 'auto-hide-reports', {
+        id: 'list_report',
+        pubkey: 'reporter_pubkey',
+        kind: 1984,
+        content: 'List report',
+        tags: [
+          ['e', 'list_event_id'],
+          ['p', LIST_AUTHOR],
+          ['a', `30005:${LIST_AUTHOR}:faves`],
+          ['report', 'sexual_minors'],
+          ['client', 'diVine'],
+        ],
+        created_at: Math.floor(Date.now() / 1000),
+      }]));
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      expect(mockFetch).not.toHaveBeenCalled();
+      const bindArgs = (mockEnv.DB!.prepare('') as unknown as { bind: ReturnType<typeof vi.fn> })
+        .bind.mock.calls.flat();
+      expect(bindArgs).toContain(AUTO_HIDE_ACTION.skipped);
+      expect(bindArgs).toContain('sexual_minors: list report, human review');
+      // The category would have hidden a video on this one report, so the
+      // skip raises an alert rather than waiting silently in the queue.
+      expect(consoleError).toHaveBeenCalledWith(
+        expect.stringMatching(/^\[ALERT\].*list report.*sexual_minors/),
+      );
+      consoleError.mockRestore();
+    });
+
+    it('sends a list report to human review when its coordinate is uppercase hex', async () => {
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const ws = getLastMockWebSocket();
+      ws!.simulateMessage(JSON.stringify(['EVENT', 'auto-hide-reports', {
+        id: 'list_report_uppercase',
+        pubkey: 'reporter_pubkey',
+        kind: 1984,
+        content: 'List report',
+        tags: [
+          ['e', 'list_event_id'],
+          ['p', LIST_AUTHOR],
+          ['a', `30005:${LIST_AUTHOR.toUpperCase()}:faves`],
+          ['report', 'sexual_minors'],
+          ['client', 'diVine'],
+        ],
+        created_at: Math.floor(Date.now() / 1000),
+      }]));
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('still auto-hides a report whose a tag names something other than a list', async () => {
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const ws = getLastMockWebSocket();
+      ws!.simulateMessage(JSON.stringify(['EVENT', 'auto-hide-reports', {
+        id: 'video_report_with_a',
+        pubkey: 'reporter_pubkey',
+        kind: 1984,
+        content: 'Video report',
+        tags: [
+          ['e', 'video_event_id'],
+          ['a', `34236:${LIST_AUTHOR}:clip`],
+          ['report', 'sexual_minors'],
+          ['client', 'diVine'],
+        ],
+        created_at: Math.floor(Date.now() / 1000),
+      }]));
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(mockFetch.mock.calls[0][1].body).method).toBe('banevent');
+    });
+
     it('should log decision to D1 on successful auto-hide', async () => {
       await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
       await new Promise(resolve => setTimeout(resolve, 10));
@@ -2352,6 +2439,36 @@ describe('ReportWatcher', () => {
         (call: string[]) => call[0]?.includes?.('INSERT') && call[0]?.includes?.('moderation_decisions')
       );
       expect(insertCalls.length).toBeGreaterThanOrEqual(2);
+    });
+
+    it('never auto-hides a list report, even once enough people report it', async () => {
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const countResult = createMockDbResult();
+      countResult.first = vi.fn().mockResolvedValue({ count: 2 });
+      mockDb.prepare = vi.fn().mockImplementation((sql: string) => {
+        if (sql.includes('COUNT(DISTINCT')) {
+          return countResult;
+        }
+        return createMockDbResult();
+      });
+
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const ws = getLastMockWebSocket();
+      const report = createReport('NS-sexualContent', 'diVine');
+      report.tags.push(['a', `30000:${'f'.repeat(64)}:crew`]);
+      ws!.simulateMessage(JSON.stringify(['EVENT', 'auto-hide-reports', report]));
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      expect(mockFetch).not.toHaveBeenCalled();
+      // Threshold-tier categories wait for review without an alert. Filtered
+      // to list-report alerts: earlier tests' async work can log others here.
+      const listAlerts = consoleError.mock.calls
+        .map(([message]) => String(message))
+        .filter(message => message.startsWith('[ALERT]') && message.includes('list report'));
+      expect(listAlerts).toEqual([]);
+      consoleError.mockRestore();
     });
 
     it('should not require trusted client for threshold tier by default', async () => {

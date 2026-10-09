@@ -233,6 +233,12 @@ export function UserActions({
     pubkey,
     onComplete: (job) => {
       const partial = job.status === 'failed' || job.failures.length > 0;
+      // Files the worker left alone because a decision it must not override was
+      // already in place (#291). Absent from a worker that predates the count.
+      // Delete All deletes restricted files, so it only leaves blocked and deleted ones.
+      const leftAlone = job.mediaSkipped
+        ? `${job.mediaSkipped} file(s) left as they were (already ${job.action === 'delete-all' ? 'blocked or deleted' : 'restricted, blocked or deleted'}).`
+        : undefined;
       if (partial) {
         const counts = `${job.mediaProcessed} media across ${job.eventsProcessed} events`;
         const detail = job.failures.length
@@ -240,12 +246,12 @@ export function UserActions({
           : `${counts}. The job did not complete cleanly.`;
         toast({
           title: `Bulk ${job.action === 'delete-all' ? 'delete' : 'age-restrict'} finished with issues`,
-          description: detail,
+          description: leftAlone ? `${detail} ${leftAlone}` : detail,
           variant: 'destructive',
         });
       } else {
         const verb = job.action === 'delete-all' ? 'Deleted' : 'Age-restricted';
-        toast({ title: `${verb} ${job.mediaProcessed} media file(s) across ${job.eventsProcessed} events` });
+        toast({ title: `${verb} ${job.mediaProcessed} media file(s) across ${job.eventsProcessed} events`, description: leftAlone });
       }
       // Non-critical audit log; never block the action. Attribute to the
       // moderator snapshotted at job START (not now), so a mid-job logout/switch
@@ -378,12 +384,12 @@ export function UserActions({
           <Tooltip>
             <TooltipTrigger asChild>
               <Button variant="outline" className="border-orange-500 text-orange-600 hover:bg-orange-50"
-                onClick={() => { bulkModeratorRef.current = getModeratorPubkey(); bulkJob.start('age-restrict-all'); }} disabled={bulkBlocked}>
+                onClick={() => { bulkModeratorRef.current = getModeratorPubkey(); bulkJob.start('age-gate-all'); }} disabled={bulkBlocked}>
                 <ShieldAlert className="h-4 w-4 mr-1" />
-                {bulkJob.runningAction === 'age-restrict-all' ? 'Restricting...' : 'Age Restrict All'}
+                {bulkJob.runningAction === 'age-gate-all' ? 'Restricting...' : 'Age Restrict All'}
               </Button>
             </TooltipTrigger>
-            <TooltipContent><p>Age-restrict all media from this user. Can be reversed.</p></TooltipContent>
+            <TooltipContent><p>Put all of this user's videos behind the 18+ gate. Undo one video at a time with Remove Restriction.</p></TooltipContent>
           </Tooltip>
 
           <ConfirmDialog

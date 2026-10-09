@@ -21,6 +21,15 @@ export function useDecisionLog(targetId: string | null | undefined) {
   // Check if target has any decisions
   const hasDecisions = (data?.length ?? 0) > 0;
 
+  // The newest decision that handled the report. An auto-hide that was skipped
+  // (a list report, an untrusted client) or is still pending leaves the report
+  // waiting for a moderator, so it records history without handling anything,
+  // and must not stand in for the moderator's action when it lands later.
+  const latestHandlingDecision = data?.find(
+    d => d.action !== AUTO_HIDE_ACTION.skipped && d.action !== AUTO_HIDE_ACTION.pending,
+  );
+  const hasHandlingDecisions = latestHandlingDecision !== undefined;
+
   // Get the most recent decision
   const latestDecision = data?.[0];
 
@@ -44,6 +53,8 @@ export function useDecisionLog(targetId: string | null | undefined) {
   return {
     decisions: data || [],
     hasDecisions,
+    hasHandlingDecisions,
+    latestHandlingDecision,
     latestDecision,
     isBanned,
     isDeleted,
