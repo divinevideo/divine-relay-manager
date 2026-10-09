@@ -41,7 +41,7 @@ beforeAll(async () => {
     d1Databases: ['DB'],
   });
   DB = (await mf.getD1Database('DB')) as unknown as D1Database;
-  // A bulk_jobs table as it exists today, before the kind column, holding a job.
+  // A bulk_jobs table from before the kind and media_skipped columns, holding a job.
   await DB.prepare(
     `CREATE TABLE bulk_jobs (
       job_id TEXT PRIMARY KEY, pubkey TEXT NOT NULL, action TEXT NOT NULL, status TEXT NOT NULL,
