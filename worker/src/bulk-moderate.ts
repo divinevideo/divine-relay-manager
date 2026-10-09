@@ -893,11 +893,10 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
         //
         // A kind-scoped job ends with its events: no media phase and no
         // account-level Zendesk sync (each deleted event already synced its own
-        // tickets in deleteEvents). The media phase deletes every video blob the
-        // account has, because funnelcake's per-user video listing cannot be
-        // narrowed to a kind, and a blob is content-addressed, so one file can
-        // back events of a kind the moderator chose to keep. The by-kind dialog
-        // never touched media; Delete All Content is the path that removes it.
+        // tickets in deleteEvents). It never touches media. Funnelcake's
+        // per-user video listing cannot be narrowed to a kind, and a blob is
+        // content-addressed, so one file can back events of a kind the
+        // moderator chose to keep.
         if (sweepDeleted === 0) {
           next = null;
           // This chunk was the sweep's whole first page and it was empty: nothing
