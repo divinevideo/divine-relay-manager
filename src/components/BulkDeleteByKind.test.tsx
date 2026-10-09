@@ -159,6 +159,23 @@ describe('BulkDeleteByKind counts', () => {
     await screen.findByText(/Could not count this account's events/);
     expect(api.getBulkKindCounts).toHaveBeenCalledTimes(1);
   });
+
+  // A failed refetch keeps the earlier counts in the cache. Delete must follow
+  // the error it shows, not those counts.
+  it('disables Delete when a later count refetch fails, even with earlier counts cached', async () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    renderDialog({}, qc);
+    await openAndPickReactions();
+    expect(screen.getByRole('button', { name: 'Delete 3 Reaction events' })).toBeEnabled();
+
+    api.getBulkKindCounts.mockRejectedValue(new Error('relay unavailable'));
+    await qc.refetchQueries({ queryKey: ['bulk-kind-counts'] });
+
+    expect(await screen.findByText(/Could not count this account's events/)).toHaveTextContent(
+      "Could not count this account's events: relay unavailable. Delete is unavailable until the count loads.",
+    );
+    expect(screen.getByRole('button', { name: /^Delete/ })).toBeDisabled();
+  });
 });
 
 describe('BulkDeleteByKind account status', () => {
