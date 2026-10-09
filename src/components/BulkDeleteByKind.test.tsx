@@ -80,7 +80,7 @@ describe('BulkDeleteByKind counts', () => {
     open();
 
     expect(screen.getByText(
-      'Deletes every event of the chosen kind from this user on the relay. This cannot be undone. Media files are not deleted; use Delete All Content to remove them.',
+      'Deletes every event of the chosen kind from this user on the relay. This cannot be undone. Media files are retained on the media server.',
     )).toBeInTheDocument();
   });
 

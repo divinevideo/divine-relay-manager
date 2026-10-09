@@ -284,7 +284,7 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
           <AlertDialogTitle>Bulk Delete Events by Kind</AlertDialogTitle>
           <AlertDialogDescription asChild>
             <div className="space-y-4">
-              <p>Deletes every event of the chosen kind from this user on the relay. This cannot be undone. Media files are not deleted; use Delete All Content to remove them.</p>
+              <p>Deletes every event of the chosen kind from this user on the relay. This cannot be undone. Media files are retained on the media server.</p>
 
               <div>
                 <Label htmlFor="kind-select-dialog" className="text-sm">Event Kind</Label>
