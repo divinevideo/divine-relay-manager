@@ -231,13 +231,71 @@ negotiation, so order matters and the gap should be minimized:
 ### Post-deploy verification
 
 - `npx wrangler queues list` shows the prod queue with a consumer attached.
-- Run one bulk action on a small test account; confirm `{jobId}` returns, a queue-consumer
-  log line fires (`npx wrangler tail`), the job row reaches `done` with non-zero counts,
-  and Blossom shows the media Restricted/Deleted.
-- `bulk_jobs` table is created on demand in the prod D1 (`divine-moderation-decisions-prod`).
+- **Use a throwaway test account for the checks below, in either environment.**
+  Staging's worker uses production's moderation service and media server (its
+  `MODERATION_API` service binding and `CDN_DOMAIN` in `wrangler.staging.toml` are
+  the same as prod's), so a bulk action run from staging changes real production
+  media.
+- On a fresh test account, block one video first (Block Media on a report about it,
+  or the file's page in moderation-service's admin), wait five minutes, then run
+  Age Restrict All. Blossom caches a file's status for up to five minutes per
+  location, so a run straight after the block can read the blocked video as active
+  and report a status disagreement for it instead of leaving it alone.
+  Confirm `{jobId}` returns, a queue-consumer log line fires (`npx wrangler tail`),
+  and the job row reaches `done`. In Blossom the blocked video stays Banned and the
+  others become AgeRestricted (18+ gate), and the result message counts 1 file left
+  as it was. Delete All sets Deleted; the age-review withhold (`age-restrict-all`)
+  sets Restricted.
+- Bulk actions read each file's status from Blossom first, so the worker needs
+  `BLOSSOM_WEBHOOK_SECRET` (prod and staging bind it). Without it every file fails
+  with "could not read current status".
+- `bulk_jobs` table is created on demand in the prod D1 (`divine-moderation-decisions-prod`),
+  and its `media_skipped` column is added on demand to an existing table.
 
 ### Rollback
 
-Revert the worker deploy (`wrangler rollback` or redeploy the prior version). The
-`bulk_jobs` table and the queue persist but go inert (the old build has no
-producer/consumer). No data cleanup required.
+Rolling back to a build from before this async job model: revert the worker
+deploy (`wrangler rollback` or redeploy the prior version). The `bulk_jobs` table
+and the queue persist but go inert (that build has no producer/consumer). No data
+cleanup required.
+
+Rolling back past #290 (to any build that has the job model but not
+`age-gate-all`): do not revert the worker first. Follow the steps below in order,
+because an older worker reads `age-gate-all` as unknown and sends SAFE,
+un-restricting the account's media. Stop those jobs rather than waiting for them:
+both workers only pick up a job that is still `pending` or `running`, so a job
+marked `failed` sends nothing more, even if its next message is still in the
+queue.
+
+1. **Roll the frontend back** and ask moderators to reload. The older UI sends
+   `age-restrict-all`, which every worker handles; a tab still showing the newer
+   UI keeps sending `age-gate-all` until it reloads.
+2. **Note the time, list the unfinished `age-gate-all` jobs, and stop them.**
+   Those accounts are part-way gated; finish them by hand afterwards with
+   single-video Age Restrict (the older Users-page button hides instead).
+
+   ```bash
+   npx wrangler d1 execute divine-moderation-decisions-prod --remote --command \
+     "SELECT job_id, pubkey FROM bulk_jobs WHERE action = 'age-gate-all' AND status IN ('pending', 'running');"
+   npx wrangler d1 execute divine-moderation-decisions-prod --remote --command \
+     "UPDATE bulk_jobs SET status = 'failed', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE action = 'age-gate-all' AND status IN ('pending', 'running');"
+   ```
+
+3. **Roll the worker back.** From then on it refuses `age-gate-all` at enqueue
+   with a 400 ("Invalid action").
+4. **Run step 2's two commands again** (keep the time you noted the first time),
+   then check for jobs a stale tab queued between steps 2 and 3
+   (replace `<step-2 time>` with a UTC time a minute before you ran step 2, in
+   the stored format `YYYY-MM-DDTHH:MM:SS.000Z`). For any row, the older worker
+   may have un-restricted that account's media, including files previously
+   blocked or hidden. Restore each file's prior restriction from pre-rollback
+   state or verified moderation history; applying the 18+ gate to everything
+   is not enough. The current moderation record may already reflect the
+   rollback's un-restrict action, so do not use it alone to infer the prior
+   decision. If that decision cannot be established, keep the file withheld
+   until a moderator determines the appropriate restriction.
+
+   ```bash
+   npx wrangler d1 execute divine-moderation-decisions-prod --remote --command \
+     "SELECT job_id, pubkey, status FROM bulk_jobs WHERE action = 'age-gate-all' AND created_at >= '<step-2 time>';"
+   ```

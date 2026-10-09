@@ -21,6 +21,7 @@ import {
   FUNNEL_ZENDESK_QUERIES,
 } from '../../shared/age-review';
 import { runBulkModeration, type BulkModerateEnv } from './bulk-moderate';
+import { getActiveAgeReviewCase } from './age-review-lookup';
 import { resolveZendeskCreds } from './zendesk-sync';
 import type { BulkAction } from '../../shared/bulk-moderation';
 import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, createMinorAccount, type KeycastEnv } from './keycast-client';
@@ -166,24 +167,6 @@ export async function handleGetAgeReviewCase(
 }
 
 /**
- * Returns the single active (non-terminal) age-review case for a pubkey, or
- * null. ReportWatcher guarantees at most one active case per pubkey, so this is
- * unambiguous. Shared by the by-pubkey lookup endpoint and the relay-RPC guard.
- */
-export async function getActiveAgeReviewCase(
-  pubkey: string,
-  env: AgeReviewEnv,
-): Promise<AgeReviewCase | null> {
-  if (!env.DB) return null;
-  const row = await env.DB.prepare(`
-    SELECT * FROM age_review_cases
-    WHERE pubkey = ? AND state NOT IN (${TERMINAL_STATES.map(() => '?').join(',')})
-    LIMIT 1
-  `).bind(pubkey, ...TERMINAL_STATES).first<AgeReviewCase>();
-  return row ?? null;
-}
-
-/**
  * Refuse-and-route guard shared by the interactive enforcement endpoints
  * (relay-rpc suspend/unsuspend/unban, bulk-moderate enqueue): if the pubkey has
  * an open (non-terminal) age-review case, returns a structured 409
@@ -210,9 +193,10 @@ export async function getActiveAgeReviewCase(
  * is NOT one of them: no case can be keyed to a value the lookup could never
  * match, so there is nothing to refuse on its behalf.
  *
- * `failClosed` is opt-in PER CALL SITE, not a property of the guard. Only
- * relay-rpc's reversals pass it today; bulk-moderate deliberately does not, for
- * reasons recorded at its call site in index.ts.
+ * `failClosed` is opt-in PER CALL SITE, not a property of the guard. Two call
+ * sites pass it today: relay-rpc's reversals, and bulk-moderate's loosening
+ * actions (age-gate-all, un-age-restrict-all). The rest of bulk deliberately
+ * fails open; see LOOSENS_AGE_REVIEW_HOLD in bulk-moderate.ts.
  */
 export async function ageReviewActiveGuard(
   pubkey: string,

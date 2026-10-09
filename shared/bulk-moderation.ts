@@ -1,11 +1,18 @@
-export const VALID_BULK_ACTIONS = ['age-restrict-all', 'un-age-restrict-all', 'delete-all'] as const;
+// age-restrict-all is the age-review withhold (hides a suspected minor's videos
+// from everyone but the owner). age-gate-all is the moderator's "Age Restrict All"
+// (puts the videos behind the 18+ gate). Keep them separate: #290.
+export const VALID_BULK_ACTIONS = ['age-restrict-all', 'age-gate-all', 'un-age-restrict-all', 'delete-all'] as const;
 
 export type BulkAction = typeof VALID_BULK_ACTIONS[number];
 
 export interface BulkModerateResult {
   success: boolean;
   eventsProcessed: number;
+  // Media changed. Media the action left alone on purpose (see
+  // decideMediaChange in worker/src/bulk-moderate.ts) is mediaSkipped, and is
+  // not a failure.
   mediaProcessed: number;
+  mediaSkipped: number;
   failures: string[];
 }
 
@@ -25,7 +32,7 @@ export type BulkJobPhase = 'events' | 'media';
 // ceiling. The first message omits phase/cursor (start); each chunk re-enqueues
 // the next with its continuation state, or finalizes the job.
 //   - phase: 'events' (delete-all only: ban per event) then 'media'
-//     (moderate each video blob). age-restrict/un-age-restrict are media-only.
+//     (moderate each video blob). The other actions are media-only.
 //   - cursor: opaque continuation for the current phase -- funnelcake v2
 //     next_cursor for media, or the relay `until` timestamp (stringified) for
 //     events. Absent = start of the phase.
@@ -53,6 +60,8 @@ export interface BulkJob {
   status: BulkJobStatus;
   eventsProcessed: number;
   mediaProcessed: number;
+  // Optional because a worker older than #291 does not send it.
+  mediaSkipped?: number;
   failures: string[];
   createdAt: string;
   updatedAt: string;

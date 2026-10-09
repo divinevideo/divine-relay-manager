@@ -27,9 +27,10 @@ import { useToast } from '@/hooks/useToast';
  * near-identical copies is how one gets missed, so the handling lives here.
  *
  * Only covers the 409. The two REVERSALS, `unsuspendpubkey` and `unbanpubkey`,
+ * and the bulk actions that loosen a hold (`age-gate-all`, `un-age-restrict-all`)
  * also answer 503 `age_review_check_failed` when the check cannot run at all.
- * `suspendpubkey` never does: fail-closed is passed only for reversals, so a
- * suspend whose lookup fails proceeds and enforces. The 503 is not a routable
+ * `suspendpubkey` never does: fail-closed is passed only for loosening actions,
+ * so a suspend whose lookup fails proceeds and enforces. The 503 is not a routable
  * case either way, since there is no case id to route to, so this returns false
  * and each site shows its own error toast. That message is already actionable.
  *

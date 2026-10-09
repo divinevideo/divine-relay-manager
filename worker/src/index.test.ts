@@ -1899,6 +1899,17 @@ describe('bulk-moderate age-review guard', () => {
     expect(send).not.toHaveBeenCalled();
   });
 
+  it('refuses age-gate-all the same way (the 18+ gate must not replace a case\'s withhold) (#290)', async () => {
+    const { env, send } = makeBulkEnv({ id: 'case-b7', state: 'restricted_pending_user_response' });
+    const response = await worker.fetch(
+      enqueueRequest({ pubkey: VALID_PUBKEY, action: 'age-gate-all' }), env, ctx,
+    );
+    expect(response.status).toBe(409);
+    const body = await response.json() as { code: string };
+    expect(body.code).toBe('age_review_active');
+    expect(send).not.toHaveBeenCalled();
+  });
+
   it('refuses delete-all the same way (no destructive job on an open case)', async () => {
     const { env, send } = makeBulkEnv({ id: 'case-b2', state: 'submitted_for_review' });
     const response = await worker.fetch(
@@ -1920,15 +1931,47 @@ describe('bulk-moderate age-review guard', () => {
     expect(send).toHaveBeenCalledTimes(1);
   });
 
-  it('fails open when the case lookup throws (transient D1 error must not block moderation)', async () => {
-    const { env, send } = makeBulkEnv({ id: 'case-b4', state: 'restricted_pending_user_response' }, { lookupThrows: true });
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  it.each(['age-restrict-all', 'delete-all'])(
+    'fails open for %s when the case lookup throws (transient D1 error must not block moderation)',
+    async (action) => {
+      const { env, send } = makeBulkEnv({ id: 'case-b4', state: 'restricted_pending_user_response' }, { lookupThrows: true });
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const response = await worker.fetch(
+        enqueueRequest({ pubkey: VALID_PUBKEY, action }), env, ctx,
+      );
+      expect(response.status).toBe(200);
+      expect(send).toHaveBeenCalledTimes(1);
+      errorSpy.mockRestore();
+    },
+  );
+
+  // The loosening actions fail closed instead: unchecked, age-gate-all would
+  // swap a suspected minor's withhold for an 18+ gate that serves the videos to
+  // signed-in viewers, and un-age-restrict-all would lift the withhold (#290).
+  it.each(['age-gate-all', 'un-age-restrict-all'])(
+    'refuses %s when the case lookup throws, rather than loosening an unchecked account (#290)',
+    async (action) => {
+      const { env, executed, send } = makeBulkEnv({ id: 'case-b6', state: 'restricted_pending_user_response' }, { lookupThrows: true });
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const response = await worker.fetch(
+        enqueueRequest({ pubkey: VALID_PUBKEY, action }), env, ctx,
+      );
+      expect(response.status).toBe(503);
+      const body = await response.json() as { code: string };
+      expect(body.code).toBe('age_review_check_failed');
+      expect(executed.some((sql) => sql.includes('INSERT INTO bulk_jobs'))).toBe(false);
+      expect(send).not.toHaveBeenCalled();
+      errorSpy.mockRestore();
+    },
+  );
+
+  it('still enqueues age-gate-all when the lookup succeeds and finds no open case', async () => {
+    const { env, send } = makeBulkEnv(null);
     const response = await worker.fetch(
-      enqueueRequest({ pubkey: VALID_PUBKEY, action: 'age-restrict-all' }), env, ctx,
+      enqueueRequest({ pubkey: VALID_PUBKEY, action: 'age-gate-all' }), env, ctx,
     );
     expect(response.status).toBe(200);
     expect(send).toHaveBeenCalledTimes(1);
-    errorSpy.mockRestore();
   });
 
   it('leaves validation to the handler: malformed pubkey is a 400, not a guard error', async () => {
