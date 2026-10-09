@@ -262,7 +262,8 @@ negotiation, so order matters and the gap should be minimized:
 Rolling back to a build from before this async job model: revert the worker
 deploy (`wrangler rollback` or redeploy the prior version). The `bulk_jobs` table
 and the queue persist but go inert (that build has no producer/consumer). No data
-cleanup required.
+cleanup required, except for unfinished delete-kind jobs (see "Rolling back past
+#289" below).
 
 Rolling back past #289 (to any build without delete by kind): either order is
 safe.
