@@ -43,10 +43,13 @@ const NOT_AN_OUTBOUND_TARGET: Record<string, string> = {
   // analysis jobs on the deployed service. That is accepted risk, not an
   // absence of risk. Revisit if realness gains a local target.
   REALNESS_API_URL: 'no local equivalent; accepted risk, POST /analyze does reach the deployed service',
-  // handleMediaProxy builds https://${CDN_DOMAIN}/admin/api/blob/... and falls
-  // back to media.divine.video when unset. There is no local blossom, so this
-  // stays the deployed host. A GET with BLOSSOM_WEBHOOK_SECRET, not a write.
-  CDN_DOMAIN: 'no local blossom; accepted risk, GET /admin/api/blob reaches production media',
+  // handleMediaProxy and the bulk actions' per-file status check
+  // (bulk-moderate.ts readBlossomStatus) build https://${CDN_DOMAIN}/admin/api/blob/...
+  // and fall back to media.divine.video when unset. There is no local blossom,
+  // so this stays the deployed host. GETs with BLOSSOM_WEBHOOK_SECRET, not
+  // writes. A video only in local test data fails its status read, so a local
+  // bulk action reports it and leaves it unchanged.
+  CDN_DOMAIN: 'no local blossom; accepted risk, GET /admin/api/blob (media proxy and bulk status reads) reaches production media',
 };
 
 /**
