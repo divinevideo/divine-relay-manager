@@ -12,7 +12,7 @@ import {
   VIDEO_MAX_PAGES,
   type BulkModerateEnv,
 } from './bulk-moderate';
-import { KIND_COUNTS_REQUEST_TIMEOUT_MS, type BulkJob, type BulkJobMessage, type BulkEnqueueResponse } from '../../shared/bulk-moderation';
+import { KIND_COUNTS_REQUEST_TIMEOUT_MS, sameSecondGapWarning, type BulkJob, type BulkJobMessage, type BulkEnqueueResponse } from '../../shared/bulk-moderation';
 import { banEvent, getAdminPubkey } from './nip86';
 import { syncZendeskAfterAction } from './zendesk-sync';
 import { BAN_REFUSED, drainJob, relayFake, type RelayEvent } from './test-helpers/relay-fake';
@@ -2227,6 +2227,25 @@ describe('delete-kind against a hostile relay', () => {
       expect(job.status).toBe('done');
       expect(job.eventsProcessed).toBe(450);
       expect(job.failures).toEqual([]);
+    });
+
+    // Only an empty final page disproves a gap. One that still lists events,
+    // here one whose ban always fails, is not an empty read.
+    it('keeps an earlier gap warning when the final sweep\'s page still lists an event it could not ban', async () => {
+      const t = now() - 100;
+      relayFake([
+        ...Array.from({ length: 250 }, (_, i) => ({ id: `s${String(i).padStart(4, '0')}`, kind: 1, created_at: t })),
+        { id: 'stuck', kind: 1, created_at: t - 10 },
+      ], { ban: (id) => (id === 'stuck' ? BAN_REFUSED : { success: true }) });
+
+      const { job } = await runJob(1);
+
+      expect(job.status).toBe('done');
+      expect(job.eventsProcessed).toBe(250);
+      expect(job.failures).toEqual([
+        sameSecondGapWarning(P, 200),
+        'event:stuck:relay refused',
+      ]);
     });
 
     it('keeps a gap warning recorded on the final sweep itself', async () => {

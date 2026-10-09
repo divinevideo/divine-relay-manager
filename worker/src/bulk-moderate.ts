@@ -904,6 +904,7 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
           // of this kind is listed at or below the ceiling, so earlier sweeps'
           // "some may be unprocessed" warnings no longer hold. (An empty page
           // records no failure except an out-of-scope one, which keeps them.)
+          // A page that still lists events, whose bans failed, is not that read.
           disproveListingGaps = !msg.cursor && !msg.eventIds && page.events.length === 0
             && page.outOfScope === 0;
         } else if (sweep + 1 >= MAX_KIND_SWEEPS) {
