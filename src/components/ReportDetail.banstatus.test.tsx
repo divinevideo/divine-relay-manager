@@ -232,6 +232,14 @@ describe('ReportDetail user ban-status panel', () => {
     }
   });
 
+  it('passes the account ban and suspend status to the by-kind delete', () => {
+    status.value = moderationStatusMock({ isUserBanned: true, isEventGone: null, checkedAt: CHECKED_AT });
+    status.value.isUserSuspended = null;
+    renderDetail();
+
+    expect(bulkDeleteProps.last).toMatchObject({ isBanned: true, isSuspended: null });
+  });
+
   it('runs a plain check when a bulk content action from UserActions completes', () => {
     renderDetail();
     const onActionComplete = userActionsProps.last?.onActionComplete as (change?: { accountStatusChanged: boolean }) => void;

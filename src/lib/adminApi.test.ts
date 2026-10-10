@@ -42,6 +42,7 @@ import {
   getAgeReviewCaseCounts,
   bulkModerate,
   getBulkJobStatus,
+  getBulkKindCounts,
   getLinkedTickets,
   closeTicket,
   ApiError,
@@ -52,6 +53,7 @@ import {
   type ModerationAction,
   type MediaStatusAction,
 } from './adminApi';
+import { KIND_COUNTS_REQUEST_TIMEOUT_MS } from '../../shared/bulk-moderation';
 
 // Mock fetch globally
 const mockFetch = vi.fn();
@@ -197,6 +199,17 @@ describe('adminApi', () => {
       await expect(getWorkerInfo(API_URL)).rejects.toThrow(
         /Request to \/api\/info timed out after 30s\. Could not reach the relay\. Try again\./,
       );
+    });
+
+    it('marks a timeout with code "timeout", so a caller can word a slow read itself', async () => {
+      mockFetch.mockRejectedValueOnce(new DOMException('timed out', 'TimeoutError'));
+
+      const error = await getBulkKindCounts(API_URL, 'a'.repeat(64)).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(ApiError);
+      expect((error as ApiError).code).toBe('timeout');
+      // The worker's count budget is checked against this same constant.
+      expect((error as ApiError).message).toContain(`after ${KIND_COUNTS_REQUEST_TIMEOUT_MS / 1000}s`);
     });
 
     it('a write (POST) timeout says the action may still have applied', async () => {
@@ -1879,6 +1892,51 @@ describe('adminApi', () => {
       });
 
       await expect(bulkModerate(API_URL, 'a'.repeat(64), 'delete-all')).rejects.toThrow('queue down');
+    });
+
+    it('sends the kind and attribution for a kind-scoped delete', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, jobId: 'job-9' }) });
+
+      await bulkModerate(API_URL, 'a'.repeat(64), 'delete-kind', 'spam', {
+        kind: 7, moderatorPubkey: 'd'.repeat(64), reportId: 'e'.repeat(64),
+      });
+
+      const body = JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string);
+      expect(body).toEqual({
+        pubkey: 'a'.repeat(64), action: 'delete-kind', reason: 'spam',
+        kind: 7, moderatorPubkey: 'd'.repeat(64), reportId: 'e'.repeat(64),
+      });
+    });
+
+    it('sends no kind for a plain delete-all', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, jobId: 'job-9' }) });
+
+      await bulkModerate(API_URL, 'a'.repeat(64), 'delete-all', 'r');
+
+      const body = JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string);
+      expect(body).toEqual({ pubkey: 'a'.repeat(64), action: 'delete-all', reason: 'r' });
+    });
+  });
+
+  describe('getBulkKindCounts', () => {
+    it('GETs the per-kind counts for a pubkey', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ counts: { 7: 3 }, complete: false }) });
+
+      const res = await getBulkKindCounts(API_URL, 'a'.repeat(64));
+
+      expect(res).toEqual({ counts: { 7: 3 }, complete: false });
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining(`/api/bulk-moderate/kind-counts?pubkey=${'a'.repeat(64)}`),
+        expect.objectContaining({ method: 'GET' }),
+      );
+    });
+
+    it('throws when the listing fails rather than returning zero counts', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false, status: 502, statusText: 'Bad Gateway', json: async () => ({ error: 'relay down' }),
+      });
+
+      await expect(getBulkKindCounts(API_URL, 'a'.repeat(64))).rejects.toThrow('relay down');
     });
   });
 

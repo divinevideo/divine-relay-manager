@@ -3,6 +3,7 @@ import { finalizeEvent, generateSecretKey } from 'nostr-tools';
 import worker from './index';
 import { LABEL_PAGE_SIZE } from './resolution-labels';
 import * as ageReview from './age-review';
+import { relayFake } from './test-helpers/relay-fake';
 
 const env = {
   ALLOWED_ORIGINS: 'https://app.divine.video,https://*.openvine-app.pages.dev',
@@ -1931,13 +1932,18 @@ describe('bulk-moderate age-review guard', () => {
     expect(send).toHaveBeenCalledTimes(1);
   });
 
-  it.each(['age-restrict-all', 'delete-all'])(
+  // delete-kind sits with delete-all: it only deletes.
+  it.each([
+    ['age-restrict-all', {}],
+    ['delete-all', {}],
+    ['delete-kind', { kind: 1 }],
+  ])(
     'fails open for %s when the case lookup throws (transient D1 error must not block moderation)',
-    async (action) => {
+    async (action, extra) => {
       const { env, send } = makeBulkEnv({ id: 'case-b4', state: 'restricted_pending_user_response' }, { lookupThrows: true });
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       const response = await worker.fetch(
-        enqueueRequest({ pubkey: VALID_PUBKEY, action }), env, ctx,
+        enqueueRequest({ pubkey: VALID_PUBKEY, action, ...extra }), env, ctx,
       );
       expect(response.status).toBe(200);
       expect(send).toHaveBeenCalledTimes(1);
@@ -1974,6 +1980,15 @@ describe('bulk-moderate age-review guard', () => {
     expect(send).toHaveBeenCalledTimes(1);
   });
 
+  it('refuses a kind-scoped delete the same way', async () => {
+    const { env, send } = makeBulkEnv({ id: 'case-b6', state: 'submitted_for_review' });
+    const response = await worker.fetch(
+      enqueueRequest({ pubkey: VALID_PUBKEY, action: 'delete-kind', kind: 1 }), env, ctx,
+    );
+    expect(response.status).toBe(409);
+    expect(send).not.toHaveBeenCalled();
+  });
+
   it('leaves validation to the handler: malformed pubkey is a 400, not a guard error', async () => {
     const { env, send } = makeBulkEnv({ id: 'case-b5', state: 'restricted_pending_user_response' });
     const response = await worker.fetch(
@@ -1981,6 +1996,39 @@ describe('bulk-moderate age-review guard', () => {
     );
     expect(response.status).toBe(400);
     expect(send).not.toHaveBeenCalled();
+  });
+});
+
+describe('bulk-moderate kind-counts route', () => {
+  const VALID_PUBKEY = 'abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234';
+  const env = {
+    ALLOWED_ORIGINS: 'https://app.divine.video',
+    RELAY_URL: 'wss://relay.divine.video',
+    ADMIN_API_KEY: 'test-admin-key',
+    NOSTR_NSEC: TEST_NSEC,
+  } as never;
+
+  function countsRequest(pubkey: string, headers: Record<string, string> = { 'X-Admin-Key': 'test-admin-key' }): Request {
+    return new Request(`https://api-relay-prod.divine.video/api/bulk-moderate/kind-counts?pubkey=${pubkey}`, {
+      headers: { Origin: 'https://app.divine.video', ...headers },
+    });
+  }
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it('requires admin auth (401 without an admin key)', async () => {
+    const response = await worker.fetch(countsRequest(VALID_PUBKEY, {}), env, ctx);
+    expect(response.status).toBe(401);
+  });
+
+  it('returns the per-kind counts for the pubkey in the query string', async () => {
+    const { reqs } = relayFake([{ id: 'e1', pubkey: VALID_PUBKEY, kind: 22, created_at: 2 }]);
+
+    const response = await worker.fetch(countsRequest(VALID_PUBKEY), env, ctx);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ counts: { 22: 1 }, complete: true });
+    expect(reqs).toEqual([expect.objectContaining({ authors: [VALID_PUBKEY] })]);
   });
 });
 

@@ -38,7 +38,7 @@ import {
   updateAgeReviewConfig,
 } from './age-review';
 import { handleAccountStatus } from './account-status';
-import { handleBulkModerateEnqueue, handleBulkJobStatus, processBulkJob, LOOSENS_AGE_REVIEW_HOLD } from './bulk-moderate';
+import { handleBulkModerateEnqueue, handleBulkJobStatus, handleBulkKindCounts, processBulkJob, LOOSENS_AGE_REVIEW_HOLD } from './bulk-moderate';
 import type { BulkAction, BulkJobMessage } from '../../shared/bulk-moderation';
 import { ensureZendeskTable, addZendeskInternalNote, syncZendeskAfterAction, getLinkedTickets, closeTicketById } from './zendesk-sync';
 import { buildReportNote, parseKind0Profile, type ReportedProfile } from './report-note';
@@ -721,9 +721,9 @@ export default {
         // case must not run out of band (age-restrict half-enforces without
         // advancing the case, un-age-restrict lifts restrictions the case
         // imposed, age-gate-all swaps the case's withhold for an 18+ gate that
-        // serves the videos to signed-in viewers (#290), delete-all destroys
-        // evidence the review may need). Refuse and route to the case; Ban
-        // remains the severe-action escape hatch.
+        // serves the videos to signed-in viewers (#290), delete-all and
+        // delete-kind destroy evidence the review may need). Refuse and route to
+        // the case; Ban remains the severe-action escape hatch.
         // Peeks at the body on a clone so malformed/invalid requests still get
         // the handler's own 400s. Two accepted edges: (1) the guard runs
         // before action validation, so a well-formed pubkey with an open case
@@ -755,6 +755,12 @@ export default {
       const bulkStatusMatch = path.match(/^\/api\/bulk-moderate\/status\/([^/]+)$/);
       if (bulkStatusMatch && request.method === 'GET') {
         return handleBulkJobStatus(decodeURIComponent(bulkStatusMatch[1]), env, corsHeaders);
+      }
+
+      // Per-kind event counts for an account, from a paged listing (the by-kind
+      // delete dialog). A lower bound when `complete` is false.
+      if (path === '/api/bulk-moderate/kind-counts' && request.method === 'GET') {
+        return handleBulkKindCounts(url.searchParams.get('pubkey'), env, corsHeaders);
       }
 
       // Age review config
