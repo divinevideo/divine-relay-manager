@@ -160,6 +160,29 @@ describe('BulkDeleteByKind counts', () => {
     expect(api.getBulkKindCounts).toHaveBeenCalledTimes(1);
   });
 
+  // A recount (after a job finishes, or on a reopen) runs over the earlier
+  // count. Until it answers, the dialog says it is counting, as on the first
+  // load, and Delete stays off.
+  it('shows counting and keeps Delete off while a recount runs over a cached count', async () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    renderDialog({}, qc);
+    await openAndPickReactions();
+    expect(screen.getByRole('button', { name: 'Delete 3 Reaction events' })).toBeEnabled();
+
+    let resolveRecount: (value: unknown) => void = () => {};
+    api.getBulkKindCounts.mockReturnValue(new Promise((resolve) => { resolveRecount = resolve; }));
+    void qc.refetchQueries({ queryKey: ['bulk-kind-counts'] });
+
+    expect(await screen.findByText('Counting events...')).toBeInTheDocument();
+    expect(screen.queryByText(/Found/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Delete events' })).toBeDisabled();
+
+    resolveRecount({ counts: { 1: 800, 7: 1 }, complete: true });
+
+    expect(await screen.findByText(/Found/)).toHaveTextContent('Found 1 Reaction events to delete');
+    expect(screen.getByRole('button', { name: 'Delete 1 Reaction events' })).toBeEnabled();
+  });
+
   // A failed refetch keeps the earlier counts in the cache. Delete must follow
   // the error it shows, not those counts.
   it('disables Delete when a later count refetch fails, even with earlier counts cached', async () => {

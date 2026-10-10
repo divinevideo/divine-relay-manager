@@ -218,14 +218,18 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
   });
 
   const counts = countsQuery.data;
+  // A recount (after a job, or on a reopen) runs over the earlier, cached
+  // count. Until it answers, that count is stale: show counting, as on the
+  // first load, and keep Delete off.
+  const recounting = countsQuery.isFetching;
   const selectedCount = counts ? counts.counts[selectedKind] ?? 0 : undefined;
   const isRunning = bulkJob.isRunning || starting;
   // A cut-short listing may have missed events of this kind, so it does not
   // rule a delete out even at zero. A lost status poll keeps Delete off: the
   // job may still be running. So does a failed count refetch, whose earlier
   // counts are still cached under the error the dialog shows.
-  const canDelete = !!counts && !countsQuery.isError && (selectedCount! > 0 || !counts.complete) && !isRunning
-    && !contentHidden && !bulkJob.trackingLost;
+  const canDelete = !!counts && !countsQuery.isError && !recounting && (selectedCount! > 0 || !counts.complete)
+    && !isRunning && !contentHidden && !bulkJob.trackingLost;
   const kindName = getKindName(parseInt(selectedKind) || 0);
   const job = bulkJob.job;
   const outcome = job && isTerminal(job.status) && (job.kind !== undefined || expected?.kind !== undefined)
@@ -263,7 +267,7 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
 
   const processed = job && !isTerminal(job.status) ? job.eventsProcessed : 0;
   const progressValue = expected && expected.count > 0 ? Math.min(100, (processed / expected.count) * 100) : 0;
-  const deleteLabel = !counts
+  const deleteLabel = !counts || recounting
     ? "Delete events"
     : counts.complete
       ? `Delete ${selectedCount} ${kindName} events`
@@ -315,7 +319,7 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
                   <p className="text-sm">{HIDDEN_ACCOUNT}</p>
                 ) : countsQuery.isError ? (
                   <p className="text-sm text-destructive">{countError}</p>
-                ) : !counts ? (
+                ) : !counts || recounting ? (
                   <div className="flex items-center gap-2 text-sm">
                     <Loader2 className="h-4 w-4 animate-spin" />
                     Counting events...
