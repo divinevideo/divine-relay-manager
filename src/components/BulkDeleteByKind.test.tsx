@@ -1,5 +1,5 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { BulkDeleteByKind } from './BulkDeleteByKind';
 import { ApiError } from '@/lib/adminApi';
@@ -181,6 +181,34 @@ describe('BulkDeleteByKind counts', () => {
 
     expect(await screen.findByText(/Found/)).toHaveTextContent('Found 1 Reaction events to delete');
     expect(screen.getByRole('button', { name: 'Delete 1 Reaction events' })).toBeEnabled();
+  });
+
+  // A recount shows "Counting events..." and turns Delete off, so returning to
+  // the tab must not start one. Opening the dialog and finishing a job do.
+  it('does not recount when the moderator returns to the tab', async () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false, refetchOnWindowFocus: true }, mutations: { retry: false } } });
+    const realNow = Date.now();
+    const nowSpy = vi.spyOn(Date, 'now');
+    try {
+      renderDialog({}, qc);
+      await openAndPickReactions();
+      expect(api.getBulkKindCounts).toHaveBeenCalledTimes(1);
+
+      // Well past the counts' 30s stale time, then a refocus.
+      nowSpy.mockReturnValue(realNow + 120_000);
+      expect(qc.getQueryCache().find({ queryKey: ['bulk-kind-counts', PUBKEY] })?.isStaleByTime(30_000)).toBe(true);
+      await act(async () => {
+        focusManager.setFocused(false);
+        focusManager.setFocused(true);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      });
+
+      expect(api.getBulkKindCounts).toHaveBeenCalledTimes(1);
+      expect(screen.getByRole('button', { name: 'Delete 3 Reaction events' })).toBeEnabled();
+    } finally {
+      nowSpy.mockRestore();
+      focusManager.setFocused(undefined);
+    }
   });
 
   // A failed refetch keeps the earlier counts in the cache. Delete must follow

@@ -182,12 +182,15 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
   // Per-kind counts from the worker's paged listing of the account; a lower
   // bound when `complete` is false.
   // No retry: each attempt is a full listing, and reopening the dialog retries.
+  // No refetch on window focus: a recount shows "Counting events..." and turns
+  // Delete off, and opening the dialog and finishing a job already recount.
   const countsQuery = useQuery({
     queryKey: ["bulk-kind-counts", pubkey],
     queryFn: () => api.getBulkKindCounts(pubkey),
     enabled: !!pubkey && dialogOpen && !contentHidden,
     staleTime: 30_000,
     retry: false,
+    refetchOnWindowFocus: false,
   });
 
   const bulkJob = useBulkModerateJob({
