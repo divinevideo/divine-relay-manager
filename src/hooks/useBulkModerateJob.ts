@@ -37,30 +37,34 @@ export function useBulkModerateJob({ pubkey, onComplete, onError, onTrackingLost
   // Guard against re-firing onTrackingLost for the same loss.
   const lostNotified = useRef(false);
 
-  // The account this hook currently shows, for an enqueue that settles after
-  // the caller switched accounts (see onSuccess).
+  // The account and environment this hook currently shows, for an enqueue that
+  // settles after the caller switched either (see onSuccess). `api` is bound to
+  // the selected environment and memoized on it, so its identity names it.
   const currentPubkey = useRef(pubkey);
   currentPubkey.current = pubkey;
+  const currentApi = useRef(api);
+  currentApi.current = api;
 
-  // `target` is the account when start was called, bound into the variables:
-  // the mutation reads its options from the latest render, so a start that
-  // awaits something first (BulkDeleteByKind resolves the moderator) would
-  // otherwise send the account selected by then, with the confirmed kind and
-  // reason.
+  // `target` and `client` are the account and environment when start was
+  // called, bound into the variables: the mutation reads its options from the
+  // latest render, so a start that awaits something first (BulkDeleteByKind
+  // resolves the moderator) would otherwise send the account and environment
+  // selected by then, with the confirmed kind and reason.
+  type EnqueueVars = { target: string; client: typeof api; action: BulkAction; options?: BulkJobStart };
   const enqueue = useMutation({
-    mutationFn: ({ target, action, options }: { target: string; action: BulkAction; options?: BulkJobStart }) => {
+    mutationFn: ({ target, client, action, options }: EnqueueVars) => {
       const reason = options?.reason ?? `Bulk ${action} by moderator`;
-      if (!options) return api.bulkModerate(target, action, reason);
+      if (!options) return client.bulkModerate(target, action, reason);
       // Rest-spread, not a field list, so a new BulkModerateOptions field is
       // forwarded without this line having to learn about it.
       const { reason: _reason, ...scope } = options;
-      return api.bulkModerate(target, action, reason, scope);
+      return client.bulkModerate(target, action, reason, scope);
     },
     onMutate: ({ action }) => { setPendingAction(action); },
-    // A job enqueued for an account no longer shown runs detached, as one does
-    // when the account changes after its enqueue (below).
-    onSuccess: (res, { target }) => {
-      if (target === currentPubkey.current) setJobId(res.jobId);
+    // A job enqueued for an account or environment no longer shown runs
+    // detached, as one does when the account changes after its enqueue (below).
+    onSuccess: (res, { target, client }) => {
+      if (target === currentPubkey.current && client === currentApi.current) setJobId(res.jobId);
       else setPendingAction(null);
     },
     onError: (error: Error) => { setPendingAction(null); onError?.(error); },
@@ -127,8 +131,8 @@ export function useBulkModerateJob({ pubkey, onComplete, onError, onTrackingLost
   const runningAction: BulkAction | null = isRunning ? (job?.action ?? pendingAction) : null;
 
   return {
-    start: (action: BulkAction, options?: BulkJobStart) => enqueue.mutate({ target: pubkey, action, options }),
-    startAsync: (action: BulkAction, options?: BulkJobStart) => enqueue.mutateAsync({ target: pubkey, action, options }),
+    start: (action: BulkAction, options?: BulkJobStart) => enqueue.mutate({ target: pubkey, client: api, action, options }),
+    startAsync: (action: BulkAction, options?: BulkJobStart) => enqueue.mutateAsync({ target: pubkey, client: api, action, options }),
     job,
     isRunning,
     runningAction,
