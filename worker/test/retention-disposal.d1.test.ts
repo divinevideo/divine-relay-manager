@@ -53,6 +53,7 @@ beforeEach(async () => {
   await DB.prepare('DELETE FROM protected_minor_provisioning_tombstones').run();
   await DB.prepare('DELETE FROM protected_minor_account_bindings').run();
   await DB.prepare('DELETE FROM protected_minor_subjects').run();
+  await DB.prepare('DELETE FROM age_review_parent_consent_submissions').run();
   await DB.prepare('DELETE FROM age_review_cases').run();
 });
 
@@ -230,5 +231,26 @@ describe('protected-record retention on real D1', () => {
     expect(await DB.prepare('SELECT 1 FROM protected_minor_projection_jobs WHERE subject_id = ?').bind(subjectId).first()).not.toBeNull();
     expect(await DB.prepare('SELECT 1 FROM protected_minor_account_bindings WHERE subject_id = ?').bind(subjectId).first()).not.toBeNull();
     expect(await DB.prepare("SELECT 1 FROM age_review_cases WHERE id = 'case-independent'").first()).toBeNull();
+  });
+
+  it('deletes a consent clip 120 days after closure and respects a legal hold', async () => {
+    const closedLongAgo = new Date(Date.now() - 121 * 864e5).toISOString();
+    await DB.prepare(`INSERT INTO age_review_cases (id, pubkey, state, closed_at)
+      VALUES ('case-clip', ?, 'denied_closed', ?), ('case-clip-held', ?, 'denied_closed', ?)`)
+      .bind(PUBKEY_A, closedLongAgo, PUBKEY_B, closedLongAgo).run();
+    await DB.prepare(`INSERT INTO age_review_parent_consent_submissions
+      (case_id, status, lease_until, created_at, receipt_id, object_key)
+      VALUES ('case-clip', 'commented', 0, unixepoch(), 'r-clip', 'obj-clip'),
+             ('case-clip-held', 'commented', 0, unixepoch(), 'r-held', 'obj-held')`).run();
+    await DB.prepare(`INSERT INTO retention_legal_holds
+      (id, record_type, record_key, disposal_stage, authorized_role, starts_at, review_at)
+      VALUES ('hold-clip', 'age_review_case', 'case-clip-held', 'consent_video', 'privacy/legal', '2020-01-01T00:00:00Z', '2030-01-01T00:00:00Z')`).run();
+    const deleted: string[] = [];
+    const bucket = { delete: async (key: string) => { deleted.push(key); } } as unknown as R2Bucket;
+    const result = await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY, CONSENT_VIDEO_BUCKET: bucket });
+    expect(deleted).toEqual(['obj-clip']);
+    expect(result.consentVideosDeleted).toBe(1);
+    const held = await DB.prepare("SELECT disposed_at FROM age_review_parent_consent_submissions WHERE case_id = 'case-clip-held'").first<{ disposed_at: unknown }>();
+    expect(held?.disposed_at).toBeNull();
   });
 });

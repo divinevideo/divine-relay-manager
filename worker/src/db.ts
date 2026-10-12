@@ -97,8 +97,24 @@ export async function ensureSchema(db: D1Database): Promise<void> {
     upload_token TEXT,
     ticket_id INTEGER,
     lease_until INTEGER NOT NULL DEFAULT 0,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    receipt_id TEXT,
+    object_key TEXT,
+    content_type TEXT,
+    size_bytes INTEGER,
+    disposed_at INTEGER
   )`).run();
+
+  // Columns added by migration 0015 for deployments whose table predates it.
+  for (const column of ['receipt_id TEXT', 'object_key TEXT', 'content_type TEXT', 'size_bytes INTEGER', 'disposed_at INTEGER']) {
+    try {
+      await db.prepare(`ALTER TABLE age_review_parent_consent_submissions ADD COLUMN ${column}`).run();
+    } catch {
+      // Column already exists
+    }
+  }
+  await db.prepare(`CREATE INDEX IF NOT EXISTS idx_parent_consent_receipt
+    ON age_review_parent_consent_submissions (receipt_id)`).run();
 
   // Add columns to existing tables that were created without them
   try {
@@ -332,7 +348,7 @@ export async function ensureSchema(db: D1Database): Promise<void> {
     id TEXT PRIMARY KEY,
     record_type TEXT NOT NULL CHECK (record_type IN ('protected_subject', 'account_binding', 'provisioning_operation', 'projection_job', 'age_review_case')),
     record_key TEXT,
-    disposal_stage TEXT NOT NULL DEFAULT 'all' CHECK (disposal_stage IN ('all', 'claim_link', 'redaction', 'compaction', 'deletion')),
+    disposal_stage TEXT NOT NULL DEFAULT 'all' CHECK (disposal_stage IN ('all', 'claim_link', 'redaction', 'compaction', 'deletion', 'consent_video')),
     authorized_role TEXT NOT NULL,
     starts_at TEXT NOT NULL,
     review_at TEXT NOT NULL,

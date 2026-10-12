@@ -168,3 +168,12 @@ new_classes = ["ReportWatcher"]
 # can't break permanently after a Cloudflare-initiated eviction.
 [triggers]
 crons = ["*/5 * * * *"]
+
+# Greenlight parent-consent videos (private; no public domain, no r2.dev).
+# Create before deploying: npx wrangler r2 bucket create divine-consent-videos-prod
+# CONSENT_ACCESS_* must name the dedicated Cloudflare Access application on
+# /api/age-review/consent-video/* before the mobile flag is enabled; while
+# either is empty the reviewer route fails closed (503) by design.
+[[r2_buckets]]
+binding = "CONSENT_VIDEO_BUCKET"
+bucket_name = "divine-consent-videos-prod"
