@@ -117,14 +117,28 @@ function ofTotal(expected: ExpectedCount | undefined, deleted: number): string {
 }
 
 // What a finished job tells the moderator. Only a job that ran to completion
-// with no failures reads as done. A job with failures, or one that stopped
-// early, says how far it got and that a re-run picks up the rest, unless the
-// account is now hidden, where a re-run would find nothing.
+// with no failures, on an account the relay still lists, reads as done. A job
+// that ended clean after the account was hidden says so instead. A job with
+// failures, or one that stopped early, says how far it got and that a re-run
+// picks up the rest, unless the account is now hidden, where a re-run would
+// find nothing.
 function describeOutcome(job: BulkJob, expected: ExpectedCount | undefined, contentHidden: boolean) {
   const kind = job.kind ?? expected?.kind;
   const kindName = kind !== undefined ? `${getKindName(kind)} ` : "";
   const deleted = job.eventsProcessed;
   const clean = job.status === "done" && job.failures.length === 0;
+  // Once the account is hidden, the relay lists none of its events, so the
+  // job's remaining reads come back empty and it can end clean with events
+  // left. Those are hidden, not deleted, and return on unban: never complete.
+  // Nothing failed, though, so it reads neutral rather than as an error.
+  if (clean && contentHidden) {
+    return {
+      clean: false,
+      neutral: true,
+      title: "Bulk delete finished, but the account is now hidden",
+      description: `Deleted ${deleted}${ofTotal(expected, deleted)} ${kindName}events. ${HIDDEN_ACCOUNT}`,
+    };
+  }
   if (clean) {
     const title = "Bulk delete complete";
     if (expected?.complete && deleted < expected.count) {
@@ -197,7 +211,7 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
     pubkey,
     onComplete: (job) => {
       const outcome = describeOutcome(job, expected, contentHidden);
-      toast(outcome.clean
+      toast(outcome.clean || outcome.neutral
         ? { title: outcome.title, description: outcome.description }
         : { title: outcome.title, description: outcome.description, variant: "destructive", className: WRAP_IDS });
       queryClient.invalidateQueries({ queryKey: ["bulk-kind-counts", pubkey] });
@@ -416,8 +430,8 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
               )}
 
               {!isRunning && !bulkJob.trackingLost && outcome && !outcome.clean && (
-                <div className="p-3 rounded-lg border border-destructive/50 text-sm space-y-1">
-                  <p className="font-medium text-destructive">{outcome.title}</p>
+                <div className={`p-3 rounded-lg border text-sm space-y-1 ${outcome.neutral ? "" : "border-destructive/50"}`}>
+                  <p className={`font-medium ${outcome.neutral ? "" : "text-destructive"}`}>{outcome.title}</p>
                   <p className={`text-muted-foreground ${WRAP_IDS}`}>{outcome.description}</p>
                 </div>
               )}

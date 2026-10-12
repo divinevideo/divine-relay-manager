@@ -697,10 +697,54 @@ describe('BulkDeleteByKind outcomes', () => {
     expect(lastToast().description).toBe(`Deleted 1 of 3 Reaction events. ${HIDDEN} Reason: boom`);
   });
 
+  // Once the account is hidden, the relay lists none of its events, so the
+  // job's remaining reads come back empty and it can end clean with events
+  // left. Those are hidden, not deleted, so it must not read as complete.
+  async function finishCleanAfterBan(counts: { counts: Record<number, number>; complete: boolean }, deleteLabel: string, deleted: number) {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    api.getBulkKindCounts.mockResolvedValue(counts);
+    api.getBulkJobStatus.mockResolvedValue(job({ status: 'running', eventsProcessed: 1 }));
+    const { rerender } = renderDialog({ isBanned: null }, qc);
+    open();
+    fireEvent.click(await screen.findByRole('button', { name: /^Reaction \(3\+?\)$/ }));
+    fireEvent.click(screen.getByRole('button', { name: deleteLabel }));
+    await screen.findByRole('status');
+    api.getBulkJobStatus.mockResolvedValue(job({ eventsProcessed: deleted }));
+
+    rerender(<QueryClientProvider client={qc}><BulkDeleteByKind pubkey={PUBKEY} isBanned={true} /></QueryClientProvider>);
+
+    await waitFor(() => expect(toast).toHaveBeenCalled(), { timeout: 4000 });
+  }
+
+  // Neutral, like the clean shortfall: not a success, but nothing failed.
+  function expectHiddenNotComplete(description: string) {
+    expect(lastToast()).toEqual({ title: 'Bulk delete finished, but the account is now hidden', description });
+    const dialog = screen.getByRole('alertdialog');
+    expect(within(dialog).getByText(description)).toBeInTheDocument();
+    const panelTitle = within(dialog).getByText('Bulk delete finished, but the account is now hidden');
+    expect(panelTitle).not.toHaveClass('text-destructive');
+    expect(panelTitle.parentElement).not.toHaveClass('border-destructive/50');
+    expect(dialog).not.toHaveTextContent(/complete/i);
+  }
+
+  it('does not call a clean job complete when the account was hidden during it (cut-short count)', async () => {
+    await finishCleanAfterBan({ counts: { 7: 3 }, complete: false }, 'Delete all Reaction events', 2);
+
+    expectHiddenNotComplete(`Deleted 2 of at least 3 Reaction events. ${HIDDEN}`);
+  });
+
+  it('does not call a clean job complete when the account was hidden during it (exact count)', async () => {
+    await finishCleanAfterBan({ counts: { 1: 800, 7: 3 }, complete: true }, 'Delete 3 Reaction events', 3);
+
+    expectHiddenNotComplete(`Deleted 3 of 3 Reaction events. ${HIDDEN}`);
+  });
+
   it('names the started kind when the finished job does not report one (an older worker)', async () => {
     await runWith({ kind: undefined, status: 'failed', eventsProcessed: 0, failures: ['job:abandoned (no terminal update; worker likely evicted mid-run)'] });
 
     expect(lastToast().description).toMatch(/^Deleted 0 of 3 Reaction events\./);
-    expect(within(screen.getByRole('alertdialog')).getByText('Bulk delete stopped early')).toBeInTheDocument();
+    const panelTitle = within(screen.getByRole('alertdialog')).getByText('Bulk delete stopped early');
+    expect(panelTitle).toHaveClass('text-destructive');
+    expect(panelTitle.parentElement).toHaveClass('border-destructive/50');
   });
 });
