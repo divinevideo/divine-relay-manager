@@ -451,6 +451,15 @@ export async function disposeDueConsentVideos(db: D1Database, bucket: R2Bucket):
      LIMIT 100`,
   ).bind().all<{ case_id: string; object_key: string }>();
 
+  // Rows whose clip is disposed and whose case has been deleted carry only
+  // an opaque receipt; drop them so the link from case to clip cannot
+  // outlive the case itself.
+  await db.prepare(
+    `DELETE FROM age_review_parent_consent_submissions
+     WHERE disposed_at IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM age_review_cases c WHERE c.id = case_id)`,
+  ).bind().run();
+
   const seen = new Set<string>();
   for (const row of [...due.results, ...abandoned.results]) {
     if (seen.has(row.object_key)) continue;

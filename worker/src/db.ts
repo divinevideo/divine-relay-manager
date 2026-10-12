@@ -102,11 +102,13 @@ export async function ensureSchema(db: D1Database): Promise<void> {
     object_key TEXT,
     content_type TEXT,
     size_bytes INTEGER,
-    disposed_at INTEGER
+    disposed_at INTEGER,
+    case_version INTEGER,
+    ticket_attempt_at INTEGER
   )`).run();
 
   // Columns added by migration 0015 for deployments whose table predates it.
-  for (const column of ['receipt_id TEXT', 'object_key TEXT', 'content_type TEXT', 'size_bytes INTEGER', 'disposed_at INTEGER']) {
+  for (const column of ['receipt_id TEXT', 'object_key TEXT', 'content_type TEXT', 'size_bytes INTEGER', 'disposed_at INTEGER', 'case_version INTEGER', 'ticket_attempt_at INTEGER']) {
     try {
       await db.prepare(`ALTER TABLE age_review_parent_consent_submissions ADD COLUMN ${column}`).run();
     } catch {

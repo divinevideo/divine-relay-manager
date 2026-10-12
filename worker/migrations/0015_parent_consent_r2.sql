@@ -6,6 +6,8 @@ ALTER TABLE age_review_parent_consent_submissions ADD COLUMN object_key TEXT;
 ALTER TABLE age_review_parent_consent_submissions ADD COLUMN content_type TEXT;
 ALTER TABLE age_review_parent_consent_submissions ADD COLUMN size_bytes INTEGER;
 ALTER TABLE age_review_parent_consent_submissions ADD COLUMN disposed_at INTEGER;
+ALTER TABLE age_review_parent_consent_submissions ADD COLUMN case_version INTEGER;
+ALTER TABLE age_review_parent_consent_submissions ADD COLUMN ticket_attempt_at INTEGER;
 CREATE INDEX IF NOT EXISTS idx_parent_consent_receipt
   ON age_review_parent_consent_submissions (receipt_id);
 

@@ -1629,7 +1629,8 @@ describe('handleParentConsent', () => {
             row = { status: 'processing', upload_token: null, ticket_id: null, lease_until: args[1], created_at: args[2], receipt_id: args[3], object_key: args[4] };
             return { meta: { changes: 1 } };
           }
-          if (sql.includes("SET status = 'stored'") && row) { row.status = 'stored'; row.content_type = args[0]; row.size_bytes = args[1]; }
+          if (sql.includes("receipt_id = NULL") && row) { row.status = 'processing'; row.receipt_id = null; row.object_key = null; row.case_version = null; row.ticket_attempt_at = null; }
+          if (sql.includes("SET status = 'stored'") && row) { row.status = 'stored'; row.content_type = args[0]; row.size_bytes = args[1]; row.receipt_id = args[2]; row.object_key = args[3]; }
           if (sql.includes("SET status = 'commented'") && row) { row.status = 'commented'; row.ticket_id = args[0]; }
           if (sql.includes('SET ticket_id') && row) { row.ticket_id = args[0]; }
           if (sql.includes("state = 'submitted_for_review'")) { c.state = 'submitted_for_review' as never; }
@@ -1741,6 +1742,45 @@ describe('handleParentConsent', () => {
     expect(res.status).toBe(200);
     expect(bucket.createMultipartUpload).not.toHaveBeenCalled();
     expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a 16+ claimed case on the support-review-only path', async () => {
+    const c = makeCase({ state: 'restricted_pending_parental_consent', suspected_age_band: 'age_16_plus_claimed', allowed_resolution: 'support_review_only' });
+    const db = { prepare: vi.fn().mockImplementation(() => ({ bind: vi.fn().mockReturnValue({ first: vi.fn().mockResolvedValue(c) }) })) };
+    const res = await handleParentConsent(request(), c.id, c.pubkey, makeEnv(db), corsHeaders);
+    expect(res.status).toBe(400);
+  });
+
+  it('uploads a fresh clip when a moderator sends the case back for a new round', async () => {
+    const c = makeCase({ state: 'restricted_pending_parental_consent', zendesk_ticket_id: 42, version: 9 });
+    const { db, row } = consentDb(c, { status: 'commented', upload_token: null, ticket_id: 42, lease_until: 0, receipt_id: 'old-receipt', object_key: 'old-key', case_version: 7, ticket_attempt_at: null, created_at: 1 });
+    const bucket = fakeBucket();
+    bucket.objects.set('old-key', new TextEncoder().encode('old'));
+    const z = zendeskWithComment();
+    vi.stubGlobal('fetch', z.fetchFn);
+    const res = await handleParentConsent(request(), c.id, c.pubkey, makeEnv(db, {
+      ZENDESK_SUBDOMAIN: 'test', ZENDESK_EMAIL: 'agent@test.com', ZENDESK_API_TOKEN: 'token', CONSENT_VIDEO_BUCKET: bucket,
+    } as Partial<AgeReviewEnv>), corsHeaders);
+    expect(res.status).toBe(200);
+    expect(bucket.objects.has('old-key')).toBe(false);
+    expect(bucket.createMultipartUpload).toHaveBeenCalledTimes(1);
+    expect(row()?.receipt_id).not.toBe('old-receipt');
+    expect(z.comment()).toContain('/api/age-review/consent-video/');
+    expect(z.comment()).not.toContain('old-receipt');
+  });
+
+  it('returns a non-retryable 409 when ticket creation needs manual reconciliation', async () => {
+    const c = makeCase({ state: 'restricted_pending_parental_consent' });
+    const { db } = consentDb(c, { status: 'stored', upload_token: null, ticket_id: null, lease_until: 0, receipt_id: 'r-old', object_key: 'k-old', case_version: null, ticket_attempt_at: Math.floor(Date.now() / 1000) - 60 * 60, created_at: 1 });
+    const bucket = fakeBucket();
+    bucket.objects.set('k-old', new TextEncoder().encode('clip'));
+    const mockFetch = vi.fn();
+    vi.stubGlobal('fetch', mockFetch);
+    const res = await handleParentConsent(request(), c.id, c.pubkey, makeEnv(db, {
+      ZENDESK_SUBDOMAIN: 'test', ZENDESK_EMAIL: 'agent@test.com', ZENDESK_API_TOKEN: 'token', CONSENT_VIDEO_BUCKET: bucket,
+    } as Partial<AgeReviewEnv>), corsHeaders);
+    expect(res.status).toBe(409);
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 
 });
@@ -3860,3 +3900,4 @@ describe('ageReviewActiveGuard — non-canonical pubkey', () => {
     expect(response).toBeNull();
   });
 });
+

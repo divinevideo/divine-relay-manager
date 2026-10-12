@@ -31,6 +31,7 @@ afterAll(async () => { await mf?.dispose(); });
 
 async function reset() {
   await ensureSchema(DB);
+  await DB.prepare('DELETE FROM age_review_parent_consent_submissions').run();
   await DB.prepare('DELETE FROM age_review_cases').run();
   await DB.prepare(
     "INSERT OR REPLACE INTO age_review_config (key, value) VALUES ('auto_delete_on_deny', 'false')",
@@ -116,6 +117,26 @@ describe('age-review handler on real D1', () => {
     } finally {
       fetchSpy.mockRestore();
     }
+  });
+
+  it('returns 404 for a different pubkey and never touches storage or Zendesk', async () => {
+    const owner = 'a'.repeat(64);
+    await DB.prepare(`INSERT INTO age_review_cases
+      (id, pubkey, state, suspected_age_band, zendesk_ticket_id, deadline_at, clock_paused, version)
+      VALUES ('consent-case-404', ?, 'restricted_pending_parental_consent', 'age_13_15', 42, ?, 0, 2)`)
+      .bind(owner, new Date(Date.now() + 9 * 864e5).toISOString()).run();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('must not be called'));
+    const form = new FormData();
+    form.set('email', 'parent@example.com');
+    form.set('video', new File(['clip'], 'clip.mp4', { type: 'video/mp4' }));
+    const request = new Request('https://api.test/v1/minor-review-cases/consent-case-404/parent-consent', { method: 'POST', body: form });
+    try {
+      const res = await handleParentConsent(request, 'consent-case-404', 'b'.repeat(64), { ...env }, cors);
+      expect(res.status).toBe(404);
+      expect(fetchSpy).not.toHaveBeenCalled();
+      const row = await DB.prepare('SELECT 1 FROM age_review_parent_consent_submissions WHERE case_id = ?').bind('consent-case-404').first();
+      expect(row).toBeNull();
+    } finally { fetchSpy.mockRestore(); }
   });
 
   it('a stale expected_version is rejected with 409 and the state is unchanged', async () => {

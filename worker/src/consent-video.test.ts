@@ -174,6 +174,8 @@ describe('disposeDueConsentVideos', () => {
     const bucket = { delete: vi.fn(async () => { order.push('r2'); }) };
     const count = await disposeDueConsentVideos(db as never, bucket as never);
     expect(count).toBe(1);
-    expect(order).toEqual(['r2', 'db']);
+    // First 'db' is the disposed-row cleanup; the object delete still
+    // precedes the update that marks this row disposed.
+    expect(order).toEqual(['db', 'r2', 'db']);
   });
 });

@@ -1050,6 +1050,9 @@ export async function handleParentConsent(
   if (current.suspected_age_band === 'under_13') {
     return json({ success: false, error: 'Under-13 cases require support review only' }, 400, corsHeaders);
   }
+  if (current.allowed_resolution !== 'parent_video_or_email') {
+    return json({ success: false, error: 'Parent consent video is not available for this case' }, 400, corsHeaders);
+  }
   if (!VALID_TRANSITIONS[current.state as AgeReviewState]?.includes('submitted_for_review')) {
     return json({ success: false, error: `Cannot submit parent consent from state '${current.state}'` }, 400, corsHeaders);
   }
@@ -1067,21 +1070,41 @@ export async function handleParentConsent(
   type Submission = {
     status: string; ticket_id: number | null; lease_until: number; created_at: number;
     receipt_id: string | null; object_key: string | null;
+    case_version: number | null; ticket_attempt_at: number | null;
   };
   // Read any prior submission before consuming the body: a retry resumes
   // against its stored object and receipt, and an invalid body must be
   // rejected without creating a submission row.
-  const prior = await env.DB.prepare(`SELECT status, ticket_id, lease_until, created_at, receipt_id, object_key
+  const prior = await env.DB.prepare(`SELECT status, ticket_id, lease_until, created_at, receipt_id, object_key, case_version, ticket_attempt_at
     FROM age_review_parent_consent_submissions WHERE case_id = ?`)
     .bind(caseId).first<Submission>();
   let submission: Submission = prior ?? {
     status: 'processing', ticket_id: null, lease_until: leaseUntil,
     created_at: nowSeconds, receipt_id: null, object_key: null,
+    case_version: null, ticket_attempt_at: null,
   };
+  // A moderator can send a submitted case back for a fresh clip. That round
+  // must not inherit the old submission: the case version moved on, so the
+  // commented row is consumed and a new receipt/object pair starts. A retry
+  // inside the same round (case_version unchanged, or a legacy row that
+  // never recorded one) still resumes.
+  const isNewRound = (submission.status === 'commented' || submission.status === 'attached')
+    && submission.case_version != null && submission.case_version !== current.version;
+  if (isNewRound) {
+    if (env.CONSENT_VIDEO_BUCKET && submission.object_key) {
+      try { await env.CONSENT_VIDEO_BUCKET.delete(submission.object_key); } catch { /* replaced below; disposal sweeps orphans */ }
+    }
+    await env.DB.prepare(`UPDATE age_review_parent_consent_submissions
+      SET status = 'processing', receipt_id = NULL, object_key = NULL, content_type = NULL,
+        size_bytes = NULL, case_version = NULL, ticket_attempt_at = NULL, upload_token = NULL
+      WHERE case_id = ?`).bind(caseId).run();
+    submission = { ...submission, status: 'processing', receipt_id: null, object_key: null, case_version: null, ticket_attempt_at: null };
+  }
   const receiptId = submission.receipt_id ?? crypto.randomUUID();
   const objectKey = submission.object_key ?? crypto.randomUUID();
 
-  const alreadyCommented = submission.status === 'commented' || submission.status === 'attached';
+  const alreadyCommented = !isNewRound
+    && (submission.status === 'commented' || submission.status === 'attached');
   const bucket = env.CONSENT_VIDEO_BUCKET;
   let alreadyStored = alreadyCommented;
   if (!alreadyStored && submission.status === 'stored' && bucket && objectKey) {
@@ -1175,8 +1198,11 @@ export async function handleParentConsent(
       // is unknown; stop automatic retries rather than risk a second ticket.
       // Support can reconcile the case and clear this record.
       if (prior && submission.status === 'stored' && !existingTicketId
-        && nowSeconds - submission.created_at >= 50 * 60) {
-        throw new Error('Zendesk ticket creation outcome requires manual reconciliation');
+        && submission.ticket_attempt_at !== null
+        && nowSeconds - submission.ticket_attempt_at >= 50 * 60) {
+        // Non-retryable on purpose: automatic retries stop here and support
+        // reconciles by hand, rather than the client looping on a 503.
+        return json({ success: false, error: 'Consent submission needs manual review; contact support' }, 409, corsHeaders);
       }
       const hasReviewLink = async (ticketId: number): Promise<boolean> => {
         const comments = await fetch(`${zendesk.baseUrl}/tickets/${ticketId}/comments?sort_order=desc&per_page=100`, {
@@ -1202,6 +1228,12 @@ export async function handleParentConsent(
           });
           if (!commented.ok) throw new Error(`Zendesk reviewer-link comment failed: ${commented.status}`);
         } else {
+          if (submission.ticket_attempt_at === null) {
+            await env.DB.prepare(`UPDATE age_review_parent_consent_submissions
+              SET ticket_attempt_at = ? WHERE case_id = ? AND ticket_attempt_at IS NULL`)
+              .bind(nowSeconds, caseId).run();
+            submission.ticket_attempt_at = nowSeconds;
+          }
           const ticketId = await createAgeReviewTicket(caseId, email, current.suspected_age_band as AgeBand,
             current.deadline_at, env, current, undefined, reviewUrl);
           if (!ticketId) throw new Error('Zendesk ticket was not linked');
@@ -1215,8 +1247,8 @@ export async function handleParentConsent(
         submission.ticket_id = linkedTicketId;
       }
       const marked = await env.DB.prepare(`UPDATE age_review_parent_consent_submissions
-        SET status = 'commented', ticket_id = ?, lease_until = 0, upload_token = NULL WHERE case_id = ?`)
-        .bind(submission.ticket_id ?? existingTicketId, caseId).run();
+        SET status = 'commented', ticket_id = ?, lease_until = 0, upload_token = NULL, case_version = ? WHERE case_id = ?`)
+        .bind(submission.ticket_id ?? existingTicketId, current.version, caseId).run();
       if (marked.meta?.changes !== 1) throw new Error('D1 did not record consent reviewer link');
     }
   } catch (error) {
