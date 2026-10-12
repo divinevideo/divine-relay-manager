@@ -1206,7 +1206,7 @@ export async function handleParentConsent(
       }
       const hasReviewLink = async (ticketId: number): Promise<boolean> => {
         const comments = await fetch(`${zendesk.baseUrl}/tickets/${ticketId}/comments?sort_order=desc&per_page=100`, {
-          headers: { Authorization: `Basic ${zendesk.auth}` },
+          headers: { Authorization: `Basic ${zendesk.auth}`, Accept: 'application/json' },
         });
         if (!comments.ok) throw new Error(`Zendesk comment lookup failed: ${comments.status}`);
         const data = await comments.json() as { comments?: Array<{ body?: string; plain_body?: string }> };
