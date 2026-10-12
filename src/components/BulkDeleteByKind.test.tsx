@@ -682,19 +682,27 @@ describe('BulkDeleteByKind outcomes', () => {
     expect(lastToast()).toEqual({ title: 'Bulk delete complete', description: `Deleted ${deleted} Reaction events` });
   });
 
-  it('lets the banned/suspended message stand in for "re-run" when the account is hidden now', async () => {
+  // A hidden account changes the wording of a real failure, never its weight:
+  // only a clean job on a hidden account reads neutral.
+  it.each([
+    ['stopped early', { status: 'failed', failures: ['job:boom'] }, 'Bulk delete stopped early', `Deleted 1 of 3 Reaction events. ${HIDDEN} Reason: boom`],
+    ['finished with issues', { status: 'done', failures: [`event:${EVENT_ID}:boom`] }, 'Bulk delete finished with issues', `Deleted 1 of 3 Reaction events. ${HIDDEN} 1 failed or could not be listed: event ${EVENT_ID} failed: boom`],
+  ])('keeps a job that %s on a now-hidden account an error, with the banned/suspended message in place of "re-run"', async (_label, over, title, description) => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
     api.getBulkJobStatus.mockResolvedValue(job({ status: 'running', eventsProcessed: 1 }));
     const { rerender } = renderDialog({ isBanned: null }, qc);
     await openAndPickReactions();
     fireEvent.click(screen.getByRole('button', { name: 'Delete 3 Reaction events' }));
     await screen.findByRole('status');
-    api.getBulkJobStatus.mockResolvedValue(job({ status: 'failed', eventsProcessed: 1, failures: ['job:boom'] }));
+    api.getBulkJobStatus.mockResolvedValue(job({ eventsProcessed: 1, ...over }));
 
     rerender(<QueryClientProvider client={qc}><BulkDeleteByKind pubkey={PUBKEY} isBanned={true} /></QueryClientProvider>);
 
     await waitFor(() => expect(toast).toHaveBeenCalled(), { timeout: 4000 });
-    expect(lastToast().description).toBe(`Deleted 1 of 3 Reaction events. ${HIDDEN} Reason: boom`);
+    expect(lastToast()).toEqual({ title, description, variant: 'destructive', className: '[overflow-wrap:anywhere]' });
+    const panelTitle = within(screen.getByRole('alertdialog')).getByText(title);
+    expect(panelTitle).toHaveClass('text-destructive');
+    expect(panelTitle.parentElement).toHaveClass('border-destructive/50');
   });
 
   // Once the account is hidden, the relay lists none of its events, so the
