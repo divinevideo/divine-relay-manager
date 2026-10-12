@@ -37,7 +37,7 @@ function json(body: unknown, status: number, cors: Record<string, string>): Resp
 export interface ConsentMultipartSink {
   onVideoStart?: (contentType: string) => void | Promise<void>;
   onVideoChunk: (chunk: Uint8Array) => void | Promise<void>;
-  onVideoEnd?: () => void | Promise<void>;
+  onVideoEnd?: () => void | Promise<unknown>;
 }
 
 export interface ConsentMultipartResult {
