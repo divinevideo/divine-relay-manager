@@ -1597,7 +1597,7 @@ describe('handleParentConsent', () => {
     expect((await handleParentConsent(request(), c.id, c.pubkey, makeEnv(db), corsHeaders)).status).toBe(400);
   });
 
-  function fakeBucket(fail = false): any {
+  function fakeBucket(fail = false): R2Bucket & { objects: Map<string, Uint8Array> } {
     const objects = new Map<string, Uint8Array>();
     return {
       objects,
@@ -1612,7 +1612,7 @@ describe('handleParentConsent', () => {
       }),
       get: vi.fn(async () => null),
       delete: vi.fn(async (key: string) => { objects.delete(key); }),
-    };
+    } as unknown as R2Bucket & { objects: Map<string, Uint8Array> };
   }
 
   function consentDb(c: ReturnType<typeof makeCase>, prior: Record<string, unknown> | null = null) {
