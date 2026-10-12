@@ -124,6 +124,11 @@ ZENDESK_GROUP_ID = "15225535020687"
 # Keycast account suspension API
 KEYCAST_URL = "https://login.divine.video"
 PROTECTED_MINOR_REPLACEMENT_ENABLED = "false"
+# Greenlight consent reviewer playback: the dedicated Access application's
+# team domain. CONSENT_ACCESS_AUD is set only once that path-scoped Access
+# application exists (see PR rollout steps); while unset, playback fails
+# closed (503) and no real clip should be accepted.
+CONSENT_ACCESS_TEAM_DOMAIN = "divinevideo.cloudflareaccess.com"
 
 # D1 Database for moderation decision log (production)
 [[d1_databases]]
