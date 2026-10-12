@@ -37,17 +37,32 @@ export function useBulkModerateJob({ pubkey, onComplete, onError, onTrackingLost
   // Guard against re-firing onTrackingLost for the same loss.
   const lostNotified = useRef(false);
 
+  // The account this hook currently shows, for an enqueue that settles after
+  // the caller switched accounts (see onSuccess).
+  const currentPubkey = useRef(pubkey);
+  currentPubkey.current = pubkey;
+
+  // `target` is the account when start was called, bound into the variables:
+  // the mutation reads its options from the latest render, so a start that
+  // awaits something first (BulkDeleteByKind resolves the moderator) would
+  // otherwise send the account selected by then, with the confirmed kind and
+  // reason.
   const enqueue = useMutation({
-    mutationFn: ({ action, options }: { action: BulkAction; options?: BulkJobStart }) => {
+    mutationFn: ({ target, action, options }: { target: string; action: BulkAction; options?: BulkJobStart }) => {
       const reason = options?.reason ?? `Bulk ${action} by moderator`;
-      if (!options) return api.bulkModerate(pubkey, action, reason);
+      if (!options) return api.bulkModerate(target, action, reason);
       // Rest-spread, not a field list, so a new BulkModerateOptions field is
       // forwarded without this line having to learn about it.
       const { reason: _reason, ...scope } = options;
-      return api.bulkModerate(pubkey, action, reason, scope);
+      return api.bulkModerate(target, action, reason, scope);
     },
     onMutate: ({ action }) => { setPendingAction(action); },
-    onSuccess: (res) => { setJobId(res.jobId); },
+    // A job enqueued for an account no longer shown runs detached, as one does
+    // when the account changes after its enqueue (below).
+    onSuccess: (res, { target }) => {
+      if (target === currentPubkey.current) setJobId(res.jobId);
+      else setPendingAction(null);
+    },
     onError: (error: Error) => { setPendingAction(null); onError?.(error); },
   });
 
@@ -112,8 +127,8 @@ export function useBulkModerateJob({ pubkey, onComplete, onError, onTrackingLost
   const runningAction: BulkAction | null = isRunning ? (job?.action ?? pendingAction) : null;
 
   return {
-    start: (action: BulkAction, options?: BulkJobStart) => enqueue.mutate({ action, options }),
-    startAsync: (action: BulkAction, options?: BulkJobStart) => enqueue.mutateAsync({ action, options }),
+    start: (action: BulkAction, options?: BulkJobStart) => enqueue.mutate({ target: pubkey, action, options }),
+    startAsync: (action: BulkAction, options?: BulkJobStart) => enqueue.mutateAsync({ target: pubkey, action, options }),
     job,
     isRunning,
     runningAction,

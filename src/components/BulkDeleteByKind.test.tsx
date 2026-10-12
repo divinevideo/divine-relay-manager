@@ -381,6 +381,31 @@ describe('BulkDeleteByKind running a job', () => {
     expect(api.bulkModerate).toHaveBeenCalledTimes(1);
   });
 
+  it('deletes from the confirmed account when the account changes while the moderator resolves', async () => {
+    const other = 'b'.repeat(64);
+    api.getBulkJobStatus.mockResolvedValue(job({ status: 'running', eventsProcessed: 0 }));
+    let release: (pubkey: string) => void = () => {};
+    const identity = new Promise<string>((resolve) => { release = resolve; });
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const view = (pubkey: string) => (
+      <QueryClientProvider client={qc}>
+        <BulkDeleteByKind pubkey={pubkey} getModeratorPubkey={() => identity} />
+      </QueryClientProvider>
+    );
+    const { rerender } = render(view(PUBKEY));
+    await openAndPickReactions();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete 3 Reaction events' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    rerender(view(other));
+    await act(async () => { release(MODERATOR); });
+
+    await waitFor(() => expect(api.bulkModerate).toHaveBeenCalledTimes(1));
+    expect(api.bulkModerate.mock.calls[0][0]).toBe(PUBKEY);
+    // The job runs detached: the now-selected account is not shown as running it.
+    expect(api.getBulkJobStatus).not.toHaveBeenCalled();
+  });
+
   it('shows progress from the job status, announced to assistive tech, and says closing does not stop it', async () => {
     api.getBulkJobStatus.mockResolvedValue(job({ status: 'running', eventsProcessed: 2 }));
     renderDialog();
