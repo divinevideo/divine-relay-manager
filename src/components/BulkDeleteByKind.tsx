@@ -230,12 +230,11 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
   const countsCurrent = !!counts && !recounting && !countsQuery.isError && !contentHidden;
   const selectedCount = counts ? counts.counts[selectedKind] ?? 0 : undefined;
   const isRunning = bulkJob.isRunning || starting;
-  // A cut-short listing may have missed events of this kind, so it does not
-  // rule a delete out even at zero. A lost status poll keeps Delete off: the
-  // job may still be running. So does a failed count refetch, whose earlier
-  // counts are still cached under the error the dialog shows.
-  const canDelete = !!counts && !countsQuery.isError && !recounting && (selectedCount! > 0 || !counts.complete)
-    && !isRunning && !contentHidden && !bulkJob.trackingLost;
+  // Delete is on only while a current count is shown, so any state that hides
+  // the numbers also turns it off. A cut-short listing may have missed events
+  // of this kind, so it does not rule a delete out even at zero. A lost status
+  // poll keeps Delete off: the job may still be running.
+  const canDelete = countsCurrent && (selectedCount! > 0 || !counts.complete) && !isRunning && !bulkJob.trackingLost;
   const kindName = getKindName(parseInt(selectedKind) || 0);
   const job = bulkJob.job;
   const outcome = job && isTerminal(job.status) && (job.kind !== undefined || expected?.kind !== undefined)
