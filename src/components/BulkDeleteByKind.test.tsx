@@ -60,6 +60,15 @@ async function openAndPickReactions() {
   fireEvent.click(await screen.findByRole('button', { name: /Reaction \(3\)/ }));
 }
 
+// While the panel says the count is loading, failed, or impossible, the kind
+// chips keep their names but drop the earlier numbers, and so does Delete.
+function expectNoStaleCounts() {
+  expect(screen.getByRole('button', { name: 'Text Note' })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Reaction' })).toHaveAttribute('aria-pressed', 'true');
+  expect(screen.getByRole('alertdialog')).not.toHaveTextContent(/\(800\)|\(3\)/);
+  expect(screen.getByRole('button', { name: 'Delete events' })).toBeDisabled();
+}
+
 function lastToast() {
   return toast.mock.calls[toast.mock.calls.length - 1][0] as { title: string; description: string; variant?: string; className?: string };
 }
@@ -227,6 +236,35 @@ describe('BulkDeleteByKind counts', () => {
     );
     expect(screen.getByRole('button', { name: /^Delete/ })).toBeDisabled();
   });
+
+  it('shows no earlier count on the chips or Delete while a recount runs', async () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    renderDialog({}, qc);
+    await openAndPickReactions();
+
+    let resolveRecount: (value: unknown) => void = () => {};
+    api.getBulkKindCounts.mockReturnValue(new Promise((resolve) => { resolveRecount = resolve; }));
+    void qc.refetchQueries({ queryKey: ['bulk-kind-counts'] });
+
+    expect(await screen.findByText('Counting events...')).toBeInTheDocument();
+    expectNoStaleCounts();
+
+    resolveRecount({ counts: { 1: 800, 7: 1 }, complete: true });
+
+    expect(await screen.findByRole('button', { name: 'Reaction (1)' })).toBeInTheDocument();
+  });
+
+  it('shows no earlier count on the chips or Delete after a count refetch fails', async () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    renderDialog({}, qc);
+    await openAndPickReactions();
+
+    api.getBulkKindCounts.mockRejectedValue(new Error('relay unavailable'));
+    await qc.refetchQueries({ queryKey: ['bulk-kind-counts'] });
+
+    expect(await screen.findByText(/Could not count this account's events/)).toBeInTheDocument();
+    expectNoStaleCounts();
+  });
 });
 
 describe('BulkDeleteByKind account status', () => {
@@ -255,6 +293,22 @@ describe('BulkDeleteByKind account status', () => {
 
     expect(screen.getByText(/can't be counted or deleted here/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^Delete/ })).toBeDisabled();
+  });
+
+  // The usual path: counted from a report, closed, banned, reopened. The
+  // cached counts must not read as what remains.
+  it('shows no earlier count on the chips or Delete when reopened after a ban', async () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const { rerender } = renderDialog({ isBanned: null }, qc);
+    await openAndPickReactions();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+
+    rerender(<QueryClientProvider client={qc}><BulkDeleteByKind pubkey={PUBKEY} isBanned={true} /></QueryClientProvider>);
+    open();
+
+    expect(await screen.findByText(HIDDEN)).toBeInTheDocument();
+    expectNoStaleCounts();
   });
 
   it('does not present zero as a confirmed absence when the account status is unknown', async () => {

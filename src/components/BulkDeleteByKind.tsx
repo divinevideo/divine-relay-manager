@@ -225,6 +225,9 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
   // count. Until it answers, that count is stale: show counting, as on the
   // first load, and keep Delete off.
   const recounting = countsQuery.isFetching;
+  // Whether the cached counts are the ones the panel stands behind. While it
+  // says counting, failed, or hidden, no earlier number shows anywhere.
+  const countsCurrent = !!counts && !recounting && !countsQuery.isError && !contentHidden;
   const selectedCount = counts ? counts.counts[selectedKind] ?? 0 : undefined;
   const isRunning = bulkJob.isRunning || starting;
   // A cut-short listing may have missed events of this kind, so it does not
@@ -270,7 +273,7 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
 
   const processed = job && !isTerminal(job.status) ? job.eventsProcessed : 0;
   const progressValue = expected && expected.count > 0 ? Math.min(100, (processed / expected.count) * 100) : 0;
-  const deleteLabel = !counts || recounting
+  const deleteLabel = !countsCurrent
     ? "Delete events"
     : counts.complete
       ? `Delete ${selectedCount} ${kindName} events`
@@ -373,7 +376,7 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
                               : 'bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200 hover:bg-blue-200 dark:hover:bg-blue-800'
                           }`}
                         >
-                          {getKindName(Number(kind))} ({count}{counts.complete ? "" : "+"})
+                          {getKindName(Number(kind))}{countsCurrent && ` (${count}${counts.complete ? "" : "+"})`}
                         </button>
                       ))}
                   </div>
