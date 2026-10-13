@@ -196,7 +196,7 @@ async function callVerifiedMinor(
     if (!res.ok) {
       const text = await res.text();
       if (res.status === 404 && isKeycastUserNotFound(text)) {
-        console.log(`[keycast] verified_minor ${verb} not applicable: no keycast account (self-custody)`);
+        console.info(`[keycast] verified_minor ${verb} not applicable: no keycast account (self-custody)`);
         return { success: false, status: 404, notFound: true, error: `404: ${text}` };
       }
       if (res.status === 409 && isKeycastAccountUnclaimed(text)) {
