@@ -35,7 +35,13 @@ export function deriveProtectedMinorView(input: {
   const isProtected = keycastFlagged || registryProtected;
 
   let note: string | null = null;
-  if (!keycastFlagged && registryProtected) {
+  // The sources disagree. Keycast still enforces its flag, but the cause varies:
+  // a denial whose keycast clear the cron has not converged, a closed binding
+  // (which arms no clear), or a flag the registry never recorded. So the note
+  // states the disagreement, not a cause.
+  if (keycastFlagged && accountStatus?.protected_minor === false) {
+    note = 'keycast still flags this account; the registry does not';
+  } else if (!keycastFlagged && registryProtected) {
     note = accountType === 'self_custody' ? 'holds own key: only report auto-clear applies'
       : accountType === 'divine' ? 'app protections not active: keycast flag not set'
       : 'app protections unknown: keycast unavailable';

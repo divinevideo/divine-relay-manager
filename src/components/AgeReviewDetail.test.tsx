@@ -530,8 +530,8 @@ describe('AgeReviewDetail', () => {
     const { queryClient } = renderDetail(makeCase({ suspected_age_band: 'age_13_15' }));
 
     await waitFor(() => expect(queryClient.isFetching()).toBe(0));
-    // not_found is definitive (self-custody), not a keycast error — the "unavailable"
-    // protected-minor label is reserved for genuine errors.
+    // not_found plus a registry answer is definitive: the "unavailable" label is
+    // reserved for a source that could not answer.
     expect(screen.queryByText(/protected-minor status unavailable/i)).not.toBeInTheDocument();
   });
 
@@ -580,7 +580,7 @@ describe('AgeReviewDetail', () => {
 
       renderDetail(makeCase());
 
-      expect(await screen.findByText('Already an approved protected minor. "Not a minor" closes this case and keeps protections on; Deny bans the account and removes them.')).toBeInTheDocument();
+      expect(await screen.findByText('Already an approved protected minor. "Not a minor" closes this case and keeps protections on; Deny bans the account and lifts its protections.')).toBeInTheDocument();
     });
 
     it('shows that note for a minor only the registry knows, one who holds their own key', async () => {
@@ -588,11 +588,24 @@ describe('AgeReviewDetail', () => {
 
       renderDetail(makeCase());
 
-      expect(await screen.findByText('Already an approved protected minor. "Not a minor" closes this case and keeps protections on; Deny bans the account and removes them.')).toBeInTheDocument();
+      expect(await screen.findByText('Already an approved protected minor. "Not a minor" closes this case and keeps protections on; Deny bans the account and lifts its protections.')).toBeInTheDocument();
     });
 
     it('refetches account status after a decision so the badge follows the registry', async () => {
       getAccountStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: false, protected_minor: false });
+      const { queryClient } = renderDetail(makeCase());
+      await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+      const callsBefore = getAccountStatus.mock.calls.length;
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Clear: not a minor' }));
+
+      await waitFor(() => expect(getAccountStatus.mock.calls.length).toBeGreaterThan(callsBefore));
+    });
+
+    it('refetches account status after a version conflict, which may follow a committed write', async () => {
+      updateAgeReviewCase.mockRejectedValueOnce(
+        new ApiError('Case was modified by another request', 409, 'Conflict', 'version_conflict', 5),
+      );
       const { queryClient } = renderDetail(makeCase());
       await waitFor(() => expect(queryClient.isFetching()).toBe(0));
       const callsBefore = getAccountStatus.mock.calls.length;

@@ -184,9 +184,6 @@ export function AgeReviewDetail({ caseData: c }: Props) {
       // moderation action moves a case between states, so refresh them alongside
       // the list or the chips disagree with the list until their 30s interval.
       queryClient.invalidateQueries({ queryKey: ['age-review-counts'] });
-      // Approve and deny write the protected-minor registry and keycast flag, and
-      // every decision can change sign-in status: refresh the badge's source.
-      queryClient.invalidateQueries({ queryKey: ['account-status'] });
       const requestedState = pendingStateRef.current as AgeReviewState | undefined;
       // Surface only actual failed enforcement legs. `not_attempted` is valid
       // for transitions where a leg does not apply.
@@ -231,6 +228,12 @@ export function AgeReviewDetail({ caseData: c }: Props) {
           });
         }
       }
+    },
+    // Approve and deny write the protected-minor registry and keycast flag, and
+    // every decision can change sign-in status. Settled, not success: a conflict
+    // or a lost response can follow a write that did commit.
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ['account-status'] });
     },
     onError: (error, _updates, ctx) => {
       // A concurrent writer (another moderator, or the deadline cron) changed
@@ -701,7 +704,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
               </div>
               {protectedMinor.protected && (
                 <p className="text-xs text-muted-foreground">
-                  Already an approved protected minor. "Not a minor" closes this case and keeps protections on; Deny bans the account and removes them.
+                  Already an approved protected minor. "Not a minor" closes this case and keeps protections on; Deny bans the account and lifts its protections.
                 </p>
               )}
 

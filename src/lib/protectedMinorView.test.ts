@@ -6,8 +6,8 @@ const view = (accountStatus: AccountStatusResponse | undefined, accountType: 'di
   deriveProtectedMinorView({ accountStatus, accountType });
 
 describe('deriveProtectedMinorView: protected', () => {
-  it('is protected when keycast flags the account', () => {
-    const v = view({ success: true, verified_minor: true, protected_minor: false }, 'divine');
+  it('is protected when keycast flags the account and the registry did not answer', () => {
+    const v = view({ success: true, verified_minor: true, protected_minor: null }, 'divine');
     expect(v.protected).toBe(true);
     expect(v.note).toBeNull();
   });
@@ -16,6 +16,12 @@ describe('deriveProtectedMinorView: protected', () => {
     const v = view({ success: true, verified_minor: true, protected_minor: true }, 'divine');
     expect(v.protected).toBe(true);
     expect(v.note).toBeNull();
+  });
+
+  it('notes when keycast still flags an account the registry does not protect', () => {
+    const v = view({ success: true, verified_minor: true, protected_minor: false }, 'divine');
+    expect(v.protected).toBe(true);
+    expect(v.note).toBe('keycast still flags this account; the registry does not');
   });
 
   it('is protected from the registry alone for an account that holds its own key', () => {
