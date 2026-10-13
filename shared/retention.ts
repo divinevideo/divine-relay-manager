@@ -8,6 +8,9 @@ export const RETENTION_DAYS = {
   projectionComplete: 30,
   ageReviewDetail: 30,
   ageReviewDecision: 365,
+  // Greenlight consent clips: deleted 120 days after the case closes, never
+  // on a fixed age-since-upload clock, and only when no legal hold applies.
+  consentVideo: 120,
   pendingOperationalDeadline: 1,
 } as const;
 

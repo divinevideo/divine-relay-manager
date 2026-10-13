@@ -107,3 +107,12 @@ bindings = [
 [[migrations]]
 tag = "v1"
 new_classes = ["ReportWatcher"]
+
+# Greenlight parent-consent videos (private; no public domain, no r2.dev).
+# Create before deploying: npx wrangler r2 bucket create divine-consent-videos-local
+# CONSENT_ACCESS_* must name the dedicated Cloudflare Access application on
+# /api/age-review/consent-video/* before the mobile flag is enabled; while
+# either is empty the reviewer route fails closed (503) by design.
+[[r2_buckets]]
+binding = "CONSENT_VIDEO_BUCKET"
+bucket_name = "divine-consent-videos-local"

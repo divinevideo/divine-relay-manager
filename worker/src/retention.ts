@@ -2,12 +2,14 @@
 // ABOUTME: Compacts retry records before deletion and never mutates active classifications.
 
 import { RETENTION_DAYS } from '../../shared/retention';
+import { disposeDueConsentVideos } from './consent-video';
 import type { SecretStoreSecret } from './nip86';
 
 const BATCH_LIMIT = 100;
 
 export interface RetentionEnv {
   DB?: D1Database;
+  CONSENT_VIDEO_BUCKET?: R2Bucket;
   PROTECTED_MINOR_TOMBSTONE_KEY?: string | SecretStoreSecret;
   SLACK_WEBHOOK_URL?: string;
 }
@@ -23,6 +25,7 @@ export interface RetentionResult {
   pendingOperationsOverdue: number;
   pendingProjectionsOverdue: number;
   unknownReasonsAlerted: number;
+  consentVideosDeleted: number;
 }
 
 function emptyResult(): RetentionResult {
@@ -31,6 +34,7 @@ function emptyResult(): RetentionResult {
     projectionsDeleted: 0, bindingsDeleted: 0, operationsCompacted: 0,
     subjectsDeleted: 0, pendingOperationsOverdue: 0,
     pendingProjectionsOverdue: 0, unknownReasonsAlerted: 0,
+    consentVideosDeleted: 0,
   };
 }
 
@@ -290,6 +294,15 @@ export async function runRetentionDisposal(env: RetentionEnv): Promise<Retention
     result.subjectsDeleted = subjects.meta.changes;
   });
 
+  // Consent clips go before the case row itself: a case must not be deleted
+  // while its clip still exists, and the clip's 120-day clock runs from
+  // closure, so this stage usually fires long before case-delete.
+  await runStage('consent-video-delete', async () => {
+    if (env.CONSENT_VIDEO_BUCKET) {
+      result.consentVideosDeleted = await disposeDueConsentVideos(db, env.CONSENT_VIDEO_BUCKET);
+    }
+  });
+
   await runStage('case-delete', async () => {
     const cases = await db.prepare(`DELETE FROM age_review_cases
       WHERE id IN (SELECT c.id FROM age_review_cases c
@@ -297,6 +310,8 @@ export async function runRetentionDisposal(env: RetentionEnv): Promise<Retention
           AND datetime(c.closed_at) <= datetime('now', '-${RETENTION_DAYS.ageReviewDecision} days')
           AND NOT EXISTS (SELECT 1 FROM protected_minor_subjects s
             WHERE s.source_case_id = c.id AND s.classification_state = 'active')
+          AND NOT EXISTS (SELECT 1 FROM age_review_parent_consent_submissions cs
+            WHERE cs.case_id = c.id AND cs.object_key IS NOT NULL AND cs.disposed_at IS NULL)
           AND ${noHold('age_review_case', 'c.id', 'deletion')}
         LIMIT ${BATCH_LIMIT})`).run();
     result.casesDeleted = cases.meta.changes;
