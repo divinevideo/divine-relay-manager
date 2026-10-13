@@ -660,6 +660,16 @@ describe('AgeReviewDetail', () => {
       expect(screen.getByRole('button', { name: 'Clear without approval' })).toBeInTheDocument();
     });
 
+    // The worker only records an approval for a lowercase 64-char hex pubkey, and
+    // the case stores the report's p tag verbatim, so a mixed-case tag can never
+    // be approved. Offering the button would fail every time.
+    it('hides approval, and says why, when the case pubkey is not lowercase hex', async () => {
+      renderDetail(makeCase({ suspected_age_band: 'age_13_15', pubkey: 'A'.repeat(64) }));
+      await screen.findByRole('button', { name: 'Clear without approval' });
+      expect(screen.queryByRole('button', { name: /Approve as protected minor/ })).not.toBeInTheDocument();
+      expect(screen.getByText(/cannot be approved as a protected minor/)).toBeInTheDocument();
+    });
+
     it('hides approval outside the 13-15 band', async () => {
       renderDetail(makeCase({ suspected_age_band: 'age_16_plus_claimed' }));
       await screen.findByRole('button', { name: 'Clear without approval' });

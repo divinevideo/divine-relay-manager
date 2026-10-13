@@ -105,6 +105,11 @@ interface Props {
   caseData: AgeReviewCase;
 }
 
+// The worker records an approval only for a lowercase 64-char hex pubkey (HEX_64 in
+// worker/src/keycast-client.ts). A case stores the report's p tag verbatim, so a
+// mixed-case tag is possible and could never be approved.
+const APPROVABLE_PUBKEY = /^[0-9a-f]{64}$/;
+
 const ENFORCEMENT_STATES: AgeReviewState[] = [
   'restricted_pending_user_response',
   'restricted_pending_parental_consent',
@@ -631,8 +636,13 @@ export function AgeReviewDetail({ caseData: c }: Props) {
               </div>
 
               {/* Terminal actions */}
+              {c.suspected_age_band === 'age_13_15' && !APPROVABLE_PUBKEY.test(c.pubkey) && (
+                <p className="text-xs text-muted-foreground">
+                  This case's pubkey is not lowercase 64-character hex, so it cannot be approved as a protected minor. "Clear without approval" is still available.
+                </p>
+              )}
               <div className="flex gap-2 pt-1">
-                {c.suspected_age_band === 'age_13_15' && (
+                {c.suspected_age_band === 'age_13_15' && APPROVABLE_PUBKEY.test(c.pubkey) && (
                   <ConfirmDialog
                     trigger={
                       <Button
