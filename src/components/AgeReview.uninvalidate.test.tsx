@@ -139,7 +139,7 @@ describe('reconcile-after-invalidate un-invalidates unobserved list caches (adve
 
     // Clear case A (any successful mutation runs invalidate + reconcile)
     const countsCallsBefore = getAgeReviewCaseCounts.mock.calls.length;
-    fireEvent.click(await screen.findByRole('button', { name: 'Clear' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Clear: not a minor' }));
     await waitFor(() => expect(updateAgeReviewCase).toHaveBeenCalledTimes(1));
     await screen.findByText('Cleared');
 

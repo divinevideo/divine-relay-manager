@@ -544,4 +544,60 @@ describe('AgeReviewDetail', () => {
       await screen.findByText(/protected-minor status unavailable/i)
     ).toBeInTheDocument();
   });
+
+  describe('clearing a case', () => {
+    it('offers approval as a protected minor only on a 13-15 case', async () => {
+      renderDetail(makeCase({ suspected_age_band: 'age_13_15' }));
+      expect(await screen.findByRole('button', { name: /Approve as protected minor/ })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Clear: not a minor' })).toBeInTheDocument();
+    });
+
+    it('hides approval outside the 13-15 band', async () => {
+      renderDetail(makeCase({ suspected_age_band: 'age_16_plus_claimed' }));
+      await screen.findByRole('button', { name: 'Clear: not a minor' });
+      expect(screen.queryByRole('button', { name: /Approve as protected minor/ })).not.toBeInTheDocument();
+    });
+
+    it('sends approved_minor only after the moderator confirms', async () => {
+      renderDetail(makeCase({ suspected_age_band: 'age_13_15' }));
+      fireEvent.click(await screen.findByRole('button', { name: /Approve as protected minor/ }));
+      expect(updateAgeReviewCase).not.toHaveBeenCalled();
+      fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
+      await waitFor(() => expect(updateAgeReviewCase).toHaveBeenCalledWith(
+        'case-1', expect.objectContaining({ state: 'cleared', resolution: 'approved_minor' }),
+      ));
+    });
+
+    it('cancelling the confirm sends nothing', async () => {
+      renderDetail(makeCase({ suspected_age_band: 'age_13_15' }));
+      fireEvent.click(await screen.findByRole('button', { name: /Approve as protected minor/ }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }));
+      expect(updateAgeReviewCase).not.toHaveBeenCalled();
+    });
+
+    it('Clear: not a minor sends not_minor immediately', async () => {
+      renderDetail(makeCase({ suspected_age_band: 'age_13_15' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Clear: not a minor' }));
+      await waitFor(() => expect(updateAgeReviewCase).toHaveBeenCalledWith(
+        'case-1', expect.objectContaining({ state: 'cleared', resolution: 'not_minor' }),
+      ));
+    });
+
+    it('shows how a closed case was resolved', async () => {
+      renderDetail(makeCase({ state: 'cleared', clear_resolution: 'approved_minor' }));
+      expect(await screen.findByText('Approved minor')).toBeInTheDocument();
+    });
+
+    it('names a failed verified_minor set in the incomplete-enforcement toast', async () => {
+      updateAgeReviewCase.mockResolvedValueOnce({
+        success: false, enforcementComplete: false,
+        enforcement: { relay: 'ok', bulk: 'ok', keycast: 'ok', subjectActivate: 'ok', keycastMinorSet: 'failed' },
+      });
+      renderDetail(makeCase({ suspected_age_band: 'age_13_15' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Clear: not a minor' }));
+      await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({
+        description: expect.stringContaining('protected-minor account flag'),
+      })));
+    });
+  });
 });

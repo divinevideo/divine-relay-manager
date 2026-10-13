@@ -19,7 +19,14 @@ interface ConfirmDialogProps {
   confirmLabel?: string;
   pendingLabel?: string;
   isPending?: boolean;
+  /** Confirm-button style. Destructive by default; `approve` for a positive, consequential action. */
+  confirmVariant?: 'destructive' | 'approve';
 }
+
+const CONFIRM_CLASSES: Record<NonNullable<ConfirmDialogProps['confirmVariant']>, string> = {
+  destructive: 'bg-destructive text-destructive-foreground hover:bg-destructive/90',
+  approve: 'bg-green-600 text-white hover:bg-green-700',
+};
 
 export function ConfirmDialog({
   trigger,
@@ -29,6 +36,7 @@ export function ConfirmDialog({
   confirmLabel = 'Confirm',
   pendingLabel = 'Processing...',
   isPending = false,
+  confirmVariant = 'destructive',
 }: ConfirmDialogProps) {
   const [open, setOpen] = useState(false);
 
@@ -52,7 +60,7 @@ export function ConfirmDialog({
                 // Dialog stays open so the user can retry.
               }
             }}
-            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            className={CONFIRM_CLASSES[confirmVariant]}
             disabled={isPending}
           >
             {isPending ? pendingLabel : confirmLabel}

@@ -37,6 +37,7 @@ import {
   EyeOff,
   MessageSquareLock,
 } from "lucide-react";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { CopyableId } from "@/components/CopyableId";
 import { UserIdentifier } from "@/components/UserIdentifier";
 import {
@@ -46,6 +47,7 @@ import {
   type AgeReviewCase,
   type AgeReviewState,
   type AgeBand,
+  type ClearResolution,
 } from "../../shared/age-review";
 
 const STATE_LABELS: Record<AgeReviewState, string> = {
@@ -58,6 +60,11 @@ const STATE_LABELS: Record<AgeReviewState, string> = {
   needs_follow_up: "Needs Follow-up",
   cleared: "Cleared",
   denied_closed: "Denied — Closed",
+};
+
+const CLEAR_RESOLUTION_LABELS: Record<ClearResolution, string> = {
+  approved_minor: 'Approved minor',
+  not_minor: 'Not a minor',
 };
 
 const BAND_LABELS: Record<AgeBand, string> = {
@@ -187,6 +194,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
         if (enforcement?.keycast === 'failed') failed.push('account sign-in');
         if (enforcement?.subjectClear === 'failed') failed.push('protected-minor registry');
         if (enforcement?.keycastMinorClear === 'failed') failed.push('protected-minor account projection');
+        if (enforcement?.keycastMinorSet === 'failed') failed.push('protected-minor account flag');
         if (data.enforcementComplete === false) {
           toast({
             title: 'Enforcement incomplete',
@@ -283,6 +291,9 @@ export function AgeReviewDetail({ caseData: c }: Props) {
         <div className="space-y-2">
           <div className="flex items-center gap-2 flex-wrap">
             <Badge className={stateColor(c.state)}>{STATE_LABELS[c.state]}</Badge>
+            {c.clear_resolution && (
+              <Badge variant="outline">{CLEAR_RESOLUTION_LABELS[c.clear_resolution]}</Badge>
+            )}
             <Badge className={bandColor(c.suspected_age_band)}>{BAND_LABELS[c.suspected_age_band]}</Badge>
             {c.clock_paused ? (
               <Badge variant="outline" className="gap-1">
@@ -578,18 +589,46 @@ export function AgeReviewDetail({ caseData: c }: Props) {
 
               {/* Terminal actions */}
               <div className="flex gap-2 pt-1">
+                {c.suspected_age_band === 'age_13_15' && (
+                  <ConfirmDialog
+                    trigger={
+                      <Button
+                        size="sm"
+                        variant="default"
+                        className="h-7 text-xs bg-green-600 hover:bg-green-700"
+                        disabled={updateCase.isPending}
+                      >
+                        <ShieldCheck className="h-3 w-3 mr-1" />
+                        Approve as protected minor (13-15)
+                      </Button>
+                    }
+                    title="Approve as a protected minor?"
+                    summary="This account is restored and marked as an approved 13-15 minor: minor DM limits apply, key export is blocked, and future under-16 reports clear automatically."
+                    confirmLabel="Approve"
+                    confirmVariant="approve"
+                    onConfirm={async () => {
+                      await updateCase.mutateAsync({
+                        state: 'cleared',
+                        resolution: 'approved_minor',
+                        resolution_note: resolutionNote || undefined,
+                      });
+                    }}
+                    isPending={updateCase.isPending}
+                  />
+                )}
                 <Button
                   size="sm"
-                  variant="default"
-                  className="h-7 text-xs bg-green-600 hover:bg-green-700"
+                  variant="outline"
+                  className="h-7 text-xs"
                   disabled={updateCase.isPending}
                   onClick={() => updateCase.mutate({
                     state: 'cleared',
+                    resolution: 'not_minor',
                     resolution_note: resolutionNote || undefined,
                   })}
                 >
                   <CheckCircle className="h-3 w-3 mr-1" />
-                  Clear
+                  Clear: not a minor
                 </Button>
                 {ageReviewConfig?.auto_delete_on_deny ? (
                   <DeleteConfirmDialog
