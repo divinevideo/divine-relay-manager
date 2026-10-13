@@ -13,6 +13,9 @@ import {
   type ModerationStatusResponse,
   DEADLINE_DAYS,
   defaultResolutionForBand,
+  CLEAR_RESOLUTIONS,
+  isClearResolution,
+  type ClearResolution,
   type EnforcementLegStatus,
   type AgeReviewEnforcement,
   type AgeReviewCaseResponse,
@@ -24,16 +27,19 @@ import { runBulkModeration, type BulkModerateEnv } from './bulk-moderate';
 import { getActiveAgeReviewCase } from './age-review-lookup';
 import { resolveZendeskCreds } from './zendesk-sync';
 import type { AccountBulkAction } from '../../shared/bulk-moderation';
-import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, createMinorAccount, type KeycastEnv } from './keycast-client';
+import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, setVerifiedMinor, createMinorAccount, HEX_64, type KeycastEnv, type KeycastReason, type KeycastResult } from './keycast-client';
 import { suspendPubkey, unsuspendPubkey, banPubkey, type BanPubkeyResult, type SecretStoreSecret } from './nip86';
 import { buildAgeReviewIdentityBlock, buildClaimedParentName, toNpub } from './report-note';
 import {
+  approvalRegistryStatements,
+  convergeProjection,
   clearSubject,
   fingerprintProvisioningRequest,
   markProjectionAttempt,
   markProjectionComplete,
   pendingProjectionJobs,
   pendingSubjectClears,
+  settleSupersededClear,
   UUID_RE,
 } from './protected-minors';
 import { digestProvisioningFingerprint, findProvisioningTombstone, resolveTombstoneKey } from './retention';
@@ -54,6 +60,19 @@ function failUnlessPurgeConfirmed(result: BanPubkeyResult): { success: boolean; 
   return result.contentRemovalUnconfirmed
     ? { success: false, error: `Ban applied; content removal not confirmed: ${result.relayError}` }
     : result;
+}
+
+// Runs convergeProjection after a keycast projection landed (#192). The
+// projection itself already succeeded, so a failed re-arm is logged rather than
+// turned into a 500 or a retry of the call that worked.
+async function convergeAfterProjection(
+  db: D1Database, pubkey: string, projected: 'active' | 'cleared',
+): Promise<void> {
+  try {
+    await convergeProjection(db, pubkey, projected);
+  } catch (error) {
+    console.error(`[age-review] Protected-minor projection convergence (${projected}) failed:`, error);
+  }
 }
 
 /**
@@ -341,6 +360,36 @@ export async function handleUpdateAgeReviewCase(
     binds.push(defaultResolutionForBand(body.suspected_age_band as AgeBand));
   }
 
+  // Clear resolution (#192). The moderator states which kind of Clear this is,
+  // because only an explicit 13-15 approval may confer durable protected-minor
+  // status; dismissing a report on a default-band case must not.
+  if (body.resolution !== undefined || body.state === 'cleared') {
+    if (body.state !== 'cleared') {
+      return json({ success: false, error: "resolution is only valid with state 'cleared'" }, 400, corsHeaders);
+    }
+    if (!isClearResolution(body.resolution)) {
+      return json({
+        success: false,
+        error: `resolution must be one of: ${CLEAR_RESOLUTIONS.join(', ')}`,
+      }, 400, corsHeaders);
+    }
+    // Band validity was checked above, so the post-update band is one of AGE_BANDS.
+    const effectiveBand = typeof body.suspected_age_band === 'string'
+      ? body.suspected_age_band
+      : existing.suspected_age_band;
+    if (body.resolution === 'approved_minor' && effectiveBand !== 'age_13_15') {
+      return json({ success: false, error: 'approved_minor requires the 13-15 age band' }, 400, corsHeaders);
+    }
+    // The protected-minor binding CHECKs a 64-char lowercase hex pubkey; a case
+    // that fails it would roll the approval batch back on every retry.
+    if (body.resolution === 'approved_minor' && !HEX_64.test(existing.pubkey)) {
+      return json({ success: false, error: 'approved_minor requires a case with a valid 64-char hex pubkey' }, 400, corsHeaders);
+    }
+    updates.push('clear_resolution = ?');
+    binds.push(body.resolution);
+  }
+  const approvingMinor = body.state === 'cleared' && body.resolution === 'approved_minor';
+
   // Clock pause/resume
   if (body.clock_paused === true && !existing.clock_paused) {
     const now = new Date();
@@ -414,9 +463,36 @@ export async function handleUpdateAgeReviewCase(
   // read and this write, changes === 0 and we abort BEFORE running any
   // enforcement -- the loser must not apply side effects for a state it no
   // longer owns.
-  const updateResult = await env.DB.prepare(
+  const casStatement = env.DB.prepare(
     `UPDATE age_review_cases SET ${updates.join(', ')} WHERE id = ? AND version = ?`
-  ).bind(...binds, caseId, existing.version).run();
+  ).bind(...binds, caseId, existing.version);
+
+  // An approval records the protected-minor subject in the same transaction as the
+  // CAS, so a case is never approved without its durable record (#192).
+  let updateResult: D1Result;
+  // Observed, not assumed: the approval's last registry statement arms the
+  // projection job, and only an armed job means D1 holds an active subject.
+  let approvalJobArmed = false;
+  if (approvingMinor) {
+    try {
+      const results = await env.DB.batch([
+        casStatement,
+        ...approvalRegistryStatements(env.DB, {
+          caseId,
+          pubkey: existing.pubkey,
+          landedVersion: existing.version + 1,
+          now: new Date().toISOString(),
+        }),
+      ]);
+      updateResult = results[0];
+      approvalJobArmed = results[results.length - 1].meta?.changes === 1;
+    } catch (error) {
+      console.error('[age-review] Approval batch failed; nothing was written:', error);
+      return json({ success: false, error: 'Approval may not have been recorded. Reload the case before retrying.' }, 500, corsHeaders);
+    }
+  } else {
+    updateResult = await casStatement.run();
+  }
 
   if (updateResult.meta?.changes !== 1) {
     // A concurrent writer bumped the version between our read and this write, so
@@ -445,7 +521,8 @@ export async function handleUpdateAgeReviewCase(
   if (TERMINAL_STATES.includes(newState)) {
     try {
       const note = (body.resolution_note as string | undefined) ?? existing.resolution_note;
-      await syncAgeReviewTicketResolution(caseId, newState, note ?? null, env);
+      await syncAgeReviewTicketResolution(caseId, newState, note ?? null, env,
+        clearedCase && isClearResolution(body.resolution) ? body.resolution : undefined);
     } catch (error) {
       console.error('[age-review] Failed to sync Zendesk ticket resolution:', error);
     }
@@ -491,6 +568,11 @@ export async function handleUpdateAgeReviewCase(
   let keycastMinorClearError: string | undefined;
   let subjectClear: EnforcementLegStatus = 'not_attempted';
   let subjectClearError: string | undefined;
+  let subjectActivate: EnforcementLegStatus = 'not_attempted';
+  let subjectActivateError: string | undefined;
+  let keycastMinorSet: EnforcementLegStatus = 'not_attempted';
+  let keycastMinorSetError: string | undefined;
+  let keycastMinorSetUnclaimed = false;
   let minorProjectionPubkey = existing.pubkey;
 
   // Shared wrapper for the relay and Keycast legs (both resolve to
@@ -574,28 +656,35 @@ export async function handleUpdateAgeReviewCase(
     // only lifts the protected-minor flag so protections release across
     // clients (#174).
     //
-    // Deliberately NOT on `cleared`: `cleared` is the favorable outcome and
-    // is overloaded. For a 13-15 consent-verified case it "restores the
-    // account" (age-review-process.md, 13-15 band) — a *confirmed protected
-    // minor* who must KEEP verified_minor. Clearing there would strip
-    // protection from a minor, the worst failure direction on this path. The
-    // 16+ mistaken-flag case also uses `cleared`, where the flag is a no-op;
-    // we cannot distinguish the two from the transition alone, so we leave the
-    // flag untouched on `cleared` (an over-protected mistaken adult is the safe
-    // side). Only deny/revoke removes it. keycast's clear is an idempotent
-    // no-op for never-minor accounts, so no pre-read is needed.
+    // Deliberately NOT on `cleared`: `cleared` is the favorable outcome and is
+    // overloaded. For an approved 13-15 minor it keeps the account open, and that
+    // confirmed protected minor must KEEP verified_minor; clearing there would
+    // strip protection from a minor, the worst failure direction on this path.
+    // The flag is therefore cleared only on deny/revoke, and SET only on an
+    // explicit `approved_minor` Clear (the set leg below, #192). A `not_minor`
+    // Clear touches neither: an over-protected mistaken adult is the safe side.
+    // keycast's clear is an idempotent no-op for never-minor accounts, so no
+    // pre-read is needed.
     //
-    // actor = the case's assigned moderator (best-effort: relay-manager auths
-    // with a shared admin pubkey, so there's no per-actor signal, and
-    // moderator_pubkey is unvalidated on write). A malformed/absent actor is
-    // dropped server-side in clearVerifiedMinor → keycast logs-only.
-    const minorClearActor = (updated?.moderator_pubkey ?? existing.moderator_pubkey) ?? undefined;
+    // actor (clear and set alike) = the case's assigned moderator (best-effort:
+    // relay-manager auths with a shared admin pubkey, so there's no per-actor
+    // signal, and moderator_pubkey is unvalidated on write). A malformed/absent
+    // actor is dropped server-side by keycast-client → keycast logs-only.
+    const minorFlagActor = (updated?.moderator_pubkey ?? existing.moderator_pubkey) ?? undefined;
+    // A newer approval of this account landed while this denial ran its other
+    // legs: latest decision wins, so its protections, keycast flag included, stay.
+    // The denial's relay ban, purge and keycast ban above have already run and
+    // stand; they are deliberately not reported or undone. Only an approval
+    // through another case for the same protected minor, landing while this
+    // handler runs, can get here.
+    let subjectKeptActive = false;
     if (deniedCase && env.DB) {
       try {
-        const result = await clearSubject(env.DB, existing.pubkey, minorClearActor, 'age_review_denied');
+        const result = await clearSubject(env.DB, existing.pubkey, minorFlagActor, 'age_review_denied', undefined, caseId);
         subjectClear = result.success ? 'ok' : 'failed';
         subjectClearError = result.error;
         minorProjectionPubkey = result.projectionPubkey ?? existing.pubkey;
+        subjectKeptActive = result.keptActive === true;
         if (!result.success) {
           console.error(`[age-review] Protected subject clear ${requestedState} failed: ${result.error}`);
         }
@@ -606,8 +695,8 @@ export async function handleUpdateAgeReviewCase(
       }
     }
     const minorClearLeg = await runStatusLeg('Keycast verified_minor clear', () =>
-      deniedCase && subjectClear !== 'failed'
-        ? clearVerifiedMinor(minorProjectionPubkey, minorClearActor, 'age_review_denied', env)
+      deniedCase && subjectClear !== 'failed' && !subjectKeptActive
+        ? clearVerifiedMinor(minorProjectionPubkey, minorFlagActor, 'age_review_denied', env)
         : undefined);
     keycastMinorClear = minorClearLeg.status;
     keycastMinorClearError = minorClearLeg.error;
@@ -616,12 +705,60 @@ export async function handleUpdateAgeReviewCase(
     // identical answer to a cron tick.
     if (deniedCase && (keycastMinorClear === 'ok' || keycastMinorClear === 'not_applicable') && env.DB) {
       try {
-        await markProjectionComplete(env.DB, minorProjectionPubkey);
+        await markProjectionComplete(env.DB, minorProjectionPubkey, 'cleared');
       } catch (error) {
         // The pending job remains a safe retry boundary after the projection
         // itself succeeded, so do not turn an applied denial into a 500.
         console.error('[age-review] Failed to mark protected-minor projection complete:', error);
       }
+    }
+    // A failed call is in doubt: it may have landed (a timeout), and a racing
+    // caller may already have completed this subject's job, so nothing would
+    // retry. Converge after every attempt, not only after a success.
+    if (deniedCase && keycastMinorClear !== 'not_attempted' && env.DB) {
+      await convergeAfterProjection(env.DB, minorProjectionPubkey, 'cleared');
+    }
+
+    // Approval (#192): the subject committed with the CAS above, and its armed job
+    // proves it. Project it onto keycast now; anything a retry could still fix
+    // stays pending for the cron.
+    if (approvingMinor && approvalJobArmed) {
+      subjectActivate = 'ok';
+    } else if (approvingMinor) {
+      // The case is approved but D1 holds no active subject for this pubkey (a
+      // registry invariant break, such as a live binding to a cleared subject).
+      // Setting keycast would project a classification D1 does not hold, and
+      // convergence would then undo it; a human has to look.
+      subjectActivate = 'failed';
+      subjectActivateError = 'Approval recorded, but no protected-minor projection was armed: '
+        + 'the account has no active protected subject. Check the registry.';
+      console.error(`[age-review] Protected subject activation failed: ${subjectActivateError}`);
+    }
+    let minorSetResult: KeycastResult | undefined;
+    const minorSetLeg = await runStatusLeg('Keycast verified_minor set', () =>
+      subjectActivate === 'ok'
+        ? setVerifiedMinor(existing.pubkey, minorFlagActor, 'age_review_approved', env)
+          .then((result) => { minorSetResult = result; return result; })
+        : undefined);
+    keycastMinorSet = minorSetLeg.status;
+    keycastMinorSetError = minorSetLeg.error;
+    keycastMinorSetUnclaimed = minorSetResult?.unclaimed === true;
+    // `unclaimed` is reported as failed (a human must look) but settled: keycast
+    // refuses that row permanently, so a retry would only re-fail every tick.
+    // TODO(#304): nothing sets the flag if the account is claimed later.
+    if (approvingMinor && env.DB
+      && (keycastMinorSet === 'ok' || keycastMinorSet === 'not_applicable' || minorSetResult?.unclaimed)) {
+      try {
+        await markProjectionComplete(env.DB, existing.pubkey, 'active');
+      } catch (error) {
+        console.error('[age-review] Failed to mark approval projection complete:', error);
+      }
+    }
+    // Converge after every attempted set, including an in-doubt failure. A refused
+    // (unclaimed) set changed nothing in keycast, so it cannot have overwritten a
+    // racing clear.
+    if (approvingMinor && env.DB && keycastMinorSet !== 'not_attempted' && !minorSetResult?.unclaimed) {
+      await convergeAfterProjection(env.DB, existing.pubkey, 'active');
     }
   }
 
@@ -638,9 +775,12 @@ export async function handleUpdateAgeReviewCase(
   const enforcement: AgeReviewEnforcement = {
     relay, relayError, bulk, bulkError, keycast, keycastError,
     keycastMinorClear, keycastMinorClearError, subjectClear, subjectClearError,
+    subjectActivate, subjectActivateError, keycastMinorSet, keycastMinorSetError,
+    ...(keycastMinorSetUnclaimed ? { keycastMinorSetUnclaimed: true } : {}),
   };
   const enforcementComplete = relay !== 'failed' && bulk !== 'failed' && keycast !== 'failed'
-    && keycastMinorClear !== 'failed' && subjectClear !== 'failed';
+    && keycastMinorClear !== 'failed' && subjectClear !== 'failed'
+    && subjectActivate !== 'failed' && keycastMinorSet !== 'failed';
   const response: AgeReviewCaseResponse = {
     success: enforcementComplete,
     case: updated,
@@ -808,8 +948,8 @@ export async function handleCreateMinorAccount(
     await env.DB.batch([env.DB.prepare(`
       INSERT INTO age_review_cases
       (id, pubkey, suspected_age_band, state, allowed_resolution, resolution_note, created_via, claim_link_url, claim_link_expires_at, zendesk_ticket_id,
-       account_name, account_nip05, account_vine_username, identity_captured_at, closed_at)
-      VALUES (?, ?, 'age_13_15', 'cleared', 'parent_video_or_email', 'Approved via parental consent (minor onboarding)', 'minor_onboarding', NULL, ?, ?, ?, ?, ?, ?, ?)
+       account_name, account_nip05, account_vine_username, identity_captured_at, closed_at, clear_resolution)
+      VALUES (?, ?, 'age_13_15', 'cleared', 'parent_video_or_email', 'Approved via parental consent (minor onboarding)', 'minor_onboarding', NULL, ?, ?, ?, ?, ?, ?, ?, 'approved_minor')
     `).bind(
       caseId,
       result.pubkey,
@@ -1937,11 +2077,17 @@ async function createAgeReviewInternalTicket(
   return null;
 }
 
+const CLEAR_RESOLUTION_NOTES: Record<ClearResolution, string> = {
+  approved_minor: 'approved as a protected 13-15 minor',
+  not_minor: 'without approval',
+};
+
 export async function syncAgeReviewTicketResolution(
   caseId: string,
   state: AgeReviewState,
   resolutionNote: string | null,
   env: AgeReviewEnv,
+  resolution?: ClearResolution,
 ): Promise<void> {
   if (!env.DB) return;
 
@@ -1957,7 +2103,8 @@ export async function syncAgeReviewTicketResolution(
   const ticketId = row.zendesk_ticket_id;
 
   const noteLines = [
-    `Age review case ${caseId} resolved: **${state}**`,
+    // `cleared` alone does not tell support whether a re-report will auto-clear.
+    `Age review case ${caseId} resolved: **${state}**${resolution ? ` (${CLEAR_RESOLUTION_NOTES[resolution]})` : ''}`,
   ];
   if (resolutionNote) noteLines.push(`Note: ${resolutionNote}`);
 
@@ -2265,17 +2412,22 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
 
     // Commit the durable classification clear first. That creates a projection
     // job which this tick (or a later tick after an outage) converges in Keycast.
-    const durableClear = await clearSubject(env.DB, row.pubkey, undefined, 'age_review_expired');
+    const durableClear = await clearSubject(env.DB, row.pubkey, undefined, 'age_review_expired', undefined, row.id);
     if (!durableClear.success) {
       console.error(`[age-review] Protected subject clear failed for expired case: ${durableClear.error}`);
+    } else if (durableClear.keptActive) {
+      console.info('[age-review] Expired case left protection on: a newer approval owns the subject');
     } else {
       try {
         const projectionPubkey = durableClear.projectionPubkey ?? row.pubkey;
         const clearResult = await clearVerifiedMinor(projectionPubkey, undefined, 'age_review_expired', env);
         // notFound settles the job here too: there is no account to project onto,
         // so leaving it pending only defers the same answer to the cron's retry.
-        if (clearResult.success || clearResult.notFound) await markProjectionComplete(env.DB, projectionPubkey);
-        else console.error(`[age-review] Keycast verified_minor clear failed for expired case: ${clearResult.error}`);
+        if (clearResult.success || clearResult.notFound) {
+          await markProjectionComplete(env.DB, projectionPubkey, 'cleared');
+        } else console.error(`[age-review] Keycast verified_minor clear failed for expired case: ${clearResult.error}`);
+        // In doubt on failure too: it may have landed after a racing approval's set.
+        await convergeAfterProjection(env.DB, projectionPubkey, 'cleared');
       } catch (error) {
         console.error('[age-review] Keycast verified_minor clear failed for expired case:', error);
       }
@@ -2283,6 +2435,8 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
 
     // purge the user's events at the relay (one-way) -- the case is closed
     // by deadline, matching the deny outcome. Best-effort; logged on failure.
+    // Runs even when a newer approval kept the subject active: as on inline
+    // deny, the denial's bans stand and only the protections follow the approval.
     try {
       const relayBan = failUnlessPurgeConfirmed(await banPubkey(row.pubkey, 'age_review_expired', env));
       if (relayBan.success) {
@@ -2305,7 +2459,7 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
   }
   for (const retry of subjectClearRetries) {
     const result = await clearSubject(
-      env.DB, retry.pubkey, retry.clearedBy, retry.reason, retry.subjectId,
+      env.DB, retry.pubkey, retry.clearedBy, retry.reason, retry.subjectId, retry.denialCaseId,
     );
     if (!result.success) {
       console.error(`[age-review] Protected-subject clear retry failed: ${result.error}`);
@@ -2314,7 +2468,7 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
 
   // Durable retry boundary for Keycast projection failures after the subject
   // clear commits.
-  let projectionJobs: Array<{ pubkey: string; reason: string }> = [];
+  let projectionJobs: Awaited<ReturnType<typeof pendingProjectionJobs>> = [];
   try {
     projectionJobs = await pendingProjectionJobs(env.DB);
   } catch (error) {
@@ -2322,15 +2476,35 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
   }
   for (const job of projectionJobs) {
     try {
-      const result = await clearVerifiedMinor(job.pubkey, undefined, job.reason as 'age_review_denied' | 'age_review_expired', env);
-      // notFound: the subject has no keycast account, so there is no projection
-      // to make and no retry that could ever succeed. Settle it -- left pending
-      // it re-calls keycast on every tick and eventually trips the retention
-      // overdue-projection alarm.
-      if (result.success || result.notFound) await markProjectionComplete(env.DB, job.pubkey);
-      else {
+      // A clear for a superseded subject would strip verified_minor from the
+      // account's live protected subject; the newer approval owns the flag.
+      if (job.superseded) {
+        await settleSupersededClear(env.DB, job.subjectId);
+        // An earlier attempt at this clear may have failed from our side yet
+        // landed in keycast after the new subject's set (a timeout). Re-arm the
+        // live subject so the set is re-applied: one extra idempotent PUT.
+        await convergeAfterProjection(env.DB, job.pubkey, 'cleared');
+        continue;
+      }
+      const result = job.classification === 'active'
+        ? await setVerifiedMinor(job.pubkey, undefined, job.reason as KeycastReason, env)
+        : await clearVerifiedMinor(job.pubkey, undefined, job.reason as KeycastReason, env);
+      // Settled when there is nothing left a retry could change: applied, no
+      // keycast account (notFound), or a row keycast refuses to flag (unclaimed).
+      // Left pending, those re-call keycast every tick and trip the retention
+      // overdue-projection alarm. TODO(#304): an unclaimed refusal settled here
+      // is only logged, and nothing sets the flag if the account is claimed later.
+      if (result.success || result.notFound || result.unclaimed) {
+        await markProjectionComplete(env.DB, job.pubkey, job.classification);
+      } else {
         await markProjectionAttempt(env.DB, job.pubkey);
         console.error(`[age-review] Keycast protected-minor projection retry failed: ${result.error}`);
+      }
+      // A call that landed, or may have (a failure is in doubt, and a racing
+      // caller may already have completed this job), can have raced an opposite
+      // projection for the same pubkey. A refused (unclaimed) one changed nothing.
+      if (!result.unclaimed) {
+        await convergeAfterProjection(env.DB, job.pubkey, job.classification);
       }
     } catch (error) {
       try {

@@ -551,10 +551,10 @@ export default {
         });
       }
 
-      // Moderator-facing account status (surfaces keycast verified_minor for the age-review view).
+      // Moderator-facing account status (keycast verified_minor + registry protected_minor for the age-review view).
       if (path.startsWith('/api/account-status/') && request.method === 'GET') {
         const targetPubkey = path.replace('/api/account-status/', '');
-        return handleAccountStatus(targetPubkey, env, corsHeaders);
+        return handleAccountStatus(targetPubkey, env, corsHeaders, ensureSchemaOnce);
       }
 
       if (path === '/api/publish' && request.method === 'POST') {

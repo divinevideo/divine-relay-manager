@@ -66,13 +66,82 @@ export async function createSubjectWithBinding(
   return { subjectId };
 }
 
+/**
+ * Registry writes for an age-review approval (#192), run in the SAME db.batch as
+ * the case's compare-and-swap UPDATE and after it. Every write is gated on the CAS
+ * having landed (the case at the bumped version, resolved as approved_minor), so a
+ * CAS lost to a writer that left the case in a different state writes nothing. (A
+ * CAS lost to an identical concurrent approval satisfies the guard and just
+ * re-arms the job: one extra idempotent set.) The batch's transaction means an
+ * approved case never exists without its subject. A pubkey that already holds an active binding (an
+ * onboarded account, say) keeps its subject; only the projection job is (re)armed.
+ * The "no active binding" test matches idx_protected_minor_active_pubkey_binding,
+ * so these inserts can never trip it and roll the approval back.
+ */
+export function approvalRegistryStatements(
+  db: D1Database,
+  input: { caseId: string; pubkey: string; landedVersion: number; now: string },
+): D1PreparedStatement[] {
+  const subjectId = crypto.randomUUID();
+  const bindingId = crypto.randomUUID();
+  const landed = `EXISTS (SELECT 1 FROM age_review_cases
+    WHERE id = ?1 AND version = ?2 AND clear_resolution = 'approved_minor')`;
+  const noActiveBinding = `NOT EXISTS (SELECT 1 FROM protected_minor_account_bindings
+    WHERE pubkey = ?3 AND unbound_at IS NULL)`;
+  return [
+    db.prepare(`INSERT INTO protected_minor_subjects (subject_id, source_case_id, classification_state, classified_at)
+      SELECT ?5, ?1, 'active', ?4 WHERE ${landed} AND ${noActiveBinding}`)
+      .bind(input.caseId, input.landedVersion, input.pubkey, input.now, subjectId),
+    db.prepare(`INSERT INTO protected_minor_account_bindings (id, subject_id, pubkey, bound_at)
+      SELECT ?6, subject_id, ?3, ?4 FROM protected_minor_subjects
+      WHERE subject_id = ?5 AND ${landed} AND ${noActiveBinding}`)
+      .bind(input.caseId, input.landedVersion, input.pubkey, input.now, subjectId, bindingId),
+    db.prepare(`INSERT INTO protected_minor_projection_jobs (subject_id, pubkey, reason, state, created_at, updated_at)
+      SELECT b.subject_id, ?3, 'age_review_approved', 'pending', ?4, ?4
+      FROM protected_minor_account_bindings b
+      JOIN protected_minor_subjects s ON s.subject_id = b.subject_id
+      WHERE b.pubkey = ?3 AND b.unbound_at IS NULL AND s.classification_state = 'active' AND ${landed}
+      ON CONFLICT(subject_id) DO UPDATE SET pubkey = excluded.pubkey, reason = excluded.reason,
+        state = 'pending', updated_at = excluded.updated_at,
+        -- An already-pending job keeps its age, as in rearmLiveSubjectProjection:
+        -- retention measures overdue projections from created_at.
+        created_at = CASE WHEN protected_minor_projection_jobs.state = 'pending'
+          THEN protected_minor_projection_jobs.created_at ELSE excluded.created_at END`)
+      .bind(input.caseId, input.landedVersion, input.pubkey, input.now),
+  ];
+}
+
+// True when the subject has an explicit approval newer than the denial row
+// `denial` (latest decision wins, #192). `updated_at` has whole-second
+// precision, so a same-second tie goes to the later-CREATED case (higher rowid),
+// which is not necessarily the later decision.
+function newerApprovalThan(subject: string, denial: string): string {
+  return `EXISTS (SELECT 1 FROM age_review_cases a
+    JOIN protected_minor_account_bindings b3 ON b3.pubkey = a.pubkey
+    WHERE b3.subject_id = ${subject}
+      AND a.state = 'cleared' AND a.clear_resolution = 'approved_minor'
+      AND (datetime(a.updated_at) > datetime(${denial}.updated_at)
+        OR (datetime(a.updated_at) = datetime(${denial}.updated_at) AND a.rowid > ${denial}.rowid)))`;
+}
+
+/**
+ * `denialCaseId` is the denial this clear carries out. Every denial path commits
+ * the case before it gets here (the cron retry selects it, inline deny and expiry
+ * await other enforcement first), so an approval can land in between; the clear
+ * re-checks latest-decision-wins inside its own batch and leaves the subject active.
+ */
 export async function clearSubject(
   db: D1Database,
   pubkey: string,
   clearedBy: string | undefined,
   reason: string,
   expectedSubjectId?: string,
-): Promise<{ success: boolean; projectionPubkey?: string; error?: string }> {
+  denialCaseId?: string,
+): Promise<{
+  success: boolean; projectionPubkey?: string; error?: string;
+  /** A newer approval owns the subject, so it stayed active and keycast must not be cleared. */
+  keptActive?: boolean;
+}> {
   try {
     const now = new Date().toISOString();
     const reasonClass = classifyClearReason(reason);
@@ -87,29 +156,61 @@ export async function clearSubject(
       .first<{ subject_id: string; classification_state: string; projection_pubkey: string | null }>();
     const projectionPubkey = subject?.projection_pubkey ?? pubkey;
     if (!subject || subject.classification_state === 'cleared') return { success: true, projectionPubkey };
-    await db.batch([
+    // One job row per subject projects whatever it last became; an approval (#192)
+    // may already own it, so re-arm rather than skip.
+    // The unbind and the job follow only a clear this batch made, so a retry the
+    // newer-approval check stopped leaves the binding and its set job alone.
+    const clearedHere = `EXISTS (SELECT 1 FROM protected_minor_subjects
+      WHERE subject_id = ? AND classification_state = 'cleared' AND cleared_at = ?)`;
+    const [subjectUpdate] = await db.batch([
       db.prepare(`UPDATE protected_minor_subjects
         SET classification_state = 'cleared', cleared_at = ?, cleared_by = ?, clear_reason = ?, clear_reason_class = ?
-        WHERE subject_id = ? AND classification_state = 'active'`)
-        .bind(now, clearedBy ?? null, reason, reasonClass, subject.subject_id),
+        WHERE subject_id = ? AND classification_state = 'active'
+          AND NOT EXISTS (SELECT 1 FROM age_review_cases d
+            WHERE d.id = ? AND ${newerApprovalThan('protected_minor_subjects.subject_id', 'd')})`)
+        .bind(now, clearedBy ?? null, reason, reasonClass, subject.subject_id, denialCaseId ?? null),
       db.prepare(`UPDATE protected_minor_account_bindings
-        SET unbound_at = COALESCE(unbound_at, ?) WHERE subject_id = ? AND unbound_at IS NULL`)
-        .bind(now, subject.subject_id),
+        SET unbound_at = COALESCE(unbound_at, ?) WHERE subject_id = ? AND unbound_at IS NULL AND ${clearedHere}`)
+        .bind(now, subject.subject_id, subject.subject_id, now),
       db.prepare(`INSERT INTO protected_minor_projection_jobs
         (subject_id, pubkey, reason, state, created_at, updated_at)
-        VALUES (?, ?, ?, 'pending', ?, ?)
-        ON CONFLICT(subject_id) DO NOTHING`)
-        .bind(subject.subject_id, projectionPubkey, reason, now, now),
+        SELECT ?, ?, ?, 'pending', ?, ? WHERE ${clearedHere}
+        ON CONFLICT(subject_id) DO UPDATE SET pubkey = excluded.pubkey, reason = excluded.reason,
+          state = 'pending', updated_at = excluded.updated_at,
+          -- An already-pending job keeps its age, as on every other re-arm: retention
+          -- measures overdue projections from created_at.
+          created_at = CASE WHEN protected_minor_projection_jobs.state = 'pending'
+            THEN protected_minor_projection_jobs.created_at ELSE excluded.created_at END`)
+        .bind(subject.subject_id, projectionPubkey, reason, now, now, subject.subject_id, now),
     ]);
+    if (subjectUpdate.meta?.changes === 0) {
+      // Nothing cleared here: either another writer cleared it first (its own
+      // projection follows), or the newer-approval check kept it active.
+      const after = await db.prepare('SELECT classification_state FROM protected_minor_subjects WHERE subject_id = ?')
+        .bind(subject.subject_id).first<{ classification_state: string }>();
+      if (after?.classification_state === 'active') return { success: true, projectionPubkey, keptActive: true };
+    }
     return { success: true, projectionPubkey };
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
 }
 
-export async function markProjectionComplete(db: D1Database, pubkey: string): Promise<void> {
+/**
+ * Completes a pending job only while its subject is still in the classification
+ * that was actually projected. A re-arm (a deny after an approval, #192) can land
+ * between a caller loading the job and finishing the keycast call; completing by
+ * pubkey alone would mark that re-armed row done and the revocation would never
+ * be sent.
+ */
+export async function markProjectionComplete(
+  db: D1Database, pubkey: string, projected: 'active' | 'cleared',
+): Promise<void> {
   await db.prepare(`UPDATE protected_minor_projection_jobs SET state = 'complete', updated_at = ?
-    WHERE pubkey = ? AND state = 'pending'`).bind(new Date().toISOString(), pubkey).run();
+    WHERE pubkey = ? AND state = 'pending'
+      AND (SELECT classification_state FROM protected_minor_subjects s
+        WHERE s.subject_id = protected_minor_projection_jobs.subject_id) = ?`)
+    .bind(new Date().toISOString(), pubkey, projected).run();
 }
 
 export async function markProjectionAttempt(db: D1Database, pubkey: string): Promise<void> {
@@ -117,16 +218,139 @@ export async function markProjectionAttempt(db: D1Database, pubkey: string): Pro
     WHERE pubkey = ? AND state = 'pending'`).bind(new Date().toISOString(), pubkey).run();
 }
 
-export async function pendingProjectionJobs(db: D1Database): Promise<Array<{ pubkey: string; reason: string }>> {
-  const rows = await db.prepare(`SELECT pubkey, reason FROM protected_minor_projection_jobs
-    WHERE state = 'pending' ORDER BY updated_at, created_at LIMIT 100`).all<{ pubkey: string; reason: string }>();
-  return rows.results.filter((row) => typeof row.pubkey === 'string' && typeof row.reason === 'string');
+/**
+ * Pending projections, each with its subject's CURRENT classification: the cron
+ * projects `active` as a keycast set and `cleared` as a keycast clear. One row per
+ * subject means the latest transition wins, which is the state keycast must match.
+ */
+export async function pendingProjectionJobs(db: D1Database): Promise<Array<{
+  subjectId: string; pubkey: string; reason: string; classification: 'active' | 'cleared';
+  /**
+   * A clear job whose pubkey is now bound to a DIFFERENT active subject (a
+   * denied account later approved on a new case, #192). Sending its keycast
+   * clear would strip the flag from the live protected minor.
+   */
+  superseded: boolean;
+}>> {
+  const rows = await db.prepare(`SELECT j.subject_id, j.pubkey, j.reason, s.classification_state AS classification,
+      (s.classification_state = 'cleared' AND EXISTS (
+        SELECT 1 FROM protected_minor_account_bindings b
+        JOIN protected_minor_subjects live ON live.subject_id = b.subject_id
+        WHERE b.pubkey = j.pubkey AND b.unbound_at IS NULL AND live.classification_state = 'active'
+      )) AS superseded
+    FROM protected_minor_projection_jobs j
+    JOIN protected_minor_subjects s ON s.subject_id = j.subject_id
+    WHERE j.state = 'pending' ORDER BY j.updated_at, j.created_at LIMIT 100`)
+    .all<{ subject_id: string; pubkey: string; reason: string; classification: string; superseded: number }>();
+  return rows.results.flatMap((row) =>
+    typeof row.pubkey === 'string' && typeof row.reason === 'string'
+      && (row.classification === 'active' || row.classification === 'cleared')
+      ? [{
+        subjectId: row.subject_id, pubkey: row.pubkey, reason: row.reason,
+        classification: row.classification, superseded: row.superseded === 1,
+      }]
+      : []);
+}
+
+/**
+ * Keycast convergence after a projection call that landed or may have (#192). Call
+ * it after every keycast verified_minor call except one keycast refused, on every
+ * path (inline approve, inline deny, expiry, cron), with the classification that
+ * call projected. Two races leave keycast disagreeing with D1 and nothing pending:
+ *
+ * - X1, a clear lands after a set. A deny, expiry or cron DELETE for a cleared
+ *   subject S1 is in flight while a new approval creates S2 for the same pubkey
+ *   and completes S2's PUT. The late DELETE unflags a live protected minor.
+ *   Fix: after a clear, re-arm the pubkey's live active subject's set job.
+ * - X2, a set lands after a clear. An approval or cron PUT for S is in flight
+ *   while a denial clears S and completes its own DELETE. The late PUT flags a
+ *   denied account. Fix: after a set, if the pubkey has no live active subject
+ *   and its most recent bound subject is cleared, re-arm that subject's clear job.
+ *
+ * The two conditions cannot both hold for one D1 state, so convergence cannot
+ * ping-pong. With no race neither condition holds, so it re-arms nothing and
+ * costs one D1 write that matches no row. A call keycast refused
+ * (account_unclaimed) changed nothing there and needs no convergence. A call
+ * that failed from our side may still have landed (a timeout), and its job may
+ * already be complete (a racing caller for the same subject succeeded first), so
+ * nothing pending would retry it: failed calls converge too.
+ */
+export async function convergeProjection(
+  db: D1Database, pubkey: string, projected: 'active' | 'cleared',
+): Promise<void> {
+  if (projected === 'cleared') {
+    await rearmLiveSubjectProjection(db, pubkey);
+  } else {
+    await rearmLatestClearedSubjectProjection(db, pubkey);
+  }
+}
+
+/**
+ * X2 half of convergeProjection. "Most recent bound subject" uses clearSubject's
+ * ordering, which puts the pubkey's live binding first; the unique index allows
+ * at most one, so a live active subject is always the latest and fails the
+ * `cleared` test without a separate guard. A job still pending for a different
+ * pubkey of that subject (a replaced account) is left alone: one job row per
+ * subject cannot carry both clears, and overwriting would drop the pending one.
+ * Either outcome leaves an account over-protected, never a live minor unprotected.
+ */
+async function rearmLatestClearedSubjectProjection(db: D1Database, pubkey: string): Promise<void> {
+  const now = new Date().toISOString();
+  await db.prepare(`INSERT INTO protected_minor_projection_jobs (subject_id, pubkey, reason, state, created_at, updated_at)
+    SELECT s.subject_id, ?1, s.clear_reason, 'pending', ?2, ?2
+    FROM protected_minor_account_bindings b
+    JOIN protected_minor_subjects s ON s.subject_id = b.subject_id
+    WHERE b.pubkey = ?1 AND s.classification_state = 'cleared'
+      AND b.rowid = (SELECT latest.rowid FROM protected_minor_account_bindings latest
+        WHERE latest.pubkey = ?1
+        ORDER BY (latest.unbound_at IS NULL) DESC, datetime(latest.bound_at) DESC, latest.rowid DESC LIMIT 1)
+    ON CONFLICT(subject_id) DO UPDATE SET pubkey = excluded.pubkey, reason = excluded.reason,
+      state = 'pending', updated_at = excluded.updated_at,
+      created_at = CASE WHEN protected_minor_projection_jobs.state = 'pending'
+        THEN protected_minor_projection_jobs.created_at ELSE excluded.created_at END
+    WHERE protected_minor_projection_jobs.state != 'pending' OR protected_minor_projection_jobs.pubkey = excluded.pubkey`)
+    .bind(pubkey, now).run();
+}
+
+/**
+ * X1 half of convergeProjection: re-arm the set job of the pubkey's live active
+ * subject so the next tick re-applies the set.
+ */
+export async function rearmLiveSubjectProjection(db: D1Database, pubkey: string): Promise<void> {
+  const now = new Date().toISOString();
+  await db.prepare(`INSERT INTO protected_minor_projection_jobs (subject_id, pubkey, reason, state, created_at, updated_at)
+    SELECT s.subject_id, b.pubkey, 'age_review_approved', 'pending', ?2, ?2
+    FROM protected_minor_account_bindings b
+    JOIN protected_minor_subjects s ON s.subject_id = b.subject_id
+    WHERE b.pubkey = ?1 AND b.unbound_at IS NULL AND s.classification_state = 'active'
+    ON CONFLICT(subject_id) DO UPDATE SET pubkey = excluded.pubkey, reason = excluded.reason,
+      state = 'pending', updated_at = excluded.updated_at,
+      -- An already-pending live job keeps its age: retention measures overdue
+      -- projections from created_at, and a persistently failing PUT must still alarm.
+      created_at = CASE WHEN protected_minor_projection_jobs.state = 'pending'
+        THEN protected_minor_projection_jobs.created_at ELSE excluded.created_at END`)
+    .bind(pubkey, now).run();
+}
+
+/**
+ * Settles a clear job that a newer active subject made moot, without calling
+ * keycast. Guarded on the job's own subject still being cleared, so a re-arm that
+ * flipped it back to an active projection is left pending.
+ */
+export async function settleSupersededClear(db: D1Database, subjectId: string): Promise<void> {
+  await db.prepare(`UPDATE protected_minor_projection_jobs SET state = 'complete', updated_at = ?
+    WHERE subject_id = ? AND state = 'pending'
+      AND (SELECT classification_state FROM protected_minor_subjects s
+        WHERE s.subject_id = protected_minor_projection_jobs.subject_id) = 'cleared'`)
+    .bind(new Date().toISOString(), subjectId).run();
 }
 
 export async function pendingSubjectClears(db: D1Database): Promise<Array<{
   subjectId: string; pubkey: string; clearedBy?: string; reason: 'age_review_denied' | 'age_review_expired';
+  /** The denial this retry carries out; clearSubject re-checks it at write time. */
+  denialCaseId: string;
 }>> {
-  const rows = await db.prepare(`SELECT s.subject_id, c.pubkey, c.moderator_pubkey, c.resolution_note
+  const rows = await db.prepare(`SELECT s.subject_id, c.id AS denial_case_id, c.pubkey, c.moderator_pubkey, c.resolution_note
     FROM protected_minor_subjects s
     JOIN protected_minor_account_bindings b ON b.subject_id = s.subject_id
     JOIN age_review_cases c ON c.pubkey = b.pubkey AND c.state = 'denied_closed'
@@ -135,11 +359,15 @@ export async function pendingSubjectClears(db: D1Database): Promise<Array<{
         JOIN protected_minor_account_bindings b2 ON b2.pubkey = c2.pubkey
         WHERE b2.subject_id = s.subject_id AND c2.state = 'denied_closed'
         ORDER BY datetime(c2.updated_at) DESC, c2.rowid DESC LIMIT 1)
+      -- Latest decision wins (#192): a denial is a retry source only until a newer
+      -- approval of the same subject (any pubkey in its binding history).
+      AND NOT ${newerApprovalThan('s.subject_id', 'c')}
     ORDER BY datetime(c.updated_at), c.rowid LIMIT 100`).all<{
-      subject_id: string; pubkey: string; moderator_pubkey: string | null; resolution_note: string | null;
+      subject_id: string; denial_case_id: string; pubkey: string; moderator_pubkey: string | null; resolution_note: string | null;
     }>();
   return rows.results.map((row) => ({
     subjectId: row.subject_id,
+    denialCaseId: row.denial_case_id,
     pubkey: row.pubkey,
     clearedBy: row.moderator_pubkey ?? undefined,
     reason: row.resolution_note?.startsWith('Auto-closed:') ? 'age_review_expired' : 'age_review_denied',

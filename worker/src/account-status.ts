@@ -1,7 +1,8 @@
 // ABOUTME: Moderator-facing account-status endpoint. Surfaces keycast's durable
-// ABOUTME: verified_minor flag (approved protected minor 13-15) for the age-review view.
+// ABOUTME: verified_minor flag and the D1 protected-minor registry for the age-review view.
 
-import { getUserStatus, HEX_64, type KeycastEnv } from './keycast-client';
+import { getUserStatus, HEX_64, type KeycastEnv, type UserStatusResult } from './keycast-client';
+import { resolveByPubkey } from './protected-minors';
 
 function json(
   data: unknown,
@@ -22,11 +23,17 @@ function json(
  * An invalid pubkey is a 400; a keycast failure/misconfiguration degrades to
  * `200 { success: false }` so the moderator UI reads "status unavailable"
  * without blocking the case view.
+ *
+ * `protected_minor` is the D1 registry's answer (#192): true when the pubkey has
+ * an active protected-minor subject. It is the only signal for an approved minor
+ * who holds their own key, since keycast has no account for them. null means
+ * unknown (no D1 binding, or the read failed), never "not protected".
  */
 export async function handleAccountStatus(
   pubkey: string,
-  env: KeycastEnv,
+  env: KeycastEnv & { DB?: D1Database },
   corsHeaders: Record<string, string>,
+  prepareDb?: (db: D1Database) => Promise<void>,
 ): Promise<Response> {
   if (!HEX_64.test(pubkey)) {
     return json(
@@ -36,14 +43,22 @@ export async function handleAccountStatus(
     );
   }
 
-  const result = await getUserStatus(pubkey, env);
+  const [result, protected_minor] = await Promise.all([
+    // getUserStatus resolves its Secrets Store token outside its own try, so a
+    // throw there must not cost the moderator the registry answer.
+    getUserStatus(pubkey, env).catch((error): UserStatusResult => {
+      console.error('[account-status] Keycast status lookup threw:', error);
+      return { success: false, error: 'unavailable' };
+    }),
+    registryProtection(pubkey, env.DB, prepareDb),
+  ]);
   if (!result.success) {
     // not_found (keycast 404) is self-custody — informational, distinct from an
     // unavailable/errored lookup, so the UI can style it non-destructively (#191).
     return json(
       result.notFound
-        ? { success: false, not_found: true }
-        : { success: false, error: result.error ?? 'unavailable' },
+        ? { success: false, not_found: true, protected_minor }
+        : { success: false, error: result.error ?? 'unavailable', protected_minor },
       200,
       corsHeaders,
     );
@@ -58,8 +73,26 @@ export async function handleAccountStatus(
       suspended_at: result.suspended_at,
       verified_minor: result.verified_minor ?? false,
       verified_minor_at: result.verified_minor_at,
+      protected_minor,
     },
     200,
     corsHeaders,
   );
+}
+
+// Best-effort: a registry failure must not cost the moderator the keycast status.
+// That includes preparing the schema, so it runs inside the same guard.
+async function registryProtection(
+  pubkey: string,
+  db: D1Database | undefined,
+  prepareDb: ((db: D1Database) => Promise<void>) | undefined,
+): Promise<boolean | null> {
+  if (!db) return null;
+  try {
+    if (prepareDb) await prepareDb(db);
+    return (await resolveByPubkey(db, pubkey)) !== null;
+  } catch (error) {
+    console.error('[account-status] Protected-minor registry read failed:', error);
+    return null;
+  }
 }

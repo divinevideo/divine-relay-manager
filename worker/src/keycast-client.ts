@@ -15,9 +15,15 @@ export interface KeycastResult {
    * that a retry could fix, and nothing that was left unenforced (issue #191).
    */
   notFound?: boolean;
+  /**
+   * Keycast refused to flag this row because it has no login credentials
+   * (409 account_unclaimed). Permanent for this account: a retry cannot succeed.
+   */
+  unclaimed?: boolean;
 }
 
-export type KeycastReason = 'age_review' | 'age_review_denied' | 'age_review_expired' | 'moderation';
+export type KeycastReason =
+  | 'age_review' | 'age_review_denied' | 'age_review_expired' | 'age_review_approved' | 'moderation';
 
 export const HEX_64 = /^[0-9a-f]{64}$/;
 
@@ -38,6 +44,20 @@ function isKeycastUserNotFound(text: string): boolean {
     return code === 'user_not_found' || error === 'user_not_found' || error === 'user not found';
   } catch {
     return trimmed.toLowerCase() === 'user not found';
+  }
+}
+
+/**
+ * True only for keycast's permanent refusal to flag a credential-less row
+ * (409 account_unclaimed). A retry cannot succeed, so callers must tell it
+ * apart from a transient failure; an unrelated 409 must not match.
+ */
+function isKeycastAccountUnclaimed(text: string): boolean {
+  try {
+    const data = JSON.parse(text.trim()) as Record<string, unknown>;
+    return typeof data.error === 'string' && data.error.startsWith('account_unclaimed');
+  } catch {
+    return false;
   }
 }
 
@@ -132,6 +152,69 @@ export async function banUser(pubkey: string, reason: KeycastReason, env: Keycas
 }
 
 /**
+ * PUT sets and DELETE clears keycast's verified_minor flag. The two calls share
+ * every rule -- pubkey guard, actor drop, query string, and how a refusal is
+ * classified -- so they share this body.
+ */
+async function callVerifiedMinor(
+  method: 'PUT' | 'DELETE',
+  pubkey: string,
+  actor: string | undefined,
+  reason: KeycastReason | undefined,
+  env: KeycastEnv,
+): Promise<KeycastResult> {
+  const verb = method === 'PUT' ? 'set' : 'clear';
+  if (!env.KEYCAST_URL || !env.KEYCAST_SERVICE_TOKEN) {
+    return { success: false, error: 'not configured' };
+  }
+  if (!HEX_64.test(pubkey)) {
+    return { success: false, error: 'invalid pubkey: must be 64 hex chars' };
+  }
+  const token = await resolveToken(env.KEYCAST_SERVICE_TOKEN);
+  if (!token) {
+    return { success: false, error: 'not configured' };
+  }
+
+  const params = new URLSearchParams();
+  if (actor) {
+    if (HEX_64.test(actor)) {
+      params.set('actor', actor);
+    } else {
+      console.warn(`[keycast] dropping malformed actor for verified_minor ${verb}; audit falls back to log-only`);
+    }
+  }
+  if (reason) {
+    params.set('reason', reason);
+  }
+  const qs = params.size > 0 ? `?${params.toString()}` : '';
+
+  try {
+    const res = await fetch(`${env.KEYCAST_URL}/api/admin/users/${pubkey}/verified-minor${qs}`, {
+      method,
+      headers: { 'Authorization': `Bearer ${token}` },
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      if (res.status === 404 && isKeycastUserNotFound(text)) {
+        console.info(`[keycast] verified_minor ${verb} not applicable: no keycast account (self-custody)`);
+        return { success: false, status: 404, notFound: true, error: `404: ${text}` };
+      }
+      if (res.status === 409 && isKeycastAccountUnclaimed(text)) {
+        console.error(`[keycast] verified_minor ${verb} refused: account has no login credentials`);
+        return { success: false, status: 409, unclaimed: true, error: `409: ${text}` };
+      }
+      console.error(`[keycast] verified_minor ${verb} failed: ${res.status}`);
+      return { success: false, status: res.status, error: `${res.status}: ${text}` };
+    }
+    return { success: true };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[keycast] verified_minor ${verb} failed: ${msg}`);
+    return { success: false, error: msg };
+  }
+}
+
+/**
  * Clear a Keycast account's verified_minor flag (protected-minor revocation,
  * issue #147; endpoint from keycast#265). Composes with the status calls —
  * the status outcome stays the caller's decision, this only lifts the flag.
@@ -150,56 +233,21 @@ export async function clearVerifiedMinor(
   reason: KeycastReason | undefined,
   env: KeycastEnv,
 ): Promise<KeycastResult> {
-  if (!env.KEYCAST_URL || !env.KEYCAST_SERVICE_TOKEN) {
-    return { success: false, error: 'not configured' };
-  }
+  return callVerifiedMinor('DELETE', pubkey, actor, reason, env);
+}
 
-  if (!HEX_64.test(pubkey)) {
-    return { success: false, error: 'invalid pubkey: must be 64 hex chars' };
-  }
-
-  const token = await resolveToken(env.KEYCAST_SERVICE_TOKEN);
-  if (!token) {
-    return { success: false, error: 'not configured' };
-  }
-
-  const params = new URLSearchParams();
-  if (actor) {
-    if (HEX_64.test(actor)) {
-      params.set('actor', actor);
-    } else {
-      console.warn('[keycast] dropping malformed actor for verified_minor clear; audit falls back to log-only');
-    }
-  }
-  if (reason) {
-    params.set('reason', reason);
-  }
-  const qs = params.size > 0 ? `?${params.toString()}` : '';
-
-  try {
-    const res = await fetch(`${env.KEYCAST_URL}/api/admin/users/${pubkey}/verified-minor${qs}`, {
-      method: 'DELETE',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-      },
-    });
-
-    if (!res.ok) {
-      const text = await res.text();
-      if (res.status === 404 && isKeycastUserNotFound(text)) {
-        console.log('[keycast] verified_minor clear not applicable: no keycast account (self-custody)');
-        return { success: false, status: 404, notFound: true, error: `404: ${text}` };
-      }
-      console.error(`[keycast] verified_minor clear failed: ${res.status}`);
-      return { success: false, status: res.status, error: `${res.status}: ${text}` };
-    }
-
-    return { success: true };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[keycast] verified_minor clear failed: ${msg}`);
-    return { success: false, error: msg };
-  }
+/**
+ * Confer verified_minor on an existing keycast account (age-review approval,
+ * #192). Requires keycast's PUT route; a keycast without it answers a bare 404,
+ * which is a failure the projection cron retries, never notFound.
+ */
+export async function setVerifiedMinor(
+  pubkey: string,
+  actor: string | undefined,
+  reason: KeycastReason | undefined,
+  env: KeycastEnv,
+): Promise<KeycastResult> {
+  return callVerifiedMinor('PUT', pubkey, actor, reason, env);
 }
 
 export interface UserStatusResult {

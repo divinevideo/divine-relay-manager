@@ -132,12 +132,12 @@ describe('active-list rows must not shadow the mutation result (#179 review roun
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     renderPage(client);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Clear' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Clear without approval' }));
     await waitFor(() => expect(updateAgeReviewCase).toHaveBeenCalledTimes(1));
 
     expect(await screen.findByText('Cleared')).toBeInTheDocument();
     await waitFor(() => {
-      expect(screen.queryByRole('button', { name: 'Clear' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Clear without approval' })).not.toBeInTheDocument();
     });
   });
 
@@ -152,12 +152,12 @@ describe('active-list rows must not shadow the mutation result (#179 review roun
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     renderPage(client);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Clear' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Clear without approval' }));
     await waitFor(() => expect(updateAgeReviewCase).toHaveBeenCalledTimes(1));
 
     expect(await screen.findByText('Cleared')).toBeInTheDocument();
     await waitFor(() => {
-      expect(screen.queryByRole('button', { name: 'Clear' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Clear without approval' })).not.toBeInTheDocument();
     });
   });
 
@@ -172,7 +172,7 @@ describe('active-list rows must not shadow the mutation result (#179 review roun
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const first = renderPage(client);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Clear' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Clear without approval' }));
     await waitFor(() => expect(updateAgeReviewCase).toHaveBeenCalledTimes(1));
     await screen.findByText('Cleared');
     first.unmount();
@@ -181,7 +181,7 @@ describe('active-list rows must not shadow the mutation result (#179 review roun
     renderPage(client);
 
     await waitFor(() => {
-      expect(screen.queryByRole('button', { name: 'Clear' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Clear without approval' })).not.toBeInTheDocument();
     });
     expect(screen.queryByText('Under Moderator Review')).not.toBeInTheDocument();
   });

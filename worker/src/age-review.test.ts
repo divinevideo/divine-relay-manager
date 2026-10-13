@@ -370,7 +370,7 @@ describe('handleUpdateAgeReviewCase', () => {
 
     const req = new Request('https://api.test/api/age-review/cases/case-1', {
       method: 'PATCH',
-      body: JSON.stringify({ state: 'cleared', resolution_note: 'Age verified' }),
+      body: JSON.stringify({ state: 'cleared', resolution: 'not_minor', resolution_note: 'Age verified' }),
     });
     const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(reviewDb, {
       ZENDESK_SUBDOMAIN: 'test',
@@ -386,7 +386,7 @@ describe('handleUpdateAgeReviewCase', () => {
     expect(zendeskCall).toBeTruthy();
     const payload = JSON.parse(zendeskCall![1].body);
     expect(payload.ticket.status).toBe('solved');
-    expect(payload.ticket.comment.body).toContain('cleared');
+    expect(payload.ticket.comment.body).toContain('**cleared** (without approval)');
     // Routes to the configured group (Trust & Safety), not a personal assignee.
     expect(payload.ticket.group_id).toBe(15225535020687);
     expect(payload.ticket.assignee_email).toBeUndefined();
@@ -594,7 +594,7 @@ describe('Keycast suspension wiring', () => {
 
     const req = new Request('https://api.test/api/age-review/cases/case-1', {
       method: 'PATCH',
-      body: JSON.stringify({ state: 'cleared' }),
+      body: JSON.stringify({ state: 'cleared', resolution: 'not_minor' }),
     });
     const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
     const body = await res.json() as { success: boolean; keycastUpdated: boolean };
@@ -628,7 +628,7 @@ describe('Keycast suspension wiring', () => {
 
     const req = new Request('https://api.test/api/age-review/cases/case-1', {
       method: 'PATCH',
-      body: JSON.stringify({ state: 'cleared' }),
+      body: JSON.stringify({ state: 'cleared', resolution: 'not_minor' }),
     });
     const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
     const body = await res.json() as { success: boolean; keycastUpdated: boolean };
@@ -695,7 +695,7 @@ describe('Keycast suspension wiring', () => {
 
     const req = new Request('https://api.test/api/age-review/cases/case-1', {
       method: 'PATCH',
-      body: JSON.stringify({ state: 'cleared' }),
+      body: JSON.stringify({ state: 'cleared', resolution: 'not_minor' }),
     });
     const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
     const body = await res.json() as { success: boolean; keycastUpdated: boolean };
@@ -728,7 +728,7 @@ describe('Keycast suspension wiring', () => {
 
     const req = new Request('https://api.test/api/age-review/cases/case-1', {
       method: 'PATCH',
-      body: JSON.stringify({ state: 'cleared' }),
+      body: JSON.stringify({ state: 'cleared', resolution: 'not_minor' }),
     });
     const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
     const body = await res.json() as { success: boolean; keycastUpdated: boolean };
@@ -877,7 +877,7 @@ describe('Keycast suspension wiring', () => {
 
     const req = new Request('https://api.test/api/age-review/cases/case-1', {
       method: 'PATCH',
-      body: JSON.stringify({ state: 'cleared' }),
+      body: JSON.stringify({ state: 'cleared', resolution: 'not_minor' }),
     });
     const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(makeDbFor(restrictedCase, updatedCase)), corsHeaders);
 
@@ -1092,7 +1092,7 @@ describe('Relay pubkey enforcement wiring', () => {
     const c = makeCase({ state: before as AgeReviewCase['state'] });
     const db = dbReturning(c, { ...c, state: to as AgeReviewCase['state'] });
     const req = new Request('https://api.test/api/age-review/cases/case-1', {
-      method: 'PATCH', body: JSON.stringify({ state: to }),
+      method: 'PATCH', body: JSON.stringify(to === 'cleared' ? { state: to, resolution: 'not_minor' } : { state: to }),
     });
     await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
     return c;
@@ -2965,6 +2965,33 @@ describe('syncAgeReviewTicketResolution', () => {
     expect(payload.ticket.status).toBe('solved');
     expect(payload.ticket.comment.public).toBe(false);
     expect(payload.ticket.comment.body).toContain('denied_closed');
+
+    vi.unstubAllGlobals();
+  });
+
+  it.each([
+    ['approved_minor', '**cleared** (approved as a protected 13-15 minor)'],
+    ['not_minor', '**cleared** (without approval)'],
+  ] as const)('says how a cleared case was resolved (%s)', async (resolution, expected) => {
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal('fetch', mockFetch);
+
+    const db = {
+      prepare: vi.fn().mockImplementation(() => ({
+        bind: vi.fn().mockReturnValue({
+          first: vi.fn().mockResolvedValue({ zendesk_ticket_id: 42 }),
+        }),
+      })),
+    };
+
+    await syncAgeReviewTicketResolution('case-1', 'cleared', null, makeEnv(db, {
+      ZENDESK_SUBDOMAIN: 'test',
+      ZENDESK_API_TOKEN: 'tok',
+      ZENDESK_EMAIL: 'agent@test.com',
+    }), resolution);
+
+    const payload = JSON.parse((mockFetch.mock.calls[0] as [string, RequestInit])[1].body as string);
+    expect(payload.ticket.comment.body).toBe(`Age review case case-1 resolved: ${expected}`);
 
     vi.unstubAllGlobals();
   });

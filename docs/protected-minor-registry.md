@@ -6,6 +6,14 @@ The registry deliberately stores only opaque subject and operation UUIDs, accoun
 
 Age-review claim links are cleared at link expiry or case closure. Contact, captured identity, reporter/moderator references, and narrative are redacted 30 days after closure; the minimized decision record expires after one year unless an active classification still depends on it. Scoped legal holds pause only their named disposal stage and do not reset any retention clock or change classification state.
 
+## Approval from age review
+
+Approving a 13-15 age-review case (`PATCH /api/age-review/cases/:id` with `state: "cleared"` and `resolution: "approved_minor"`) records the account as a protected minor, the same state onboarding creates. In the same D1 batch as the case update it creates an active subject bound to the case pubkey, or reuses the active subject that pubkey already holds, and arms that subject's projection job. A `not_minor` clear records nothing. `resolution` is required whenever `state` is `cleared`, and an approval needs the case's pubkey to be 64 lowercase hex.
+
+One projection job per subject carries whatever the subject last became. The job projects an `active` subject as a Keycast `PUT` of `verified_minor` and a `cleared` subject as a `DELETE`, inline right after the write and from the cron for any job still pending. Latest decision wins: a denial's clear leaves the subject active when a newer explicit approval exists for it, and after every projection that lands the worker re-arms the opposite projection if a racing writer left Keycast disagreeing with D1.
+
+Two outcomes settle a job without a Keycast change, so nothing retries them. An account with no Keycast row (self-custody) has nothing to flag; it is still a registry subject, so later under-16 reports auto-clear. A row with no login credentials is refused with `account_unclaimed`. When that refusal answers the approval's own call, the moderator is told the flag was not applied; when the cron's retry gets it, it is only logged. Either way, nothing sets the flag later if the account is claimed.
+
 ## Service API
 
 All `/api/internal/protected-minors/*` routes accept only `Authorization: Bearer <PROTECTED_MINOR_SERVICE_TOKEN>`. Cloudflare Access browser assertions and `X-Admin-Key` do not authorize them. Funnelcake must also authenticate at the edge with a dedicated Cloudflare Access service token. The Worker bearer remains mandatory defense in depth and must be distinct from both Access token values.
@@ -23,7 +31,7 @@ Opaque subject references must never be logged, emitted in analytics, placed in 
 ## Deployment and rollback
 
 1. Create the `PROTECTED_MINOR_SERVICE_TOKEN` Secrets Store entry, then complete the environment's Cloudflare Access and caller configuration in [Protected-minor edge authentication](protected-minor-edge-auth.md).
-2. Deploy Keycast #385 before deploying Relay Manager, because onboarding now sends its provisioning operation ID for crash-safe recovery.
+2. Deploy Keycast #385 before deploying Relay Manager, because onboarding now sends its provisioning operation ID for crash-safe recovery. Deploy Keycast #433 (the `PUT /api/admin/users/:pubkey/verified-minor` route) before moderators approve cases. Relay Manager is safe to deploy first: approvals still record, their set jobs stay pending and converge once the route exists, and a job pending for more than 24 hours alerts.
 3. Create the dedicated `PROTECTED_MINOR_TOMBSTONE_KEY` Secrets Store value in staging and production, then deploy Relay Manager with replacement disabled. `ensureSchema()` creates and heals the tables; do not run Wrangler migrations against this database. Missing tombstone key material pauses compaction and alerts rather than deleting replay detail.
 4. Invoke `POST /api/admin/protected-minors/backfill` in staging and inspect its counts, then repeat in production. If a row exposes an integrity conflict, resolve it and rerun; committed rows are skipped by source case ID.
 5. Deploy and enable Funnelcake #1118 only after resolve/close have been verified.

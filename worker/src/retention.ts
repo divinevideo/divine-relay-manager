@@ -310,6 +310,19 @@ export async function runRetentionDisposal(env: RetentionEnv): Promise<Retention
           AND datetime(c.closed_at) <= datetime('now', '-${RETENTION_DAYS.ageReviewDecision} days')
           AND NOT EXISTS (SELECT 1 FROM protected_minor_subjects s
             WHERE s.source_case_id = c.id AND s.classification_state = 'active')
+          -- An approval of a still-active subject is what keeps an older surviving
+          -- denial of that subject from being retried as a clear (latest decision
+          -- wins, #192). A reused subject's source is an earlier case, so the
+          -- check above does not cover it; keep the approval while such a denial
+          -- remains (held, or kept for its consent clip).
+          AND NOT (c.state = 'cleared' AND c.clear_resolution = 'approved_minor' AND EXISTS (
+            SELECT 1 FROM protected_minor_account_bindings ba
+            JOIN protected_minor_subjects s ON s.subject_id = ba.subject_id AND s.classification_state = 'active'
+            JOIN protected_minor_account_bindings bd ON bd.subject_id = s.subject_id
+            JOIN age_review_cases d ON d.pubkey = bd.pubkey AND d.state = 'denied_closed'
+            WHERE ba.pubkey = c.pubkey
+              AND (datetime(d.updated_at) < datetime(c.updated_at)
+                OR (datetime(d.updated_at) = datetime(c.updated_at) AND d.rowid < c.rowid))))
           AND NOT EXISTS (SELECT 1 FROM age_review_parent_consent_submissions cs
             WHERE cs.case_id = c.id AND cs.object_key IS NOT NULL AND cs.disposed_at IS NULL)
           AND ${noHold('age_review_case', 'c.id', 'deletion')}

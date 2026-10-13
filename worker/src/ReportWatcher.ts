@@ -21,6 +21,7 @@ import {
 } from '../../shared/age-review';
 import { getReportedList } from '../../shared/list-report';
 import { getUserStatus, type KeycastEnv } from './keycast-client';
+import { resolveByPubkey } from './protected-minors';
 import { fetchAccountIdentity } from './relay-profile';
 
 const UNRESOLVED_AUTO_HIDE_VISIBILITY = 'unresolved-hide';
@@ -1348,6 +1349,25 @@ export class ReportWatcher implements DurableObject {
     return `event-visibility:${eventId}`;
   }
 
+  /**
+   * An approved minor: an active protected-minor subject (#192; the durable record,
+   * and the only one a self-custody account has) or keycast's verified_minor flag.
+   * The keycast fallback covers onboarding accounts the registry never recorded, but
+   * it also answers yes while a denial's keycast clear is still pending (the account
+   * is banned by then, and the cron converges within a tick). The registry is read
+   * first because it is local and survives a keycast outage. Returns which source
+   * proved it, for the decision log, or null for no approved minor.
+   */
+  private async isApprovedMinor(pubkey: string): Promise<'registry' | 'keycast' | null> {
+    try {
+      if (await resolveByPubkey(this.env.DB!, pubkey)) return 'registry';
+    } catch (err) {
+      console.warn('[ReportWatcher] Protected-minor registry check failed; falling back to keycast:', err);
+    }
+    const keycastStatus = await getUserStatus(pubkey, this.env);
+    return keycastStatus.success && keycastStatus.verified_minor === true ? 'keycast' : null;
+  }
+
   private async createAgeReviewCase(event: ReportEvent, reportedPubkey: string): Promise<void> {
     if (!this.env.DB) {
       console.warn('[ReportWatcher] D1 database not available, cannot create age review case');
@@ -1376,10 +1396,10 @@ export class ReportWatcher implements DurableObject {
       return;
     }
 
-    // Auto-clear: if user is a previously verified minor, create case as immediately cleared
+    // Auto-clear: an approved minor (registry or keycast) is recorded as already cleared
     try {
-      const keycastStatus = await getUserStatus(reportedPubkey, this.env);
-      if (keycastStatus.success && keycastStatus.verified_minor) {
+      const approvedVia = await this.isApprovedMinor(reportedPubkey);
+      if (approvedVia) {
         const caseId = crypto.randomUUID();
         // Capture here too. This case opens already cleared, so nothing hides the
         // profile today -- but the account may be actioned later, and a cleared
@@ -1410,7 +1430,7 @@ export class ReportWatcher implements DurableObject {
           targetType: 'pubkey',
           targetId: reportedPubkey,
           action: AGE_REVIEW_ACTION.caseCreated,
-          reason: `Under-16 report auto-cleared: verified minor (case ${caseId})`,
+          reason: `Under-16 report auto-cleared: verified minor via ${approvedVia} (case ${caseId})`,
           reportId: event.id,
           reporterPubkey: event.pubkey,
         });
@@ -1419,7 +1439,7 @@ export class ReportWatcher implements DurableObject {
         return;
       }
     } catch (err) {
-      console.warn('[ReportWatcher] Keycast verified_minor check failed; proceeding with normal case:', err);
+      console.warn('[ReportWatcher] Approved-minor check failed; proceeding with normal case:', err);
     }
 
     const caseId = crypto.randomUUID();

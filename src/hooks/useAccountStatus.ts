@@ -1,6 +1,6 @@
-// ABOUTME: Shared query for a pubkey's keycast account status (membership,
-// ABOUTME: suspension, verified_minor). Consumed by the age-review view; the
-// ABOUTME: reports-pane reuse is a planned follow-up (part C).
+// ABOUTME: Shared query for a pubkey's account status (keycast membership,
+// ABOUTME: suspension, verified_minor; registry protected_minor). Consumed by the
+// ABOUTME: age-review view; the reports-pane reuse is a planned follow-up (part C).
 import { useQuery } from '@tanstack/react-query';
 import { useAdminApi, useApiUrl } from './useAdminApi';
 

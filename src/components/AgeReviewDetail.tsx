@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { useAccountStatus } from "@/hooks/useAccountStatus";
+import { deriveProtectedMinorView } from "@/lib/protectedMinorView";
 import { useUserStats } from "@/hooks/useUserStats";
 import { AccountTypeIndicator } from "@/components/AccountTypeIndicator";
 import { AgeReviewContent } from "@/components/AgeReviewContent";
@@ -36,7 +37,9 @@ import {
   ShieldCheck,
   EyeOff,
   MessageSquareLock,
+  KeyRound,
 } from "lucide-react";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { CopyableId } from "@/components/CopyableId";
 import { UserIdentifier } from "@/components/UserIdentifier";
 import {
@@ -46,6 +49,7 @@ import {
   type AgeReviewCase,
   type AgeReviewState,
   type AgeBand,
+  type ClearResolution,
 } from "../../shared/age-review";
 
 const STATE_LABELS: Record<AgeReviewState, string> = {
@@ -58,6 +62,13 @@ const STATE_LABELS: Record<AgeReviewState, string> = {
   needs_follow_up: "Needs Follow-up",
   cleared: "Cleared",
   denied_closed: "Denied — Closed",
+};
+
+const CLEAR_RESOLUTION_LABELS: Record<ClearResolution, string> = {
+  approved_minor: 'Approved minor',
+  // Names the action, not the person: the account may be a 16-17 year old, or
+  // already an approved minor whose protections this Clear leaves on.
+  not_minor: 'Cleared without approval',
 };
 
 const BAND_LABELS: Record<AgeBand, string> = {
@@ -94,6 +105,11 @@ interface Props {
   caseData: AgeReviewCase;
 }
 
+// The worker records an approval only for a lowercase 64-char hex pubkey (HEX_64 in
+// worker/src/keycast-client.ts). A case stores the report's p tag verbatim, so a
+// mixed-case tag is possible and could never be approved.
+const APPROVABLE_PUBKEY = /^[0-9a-f]{64}$/;
+
 const ENFORCEMENT_STATES: AgeReviewState[] = [
   'restricted_pending_user_response',
   'restricted_pending_parental_consent',
@@ -127,7 +143,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
     // switch a closure-read c would misroute every cache write below
     // (review: wrong case's keys written, the acted-on case left stale)
     onMutate: () => ({ caseId: c.id, casePubkey: c.pubkey }),
-    onSuccess: (data, _updates, ctx) => {
+    onSuccess: (data, updates, ctx) => {
       // Keep the per-case entry in step: the hand-off seeds
       // ['age-review-case', id] (30s staleTime), and a terminal action drops
       // the case from the active list, so the detail falls back to that
@@ -177,20 +193,51 @@ export function AgeReviewDetail({ caseData: c }: Props) {
       // the list or the chips disagree with the list until their 30s interval.
       queryClient.invalidateQueries({ queryKey: ['age-review-counts'] });
       const requestedState = pendingStateRef.current as AgeReviewState | undefined;
+      // Surface only actual failed enforcement legs. `not_attempted` is valid
+      // for transitions where a leg does not apply.
+      const enforcement = data.enforcement;
+      const failed: string[] = [];
+      if (enforcement?.relay === 'failed') failed.push('relay (existing posts and feed)');
+      if (enforcement?.bulk === 'failed') failed.push('media and content');
+      if (enforcement?.keycast === 'failed') failed.push('account sign-in');
+      if (enforcement?.subjectClear === 'failed') failed.push('protected-minor registry');
+      if (enforcement?.keycastMinorClear === 'failed') failed.push('protected-minor account projection');
+      if (enforcement?.keycastMinorSet === 'failed') failed.push('protected-minor account flag');
+      // An approval is only real once the worker reports it recorded the
+      // protected subject. A worker that predates approvals (Pages deployed
+      // before it) clears the case and never mentions subjectActivate, so absent
+      // counts as not recorded rather than as success. This is the one toast
+      // shown, so it also names any other leg that failed. The case is closed
+      // and a second approval is refused, so the moderator must escalate.
+      if (updates.resolution === 'approved_minor' && enforcement?.subjectActivate !== 'ok') {
+        const others = failed.length > 0 ? ` Also did not apply: ${failed.join(', ')}.` : '';
+        toast({
+          title: 'Protected-minor approval not recorded',
+          description: 'The case is closed, but the account was NOT recorded as a protected minor, so it is restored without minor protections. Escalate now; it cannot be re-approved from this case.' + others,
+          variant: 'destructive',
+        });
+        return;
+      }
       if (requestedState && ENFORCEMENT_STATES.includes(requestedState)) {
-        // Surface only actual failed enforcement legs. `not_attempted` is valid
-        // for transitions where a leg does not apply.
-        const enforcement = data.enforcement;
-        const failed: string[] = [];
-        if (enforcement?.relay === 'failed') failed.push('relay (existing posts and feed)');
-        if (enforcement?.bulk === 'failed') failed.push('media and content');
-        if (enforcement?.keycast === 'failed') failed.push('account sign-in');
-        if (enforcement?.subjectClear === 'failed') failed.push('protected-minor registry');
-        if (enforcement?.keycastMinorClear === 'failed') failed.push('protected-minor account projection');
-        if (data.enforcementComplete === false) {
+        // keycast refuses to flag a row with no login credentials, permanently, so
+        // the worker settles it: it must not sit under "automated retry will continue".
+        const unclaimed = enforcement?.keycastMinorSetUnclaimed === true;
+        const retryable = unclaimed ? failed.filter((leg) => leg !== 'protected-minor account flag') : failed;
+        if (unclaimed) {
+          // One toast: the store keeps only the newest, so a second toast for the
+          // other failed legs would evict this permanent refusal.
+          const others = data.enforcementComplete === false && retryable.length > 0
+            ? ` Also did not apply: ${retryable.join(', ')}. Automated retry will continue where supported.`
+            : '';
+          toast({
+            title: 'Approved, but keycast refused the minor flag',
+            description: 'Recorded as a protected minor, so future under-16 reports clear automatically. Keycast refused the minor flag because this account has no login credentials, so the app protections and key-export block do not apply. Nothing re-applies the flag if the account is claimed later; escalate if it is.' + others,
+            variant: 'destructive',
+          });
+        } else if (data.enforcementComplete === false) {
           toast({
             title: 'Enforcement incomplete',
-            description: `Case updated, but these did not apply: ${failed.join(', ') || 'one or more enforcement steps'}. The case is now closed; automated retry will continue where supported. Escalate if enforcement does not converge.`,
+            description: `Case updated, but these did not apply: ${retryable.join(', ') || 'one or more enforcement steps'}. The case is now closed; automated retry will continue where supported. Escalate if enforcement does not converge.`,
             variant: 'destructive',
           });
         } else if (enforcement?.keycast === 'not_applicable') {
@@ -204,6 +251,23 @@ export function AgeReviewDetail({ caseData: c }: Props) {
           });
         }
       }
+    },
+    // Approve and deny write the protected-minor registry and keycast flag, and
+    // every decision can change sign-in status. Settled, not success: a conflict
+    // or a lost response can follow a write that did commit. Only this case's
+    // account can have changed, and only by a state change: a clock or band edit
+    // leaves both statuses alone, unless it lost a version conflict, since the
+    // winning write may have been a decision. Key shape:
+    // ['account-status', apiUrl, pubkey], lowercased as useAccountStatus is called.
+    onSettled: (_data, error, updates, ctx) => {
+      if (!ctx) return;
+      const conflict = error instanceof ApiError && error.code === 'version_conflict';
+      if (updates.state === undefined && !conflict) return;
+      const subject = ctx.casePubkey.toLowerCase();
+      queryClient.invalidateQueries({
+        queryKey: ['account-status'],
+        predicate: (query) => query.queryKey[2] === subject,
+      });
     },
     onError: (error, _updates, ctx) => {
       // A concurrent writer (another moderator, or the deadline cron) changed
@@ -234,8 +298,9 @@ export function AgeReviewDetail({ caseData: c }: Props) {
     queryFn: () => api.getAgeReviewConfig(),
   });
 
-  // Keycast-backed protected-minor status (verified_minor). Best-effort: a
-  // keycast blip resolves to success:false, so we show status unavailable.
+  // Protected-minor status from keycast (verified_minor) and the D1 registry
+  // (protected_minor). Best-effort: a keycast blip resolves to success:false, and
+  // without a registry answer we show status unavailable.
   // Normalized once here: the case pubkey is stored verbatim from the report's
   // `p` tag, which is untrusted, while relays and the worker both require
   // lowercase hex. Passing it raw makes a mixed-case tag look like an account
@@ -264,8 +329,10 @@ export function AgeReviewDetail({ caseData: c }: Props) {
     contentPresenceKnown,
     ticketLinked: !!c.zendesk_ticket_id,
   });
-  const protectedMinorStatusUnavailable =
-    !accountStatusLoading && accountVerdict.accountType === 'unknown';
+  // keycast's verified_minor plus the D1 registry (#192): the registry is the only
+  // signal for an approved minor who holds their own key.
+  const protectedMinor = deriveProtectedMinorView({ accountStatus, accountType: accountVerdict.accountType });
+  const protectedMinorStatusUnavailable = !accountStatusLoading && protectedMinor.statusUnavailable;
   const verifiedMinorAtDate = accountStatus?.verified_minor_at
     ? new Date(accountStatus.verified_minor_at)
     : null;
@@ -283,17 +350,23 @@ export function AgeReviewDetail({ caseData: c }: Props) {
         <div className="space-y-2">
           <div className="flex items-center gap-2 flex-wrap">
             <Badge className={stateColor(c.state)}>{STATE_LABELS[c.state]}</Badge>
+            {c.clear_resolution && (
+              <Badge variant="outline">{CLEAR_RESOLUTION_LABELS[c.clear_resolution]}</Badge>
+            )}
             <Badge className={bandColor(c.suspected_age_band)}>{BAND_LABELS[c.suspected_age_band]}</Badge>
             {c.clock_paused ? (
               <Badge variant="outline" className="gap-1">
                 <Pause className="h-3 w-3" /> Clock Paused
               </Badge>
             ) : null}
-            {accountStatus?.verified_minor ? (
+            {protectedMinor.protected ? (
               <>
                 <Badge className="bg-emerald-600 text-white hover:bg-emerald-600">
                   Approved protected minor (13-15)
                 </Badge>
+                {protectedMinor.note ? (
+                  <span className="text-xs text-muted-foreground">{protectedMinor.note}</span>
+                ) : null}
                 {verifiedMinorAtLabel ? (
                   <span className="text-xs text-muted-foreground">
                     approved {verifiedMinorAtLabel}
@@ -301,10 +374,11 @@ export function AgeReviewDetail({ caseData: c }: Props) {
                 ) : null}
               </>
             ) : protectedMinorStatusUnavailable ? (
-              // Couldn't determine (keycast down/misconfig) — don't let a blip
-              // read the same as a confirmed non-minor; keep the safety signal.
-              // not_found (self-custody) is definitive, not an error, so it is
-              // excluded here — the account-type indicator states it directly.
+              // Couldn't determine (keycast down/misconfig, or no registry
+              // answer): don't let a blip read the same as a confirmed non-minor;
+              // keep the safety signal. Self-custody (not_found) is definitive
+              // for keycast but not for protection, which only the registry
+              // knows for those accounts, so it is unavailable without one.
               <span className="text-xs text-muted-foreground">
                 protected-minor status unavailable
               </span>
@@ -358,25 +432,21 @@ export function AgeReviewDetail({ caseData: c }: Props) {
                     Adult content lock: adult content is hidden and the 18+ visibility toggle is disabled, so they cannot re-enable it.
                   </span>
                 </div>
-                <div className="text-muted-foreground/80">
-                  Derived from the approved protected-minor status above; enforced client-side by the Divine apps on supported versions. Not confirmed per device.
-                </div>
-              </div>
-              {/* TODO(divinevideo/support-trust-safety#176): move the DM
-                  restriction into the applied section above (and remove this
-                  one) once released mobile + web builds enforce it. Until
-                  then it lives under an explicit not-yet heading so a
-                  moderator can never mistake it for a live protection. */}
-              <div className="space-y-1.5 border-t pt-2">
-                <h4 className="flex items-center gap-1.5 font-medium text-muted-foreground">
-                  <Clock className="h-3.5 w-3.5" />
-                  Rolling out (not yet enforced by released apps)
-                </h4>
+                {/* Released in mobile 1.0.16 (divinevideo/support-trust-safety#176). */}
                 <div className="flex items-start gap-1.5 text-muted-foreground">
                   <MessageSquareLock className="h-3.5 w-3.5 mt-0.5 shrink-0" />
                   <span>
                     DM restriction: DMs limited to the pinned official accounts, Divine HQ (_@divinehq.divine.video) and Divine Moderation (moderation@divine.video); everything else is blocked on send and hidden on receive.
                   </span>
+                </div>
+                <div className="flex items-start gap-1.5 text-muted-foreground">
+                  <KeyRound className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                  <span>
+                    Key export blocked: Divine login will not export or change this account's key.
+                  </span>
+                </div>
+                <div className="text-muted-foreground/80">
+                  Derived from the approved protected-minor status above; enforced client-side by the Divine apps on supported versions, and key export by keycast. Not confirmed per device.
                 </div>
               </div>
             </div>
@@ -577,19 +647,68 @@ export function AgeReviewDetail({ caseData: c }: Props) {
               </div>
 
               {/* Terminal actions */}
+              {c.suspected_age_band === 'age_13_15' && !APPROVABLE_PUBKEY.test(c.pubkey) && (
+                <p className="text-xs text-muted-foreground">
+                  This case's pubkey is not lowercase 64-character hex, so it cannot be approved as a protected minor. "Clear without approval" is still available.
+                </p>
+              )}
               <div className="flex gap-2 pt-1">
+                {c.suspected_age_band === 'age_13_15' && APPROVABLE_PUBKEY.test(c.pubkey) && (
+                  <ConfirmDialog
+                    trigger={
+                      <Button
+                        size="sm"
+                        variant="default"
+                        className="h-7 text-xs bg-green-600 hover:bg-green-700"
+                        disabled={updateCase.isPending}
+                      >
+                        <ShieldCheck className="h-3 w-3 mr-1" />
+                        Approve as protected minor (13-15)
+                      </Button>
+                    }
+                    title="Approve as a protected minor?"
+                    summary={protectedMinor.approveSummary}
+                    confirmLabel="Approve"
+                    confirmVariant="approve"
+                    onConfirm={async () => {
+                      try {
+                        await updateCase.mutateAsync({
+                          state: 'cleared',
+                          resolution: 'approved_minor',
+                          resolution_note: resolutionNote || undefined,
+                        });
+                      } catch (error) {
+                        // Another writer changed the case: close the confirm so a
+                        // replay cannot approve on top of that change. onError has
+                        // already reloaded the case and told the moderator. Any
+                        // other error keeps the confirm open for a retry.
+                        if (error instanceof ApiError && error.code === 'version_conflict') return;
+                        // The inline error renders under this confirm's overlay; toast it so
+                        // the moderator sees why approval failed before choosing to retry.
+                        toast({
+                          title: 'Approval failed',
+                          description: error instanceof Error ? error.message : String(error),
+                          variant: 'destructive',
+                        });
+                        throw error;
+                      }
+                    }}
+                    isPending={updateCase.isPending}
+                  />
+                )}
                 <Button
                   size="sm"
-                  variant="default"
-                  className="h-7 text-xs bg-green-600 hover:bg-green-700"
+                  variant="outline"
+                  className="h-7 text-xs"
                   disabled={updateCase.isPending}
                   onClick={() => updateCase.mutate({
                     state: 'cleared',
+                    resolution: 'not_minor',
                     resolution_note: resolutionNote || undefined,
                   })}
                 >
                   <CheckCircle className="h-3 w-3 mr-1" />
-                  Clear
+                  Clear without approval
                 </Button>
                 {ageReviewConfig?.auto_delete_on_deny ? (
                   <DeleteConfirmDialog
@@ -625,6 +744,11 @@ export function AgeReviewDetail({ caseData: c }: Props) {
                   </Button>
                 )}
               </div>
+              {protectedMinor.protected && (
+                <p className="text-xs text-muted-foreground">
+                  Already an approved protected minor. "Clear without approval" closes this case and keeps protections on; Deny bans the account and lifts its protections.
+                </p>
+              )}
 
               {updateCase.isPending && (
                 <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
