@@ -836,7 +836,7 @@ export function approvalRegistryStatements(
       JOIN protected_minor_subjects s ON s.subject_id = b.subject_id
       WHERE b.pubkey = ?3 AND b.unbound_at IS NULL AND s.classification_state = 'active' AND ${landed}
       ON CONFLICT(subject_id) DO UPDATE SET pubkey = excluded.pubkey, reason = excluded.reason,
-        state = 'pending', updated_at = excluded.updated_at`)
+        state = 'pending', created_at = excluded.created_at, updated_at = excluded.updated_at`)
       .bind(input.caseId, input.landedVersion, input.pubkey, input.now),
   ];
 }
@@ -908,7 +908,7 @@ Rename `minorClearActor` to `minorFlagActor` (it is now the actor for both direc
     // refuses that row permanently, so a retry would only re-fail every tick.
     if (approvingMinor && (keycastMinorSet === 'ok' || keycastMinorSet === 'not_applicable' || minorSetResult?.unclaimed)) {
       try {
-        await markProjectionComplete(env.DB, existing.pubkey);
+        await markProjectionComplete(env.DB, existing.pubkey, 'active');
       } catch (error) {
         console.error('[age-review] Failed to mark approval projection complete:', error);
       }
