@@ -432,6 +432,7 @@ describe('age-review cron on real D1', () => {
     expect(calls).toEqual(['DELETE', 'PUT']);
     expect(await jobState(s2)).toBe('complete');
   });
+
   it('re-arming keeps the age of an already-pending live job', async () => {
     for (const t of ['protected_minor_projection_jobs', 'protected_minor_account_bindings', 'protected_minor_subjects']) {
       await DB.prepare(`DELETE FROM ${t}`).run();
