@@ -151,7 +151,8 @@ guard := EXISTS (SELECT 1 FROM age_review_cases
 4. `INSERT INTO protected_minor_projection_jobs (subject_id, pubkey, 'age_review_approved',
     'pending', now, now) SELECT <the pubkey's active subject> WHERE guard
     ON CONFLICT(subject_id) DO UPDATE SET pubkey = excluded.pubkey, reason = excluded.reason,
-    state = 'pending', updated_at = excluded.updated_at`.
+    state = 'pending', updated_at = excluded.updated_at, created_at = <kept when the existing job
+    is already pending, else excluded.created_at>`.
 
 If the pubkey already has an active subject (for example, an onboarded account whose keycast read
 failed during auto-clear, so a case opened), no new subject is created; the existing one gets a
@@ -161,15 +162,17 @@ projection job. The CAS outcome is read from statement 1's `meta.changes` exactl
 
 After the batch, alongside the unchanged relay / bulk / keycast-status legs:
 
-- `subjectActivate`: `ok` when the batch committed (it is part of the CAS, so it cannot fail
-  independently; reported for symmetry with `subjectClear` and so the UI can state it).
+- `subjectActivate`: observed from the batch, not assumed. `ok` when statement 4 armed a job
+  (`meta.changes === 1`); otherwise `failed` with an explanatory error, the keycast set is skipped
+  (D1 holds no active subject to project), and the response is HTTP 207. The UI treats anything but
+  `ok` on an approval, including a worker too old to report it, as "not recorded".
 - `keycastMinorSet`: `setVerifiedMinor(pubkey, actor, 'age_review_approved', env)` via
   `runStatusLeg`. `ok` or `not_applicable` (keycast's own "user not found", i.e. self-custody)
   marks the projection job complete. A 409 `account_unclaimed` is reported as `failed` with that
   error and also marks the job complete: no retry can succeed, and a human has to look. Any other
   failure leaves the job pending for the cron.
-- `enforcementComplete` also requires `keycastMinorSet !== 'failed'`; a failure is HTTP 207 and
-  never rolls back the approval.
+- `enforcementComplete` also requires `subjectActivate !== 'failed'` and
+  `keycastMinorSet !== 'failed'`; a failure is HTTP 207 and never rolls back the approval.
 
 `resolution: 'not_minor'` behaves exactly as Clear does today.
 
@@ -184,8 +187,9 @@ job is a clear. Once approvals enqueue jobs, an approved subject later denied wo
 - `pendingProjectionJobs` joins `protected_minor_subjects` and returns `classification_state`.
   The cron calls `setVerifiedMinor` for `active` and `clearVerifiedMinor` for `cleared`. The job's
   `reason` is passed through as the keycast reason.
-- `markProjectionComplete` / `markProjectionAttempt` keep their `WHERE pubkey = ? AND state =
-  'pending'` keys.
+- `markProjectionAttempt` keeps its `WHERE pubkey = ? AND state = 'pending'` key.
+  `markProjectionComplete` also requires the job's subject to still hold the classification that
+  was projected (see Amendments).
 
 ### keycast-client
 
@@ -199,7 +203,8 @@ resolution, HEX_64 guards, actor dropped when malformed, `isKeycastUserNotFound`
 `createAgeReviewCase` auto-clears when keycast reports `verified_minor` **or** `resolveByPubkey`
 finds an active subject. The D1 check runs first (cheap, local, works for self-custody), so a
 keycast outage no longer opens a case against an approved minor. The auto-cleared case records
-`clear_resolution = 'approved_minor'`.
+`clear_resolution = NULL` (see Amendments), and its decision-log reason names the source that
+proved the approval (`via registry` or `via keycast`).
 
 ### Shared types
 
@@ -216,7 +221,8 @@ Replace the single green **Clear** with two actions:
   destructive style so existing callers are unchanged):
   > **Approve as a protected minor?**
   > This account is restored and marked as an approved 13-15 minor: minor DM limits apply,
-  > key export is blocked, and future under-16 reports clear automatically.
+  > key export is blocked for Divine login accounts, and future under-16 reports clear
+  > automatically.
   >
   > [Cancel] [Approve]
 
@@ -257,6 +263,39 @@ state badge. `adminApi.updateAgeReviewCase` and the `useAdminApi` wrapper forwar
   wrangler + Caddy + Vite. Report an account under 16, approve it in the UI, confirm the keycast
   row and D1 subject, re-report and watch it auto-clear, deny it and watch the flag clear; repeat
   with keycast stopped to exercise the cron retry.
+
+## Amendments during implementation
+
+Decisions made while building and reviewing the branch. Where they differ from the text above,
+these win.
+
+- **Auto-clears record a NULL resolution.** A ReportWatcher auto-clear observes an existing
+  approval rather than making one, so it must not count as a newer approval under the
+  latest-decision rule below. The UI's "Auto-cleared" note already marks these cases.
+- **Latest decision wins for subject-clear retries.** A `denied_closed` case is a retry source for
+  clearing a subject only while no explicit approval (`cleared` with
+  `clear_resolution = 'approved_minor'`) of that subject, on any pubkey in its binding history, is
+  newer. Ties within one second fall back to row creation order, an accepted limitation.
+- **Projection completion is compare-and-set on classification.** `markProjectionComplete` marks a
+  job complete only while its subject still holds the classification that was sent to keycast. A
+  deny that re-arms the job mid-flight therefore survives the in-flight set's completion.
+- **Re-arms upsert, and created_at measures a pending job's age.** Every job write
+  (`clearSubject`, the approval batch, convergence re-arms) is an `ON CONFLICT ... DO UPDATE` that
+  sets the job pending. `created_at` is kept when the job is already pending and reset otherwise,
+  so the retention overdue-projection alarm still fires for a persistently failing projection.
+- **Superseded clear jobs settle without keycast.** A cleared subject's job whose pubkey now has a
+  live binding to a different active subject is completed without a DELETE: keycast must mirror the
+  pubkey's current protection.
+- **Convergence after every projection.** After any keycast verified_minor call that landed
+  (success or no account), on every path (inline approve, inline deny, expiry, cron),
+  `convergeProjection` re-arms the opposite projection when a racing write left keycast
+  disagreeing with D1: after a clear, the pubkey's live active subject's set; after a set, with no
+  live active subject, its most recent cleared subject's clear. A refused (`account_unclaimed`) or
+  failed call changed nothing in keycast and needs none.
+- **Non-hex pubkeys are a 400.** `approved_minor` for a case whose pubkey cannot be bound (the
+  bindings table requires 64 lowercase hex) is refused before any write.
+- **keycast's set uses an explicit transaction** rather than the single-statement CTE described in
+  the keycast section.
 
 ## Rollout
 

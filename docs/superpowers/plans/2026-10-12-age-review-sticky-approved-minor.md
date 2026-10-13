@@ -22,7 +22,7 @@
 - No test may reach a deployed service. Tests stub `fetch`; the local stack uses local services only.
 - Never truncate pubkeys. Test pubkeys that reach `protected_minor_account_bindings` must be 64 lowercase hex (the table CHECKs it).
 - Verification commands (all must pass before the branch is called done): `npx tsc -p tsconfig.app.json --noEmit`; `cd worker && npm run typecheck`; `cd worker && npx vitest run`; `cd worker && npm run test:d1`; `npx vitest run` (root); `npx vite build`.
-- Mutation checks: back up with `cp` to the scratchpad and restore with `cp`. Never `git checkout` a file to undo a mutation. Each guard dies to exactly one mutation.
+- Mutation checks: back up with `cp` to a temporary directory outside the repo and restore with `cp`. Never `git checkout` a file to undo a mutation. Each guard dies to exactly one mutation.
 
 ## Review Focus
 
@@ -1242,7 +1242,7 @@ Expected: PASS.
 
 - [ ] **Step 7: Mutation-check** — remove the `c.suspected_age_band === 'age_13_15' &&` gate → only `hides approval outside the 13-15 band` fails. Restore.
 
-- [ ] **Step 8: Visual check with Playwright** against the local stack from Task 7 (or `npx vite --port 8080` with a mocked case if the stack is not up yet): screenshot the detail panel for a 13-15 case (both buttons), the confirm dialog, and a 16+ case (Clear only), at 1280px wide. Save under the scratchpad; do not commit screenshots.
+- [ ] **Step 8: Visual check with Playwright** against the local stack from Task 7 (or `npx vite --port 8080` with a mocked case if the stack is not up yet): screenshot the detail panel for a 13-15 case (both buttons), the confirm dialog, and a 16+ case (Clear only), at 1280px wide. Save outside the repo; do not commit screenshots.
 
 - [ ] **Step 9: Commit**
 
@@ -1268,7 +1268,7 @@ npx tsc -p tsconfig.app.json --noEmit && (cd worker && npm run typecheck) \
 ```
 Expected: all green. Record counts against the baseline (worker 819, d1 112, frontend 1044 + 1 skipped).
 
-- [ ] **Step 2: Verify the built bundle has the CF Access client id** (memory: a worktree build without `.env.local` ships broken): `grep -l "$(grep VITE_CF_ACCESS_CLIENT_ID .env.local | cut -d= -f2)" dist/assets/*.js` returns a file.
+- [ ] **Step 2: Verify the built bundle has the CF Access client id** (a worktree build without `.env.local` ships broken): `grep -l "$(grep VITE_CF_ACCESS_CLIENT_ID .env.local | cut -d= -f2)" dist/assets/*.js` returns a file.
 
 - [ ] **Step 3: Bring up the full local stack**
 
