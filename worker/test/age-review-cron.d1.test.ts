@@ -383,6 +383,23 @@ describe('age-review cron on real D1', () => {
       expect(keycast.calls).toEqual(calls);
     });
 
+    // clearSubject unbinds as it clears, so this state is a registry invariant
+    // break. The retry must still follow the registry's own test for a protected
+    // account (resolveByPubkey): a live binding AND an active subject.
+    it('does not retry a cleared subject whose binding was left live', async () => {
+      await checkAgeReviewDeadlines(env());
+      await DB.prepare(`UPDATE protected_minor_subjects
+        SET classification_state = 'cleared', cleared_at = ?, clear_reason = 'age_review_denied',
+          clear_reason_class = 'valid_prior' WHERE subject_id = ?`)
+        .bind(new Date().toISOString(), subjectId).run();
+
+      keycast.claimed = true;
+      anHourLater();
+      await checkAgeReviewDeadlines(env());
+
+      expect(keycast.calls).toEqual(['PUT']);
+    });
+
     // A closed binding is a deleted account: the subject stays active, but no
     // account is left to flag.
     it('does not retry an account whose binding was closed', async () => {
