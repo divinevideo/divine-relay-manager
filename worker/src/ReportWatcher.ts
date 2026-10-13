@@ -1470,11 +1470,15 @@ export class ReportWatcher implements DurableObject {
     // hides the profile and makes the loss permanent.
     const identityCapturedAt = lookup.completed ? new Date().toISOString() : null;
 
-    await this.env.DB.prepare(`
+    // A family can start Greenlight during the identity lookup above. Check
+    // inside the insert too, so the two entry points keep one active case.
+    const inserted = await this.env.DB.prepare(`
       INSERT INTO age_review_cases
       (id, pubkey, reporter_pubkey, report_id, suspected_age_band, state, allowed_resolution, deadline_at,
        account_name, account_nip05, account_vine_username, identity_captured_at)
-      VALUES (?, ?, ?, ?, ?, 'open_reported', ?, ?, ?, ?, ?, ?)
+      SELECT ?, ?, ?, ?, ?, 'open_reported', ?, ?, ?, ?, ?, ?
+      WHERE NOT EXISTS (SELECT 1 FROM age_review_cases WHERE pubkey = ?
+        AND state NOT IN (${TERMINAL_STATES.map(() => '?').join(',')}))
     `).bind(
       caseId,
       reportedPubkey,
@@ -1487,7 +1491,10 @@ export class ReportWatcher implements DurableObject {
       identity?.nip05 ?? null,
       identity?.vineUsername ?? null,
       identityCapturedAt,
+      reportedPubkey,
+      ...TERMINAL_STATES,
     ).run();
+    if (inserted.meta?.changes === 0) return;
 
     await this.logDecision({
       targetType: 'pubkey',

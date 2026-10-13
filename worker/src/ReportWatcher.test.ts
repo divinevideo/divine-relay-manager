@@ -2872,11 +2872,12 @@ describe('ReportWatcher', () => {
     /**
      * Identity binds on the main INSERT, by position:
      * 7 name, 8 nip05, 9 vine username, 10 identity_captured_at.
+     * The last three binds belong to the atomic active-case predicate.
      * Membership assertions cannot distinguish these -- the row already binds
      * a deadline ISO timestamp, so a "some bind looks like a date" check passes
      * even when identity_captured_at is dropped entirely.
      */
-    function identityBinds(expectedArity = 11) {
+    function identityBinds(expectedArity = 14) {
       // The SQL filter also matches the dedup SELECT and the decision log, and
       // flattening them together silently shifts every position. Pick the bind
       // call belonging to the INSERT itself, by its arity.
@@ -2884,7 +2885,7 @@ describe('ReportWatcher', () => {
         .find((binds: unknown[]) => binds.length === expectedArity);
       if (!call) throw new Error(`no INSERT bind call with ${expectedArity} params`);
       const [, , , , , , , name, nip05, vineUsername, capturedAt] = call as unknown[];
-      return expectedArity === 11
+      return expectedArity === 14
         ? { name, nip05, vineUsername, capturedAt }
         // Auto-clear binds fewer leading columns: id, pubkey, reporter, report, then identity.
         : { name: call[4], nip05: call[5], vineUsername: call[6], capturedAt: call[7] };
