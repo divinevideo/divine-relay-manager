@@ -24,7 +24,7 @@ import { runBulkModeration, type BulkModerateEnv } from './bulk-moderate';
 import { getActiveAgeReviewCase } from './age-review-lookup';
 import { resolveZendeskCreds } from './zendesk-sync';
 import type { AccountBulkAction } from '../../shared/bulk-moderation';
-import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, createMinorAccount, type KeycastEnv } from './keycast-client';
+import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, setVerifiedMinor, createMinorAccount, type KeycastEnv, type KeycastReason } from './keycast-client';
 import { suspendPubkey, unsuspendPubkey, banPubkey, type BanPubkeyResult, type SecretStoreSecret } from './nip86';
 import { buildAgeReviewIdentityBlock, buildClaimedParentName, toNpub } from './report-note';
 import {
@@ -2314,7 +2314,7 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
 
   // Durable retry boundary for Keycast projection failures after the subject
   // clear commits.
-  let projectionJobs: Array<{ pubkey: string; reason: string }> = [];
+  let projectionJobs: Awaited<ReturnType<typeof pendingProjectionJobs>> = [];
   try {
     projectionJobs = await pendingProjectionJobs(env.DB);
   } catch (error) {
@@ -2322,12 +2322,14 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
   }
   for (const job of projectionJobs) {
     try {
-      const result = await clearVerifiedMinor(job.pubkey, undefined, job.reason as 'age_review_denied' | 'age_review_expired', env);
-      // notFound: the subject has no keycast account, so there is no projection
-      // to make and no retry that could ever succeed. Settle it -- left pending
-      // it re-calls keycast on every tick and eventually trips the retention
+      const result = job.classification === 'active'
+        ? await setVerifiedMinor(job.pubkey, undefined, job.reason as KeycastReason, env)
+        : await clearVerifiedMinor(job.pubkey, undefined, job.reason as KeycastReason, env);
+      // Settled when there is nothing left a retry could change: applied, no
+      // keycast account (notFound), or a row keycast refuses to flag (unclaimed).
+      // Left pending, those re-call keycast every tick and trip the retention
       // overdue-projection alarm.
-      if (result.success || result.notFound) await markProjectionComplete(env.DB, job.pubkey);
+      if (result.success || result.notFound || result.unclaimed) await markProjectionComplete(env.DB, job.pubkey);
       else {
         await markProjectionAttempt(env.DB, job.pubkey);
         console.error(`[age-review] Keycast protected-minor projection retry failed: ${result.error}`);

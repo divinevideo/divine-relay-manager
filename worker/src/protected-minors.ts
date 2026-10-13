@@ -87,6 +87,8 @@ export async function clearSubject(
       .first<{ subject_id: string; classification_state: string; projection_pubkey: string | null }>();
     const projectionPubkey = subject?.projection_pubkey ?? pubkey;
     if (!subject || subject.classification_state === 'cleared') return { success: true, projectionPubkey };
+    // One job row per subject projects whatever it last became; an approval (#192)
+    // may already own it, so re-arm rather than skip.
     await db.batch([
       db.prepare(`UPDATE protected_minor_subjects
         SET classification_state = 'cleared', cleared_at = ?, cleared_by = ?, clear_reason = ?, clear_reason_class = ?
@@ -98,7 +100,8 @@ export async function clearSubject(
       db.prepare(`INSERT INTO protected_minor_projection_jobs
         (subject_id, pubkey, reason, state, created_at, updated_at)
         VALUES (?, ?, ?, 'pending', ?, ?)
-        ON CONFLICT(subject_id) DO NOTHING`)
+        ON CONFLICT(subject_id) DO UPDATE SET pubkey = excluded.pubkey, reason = excluded.reason,
+          state = 'pending', updated_at = excluded.updated_at`)
         .bind(subject.subject_id, projectionPubkey, reason, now, now),
     ]);
     return { success: true, projectionPubkey };
@@ -117,10 +120,24 @@ export async function markProjectionAttempt(db: D1Database, pubkey: string): Pro
     WHERE pubkey = ? AND state = 'pending'`).bind(new Date().toISOString(), pubkey).run();
 }
 
-export async function pendingProjectionJobs(db: D1Database): Promise<Array<{ pubkey: string; reason: string }>> {
-  const rows = await db.prepare(`SELECT pubkey, reason FROM protected_minor_projection_jobs
-    WHERE state = 'pending' ORDER BY updated_at, created_at LIMIT 100`).all<{ pubkey: string; reason: string }>();
-  return rows.results.filter((row) => typeof row.pubkey === 'string' && typeof row.reason === 'string');
+/**
+ * Pending projections, each with its subject's CURRENT classification: the cron
+ * projects `active` as a keycast set and `cleared` as a keycast clear. One row per
+ * subject means the latest transition wins, which is the state keycast must match.
+ */
+export async function pendingProjectionJobs(db: D1Database): Promise<Array<{
+  pubkey: string; reason: string; classification: 'active' | 'cleared';
+}>> {
+  const rows = await db.prepare(`SELECT j.pubkey, j.reason, s.classification_state AS classification
+    FROM protected_minor_projection_jobs j
+    JOIN protected_minor_subjects s ON s.subject_id = j.subject_id
+    WHERE j.state = 'pending' ORDER BY j.updated_at, j.created_at LIMIT 100`)
+    .all<{ pubkey: string; reason: string; classification: string }>();
+  return rows.results.flatMap((row) =>
+    typeof row.pubkey === 'string' && typeof row.reason === 'string'
+      && (row.classification === 'active' || row.classification === 'cleared')
+      ? [{ pubkey: row.pubkey, reason: row.reason, classification: row.classification }]
+      : []);
 }
 
 export async function pendingSubjectClears(db: D1Database): Promise<Array<{

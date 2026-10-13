@@ -184,4 +184,69 @@ describe('age-review cron on real D1', () => {
     await checkAgeReviewDeadlines(keycastEnv);
     expect(keycastCalls).toBe(1);
   });
+
+  it('projects an active subject with PUT and a cleared one with DELETE', async () => {
+    await DB.prepare('DELETE FROM protected_minor_projection_jobs').run();
+    await DB.prepare('DELETE FROM protected_minor_subjects').run();
+    const now = new Date().toISOString();
+    const activeKey = 'e'.repeat(64);
+    const clearedKey = 'f'.repeat(64);
+    await DB.prepare(`INSERT OR REPLACE INTO protected_minor_subjects
+      (subject_id, classification_state, classified_at) VALUES ('subj-active', 'active', ?)`).bind(now).run();
+    await DB.prepare(`INSERT OR REPLACE INTO protected_minor_subjects
+      (subject_id, classification_state, classified_at, cleared_at, clear_reason, clear_reason_class)
+      VALUES ('subj-cleared', 'cleared', ?, ?, 'age_review_denied', 'valid_prior')`).bind(now, now).run();
+    for (const [subject, key, reason] of [
+      ['subj-active', activeKey, 'age_review_approved'],
+      ['subj-cleared', clearedKey, 'age_review_denied'],
+    ]) {
+      await DB.prepare(`INSERT OR REPLACE INTO protected_minor_projection_jobs
+        (subject_id, pubkey, reason, state, created_at, updated_at) VALUES (?, ?, ?, 'pending', ?, ?)`)
+        .bind(subject, key, reason, now, now).run();
+    }
+    const calls: Array<{ url: string; method: string }> = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      if (String(input).includes('/verified-minor')) {
+        calls.push({ url: String(input), method: init?.method ?? 'GET' });
+        return Promise.resolve(new Response('{}', { status: 200 }));
+      }
+      return Promise.resolve(new Response('ok', { status: 200 }));
+    });
+
+    await checkAgeReviewDeadlines({ ...cronEnv, KEYCAST_URL: 'https://login.test.divine.video', KEYCAST_SERVICE_TOKEN: 'test-token' });
+
+    expect(calls).toContainEqual({
+      url: `https://login.test.divine.video/api/admin/users/${activeKey}/verified-minor?reason=age_review_approved`,
+      method: 'PUT',
+    });
+    expect(calls).toContainEqual({
+      url: `https://login.test.divine.video/api/admin/users/${clearedKey}/verified-minor?reason=age_review_denied`,
+      method: 'DELETE',
+    });
+    const pending = await DB.prepare(
+      "SELECT COUNT(*) AS c FROM protected_minor_projection_jobs WHERE state = 'pending'",
+    ).first<{ c: number }>();
+    expect(pending!.c).toBe(0);
+  });
+
+  it('settles a set refused as account_unclaimed rather than retrying it forever', async () => {
+    await DB.prepare('DELETE FROM protected_minor_projection_jobs').run();
+    await DB.prepare('DELETE FROM protected_minor_subjects').run();
+    const now = new Date().toISOString();
+    await DB.prepare(`INSERT OR REPLACE INTO protected_minor_subjects
+      (subject_id, classification_state, classified_at) VALUES ('subj-unclaimed', 'active', ?)`).bind(now).run();
+    await DB.prepare(`INSERT OR REPLACE INTO protected_minor_projection_jobs
+      (subject_id, pubkey, reason, state, created_at, updated_at)
+      VALUES ('subj-unclaimed', ?, 'age_review_approved', 'pending', ?, ?)`).bind('9'.repeat(64), now, now).run();
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) =>
+      Promise.resolve(String(input).includes('/verified-minor')
+        ? new Response('{"error":"account_unclaimed: account has no login credentials"}', { status: 409 })
+        : new Response('ok', { status: 200 })));
+
+    await checkAgeReviewDeadlines({ ...cronEnv, KEYCAST_URL: 'https://login.test.divine.video', KEYCAST_SERVICE_TOKEN: 'test-token' });
+
+    const row = await DB.prepare("SELECT state FROM protected_minor_projection_jobs WHERE subject_id = 'subj-unclaimed'")
+      .first<{ state: string }>();
+    expect(row!.state).toBe('complete');
+  });
 });

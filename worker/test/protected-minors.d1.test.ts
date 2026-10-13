@@ -2,7 +2,7 @@ import { Miniflare } from 'miniflare';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ensureSchema } from '../src/db';
 import { handleCreateMinorAccount } from '../src/age-review';
-import { backfillProtectedMinorSubjects, clearSubject, closeBinding, createSubjectWithBinding, fingerprintProvisioningRequest, handleProtectedMinorServiceRoute, pendingSubjectClears, resolveByPubkey, startOrResumeReplacement } from '../src/protected-minors';
+import { backfillProtectedMinorSubjects, clearSubject, closeBinding, createSubjectWithBinding, fingerprintProvisioningRequest, handleProtectedMinorServiceRoute, pendingProjectionJobs, pendingSubjectClears, resolveByPubkey, startOrResumeReplacement } from '../src/protected-minors';
 import { digestProvisioningFingerprint } from '../src/retention';
 
 const PUBKEY_A = 'a'.repeat(64);
@@ -39,6 +39,24 @@ describe('protected-minor registry on real D1', () => {
       'protected_minor_provisioning_operations', 'protected_minor_provisioning_tombstones',
       'protected_minor_subjects',
     ]);
+  });
+
+  it('a clear after a completed approval projection re-arms the job instead of dropping it', async () => {
+    const pubkey = 'd'.repeat(64);
+    const { subjectId } = await createSubjectWithBinding(DB, 'case-approved-then-denied', pubkey);
+    const earlier = '2026-01-01T00:00:00.000Z';
+    await DB.prepare(`INSERT INTO protected_minor_projection_jobs
+      (subject_id, pubkey, reason, state, created_at, updated_at)
+      VALUES (?, ?, 'age_review_approved', 'complete', ?, ?)`).bind(subjectId, pubkey, earlier, earlier).run();
+
+    const result = await clearSubject(DB, pubkey, undefined, 'age_review_denied');
+    expect(result.success).toBe(true);
+
+    const job = await DB.prepare(`SELECT state, reason FROM protected_minor_projection_jobs WHERE subject_id = ?`)
+      .bind(subjectId).first<{ state: string; reason: string }>();
+    expect(job).toEqual({ state: 'pending', reason: 'age_review_denied' });
+    const jobs = await pendingProjectionJobs(DB);
+    expect(jobs).toContainEqual({ pubkey, reason: 'age_review_denied', classification: 'cleared' });
   });
 
   it('resolves active subjects and clear wins without deleting binding history', async () => {
