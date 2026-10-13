@@ -2981,6 +2981,49 @@ describe('ReportWatcher', () => {
       expect(identityBinds(8).capturedAt).toBeNull();
     });
 
+    function routeRegistryLookup(result: unknown | Error) {
+      const prepare = ageEnv.DB!.prepare as ReturnType<typeof vi.fn>;
+      const fallback = prepare.getMockImplementation() as ((sql: string) => unknown) | undefined;
+      prepare.mockImplementation((sql: string) => {
+        if (sql.includes('protected_minor_account_bindings')) {
+          const first = result instanceof Error ? vi.fn().mockRejectedValue(result) : vi.fn().mockResolvedValue(result);
+          return { bind: vi.fn().mockReturnValue({ first, run: mockDbRun }), first, run: mockDbRun };
+        }
+        return fallback ? fallback(sql) : { run: mockDbRun, first: mockDbFirst, bind: vi.fn().mockReturnValue({ run: mockDbRun, first: mockDbFirst }) };
+      });
+    }
+
+    function ageInsertSql(): string {
+      return (ageEnv.DB!.prepare as ReturnType<typeof vi.fn>).mock.calls
+        .map((c) => String(c[0])).find((sql) => sql.includes('INSERT INTO age_review_cases'))!;
+    }
+
+    it('auto-clears an account with an active protected-minor subject without asking keycast', async () => {
+      routeRegistryLookup({ subject_id: '11111111-1111-4111-8111-111111111111' });
+      await sendUnderageReport('registry_hit_1', 'c'.repeat(64));
+      const insertSql = ageInsertSql();
+      expect(insertSql).toContain("'cleared'");
+      // An auto-clear observes an existing approval; it is not a new decision, so it records no
+      // clear_resolution (the latest-decision rule in pendingSubjectClears counts only explicit approvals).
+      expect(insertSql).not.toContain("'approved_minor'");
+      expect(mockGetUserStatus).not.toHaveBeenCalled();
+    });
+
+    it('falls back to keycast when the registry lookup throws', async () => {
+      routeRegistryLookup(new Error('D1 unavailable'));
+      mockGetUserStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: true });
+      await sendUnderageReport('registry_throw_1', 'd'.repeat(64));
+      expect(ageInsertSql()).toContain("'cleared'");
+      expect(mockGetUserStatus).toHaveBeenCalled();
+    });
+
+    it('opens a normal case when neither the registry nor keycast knows the account', async () => {
+      routeRegistryLookup(null);
+      mockGetUserStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: false });
+      await sendUnderageReport('registry_miss_1', 'e'.repeat(64));
+      expect(ageInsertSql()).not.toContain("'cleared'");
+    });
+
     it('should auto-clear age review case for verified minors', async () => {
       mockGetUserStatus.mockResolvedValue({
         success: true,
