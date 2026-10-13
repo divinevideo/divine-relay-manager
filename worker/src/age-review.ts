@@ -1115,6 +1115,8 @@ export async function handleParentConsent(
     submission = { ...submission, status: 'processing', receipt_id: null, object_key: null, case_version: null, ticket_attempt_at: null };
   }
   const receiptId = submission.receipt_id ?? crypto.randomUUID();
+  // A key minted here is known only to this request until a row records it.
+  const freshObjectKey = submission.object_key == null;
   const objectKey = submission.object_key ?? crypto.randomUUID();
 
   const alreadyCommented = !isNewRound
@@ -1130,7 +1132,23 @@ export async function handleParentConsent(
   // discarded on a resume where the object is already stored), and only the
   // small email field is retained.
   let writer: R2MultipartVideoWriter | null = null;
+  let wroteObject = false;
   let parsed: ConsentMultipartResult;
+  // A rejection after the clip reached R2 would otherwise leave it there with
+  // no row naming it, and both disposal sweeps start from rows. Delete only a
+  // key this request minted and wrote, and only while no row names it, so a
+  // clip a submission or an earlier round records is never touched.
+  const discardUnrecordedUpload = async (): Promise<void> => {
+    if (!wroteObject || !freshObjectKey || !bucket) return;
+    try {
+      const named = await env.DB!.prepare(`SELECT 1 FROM age_review_parent_consent_submissions WHERE object_key = ?
+        UNION ALL SELECT 1 FROM age_review_parent_consent_superseded WHERE object_key = ? LIMIT 1`)
+        .bind(objectKey, objectKey).first();
+      if (!named) await bucket.delete(objectKey);
+    } catch (error) {
+      console.error('[age-review] Could not discard a rejected consent upload:', error);
+    }
+  };
   try {
     parsed = await parseConsentMultipart(request.body, request.headers.get('Content-Type')!, {}, {
       onVideoStart: async (contentType) => {
@@ -1140,10 +1158,15 @@ export async function handleParentConsent(
         }
       },
       onVideoChunk: async (chunk) => { await writer?.write(chunk); },
-      onVideoEnd: async () => { await writer?.finish(); },
+      onVideoEnd: async () => {
+        if (!writer) return;
+        await writer.finish();
+        wroteObject = true;
+      },
     });
   } catch (error) {
     await (writer as R2MultipartVideoWriter | null)?.abort();
+    await discardUnrecordedUpload();
     if (error instanceof ConsentUploadError) {
       return json({ success: false, error: error.message }, error.status, corsHeaders);
     }
@@ -1153,6 +1176,7 @@ export async function handleParentConsent(
 
   const email = parsed.email;
   if (typeof email !== 'string' || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) || email.length > 254) {
+    await discardUnrecordedUpload();
     return json({ success: false, error: 'Invalid email format' }, 400, corsHeaders);
   }
 
@@ -1162,12 +1186,16 @@ export async function handleParentConsent(
     (case_id, lease_until, created_at, receipt_id, object_key) VALUES (?, ?, ?, ?, ?)`)
     .bind(caseId, leaseUntil, nowSeconds, receiptId, objectKey).run();
   if (inserted.meta?.changes !== 1) {
-    if (!prior) return json({ success: false, error: 'Submission changed; retry' }, 409, corsHeaders);
+    if (!prior) {
+      await discardUnrecordedUpload();
+      return json({ success: false, error: 'Submission changed; retry' }, 409, corsHeaders);
+    }
     if (prior.status !== 'commented' && prior.status !== 'attached') {
       const lock = await env.DB.prepare(`UPDATE age_review_parent_consent_submissions
         SET lease_until = ? WHERE case_id = ? AND status IN ('processing', 'stored') AND lease_until < ?`)
         .bind(leaseUntil, caseId, nowSeconds).run();
       if (lock.meta?.changes !== 1) {
+        await discardUnrecordedUpload();
         return json({ success: false, error: 'Consent submission is already in progress; retry' }, 409, corsHeaders);
       }
     }
@@ -1190,6 +1218,7 @@ export async function handleParentConsent(
       .bind(parsed.videoContentType, parsed.videoSize, receiptId, objectKey, leaseUntil, caseId).run();
     if (marked.meta?.changes !== 1) {
       await releaseLease();
+      await discardUnrecordedUpload();
       return json({ success: false, error: 'Submission changed; retry' }, 409, corsHeaders);
     }
     submission.status = 'stored';
