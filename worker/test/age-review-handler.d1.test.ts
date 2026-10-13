@@ -364,6 +364,15 @@ describe('clear resolution on the PATCH', () => {
     const cols = await DB.prepare('PRAGMA table_info(age_review_cases)').all<{ name: string }>();
     expect(cols.results.map((c) => c.name)).toContain('clear_resolution');
   });
+
+  it('ensureSchema surfaces an ALTER failure that is not a duplicate column', async () => {
+    const failing = {
+      prepare: (sql: string) => sql.includes('ADD COLUMN clear_resolution')
+        ? { run: () => Promise.reject(new Error('D1_ERROR: database is locked')) }
+        : DB.prepare(sql),
+    } as unknown as D1Database;
+    await expect(ensureSchema(failing)).rejects.toThrow('database is locked');
+  });
 });
 
 describe('approving a 13-15 minor', () => {

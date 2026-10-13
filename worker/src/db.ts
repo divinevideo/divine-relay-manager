@@ -157,8 +157,10 @@ export async function ensureSchema(db: D1Database): Promise<void> {
   ]) {
     try {
       await db.prepare(`ALTER TABLE age_review_cases ADD COLUMN ${column}`).run();
-    } catch {
-      // Column already exists
+    } catch (error) {
+      // Only "already exists" is expected; anything else would leave the schema
+      // short a column that later writes depend on.
+      if (!String(error).includes('duplicate column name')) throw error;
     }
   }
   await db.prepare(`UPDATE age_review_cases SET closed_at = updated_at
