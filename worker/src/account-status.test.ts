@@ -122,6 +122,51 @@ describe('handleAccountStatus', () => {
     expect(await res.json()).toMatchObject({ success: true, verified_minor: true, protected_minor: null });
   });
 
+  // The registry tables are created by ensureSchema, not by a migration step the
+  // deploy runs, so a request served before anything else has prepared a fresh D1
+  // would otherwise read "no such table" and look like a registry outage.
+  it('prepares the schema before reading the registry', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ pubkey: VALID_PUBKEY, status: 'active', verified_minor: true }),
+      }),
+    );
+    let prepared = false;
+    const DB = {
+      prepare: () => {
+        if (!prepared) throw new Error('D1_ERROR: no such table: protected_minor_subjects');
+        return { bind: () => ({ first: () => Promise.resolve({ subject_id: 'subject-1' }) }) };
+      },
+    } as unknown as D1Database;
+    const prepareDb = vi.fn(async () => { prepared = true; });
+
+    const res = await handleAccountStatus(VALID_PUBKEY, { ...makeEnv(), DB }, CORS, prepareDb);
+
+    expect(prepareDb).toHaveBeenCalledWith(DB);
+    expect(await res.json()).toMatchObject({ success: true, verified_minor: true, protected_minor: true });
+  });
+
+  it('keeps the keycast status and reports protected_minor null when preparing the schema throws', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ pubkey: VALID_PUBKEY, status: 'active', verified_minor: true }),
+      }),
+    );
+    const DB = { prepare: () => { throw new Error('unreachable: schema prep failed first'); } } as unknown as D1Database;
+    const prepareDb = vi.fn().mockRejectedValue(new Error('D1_ERROR: database unavailable'));
+
+    const res = await handleAccountStatus(VALID_PUBKEY, { ...makeEnv(), DB }, CORS, prepareDb);
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ success: true, verified_minor: true, protected_minor: null });
+  });
+
   it('keeps the registry answer when resolving the keycast token throws', async () => {
     const fetchSpy = vi.fn();
     vi.stubGlobal('fetch', fetchSpy);

@@ -33,6 +33,7 @@ export async function handleAccountStatus(
   pubkey: string,
   env: KeycastEnv & { DB?: D1Database },
   corsHeaders: Record<string, string>,
+  prepareDb?: (db: D1Database) => Promise<void>,
 ): Promise<Response> {
   if (!HEX_64.test(pubkey)) {
     return json(
@@ -49,7 +50,7 @@ export async function handleAccountStatus(
       console.error('[account-status] Keycast status lookup threw:', error);
       return { success: false, error: 'unavailable' };
     }),
-    registryProtection(pubkey, env.DB),
+    registryProtection(pubkey, env.DB, prepareDb),
   ]);
   if (!result.success) {
     // not_found (keycast 404) is self-custody — informational, distinct from an
@@ -80,9 +81,15 @@ export async function handleAccountStatus(
 }
 
 // Best-effort: a registry failure must not cost the moderator the keycast status.
-async function registryProtection(pubkey: string, db: D1Database | undefined): Promise<boolean | null> {
+// That includes preparing the schema, so it runs inside the same guard.
+async function registryProtection(
+  pubkey: string,
+  db: D1Database | undefined,
+  prepareDb: ((db: D1Database) => Promise<void>) | undefined,
+): Promise<boolean | null> {
   if (!db) return null;
   try {
+    if (prepareDb) await prepareDb(db);
     return (await resolveByPubkey(db, pubkey)) !== null;
   } catch (error) {
     console.error('[account-status] Protected-minor registry read failed:', error);
