@@ -254,9 +254,17 @@ export function AgeReviewDetail({ caseData: c }: Props) {
     },
     // Approve and deny write the protected-minor registry and keycast flag, and
     // every decision can change sign-in status. Settled, not success: a conflict
-    // or a lost response can follow a write that did commit.
-    onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ['account-status'] });
+    // or a lost response can follow a write that did commit. Only this case's
+    // account can have changed, and only by a state change: a clock or band edit
+    // leaves both statuses alone. Key shape: ['account-status', apiUrl, pubkey],
+    // lowercased as useAccountStatus is called.
+    onSettled: (_data, _error, updates, ctx) => {
+      if (updates.state === undefined || !ctx) return;
+      const subject = ctx.casePubkey.toLowerCase();
+      queryClient.invalidateQueries({
+        queryKey: ['account-status'],
+        predicate: (query) => query.queryKey[2] === subject,
+      });
     },
     onError: (error, _updates, ctx) => {
       // A concurrent writer (another moderator, or the deadline cron) changed

@@ -600,6 +600,36 @@ describe('AgeReviewDetail', () => {
       await waitFor(() => expect(getAccountStatus.mock.calls.length).toBeGreaterThan(callsBefore));
     });
 
+    // A clock or note edit cannot change registry or sign-in status; refetching on it
+    // costs a keycast round trip per click.
+    it('does not refetch account status after an edit that is not a decision', async () => {
+      const { queryClient } = renderDetail(makeCase());
+      await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+      const callsBefore = getAccountStatus.mock.calls.length;
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Pause Clock' }));
+
+      await waitFor(() => expect(updateAgeReviewCase).toHaveBeenCalledWith(
+        'case-1', expect.objectContaining({ clock_paused: true }),
+      ));
+      await waitFor(() => expect(queryClient.isMutating()).toBe(0));
+      await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+      expect(getAccountStatus.mock.calls.length).toBe(callsBefore);
+    });
+
+    it('invalidates only the decided case\'s account status, not other accounts\' cached status', async () => {
+      const { queryClient } = renderDetail(makeCase());
+      await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+      const otherKey = ['account-status', 'https://api.test.divine.video', 'c'.repeat(64)];
+      queryClient.setQueryData(otherKey, { success: true, status: 'active', verified_minor: false, protected_minor: false });
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Clear without approval' }));
+
+      await waitFor(() => expect(updateAgeReviewCase).toHaveBeenCalled());
+      await waitFor(() => expect(queryClient.isMutating()).toBe(0));
+      expect(queryClient.getQueryState(otherKey)?.isInvalidated).toBe(false);
+    });
+
     it('refetches account status after a version conflict, which may follow a committed write', async () => {
       updateAgeReviewCase.mockRejectedValueOnce(
         new ApiError('Case was modified by another request', 409, 'Conflict', 'version_conflict', 5),
