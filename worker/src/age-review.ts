@@ -31,13 +31,13 @@ import { suspendPubkey, unsuspendPubkey, banPubkey, type BanPubkeyResult, type S
 import { buildAgeReviewIdentityBlock, buildClaimedParentName, toNpub } from './report-note';
 import {
   approvalRegistryStatements,
+  convergeProjection,
   clearSubject,
   fingerprintProvisioningRequest,
   markProjectionAttempt,
   markProjectionComplete,
   pendingProjectionJobs,
   pendingSubjectClears,
-  rearmLiveSubjectProjection,
   settleSupersededClear,
   UUID_RE,
 } from './protected-minors';
@@ -59,6 +59,19 @@ function failUnlessPurgeConfirmed(result: BanPubkeyResult): { success: boolean; 
   return result.contentRemovalUnconfirmed
     ? { success: false, error: `Ban applied; content removal not confirmed: ${result.relayError}` }
     : result;
+}
+
+// Runs convergeProjection after a keycast projection landed (#192). The
+// projection itself already succeeded, so a failed re-arm is logged rather than
+// turned into a 500 or a retry of the call that worked.
+async function convergeAfterProjection(
+  db: D1Database, pubkey: string, projected: 'active' | 'cleared',
+): Promise<void> {
+  try {
+    await convergeProjection(db, pubkey, projected);
+  } catch (error) {
+    console.error(`[age-review] Protected-minor projection convergence (${projected}) failed:`, error);
+  }
 }
 
 /**
@@ -681,6 +694,7 @@ export async function handleUpdateAgeReviewCase(
         // itself succeeded, so do not turn an applied denial into a 500.
         console.error('[age-review] Failed to mark protected-minor projection complete:', error);
       }
+      await convergeAfterProjection(env.DB, minorProjectionPubkey, 'cleared');
     }
 
     // Approval (#192): the subject committed with the CAS above. Project it onto
@@ -702,6 +716,11 @@ export async function handleUpdateAgeReviewCase(
         await markProjectionComplete(env.DB, existing.pubkey, 'active');
       } catch (error) {
         console.error('[age-review] Failed to mark approval projection complete:', error);
+      }
+      // A refused (unclaimed) set changed nothing in keycast, so it cannot have
+      // overwritten a racing clear.
+      if (keycastMinorSet === 'ok' || keycastMinorSet === 'not_applicable') {
+        await convergeAfterProjection(env.DB, existing.pubkey, 'active');
       }
     }
   }
@@ -2356,8 +2375,10 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
         const clearResult = await clearVerifiedMinor(projectionPubkey, undefined, 'age_review_expired', env);
         // notFound settles the job here too: there is no account to project onto,
         // so leaving it pending only defers the same answer to the cron's retry.
-        if (clearResult.success || clearResult.notFound) await markProjectionComplete(env.DB, projectionPubkey, 'cleared');
-        else console.error(`[age-review] Keycast verified_minor clear failed for expired case: ${clearResult.error}`);
+        if (clearResult.success || clearResult.notFound) {
+          await markProjectionComplete(env.DB, projectionPubkey, 'cleared');
+          await convergeAfterProjection(env.DB, projectionPubkey, 'cleared');
+        } else console.error(`[age-review] Keycast verified_minor clear failed for expired case: ${clearResult.error}`);
       } catch (error) {
         console.error('[age-review] Keycast verified_minor clear failed for expired case:', error);
       }
@@ -2419,9 +2440,10 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
       // overdue-projection alarm.
       if (result.success || result.notFound || result.unclaimed) {
         await markProjectionComplete(env.DB, job.pubkey, job.classification);
-        // A clear that landed may have raced a new approval's set for the same pubkey.
-        if (job.classification === 'cleared' && (result.success || result.notFound)) {
-          await rearmLiveSubjectProjection(env.DB, job.pubkey);
+        // A call that landed may have raced an opposite projection for the same
+        // pubkey; a refused (unclaimed) one changed nothing in keycast.
+        if (result.success || result.notFound) {
+          await convergeAfterProjection(env.DB, job.pubkey, job.classification);
         }
       } else {
         await markProjectionAttempt(env.DB, job.pubkey);

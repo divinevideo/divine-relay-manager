@@ -6,8 +6,8 @@
 import { Miniflare } from 'miniflare';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { ensureSchema } from '../src/db';
-import { handleUpdateAgeReviewCase, handleAgeReviewReplyWebhook, handleParentConsent } from '../src/age-review';
-import { createSubjectWithBinding, approvalRegistryStatements, resolveByPubkey } from '../src/protected-minors';
+import { handleUpdateAgeReviewCase, handleAgeReviewReplyWebhook, handleParentConsent, checkAgeReviewDeadlines } from '../src/age-review';
+import { createSubjectWithBinding, approvalRegistryStatements, resolveByPubkey, clearSubject, markProjectionComplete } from '../src/protected-minors';
 
 let mf: Miniflare;
 let DB: D1Database;
@@ -551,5 +551,105 @@ describe('approving a 13-15 minor', () => {
     expect(body.enforcement.keycastMinorSet).toBe('not_attempted');
     expect(body.enforcement.subjectActivate).toBe('not_attempted');
     expect(keycastPuts).toHaveLength(0);
+  });
+});
+
+// keycast must end mirroring D1 whichever order racing projections land in (#192).
+// `flagged` models keycast's verified_minor: PUT sets it, DELETE clears it. Each
+// test drives the inline leg into the race, then one cron tick must converge it.
+describe('inline projection convergence after racing writes', () => {
+  const P = 'e3'.repeat(32);
+  const raceEnv = () => ({
+    ...env,
+    KEYCAST_URL: 'https://keycast.invalid',
+    KEYCAST_SERVICE_TOKEN: 'test-token',
+    NOSTR_NSEC: 'nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5',
+    RELAY_URL: 'wss://relay.invalid',
+  } as unknown as Parameters<typeof handleUpdateAgeReviewCase>[2]);
+  let flagged: boolean;
+  let calls: string[];
+  const pendingCount = async () => (await DB.prepare(
+    "SELECT COUNT(*) AS c FROM protected_minor_projection_jobs WHERE state = 'pending'",
+  ).first<{ c: number }>())!.c;
+
+  beforeEach(async () => {
+    await reset();
+    for (const table of ['protected_minor_projection_jobs', 'protected_minor_account_bindings', 'protected_minor_subjects']) {
+      await DB.prepare(`DELETE FROM ${table}`).run();
+    }
+    flagged = false;
+    calls = [];
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  function stubKeycast(onCall: (method: string) => Promise<void>) {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      if (!String(input).includes('/verified-minor')) return new Response('{}', { status: 200 });
+      const method = init?.method ?? 'GET';
+      calls.push(method);
+      await onCall(method); // the racing writer runs while this call is in flight
+      flagged = method === 'PUT';
+      return new Response('{}', { status: 200 });
+    });
+  }
+  function patchCase(id: string, body: Record<string, unknown>) {
+    return handleUpdateAgeReviewCase(new Request(`https://api.test/api/age-review/cases/${id}`, {
+      method: 'PATCH', body: JSON.stringify(body),
+    }), id, raceEnv(), cors);
+  }
+
+  it('X1: a deny clear landing after a racing approval set re-arms the live subject', async () => {
+    await createSubjectWithBinding(DB, 'onboarding', P);
+    await DB.prepare(`INSERT INTO age_review_cases (id, pubkey, state, deadline_at, clock_paused, version)
+      VALUES ('x1-deny', ?, 'restricted_pending_user_response', ?, 0, 0)`)
+      .bind(P, new Date(Date.now() + 9 * 864e5).toISOString()).run();
+    let s2 = '';
+    stubKeycast(async (method) => {
+      if (method !== 'DELETE' || s2) return;
+      // A newer approval creates S2 and completes its PUT while the deny's DELETE is in flight.
+      await DB.prepare(`INSERT INTO age_review_cases (id, pubkey, state, clear_resolution, updated_at)
+        VALUES ('x1-approve', ?, 'cleared', 'approved_minor', datetime('now', '+2 seconds'))`).bind(P).run();
+      s2 = (await createSubjectWithBinding(DB, 'x1-approve', P)).subjectId;
+      const now = new Date().toISOString();
+      await DB.prepare(`INSERT INTO protected_minor_projection_jobs
+        (subject_id, pubkey, reason, state, created_at, updated_at)
+        VALUES (?, ?, 'age_review_approved', 'complete', ?, ?)`).bind(s2, P, now, now).run();
+      flagged = true;
+    });
+
+    await patchCase('x1-deny', { state: 'denied_closed' });
+    expect(calls).toEqual(['DELETE']);
+    expect(flagged).toBe(false); // diverged: S2 is active and keycast is unflagged
+    expect(await pendingCount()).toBe(1);
+
+    await checkAgeReviewDeadlines(raceEnv());
+    expect(calls).toEqual(['DELETE', 'PUT']);
+    expect(flagged).toBe(true);
+    expect(await pendingCount()).toBe(0);
+  });
+
+  it('X2: an approval set landing after a racing denial completed its clear re-arms the clear', async () => {
+    await DB.prepare(`INSERT INTO age_review_cases (id, pubkey, state, suspected_age_band, deadline_at, clock_paused, version)
+      VALUES ('x2-approve', ?, 'submitted_for_review', 'age_13_15', ?, 0, 0)`)
+      .bind(P, new Date(Date.now() + 9 * 864e5).toISOString()).run();
+    let denied = false;
+    stubKeycast(async (method) => {
+      if (method !== 'PUT' || denied) return;
+      // A denial clears the subject and its own DELETE completes while this PUT is in flight.
+      denied = true;
+      await clearSubject(DB, P, undefined, 'age_review_denied');
+      flagged = false;
+      await markProjectionComplete(DB, P, 'cleared');
+    });
+
+    await patchCase('x2-approve', { state: 'cleared', resolution: 'approved_minor' });
+    expect(calls).toEqual(['PUT']);
+    expect(flagged).toBe(true); // diverged: the subject is cleared and keycast is flagged
+    expect(await pendingCount()).toBe(1);
+
+    await checkAgeReviewDeadlines(raceEnv());
+    expect(calls).toEqual(['PUT', 'DELETE']);
+    expect(flagged).toBe(false);
+    expect(await pendingCount()).toBe(0);
   });
 });

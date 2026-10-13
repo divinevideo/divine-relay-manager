@@ -2,7 +2,7 @@ import { Miniflare } from 'miniflare';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ensureSchema } from '../src/db';
 import { handleCreateMinorAccount } from '../src/age-review';
-import { backfillProtectedMinorSubjects, clearSubject, closeBinding, createSubjectWithBinding, fingerprintProvisioningRequest, handleProtectedMinorServiceRoute, pendingProjectionJobs, pendingSubjectClears, resolveByPubkey, startOrResumeReplacement } from '../src/protected-minors';
+import { backfillProtectedMinorSubjects, clearSubject, closeBinding, convergeProjection, createSubjectWithBinding, fingerprintProvisioningRequest, handleProtectedMinorServiceRoute, pendingProjectionJobs, pendingSubjectClears, resolveByPubkey, startOrResumeReplacement } from '../src/protected-minors';
 import { digestProvisioningFingerprint } from '../src/retention';
 
 const PUBKEY_A = 'a'.repeat(64);
@@ -299,5 +299,68 @@ describe('protected-minor registry on real D1', () => {
     expect(onboardCase!.clear_resolution).toBe('approved_minor');
     expect(fetchMock).toHaveBeenCalledTimes(2);
     vi.unstubAllGlobals();
+  });
+});
+
+describe('convergeProjection after a set (#192)', () => {
+  const P = 'f1'.repeat(32);
+  const OTHER = 'f2'.repeat(32);
+  const old = '2026-01-01T00:00:00.000Z';
+  const jobOf = (subjectId: string) => DB.prepare(
+    'SELECT pubkey, reason, state, created_at FROM protected_minor_projection_jobs WHERE subject_id = ?',
+  ).bind(subjectId).first<{ pubkey: string; reason: string; state: string; created_at: string }>();
+  async function completeJob(subjectId: string, pubkey: string, reason: string) {
+    await DB.prepare(`UPDATE protected_minor_projection_jobs SET pubkey = ?, reason = ?, state = 'complete',
+      created_at = ?, updated_at = ? WHERE subject_id = ?`).bind(pubkey, reason, old, old, subjectId).run();
+  }
+
+  it('re-arms the most recent cleared subject with its clear reason and a fresh age', async () => {
+    const { subjectId: s1 } = await createSubjectWithBinding(DB, 'c1', P, '2026-02-01T00:00:00.000Z');
+    await clearSubject(DB, P, undefined, 'age_review_denied', s1);
+    await completeJob(s1, P, 'age_review_denied');
+    const { subjectId: s2 } = await createSubjectWithBinding(DB, 'c2', P, '2026-03-01T00:00:00.000Z');
+    await clearSubject(DB, P, undefined, 'age_review_expired', s2);
+    await completeJob(s2, P, 'age_review_expired');
+
+    await convergeProjection(DB, P, 'active');
+
+    const rearmed = await jobOf(s2);
+    expect(rearmed).toMatchObject({ pubkey: P, reason: 'age_review_expired', state: 'pending' });
+    expect(rearmed!.created_at).not.toBe(old);
+    expect((await jobOf(s1))!.state).toBe('complete');
+  });
+
+  it('keeps the age of a clear job that is already pending', async () => {
+    const { subjectId } = await createSubjectWithBinding(DB, 'c1', P);
+    await clearSubject(DB, P, undefined, 'age_review_denied', subjectId);
+    await DB.prepare('UPDATE protected_minor_projection_jobs SET created_at = ? WHERE subject_id = ?')
+      .bind(old, subjectId).run();
+
+    await convergeProjection(DB, P, 'active');
+
+    expect(await jobOf(subjectId)).toMatchObject({ state: 'pending', created_at: old });
+  });
+
+  it('leaves alone a clear still pending for the subject\'s other pubkey', async () => {
+    const { subjectId } = await createSubjectWithBinding(DB, 'c1', P);
+    await DB.prepare('UPDATE protected_minor_account_bindings SET unbound_at = ? WHERE pubkey = ?').bind(old, P).run();
+    await DB.prepare(`INSERT INTO protected_minor_account_bindings (id, subject_id, pubkey, bound_at)
+      VALUES ('replacement', ?, ?, ?)`).bind(subjectId, OTHER, '2026-02-01T00:00:00.000Z').run();
+    await clearSubject(DB, OTHER, undefined, 'age_review_denied', subjectId); // job pending for OTHER
+
+    await convergeProjection(DB, P, 'active');
+
+    expect(await jobOf(subjectId)).toMatchObject({ pubkey: OTHER, state: 'pending' });
+  });
+
+  it('does nothing while the pubkey has a live active subject', async () => {
+    const { subjectId: s1 } = await createSubjectWithBinding(DB, 'c1', P, '2026-02-01T00:00:00.000Z');
+    await clearSubject(DB, P, undefined, 'age_review_denied', s1);
+    await completeJob(s1, P, 'age_review_denied');
+    await createSubjectWithBinding(DB, 'c2', P, '2020-01-01T00:00:00.000Z'); // live, though bound "earlier"
+
+    await convergeProjection(DB, P, 'active');
+
+    expect((await jobOf(s1))!.state).toBe('complete');
   });
 });

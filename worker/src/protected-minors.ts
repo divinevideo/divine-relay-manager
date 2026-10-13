@@ -208,12 +208,65 @@ export async function pendingProjectionJobs(db: D1Database): Promise<Array<{
 }
 
 /**
- * Convergence after a keycast clear (#192). The cron can load a cleared subject's
- * job before a new approval exists, then have its DELETE land AFTER the approval's
- * PUT (the approval creates S2 for the same pubkey and completes S2's job in
- * between). keycast would end unflagged while S2 is active and no job is pending.
- * Re-arming the live subject's job makes the next tick re-apply the set; when no
- * race happened it is one extra idempotent PUT.
+ * Keycast convergence after a projection call that landed (#192). Call it after
+ * every keycast verified_minor call that succeeded or found no account, on every
+ * path (inline approve, inline deny, expiry, cron), with the classification that
+ * call projected. Two races leave keycast disagreeing with D1 and nothing pending:
+ *
+ * - X1, a clear lands after a set. A deny, expiry or cron DELETE for a cleared
+ *   subject S1 is in flight while a new approval creates S2 for the same pubkey
+ *   and completes S2's PUT. The late DELETE unflags a live protected minor.
+ *   Fix: after a clear, re-arm the pubkey's live active subject's set job.
+ * - X2, a set lands after a clear. An approval or cron PUT for S is in flight
+ *   while a denial clears S and completes its own DELETE. The late PUT flags a
+ *   denied account. Fix: after a set, if the pubkey has no live active subject
+ *   and its most recent bound subject is cleared, re-arm that subject's clear job.
+ *
+ * The two conditions cannot both hold for one D1 state, so convergence cannot
+ * ping-pong. With no race it costs one extra idempotent keycast call. A call
+ * keycast refused (account_unclaimed) or that failed changed nothing there, so it
+ * cannot have overwritten a racing projection and needs no convergence.
+ */
+export async function convergeProjection(
+  db: D1Database, pubkey: string, projected: 'active' | 'cleared',
+): Promise<void> {
+  if (projected === 'cleared') {
+    await rearmLiveSubjectProjection(db, pubkey);
+  } else {
+    await rearmLatestClearedSubjectProjection(db, pubkey);
+  }
+}
+
+/**
+ * X2 half of convergeProjection. "Most recent bound subject" uses clearSubject's
+ * ordering, which puts the pubkey's live binding first; the unique index allows
+ * at most one, so a live active subject is always the latest and fails the
+ * `cleared` test without a separate guard. A job still pending for a different
+ * pubkey of that subject (a replaced account) is left alone: one job row per
+ * subject cannot carry both clears, and overwriting would drop the pending one.
+ * Either outcome leaves an account over-protected, never a live minor unprotected.
+ */
+async function rearmLatestClearedSubjectProjection(db: D1Database, pubkey: string): Promise<void> {
+  const now = new Date().toISOString();
+  await db.prepare(`INSERT INTO protected_minor_projection_jobs (subject_id, pubkey, reason, state, created_at, updated_at)
+    SELECT s.subject_id, ?1, s.clear_reason, 'pending', ?2, ?2
+    FROM protected_minor_account_bindings b
+    JOIN protected_minor_subjects s ON s.subject_id = b.subject_id
+    WHERE b.pubkey = ?1 AND s.classification_state = 'cleared'
+      AND b.rowid = (SELECT latest.rowid FROM protected_minor_account_bindings latest
+        WHERE latest.pubkey = ?1
+        ORDER BY (latest.unbound_at IS NULL) DESC, datetime(latest.bound_at) DESC, latest.rowid DESC LIMIT 1)
+    ON CONFLICT(subject_id) DO UPDATE SET pubkey = excluded.pubkey, reason = excluded.reason,
+      state = 'pending', updated_at = excluded.updated_at,
+      created_at = CASE WHEN protected_minor_projection_jobs.state = 'pending'
+        THEN protected_minor_projection_jobs.created_at ELSE excluded.created_at END
+    WHERE protected_minor_projection_jobs.state != 'pending' OR protected_minor_projection_jobs.pubkey = excluded.pubkey`)
+    .bind(pubkey, now).run();
+}
+
+/**
+ * X1 half of convergeProjection: re-arm the set job of the pubkey's live active
+ * subject so the next tick re-applies the set.
  */
 export async function rearmLiveSubjectProjection(db: D1Database, pubkey: string): Promise<void> {
   const now = new Date().toISOString();

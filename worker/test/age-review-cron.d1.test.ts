@@ -10,7 +10,7 @@ import { Miniflare } from 'miniflare';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { ensureSchema } from '../src/db';
 import { checkAgeReviewDeadlines } from '../src/age-review';
-import { clearSubject, createSubjectWithBinding, pendingSubjectClears, rearmLiveSubjectProjection } from '../src/protected-minors';
+import { clearSubject, createSubjectWithBinding, markProjectionComplete, pendingSubjectClears, rearmLiveSubjectProjection } from '../src/protected-minors';
 
 let mf: Miniflare;
 let DB: D1Database;
@@ -447,5 +447,89 @@ describe('age-review cron on real D1', () => {
     const job = await DB.prepare('SELECT state, created_at FROM protected_minor_projection_jobs WHERE subject_id = ?')
       .bind(subjectId).first<{ state: string; created_at: string }>();
     expect(job).toEqual({ state: 'pending', created_at: old });
+  });
+
+  // keycast must end mirroring D1 whichever order racing projections land in.
+  // `flagged` models keycast's verified_minor: PUT sets it, DELETE clears it.
+  describe('projection convergence after racing writes (#192)', () => {
+    const env = () => ({ ...cronEnv, KEYCAST_URL: 'https://keycast.invalid', KEYCAST_SERVICE_TOKEN: 'test-token' });
+    let flagged: boolean;
+    let calls: string[];
+    const pendingCount = async () => (await DB.prepare(
+      "SELECT COUNT(*) AS c FROM protected_minor_projection_jobs WHERE state = 'pending'",
+    ).first<{ c: number }>())!.c;
+
+    beforeEach(async () => {
+      for (const t of ['protected_minor_projection_jobs', 'protected_minor_account_bindings', 'protected_minor_subjects']) {
+        await DB.prepare(`DELETE FROM ${t}`).run();
+      }
+      flagged = false;
+      calls = [];
+    });
+
+    function stubKeycast(onCall: (method: string) => Promise<void>) {
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+        if (!String(input).includes('/verified-minor')) return new Response('ok', { status: 200 });
+        const method = init?.method ?? 'GET';
+        calls.push(method);
+        await onCall(method); // the racing writer runs while this call is in flight
+        flagged = method === 'PUT';
+        return new Response('{}', { status: 200 });
+      });
+    }
+
+    it('X1: an expiry clear landing after a racing approval set re-arms the live subject', async () => {
+      const P = 'e1'.repeat(32);
+      await createSubjectWithBinding(DB, 'onboarding', P);
+      await DB.prepare(`INSERT INTO age_review_cases (id, pubkey, state, deadline_at, clock_paused)
+        VALUES ('x1-expired', ?, 'restricted_pending_user_response', ?, 0)`)
+        .bind(P, new Date(Date.now() - 60_000).toISOString()).run();
+      let s2 = '';
+      stubKeycast(async (method) => {
+        if (method !== 'DELETE' || s2) return;
+        // A new approval creates S2 and completes its PUT while the expiry's DELETE is in flight.
+        // Its case is the newer decision, so the expiry denial is no retry source for S2.
+        await DB.prepare(`INSERT INTO age_review_cases (id, pubkey, state, clear_resolution, updated_at)
+          VALUES ('x1-approve', ?, 'cleared', 'approved_minor', datetime('now', '+2 seconds'))`).bind(P).run();
+        s2 = (await createSubjectWithBinding(DB, 'x1-approve', P)).subjectId;
+        const now = new Date().toISOString();
+        await DB.prepare(`INSERT INTO protected_minor_projection_jobs
+          (subject_id, pubkey, reason, state, created_at, updated_at)
+          VALUES (?, ?, 'age_review_approved', 'complete', ?, ?)`).bind(s2, P, now, now).run();
+        flagged = true;
+      });
+
+      await checkAgeReviewDeadlines(env());
+      await checkAgeReviewDeadlines(env());
+
+      expect(calls).toEqual(['DELETE', 'PUT']);
+      expect(flagged).toBe(true);
+      expect(await pendingCount()).toBe(0);
+    });
+
+    it('X2: a cron set landing after a racing denial completed its clear re-arms the clear', async () => {
+      const P = 'e2'.repeat(32);
+      const { subjectId } = await createSubjectWithBinding(DB, 'x2-approve', P);
+      const now = new Date().toISOString();
+      await DB.prepare(`INSERT INTO protected_minor_projection_jobs
+        (subject_id, pubkey, reason, state, created_at, updated_at)
+        VALUES (?, ?, 'age_review_approved', 'pending', ?, ?)`).bind(subjectId, P, now, now).run();
+      let denied = false;
+      stubKeycast(async (method) => {
+        if (method !== 'PUT' || denied) return;
+        // A denial clears S and its own DELETE completes while this PUT is in flight.
+        denied = true;
+        await clearSubject(DB, P, undefined, 'age_review_denied');
+        flagged = false;
+        await markProjectionComplete(DB, P, 'cleared');
+      });
+
+      await checkAgeReviewDeadlines(env());
+      await checkAgeReviewDeadlines(env());
+
+      expect(calls).toEqual(['PUT', 'DELETE']);
+      expect(flagged).toBe(false);
+      expect(await pendingCount()).toBe(0);
+    });
   });
 });
