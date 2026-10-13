@@ -134,7 +134,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
     // switch a closure-read c would misroute every cache write below
     // (review: wrong case's keys written, the acted-on case left stale)
     onMutate: () => ({ caseId: c.id, casePubkey: c.pubkey }),
-    onSuccess: (data, _updates, ctx) => {
+    onSuccess: (data, updates, ctx) => {
       // Keep the per-case entry in step: the hand-off seeds
       // ['age-review-case', id] (30s staleTime), and a terminal action drops
       // the case from the active list, so the detail falls back to that
@@ -184,6 +184,18 @@ export function AgeReviewDetail({ caseData: c }: Props) {
       // the list or the chips disagree with the list until their 30s interval.
       queryClient.invalidateQueries({ queryKey: ['age-review-counts'] });
       const requestedState = pendingStateRef.current as AgeReviewState | undefined;
+      // An approval is only real once the worker reports it recorded the
+      // protected subject. A worker that predates approvals (Pages deployed
+      // before it) clears the case and never mentions subjectActivate, so absent
+      // counts as not recorded rather than as success.
+      if (updates.resolution === 'approved_minor' && data.enforcement?.subjectActivate !== 'ok') {
+        toast({
+          title: 'Protected-minor approval incomplete',
+          description: 'Approval was not recorded as a protected minor; reload and retry',
+          variant: 'destructive',
+        });
+        return;
+      }
       if (requestedState && ENFORCEMENT_STATES.includes(requestedState)) {
         // Surface only actual failed enforcement legs. `not_attempted` is valid
         // for transitions where a leg does not apply.
@@ -603,15 +615,24 @@ export function AgeReviewDetail({ caseData: c }: Props) {
                       </Button>
                     }
                     title="Approve as a protected minor?"
-                    summary="This account is restored and marked as an approved 13-15 minor: minor DM limits apply, key export is blocked, and future under-16 reports clear automatically."
+                    summary="This account is restored and marked as an approved 13-15 minor: minor DM limits apply, key export is blocked for Divine login accounts, and future under-16 reports clear automatically."
                     confirmLabel="Approve"
                     confirmVariant="approve"
                     onConfirm={async () => {
-                      await updateCase.mutateAsync({
-                        state: 'cleared',
-                        resolution: 'approved_minor',
-                        resolution_note: resolutionNote || undefined,
-                      });
+                      try {
+                        await updateCase.mutateAsync({
+                          state: 'cleared',
+                          resolution: 'approved_minor',
+                          resolution_note: resolutionNote || undefined,
+                        });
+                      } catch (error) {
+                        // Another writer changed the case: close the confirm so a
+                        // replay cannot approve on top of that change. onError has
+                        // already reloaded the case and told the moderator. Any
+                        // other error keeps the confirm open for a retry.
+                        if (error instanceof ApiError && error.code === 'version_conflict') return;
+                        throw error;
+                      }
                     }}
                     isPending={updateCase.isPending}
                   />

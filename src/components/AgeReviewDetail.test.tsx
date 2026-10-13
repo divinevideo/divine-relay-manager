@@ -588,6 +588,77 @@ describe('AgeReviewDetail', () => {
       expect(await screen.findByText('Approved minor')).toBeInTheDocument();
     });
 
+    async function confirmApproval() {
+      renderDetail(makeCase({ suspected_age_band: 'age_13_15' }));
+      fireEvent.click(await screen.findByRole('button', { name: /Approve as protected minor/ }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
+      await waitFor(() => expect(updateAgeReviewCase).toHaveBeenCalled());
+    }
+    const approvalOk = {
+      success: true, enforcementComplete: true,
+      enforcement: { relay: 'ok', bulk: 'ok', keycast: 'ok', subjectActivate: 'ok', keycastMinorSet: 'ok' },
+    };
+    const notRecorded = 'Approval was not recorded as a protected minor; reload and retry';
+
+    it('states what approval does, including that key export is blocked only for Divine login accounts', async () => {
+      renderDetail(makeCase({ suspected_age_band: 'age_13_15' }));
+      fireEvent.click(await screen.findByRole('button', { name: /Approve as protected minor/ }));
+      expect(await screen.findByText(
+        'This account is restored and marked as an approved 13-15 minor: minor DM limits apply, key export is blocked for Divine login accounts, and future under-16 reports clear automatically.',
+      )).toBeInTheDocument();
+    });
+
+    // A stale replay must not approve on top of another moderator's change.
+    it('closes the confirm on a version_conflict so it cannot be replayed', async () => {
+      updateAgeReviewCase.mockRejectedValueOnce(
+        new ApiError('Case was modified by another request', 409, 'Conflict', 'version_conflict', 5),
+      );
+      await confirmApproval();
+      await waitFor(() => expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument());
+    });
+
+    it('keeps the confirm open on any other error so the moderator can retry', async () => {
+      updateAgeReviewCase.mockRejectedValueOnce(new ApiError('server error', 500, 'Server Error'));
+      await confirmApproval();
+      await waitFor(() => expect(screen.getByText(/Failed to update/)).toBeInTheDocument());
+      expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument();
+    });
+
+    it('does not report success when the worker did not record a protected subject', async () => {
+      // A worker that predates approvals (Pages deployed first) answers without subjectActivate.
+      updateAgeReviewCase.mockResolvedValueOnce({
+        success: true, enforcementComplete: true, enforcement: { relay: 'ok', bulk: 'ok', keycast: 'ok' },
+      });
+      await confirmApproval();
+      await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({
+        description: notRecorded, variant: 'destructive',
+      })));
+    });
+
+    it('reports a failed subject activation as not recorded', async () => {
+      updateAgeReviewCase.mockResolvedValueOnce({
+        ...approvalOk, success: false, enforcementComplete: false,
+        enforcement: { ...approvalOk.enforcement, subjectActivate: 'failed' },
+      });
+      await confirmApproval();
+      await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({ description: notRecorded })));
+    });
+
+    it('raises no not-recorded warning when the subject was activated', async () => {
+      updateAgeReviewCase.mockResolvedValueOnce(approvalOk);
+      await confirmApproval();
+      await waitFor(() => expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument());
+      expect(toast).not.toHaveBeenCalledWith(expect.objectContaining({ description: notRecorded }));
+    });
+
+    it('applies the not-recorded check only to approvals', async () => {
+      updateAgeReviewCase.mockResolvedValueOnce({ success: true, enforcementComplete: true, enforcement: { relay: 'ok' } });
+      renderDetail(makeCase({ suspected_age_band: 'age_13_15' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Clear: not a minor' }));
+      await waitFor(() => expect(updateAgeReviewCase).toHaveBeenCalled());
+      expect(toast).not.toHaveBeenCalledWith(expect.objectContaining({ description: notRecorded }));
+    });
+
     it('names a failed verified_minor set in the incomplete-enforcement toast', async () => {
       updateAgeReviewCase.mockResolvedValueOnce({
         success: false, enforcementComplete: false,
