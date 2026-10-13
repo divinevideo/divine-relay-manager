@@ -121,3 +121,27 @@ describe('consent clips from earlier rounds', () => {
     expect(await DB.prepare("SELECT id FROM age_review_cases WHERE id = 'old-case'").first()).toEqual({ id: 'old-case' });
   });
 });
+
+describe('the abandoned-upload sweep', () => {
+  for (const stage of ['all', 'consent_video']) {
+    it(`keeps an abandoned upload under a ${stage} legal hold`, async () => {
+      const closed = new Date(Date.now() - 864e5).toISOString();
+      await DB.prepare(`INSERT INTO age_review_cases (id, pubkey, state, closed_at)
+        VALUES ('held-abandoned', ?, 'denied_closed', ?), ('free-abandoned', ?, 'denied_closed', ?)`)
+        .bind(OWNER, closed, OWNER, closed).run();
+      await DB.prepare(`INSERT INTO age_review_parent_consent_submissions
+        (case_id, status, lease_until, created_at, receipt_id, object_key)
+        VALUES ('held-abandoned', 'processing', 0, unixepoch('now', '-8 days'), 'r-ha', 'k-ha'),
+               ('free-abandoned', 'processing', 0, unixepoch('now', '-8 days'), 'r-fa', 'k-fa')`).run();
+      await DB.prepare(`INSERT INTO retention_legal_holds
+        (id, record_type, record_key, disposal_stage, authorized_role, starts_at, review_at)
+        VALUES ('hold', 'age_review_case', 'held-abandoned', ?, 'privacy/legal', '2020-01-01T00:00:00Z', '2030-01-01T00:00:00Z')`)
+        .bind(stage).run();
+      const { bucket, deleted } = fakeBucket(['k-ha', 'k-fa']);
+
+      await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY, CONSENT_VIDEO_BUCKET: bucket });
+
+      expect(deleted).toEqual(['k-fa']);
+    });
+  }
+});

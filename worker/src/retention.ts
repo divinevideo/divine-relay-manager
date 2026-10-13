@@ -3,6 +3,7 @@
 
 import { RETENTION_DAYS } from '../../shared/retention';
 import { disposeDueConsentVideos } from './consent-video';
+import { noLegalHold } from './legal-holds';
 import type { SecretStoreSecret } from './nip86';
 
 const BATCH_LIMIT = 100;
@@ -121,16 +122,6 @@ async function notifyIfDue(env: RetentionEnv, alertType: string, message: string
   }
 }
 
-const noHold = (recordType: string, recordKey: string, stage: string) => `NOT EXISTS (
-  SELECT 1 FROM retention_legal_holds h
-  WHERE h.record_type = '${recordType}'
-    AND (h.record_key IS NULL OR h.record_key = ${recordKey})
-    AND (h.disposal_stage = 'all' OR h.disposal_stage = '${stage}')
-    AND datetime(h.starts_at) <= datetime('now')
-    AND h.released_at IS NULL
-    AND (h.expires_at IS NULL OR datetime(h.expires_at) > datetime('now'))
-)`;
-
 export async function runRetentionDisposal(env: RetentionEnv): Promise<RetentionResult> {
   if (!env.DB) return emptyResult();
   const db = env.DB;
@@ -187,7 +178,7 @@ export async function runRetentionDisposal(env: RetentionEnv): Promise<Retention
         WHERE claim_link_url IS NOT NULL
           AND ((claim_link_expires_at IS NOT NULL AND datetime(claim_link_expires_at) <= datetime('now'))
             OR closed_at IS NOT NULL)
-          AND ${noHold('age_review_case', 'age_review_cases.id', 'claim_link')}
+          AND ${noLegalHold('age_review_case', 'age_review_cases.id', 'claim_link')}
         LIMIT ${BATCH_LIMIT})`).run();
     result.claimLinksCleared = claims.meta.changes;
   });
@@ -201,7 +192,7 @@ export async function runRetentionDisposal(env: RetentionEnv): Promise<Retention
       WHERE id IN (SELECT id FROM age_review_cases
         WHERE closed_at IS NOT NULL AND redacted_at IS NULL
           AND datetime(closed_at) <= datetime('now', '-${RETENTION_DAYS.ageReviewDetail} days')
-          AND ${noHold('age_review_case', 'age_review_cases.id', 'redaction')}
+          AND ${noLegalHold('age_review_case', 'age_review_cases.id', 'redaction')}
         LIMIT ${BATCH_LIMIT})`).run();
     result.casesRedacted = redacted.meta.changes;
   });
@@ -210,7 +201,7 @@ export async function runRetentionDisposal(env: RetentionEnv): Promise<Retention
     const projections = await db.prepare(`DELETE FROM protected_minor_projection_jobs
       WHERE subject_id IN (SELECT subject_id FROM protected_minor_projection_jobs
         WHERE state = 'complete' AND datetime(updated_at) <= datetime('now', '-${RETENTION_DAYS.projectionComplete} days')
-          AND ${noHold('projection_job', 'protected_minor_projection_jobs.subject_id', 'deletion')}
+          AND ${noLegalHold('projection_job', 'protected_minor_projection_jobs.subject_id', 'deletion')}
         LIMIT ${BATCH_LIMIT})`).run();
     result.projectionsDeleted = projections.meta.changes;
   });
@@ -223,7 +214,7 @@ export async function runRetentionDisposal(env: RetentionEnv): Promise<Retention
           result_pubkey, updated_at FROM protected_minor_provisioning_operations
         WHERE state IN ('complete', 'failed')
           AND datetime(updated_at) <= datetime('now', '-${RETENTION_DAYS.provisioningDetail} days')
-          AND ${noHold('provisioning_operation', 'protected_minor_provisioning_operations.provisioning_operation_id', 'compaction')}
+          AND ${noLegalHold('provisioning_operation', 'protected_minor_provisioning_operations.provisioning_operation_id', 'compaction')}
         ORDER BY datetime(updated_at) LIMIT ${BATCH_LIMIT}`).all<{
           provisioning_operation_id: string; subject_id: string | null; kind: string; request_fingerprint: string;
           state: string; result_pubkey: string | null; updated_at: string;
@@ -240,14 +231,14 @@ export async function runRetentionDisposal(env: RetentionEnv): Promise<Retention
             SELECT provisioning_operation_id, kind, state, updated_at, ?, ?, ?
             FROM protected_minor_provisioning_operations
             WHERE provisioning_operation_id = ? AND state IN ('complete', 'failed')
-              AND ${noHold('provisioning_operation', 'provisioning_operation_id', 'compaction')}
+              AND ${noLegalHold('provisioning_operation', 'provisioning_operation_id', 'compaction')}
             ON CONFLICT(provisioning_operation_id) DO NOTHING`)
             .bind(requestDigest, resultDigest, tombstoneKeyring.active_key_id, operation.provisioning_operation_id),
           db.prepare(`DELETE FROM protected_minor_provisioning_operations
             WHERE provisioning_operation_id = ?
               AND EXISTS (SELECT 1 FROM protected_minor_provisioning_tombstones
                 WHERE provisioning_operation_id = ?)
-              AND ${noHold('provisioning_operation', 'provisioning_operation_id', 'compaction')}`)
+              AND ${noLegalHold('provisioning_operation', 'provisioning_operation_id', 'compaction')}`)
             .bind(operation.provisioning_operation_id, operation.provisioning_operation_id),
         ]);
         result.operationsCompacted += batch[1].meta.changes;
@@ -275,7 +266,7 @@ export async function runRetentionDisposal(env: RetentionEnv): Promise<Retention
             AND datetime(s.cleared_at) <= datetime('now', '-${RETENTION_DAYS.validPriorClassification} days')))
           AND NOT EXISTS (SELECT 1 FROM protected_minor_projection_jobs p WHERE p.subject_id = b.subject_id)
           AND NOT EXISTS (SELECT 1 FROM protected_minor_provisioning_operations o WHERE o.subject_id = b.subject_id)
-          AND ${noHold('account_binding', 'b.id', 'deletion')}
+          AND ${noLegalHold('account_binding', 'b.id', 'deletion')}
         LIMIT ${BATCH_LIMIT})`).run();
     result.bindingsDeleted = bindings.meta.changes;
   });
@@ -289,7 +280,7 @@ export async function runRetentionDisposal(env: RetentionEnv): Promise<Retention
           AND NOT EXISTS (SELECT 1 FROM protected_minor_account_bindings b WHERE b.subject_id = s.subject_id)
           AND NOT EXISTS (SELECT 1 FROM protected_minor_projection_jobs p WHERE p.subject_id = s.subject_id)
           AND NOT EXISTS (SELECT 1 FROM protected_minor_provisioning_operations o WHERE o.subject_id = s.subject_id)
-          AND ${noHold('protected_subject', 's.subject_id', 'deletion')}
+          AND ${noLegalHold('protected_subject', 's.subject_id', 'deletion')}
         LIMIT ${BATCH_LIMIT})`).run();
     result.subjectsDeleted = subjects.meta.changes;
   });
@@ -314,7 +305,7 @@ export async function runRetentionDisposal(env: RetentionEnv): Promise<Retention
             WHERE cs.case_id = c.id AND cs.object_key IS NOT NULL AND cs.disposed_at IS NULL)
           AND NOT EXISTS (SELECT 1 FROM age_review_parent_consent_superseded ps
             WHERE ps.case_id = c.id AND ps.disposed_at IS NULL)
-          AND ${noHold('age_review_case', 'c.id', 'deletion')}
+          AND ${noLegalHold('age_review_case', 'c.id', 'deletion')}
         LIMIT ${BATCH_LIMIT})`).run();
     result.casesDeleted = cases.meta.changes;
   });

@@ -2,6 +2,7 @@
 // ABOUTME: multipart parsing, Access-gated reviewer playback, and disposal.
 
 import { RETENTION_DAYS } from '../../shared/retention';
+import { noLegalHold } from './legal-holds';
 
 export const CONSENT_VIDEO_LIMIT = 80_000_000;
 export const CONSENT_BODY_LIMIT = 82_000_000;
@@ -449,13 +450,7 @@ export async function disposeDueConsentVideos(db: D1Database, bucket: R2Bucket):
      WHERE ${alias}.object_key IS NOT NULL AND ${alias}.disposed_at IS NULL
        AND c.closed_at IS NOT NULL
        AND datetime(c.closed_at) <= datetime('now', '-${RETENTION_DAYS.consentVideo} days')
-       AND NOT EXISTS (SELECT 1 FROM retention_legal_holds h
-         WHERE h.record_type = 'age_review_case'
-           AND (h.record_key IS NULL OR h.record_key = ${alias}.case_id)
-           AND (h.disposal_stage = 'all' OR h.disposal_stage = 'consent_video')
-           AND datetime(h.starts_at) <= datetime('now')
-           AND h.released_at IS NULL
-           AND (h.expires_at IS NULL OR datetime(h.expires_at) > datetime('now')))`;
+       AND ${noLegalHold('age_review_case', `${alias}.case_id`, 'consent_video')}`;
   const due = await db.prepare(
     `SELECT s.case_id, s.object_key FROM age_review_parent_consent_submissions s
      ${dueAndUnheld('s')}
@@ -471,6 +466,7 @@ export async function disposeDueConsentVideos(db: D1Database, bucket: R2Bucket):
      WHERE s.object_key IS NOT NULL AND s.disposed_at IS NULL AND s.status = 'processing'
        AND s.created_at <= unixepoch('now', '-7 days')
        AND NOT EXISTS (SELECT 1 FROM age_review_cases c WHERE c.id = s.case_id AND c.closed_at IS NULL)
+       AND ${noLegalHold('age_review_case', 's.case_id', 'consent_video')}
      LIMIT 100`,
   ).bind().all<{ case_id: string; object_key: string }>();
 
