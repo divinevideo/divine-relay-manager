@@ -1,7 +1,18 @@
 import { Miniflare } from 'miniflare';
+import type { AgeReviewCase } from '../../shared/age-review';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { ensureSchema } from '../src/db';
 import { handleStartGreenlight, handleGetModerationStatus } from '../src/age-review';
+
+type StartResponse = {
+  restriction: { status: string };
+  minorReviewCase: {
+    id: string;
+    suspectedAgeBand: string;
+    allowedResolution: string;
+    responseDeadline: { clock: string };
+  };
+};
 
 let mf: Miniflare;
 let DB: D1Database;
@@ -22,29 +33,29 @@ describe('starting the existing Greenlight consent process', () => {
   it('creates a real owned 13–15 case without making a voluntary application a moderation restriction', async () => {
     const response = await start();
     expect(response.status).toBe(201);
-    const status = await response.json() as any;
+    const status = await response.json() as StartResponse;
     expect(status.restriction.status).toBe('active');
     expect(status.minorReviewCase.suspectedAgeBand).toBe('age_13_15');
     expect(status.minorReviewCase.allowedResolution).toBe('parent_video_or_email');
     expect(status.minorReviewCase.id).toBeTruthy();
-    const row = await DB.prepare('SELECT * FROM age_review_cases WHERE id = ?').bind(status.minorReviewCase.id).first<any>();
-    expect(row.pubkey).toBe(owner);
-    expect(row.state).toBe('open_reported');
-    expect(row.deadline_at).toBeNull();
-    const reloaded = await (await handleGetModerationStatus(owner, { DB }, {})).json() as any;
+    const row = await DB.prepare('SELECT * FROM age_review_cases WHERE id = ?').bind(status.minorReviewCase.id).first<AgeReviewCase>();
+    expect(row?.pubkey).toBe(owner);
+    expect(row?.state).toBe('open_reported');
+    expect(row?.deadline_at).toBeNull();
+    const reloaded = await (await handleGetModerationStatus(owner, { DB }, {})).json() as StartResponse;
     expect(reloaded.restriction.status).toBe('active');
     expect(reloaded.minorReviewCase.id).toBe(status.minorReviewCase.id);
     expect(reloaded.minorReviewCase.responseDeadline.clock).toBe('not_applicable');
   });
   it('resumes the same case on retries and concurrent starts', async () => {
     const responses = await Promise.all([start(), start(), start()]);
-    const bodies = await Promise.all(responses.map((response) => response.json() as Promise<any>));
+    const bodies = await Promise.all(responses.map((response) => response.json() as Promise<StartResponse>));
     expect(new Set(bodies.map((body) => body.minorReviewCase.id)).size).toBe(1);
-    expect((await DB.prepare('SELECT COUNT(*) AS count FROM age_review_cases').first<any>()).count).toBe(1);
+    expect((await DB.prepare('SELECT COUNT(*) AS count FROM age_review_cases').first<{ count: number }>())?.count).toBe(1);
   });
   it('does not reuse another account’s application', async () => {
-    const first = await (await start()).json() as any;
-    const second = await (await start(other)).json() as any;
+    const first = await (await start()).json() as StartResponse;
+    const second = await (await start(other)).json() as StartResponse;
     expect(second.minorReviewCase.id).not.toBe(first.minorReviewCase.id);
   });
   it('uses an unreviewed report without losing its provenance or imposing a restriction', async () => {
@@ -52,25 +63,25 @@ describe('starting the existing Greenlight consent process', () => {
       .bind(owner, other).run();
     const response = await start();
     expect(response.status).toBe(200);
-    const body = await response.json() as any;
+    const body = await response.json() as StartResponse;
     expect(body.restriction.status).toBe('active');
     expect(body.minorReviewCase.id).toBe('reported');
-    const row = await DB.prepare("SELECT * FROM age_review_cases WHERE id = 'reported'").first<any>();
-    expect(row.created_via).toBe('report');
-    expect(row.report_id).toBe('report-1');
-    expect(row.reporter_pubkey).toBe(other);
-    expect(row.greenlight_requested_at).toBeTruthy();
+    const row = await DB.prepare("SELECT * FROM age_review_cases WHERE id = 'reported'").first<AgeReviewCase>();
+    expect(row?.created_via).toBe('report');
+    expect(row?.report_id).toBe('report-1');
+    expect(row?.reporter_pubkey).toBe(other);
+    expect(row?.greenlight_requested_at).toBeTruthy();
   });
   it('does not change a report already assigned to a moderator', async () => {
     await DB.prepare("INSERT INTO age_review_cases (id, pubkey, state, suspected_age_band, allowed_resolution, created_via, moderator_pubkey) VALUES ('assigned', ?, 'open_reported', 'age_13_15', 'parent_video_or_email', 'report', ?)")
       .bind(owner, other).run();
     expect((await start()).status).toBe(409);
-    expect((await DB.prepare("SELECT greenlight_requested_at FROM age_review_cases WHERE id = 'assigned'").first<any>()).greenlight_requested_at).toBeNull();
+    expect((await DB.prepare("SELECT greenlight_requested_at FROM age_review_cases WHERE id = 'assigned'").first<AgeReviewCase>())?.greenlight_requested_at).toBeNull();
   });
   it('keeps an existing moderator restriction and reuses its eligible case', async () => {
     await DB.prepare("INSERT INTO age_review_cases (id, pubkey, state, suspected_age_band, allowed_resolution) VALUES ('restricted', ?, 'restricted_pending_parental_consent', 'age_13_15', 'parent_video_or_email')").bind(owner).run();
     const response = await start();
-    const body = await response.json() as any;
+    const body = await response.json() as StartResponse;
     expect(response.status).toBe(200);
     expect(body.restriction.status).toBe('restricted_minor_review');
     expect(body.minorReviewCase.id).toBe('restricted');
@@ -80,7 +91,7 @@ describe('starting the existing Greenlight consent process', () => {
       await DB.prepare('DELETE FROM age_review_cases').run();
       await DB.prepare("INSERT INTO age_review_cases (id, pubkey, suspected_age_band, allowed_resolution) VALUES ('existing', ?, ?, 'support_review_only')").bind(owner, band).run();
       expect((await start()).status).toBe(409);
-      expect((await DB.prepare('SELECT suspected_age_band FROM age_review_cases').first<any>()).suspected_age_band).toBe(band);
+      expect((await DB.prepare('SELECT suspected_age_band FROM age_review_cases').first<AgeReviewCase>())?.suspected_age_band).toBe(band);
     }
   });
 });

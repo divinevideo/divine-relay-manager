@@ -4,6 +4,7 @@
 //   enforcement failures are surfaced (success:false / HTTP 207), not
 //         masked as success, while the state transition still persists.
 import { Miniflare } from 'miniflare';
+import type { ModerationStatusResponse } from '../../shared/age-review';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { ensureSchema } from '../src/db';
 import { handleUpdateAgeReviewCase, handleAgeReviewReplyWebhook, handleParentConsent, checkAgeReviewDeadlines, handleGetModerationStatus, handleStartGreenlight } from '../src/age-review';
@@ -110,7 +111,7 @@ describe('age-review handler on real D1', () => {
     try {
       const consentEnv = { ...env, ZENDESK_SUBDOMAIN: 'test', ZENDESK_EMAIL: 'agent@test.com', ZENDESK_API_TOKEN: 'token', CONSENT_VIDEO_BUCKET: bucket as unknown as R2Bucket };
       expect((await handleParentConsent(request(), 'consent-case', owner, consentEnv, cors)).status).toBe(200);
-      const status = await (await handleGetModerationStatus(owner, consentEnv, cors)).json() as any;
+      const status = await (await handleGetModerationStatus(owner, consentEnv, cors)).json() as ModerationStatusResponse;
       expect(status.restriction.status).toBe(restriction);
       const caseRow = await DB.prepare('SELECT state, version, clock_paused, parent_contact_email FROM age_review_cases WHERE id = ?')
         .bind('consent-case').first<{ state: string; version: number; clock_paused: number; parent_contact_email: string }>();
