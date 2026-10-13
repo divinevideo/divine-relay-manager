@@ -15,6 +15,7 @@ import {
   defaultResolutionForBand,
   CLEAR_RESOLUTIONS,
   isClearResolution,
+  type ClearResolution,
   type EnforcementLegStatus,
   type AgeReviewEnforcement,
   type AgeReviewCaseResponse,
@@ -520,7 +521,8 @@ export async function handleUpdateAgeReviewCase(
   if (TERMINAL_STATES.includes(newState)) {
     try {
       const note = (body.resolution_note as string | undefined) ?? existing.resolution_note;
-      await syncAgeReviewTicketResolution(caseId, newState, note ?? null, env);
+      await syncAgeReviewTicketResolution(caseId, newState, note ?? null, env,
+        clearedCase && isClearResolution(body.resolution) ? body.resolution : undefined);
     } catch (error) {
       console.error('[age-review] Failed to sync Zendesk ticket resolution:', error);
     }
@@ -2070,11 +2072,17 @@ async function createAgeReviewInternalTicket(
   return null;
 }
 
+const CLEAR_RESOLUTION_NOTES: Record<ClearResolution, string> = {
+  approved_minor: 'approved as a protected 13-15 minor',
+  not_minor: 'without approval',
+};
+
 export async function syncAgeReviewTicketResolution(
   caseId: string,
   state: AgeReviewState,
   resolutionNote: string | null,
   env: AgeReviewEnv,
+  resolution?: ClearResolution,
 ): Promise<void> {
   if (!env.DB) return;
 
@@ -2090,7 +2098,8 @@ export async function syncAgeReviewTicketResolution(
   const ticketId = row.zendesk_ticket_id;
 
   const noteLines = [
-    `Age review case ${caseId} resolved: **${state}**`,
+    // `cleared` alone does not tell support whether a re-report will auto-clear.
+    `Age review case ${caseId} resolved: **${state}**${resolution ? ` (${CLEAR_RESOLUTION_NOTES[resolution]})` : ''}`,
   ];
   if (resolutionNote) noteLines.push(`Note: ${resolutionNote}`);
 
