@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { useAccountStatus } from "@/hooks/useAccountStatus";
+import { deriveProtectedMinorView } from "@/lib/protectedMinorView";
 import { useUserStats } from "@/hooks/useUserStats";
 import { AccountTypeIndicator } from "@/components/AccountTypeIndicator";
 import { AgeReviewContent } from "@/components/AgeReviewContent";
@@ -287,8 +288,10 @@ export function AgeReviewDetail({ caseData: c }: Props) {
     contentPresenceKnown,
     ticketLinked: !!c.zendesk_ticket_id,
   });
-  const protectedMinorStatusUnavailable =
-    !accountStatusLoading && accountVerdict.accountType === 'unknown';
+  // keycast's verified_minor plus the D1 registry (#192): the registry is the only
+  // signal for an approved minor who holds their own key.
+  const protectedMinor = deriveProtectedMinorView({ accountStatus, accountType: accountVerdict.accountType });
+  const protectedMinorStatusUnavailable = !accountStatusLoading && protectedMinor.statusUnavailable;
   const verifiedMinorAtDate = accountStatus?.verified_minor_at
     ? new Date(accountStatus.verified_minor_at)
     : null;
@@ -315,11 +318,14 @@ export function AgeReviewDetail({ caseData: c }: Props) {
                 <Pause className="h-3 w-3" /> Clock Paused
               </Badge>
             ) : null}
-            {accountStatus?.verified_minor ? (
+            {protectedMinor.protected ? (
               <>
                 <Badge className="bg-emerald-600 text-white hover:bg-emerald-600">
                   Approved protected minor (13-15)
                 </Badge>
+                {protectedMinor.note ? (
+                  <span className="text-xs text-muted-foreground">{protectedMinor.note}</span>
+                ) : null}
                 {verifiedMinorAtLabel ? (
                   <span className="text-xs text-muted-foreground">
                     approved {verifiedMinorAtLabel}
@@ -618,7 +624,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
                       </Button>
                     }
                     title="Approve as a protected minor?"
-                    summary="This account is restored and marked as an approved 13-15 minor: minor DM limits apply, key export is blocked for Divine login accounts, and future under-16 reports clear automatically."
+                    summary={protectedMinor.approveSummary}
                     confirmLabel="Approve"
                     confirmVariant="approve"
                     onConfirm={async () => {
@@ -688,6 +694,11 @@ export function AgeReviewDetail({ caseData: c }: Props) {
                   </Button>
                 )}
               </div>
+              {protectedMinor.protected && (
+                <p className="text-xs text-muted-foreground">
+                  Already an approved protected minor. "Not a minor" closes this case and keeps protections on.
+                </p>
+              )}
 
               {updateCase.isPending && (
                 <div className="flex items-center gap-1.5 text-xs text-muted-foreground">

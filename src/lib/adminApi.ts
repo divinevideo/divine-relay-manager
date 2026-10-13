@@ -1434,6 +1434,8 @@ export interface AccountStatusResponse {
   suspended_at?: string;
   verified_minor?: boolean;
   verified_minor_at?: string;
+  /** D1 protected-minor registry (#192): true for an active subject; null when unknown. */
+  protected_minor?: boolean | null;
   not_found?: boolean;
   error?: string;
 }
