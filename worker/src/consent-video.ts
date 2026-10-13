@@ -14,11 +14,18 @@ export interface ConsentVideoEnv {
   CONSENT_ACCESS_AUD?: string;
 }
 
+/**
+ * A rejected consent upload. `code` is the stable machine-readable reason the
+ * route returns beside the human `error` text, so a client branches on it
+ * rather than on wording.
+ */
 export class ConsentUploadError extends Error {
   readonly status: number;
-  constructor(status: number, message: string) {
+  readonly code: string;
+  constructor(status: number, message: string, code: string) {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -74,7 +81,7 @@ export async function parseConsentMultipart(
   const videoLimit = limits.videoLimit ?? CONSENT_VIDEO_LIMIT;
   const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;\s]+))/i);
   const boundary = boundaryMatch?.[1] ?? boundaryMatch?.[2];
-  if (!boundary) throw new ConsentUploadError(400, 'Invalid multipart body');
+  if (!boundary) throw new ConsentUploadError(400, 'Invalid multipart body', 'invalid_multipart');
 
   const enc = new TextEncoder();
   const marker = enc.encode(`\r\n--${boundary}`);
@@ -98,13 +105,13 @@ export async function parseConsentMultipart(
     if (partIsVideo) {
       videoSize += data.length;
       if (videoSize > videoLimit) {
-        throw new ConsentUploadError(413, 'Consent video exceeds 80 MB');
+        throw new ConsentUploadError(413, 'Consent video exceeds 80 MB', 'video_too_large');
       }
       await sink.onVideoChunk(data);
     } else if (partName) {
       fieldChunks.push(data);
       const size = fieldChunks.reduce((n, c) => n + c.length, 0);
-      if (size > 1_000_000) throw new ConsentUploadError(400, 'Multipart field too large');
+      if (size > 1_000_000) throw new ConsentUploadError(400, 'Multipart field too large', 'field_too_large');
     }
   };
 
@@ -136,12 +143,12 @@ export async function parseConsentMultipart(
           } else if (buf.length > marker.length) {
             buf = buf.slice(buf.length - marker.length);
           }
-          if (final) throw new ConsentUploadError(400, 'Invalid multipart body');
+          if (final) throw new ConsentUploadError(400, 'Invalid multipart body', 'invalid_multipart');
           return;
         }
         // Need the two bytes after the marker to tell end-of-body from next part.
         if (buf.length < idx + marker.length + 2) {
-          if (final) throw new ConsentUploadError(400, 'Invalid multipart body');
+          if (final) throw new ConsentUploadError(400, 'Invalid multipart body', 'invalid_multipart');
           if (state === 'data' && idx > 0) {
             await emitData(buf.slice(0, idx));
             buf = buf.slice(idx);
@@ -156,14 +163,14 @@ export async function parseConsentMultipart(
           state = 'done';
           return;
         }
-        if (trailer !== '\r\n') throw new ConsentUploadError(400, 'Invalid multipart body');
+        if (trailer !== '\r\n') throw new ConsentUploadError(400, 'Invalid multipart body', 'invalid_multipart');
         state = 'headers';
         continue;
       }
       // headers
       const idx = findSub(buf, headerSep);
       if (idx === -1) {
-        if (final) throw new ConsentUploadError(400, 'Invalid multipart body');
+        if (final) throw new ConsentUploadError(400, 'Invalid multipart body', 'invalid_multipart');
         return;
       }
       const headerText = new TextDecoder('latin1').decode(buf.slice(0, idx));
@@ -176,9 +183,9 @@ export async function parseConsentMultipart(
       if (partIsVideo) {
         // One clip per submission: a second part would start another upload
         // to the same object and leave the recorded size the sum of both.
-        if (sawVideo) throw new ConsentUploadError(400, 'Only one video file part is allowed');
+        if (sawVideo) throw new ConsentUploadError(400, 'Only one video file part is allowed', 'extra_video_part');
         if (!type.startsWith('video/')) {
-          throw new ConsentUploadError(415, 'video/* content type is required');
+          throw new ConsentUploadError(415, 'video/* content type is required', 'video_type_required');
         }
         sawVideo = true;
         videoContentType = type;
@@ -194,15 +201,15 @@ export async function parseConsentMultipart(
     totalBytes += next.value.byteLength;
     if (totalBytes > bodyLimit) {
       await reader.cancel();
-      throw new ConsentUploadError(413, 'Consent upload exceeds 82 MB');
+      throw new ConsentUploadError(413, 'Consent upload exceeds 82 MB', 'upload_too_large');
     }
     buf = concat(buf, next.value);
     await processBuffer(false);
     if ((state as string) === 'done') break;
   }
   if ((state as string) !== 'done') await processBuffer(true);
-  if (!sawVideo) throw new ConsentUploadError(400, 'A video file part is required');
-  if (videoSize === 0) throw new ConsentUploadError(400, 'A non-empty video file is required');
+  if (!sawVideo) throw new ConsentUploadError(400, 'A video file part is required', 'video_required');
+  if (videoSize === 0) throw new ConsentUploadError(400, 'A non-empty video file is required', 'video_empty');
 
   return { email: fields.get('email') ?? null, videoContentType, videoSize };
 }

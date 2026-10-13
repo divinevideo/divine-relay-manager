@@ -82,6 +82,28 @@ describe('parseConsentMultipart', () => {
   });
 });
 
+describe('parseConsentMultipart error codes', () => {
+  const parse = (parts: Parameters<typeof multipartBody>[0], limits: { videoLimit?: number; bodyLimit?: number } = {}) => {
+    const { body, contentType } = multipartBody(parts);
+    return parseConsentMultipart(body, contentType, limits, { onVideoChunk: () => {} });
+  };
+  const video = (value: string | Uint8Array = 'clip', type = 'video/mp4') =>
+    ({ name: 'video', filename: 'c.mp4', type, value });
+
+  it.each([
+    ['invalid_multipart', () => parseConsentMultipart(new ReadableStream(), 'multipart/form-data', {}, { onVideoChunk: () => {} })],
+    ['extra_video_part', () => parse([video(), video()])],
+    ['video_type_required', () => parse([video('hi', 'text/plain')])],
+    ['video_too_large', () => parse([video(new Uint8Array(100))], { videoLimit: 10 })],
+    ['upload_too_large', () => parse([video(new Uint8Array(100))], { bodyLimit: 50 })],
+    ['field_too_large', () => parse([{ name: 'email', value: 'x'.repeat(1_000_001) }, video()])],
+    ['video_required', () => parse([{ name: 'email', value: 'parent@example.com' }])],
+    ['video_empty', () => parse([video('')])],
+  ])('rejects with code %s', async (code, run) => {
+    await expect(run()).rejects.toMatchObject({ code });
+  });
+});
+
 describe('R2MultipartVideoWriter', () => {
   it('uploads parts and completes with total size', async () => {
     const parts: Array<{ n: number; size: number }> = [];

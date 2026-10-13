@@ -1669,6 +1669,57 @@ describe('handleParentConsent', () => {
     return { fetchFn, comment: () => commentBody };
   }
 
+  it('answers each rejection with a stable code beside its error text', async () => {
+    const codeOf = async (res: Response) => ({ status: res.status, code: ((await res.json()) as { code?: string }).code });
+    const caseDb = (c: ReturnType<typeof makeCase> | null) =>
+      ({ prepare: vi.fn().mockImplementation(() => ({ bind: vi.fn().mockReturnValue({ first: vi.fn().mockResolvedValue(c) }) })) });
+    const pending = () => makeCase({ state: 'restricted_pending_parental_consent' });
+
+    expect(await codeOf(await handleParentConsent(request(), 'case-1', 'pk', makeEnv(), corsHeaders)))
+      .toEqual({ status: 500, code: 'database_unavailable' });
+    expect(await codeOf(await handleParentConsent(request(), 'case-1', 'pk', consentEnv(caseDb(null)), corsHeaders)))
+      .toEqual({ status: 404, code: 'case_not_found' });
+    const closed = makeCase({ state: 'denied_closed' });
+    expect(await codeOf(await handleParentConsent(request(), closed.id, closed.pubkey, consentEnv(caseDb(closed)), corsHeaders)))
+      .toEqual({ status: 400, code: 'case_closed' });
+    const under13 = makeCase({ state: 'restricted_pending_parental_consent', suspected_age_band: 'under_13' });
+    expect(await codeOf(await handleParentConsent(request(), under13.id, under13.pubkey, consentEnv(caseDb(under13)), corsHeaders)))
+      .toEqual({ status: 400, code: 'under_13_support_only' });
+    const supportOnly = makeCase({ state: 'restricted_pending_parental_consent', suspected_age_band: 'age_16_plus_claimed', allowed_resolution: 'support_review_only' });
+    expect(await codeOf(await handleParentConsent(request(), supportOnly.id, supportOnly.pubkey, consentEnv(caseDb(supportOnly)), corsHeaders)))
+      .toEqual({ status: 400, code: 'consent_video_not_available' });
+    const reported = makeCase({ state: 'open_reported' });
+    expect(await codeOf(await handleParentConsent(request(), reported.id, reported.pubkey, consentEnv(caseDb(reported)), corsHeaders)))
+      .toEqual({ status: 400, code: 'invalid_case_state' });
+    const c = pending();
+    expect(await codeOf(await handleParentConsent(request(), c.id, c.pubkey, makeEnv(caseDb(c), { CONSENT_VIDEO_BUCKET: fakeBucket() } as Partial<AgeReviewEnv>), corsHeaders)))
+      .toEqual({ status: 503, code: 'consent_upload_not_configured' });
+    const notMultipart = new Request('https://api.test/v1/minor-review-cases/case-1/parent-consent', { method: 'POST', body: '{}', headers: { 'Content-Type': 'application/json' } });
+    expect(await codeOf(await handleParentConsent(notMultipart, c.id, c.pubkey, consentEnv(caseDb(c)), corsHeaders)))
+      .toEqual({ status: 400, code: 'multipart_required' });
+    const tooLarge = request();
+    tooLarge.headers.set('Content-Length', String(83 * 1024 * 1024));
+    expect(await codeOf(await handleParentConsent(tooLarge, c.id, c.pubkey, consentEnv(caseDb(c)), corsHeaders)))
+      .toEqual({ status: 413, code: 'upload_too_large' });
+    const noBody = new Request('https://api.test/v1/minor-review-cases/case-1/parent-consent', { method: 'POST', headers: { 'Content-Type': 'multipart/form-data; boundary=x' } });
+    expect(await codeOf(await handleParentConsent(noBody, c.id, c.pubkey, consentEnv(caseDb(c)), corsHeaders)))
+      .toEqual({ status: 400, code: 'missing_fields' });
+    const twoClips = new FormData();
+    twoClips.set('email', 'parent@example.com');
+    twoClips.append('video', new File(['a'], 'a.mp4', { type: 'video/mp4' }));
+    twoClips.append('video', new File(['b'], 'b.mp4', { type: 'video/mp4' }));
+    const extra = new Request('https://api.test/v1/minor-review-cases/case-1/parent-consent', { method: 'POST', body: twoClips });
+    expect(await codeOf(await handleParentConsent(extra, c.id, c.pubkey, consentEnv(consentDb(c).db), corsHeaders)))
+      .toEqual({ status: 400, code: 'extra_video_part' });
+    expect(await codeOf(await handleParentConsent(request('bad-email'), c.id, c.pubkey, consentEnv(consentDb(c).db), corsHeaders)))
+      .toEqual({ status: 400, code: 'invalid_email' });
+    expect(await codeOf(await handleParentConsent(request('parent@example.com', 'text/plain'), c.id, c.pubkey, consentEnv(consentDb(c).db), corsHeaders)))
+      .toEqual({ status: 415, code: 'video_type_required' });
+    const storageFails = consentEnv(consentDb(c).db, { CONSENT_VIDEO_BUCKET: fakeBucket(true) } as Partial<AgeReviewEnv>);
+    expect(await codeOf(await handleParentConsent(request(), c.id, c.pubkey, storageFails, corsHeaders)))
+      .toEqual({ status: 503, code: 'storage_failed' });
+  });
+
   it('stores the clip in R2 and comments the reviewer link before advancing the case', async () => {
     const c = makeCase({ state: 'restricted_pending_parental_consent', zendesk_ticket_id: 42, version: 7 });
     const { db, calls } = consentDb(c);
@@ -1715,6 +1766,7 @@ describe('handleParentConsent', () => {
       CONSENT_VIDEO_BUCKET: fakeBucket(),
     } as Partial<AgeReviewEnv>), corsHeaders);
     expect(res.status).toBe(503);
+    expect(((await res.json()) as { code?: string }).code).toBe('review_link_failed');
     expect(calls.some((sql) => sql.includes("state = 'submitted_for_review'"))).toBe(false);
   });
 
@@ -1839,6 +1891,7 @@ describe('handleParentConsent', () => {
       ZENDESK_SUBDOMAIN: 'test', ZENDESK_EMAIL: 'agent@test.com', ZENDESK_API_TOKEN: 'token', CONSENT_VIDEO_BUCKET: bucket,
     } as Partial<AgeReviewEnv>), corsHeaders);
     expect(res.status).toBe(409);
+    expect(((await res.json()) as { code?: string }).code).toBe('needs_manual_review');
     expect(mockFetch).not.toHaveBeenCalled();
   });
 

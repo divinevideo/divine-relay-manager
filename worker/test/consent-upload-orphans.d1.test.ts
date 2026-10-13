@@ -91,6 +91,7 @@ describe('a consent upload rejected after its clip is stored', () => {
       consentRequest([['email', 'parent@example.com'], ['video', clip()]]),
       'orphan-case', OWNER, envWith(bucket), {});
     expect(res.status).toBe(409);
+    expect(((await res.json()) as { code?: string }).code).toBe('submission_in_progress');
     expect([...objects]).toEqual([]);
   });
 
@@ -113,6 +114,7 @@ describe('a consent upload rejected after its clip is stored', () => {
       consentRequest([['email', 'parent@example.com'], ['video', clip()]]),
       'orphan-case', OWNER, env, {});
     expect(res.status).toBe(409);
+    expect(((await res.json()) as { code?: string }).code).toBe('submission_changed');
     const row = await DB.prepare("SELECT object_key FROM age_review_parent_consent_submissions WHERE case_id = 'orphan-case'")
       .first<{ object_key: string }>();
     expect(row?.object_key).toBeTruthy();

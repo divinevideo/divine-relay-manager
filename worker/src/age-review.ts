@@ -1037,39 +1037,39 @@ export async function handleParentConsent(
   env: AgeReviewEnv,
   corsHeaders: Record<string, string>,
 ): Promise<Response> {
-  if (!env.DB) return json({ success: false, error: 'Database not configured' }, 500, corsHeaders);
+  if (!env.DB) return json({ success: false, code: 'database_unavailable', error: 'Database not configured' }, 500, corsHeaders);
 
   let current = await env.DB.prepare('SELECT * FROM age_review_cases WHERE id = ? AND pubkey = ?')
     .bind(caseId, userPubkey).first<AgeReviewCase>();
-  if (!current) return json({ success: false, error: 'Case not found' }, 404, corsHeaders);
+  if (!current) return json({ success: false, code: 'case_not_found', error: 'Case not found' }, 404, corsHeaders);
   // A successful retry must not re-upload the video or add another comment.
   if (current.state === 'submitted_for_review') return json({ success: true }, 200, corsHeaders);
   if (TERMINAL_STATES.includes(current.state as AgeReviewState)) {
-    return json({ success: false, error: 'Case is already closed' }, 400, corsHeaders);
+    return json({ success: false, code: 'case_closed', error: 'Case is already closed' }, 400, corsHeaders);
   }
   if (current.suspected_age_band === 'under_13') {
-    return json({ success: false, error: 'Under-13 cases require support review only' }, 400, corsHeaders);
+    return json({ success: false, code: 'under_13_support_only', error: 'Under-13 cases require support review only' }, 400, corsHeaders);
   }
   if (current.allowed_resolution !== 'parent_video_or_email') {
-    return json({ success: false, error: 'Parent consent video is not available for this case' }, 400, corsHeaders);
+    return json({ success: false, code: 'consent_video_not_available', error: 'Parent consent video is not available for this case' }, 400, corsHeaders);
   }
   if (!VALID_TRANSITIONS[current.state as AgeReviewState]?.includes('submitted_for_review')) {
-    return json({ success: false, error: `Cannot submit parent consent from state '${current.state}'` }, 400, corsHeaders);
+    return json({ success: false, code: 'invalid_case_state', error: `Cannot submit parent consent from state '${current.state}'` }, 400, corsHeaders);
   }
   // Fail closed until a reviewer can open what is stored: playback needs the
   // bucket and both Access settings, so upload needs the same three. A clip
   // accepted earlier would pause the case behind a link that answers 503.
   if (!env.CONSENT_VIDEO_BUCKET || !env.CONSENT_ACCESS_TEAM_DOMAIN || !env.CONSENT_ACCESS_AUD) {
-    return json({ success: false, error: 'Consent upload is not configured' }, 503, corsHeaders);
+    return json({ success: false, code: 'consent_upload_not_configured', error: 'Consent upload is not configured' }, 503, corsHeaders);
   }
   if (!request.headers.get('Content-Type')?.toLowerCase().startsWith('multipart/form-data;')) {
-    return json({ success: false, error: 'multipart/form-data is required' }, 400, corsHeaders);
+    return json({ success: false, code: 'multipart_required', error: 'multipart/form-data is required' }, 400, corsHeaders);
   }
   const declaredLength = Number(request.headers.get('Content-Length'));
   if (Number.isFinite(declaredLength) && declaredLength > CONSENT_BODY_LIMIT) {
-    return json({ success: false, error: 'Consent upload exceeds 82 MB' }, 413, corsHeaders);
+    return json({ success: false, code: 'upload_too_large', error: 'Consent upload exceeds 82 MB' }, 413, corsHeaders);
   }
-  if (!request.body) return json({ success: false, error: 'email and video are required' }, 400, corsHeaders);
+  if (!request.body) return json({ success: false, code: 'missing_fields', error: 'email and video are required' }, 400, corsHeaders);
 
   const nowSeconds = Math.floor(Date.now() / 1000);
   const leaseUntil = nowSeconds + 10 * 60;
@@ -1168,16 +1168,16 @@ export async function handleParentConsent(
     await (writer as R2MultipartVideoWriter | null)?.abort();
     await discardUnrecordedUpload();
     if (error instanceof ConsentUploadError) {
-      return json({ success: false, error: error.message }, error.status, corsHeaders);
+      return json({ success: false, code: error.code, error: error.message }, error.status, corsHeaders);
     }
     console.error('[age-review] Failed to store consent video:', error);
-    return json({ success: false, error: 'Could not store consent video; retry' }, 503, corsHeaders);
+    return json({ success: false, code: 'storage_failed', error: 'Could not store consent video; retry' }, 503, corsHeaders);
   }
 
   const email = parsed.email;
   if (typeof email !== 'string' || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) || email.length > 254) {
     await discardUnrecordedUpload();
-    return json({ success: false, error: 'Invalid email format' }, 400, corsHeaders);
+    return json({ success: false, code: 'invalid_email', error: 'Invalid email format' }, 400, corsHeaders);
   }
 
   // Claim the submission row only after the body has validated, then take
@@ -1188,7 +1188,7 @@ export async function handleParentConsent(
   if (inserted.meta?.changes !== 1) {
     if (!prior) {
       await discardUnrecordedUpload();
-      return json({ success: false, error: 'Submission changed; retry' }, 409, corsHeaders);
+      return json({ success: false, code: 'submission_changed', error: 'Submission changed; retry' }, 409, corsHeaders);
     }
     if (prior.status !== 'commented' && prior.status !== 'attached') {
       const lock = await env.DB.prepare(`UPDATE age_review_parent_consent_submissions
@@ -1196,7 +1196,7 @@ export async function handleParentConsent(
         .bind(leaseUntil, caseId, nowSeconds).run();
       if (lock.meta?.changes !== 1) {
         await discardUnrecordedUpload();
-        return json({ success: false, error: 'Consent submission is already in progress; retry' }, 409, corsHeaders);
+        return json({ success: false, code: 'submission_in_progress', error: 'Consent submission is already in progress; retry' }, 409, corsHeaders);
       }
     }
     submission = prior;
@@ -1219,7 +1219,7 @@ export async function handleParentConsent(
     if (marked.meta?.changes !== 1) {
       await releaseLease();
       await discardUnrecordedUpload();
-      return json({ success: false, error: 'Submission changed; retry' }, 409, corsHeaders);
+      return json({ success: false, code: 'submission_changed', error: 'Submission changed; retry' }, 409, corsHeaders);
     }
     submission.status = 'stored';
   }
@@ -1246,7 +1246,7 @@ export async function handleParentConsent(
         // finds the ticket, whose subject carries it.
         console.error(`[age-review] Consent submission for case ${caseId} needs manual reconciliation: ticket creation outcome unknown`);
         await alertReconciliationOnce(env, current);
-        return json({ success: false, error: 'Consent submission needs manual review; contact support' }, 409, corsHeaders);
+        return json({ success: false, code: 'needs_manual_review', error: 'Consent submission needs manual review; contact support' }, 409, corsHeaders);
       }
       const hasReviewLink = async (ticketId: number): Promise<boolean> => {
         const comments = await fetch(`${zendesk.baseUrl}/tickets/${ticketId}/comments?sort_order=desc&per_page=100`, {
@@ -1298,13 +1298,13 @@ export async function handleParentConsent(
   } catch (error) {
     console.error('[age-review] Failed to link consent video for review:', error);
     await releaseLease();
-    return json({ success: false, error: 'Could not submit consent video; retry' }, 503, corsHeaders);
+    return json({ success: false, code: 'review_link_failed', error: 'Could not submit consent video; retry' }, 503, corsHeaders);
   }
 
   for (let attempt = 0; attempt < 2 && current; attempt++) {
     if (current.state === 'submitted_for_review') return json({ success: true }, 200, corsHeaders);
     if (!VALID_TRANSITIONS[current.state as AgeReviewState]?.includes('submitted_for_review')) {
-      return json({ success: false, error: 'Case changed during submission' }, 409, corsHeaders);
+      return json({ success: false, code: 'case_changed', error: 'Case changed during submission' }, 409, corsHeaders);
     }
     const now = new Date();
     const deadline = current.deadline_at ? new Date(current.deadline_at) : null;
@@ -1321,7 +1321,7 @@ export async function handleParentConsent(
     current = await env.DB.prepare('SELECT * FROM age_review_cases WHERE id = ? AND pubkey = ?')
       .bind(caseId, userPubkey).first<AgeReviewCase>();
   }
-  return json({ success: false, error: 'Case changed during submission; retry' }, 409, corsHeaders);
+  return json({ success: false, code: 'case_changed', error: 'Case changed during submission; retry' }, 409, corsHeaders);
 }
 
 // ---------------------------------------------------------------------------
