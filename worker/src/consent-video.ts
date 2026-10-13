@@ -349,11 +349,26 @@ export async function verifyConsentAccessJwt(
   }
 }
 
-interface ConsentSubmissionRow {
+interface ConsentClipRow {
   object_key: string;
   content_type: string | null;
   size_bytes: number | null;
-  status: string;
+}
+
+/**
+ * The undisposed clip a reviewer receipt names: the case's current
+ * submission, or a round a moderator sent back, whose link is still on the
+ * ticket.
+ */
+export async function findConsentClip(db: D1Database, receiptId: string): Promise<ConsentClipRow | null> {
+  return db.prepare(
+    `SELECT object_key, content_type, size_bytes FROM age_review_parent_consent_submissions
+     WHERE receipt_id = ? AND disposed_at IS NULL AND object_key IS NOT NULL
+     UNION ALL
+     SELECT object_key, content_type, size_bytes FROM age_review_parent_consent_superseded
+     WHERE receipt_id = ? AND disposed_at IS NULL
+     LIMIT 1`,
+  ).bind(receiptId, receiptId).first<ConsentClipRow>();
 }
 
 export async function handleConsentVideo(
@@ -369,10 +384,7 @@ export async function handleConsentVideo(
   if (!token || !(await verifyConsentAccessJwt(token, env))) {
     return json({ success: false, error: 'Unauthorized' }, 401, corsHeaders);
   }
-  const row = await env.DB.prepare(
-    `SELECT object_key, content_type, size_bytes, status FROM age_review_parent_consent_submissions
-     WHERE receipt_id = ? AND disposed_at IS NULL`,
-  ).bind(receiptId).first<ConsentSubmissionRow>();
+  const row = await findConsentClip(env.DB, receiptId);
   if (!row?.object_key) return json({ success: false, error: 'Not found' }, 404, corsHeaders);
 
   const total = row.size_bytes ?? undefined;
@@ -431,21 +443,29 @@ export async function handleConsentVideo(
 
 export async function disposeDueConsentVideos(db: D1Database, bucket: R2Bucket): Promise<number> {
   let disposed = 0;
-  const due = await db.prepare(
-    `SELECT s.case_id, s.object_key FROM age_review_parent_consent_submissions s
-     JOIN age_review_cases c ON c.id = s.case_id
-     WHERE s.object_key IS NOT NULL AND s.disposed_at IS NULL
+  // The case is closed past the consent retention window and no hold covers
+  // its consent clips. Shared by the current clip and earlier rounds.
+  const dueAndUnheld = (alias: string) => `JOIN age_review_cases c ON c.id = ${alias}.case_id
+     WHERE ${alias}.object_key IS NOT NULL AND ${alias}.disposed_at IS NULL
        AND c.closed_at IS NOT NULL
        AND datetime(c.closed_at) <= datetime('now', '-${RETENTION_DAYS.consentVideo} days')
        AND NOT EXISTS (SELECT 1 FROM retention_legal_holds h
          WHERE h.record_type = 'age_review_case'
-           AND (h.record_key IS NULL OR h.record_key = s.case_id)
+           AND (h.record_key IS NULL OR h.record_key = ${alias}.case_id)
            AND (h.disposal_stage = 'all' OR h.disposal_stage = 'consent_video')
            AND datetime(h.starts_at) <= datetime('now')
            AND h.released_at IS NULL
-           AND (h.expires_at IS NULL OR datetime(h.expires_at) > datetime('now')))
+           AND (h.expires_at IS NULL OR datetime(h.expires_at) > datetime('now')))`;
+  const due = await db.prepare(
+    `SELECT s.case_id, s.object_key FROM age_review_parent_consent_submissions s
+     ${dueAndUnheld('s')}
      LIMIT 100`,
   ).bind().all<{ case_id: string; object_key: string }>();
+  const superseded = await db.prepare(
+    `SELECT p.receipt_id, p.object_key FROM age_review_parent_consent_superseded p
+     ${dueAndUnheld('p')}
+     LIMIT 100`,
+  ).bind().all<{ receipt_id: string; object_key: string }>();
   const abandoned = await db.prepare(
     `SELECT s.case_id, s.object_key FROM age_review_parent_consent_submissions s
      WHERE s.object_key IS NOT NULL AND s.disposed_at IS NULL AND s.status = 'processing'
@@ -459,6 +479,11 @@ export async function disposeDueConsentVideos(db: D1Database, bucket: R2Bucket):
   // outlive the case itself.
   await db.prepare(
     `DELETE FROM age_review_parent_consent_submissions
+     WHERE disposed_at IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM age_review_cases c WHERE c.id = case_id)`,
+  ).bind().run();
+  await db.prepare(
+    `DELETE FROM age_review_parent_consent_superseded
      WHERE disposed_at IS NOT NULL
        AND NOT EXISTS (SELECT 1 FROM age_review_cases c WHERE c.id = case_id)`,
   ).bind().run();
@@ -477,6 +502,21 @@ export async function disposeDueConsentVideos(db: D1Database, bucket: R2Bucket):
       `UPDATE age_review_parent_consent_submissions SET disposed_at = unixepoch(), status = 'disposed'
        WHERE case_id = ? AND object_key = ? AND disposed_at IS NULL`,
     ).bind(row.case_id, row.object_key).run();
+    disposed += marked.meta?.changes ?? 0;
+  }
+  for (const row of superseded.results) {
+    if (seen.has(row.object_key)) continue;
+    seen.add(row.object_key);
+    try {
+      await bucket.delete(row.object_key);
+    } catch (error) {
+      console.error('[retention] consent video delete failed:', error);
+      continue;
+    }
+    const marked = await db.prepare(
+      `UPDATE age_review_parent_consent_superseded SET disposed_at = unixepoch()
+       WHERE receipt_id = ? AND disposed_at IS NULL`,
+    ).bind(row.receipt_id).run();
     disposed += marked.meta?.changes ?? 0;
   }
   return disposed;

@@ -129,6 +129,19 @@ export async function ensureSchema(db: D1Database): Promise<void> {
   }
   await db.prepare(`CREATE INDEX IF NOT EXISTS idx_parent_consent_receipt
     ON age_review_parent_consent_submissions (receipt_id)`).run();
+  // A clip from a round a moderator sent back, kept with its receipt until
+  // retention disposes of it under the same rules as the current clip.
+  await db.prepare(`CREATE TABLE IF NOT EXISTS age_review_parent_consent_superseded (
+    receipt_id TEXT PRIMARY KEY,
+    case_id TEXT NOT NULL,
+    object_key TEXT NOT NULL,
+    content_type TEXT,
+    size_bytes INTEGER,
+    superseded_at INTEGER NOT NULL,
+    disposed_at INTEGER
+  )`).run();
+  await db.prepare(`CREATE INDEX IF NOT EXISTS idx_parent_consent_superseded_case
+    ON age_review_parent_consent_superseded (case_id)`).run();
 
   // Add columns to existing tables that were created without them
   try {

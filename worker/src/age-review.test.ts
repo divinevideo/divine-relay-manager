@@ -1648,7 +1648,8 @@ describe('handleParentConsent', () => {
           return { meta: { changes: 1 } };
         }),
       })),
-    })) };
+    })) } as { prepare: ReturnType<typeof vi.fn>; batch?: (stmts: Array<{ run: () => Promise<unknown> }>) => Promise<unknown[]> };
+    db.batch = async (stmts) => { const out: unknown[] = []; for (const stmt of stmts) out.push(await stmt.run()); return out; };
     return { db, calls, row: () => row };
   }
 
@@ -1785,7 +1786,7 @@ describe('handleParentConsent', () => {
 
   it('uploads a fresh clip when a moderator sends the case back for a new round', async () => {
     const c = makeCase({ state: 'restricted_pending_parental_consent', zendesk_ticket_id: 42, version: 9 });
-    const { db, row } = consentDb(c, { status: 'commented', upload_token: null, ticket_id: 42, lease_until: 0, receipt_id: 'old-receipt', object_key: 'old-key', case_version: 7, ticket_attempt_at: null, created_at: 1 });
+    const { db, row, calls } = consentDb(c, { status: 'commented', upload_token: null, ticket_id: 42, lease_until: 0, receipt_id: 'old-receipt', object_key: 'old-key', case_version: 7, ticket_attempt_at: null, created_at: 1 });
     const bucket = fakeBucket();
     bucket.objects.set('old-key', new TextEncoder().encode('old'));
     const z = zendeskWithComment();
@@ -1794,7 +1795,9 @@ describe('handleParentConsent', () => {
       ZENDESK_SUBDOMAIN: 'test', ZENDESK_EMAIL: 'agent@test.com', ZENDESK_API_TOKEN: 'token', CONSENT_VIDEO_BUCKET: bucket,
     } as Partial<AgeReviewEnv>), corsHeaders);
     expect(res.status).toBe(200);
-    expect(bucket.objects.has('old-key')).toBe(false);
+    // The earlier clip is left for retention, recorded with its receipt.
+    expect(bucket.objects.has('old-key')).toBe(true);
+    expect(calls.some((sql) => sql.includes('INSERT OR IGNORE INTO age_review_parent_consent_superseded'))).toBe(true);
     expect(bucket.createMultipartUpload).toHaveBeenCalledTimes(1);
     expect(row()?.receipt_id).not.toBe('old-receipt');
     expect(z.comment()).toContain('/api/age-review/consent-video/');

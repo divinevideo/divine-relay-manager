@@ -1097,13 +1097,21 @@ export async function handleParentConsent(
   const isNewRound = (submission.status === 'commented' || submission.status === 'attached')
     && submission.case_version != null && submission.case_version !== current.version;
   if (isNewRound) {
-    if (env.CONSENT_VIDEO_BUCKET && submission.object_key) {
-      try { await env.CONSENT_VIDEO_BUCKET.delete(submission.object_key); } catch { /* replaced below; disposal sweeps orphans */ }
-    }
-    await env.DB.prepare(`UPDATE age_review_parent_consent_submissions
-      SET status = 'processing', receipt_id = NULL, object_key = NULL, content_type = NULL,
-        size_bytes = NULL, case_version = NULL, ticket_attempt_at = NULL, upload_token = NULL
-      WHERE case_id = ?`).bind(caseId).run();
+    // The earlier clip stays: its reviewer link is already on the ticket, and
+    // only retention may dispose of it, after the case closes and with legal
+    // holds honored. Move it aside in the same batch as the reset, so the
+    // receipt is never lost even when this new upload is then rejected.
+    await env.DB.batch([
+      env.DB.prepare(`INSERT OR IGNORE INTO age_review_parent_consent_superseded
+        (receipt_id, case_id, object_key, content_type, size_bytes, superseded_at)
+        SELECT receipt_id, case_id, object_key, content_type, size_bytes, unixepoch()
+        FROM age_review_parent_consent_submissions
+        WHERE case_id = ? AND receipt_id IS NOT NULL AND object_key IS NOT NULL`).bind(caseId),
+      env.DB.prepare(`UPDATE age_review_parent_consent_submissions
+        SET status = 'processing', receipt_id = NULL, object_key = NULL, content_type = NULL,
+          size_bytes = NULL, case_version = NULL, ticket_attempt_at = NULL, upload_token = NULL
+        WHERE case_id = ?`).bind(caseId),
+    ]);
     submission = { ...submission, status: 'processing', receipt_id: null, object_key: null, case_version: null, ticket_attempt_at: null };
   }
   const receiptId = submission.receipt_id ?? crypto.randomUUID();

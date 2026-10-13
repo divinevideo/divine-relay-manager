@@ -312,6 +312,8 @@ export async function runRetentionDisposal(env: RetentionEnv): Promise<Retention
             WHERE s.source_case_id = c.id AND s.classification_state = 'active')
           AND NOT EXISTS (SELECT 1 FROM age_review_parent_consent_submissions cs
             WHERE cs.case_id = c.id AND cs.object_key IS NOT NULL AND cs.disposed_at IS NULL)
+          AND NOT EXISTS (SELECT 1 FROM age_review_parent_consent_superseded ps
+            WHERE ps.case_id = c.id AND ps.disposed_at IS NULL)
           AND ${noHold('age_review_case', 'c.id', 'deletion')}
         LIMIT ${BATCH_LIMIT})`).run();
     result.casesDeleted = cases.meta.changes;

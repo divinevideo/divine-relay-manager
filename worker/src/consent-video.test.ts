@@ -180,14 +180,15 @@ describe('disposeDueConsentVideos', () => {
     const order: string[] = [];
     const rows = [{ case_id: 'c1', object_key: 'obj1' }];
     const db = { prepare: vi.fn((sql: string) => ({ bind: vi.fn(() => ({
-      all: vi.fn(async () => ({ results: sql.includes('closed_at') ? rows : [] })),
+      all: vi.fn(async () => ({ results: sql.includes('closed_at') && sql.includes('consent_submissions') ? rows : [] })),
       run: vi.fn(async () => { order.push('db'); return { meta: { changes: 1 } }; }),
     })) })) };
     const bucket = { delete: vi.fn(async () => { order.push('r2'); }) };
     const count = await disposeDueConsentVideos(db as never, bucket as never);
     expect(count).toBe(1);
-    // First 'db' is the disposed-row cleanup; the object delete still
-    // precedes the update that marks this row disposed.
-    expect(order).toEqual(['db', 'r2', 'db']);
+    // The first two 'db' entries are the disposed-row cleanups for current
+    // and earlier rounds; the object delete still precedes the update that
+    // marks this row disposed.
+    expect(order).toEqual(['db', 'db', 'r2', 'db']);
   });
 });
