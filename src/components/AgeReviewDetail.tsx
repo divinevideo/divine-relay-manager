@@ -184,29 +184,32 @@ export function AgeReviewDetail({ caseData: c }: Props) {
       // the list or the chips disagree with the list until their 30s interval.
       queryClient.invalidateQueries({ queryKey: ['age-review-counts'] });
       const requestedState = pendingStateRef.current as AgeReviewState | undefined;
+      // Surface only actual failed enforcement legs. `not_attempted` is valid
+      // for transitions where a leg does not apply.
+      const enforcement = data.enforcement;
+      const failed: string[] = [];
+      if (enforcement?.relay === 'failed') failed.push('relay (existing posts and feed)');
+      if (enforcement?.bulk === 'failed') failed.push('media and content');
+      if (enforcement?.keycast === 'failed') failed.push('account sign-in');
+      if (enforcement?.subjectClear === 'failed') failed.push('protected-minor registry');
+      if (enforcement?.keycastMinorClear === 'failed') failed.push('protected-minor account projection');
+      if (enforcement?.keycastMinorSet === 'failed') failed.push('protected-minor account flag');
       // An approval is only real once the worker reports it recorded the
       // protected subject. A worker that predates approvals (Pages deployed
       // before it) clears the case and never mentions subjectActivate, so absent
-      // counts as not recorded rather than as success.
-      if (updates.resolution === 'approved_minor' && data.enforcement?.subjectActivate !== 'ok') {
+      // counts as not recorded rather than as success. This is the one toast
+      // shown, so it also names any other leg that failed. The case is closed
+      // and a second approval is refused, so the moderator must escalate.
+      if (updates.resolution === 'approved_minor' && enforcement?.subjectActivate !== 'ok') {
+        const others = failed.length > 0 ? ` Also did not apply: ${failed.join(', ')}.` : '';
         toast({
-          title: 'Protected-minor approval incomplete',
-          description: 'Approval was not recorded as a protected minor; reload and retry',
+          title: 'Protected-minor approval not recorded',
+          description: 'The case is closed, but the account was NOT recorded as a protected minor, so it is restored without minor protections. Escalate now; it cannot be re-approved from this case.' + others,
           variant: 'destructive',
         });
         return;
       }
       if (requestedState && ENFORCEMENT_STATES.includes(requestedState)) {
-        // Surface only actual failed enforcement legs. `not_attempted` is valid
-        // for transitions where a leg does not apply.
-        const enforcement = data.enforcement;
-        const failed: string[] = [];
-        if (enforcement?.relay === 'failed') failed.push('relay (existing posts and feed)');
-        if (enforcement?.bulk === 'failed') failed.push('media and content');
-        if (enforcement?.keycast === 'failed') failed.push('account sign-in');
-        if (enforcement?.subjectClear === 'failed') failed.push('protected-minor registry');
-        if (enforcement?.keycastMinorClear === 'failed') failed.push('protected-minor account projection');
-        if (enforcement?.keycastMinorSet === 'failed') failed.push('protected-minor account flag');
         if (data.enforcementComplete === false) {
           toast({
             title: 'Enforcement incomplete',

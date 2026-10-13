@@ -715,7 +715,7 @@ export async function handleUpdateAgeReviewCase(
       // convergence would then undo it; a human has to look.
       subjectActivate = 'failed';
       subjectActivateError = 'Approval recorded, but no protected-minor projection was armed: '
-        + 'the account has no active protected subject. Check the registry before retrying.';
+        + 'the account has no active protected subject. Check the registry.';
       console.error(`[age-review] Protected subject activation failed: ${subjectActivateError}`);
     }
     let minorSetResult: KeycastResult | undefined;

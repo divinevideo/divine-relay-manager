@@ -598,7 +598,8 @@ describe('AgeReviewDetail', () => {
       success: true, enforcementComplete: true,
       enforcement: { relay: 'ok', bulk: 'ok', keycast: 'ok', subjectActivate: 'ok', keycastMinorSet: 'ok' },
     };
-    const notRecorded = 'Approval was not recorded as a protected minor; reload and retry';
+    const notRecorded = 'The case is closed, but the account was NOT recorded as a protected minor, so it is restored without minor protections. Escalate now; it cannot be re-approved from this case.';
+    const anyNotRecorded = expect.objectContaining({ description: expect.stringContaining('NOT recorded as a protected minor') });
 
     it('states what approval does, including that key export is blocked only for Divine login accounts', async () => {
       renderDetail(makeCase({ suspected_age_band: 'age_13_15' }));
@@ -644,11 +645,25 @@ describe('AgeReviewDetail', () => {
       await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({ description: notRecorded })));
     });
 
+    // The not-recorded toast is the only one shown, so it must carry the other failures too.
+    it('names other failed legs in the not-recorded toast', async () => {
+      updateAgeReviewCase.mockResolvedValueOnce({
+        ...approvalOk, success: false, enforcementComplete: false,
+        enforcement: { ...approvalOk.enforcement, relay: 'failed', bulk: 'failed', subjectActivate: 'failed', keycastMinorSet: 'not_attempted' },
+      });
+      await confirmApproval();
+      await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({
+        description: `${notRecorded} Also did not apply: relay (existing posts and feed), media and content.`,
+        variant: 'destructive',
+      })));
+      expect(toast).not.toHaveBeenCalledWith(expect.objectContaining({ title: 'Enforcement incomplete' }));
+    });
+
     it('raises no not-recorded warning when the subject was activated', async () => {
       updateAgeReviewCase.mockResolvedValueOnce(approvalOk);
       await confirmApproval();
       await waitFor(() => expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument());
-      expect(toast).not.toHaveBeenCalledWith(expect.objectContaining({ description: notRecorded }));
+      expect(toast).not.toHaveBeenCalledWith(anyNotRecorded);
     });
 
     it('applies the not-recorded check only to approvals', async () => {
@@ -656,7 +671,7 @@ describe('AgeReviewDetail', () => {
       renderDetail(makeCase({ suspected_age_band: 'age_13_15' }));
       fireEvent.click(await screen.findByRole('button', { name: 'Clear: not a minor' }));
       await waitFor(() => expect(updateAgeReviewCase).toHaveBeenCalled());
-      expect(toast).not.toHaveBeenCalledWith(expect.objectContaining({ description: notRecorded }));
+      expect(toast).not.toHaveBeenCalledWith(anyNotRecorded);
     });
 
     it('names a failed verified_minor set in the incomplete-enforcement toast', async () => {
