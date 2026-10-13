@@ -100,7 +100,7 @@ describe('age-review handler on real D1', () => {
       method: 'POST', body: form,
     });
     try {
-      const consentEnv = { ...env, ZENDESK_SUBDOMAIN: 'test', ZENDESK_EMAIL: 'agent@test.com', ZENDESK_API_TOKEN: 'token', CONSENT_VIDEO_BUCKET: bucket as unknown as R2Bucket };
+      const consentEnv = { ...env, ZENDESK_SUBDOMAIN: 'test', ZENDESK_EMAIL: 'agent@test.com', ZENDESK_API_TOKEN: 'token', CONSENT_VIDEO_BUCKET: bucket as unknown as R2Bucket, CONSENT_ACCESS_TEAM_DOMAIN: 'team.cloudflareaccess.com', CONSENT_ACCESS_AUD: 'aud' };
       expect((await handleParentConsent(request(), 'consent-case', owner, consentEnv, cors)).status).toBe(200);
       const caseRow = await DB.prepare('SELECT state, version, clock_paused, parent_contact_email FROM age_review_cases WHERE id = ?')
         .bind('consent-case').first<{ state: string; version: number; clock_paused: number; parent_contact_email: string }>();

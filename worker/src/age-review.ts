@@ -1056,6 +1056,12 @@ export async function handleParentConsent(
   if (!VALID_TRANSITIONS[current.state as AgeReviewState]?.includes('submitted_for_review')) {
     return json({ success: false, error: `Cannot submit parent consent from state '${current.state}'` }, 400, corsHeaders);
   }
+  // Fail closed until a reviewer can open what is stored: playback needs the
+  // bucket and both Access settings, so upload needs the same three. A clip
+  // accepted earlier would pause the case behind a link that answers 503.
+  if (!env.CONSENT_VIDEO_BUCKET || !env.CONSENT_ACCESS_TEAM_DOMAIN || !env.CONSENT_ACCESS_AUD) {
+    return json({ success: false, error: 'Consent upload is not configured' }, 503, corsHeaders);
+  }
   if (!request.headers.get('Content-Type')?.toLowerCase().startsWith('multipart/form-data;')) {
     return json({ success: false, error: 'multipart/form-data is required' }, 400, corsHeaders);
   }
@@ -1140,9 +1146,6 @@ export async function handleParentConsent(
   const email = parsed.email;
   if (typeof email !== 'string' || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) || email.length > 254) {
     return json({ success: false, error: 'Invalid email format' }, 400, corsHeaders);
-  }
-  if (!bucket && needUpload) {
-    return json({ success: false, error: 'Consent upload is not configured' }, 503, corsHeaders);
   }
 
   // Claim the submission row only after the body has validated, then take
