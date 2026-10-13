@@ -455,6 +455,32 @@ describe('approving a 13-15 minor', () => {
       expect(await pendingJobs()).toBe(1);
     });
 
+    // Retention's overdue-projection alarm measures from created_at, so re-approving
+    // must not make a still-failing projection look new.
+    describe('created_at of the existing subject\'s job', () => {
+      const old = '2026-01-01T00:00:00.000Z';
+      async function existingJob(state: 'pending' | 'complete') {
+        const { subjectId } = await createSubjectWithBinding(DB, 'onboarding-case', pubkey);
+        await DB.prepare(`INSERT INTO protected_minor_projection_jobs
+          (subject_id, pubkey, reason, state, created_at, updated_at)
+          VALUES (?, ?, 'age_review_approved', ?, ?, ?)`).bind(subjectId, pubkey, state, old, old).run();
+        await DB.prepare("UPDATE age_review_cases SET state = 'cleared', clear_resolution = 'approved_minor', version = 3 WHERE id = 'ap'").run();
+        await runWith(3);
+        return DB.prepare('SELECT state, created_at FROM protected_minor_projection_jobs WHERE subject_id = ?')
+          .bind(subjectId).first<{ state: string; created_at: string }>();
+      }
+
+      it('is kept when the job is already pending', async () => {
+        expect(await existingJob('pending')).toEqual({ state: 'pending', created_at: old });
+      });
+
+      it('is reset when a settled job is re-armed', async () => {
+        const job = await existingJob('complete');
+        expect(job!.state).toBe('pending');
+        expect(job!.created_at).not.toBe(old);
+      });
+    });
+
     it('writes nothing when the CAS missed (case not at the landed version)', async () => {
       await DB.prepare("UPDATE age_review_cases SET state = 'cleared', clear_resolution = 'approved_minor', version = 3 WHERE id = 'ap'").run();
       await runWith(4);

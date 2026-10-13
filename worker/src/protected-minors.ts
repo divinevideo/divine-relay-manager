@@ -102,7 +102,11 @@ export function approvalRegistryStatements(
       JOIN protected_minor_subjects s ON s.subject_id = b.subject_id
       WHERE b.pubkey = ?3 AND b.unbound_at IS NULL AND s.classification_state = 'active' AND ${landed}
       ON CONFLICT(subject_id) DO UPDATE SET pubkey = excluded.pubkey, reason = excluded.reason,
-        state = 'pending', created_at = excluded.created_at, updated_at = excluded.updated_at`)
+        state = 'pending', updated_at = excluded.updated_at,
+        -- An already-pending job keeps its age, as in rearmLiveSubjectProjection:
+        -- retention measures overdue projections from created_at.
+        created_at = CASE WHEN protected_minor_projection_jobs.state = 'pending'
+          THEN protected_minor_projection_jobs.created_at ELSE excluded.created_at END`)
       .bind(input.caseId, input.landedVersion, input.pubkey, input.now),
   ];
 }
