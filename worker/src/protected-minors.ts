@@ -208,6 +208,26 @@ export async function pendingProjectionJobs(db: D1Database): Promise<Array<{
 }
 
 /**
+ * Convergence after a keycast clear (#192). The cron can load a cleared subject's
+ * job before a new approval exists, then have its DELETE land AFTER the approval's
+ * PUT (the approval creates S2 for the same pubkey and completes S2's job in
+ * between). keycast would end unflagged while S2 is active and no job is pending.
+ * Re-arming the live subject's job makes the next tick re-apply the set; when no
+ * race happened it is one extra idempotent PUT.
+ */
+export async function rearmLiveSubjectProjection(db: D1Database, pubkey: string): Promise<void> {
+  const now = new Date().toISOString();
+  await db.prepare(`INSERT INTO protected_minor_projection_jobs (subject_id, pubkey, reason, state, created_at, updated_at)
+    SELECT s.subject_id, b.pubkey, 'age_review_approved', 'pending', ?2, ?2
+    FROM protected_minor_account_bindings b
+    JOIN protected_minor_subjects s ON s.subject_id = b.subject_id
+    WHERE b.pubkey = ?1 AND b.unbound_at IS NULL AND s.classification_state = 'active'
+    ON CONFLICT(subject_id) DO UPDATE SET pubkey = excluded.pubkey, reason = excluded.reason,
+      state = 'pending', created_at = excluded.created_at, updated_at = excluded.updated_at`)
+    .bind(pubkey, now).run();
+}
+
+/**
  * Settles a clear job that a newer active subject made moot, without calling
  * keycast. Guarded on the job's own subject still being cleared, so a re-arm that
  * flipped it back to an active projection is left pending.

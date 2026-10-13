@@ -336,6 +336,27 @@ describe('age-review cron on real D1', () => {
       expect(retries.map((r) => r.subjectId)).toEqual([subjectId]);
     });
 
+    it('(d) a later not_minor Clear is not an approval: the denial stays a retry source', async () => {
+      const { subjectId } = await createSubjectWithBinding(DB, 'onboarding-case', P); // clear failed: S1 active
+      await caseAt('deny-case', 'denied_closed', null, '2026-03-01 00:00:00');
+      await caseAt('dismiss-case', 'cleared', 'not_minor', '2026-04-01 00:00:00');
+      expect((await pendingSubjectClears(DB)).map((r) => r.subjectId)).toEqual([subjectId]);
+    });
+
+    it('(e) a later legacy Clear (no resolution) is not an approval either', async () => {
+      const { subjectId } = await createSubjectWithBinding(DB, 'onboarding-case', P);
+      await caseAt('deny-case', 'denied_closed', null, '2026-03-01 00:00:00');
+      await caseAt('legacy-case', 'cleared', null, '2026-04-01 00:00:00');
+      expect((await pendingSubjectClears(DB)).map((r) => r.subjectId)).toEqual([subjectId]);
+    });
+
+    it('(f) same-second deny and approval: the later row (higher rowid) wins', async () => {
+      await createSubjectWithBinding(DB, 'onboarding-case', P);
+      await caseAt('deny-case', 'denied_closed', null, '2026-03-01 00:00:00');
+      await caseAt('approve-case', 'cleared', 'approved_minor', '2026-03-01 00:00:00');
+      expect(await pendingSubjectClears(DB)).toEqual([]);
+    });
+
     it('(c) deny whose subject clear failed, then an approval reusing that subject: no retry', async () => {
       await createSubjectWithBinding(DB, 'onboarding-case', P); // S1 stays active
       await caseAt('deny-case', 'denied_closed', null, '2026-03-01 00:00:00');
@@ -368,5 +389,41 @@ describe('age-review cron on real D1', () => {
     const s2row = await DB.prepare('SELECT classification_state FROM protected_minor_subjects WHERE subject_id = ?')
       .bind(s2).first<{ classification_state: string }>();
     expect(s2row!.classification_state).toBe('active');
+  });
+  it('re-arms the live subject when a clear lands after a racing approval completed its set', async () => {
+    for (const t of ['protected_minor_projection_jobs', 'protected_minor_account_bindings', 'protected_minor_subjects']) {
+      await DB.prepare(`DELETE FROM ${t}`).run();
+    }
+    const P = 'a1'.repeat(32);
+    const { subjectId: s1 } = await createSubjectWithBinding(DB, 'old-case', P);
+    await clearSubject(DB, P, undefined, 'age_review_denied', s1); // S1 cleared, clear job pending
+    const calls: string[] = [];
+    let s2 = '';
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      if (!String(input).includes('/verified-minor')) return new Response('ok', { status: 200 });
+      calls.push(init?.method ?? 'GET');
+      if (init?.method === 'DELETE' && !s2) {
+        // The approval creates S2 and its PUT completes while this DELETE is in flight.
+        s2 = (await createSubjectWithBinding(DB, 'new-case', P)).subjectId;
+        const now = new Date().toISOString();
+        await DB.prepare(`INSERT INTO protected_minor_projection_jobs
+          (subject_id, pubkey, reason, state, created_at, updated_at)
+          VALUES (?, ?, 'age_review_approved', 'complete', ?, ?)`).bind(s2, P, now, now).run();
+      }
+      return new Response('{}', { status: 200 });
+    });
+    const env = { ...cronEnv, KEYCAST_URL: 'https://keycast.invalid', KEYCAST_SERVICE_TOKEN: 'test-token' };
+    const jobState = async (id: string) => (await DB.prepare(
+      'SELECT state FROM protected_minor_projection_jobs WHERE subject_id = ?',
+    ).bind(id).first<{ state: string }>())!.state;
+
+    await checkAgeReviewDeadlines(env);
+    expect(calls).toEqual(['DELETE']);
+    expect(await jobState(s1)).toBe('complete');
+    expect(await jobState(s2)).toBe('pending');
+
+    await checkAgeReviewDeadlines(env);
+    expect(calls).toEqual(['DELETE', 'PUT']);
+    expect(await jobState(s2)).toBe('complete');
   });
 });
