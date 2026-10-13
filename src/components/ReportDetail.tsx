@@ -1360,9 +1360,10 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                     <div>
                       <BulkDeleteByKind
                         pubkey={context.reportedUser.pubkey}
-                        logDecision={logDecision}
                         reportId={report?.id}
                         getModeratorPubkey={getModeratorPubkey}
+                        isBanned={isUserBanned}
+                        isSuspended={moderationStatus.isUserSuspended}
                         onComplete={handleActionComplete}
                       />
                     </div>

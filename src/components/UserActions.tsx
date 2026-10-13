@@ -13,6 +13,10 @@ import { ConfirmDialog } from './ConfirmDialog';
 import { useNavigate } from 'react-router-dom';
 import { UserX, UserCheck, ShieldAlert, Trash2, Pause, Play, ArrowRight } from 'lucide-react';
 
+// Approved wording; BulkDeleteByKind keeps its own dialog-specific variant on purpose.
+const LOST_TRACK_TITLE = 'Lost track of the bulk action';
+const LOST_TRACK_BODY = 'It may still be running on the server. Wait a minute and check again before running it again.';
+
 interface UserActionsProps {
   pubkey: string;
   context?: 'report' | 'age-review' | 'users';
@@ -269,14 +273,22 @@ export function UserActions({
       // the contexts where the buttons still render (Users tab, non-underage
       // report on an account that also has an open case).
       if (routeToAgeReviewIfGuarded(error)) return;
-      // Covers both enqueue failure and a persistent status-poll failure
-      // (the job may have started; error.message carries the specific reason).
+      // The enqueue failed, so no job started.
       toast({ title: 'Bulk action failed', description: error.message, variant: 'destructive' });
+    },
+    // A status poll that gave out is not a failed job: it may still be running.
+    onTrackingLost: () => {
+      toast({ title: LOST_TRACK_TITLE, description: LOST_TRACK_BODY });
     },
   });
 
   const anyPending = suspendUserMutation.isPending || unsuspendUserMutation.isPending ||
     banUserMutation.isPending || unbanUserMutation.isPending || bulkJob.isRunning;
+  // Lost tracking keeps only the bulk buttons (and Delete All Content's confirm,
+  // which their disabled trigger can't open) off: a second bulk job could start
+  // under one that is still going. Ban, Suspend and Unban stay on their usual
+  // rule; Ban is the severe-action escape hatch.
+  const bulkBlocked = anyPending || bulkJob.trackingLost;
 
   // A default-parameter value applies to `undefined`, not to `null`, so a caller
   // that passes an explicit null keeps it and lands here.
@@ -285,6 +297,13 @@ export function UserActions({
 
   return (
     <div className="flex flex-wrap gap-2">
+      {bulkJob.trackingLost && (
+        <div className="basis-full flex flex-wrap items-center gap-2 rounded-md border p-2 text-xs">
+          <span className="font-medium">{LOST_TRACK_TITLE}</span>
+          <span className="text-muted-foreground">{LOST_TRACK_BODY}</span>
+          <Button variant="outline" size="sm" onClick={bulkJob.checkAgain}>Check again</Button>
+        </div>
+      )}
       {showStatusNote && (
         <p className="basis-full text-xs text-muted-foreground">
           {statusPending
@@ -365,7 +384,7 @@ export function UserActions({
           <Tooltip>
             <TooltipTrigger asChild>
               <Button variant="outline" className="border-orange-500 text-orange-600 hover:bg-orange-50"
-                onClick={() => { bulkModeratorRef.current = getModeratorPubkey(); bulkJob.start('age-gate-all'); }} disabled={anyPending}>
+                onClick={() => { bulkModeratorRef.current = getModeratorPubkey(); bulkJob.start('age-gate-all'); }} disabled={bulkBlocked}>
                 <ShieldAlert className="h-4 w-4 mr-1" />
                 {bulkJob.runningAction === 'age-gate-all' ? 'Restricting...' : 'Age Restrict All'}
               </Button>
@@ -375,7 +394,7 @@ export function UserActions({
 
           <ConfirmDialog
             trigger={
-              <Button variant="destructive" disabled={anyPending}>
+              <Button variant="destructive" disabled={bulkBlocked}>
                 <Trash2 className="h-4 w-4 mr-1" />
                 {bulkJob.runningAction === 'delete-all' ? 'Deleting...' : 'Delete All Content'}
               </Button>

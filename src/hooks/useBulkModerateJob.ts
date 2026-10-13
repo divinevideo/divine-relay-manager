@@ -4,32 +4,69 @@
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { useAdminApi } from '@/hooks/useAdminApi';
-import type { BulkAction, BulkJob } from '@/lib/adminApi';
+import type { BulkAction, BulkJob, BulkModerateOptions } from '@/lib/adminApi';
 
 const POLL_INTERVAL_MS = 1500;
 
-const isTerminal = (status?: string): boolean => status === 'done' || status === 'failed';
+export const isTerminal = (status?: string): boolean => status === 'done' || status === 'failed';
+
+// Optional per-job settings. `reason` defaults to "Bulk <action> by moderator";
+// the rest scopes or attributes the job (see BulkModerateOptions).
+export interface BulkJobStart extends BulkModerateOptions {
+  reason?: string;
+}
 
 interface UseBulkModerateJobOptions {
   pubkey: string;
   // Called once when a job reaches a terminal state (done or failed).
   onComplete?: (job: BulkJob) => void;
-  // Called if the enqueue fails, or if the status poll keeps failing (worker
-  // unreachable) so the UI doesn't poll — and stay disabled — forever.
+  // Called if the enqueue fails. A failed status poll is not reported here: the
+  // job may still be running, so it is tracking that was lost, not the job.
   onError?: (error: Error) => void;
+  // Called once each time the status poll gives out while a job is held (see
+  // `trackingLost`).
+  onTrackingLost?: () => void;
 }
 
-export function useBulkModerateJob({ pubkey, onComplete, onError }: UseBulkModerateJobOptions) {
+export function useBulkModerateJob({ pubkey, onComplete, onError, onTrackingLost }: UseBulkModerateJobOptions) {
   const api = useAdminApi();
   const [jobId, setJobId] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<BulkAction | null>(null);
-  // Guard against re-firing onComplete/onError for the same job.
+  // Guard against re-firing onComplete for the same job.
   const notifiedJobId = useRef<string | null>(null);
+  // Guard against re-firing onTrackingLost for the same loss.
+  const lostNotified = useRef(false);
 
+  // The account and environment this hook currently shows, for an enqueue that
+  // settles after the caller switched either (see onSuccess). `api` is bound to
+  // the selected environment and memoized on it, so its identity names it.
+  const currentPubkey = useRef(pubkey);
+  currentPubkey.current = pubkey;
+  const currentApi = useRef(api);
+  currentApi.current = api;
+
+  // `target` and `client` are the account and environment when start was
+  // called, bound into the variables: the mutation reads its options from the
+  // latest render, so a start that awaits something first (BulkDeleteByKind
+  // resolves the moderator) would otherwise send the account and environment
+  // selected by then, with the confirmed kind and reason.
+  type EnqueueVars = { target: string; client: typeof api; action: BulkAction; options?: BulkJobStart };
   const enqueue = useMutation({
-    mutationFn: (action: BulkAction) => api.bulkModerate(pubkey, action, `Bulk ${action} by moderator`),
-    onMutate: (action) => { setPendingAction(action); },
-    onSuccess: (res) => { setJobId(res.jobId); },
+    mutationFn: ({ target, client, action, options }: EnqueueVars) => {
+      const reason = options?.reason ?? `Bulk ${action} by moderator`;
+      if (!options) return client.bulkModerate(target, action, reason);
+      // Rest-spread, not a field list, so a new BulkModerateOptions field is
+      // forwarded without this line having to learn about it.
+      const { reason: _reason, ...scope } = options;
+      return client.bulkModerate(target, action, reason, scope);
+    },
+    onMutate: ({ action }) => { setPendingAction(action); },
+    // A job enqueued for an account or environment no longer shown runs
+    // detached, as one does when the account changes after its enqueue (below).
+    onSuccess: (res, { target, client }) => {
+      if (target === currentPubkey.current && client === currentApi.current) setJobId(res.jobId);
+      else setPendingAction(null);
+    },
     onError: (error: Error) => { setPendingAction(null); onError?.(error); },
   });
 
@@ -41,6 +78,7 @@ export function useBulkModerateJob({ pubkey, onComplete, onError }: UseBulkModer
     setJobId(null);
     setPendingAction(null);
     notifiedJobId.current = null;
+    lostNotified.current = false;
   }, [pubkey]);
 
   // No fixed client give-up timer: a chunked job can legitimately run longer than
@@ -48,8 +86,8 @@ export function useBulkModerateJob({ pubkey, onComplete, onError }: UseBulkModer
   // would let a moderator start a second, duplicate job against the same target.
   // Instead the buttons stay disabled until the job is terminal. The worker's
   // stale-heal flips an abandoned job to `failed` within STALE_JOB_MS, so a
-  // terminal status is always reached; a persistent status-fetch failure (worker
-  // unreachable) re-enables via the isError path below.
+  // terminal status is always reached. A persistent status-fetch failure stops
+  // polling and sets `trackingLost`; `checkAgain` resumes it.
   const statusQuery = useQuery({
     queryKey: ['bulk-job', pubkey, jobId],
     queryFn: () => api.getBulkJobStatus(jobId as string),
@@ -72,32 +110,34 @@ export function useBulkModerateJob({ pubkey, onComplete, onError }: UseBulkModer
     }
   }, [job, pubkey, onComplete]);
 
-  // Surface a persistent status-fetch failure so the buttons don't stay disabled
-  // with no feedback.
+  // The status read failed while a job is held and not known to be finished.
+  // That is not a failed job: it may still be running on the server. Callers
+  // keep their destructive buttons off and offer `checkAgain`.
+  const trackingLost = jobId !== null && statusQuery.isError && !isTerminal(job?.status);
+
   useEffect(() => {
-    if (jobId && statusQuery.isError && notifiedJobId.current !== jobId) {
-      notifiedJobId.current = jobId;
-      onError?.(
-        statusQuery.error instanceof Error
-          ? statusQuery.error
-          : new Error('Lost track of the bulk job. Re-check the user and retry if needed.'),
-      );
+    if (trackingLost && !lostNotified.current) {
+      lostNotified.current = true;
+      onTrackingLost?.();
+    } else if (!trackingLost) {
+      lostNotified.current = false;
     }
-  }, [statusQuery.isError, statusQuery.error, jobId, onError]);
+  }, [trackingLost, onTrackingLost]);
 
   // Running = enqueueing, or a job exists that hasn't reached a terminal state and
-  // whose status polling hasn't persistently failed. Stays true (buttons disabled)
-  // for the full life of a non-terminal job -- the safe state on a destructive
-  // path -- until the worker reports terminal or the poll gives out.
+  // whose status we can still read. Lost tracking is reported separately.
   const isRunning =
     enqueue.isPending || (jobId !== null && !isTerminal(job?.status) && !statusQuery.isError);
   const runningAction: BulkAction | null = isRunning ? (job?.action ?? pendingAction) : null;
 
   return {
-    start: (action: BulkAction) => enqueue.mutate(action),
-    startAsync: (action: BulkAction) => enqueue.mutateAsync(action),
+    start: (action: BulkAction, options?: BulkJobStart) => enqueue.mutate({ target: pubkey, client: api, action, options }),
+    startAsync: (action: BulkAction, options?: BulkJobStart) => enqueue.mutateAsync({ target: pubkey, client: api, action, options }),
     job,
     isRunning,
     runningAction,
+    trackingLost,
+    // Re-read the held job's status after tracking was lost.
+    checkAgain: () => { void statusQuery.refetch(); },
   };
 }

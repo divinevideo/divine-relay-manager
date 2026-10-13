@@ -154,9 +154,10 @@ export function useAdminApi() {
       adminApi.updateAgeReviewCase(apiUrl, caseId, updates),
 
     // Bulk moderation
-    bulkModerate: (pubkey: string, action: adminApi.BulkAction, reason?: string) =>
-      adminApi.bulkModerate(apiUrl, pubkey, action, reason),
+    bulkModerate: (pubkey: string, action: adminApi.BulkAction, reason?: string, options?: adminApi.BulkModerateOptions) =>
+      adminApi.bulkModerate(apiUrl, pubkey, action, reason, options),
     getBulkJobStatus: (jobId: string) => adminApi.getBulkJobStatus(apiUrl, jobId),
+    getBulkKindCounts: (pubkey: string) => adminApi.getBulkKindCounts(apiUrl, pubkey),
 
     // Delete operations
     deleteMedia: (sha256: string, reason?: string) =>

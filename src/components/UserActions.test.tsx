@@ -334,18 +334,108 @@ describe('UserActions', () => {
     expect(onActionComplete).toHaveBeenCalledTimes(1);
   });
 
-  it('surfaces a persistent status-poll failure (worker unreachable) and re-enables the buttons', async () => {
+  // A failed status poll is a read that went unanswered, not a failed job: the
+  // job may still be running, so the buttons stay off until a check settles it.
+  it('reports a lost status poll as lost track, not failed, and keeps the buttons off', async () => {
     api.getBulkJobStatus.mockRejectedValue(new Error('Network connection lost'));
     renderWithProvider(<UserActions pubkey={PUBKEY} />);
 
     fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
 
-    await waitFor(() =>
-      expect(toast).toHaveBeenCalledWith(
-        expect.objectContaining({ title: 'Bulk action failed', variant: 'destructive' }),
-      ),
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({
+      title: 'Lost track of the bulk action',
+      description: 'It may still be running on the server. Wait a minute and check again before running it again.',
+    }));
+    expect(toast).not.toHaveBeenCalledWith(expect.objectContaining({ title: 'Bulk action failed' }));
+    expect(screen.getByText('Lost track of the bulk action')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Age Restrict All/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Delete All Content/i })).toBeDisabled();
+    // Only the bulk buttons: Ban is the severe-action escape hatch, and the
+    // account actions don't race a bulk job.
+    expect(screen.getByRole('button', { name: /Ban User/i })).toBeEnabled();
+    expect(screen.getByRole('button', { name: /Suspend User/i })).toBeEnabled();
+  });
+
+  // The bulk gate is "anything pending, or tracking lost": an account action
+  // in flight keeps the bulk buttons off too, not only a lost job.
+  it.each([
+    ['Suspend', false, () => api.suspendPubkey, (): void => {
+      fireEvent.click(screen.getByRole('button', { name: /^Suspend User/i }));
+    }],
+    ['Unban', true, () => api.unbanPubkey, (): void => {
+      fireEvent.click(screen.getByRole('button', { name: /Unban User/i }));
+    }],
+    ['Ban', false, () => api.banPubkey, (): void => {
+      fireEvent.click(screen.getByRole('button', { name: /Ban User/i }));
+      const dialog = screen.getByRole('alertdialog');
+      fireEvent.click(within(dialog).getByRole('button', { name: /Ban User/i }));
+    }],
+  ] as const)('keeps the bulk buttons off while %s is pending', async (_label, isBanned, call, act) => {
+    call().mockReturnValue(new Promise(() => {}));                    // never settles
+    renderWithProvider(<UserActions pubkey={PUBKEY} isBanned={isBanned} />);
+
+    act();
+
+    await waitFor(() => expect(call()).toHaveBeenCalled());
+    expect(screen.getByRole('button', { name: /Age Restrict All/i, hidden: true })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Delete All Content/i, hidden: true })).toBeDisabled();
+  });
+
+  it('keeps Unban available while tracking is lost', async () => {
+    api.getBulkJobStatus.mockRejectedValue(new Error('Network connection lost'));
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const tree = (isBanned: boolean) => (
+      <QueryClientProvider client={qc}>
+        <TooltipProvider><UserActions pubkey={PUBKEY} isBanned={isBanned} /></TooltipProvider>
+      </QueryClientProvider>
     );
-    // Not stuck polling/disabled: the button returns to its idle label.
+    const { rerender } = render(tree(false));
+    fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
+    await screen.findByText('Lost track of the bulk action');
+
+    // The account is banned meanwhile (same mount, same lost job).
+    rerender(tree(true));
+
+    expect(screen.getByText('Lost track of the bulk action')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Unban User/i })).toBeEnabled();
+  });
+
+  // A finished job's status can be read again later (a refocused tab once it
+  // is stale), and that read can fail. The job is over, so that is not lost
+  // tracking, and the bulk buttons stay usable.
+  it('does not report lost track when a finished job\'s later status read fails', async () => {
+    api.getBulkJobStatus.mockResolvedValue(doneJob('age-gate-all'));
+    const onActionComplete = vi.fn();
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <TooltipProvider><UserActions pubkey={PUBKEY} onActionComplete={onActionComplete} /></TooltipProvider>
+      </QueryClientProvider>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
+    await waitFor(() => expect(onActionComplete).toHaveBeenCalledTimes(1));
+
+    api.getBulkJobStatus.mockRejectedValue(new Error('Network connection lost'));
+    await qc.refetchQueries({ queryKey: ['bulk-job'] });
+    await waitFor(() => expect(qc.getQueryState(['bulk-job', PUBKEY, 'job-1'])?.status).toBe('error'));
+
+    expect(screen.queryByText('Lost track of the bulk action')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Age Restrict All$/i })).toBeEnabled();
+    expect(screen.getByRole('button', { name: /Delete All Content/i })).toBeEnabled();
+  });
+
+  it('"Check again" re-reads the job and settles it', async () => {
+    api.getBulkJobStatus.mockRejectedValueOnce(new Error('Network connection lost'));
+    api.getBulkJobStatus.mockResolvedValue(doneJob('age-gate-all'));
+    const onActionComplete = vi.fn();
+    renderWithProvider(<UserActions pubkey={PUBKEY} onActionComplete={onActionComplete} />);
+    fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
+    const checkAgain = await screen.findByRole('button', { name: 'Check again' });
+
+    fireEvent.click(checkAgain);
+
+    await waitFor(() => expect(onActionComplete).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText('Lost track of the bulk action')).not.toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole('button', { name: /^Age Restrict All$/i })).toBeEnabled());
   });
 

@@ -10,6 +10,8 @@ import {
   type BulkJob,
   type BulkJobStatus,
   type BulkEnqueueResponse,
+  type BulkKindCounts,
+  KIND_COUNTS_REQUEST_TIMEOUT_MS,
 } from "../../shared/bulk-moderation";
 import { extractMediaHashes as extractSharedMediaHashes } from "../../shared/media-hashes";
 import type { AgeReviewCaseResponse } from "../../shared/age-review";
@@ -142,7 +144,9 @@ function asTimeoutApiError(err: unknown, label: string, mutates: boolean, timeou
     const tail = mutates
       ? 'The action may still have applied. Re-check before retrying.'
       : 'Could not reach the relay. Try again.';
-    return new ApiError(`${label} timed out after ${timeoutMs / 1000}s. ${tail}`);
+    // code 'timeout' lets a caller word a slow read itself: a read that ran
+    // long may have reached the relay fine, so "could not reach" isn't always so.
+    return new ApiError(`${label} timed out after ${timeoutMs / 1000}s. ${tail}`, undefined, undefined, 'timeout');
   }
   return err;
 }
@@ -1492,7 +1496,16 @@ export async function createMinorAccount(
 }
 
 // Bulk moderation
-export { VALID_BULK_ACTIONS, type BulkAction, type BulkModerateResult, type BulkJob, type BulkJobStatus };
+export { VALID_BULK_ACTIONS, type BulkAction, type BulkModerateResult, type BulkJob, type BulkJobStatus, type BulkKindCounts };
+
+// Optional job scope: `kind` is required for delete-kind (the one event kind it
+// deletes) and rejected for every other action. The moderator and report
+// attribute the job's per-event decision rows.
+export interface BulkModerateOptions {
+  kind?: number;
+  moderatorPubkey?: string;
+  reportId?: string;
+}
 
 // Enqueue a bulk moderation job. Returns immediately with a jobId; the work runs
 // in a queue consumer. Poll getBulkJobStatus until the job is terminal.
@@ -1501,8 +1514,9 @@ export async function bulkModerate(
   pubkey: string,
   action: BulkAction,
   reason?: string,
+  options: BulkModerateOptions = {},
 ): Promise<BulkEnqueueResponse> {
-  const result = await apiRequest<BulkEnqueueResponse>(apiUrl, '/api/bulk-moderate', 'POST', { pubkey, action, reason });
+  const result = await apiRequest<BulkEnqueueResponse>(apiUrl, '/api/bulk-moderate', 'POST', { pubkey, action, reason, ...options });
   if (!result.success || !result.jobId) {
     throw new ApiError('Failed to start bulk moderation');
   }
@@ -1512,6 +1526,15 @@ export async function bulkModerate(
 // Fetch a bulk job's current state. `status` is terminal at 'done' | 'failed'.
 export async function getBulkJobStatus(apiUrl: string, jobId: string): Promise<BulkJob> {
   return apiRequest<BulkJob>(apiUrl, `/api/bulk-moderate/status/${encodeURIComponent(jobId)}`, 'GET');
+}
+
+// Per-kind event counts for an account, from a full relay listing. When
+// `complete` is false the counts are a lower bound.
+export async function getBulkKindCounts(apiUrl: string, pubkey: string): Promise<BulkKindCounts> {
+  return apiRequest<BulkKindCounts>(
+    apiUrl, `/api/bulk-moderate/kind-counts?pubkey=${encodeURIComponent(pubkey)}`, 'GET', undefined,
+    { timeoutMs: KIND_COUNTS_REQUEST_TIMEOUT_MS },
+  );
 }
 
 // Delete media (convenience wrapper)

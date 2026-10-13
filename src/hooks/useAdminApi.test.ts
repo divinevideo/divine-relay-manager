@@ -19,12 +19,16 @@ const deleteDecisions = vi.hoisted(() => vi.fn());
 const fetchResolutionState = vi.hoisted(() => vi.fn());
 const fetchResolutionLabelTargets = vi.hoisted(() => vi.fn());
 const listSuspendedPubkeys = vi.hoisted(() => vi.fn());
+const bulkModerate = vi.hoisted(() => vi.fn());
+const getBulkKindCounts = vi.hoisted(() => vi.fn());
 vi.mock('@/lib/adminApi', async (orig) => ({
   ...(await orig<typeof import('@/lib/adminApi')>()),
   deleteDecisions,
   fetchResolutionState,
   fetchResolutionLabelTargets,
   listSuspendedPubkeys,
+  bulkModerate,
+  getBulkKindCounts,
 }));
 
 describe('useAdminApi', () => {
@@ -72,6 +76,25 @@ describe('useAdminApi', () => {
     result.current.listSuspendedPubkeys({ timeoutMs: 4000 });
 
     expect(listSuspendedPubkeys).toHaveBeenCalledWith(API_URL, { timeoutMs: 4000 });
+  });
+
+  // A dropped kind gets the by-kind delete refused (400); a dropped moderator or
+  // report loses the attribution.
+  it('forwards the kind and attribution to the bulk enqueue', () => {
+    const { result } = renderHook(() => useAdminApi());
+    const options = { kind: 7, moderatorPubkey: 'd'.repeat(64), reportId: 'e'.repeat(64) };
+
+    result.current.bulkModerate('abc', 'delete-kind', 'spam', options);
+
+    expect(bulkModerate).toHaveBeenCalledWith(API_URL, 'abc', 'delete-kind', 'spam', options);
+  });
+
+  it('forwards the pubkey to the kind-count read', () => {
+    const { result } = renderHook(() => useAdminApi());
+
+    result.current.getBulkKindCounts('abc');
+
+    expect(getBulkKindCounts).toHaveBeenCalledWith(API_URL, 'abc');
   });
 
 });
