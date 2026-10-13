@@ -2998,6 +2998,18 @@ describe('ReportWatcher', () => {
         .map((c) => String(c[0])).find((sql) => sql.includes('INSERT INTO age_review_cases'))!;
     }
 
+    // The decision log names which source proved the approval, so an audit can
+    // tell a registry hit from keycast's flag.
+    async function autoClearReason(): Promise<string> {
+      let reason: string | undefined;
+      await vi.waitFor(() => {
+        reason = bindCallsFor('INSERT INTO moderation_decisions').flat()
+          .find((arg): arg is string => typeof arg === 'string' && arg.startsWith('Under-16 report auto-cleared'));
+        expect(reason).toBeDefined();
+      }, { timeout: 2000 });
+      return reason!;
+    }
+
     it('auto-clears an account with an active protected-minor subject without asking keycast', async () => {
       routeRegistryLookup({ subject_id: '11111111-1111-4111-8111-111111111111' });
       await sendUnderageReport('registry_hit_1', 'c'.repeat(64));
@@ -3007,6 +3019,7 @@ describe('ReportWatcher', () => {
       // clear_resolution (the latest-decision rule in pendingSubjectClears counts only explicit approvals).
       expect(insertSql).not.toContain("'approved_minor'");
       expect(mockGetUserStatus).not.toHaveBeenCalled();
+      expect(await autoClearReason()).toMatch(/^Under-16 report auto-cleared: verified minor via registry \(case [0-9a-f-]{36}\)$/);
     });
 
     it('falls back to keycast when the registry lookup throws', async () => {
@@ -3015,6 +3028,7 @@ describe('ReportWatcher', () => {
       await sendUnderageReport('registry_throw_1', 'd'.repeat(64));
       expect(ageInsertSql()).toContain("'cleared'");
       expect(mockGetUserStatus).toHaveBeenCalled();
+      expect(await autoClearReason()).toMatch(/^Under-16 report auto-cleared: verified minor via keycast \(case [0-9a-f-]{36}\)$/);
     });
 
     it('opens a normal case when neither the registry nor keycast knows the account', async () => {

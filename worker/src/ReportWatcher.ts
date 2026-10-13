@@ -1353,16 +1353,17 @@ export class ReportWatcher implements DurableObject {
    * An approved minor: an active protected-minor subject (#192; the durable record,
    * and the only one a self-custody account has) or keycast's verified_minor flag
    * (covers onboarding accounts and any projection still pending). The registry is
-   * read first because it is local and survives a keycast outage.
+   * read first because it is local and survives a keycast outage. Returns which
+   * source proved it, for the decision log, or null for no approved minor.
    */
-  private async isApprovedMinor(pubkey: string): Promise<boolean> {
+  private async isApprovedMinor(pubkey: string): Promise<'registry' | 'keycast' | null> {
     try {
-      if (await resolveByPubkey(this.env.DB!, pubkey)) return true;
+      if (await resolveByPubkey(this.env.DB!, pubkey)) return 'registry';
     } catch (err) {
       console.warn('[ReportWatcher] Protected-minor registry check failed; falling back to keycast:', err);
     }
     const keycastStatus = await getUserStatus(pubkey, this.env);
-    return keycastStatus.success && keycastStatus.verified_minor === true;
+    return keycastStatus.success && keycastStatus.verified_minor === true ? 'keycast' : null;
   }
 
   private async createAgeReviewCase(event: ReportEvent, reportedPubkey: string): Promise<void> {
@@ -1395,7 +1396,8 @@ export class ReportWatcher implements DurableObject {
 
     // Auto-clear: an approved minor (registry or keycast) is recorded as already cleared
     try {
-      if (await this.isApprovedMinor(reportedPubkey)) {
+      const approvedVia = await this.isApprovedMinor(reportedPubkey);
+      if (approvedVia) {
         const caseId = crypto.randomUUID();
         // Capture here too. This case opens already cleared, so nothing hides the
         // profile today -- but the account may be actioned later, and a cleared
@@ -1426,7 +1428,7 @@ export class ReportWatcher implements DurableObject {
           targetType: 'pubkey',
           targetId: reportedPubkey,
           action: AGE_REVIEW_ACTION.caseCreated,
-          reason: `Under-16 report auto-cleared: verified minor (case ${caseId})`,
+          reason: `Under-16 report auto-cleared: verified minor via ${approvedVia} (case ${caseId})`,
           reportId: event.id,
           reporterPubkey: event.pubkey,
         });
