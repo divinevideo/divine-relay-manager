@@ -302,8 +302,9 @@ these win.
 - **The case view reads the registry too.** `GET /api/account-status/:pubkey` adds
   `protected_minor` (true for an active subject, false for none, null when D1 cannot answer). The
   approved badge shows when either keycast or the registry says protected, with a note when
-  keycast's app protections are not in force, and "protected-minor status unavailable" whenever
-  the registry has not answered. A self-custody approved minor has no keycast account, so the
+  keycast's app protections are not in force. "Protected-minor status unavailable" shows when
+  neither source says protected and either keycast could not say what kind of account this is or
+  the registry did not answer. A self-custody approved minor has no keycast account, so the
   registry is the only source for it.
 - **The approve confirm claims only what the account gets.** A Divine login account: DM limits,
   the adult content lock and the key-export block, plus report auto-clear. An account holding its
