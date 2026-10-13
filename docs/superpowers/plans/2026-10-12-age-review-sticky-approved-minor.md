@@ -981,7 +981,9 @@ git commit -m "feat(age-review): approving a 13-15 minor records a protected sub
       const insertSql = (ageEnv.DB!.prepare as ReturnType<typeof vi.fn>).mock.calls
         .map((c) => String(c[0])).find((sql) => sql.includes('INSERT INTO age_review_cases'))!;
       expect(insertSql).toContain("'cleared'");
-      expect(insertSql).toContain("'approved_minor'");
+      // An auto-clear observes an existing approval; it is not a new decision, so it records no
+      // clear_resolution (the latest-decision rule in pendingSubjectClears counts only explicit approvals).
+      expect(insertSql).not.toContain("'approved_minor'");
       expect(mockGetUserStatus).not.toHaveBeenCalled();
     });
 
@@ -1043,7 +1045,7 @@ with
 ```ts
       if (await this.isApprovedMinor(reportedPubkey)) {
 ```
-In that block's `INSERT INTO age_review_cases`, add `clear_resolution` to the column list (after `closed_at`) and `'approved_minor'` as a literal in the matching VALUES position (after `datetime('now')`), so the bind arity stays 8. Update the block's leading comment to "Auto-clear: an approved minor (registry or keycast) is recorded as already cleared", and the `catch` warning to "Approved-minor check failed; proceeding with normal case".
+Leave that block's `INSERT INTO age_review_cases` without a `clear_resolution` (NULL): an auto-clear observes an existing approval rather than deciding one, and Task 4's latest-decision rule in `pendingSubjectClears` must count only explicit approvals (controller ruling, see ledger). Update the block's leading comment to "Auto-clear: an approved minor (registry or keycast) is recorded as already cleared", and the `catch` warning to "Approved-minor check failed; proceeding with normal case".
 
 - [ ] **Step 4: Run to verify pass**
 
