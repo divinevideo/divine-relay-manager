@@ -3,6 +3,7 @@ import { finalizeEvent, generateSecretKey } from 'nostr-tools';
 import worker from './index';
 import { LABEL_PAGE_SIZE } from './resolution-labels';
 import * as ageReview from './age-review';
+import * as accountStatus from './account-status';
 import { relayFake } from './test-helpers/relay-fake';
 
 const env = {
@@ -13,6 +14,25 @@ const env = {
 const TEST_NSEC = 'nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5';
 
 const ctx = {} as ExecutionContext;
+
+describe('account-status route', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  // The handler only prepares the schema if the route hands it a preparer; its
+  // own tests call it directly, so only this pins the wiring. Without it the first
+  // read on a fresh database reports every account as status unavailable.
+  it('hands the handler the schema bootstrap', async () => {
+    const handler = vi.spyOn(accountStatus, 'handleAccountStatus')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+    const pubkey = 'a'.repeat(64);
+
+    await worker.fetch(new Request(`https://worker.test/api/account-status/${pubkey}`, {
+      headers: { 'X-Admin-Key': 'test-admin-key' },
+    }), { ALLOWED_ORIGINS: 'https://app.divine.video', ADMIN_API_KEY: 'test-admin-key' } as never, ctx);
+
+    expect(handler).toHaveBeenCalledWith(pubkey, expect.anything(), expect.anything(), expect.any(Function));
+  });
+});
 
 describe('age-review update lifetime', () => {
   afterEach(() => vi.restoreAllMocks());

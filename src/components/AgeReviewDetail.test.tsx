@@ -657,6 +657,18 @@ describe('AgeReviewDetail', () => {
       await waitFor(() => expect(getAccountStatus.mock.calls.length).toBeGreaterThan(callsBefore));
     });
 
+    // The status query is keyed by the lowercased pubkey; a case that stored a
+    // mixed-case `p` tag must still refresh its badge.
+    it('refetches account status after a decision on a case whose pubkey is not lowercase', async () => {
+      const { queryClient } = renderDetail(makeCase({ pubkey: 'A'.repeat(64) }));
+      await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+      const callsBefore = getAccountStatus.mock.calls.length;
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Clear without approval' }));
+
+      await waitFor(() => expect(getAccountStatus.mock.calls.length).toBeGreaterThan(callsBefore));
+    });
+
     it('does not show "status unavailable" while account status is still loading', async () => {
       getAccountStatus.mockReturnValue(new Promise(() => {}));
 

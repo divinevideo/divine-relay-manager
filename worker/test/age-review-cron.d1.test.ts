@@ -395,6 +395,38 @@ describe('age-review cron on real D1', () => {
       expect(job).toEqual({ reason: 'age_review_approved', state: 'pending' });
     });
 
+    it('(g2) the cron retry hands its denial to the clear, so an approval landing mid-tick survives', async () => {
+      const { subjectId } = await createSubjectWithBinding(DB, 'onboarding-case', P); // clear failed: S1 active
+      await caseAt('deny-case', 'denied_closed', null, '2026-03-01 00:00:00');
+      // The approval lands after the cron loaded its retries and before the clear's
+      // write batch: the only check left is the one keyed on the denial's case id.
+      let injected = false;
+      const racingDb = new Proxy(DB, {
+        get(target, prop) {
+          if (prop === 'batch') {
+            return async (statements: D1PreparedStatement[]) => {
+              if (!injected) {
+                injected = true;
+                await caseAt('approve-case', 'cleared', 'approved_minor', '2026-04-01 00:00:00');
+              }
+              return target.batch(statements);
+            };
+          }
+          const value = Reflect.get(target, prop, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+
+      await checkAgeReviewDeadlines({ ...env(), DB: racingDb });
+
+      expect(injected).toBe(true);
+      expect(await activeCount()).toBe(1);
+      const binding = await DB.prepare('SELECT unbound_at FROM protected_minor_account_bindings WHERE subject_id = ?')
+        .bind(subjectId).first<{ unbound_at: string | null }>();
+      expect(binding!.unbound_at).toBeNull();
+      expect(keycastCalls).not.toContain('DELETE');
+    });
+
     it('(h) the same retry with no newer approval still clears the subject', async () => {
       const { subjectId } = await createSubjectWithBinding(DB, 'onboarding-case', P);
       await caseAt('deny-case', 'denied_closed', null, '2026-03-01 00:00:00');
