@@ -601,6 +601,8 @@ ALTER TABLE age_review_cases ADD COLUMN clear_resolution TEXT
   }
 ```
 
+- [ ] **Step 5b: Onboarding parity.** In `handleCreateMinorAccount`'s `INSERT INTO age_review_cases` (~line 802), add `clear_resolution` to the column list after `closed_at` and the literal `'approved_minor'` as the matching value, so an onboarded case and an approved one record the same resolution. Add to the existing onboarding test in `worker/test/protected-minors.d1.test.ts` (`records onboarding case, subject, binding, and operation atomically`) an assertion that the created case has `clear_resolution = 'approved_minor'`; confirm it fails before the SQL change and passes after.
+
 - [ ] **Step 6: Update existing Clear callers in tests**
 
 Run: `grep -rn "state: 'cleared'" worker/src/age-review.test.ts worker/test src/components/*.test.tsx | grep -v "as const\|makeCase"`
