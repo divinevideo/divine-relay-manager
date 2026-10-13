@@ -369,6 +369,43 @@ describe('age-review cron on real D1', () => {
 
       expect(await pendingSubjectClears(DB)).toEqual([]);
     });
+
+    it('(g) a retry loaded before an approval landed does not clear the approved subject', async () => {
+      const { subjectId } = await createSubjectWithBinding(DB, 'onboarding-case', P); // clear failed: S1 active
+      await caseAt('deny-case', 'denied_closed', null, '2026-03-01 00:00:00');
+      const [retry] = await pendingSubjectClears(DB);
+      expect(retry.denialCaseId).toBe('deny-case');
+
+      // The approval reuses S1 and arms its set job between the cron's load and its write.
+      await caseAt('approve-case', 'cleared', 'approved_minor', '2026-04-01 00:00:00');
+      const now = new Date().toISOString();
+      await DB.prepare(`INSERT INTO protected_minor_projection_jobs
+        (subject_id, pubkey, reason, state, created_at, updated_at)
+        VALUES (?, ?, 'age_review_approved', 'pending', ?, ?)`).bind(subjectId, P, now, now).run();
+
+      await clearSubject(DB, retry.pubkey, retry.clearedBy, retry.reason, retry.subjectId, retry.denialCaseId);
+
+      expect(await activeCount()).toBe(1);
+      const binding = await DB.prepare('SELECT unbound_at FROM protected_minor_account_bindings WHERE subject_id = ?')
+        .bind(subjectId).first<{ unbound_at: string | null }>();
+      expect(binding!.unbound_at).toBeNull();
+      const job = await DB.prepare('SELECT reason, state FROM protected_minor_projection_jobs WHERE subject_id = ?')
+        .bind(subjectId).first<{ reason: string; state: string }>();
+      expect(job).toEqual({ reason: 'age_review_approved', state: 'pending' });
+    });
+
+    it('(h) the same retry with no newer approval still clears the subject', async () => {
+      const { subjectId } = await createSubjectWithBinding(DB, 'onboarding-case', P);
+      await caseAt('deny-case', 'denied_closed', null, '2026-03-01 00:00:00');
+      const [retry] = await pendingSubjectClears(DB);
+
+      await clearSubject(DB, retry.pubkey, retry.clearedBy, retry.reason, retry.subjectId, retry.denialCaseId);
+
+      expect(await activeCount()).toBe(0);
+      const job = await DB.prepare('SELECT reason, state FROM protected_minor_projection_jobs WHERE subject_id = ?')
+        .bind(subjectId).first<{ reason: string; state: string }>();
+      expect(job).toEqual({ reason: 'age_review_denied', state: 'pending' });
+    });
   });
 
   it('settles a clear job superseded by a newer active subject without calling keycast', async () => {

@@ -111,12 +111,29 @@ export function approvalRegistryStatements(
   ];
 }
 
+// True when the subject has an explicit approval newer than the denial row
+// `denial` (latest decision wins, #192). Same-second ties go to the later row.
+function newerApprovalThan(subject: string, denial: string): string {
+  return `EXISTS (SELECT 1 FROM age_review_cases a
+    JOIN protected_minor_account_bindings b3 ON b3.pubkey = a.pubkey
+    WHERE b3.subject_id = ${subject}
+      AND a.state = 'cleared' AND a.clear_resolution = 'approved_minor'
+      AND (datetime(a.updated_at) > datetime(${denial}.updated_at)
+        OR (datetime(a.updated_at) = datetime(${denial}.updated_at) AND a.rowid > ${denial}.rowid)))`;
+}
+
+/**
+ * `retryOfDenialCaseId` marks a cron retry of that denial. The retry was chosen
+ * before this write, so an approval can land in between; the clear then re-checks
+ * latest-decision-wins inside its own batch and leaves the subject active.
+ */
 export async function clearSubject(
   db: D1Database,
   pubkey: string,
   clearedBy: string | undefined,
   reason: string,
   expectedSubjectId?: string,
+  retryOfDenialCaseId?: string,
 ): Promise<{ success: boolean; projectionPubkey?: string; error?: string }> {
   try {
     const now = new Date().toISOString();
@@ -134,24 +151,30 @@ export async function clearSubject(
     if (!subject || subject.classification_state === 'cleared') return { success: true, projectionPubkey };
     // One job row per subject projects whatever it last became; an approval (#192)
     // may already own it, so re-arm rather than skip.
+    // The unbind and the job follow only a clear this batch made, so a retry the
+    // newer-approval check stopped leaves the binding and its set job alone.
+    const clearedHere = `EXISTS (SELECT 1 FROM protected_minor_subjects
+      WHERE subject_id = ? AND classification_state = 'cleared' AND cleared_at = ?)`;
     await db.batch([
       db.prepare(`UPDATE protected_minor_subjects
         SET classification_state = 'cleared', cleared_at = ?, cleared_by = ?, clear_reason = ?, clear_reason_class = ?
-        WHERE subject_id = ? AND classification_state = 'active'`)
-        .bind(now, clearedBy ?? null, reason, reasonClass, subject.subject_id),
+        WHERE subject_id = ? AND classification_state = 'active'
+          AND NOT EXISTS (SELECT 1 FROM age_review_cases d
+            WHERE d.id = ? AND ${newerApprovalThan('protected_minor_subjects.subject_id', 'd')})`)
+        .bind(now, clearedBy ?? null, reason, reasonClass, subject.subject_id, retryOfDenialCaseId ?? null),
       db.prepare(`UPDATE protected_minor_account_bindings
-        SET unbound_at = COALESCE(unbound_at, ?) WHERE subject_id = ? AND unbound_at IS NULL`)
-        .bind(now, subject.subject_id),
+        SET unbound_at = COALESCE(unbound_at, ?) WHERE subject_id = ? AND unbound_at IS NULL AND ${clearedHere}`)
+        .bind(now, subject.subject_id, subject.subject_id, now),
       db.prepare(`INSERT INTO protected_minor_projection_jobs
         (subject_id, pubkey, reason, state, created_at, updated_at)
-        VALUES (?, ?, ?, 'pending', ?, ?)
+        SELECT ?, ?, ?, 'pending', ?, ? WHERE ${clearedHere}
         ON CONFLICT(subject_id) DO UPDATE SET pubkey = excluded.pubkey, reason = excluded.reason,
           state = 'pending', updated_at = excluded.updated_at,
           -- An already-pending job keeps its age, as on every other re-arm: retention
           -- measures overdue projections from created_at.
           created_at = CASE WHEN protected_minor_projection_jobs.state = 'pending'
             THEN protected_minor_projection_jobs.created_at ELSE excluded.created_at END`)
-        .bind(subject.subject_id, projectionPubkey, reason, now, now),
+        .bind(subject.subject_id, projectionPubkey, reason, now, now, subject.subject_id, now),
     ]);
     return { success: true, projectionPubkey };
   } catch (error) {
@@ -310,8 +333,10 @@ export async function settleSupersededClear(db: D1Database, subjectId: string): 
 
 export async function pendingSubjectClears(db: D1Database): Promise<Array<{
   subjectId: string; pubkey: string; clearedBy?: string; reason: 'age_review_denied' | 'age_review_expired';
+  /** The denial this retry carries out; clearSubject re-checks it at write time. */
+  denialCaseId: string;
 }>> {
-  const rows = await db.prepare(`SELECT s.subject_id, c.pubkey, c.moderator_pubkey, c.resolution_note
+  const rows = await db.prepare(`SELECT s.subject_id, c.id AS denial_case_id, c.pubkey, c.moderator_pubkey, c.resolution_note
     FROM protected_minor_subjects s
     JOIN protected_minor_account_bindings b ON b.subject_id = s.subject_id
     JOIN age_review_cases c ON c.pubkey = b.pubkey AND c.state = 'denied_closed'
@@ -322,17 +347,13 @@ export async function pendingSubjectClears(db: D1Database): Promise<Array<{
         ORDER BY datetime(c2.updated_at) DESC, c2.rowid DESC LIMIT 1)
       -- Latest decision wins (#192): a denial is a retry source only until a newer
       -- approval of the same subject (any pubkey in its binding history).
-      AND NOT EXISTS (SELECT 1 FROM age_review_cases a
-        JOIN protected_minor_account_bindings b3 ON b3.pubkey = a.pubkey
-        WHERE b3.subject_id = s.subject_id
-          AND a.state = 'cleared' AND a.clear_resolution = 'approved_minor'
-          AND (datetime(a.updated_at) > datetime(c.updated_at)
-            OR (datetime(a.updated_at) = datetime(c.updated_at) AND a.rowid > c.rowid)))
+      AND NOT ${newerApprovalThan('s.subject_id', 'c')}
     ORDER BY datetime(c.updated_at), c.rowid LIMIT 100`).all<{
-      subject_id: string; pubkey: string; moderator_pubkey: string | null; resolution_note: string | null;
+      subject_id: string; denial_case_id: string; pubkey: string; moderator_pubkey: string | null; resolution_note: string | null;
     }>();
   return rows.results.map((row) => ({
     subjectId: row.subject_id,
+    denialCaseId: row.denial_case_id,
     pubkey: row.pubkey,
     clearedBy: row.moderator_pubkey ?? undefined,
     reason: row.resolution_note?.startsWith('Auto-closed:') ? 'age_review_expired' : 'age_review_denied',

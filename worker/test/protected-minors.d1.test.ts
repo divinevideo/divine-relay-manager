@@ -122,7 +122,7 @@ describe('protected-minor registry on real D1', () => {
       VALUES ('deny-a', ?, 'denied_closed', ?, 'Denied by moderator', ?, ?)`)
       .bind(PUBKEY_A, PUBKEY_B, '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z').run();
     expect(await pendingSubjectClears(DB)).toEqual([{
-      subjectId, pubkey: PUBKEY_A, clearedBy: PUBKEY_B, reason: 'age_review_denied',
+      subjectId, pubkey: PUBKEY_A, clearedBy: PUBKEY_B, reason: 'age_review_denied', denialCaseId: 'deny-a',
     }]);
     await clearSubject(DB, PUBKEY_A, PUBKEY_B, 'age_review_denied', subjectId);
     expect(await pendingSubjectClears(DB)).toEqual([]);
