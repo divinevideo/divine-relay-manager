@@ -126,7 +126,7 @@ describe('hand-off seeded cache across terminal mutations (#179 review)', () => 
     );
 
     // Hand-off opened the real detail with active controls
-    const clearButton = await screen.findByRole('button', { name: 'Clear: not a minor' });
+    const clearButton = await screen.findByRole('button', { name: 'Clear: not a protected minor' });
     fireEvent.click(clearButton);
 
     await waitFor(() => expect(updateAgeReviewCase).toHaveBeenCalledTimes(1));
@@ -135,7 +135,7 @@ describe('hand-off seeded cache across terminal mutations (#179 review)', () => 
     // stale active controls, no second action possible
     expect(await screen.findByText('Cleared')).toBeInTheDocument();
     await waitFor(() => {
-      expect(screen.queryByRole('button', { name: 'Clear: not a minor' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Clear: not a protected minor' })).not.toBeInTheDocument();
     });
   });
 });

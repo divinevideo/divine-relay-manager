@@ -122,7 +122,7 @@ describe('re-entering the hand-off after a terminal action (adversarial)', () =>
         </MemoryRouter>
       </QueryClientProvider>
     );
-    const clearButton = await first.findByRole('button', { name: 'Clear: not a minor' });
+    const clearButton = await first.findByRole('button', { name: 'Clear: not a protected minor' });
     fireEvent.click(clearButton);
     await waitFor(() => expect(updateAgeReviewCase).toHaveBeenCalledTimes(1));
     expect(await first.findByText('Cleared')).toBeInTheDocument();
@@ -146,7 +146,7 @@ describe('re-entering the hand-off after a terminal action (adversarial)', () =>
     // The truth is terminal: the moderator must see Cleared (or the honest
     // no-active-case empty state) — never actionable ACTIVE controls.
     await waitFor(() => {
-      expect(screen.queryByRole('button', { name: 'Clear: not a minor' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Clear: not a protected minor' })).not.toBeInTheDocument();
     }, { timeout: 3000 });
     expect(
       screen.queryByText('Cleared') ??

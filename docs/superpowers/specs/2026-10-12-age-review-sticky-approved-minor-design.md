@@ -299,6 +299,23 @@ these win.
   bindings table requires 64 lowercase hex) is refused before any write.
 - **keycast's set uses an explicit transaction** rather than the single-statement CTE described in
   the keycast section.
+- **The case view reads the registry too.** `GET /api/account-status/:pubkey` adds
+  `protected_minor` (true for an active subject, false for none, null when D1 cannot answer). The
+  approved badge shows when either keycast or the registry says protected, with a note when
+  keycast's app protections are not in force, and "protected-minor status unavailable" whenever
+  the registry has not answered. A self-custody approved minor has no keycast account, so the
+  registry is the only source for it.
+- **The approve confirm claims only what the account gets.** A Divine login account: DM limits,
+  the adult content lock and the key-export block, plus report auto-clear. An account holding its
+  own key: report auto-clear only. Unknown account type: a qualified version.
+- **The DM restriction is an applied protection.** It shipped in mobile 1.0.16 (app stores carry
+  1.0.23), so the panel's "Rolling out" section is gone and the panel also lists the key-export
+  block.
+- **The second Clear is labelled "Clear: not a protected minor"** (resolution label "Not a
+  protected minor"). A cleared 16+ case can still be a 16-17 year old minor; the stored value stays
+  `not_minor`.
+- **An `account_unclaimed` refusal is reported as permanent** (`keycastMinorSetUnclaimed`), with
+  its own toast, since the job is settled and nothing retries it.
 
 ## Rollout
 
@@ -311,4 +328,6 @@ issue text is drafted locally for review.
 
 - Backfilling historical cleared 13-15 cases (their resolution is unknown).
 - Splitting the funnel's "restored" count by `clear_resolution`.
+- Ageing out at 16. There is no automatic age-out, by decision; a manual path to make an account
+  an allowed minor without protections (on appeal or request) is a later follow-up.
 - Mobile/web behaviour, which already keys off `verified_minor`.

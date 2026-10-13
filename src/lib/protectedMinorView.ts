@@ -8,7 +8,7 @@ export interface ProtectedMinorView {
   protected: boolean;
   /** Qualifier beside the badge when keycast's app protections are not in force. */
   note: string | null;
-  /** Neither source can answer, so the view must not read as "not a minor". */
+  /** Neither source can answer, so the view must not read as "not a protected minor". */
   statusUnavailable: boolean;
   /** Approve-confirm copy that claims only the protections this account gets. */
   approveSummary: string;

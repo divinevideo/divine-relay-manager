@@ -66,7 +66,8 @@ const STATE_LABELS: Record<AgeReviewState, string> = {
 
 const CLEAR_RESOLUTION_LABELS: Record<ClearResolution, string> = {
   approved_minor: 'Approved minor',
-  not_minor: 'Not a minor',
+  // "Protected": a cleared 16+ case can still be a 16-17 year old minor.
+  not_minor: 'Not a protected minor',
 };
 
 const BAND_LABELS: Record<AgeBand, string> = {
@@ -218,7 +219,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
         if (unclaimed) {
           toast({
             title: 'Approved, but keycast refused the minor flag',
-            description: 'Recorded as a protected minor, so future under-16 reports clear automatically. Keycast refused the minor flag because this account has no login credentials, so the app protections and key-export block do not apply and this will not be retried. Escalate if the account is claimed later.',
+            description: 'Recorded as a protected minor, so future under-16 reports clear automatically. Keycast refused the minor flag because this account has no login credentials, so the app protections and key-export block do not apply. Nothing re-applies the flag if the account is claimed later; escalate if it is.',
             variant: 'destructive',
           });
         }
@@ -229,7 +230,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
             description: `Case updated, but these did not apply: ${retryable.join(', ') || 'one or more enforcement steps'}. The case is now closed; automated retry will continue where supported. Escalate if enforcement does not converge.`,
             variant: 'destructive',
           });
-        } else if (enforcement?.keycast === 'not_applicable') {
+        } else if (enforcement?.keycast === 'not_applicable' && !unclaimed) {
           // Enforcement is complete, so this is not a failure and must not read
           // as one, but it cannot be silent either. Without it the moderator
           // walks away believing a sign-in was blocked when the account has no
@@ -681,7 +682,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
                   })}
                 >
                   <CheckCircle className="h-3 w-3 mr-1" />
-                  Clear: not a minor
+                  Clear: not a protected minor
                 </Button>
                 {ageReviewConfig?.auto_delete_on_deny ? (
                   <DeleteConfirmDialog
@@ -719,7 +720,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
               </div>
               {protectedMinor.protected && (
                 <p className="text-xs text-muted-foreground">
-                  Already an approved protected minor. "Not a minor" closes this case and keeps protections on; Deny bans the account and lifts its protections.
+                  Already an approved protected minor. "Not a protected minor" closes this case and keeps protections on; Deny bans the account and lifts its protections.
                 </p>
               )}
 
