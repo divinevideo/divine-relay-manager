@@ -1045,7 +1045,7 @@ with
 ```ts
       if (await this.isApprovedMinor(reportedPubkey)) {
 ```
-Leave that block's `INSERT INTO age_review_cases` without a `clear_resolution` (NULL): an auto-clear observes an existing approval rather than deciding one, and Task 4's latest-decision rule in `pendingSubjectClears` must count only explicit approvals (controller ruling, see ledger). Update the block's leading comment to "Auto-clear: an approved minor (registry or keycast) is recorded as already cleared", and the `catch` warning to "Approved-minor check failed; proceeding with normal case".
+Leave that block's `INSERT INTO age_review_cases` without a `clear_resolution` (NULL): an auto-clear observes an existing approval rather than deciding one, and Task 4's latest-decision rule in `pendingSubjectClears` must count only explicit approvals. Update the block's leading comment to "Auto-clear: an approved minor (registry or keycast) is recorded as already cleared", and the `catch` warning to "Approved-minor check failed; proceeding with normal case".
 
 - [ ] **Step 4: Run to verify pass**
 
@@ -1084,12 +1084,12 @@ describe('clearing a case', () => {
   it('offers approval as a protected minor only on a 13-15 case', async () => {
     renderDetail(makeCase({ suspected_age_band: 'age_13_15' }));
     expect(await screen.findByRole('button', { name: /Approve as protected minor/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Clear: not a minor' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Clear without approval' })).toBeInTheDocument();
   });
 
   it('hides approval outside the 13-15 band', async () => {
     renderDetail(makeCase({ suspected_age_band: 'age_16_plus_claimed' }));
-    await screen.findByRole('button', { name: 'Clear: not a minor' });
+    await screen.findByRole('button', { name: 'Clear without approval' });
     expect(screen.queryByRole('button', { name: /Approve as protected minor/ })).not.toBeInTheDocument();
   });
 
@@ -1110,9 +1110,9 @@ describe('clearing a case', () => {
     expect(updateAgeReviewCase).not.toHaveBeenCalled();
   });
 
-  it('Clear: not a minor sends not_minor immediately', async () => {
+  it('Clear without approval sends not_minor immediately', async () => {
     renderDetail(makeCase({ suspected_age_band: 'age_13_15' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Clear: not a minor' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Clear without approval' }));
     await waitFor(() => expect(updateAgeReviewCase).toHaveBeenCalledWith(
       'case-1', expect.objectContaining({ state: 'cleared', resolution: 'not_minor' }),
     ));
@@ -1129,7 +1129,7 @@ describe('clearing a case', () => {
       enforcement: { relay: 'ok', bulk: 'ok', keycast: 'ok', subjectActivate: 'ok', keycastMinorSet: 'failed' },
     });
     renderDetail(makeCase({ suspected_age_band: 'age_13_15' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Clear: not a minor' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Clear without approval' }));
     await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({
       description: expect.stringContaining('protected-minor account flag'),
     })));
@@ -1227,13 +1227,13 @@ Replace the single green Clear `<Button>` in the terminal actions with:
                   })}
                 >
                   <CheckCircle className="h-3 w-3 mr-1" />
-                  Clear: not a minor
+                  Clear without approval
                 </Button>
 ```
 
 - [ ] **Step 5: Update the five queue tests**
 
-In each of `AgeReview.handoff-mutation`, `AgeReview.midflight-switch`, `AgeReview.reentry`, `AgeReview.list-shadow`, `AgeReview.uninvalidate` `.test.tsx`, replace `{ name: 'Clear' }` with `{ name: 'Clear: not a minor' }`. Where a test asserts the exact PATCH body, add `resolution: 'not_minor'`. These tests cover cache behaviour after a terminal action, which is unchanged.
+In each of `AgeReview.handoff-mutation`, `AgeReview.midflight-switch`, `AgeReview.reentry`, `AgeReview.list-shadow`, `AgeReview.uninvalidate` `.test.tsx`, replace `{ name: 'Clear' }` with `{ name: 'Clear without approval' }`. Where a test asserts the exact PATCH body, add `resolution: 'not_minor'`. These tests cover cache behaviour after a terminal action, which is unchanged.
 
 - [ ] **Step 6: Run to verify pass**
 
@@ -1287,7 +1287,7 @@ Expected: all green. Record counts against the baseline (worker 819, d1 112, fro
 5. Stop keycast. Approve a second account's case. Confirm a 207 toast naming "protected-minor account flag", and the job `pending`. Restart keycast, run the cron (`curl "http://localhost:8787/__scheduled?cron=*/5+*+*+*+*"` under `wrangler dev --test-scheduled`, or wait a tick) and confirm the flag is TRUE and the job `complete`.
 6. Report and approve a self-custody pubkey (no keycast account). Confirm `not_applicable` and an active subject; re-report and confirm auto-clear.
 7. Revocation after approval: insert a new `open_reported` case for the step-3 account directly into local D1 (a report would auto-clear), move it to restricted in the UI, then deny it. Confirm the subject is `cleared`, its projection job was re-armed to `pending` and then `complete`, and keycast `verified_minor` is FALSE.
-8. Clear a 13-15 case with "Clear: not a minor". Confirm no subject and no keycast change.
+8. Clear a 13-15 case with "Clear without approval". Confirm no subject and no keycast change.
 
 - [ ] **Step 5: Tear down** the local stack processes started here. Leave the worktrees.
 

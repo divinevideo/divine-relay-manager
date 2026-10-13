@@ -300,7 +300,7 @@ describe('clear resolution on the PATCH', () => {
     }
   });
 
-  // Hex pubkey: once Task 4 lands, an approval binds it and the bindings table CHECKs the shape.
+  // Hex pubkey: an approval binds it and the bindings table CHECKs the shape.
   async function insertBandCase(id: string, band: string) {
     await DB.prepare(
       `INSERT INTO age_review_cases (id, pubkey, state, suspected_age_band, deadline_at, clock_paused, version)
