@@ -745,6 +745,7 @@ export async function handleUpdateAgeReviewCase(
     keycastMinorSetUnclaimed = minorSetResult?.unclaimed === true;
     // `unclaimed` is reported as failed (a human must look) but settled: keycast
     // refuses that row permanently, so a retry would only re-fail every tick.
+    // TODO(#304): nothing sets the flag if the account is claimed later.
     if (approvingMinor && env.DB
       && (keycastMinorSet === 'ok' || keycastMinorSet === 'not_applicable' || minorSetResult?.unclaimed)) {
       try {
@@ -2491,7 +2492,8 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
       // Settled when there is nothing left a retry could change: applied, no
       // keycast account (notFound), or a row keycast refuses to flag (unclaimed).
       // Left pending, those re-call keycast every tick and trip the retention
-      // overdue-projection alarm.
+      // overdue-projection alarm. TODO(#304): an unclaimed refusal settled here
+      // is only logged, and nothing sets the flag if the account is claimed later.
       if (result.success || result.notFound || result.unclaimed) {
         await markProjectionComplete(env.DB, job.pubkey, job.classification);
       } else {

@@ -12,7 +12,7 @@ Approving a 13-15 age-review case (`PATCH /api/age-review/cases/:id` with `state
 
 One projection job per subject carries whatever the subject last became. The job projects an `active` subject as a Keycast `PUT` of `verified_minor` and a `cleared` subject as a `DELETE`, inline right after the write and from the cron for any job still pending. Latest decision wins: a denial's clear leaves the subject active when a newer explicit approval exists for it, and after every projection that lands the worker re-arms the opposite projection if a racing writer left Keycast disagreeing with D1.
 
-Two outcomes settle a job without a Keycast change, so nothing retries them. An account with no Keycast row (self-custody) has nothing to flag; it is still a registry subject, so later under-16 reports auto-clear. A row with no login credentials is refused with `account_unclaimed`; the moderator is told the flag was not applied, and nothing sets it later if the account is claimed.
+Two outcomes settle a job without a Keycast change, so nothing retries them. An account with no Keycast row (self-custody) has nothing to flag; it is still a registry subject, so later under-16 reports auto-clear. A row with no login credentials is refused with `account_unclaimed`. When that refusal answers the approval's own call, the moderator is told the flag was not applied; when the cron's retry gets it, it is only logged. Either way, nothing sets the flag later if the account is claimed.
 
 ## Service API
 
