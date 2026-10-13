@@ -16,13 +16,12 @@ export interface ProtectedMinorView {
 
 // The app protections (adult content lock, DM limits) and the key-export block
 // all key on keycast's verified_minor, so they reach only Divine login accounts.
-// An account holding its own key gets the registry's report auto-clear. DM limits
-// say "rolling out" to match the protections panel in the same view
-// (TODO(divinevideo/support-trust-safety#176) there): change both together.
+// An account holding its own key gets the registry's report auto-clear. Keep this
+// in step with the protections panel in AgeReviewDetail.
 const APPROVE_SUMMARY: Record<AccountType, string> = {
-  divine: 'This account is restored and marked as an approved 13-15 minor. The adult content lock applies, key export is blocked, minor DM limits are rolling out, and future under-16 reports clear automatically.',
+  divine: 'This account is restored and marked as an approved 13-15 minor. Minor DM limits and the adult content lock apply, key export is blocked, and future under-16 reports clear automatically.',
   self_custody: "This account holds its own key, so Divine can't apply the adult content lock, minor DM limits or a key-export block. Approving restores it and makes future under-16 reports clear automatically.",
-  unknown: 'This account is restored and marked as an approved 13-15 minor, and future under-16 reports clear automatically. For Divine login accounts, the adult content lock also applies, key export is blocked, and minor DM limits are rolling out.',
+  unknown: 'This account is restored and marked as an approved 13-15 minor, and future under-16 reports clear automatically. For Divine login accounts, minor DM limits and the adult content lock also apply and key export is blocked.',
 };
 
 export function deriveProtectedMinorView(input: {

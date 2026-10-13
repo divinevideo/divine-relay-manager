@@ -434,7 +434,7 @@ describe('AgeReviewDetail', () => {
     ).not.toBeInTheDocument();
   });
 
-  it('lists only shipped protections under "apply to this account" (adult lock, not the DM restriction)', async () => {
+  it('lists the adult content lock and the DM restriction under "apply to this account"', async () => {
     getAccountStatus.mockResolvedValue({
       success: true,
       verified_minor: true,
@@ -449,26 +449,22 @@ describe('AgeReviewDetail', () => {
     const appliedSection = appliedHeading.closest('div') as HTMLElement;
     expect(within(appliedSection).getByText(/adult content is hidden/i)).toBeInTheDocument();
     expect(within(appliedSection).getByText(/18\+ visibility toggle is disabled/i)).toBeInTheDocument();
-    // The DM restriction (#176) is not enforced by any released client yet,
-    // so it must NOT sit under the applied-protections heading.
-    expect(within(appliedSection).queryByText(/DM restriction/i)).not.toBeInTheDocument();
+    // DM restriction (divinevideo/support-trust-safety#176): released in mobile 1.0.16, so
+    // it is an applied protection. The row names the pinned accounts by
+    // canonical NIP-05 handle (display names are impersonable), both directions.
+    expect(within(appliedSection).getByText(/DM restriction/i)).toBeInTheDocument();
+    expect(within(appliedSection).getByText(/_@divinehq\.divine\.video/)).toBeInTheDocument();
+    expect(within(appliedSection).getByText(/moderation@divine\.video/)).toBeInTheDocument();
+    expect(within(appliedSection).getByText(/blocked on send and hidden on receive/i)).toBeInTheDocument();
   });
 
-  it('shows the DM restriction in a separate rolling-out section, not as an applied protection', async () => {
+  it('has no rolling-out section now that every protection is released', async () => {
     getAccountStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: true });
 
     renderDetail(makeCase());
 
-    // Rolling-out section (#176): its heading carries the not-yet-enforced
-    // framing, and the row names the pinned accounts by canonical NIP-05
-    // handle (display names are impersonable), both directions.
-    const rolloutHeading = await screen.findByText(/rolling out \(not yet enforced/i);
-    expect(rolloutHeading).toHaveTextContent(/not yet enforced by released apps/i);
-    const rolloutSection = rolloutHeading.closest('div') as HTMLElement;
-    expect(within(rolloutSection).getByText(/DM restriction/i)).toBeInTheDocument();
-    expect(within(rolloutSection).getByText(/_@divinehq\.divine\.video/)).toBeInTheDocument();
-    expect(within(rolloutSection).getByText(/moderation@divine\.video/)).toBeInTheDocument();
-    expect(within(rolloutSection).getByText(/blocked on send and hidden on receive/i)).toBeInTheDocument();
+    await screen.findByText(/protections that apply to this account/i);
+    expect(screen.queryByText(/rolling out/i)).not.toBeInTheDocument();
   });
 
   it('frames the protections as policy-derived, not per-device confirmed', async () => {
@@ -497,7 +493,7 @@ describe('AgeReviewDetail', () => {
     expect(
       screen.queryByText(/protections that apply to this account/i)
     ).not.toBeInTheDocument();
-    expect(screen.queryByText(/rolling out \(not yet enforced/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/DM restriction/i)).not.toBeInTheDocument();
   });
 
   it('does not show the protections block when the account status is unavailable', async () => {
@@ -513,7 +509,7 @@ describe('AgeReviewDetail', () => {
     expect(
       screen.queryByText(/protections that apply to this account/i)
     ).not.toBeInTheDocument();
-    expect(screen.queryByText(/rolling out \(not yet enforced/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/DM restriction/i)).not.toBeInTheDocument();
   });
 
   it('renders the account-type indicator (self-custody) for a not_found account', async () => {
@@ -651,7 +647,7 @@ describe('AgeReviewDetail', () => {
       await waitFor(() => expect(queryClient.isFetching()).toBe(0));
       fireEvent.click(await screen.findByRole('button', { name: /Approve as protected minor/ }));
 
-      expect(await screen.findByText(/The adult content lock applies, key export is blocked, minor DM limits are rolling out/)).toBeInTheDocument();
+      expect(await screen.findByText(/Minor DM limits and the adult content lock apply, key export is blocked/)).toBeInTheDocument();
     });
   });
 
@@ -717,7 +713,7 @@ describe('AgeReviewDetail', () => {
       await waitFor(() => expect(queryClient.isFetching()).toBe(0));
       fireEvent.click(await screen.findByRole('button', { name: /Approve as protected minor/ }));
       expect(await screen.findByText(
-        'This account is restored and marked as an approved 13-15 minor, and future under-16 reports clear automatically. For Divine login accounts, the adult content lock also applies, key export is blocked, and minor DM limits are rolling out.',
+        'This account is restored and marked as an approved 13-15 minor, and future under-16 reports clear automatically. For Divine login accounts, minor DM limits and the adult content lock also apply and key export is blocked.',
       )).toBeInTheDocument();
     });
 

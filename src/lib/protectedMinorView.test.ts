@@ -75,7 +75,7 @@ describe('deriveProtectedMinorView: status unavailable', () => {
 describe('deriveProtectedMinorView: approve confirm copy', () => {
   it('promises app protections for a Divine login account', () => {
     expect(view({ success: true }, 'divine').approveSummary).toBe(
-      'This account is restored and marked as an approved 13-15 minor. The adult content lock applies, key export is blocked, minor DM limits are rolling out, and future under-16 reports clear automatically.',
+      'This account is restored and marked as an approved 13-15 minor. Minor DM limits and the adult content lock apply, key export is blocked, and future under-16 reports clear automatically.',
     );
   });
 
@@ -87,7 +87,7 @@ describe('deriveProtectedMinorView: approve confirm copy', () => {
 
   it('qualifies app protections when the account type is unknown', () => {
     expect(view(undefined, 'unknown').approveSummary).toBe(
-      'This account is restored and marked as an approved 13-15 minor, and future under-16 reports clear automatically. For Divine login accounts, the adult content lock also applies, key export is blocked, and minor DM limits are rolling out.',
+      'This account is restored and marked as an approved 13-15 minor, and future under-16 reports clear automatically. For Divine login accounts, minor DM limits and the adult content lock also apply and key export is blocked.',
     );
   });
 });

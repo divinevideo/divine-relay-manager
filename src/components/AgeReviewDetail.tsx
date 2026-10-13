@@ -398,25 +398,15 @@ export function AgeReviewDetail({ caseData: c }: Props) {
                     Adult content lock: adult content is hidden and the 18+ visibility toggle is disabled, so they cannot re-enable it.
                   </span>
                 </div>
-                <div className="text-muted-foreground/80">
-                  Derived from the approved protected-minor status above; enforced client-side by the Divine apps on supported versions. Not confirmed per device.
-                </div>
-              </div>
-              {/* TODO(divinevideo/support-trust-safety#176): move the DM
-                  restriction into the applied section above (and remove this
-                  one) once released mobile + web builds enforce it. Until
-                  then it lives under an explicit not-yet heading so a
-                  moderator can never mistake it for a live protection. */}
-              <div className="space-y-1.5 border-t pt-2">
-                <h4 className="flex items-center gap-1.5 font-medium text-muted-foreground">
-                  <Clock className="h-3.5 w-3.5" />
-                  Rolling out (not yet enforced by released apps)
-                </h4>
+                {/* Released in mobile 1.0.16 (divinevideo/support-trust-safety#176). */}
                 <div className="flex items-start gap-1.5 text-muted-foreground">
                   <MessageSquareLock className="h-3.5 w-3.5 mt-0.5 shrink-0" />
                   <span>
                     DM restriction: DMs limited to the pinned official accounts, Divine HQ (_@divinehq.divine.video) and Divine Moderation (moderation@divine.video); everything else is blocked on send and hidden on receive.
                   </span>
+                </div>
+                <div className="text-muted-foreground/80">
+                  Derived from the approved protected-minor status above; enforced client-side by the Divine apps on supported versions. Not confirmed per device.
                 </div>
               </div>
             </div>
