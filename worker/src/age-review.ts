@@ -669,12 +669,16 @@ export async function handleUpdateAgeReviewCase(
     // signal, and moderator_pubkey is unvalidated on write). A malformed/absent
     // actor is dropped server-side by keycast-client → keycast logs-only.
     const minorFlagActor = (updated?.moderator_pubkey ?? existing.moderator_pubkey) ?? undefined;
+    // A newer approval of this account landed while this denial ran its other
+    // legs: latest decision wins, so its protections, keycast flag included, stay.
+    let subjectKeptActive = false;
     if (deniedCase && env.DB) {
       try {
-        const result = await clearSubject(env.DB, existing.pubkey, minorFlagActor, 'age_review_denied');
+        const result = await clearSubject(env.DB, existing.pubkey, minorFlagActor, 'age_review_denied', undefined, caseId);
         subjectClear = result.success ? 'ok' : 'failed';
         subjectClearError = result.error;
         minorProjectionPubkey = result.projectionPubkey ?? existing.pubkey;
+        subjectKeptActive = result.keptActive === true;
         if (!result.success) {
           console.error(`[age-review] Protected subject clear ${requestedState} failed: ${result.error}`);
         }
@@ -685,7 +689,7 @@ export async function handleUpdateAgeReviewCase(
       }
     }
     const minorClearLeg = await runStatusLeg('Keycast verified_minor clear', () =>
-      deniedCase && subjectClear !== 'failed'
+      deniedCase && subjectClear !== 'failed' && !subjectKeptActive
         ? clearVerifiedMinor(minorProjectionPubkey, minorFlagActor, 'age_review_denied', env)
         : undefined);
     keycastMinorClear = minorClearLeg.status;
@@ -2388,9 +2392,11 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
 
     // Commit the durable classification clear first. That creates a projection
     // job which this tick (or a later tick after an outage) converges in Keycast.
-    const durableClear = await clearSubject(env.DB, row.pubkey, undefined, 'age_review_expired');
+    const durableClear = await clearSubject(env.DB, row.pubkey, undefined, 'age_review_expired', undefined, row.id);
     if (!durableClear.success) {
       console.error(`[age-review] Protected subject clear failed for expired case: ${durableClear.error}`);
+    } else if (durableClear.keptActive) {
+      console.info('[age-review] Expired case left protection on: a newer approval owns the subject');
     } else {
       try {
         const projectionPubkey = durableClear.projectionPubkey ?? row.pubkey;

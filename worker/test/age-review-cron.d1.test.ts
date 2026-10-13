@@ -383,8 +383,9 @@ describe('age-review cron on real D1', () => {
         (subject_id, pubkey, reason, state, created_at, updated_at)
         VALUES (?, ?, 'age_review_approved', 'pending', ?, ?)`).bind(subjectId, P, now, now).run();
 
-      await clearSubject(DB, retry.pubkey, retry.clearedBy, retry.reason, retry.subjectId, retry.denialCaseId);
+      const result = await clearSubject(DB, retry.pubkey, retry.clearedBy, retry.reason, retry.subjectId, retry.denialCaseId);
 
+      expect(result).toEqual({ success: true, projectionPubkey: P, keptActive: true });
       expect(await activeCount()).toBe(1);
       const binding = await DB.prepare('SELECT unbound_at FROM protected_minor_account_bindings WHERE subject_id = ?')
         .bind(subjectId).first<{ unbound_at: string | null }>();
@@ -399,12 +400,38 @@ describe('age-review cron on real D1', () => {
       await caseAt('deny-case', 'denied_closed', null, '2026-03-01 00:00:00');
       const [retry] = await pendingSubjectClears(DB);
 
-      await clearSubject(DB, retry.pubkey, retry.clearedBy, retry.reason, retry.subjectId, retry.denialCaseId);
+      const result = await clearSubject(DB, retry.pubkey, retry.clearedBy, retry.reason, retry.subjectId, retry.denialCaseId);
 
+      expect(result).toEqual({ success: true, projectionPubkey: P });
       expect(await activeCount()).toBe(0);
       const job = await DB.prepare('SELECT reason, state FROM protected_minor_projection_jobs WHERE subject_id = ?')
         .bind(subjectId).first<{ reason: string; state: string }>();
       expect(job).toEqual({ reason: 'age_review_denied', state: 'pending' });
+    });
+
+    it('(i) an approval landing while an expiry runs its other legs keeps the subject and the keycast flag', async () => {
+      await DB.prepare(`INSERT INTO age_review_cases (id, pubkey, state, suspected_age_band, deadline_at, clock_paused, version)
+        VALUES ('expiring-case', ?, 'restricted_pending_user_response', 'age_13_15', ?, 0, 0)`)
+        .bind(P, new Date(Date.now() - 864e5).toISOString()).run();
+      let approved = '';
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+        const url = String(input);
+        if (url.includes('/verified-minor')) keycastCalls.push(init?.method ?? 'GET');
+        if (url.includes('keycast.invalid') && !url.includes('/verified-minor') && !approved) {
+          // A newer approval creates the subject while the expiry's keycast ban is in flight.
+          await caseAt('approve-case', 'cleared', 'approved_minor', '2099-01-01 00:00:00');
+          approved = (await createSubjectWithBinding(DB, 'approve-case', P)).subjectId;
+        }
+        return new Response('{}', { status: 200 });
+      });
+
+      await checkAgeReviewDeadlines(env());
+
+      expect(approved).not.toBe('');
+      expect((await DB.prepare('SELECT state FROM age_review_cases WHERE id = ?')
+        .bind('expiring-case').first<{ state: string }>())!.state).toBe('denied_closed');
+      expect(keycastCalls).not.toContain('DELETE');
+      expect(await activeCount()).toBe(1);
     });
   });
 

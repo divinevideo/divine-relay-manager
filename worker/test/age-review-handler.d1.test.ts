@@ -691,6 +691,43 @@ describe('inline projection convergence after racing writes', () => {
     expect(await pendingCount()).toBe(0);
   });
 
+  it('X3: an approval landing while a deny runs its other legs keeps the subject and the keycast flag', async () => {
+    await DB.prepare(`INSERT INTO age_review_cases (id, pubkey, state, deadline_at, clock_paused, version)
+      VALUES ('x3-deny', ?, 'restricted_pending_user_response', ?, 0, 0)`)
+      .bind(P, new Date(Date.now() + 9 * 864e5).toISOString()).run();
+    let s2 = '';
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.includes('/verified-minor')) calls.push(init?.method ?? 'GET');
+      if (url.includes('keycast.invalid') && !url.includes('/verified-minor') && !s2) {
+        // A newer approval creates S2 and completes its PUT while the deny's keycast ban is in flight.
+        await DB.prepare(`INSERT INTO age_review_cases (id, pubkey, state, clear_resolution, updated_at)
+          VALUES ('x3-approve', ?, 'cleared', 'approved_minor', datetime('now', '+2 seconds'))`).bind(P).run();
+        s2 = (await createSubjectWithBinding(DB, 'x3-approve', P)).subjectId;
+        const now = new Date().toISOString();
+        await DB.prepare(`INSERT INTO protected_minor_projection_jobs
+          (subject_id, pubkey, reason, state, created_at, updated_at)
+          VALUES (?, ?, 'age_review_approved', 'complete', ?, ?)`).bind(s2, P, now, now).run();
+      }
+      return new Response('{}', { status: 200 });
+    });
+
+    const res = await patchCase('x3-deny', { state: 'denied_closed' });
+    const body = await res.json() as { enforcement: { subjectClear: string; keycastMinorClear: string } };
+
+    expect(s2).not.toBe('');
+    expect(calls).toEqual([]); // no keycast DELETE for the approved minor
+    expect(body.enforcement.subjectClear).toBe('ok');
+    expect(body.enforcement.keycastMinorClear).toBe('not_attempted');
+    const subject = await DB.prepare('SELECT classification_state FROM protected_minor_subjects WHERE subject_id = ?')
+      .bind(s2).first<{ classification_state: string }>();
+    expect(subject!.classification_state).toBe('active');
+    const binding = await DB.prepare('SELECT unbound_at FROM protected_minor_account_bindings WHERE subject_id = ?')
+      .bind(s2).first<{ unbound_at: string | null }>();
+    expect(binding!.unbound_at).toBeNull();
+    expect(await pendingCount()).toBe(0);
+  });
+
   it('X2: an approval set landing after a racing denial completed its clear re-arms the clear', async () => {
     await DB.prepare(`INSERT INTO age_review_cases (id, pubkey, state, suspected_age_band, deadline_at, clock_paused, version)
       VALUES ('x2-approve', ?, 'submitted_for_review', 'age_13_15', ?, 0, 0)`)

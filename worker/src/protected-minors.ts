@@ -123,9 +123,10 @@ function newerApprovalThan(subject: string, denial: string): string {
 }
 
 /**
- * `retryOfDenialCaseId` marks a cron retry of that denial. The retry was chosen
- * before this write, so an approval can land in between; the clear then re-checks
- * latest-decision-wins inside its own batch and leaves the subject active.
+ * `denialCaseId` is the denial this clear carries out. Every denial path commits
+ * the case before it gets here (the cron retry selects it, inline deny and expiry
+ * await other enforcement first), so an approval can land in between; the clear
+ * re-checks latest-decision-wins inside its own batch and leaves the subject active.
  */
 export async function clearSubject(
   db: D1Database,
@@ -133,8 +134,12 @@ export async function clearSubject(
   clearedBy: string | undefined,
   reason: string,
   expectedSubjectId?: string,
-  retryOfDenialCaseId?: string,
-): Promise<{ success: boolean; projectionPubkey?: string; error?: string }> {
+  denialCaseId?: string,
+): Promise<{
+  success: boolean; projectionPubkey?: string; error?: string;
+  /** A newer approval owns the subject, so it stayed active and keycast must not be cleared. */
+  keptActive?: boolean;
+}> {
   try {
     const now = new Date().toISOString();
     const reasonClass = classifyClearReason(reason);
@@ -155,13 +160,13 @@ export async function clearSubject(
     // newer-approval check stopped leaves the binding and its set job alone.
     const clearedHere = `EXISTS (SELECT 1 FROM protected_minor_subjects
       WHERE subject_id = ? AND classification_state = 'cleared' AND cleared_at = ?)`;
-    await db.batch([
+    const [subjectUpdate] = await db.batch([
       db.prepare(`UPDATE protected_minor_subjects
         SET classification_state = 'cleared', cleared_at = ?, cleared_by = ?, clear_reason = ?, clear_reason_class = ?
         WHERE subject_id = ? AND classification_state = 'active'
           AND NOT EXISTS (SELECT 1 FROM age_review_cases d
             WHERE d.id = ? AND ${newerApprovalThan('protected_minor_subjects.subject_id', 'd')})`)
-        .bind(now, clearedBy ?? null, reason, reasonClass, subject.subject_id, retryOfDenialCaseId ?? null),
+        .bind(now, clearedBy ?? null, reason, reasonClass, subject.subject_id, denialCaseId ?? null),
       db.prepare(`UPDATE protected_minor_account_bindings
         SET unbound_at = COALESCE(unbound_at, ?) WHERE subject_id = ? AND unbound_at IS NULL AND ${clearedHere}`)
         .bind(now, subject.subject_id, subject.subject_id, now),
@@ -176,6 +181,13 @@ export async function clearSubject(
             THEN protected_minor_projection_jobs.created_at ELSE excluded.created_at END`)
         .bind(subject.subject_id, projectionPubkey, reason, now, now, subject.subject_id, now),
     ]);
+    if (subjectUpdate.meta?.changes === 0) {
+      // Nothing cleared here: either another writer cleared it first (its own
+      // projection follows), or the newer-approval check kept it active.
+      const after = await db.prepare('SELECT classification_state FROM protected_minor_subjects WHERE subject_id = ?')
+        .bind(subject.subject_id).first<{ classification_state: string }>();
+      if (after?.classification_state === 'active') return { success: true, projectionPubkey, keptActive: true };
+    }
     return { success: true, projectionPubkey };
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : String(error) };
