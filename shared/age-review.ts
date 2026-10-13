@@ -298,6 +298,9 @@ export interface AgeReviewEnforcement {
   /** Keycast verified_minor set on approval; retried by the projection cron (#192). */
   keycastMinorSet?: EnforcementLegStatus;
   keycastMinorSetError?: string;
+  /** The set failed because keycast refuses to flag a row without login credentials
+   * (409 account_unclaimed). Permanent: the job is settled and never retried. */
+  keycastMinorSetUnclaimed?: boolean;
 }
 
 // Response body for a case GET/PATCH. On a partial-enforcement PATCH the worker

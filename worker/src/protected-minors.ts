@@ -146,7 +146,11 @@ export async function clearSubject(
         (subject_id, pubkey, reason, state, created_at, updated_at)
         VALUES (?, ?, ?, 'pending', ?, ?)
         ON CONFLICT(subject_id) DO UPDATE SET pubkey = excluded.pubkey, reason = excluded.reason,
-          state = 'pending', created_at = excluded.created_at, updated_at = excluded.updated_at`)
+          state = 'pending', updated_at = excluded.updated_at,
+          -- An already-pending job keeps its age, as on every other re-arm: retention
+          -- measures overdue projections from created_at.
+          created_at = CASE WHEN protected_minor_projection_jobs.state = 'pending'
+            THEN protected_minor_projection_jobs.created_at ELSE excluded.created_at END`)
         .bind(subject.subject_id, projectionPubkey, reason, now, now),
     ]);
     return { success: true, projectionPubkey };

@@ -65,6 +65,21 @@ describe('protected-minor registry on real D1', () => {
     });
   });
 
+  it('a clear keeps the age of a job that is still pending, so the overdue alarm still fires', async () => {
+    const pubkey = 'e'.repeat(64);
+    const { subjectId } = await createSubjectWithBinding(DB, 'case-pending-then-denied', pubkey);
+    const earlier = '2026-01-01T00:00:00.000Z';
+    await DB.prepare(`INSERT INTO protected_minor_projection_jobs
+      (subject_id, pubkey, reason, state, created_at, updated_at)
+      VALUES (?, ?, 'age_review_approved', 'pending', ?, ?)`).bind(subjectId, pubkey, earlier, earlier).run();
+
+    expect((await clearSubject(DB, pubkey, undefined, 'age_review_denied')).success).toBe(true);
+
+    const job = await DB.prepare(`SELECT state, reason, created_at FROM protected_minor_projection_jobs WHERE subject_id = ?`)
+      .bind(subjectId).first<{ state: string; reason: string; created_at: string }>();
+    expect(job).toEqual({ state: 'pending', reason: 'age_review_denied', created_at: earlier });
+  });
+
   it('resolves active subjects and clear wins without deleting binding history', async () => {
     const { subjectId } = await createSubjectWithBinding(DB, 'case-a', PUBKEY_A);
     expect(await resolveByPubkey(DB, PUBKEY_A)).toEqual({ subjectRef: subjectId });

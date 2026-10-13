@@ -456,6 +456,8 @@ describe('AgeReviewDetail', () => {
     expect(within(appliedSection).getByText(/_@divinehq\.divine\.video/)).toBeInTheDocument();
     expect(within(appliedSection).getByText(/moderation@divine\.video/)).toBeInTheDocument();
     expect(within(appliedSection).getByText(/blocked on send and hidden on receive/i)).toBeInTheDocument();
+    // Key export: keycast refuses export and change-key for a verified minor.
+    expect(within(appliedSection).getByText(/Key export blocked/i)).toBeInTheDocument();
   });
 
   it('has no rolling-out section now that every protection is released', async () => {
@@ -731,6 +733,45 @@ describe('AgeReviewDetail', () => {
       await confirmApproval();
       await waitFor(() => expect(screen.getByText(/Failed to update/)).toBeInTheDocument());
       expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument();
+    });
+
+    // The inline error sits under the confirm's overlay, so the failure must also toast.
+    it('toasts any other approval error, which the open confirm would hide', async () => {
+      updateAgeReviewCase.mockRejectedValueOnce(new ApiError(
+        'Approval may not have been recorded. Reload the case before retrying.', 500, 'Server Error',
+      ));
+      await confirmApproval();
+      await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({
+        title: 'Approval failed',
+        description: 'Approval may not have been recorded. Reload the case before retrying.',
+        variant: 'destructive',
+      })));
+    });
+
+    it('says an unclaimed refusal is permanent rather than promising a retry', async () => {
+      updateAgeReviewCase.mockResolvedValueOnce({
+        ...approvalOk, success: false, enforcementComplete: false,
+        enforcement: { ...approvalOk.enforcement, keycastMinorSet: 'failed', keycastMinorSetUnclaimed: true },
+      });
+      await confirmApproval();
+      await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({
+        title: 'Approved, but keycast refused the minor flag',
+        description: "Recorded as a protected minor, so future under-16 reports clear automatically. Keycast refused the minor flag because this account has no login credentials, so the app protections and key-export block do not apply and this will not be retried. Escalate if the account is claimed later.",
+        variant: 'destructive',
+      })));
+      expect(toast).not.toHaveBeenCalledWith(expect.objectContaining({ title: 'Enforcement incomplete' }));
+    });
+
+    it('still reports other failed legs alongside an unclaimed refusal', async () => {
+      updateAgeReviewCase.mockResolvedValueOnce({
+        ...approvalOk, success: false, enforcementComplete: false,
+        enforcement: { ...approvalOk.enforcement, relay: 'failed', keycastMinorSet: 'failed', keycastMinorSetUnclaimed: true },
+      });
+      await confirmApproval();
+      await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({
+        title: 'Enforcement incomplete',
+        description: expect.stringContaining('these did not apply: relay (existing posts and feed).'),
+      })));
     });
 
     it('does not report success when the worker did not record a protected subject', async () => {

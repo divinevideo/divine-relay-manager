@@ -570,6 +570,7 @@ export async function handleUpdateAgeReviewCase(
   let subjectActivateError: string | undefined;
   let keycastMinorSet: EnforcementLegStatus = 'not_attempted';
   let keycastMinorSetError: string | undefined;
+  let keycastMinorSetUnclaimed = false;
   let minorProjectionPubkey = existing.pubkey;
 
   // Shared wrapper for the relay and Keycast legs (both resolve to
@@ -726,6 +727,7 @@ export async function handleUpdateAgeReviewCase(
         : undefined);
     keycastMinorSet = minorSetLeg.status;
     keycastMinorSetError = minorSetLeg.error;
+    keycastMinorSetUnclaimed = minorSetResult?.unclaimed === true;
     // `unclaimed` is reported as failed (a human must look) but settled: keycast
     // refuses that row permanently, so a retry would only re-fail every tick.
     if (approvingMinor && env.DB
@@ -757,6 +759,7 @@ export async function handleUpdateAgeReviewCase(
     relay, relayError, bulk, bulkError, keycast, keycastError,
     keycastMinorClear, keycastMinorClearError, subjectClear, subjectClearError,
     subjectActivate, subjectActivateError, keycastMinorSet, keycastMinorSetError,
+    ...(keycastMinorSetUnclaimed ? { keycastMinorSetUnclaimed: true } : {}),
   };
   const enforcementComplete = relay !== 'failed' && bulk !== 'failed' && keycast !== 'failed'
     && keycastMinorClear !== 'failed' && subjectClear !== 'failed'

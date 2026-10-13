@@ -37,6 +37,7 @@ import {
   ShieldCheck,
   EyeOff,
   MessageSquareLock,
+  KeyRound,
 } from "lucide-react";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { CopyableId } from "@/components/CopyableId";
@@ -211,10 +212,21 @@ export function AgeReviewDetail({ caseData: c }: Props) {
         return;
       }
       if (requestedState && ENFORCEMENT_STATES.includes(requestedState)) {
-        if (data.enforcementComplete === false) {
+        // keycast refuses to flag a row with no login credentials, permanently, so
+        // the worker settles it: it must not sit under "automated retry will continue".
+        const unclaimed = enforcement?.keycastMinorSetUnclaimed === true;
+        if (unclaimed) {
+          toast({
+            title: 'Approved, but keycast refused the minor flag',
+            description: 'Recorded as a protected minor, so future under-16 reports clear automatically. Keycast refused the minor flag because this account has no login credentials, so the app protections and key-export block do not apply and this will not be retried. Escalate if the account is claimed later.',
+            variant: 'destructive',
+          });
+        }
+        const retryable = unclaimed ? failed.filter((leg) => leg !== 'protected-minor account flag') : failed;
+        if (data.enforcementComplete === false && (!unclaimed || retryable.length > 0)) {
           toast({
             title: 'Enforcement incomplete',
-            description: `Case updated, but these did not apply: ${failed.join(', ') || 'one or more enforcement steps'}. The case is now closed; automated retry will continue where supported. Escalate if enforcement does not converge.`,
+            description: `Case updated, but these did not apply: ${retryable.join(', ') || 'one or more enforcement steps'}. The case is now closed; automated retry will continue where supported. Escalate if enforcement does not converge.`,
             variant: 'destructive',
           });
         } else if (enforcement?.keycast === 'not_applicable') {
@@ -405,8 +417,14 @@ export function AgeReviewDetail({ caseData: c }: Props) {
                     DM restriction: DMs limited to the pinned official accounts, Divine HQ (_@divinehq.divine.video) and Divine Moderation (moderation@divine.video); everything else is blocked on send and hidden on receive.
                   </span>
                 </div>
+                <div className="flex items-start gap-1.5 text-muted-foreground">
+                  <KeyRound className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                  <span>
+                    Key export blocked: Divine login will not export or change this account's key.
+                  </span>
+                </div>
                 <div className="text-muted-foreground/80">
-                  Derived from the approved protected-minor status above; enforced client-side by the Divine apps on supported versions. Not confirmed per device.
+                  Derived from the approved protected-minor status above; enforced client-side by the Divine apps on supported versions, and key export by keycast. Not confirmed per device.
                 </div>
               </div>
             </div>
@@ -638,6 +656,13 @@ export function AgeReviewDetail({ caseData: c }: Props) {
                         // already reloaded the case and told the moderator. Any
                         // other error keeps the confirm open for a retry.
                         if (error instanceof ApiError && error.code === 'version_conflict') return;
+                        // The inline error renders under this confirm's overlay; toast it so
+                        // the moderator sees why approval failed before choosing to retry.
+                        toast({
+                          title: 'Approval failed',
+                          description: error instanceof Error ? error.message : String(error),
+                          variant: 'destructive',
+                        });
                         throw error;
                       }
                     }}

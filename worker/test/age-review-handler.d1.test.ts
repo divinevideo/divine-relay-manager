@@ -589,8 +589,10 @@ describe('approving a 13-15 minor', () => {
     ));
     const res = await approve();
     expect(res.status).toBe(207);
-    const body = await res.json() as { enforcement: { keycastMinorSet: string } };
+    const body = await res.json() as { enforcement: { keycastMinorSet: string; keycastMinorSetUnclaimed?: boolean } };
     expect(body.enforcement.keycastMinorSet).toBe('failed');
+    // Permanent, so the UI must not promise a retry.
+    expect(body.enforcement.keycastMinorSetUnclaimed).toBe(true);
     expect(await pendingJobs()).toBe(0);
   });
 

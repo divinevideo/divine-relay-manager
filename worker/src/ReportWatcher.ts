@@ -1351,10 +1351,12 @@ export class ReportWatcher implements DurableObject {
 
   /**
    * An approved minor: an active protected-minor subject (#192; the durable record,
-   * and the only one a self-custody account has) or keycast's verified_minor flag
-   * (covers onboarding accounts and any projection still pending). The registry is
-   * read first because it is local and survives a keycast outage. Returns which
-   * source proved it, for the decision log, or null for no approved minor.
+   * and the only one a self-custody account has) or keycast's verified_minor flag.
+   * The keycast fallback covers onboarding accounts the registry never recorded, but
+   * it also answers yes while a denial's keycast clear is still pending (the account
+   * is banned by then, and the cron converges within a tick). The registry is read
+   * first because it is local and survives a keycast outage. Returns which source
+   * proved it, for the decision log, or null for no approved minor.
    */
   private async isApprovedMinor(pubkey: string): Promise<'registry' | 'keycast' | null> {
     try {
