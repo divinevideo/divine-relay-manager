@@ -219,19 +219,20 @@ export function AgeReviewDetail({ caseData: c }: Props) {
         return;
       }
       if (requestedState && ENFORCEMENT_STATES.includes(requestedState)) {
-        // keycast refuses to flag a row with no login credentials, permanently, so
-        // the worker settles it: it must not sit under "automated retry will continue".
+        // keycast refuses to flag a row with no login credentials until the account
+        // is claimed, and the worker retries it hourly: "automated retry will
+        // continue" would not say what the moderator is waiting for.
         const unclaimed = enforcement?.keycastMinorSetUnclaimed === true;
         const retryable = unclaimed ? failed.filter((leg) => leg !== 'protected-minor account flag') : failed;
         if (unclaimed) {
           // One toast: the store keeps only the newest, so a second toast for the
-          // other failed legs would evict this permanent refusal.
+          // other failed legs would evict this refusal.
           const others = data.enforcementComplete === false && retryable.length > 0
             ? ` Also did not apply: ${retryable.join(', ')}. Automated retry will continue where supported.`
             : '';
           toast({
             title: 'Approved, but keycast refused the minor flag',
-            description: 'Recorded as a protected minor, so future under-16 reports clear automatically. Keycast refused the minor flag because this account has no login credentials, so the app protections and key-export block do not apply. Nothing re-applies the flag if the account is claimed later; escalate if it is.' + others,
+            description: 'Recorded as a protected minor, so future under-16 reports clear automatically. Keycast refused the minor flag because this account has no login credentials, so the app protections and key-export block do not apply yet. The flag is retried automatically and applies once the account is claimed.' + others,
             variant: 'destructive',
           });
         } else if (data.enforcementComplete === false) {
