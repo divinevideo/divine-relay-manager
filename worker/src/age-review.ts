@@ -26,7 +26,7 @@ import { runBulkModeration, type BulkModerateEnv } from './bulk-moderate';
 import { getActiveAgeReviewCase } from './age-review-lookup';
 import { resolveZendeskCreds } from './zendesk-sync';
 import type { AccountBulkAction } from '../../shared/bulk-moderation';
-import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, setVerifiedMinor, createMinorAccount, type KeycastEnv, type KeycastReason, type KeycastResult } from './keycast-client';
+import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, setVerifiedMinor, createMinorAccount, HEX_64, type KeycastEnv, type KeycastReason, type KeycastResult } from './keycast-client';
 import { suspendPubkey, unsuspendPubkey, banPubkey, type BanPubkeyResult, type SecretStoreSecret } from './nip86';
 import { buildAgeReviewIdentityBlock, buildClaimedParentName, toNpub } from './report-note';
 import {
@@ -37,6 +37,7 @@ import {
   markProjectionComplete,
   pendingProjectionJobs,
   pendingSubjectClears,
+  settleSupersededClear,
   UUID_RE,
 } from './protected-minors';
 import { digestProvisioningFingerprint, findProvisioningTombstone, resolveTombstoneKey } from './retention';
@@ -364,6 +365,11 @@ export async function handleUpdateAgeReviewCase(
     if (body.resolution === 'approved_minor' && effectiveBand !== 'age_13_15') {
       return json({ success: false, error: 'approved_minor requires the 13-15 age band' }, 400, corsHeaders);
     }
+    // The protected-minor binding CHECKs a 64-char lowercase hex pubkey; a case
+    // that fails it would roll the approval batch back on every retry.
+    if (body.resolution === 'approved_minor' && !HEX_64.test(existing.pubkey)) {
+      return json({ success: false, error: 'approved_minor requires a case with a valid 64-char hex pubkey' }, 400, corsHeaders);
+    }
     updates.push('clear_resolution = ?');
     binds.push(body.resolution);
   }
@@ -462,7 +468,7 @@ export async function handleUpdateAgeReviewCase(
       ]);
     } catch (error) {
       console.error('[age-review] Approval batch failed; nothing was written:', error);
-      return json({ success: false, error: 'Approval could not be recorded. Nothing was changed; retry.' }, 500, corsHeaders);
+      return json({ success: false, error: 'Approval may not have been recorded. Reload the case before retrying.' }, 500, corsHeaders);
     }
   } else {
     updateResult = await casStatement.run();
@@ -2397,6 +2403,12 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
   }
   for (const job of projectionJobs) {
     try {
+      // A clear for a superseded subject would strip verified_minor from the
+      // account's live protected subject; the newer approval owns the flag.
+      if (job.superseded) {
+        await settleSupersededClear(env.DB, job.subjectId);
+        continue;
+      }
       const result = job.classification === 'active'
         ? await setVerifiedMinor(job.pubkey, undefined, job.reason as KeycastReason, env)
         : await clearVerifiedMinor(job.pubkey, undefined, job.reason as KeycastReason, env);

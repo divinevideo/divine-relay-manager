@@ -60,7 +60,9 @@ describe('protected-minor registry on real D1', () => {
       .bind(subjectId).first<{ created_at: string }>();
     expect(rearmed!.created_at > earlier).toBe(true);
     const jobs = await pendingProjectionJobs(DB);
-    expect(jobs).toContainEqual({ pubkey, reason: 'age_review_denied', classification: 'cleared' });
+    expect(jobs).toContainEqual({
+      subjectId, pubkey, reason: 'age_review_denied', classification: 'cleared', superseded: false,
+    });
   });
 
   it('resolves active subjects and clear wins without deleting binding history', async () => {

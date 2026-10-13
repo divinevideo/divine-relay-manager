@@ -10,7 +10,7 @@ import { Miniflare } from 'miniflare';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { ensureSchema } from '../src/db';
 import { checkAgeReviewDeadlines } from '../src/age-review';
-import { clearSubject, createSubjectWithBinding } from '../src/protected-minors';
+import { clearSubject, createSubjectWithBinding, pendingSubjectClears } from '../src/protected-minors';
 
 let mf: Miniflare;
 let DB: D1Database;
@@ -214,14 +214,14 @@ describe('age-review cron on real D1', () => {
       return Promise.resolve(new Response('ok', { status: 200 }));
     });
 
-    await checkAgeReviewDeadlines({ ...cronEnv, KEYCAST_URL: 'https://login.test.divine.video', KEYCAST_SERVICE_TOKEN: 'test-token' });
+    await checkAgeReviewDeadlines({ ...cronEnv, KEYCAST_URL: 'https://keycast.invalid', KEYCAST_SERVICE_TOKEN: 'test-token' });
 
     expect(calls).toContainEqual({
-      url: `https://login.test.divine.video/api/admin/users/${activeKey}/verified-minor?reason=age_review_approved`,
+      url: `https://keycast.invalid/api/admin/users/${activeKey}/verified-minor?reason=age_review_approved`,
       method: 'PUT',
     });
     expect(calls).toContainEqual({
-      url: `https://login.test.divine.video/api/admin/users/${clearedKey}/verified-minor?reason=age_review_denied`,
+      url: `https://keycast.invalid/api/admin/users/${clearedKey}/verified-minor?reason=age_review_denied`,
       method: 'DELETE',
     });
     const pending = await DB.prepare(
@@ -244,7 +244,7 @@ describe('age-review cron on real D1', () => {
         ? new Response('{"error":"account_unclaimed: account has no login credentials"}', { status: 409 })
         : new Response('ok', { status: 200 })));
 
-    await checkAgeReviewDeadlines({ ...cronEnv, KEYCAST_URL: 'https://login.test.divine.video', KEYCAST_SERVICE_TOKEN: 'test-token' });
+    await checkAgeReviewDeadlines({ ...cronEnv, KEYCAST_URL: 'https://keycast.invalid', KEYCAST_SERVICE_TOKEN: 'test-token' });
 
     const row = await DB.prepare("SELECT state FROM protected_minor_projection_jobs WHERE subject_id = 'subj-unclaimed'")
       .first<{ state: string }>();
@@ -273,7 +273,7 @@ describe('age-review cron on real D1', () => {
       }
       return new Response('{}', { status: 200 });
     });
-    const env = { ...cronEnv, KEYCAST_URL: 'https://login.test.divine.video', KEYCAST_SERVICE_TOKEN: 'test-token' };
+    const env = { ...cronEnv, KEYCAST_URL: 'https://keycast.invalid', KEYCAST_SERVICE_TOKEN: 'test-token' };
 
     await checkAgeReviewDeadlines(env);
     expect(methods).toEqual(['PUT']);
@@ -286,5 +286,87 @@ describe('age-review cron on real D1', () => {
     const done = await DB.prepare('SELECT state FROM protected_minor_projection_jobs WHERE subject_id = ?')
       .bind(subjectId).first<{ state: string }>();
     expect(done!.state).toBe('complete');
+  });
+  describe('latest decision wins between a denial and an approval (#192)', () => {
+    const P = 'c'.repeat(64);
+    const env = () => ({ ...cronEnv, KEYCAST_URL: 'https://keycast.invalid', KEYCAST_SERVICE_TOKEN: 'test-token' });
+    let keycastCalls: string[];
+
+    beforeEach(async () => {
+      for (const t of ['protected_minor_projection_jobs', 'protected_minor_account_bindings', 'protected_minor_subjects']) {
+        await DB.prepare(`DELETE FROM ${t}`).run();
+      }
+      keycastCalls = [];
+      vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+        if (String(input).includes('/verified-minor')) keycastCalls.push(init?.method ?? 'GET');
+        return Promise.resolve(new Response('{}', { status: 200 }));
+      });
+    });
+    afterEach(() => vi.restoreAllMocks());
+
+    async function caseAt(id: string, state: string, resolution: string | null, updatedAt: string) {
+      await DB.prepare(`INSERT INTO age_review_cases
+        (id, pubkey, state, clear_resolution, suspected_age_band, deadline_at, clock_paused, version, updated_at)
+        VALUES (?, ?, ?, ?, 'age_13_15', NULL, 0, 1, ?)`).bind(id, P, state, resolution, updatedAt).run();
+    }
+    const activeCount = async () => (await DB.prepare(
+      "SELECT COUNT(*) AS c FROM protected_minor_subjects WHERE classification_state = 'active'",
+    ).first<{ c: number }>())!.c;
+
+    it('(a) deny then a newer approval on a new subject: no retry, subject stays active', async () => {
+      const { subjectId: s1 } = await createSubjectWithBinding(DB, 'deny-case', P);
+      await caseAt('deny-case', 'denied_closed', null, '2026-03-01 00:00:00');
+      await clearSubject(DB, P, undefined, 'age_review_denied', s1);
+      await DB.prepare("DELETE FROM protected_minor_projection_jobs").run();
+      await createSubjectWithBinding(DB, 'approve-case', P);
+      await caseAt('approve-case', 'cleared', 'approved_minor', '2026-04-01 00:00:00');
+
+      expect(await pendingSubjectClears(DB)).toEqual([]);
+      await checkAgeReviewDeadlines(env());
+      expect(await activeCount()).toBe(1);
+      expect(keycastCalls).toEqual([]);
+    });
+
+    it('(b) approve then a later deny with the subject left active: still a retry source', async () => {
+      const { subjectId } = await createSubjectWithBinding(DB, 'approve-case', P);
+      await caseAt('approve-case', 'cleared', 'approved_minor', '2026-03-01 00:00:00');
+      await caseAt('deny-case', 'denied_closed', null, '2026-04-01 00:00:00');
+
+      const retries = await pendingSubjectClears(DB);
+      expect(retries.map((r) => r.subjectId)).toEqual([subjectId]);
+    });
+
+    it('(c) deny whose subject clear failed, then an approval reusing that subject: no retry', async () => {
+      await createSubjectWithBinding(DB, 'onboarding-case', P); // S1 stays active
+      await caseAt('deny-case', 'denied_closed', null, '2026-03-01 00:00:00');
+      await caseAt('approve-case', 'cleared', 'approved_minor', '2026-04-01 00:00:00');
+
+      expect(await pendingSubjectClears(DB)).toEqual([]);
+    });
+  });
+
+  it('settles a clear job superseded by a newer active subject without calling keycast', async () => {
+    for (const t of ['protected_minor_projection_jobs', 'protected_minor_account_bindings', 'protected_minor_subjects']) {
+      await DB.prepare(`DELETE FROM ${t}`).run();
+    }
+    const P = 'd'.repeat(64);
+    const { subjectId: s1 } = await createSubjectWithBinding(DB, 'old-case', P);
+    await clearSubject(DB, P, undefined, 'age_review_denied', s1); // S1 cleared, clear job pending
+    const { subjectId: s2 } = await createSubjectWithBinding(DB, 'new-case', P); // S2 active
+    const calls: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      if (String(input).includes('/verified-minor')) calls.push(init?.method ?? 'GET');
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    });
+
+    await checkAgeReviewDeadlines({ ...cronEnv, KEYCAST_URL: 'https://keycast.invalid', KEYCAST_SERVICE_TOKEN: 'test-token' });
+
+    expect(calls).toEqual([]);
+    const job = await DB.prepare('SELECT state FROM protected_minor_projection_jobs WHERE subject_id = ?')
+      .bind(s1).first<{ state: string }>();
+    expect(job!.state).toBe('complete');
+    const s2row = await DB.prepare('SELECT classification_state FROM protected_minor_subjects WHERE subject_id = ?')
+      .bind(s2).first<{ classification_state: string }>();
+    expect(s2row!.classification_state).toBe('active');
   });
 });

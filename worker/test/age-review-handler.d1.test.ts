@@ -372,10 +372,10 @@ describe('approving a 13-15 minor', () => {
   // is the only one that can decide enforcementComplete / the 200-vs-207 status.
   const keycastEnv = () => ({
     ...env,
-    KEYCAST_URL: 'https://login.test.divine.video',
+    KEYCAST_URL: 'https://keycast.invalid',
     KEYCAST_SERVICE_TOKEN: 'test-token',
     NOSTR_NSEC: 'nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5',
-    RELAY_URL: 'wss://relay.test.divine.video',
+    RELAY_URL: 'wss://relay.invalid',
   } as unknown as Parameters<typeof handleUpdateAgeReviewCase>[2]);
   let keycastPuts: string[];
 
@@ -424,7 +424,7 @@ describe('approving a 13-15 minor', () => {
       .first<{ source_case_id: string; classification_state: string }>();
     expect(subject).toEqual({ source_case_id: 'ap', classification_state: 'active' });
     expect(keycastPuts).toEqual([
-      `https://login.test.divine.video/api/admin/users/${pubkey}/verified-minor?reason=age_review_approved`,
+      `https://keycast.invalid/api/admin/users/${pubkey}/verified-minor?reason=age_review_approved`,
     ]);
     expect(await pendingJobs()).toBe(0);
   });
@@ -470,6 +470,27 @@ describe('approving a 13-15 minor', () => {
     const count = await DB.prepare('SELECT COUNT(*) AS c FROM protected_minor_subjects').first<{ c: number }>();
     expect(count!.c).toBe(1);
     expect(keycastPuts).toHaveLength(1);
+  });
+
+  it('arms the EXISTING subject\'s job when reusing it (keycast down so it stays pending)', async () => {
+    const { subjectId } = await createSubjectWithBinding(DB, 'onboarding-case', pubkey);
+    vi.restoreAllMocks();
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => Promise.resolve(
+      String(input).includes('/verified-minor') ? new Response('Not Found', { status: 404 }) : new Response('{}', { status: 200 }),
+    ));
+    await approve();
+    const jobs = await DB.prepare("SELECT subject_id FROM protected_minor_projection_jobs WHERE state = 'pending'")
+      .all<{ subject_id: string }>();
+    expect(jobs.results).toEqual([{ subject_id: subjectId }]);
+  });
+
+  it('refuses approved_minor for a case whose pubkey cannot be bound (400, case untouched)', async () => {
+    await DB.prepare("UPDATE age_review_cases SET pubkey = 'not-hex' WHERE id = 'ap'").run();
+    const res = await approve();
+    expect(res.status).toBe(400);
+    const row = await DB.prepare("SELECT state FROM age_review_cases WHERE id = 'ap'").first<{ state: string }>();
+    expect(row!.state).toBe('submitted_for_review');
+    expect(await rowCount('protected_minor_subjects')).toBe(0);
   });
 
   it('keeps the job pending when keycast fails (route not yet deployed)', async () => {
