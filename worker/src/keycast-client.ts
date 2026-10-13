@@ -47,6 +47,11 @@ function isKeycastUserNotFound(text: string): boolean {
   }
 }
 
+/**
+ * True only for keycast's permanent refusal to flag a credential-less row
+ * (409 account_unclaimed). A retry cannot succeed, so callers must tell it
+ * apart from a transient failure; an unrelated 409 must not match.
+ */
 function isKeycastAccountUnclaimed(text: string): boolean {
   try {
     const data = JSON.parse(text.trim()) as Record<string, unknown>;
@@ -147,19 +152,6 @@ export async function banUser(pubkey: string, reason: KeycastReason, env: Keycas
 }
 
 /**
- * Clear a Keycast account's verified_minor flag (protected-minor revocation,
- * issue #147; endpoint from keycast#265). Composes with the status calls —
- * the status outcome stays the caller's decision, this only lifts the flag.
- * Keycast's clear is an idempotent success no-op on never-minor /
- * already-cleared accounts and only writes a durable admin_audit_events row
- * on a real transition, so callers invoke it unconditionally on revoke/deny
- * without a pre-read. `actor` (moderator hex pubkey) and `reason` feed that
- * audit row; a malformed actor is dropped (keycast 400s on it, which would
- * fail the whole clear) so keycast falls back to log-only. Only the
- * revoke-direction reasons are valid here (age_review_denied / _expired);
- * `cleared` is deliberately not a clear trigger (see age-review.ts).
- */
-/**
  * PUT sets and DELETE clears keycast's verified_minor flag. The two calls share
  * every rule -- pubkey guard, actor drop, query string, and how a refusal is
  * classified -- so they share this body.
@@ -222,6 +214,19 @@ async function callVerifiedMinor(
   }
 }
 
+/**
+ * Clear a Keycast account's verified_minor flag (protected-minor revocation,
+ * issue #147; endpoint from keycast#265). Composes with the status calls —
+ * the status outcome stays the caller's decision, this only lifts the flag.
+ * Keycast's clear is an idempotent success no-op on never-minor /
+ * already-cleared accounts and only writes a durable admin_audit_events row
+ * on a real transition, so callers invoke it unconditionally on revoke/deny
+ * without a pre-read. `actor` (moderator hex pubkey) and `reason` feed that
+ * audit row; a malformed actor is dropped (keycast 400s on it, which would
+ * fail the whole clear) so keycast falls back to log-only. Only the
+ * revoke-direction reasons are valid here (age_review_denied / _expired);
+ * `cleared` is deliberately not a clear trigger (see age-review.ts).
+ */
 export async function clearVerifiedMinor(
   pubkey: string,
   actor: string | undefined,

@@ -61,6 +61,15 @@ describe('keycast-client', () => {
   });
 
   describe('clearVerifiedMinor', () => {
+    it('classifies a 409 account_unclaimed on DELETE as unclaimed (shared helper behavior)', async () => {
+      fetchMock.mockResolvedValue({
+        ok: false, status: 409,
+        text: () => Promise.resolve('{"error":"account_unclaimed: account has no login credentials"}'),
+      });
+      const result = await clearVerifiedMinor(VALID_PUBKEY, undefined, 'age_review_denied', makeEnv());
+      expect(result).toMatchObject({ success: false, status: 409, unclaimed: true });
+    });
+
     it('sends DELETE to the verified-minor endpoint with actor and reason', async () => {
       const actor = 'b'.repeat(64);
       const result = await clearVerifiedMinor(VALID_PUBKEY, actor, 'age_review_denied', makeEnv());
@@ -153,6 +162,17 @@ describe('keycast-client', () => {
     it('does not treat an unrelated 409 as unclaimed', async () => {
       fetchMock.mockResolvedValue({ ok: false, status: 409, text: () => Promise.resolve('{"error":"conflict"}') });
       const result = await setVerifiedMinor(VALID_PUBKEY, undefined, 'age_review_approved', makeEnv());
+      expect(result.unclaimed).toBeUndefined();
+    });
+
+    it('does not treat an account_unclaimed body on a non-409 status as unclaimed', async () => {
+      fetchMock.mockResolvedValue({
+        ok: false, status: 500,
+        text: () => Promise.resolve('{"error":"account_unclaimed: account has no login credentials"}'),
+      });
+      const result = await setVerifiedMinor(VALID_PUBKEY, undefined, 'age_review_approved', makeEnv());
+      expect(result.success).toBe(false);
+      expect(result.status).toBe(500);
       expect(result.unclaimed).toBeUndefined();
     });
 
