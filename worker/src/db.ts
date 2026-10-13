@@ -2,6 +2,18 @@
 // ABOUTME: Creates moderation_decisions, moderation_targets, age_review_cases,
 // ABOUTME: age_review_config, protected-minor registry, and Zendesk DDL on a fresh D1
 
+// Shared by the create and the rebuild that widens an existing table.
+const RETENTION_LEGAL_HOLDS_COLUMNS = `    id TEXT PRIMARY KEY,
+    record_type TEXT NOT NULL CHECK (record_type IN ('protected_subject', 'account_binding', 'provisioning_operation', 'projection_job', 'age_review_case')),
+    record_key TEXT,
+    disposal_stage TEXT NOT NULL DEFAULT 'all' CHECK (disposal_stage IN ('all', 'claim_link', 'redaction', 'compaction', 'deletion', 'consent_video')),
+    authorized_role TEXT NOT NULL,
+    starts_at TEXT NOT NULL,
+    review_at TEXT NOT NULL,
+    expires_at TEXT,
+    released_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP`;
+
 /**
  * Ensure all moderation tables and indexes exist.
  * Safe to call multiple times (CREATE IF NOT EXISTS / ALTER wrapped in try-catch).
@@ -347,17 +359,33 @@ export async function ensureSchema(db: D1Database): Promise<void> {
   )`).run();
 
   await db.prepare(`CREATE TABLE IF NOT EXISTS retention_legal_holds (
-    id TEXT PRIMARY KEY,
-    record_type TEXT NOT NULL CHECK (record_type IN ('protected_subject', 'account_binding', 'provisioning_operation', 'projection_job', 'age_review_case')),
-    record_key TEXT,
-    disposal_stage TEXT NOT NULL DEFAULT 'all' CHECK (disposal_stage IN ('all', 'claim_link', 'redaction', 'compaction', 'deletion', 'consent_video')),
-    authorized_role TEXT NOT NULL,
-    starts_at TEXT NOT NULL,
-    review_at TEXT NOT NULL,
-    expires_at TEXT,
-    released_at TEXT,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+${RETENTION_LEGAL_HOLDS_COLUMNS}
   )`).run();
+  // A table created before #286 keeps its old CHECK, because CREATE TABLE IF
+  // NOT EXISTS never alters an existing table and migration 0015's rebuild
+  // only runs when migrations are applied by hand. Widen it here the same
+  // way, in one batch so the rows move with the table.
+  try {
+    const holds = await db.prepare(
+      `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'retention_legal_holds'`
+    ).first<{ sql: string }>();
+    if (holds && !holds.sql.includes("'consent_video'")) {
+      await db.batch([
+        db.prepare('DROP TABLE IF EXISTS retention_legal_holds_new'),
+        db.prepare(`CREATE TABLE retention_legal_holds_new (
+  ${RETENTION_LEGAL_HOLDS_COLUMNS}
+    )`),
+        db.prepare(`INSERT INTO retention_legal_holds_new
+          (id, record_type, record_key, disposal_stage, authorized_role, starts_at, review_at, expires_at, released_at, created_at)
+          SELECT id, record_type, record_key, disposal_stage, authorized_role, starts_at, review_at, expires_at, released_at, created_at
+          FROM retention_legal_holds`),
+        db.prepare('DROP TABLE retention_legal_holds'),
+        db.prepare('ALTER TABLE retention_legal_holds_new RENAME TO retention_legal_holds'),
+      ]);
+    }
+  } catch (error) {
+    console.error('[db] Could not widen retention_legal_holds for consent_video holds:', error);
+  }
   await db.prepare(`CREATE INDEX IF NOT EXISTS idx_retention_holds_active
     ON retention_legal_holds(record_type, record_key, disposal_stage, starts_at, released_at, expires_at)`).run();
   await db.prepare(`CREATE TABLE IF NOT EXISTS retention_alert_state (
