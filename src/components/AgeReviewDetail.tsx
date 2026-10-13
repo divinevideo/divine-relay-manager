@@ -184,6 +184,9 @@ export function AgeReviewDetail({ caseData: c }: Props) {
       // moderation action moves a case between states, so refresh them alongside
       // the list or the chips disagree with the list until their 30s interval.
       queryClient.invalidateQueries({ queryKey: ['age-review-counts'] });
+      // Approve and deny write the protected-minor registry and keycast flag, and
+      // every decision can change sign-in status: refresh the badge's source.
+      queryClient.invalidateQueries({ queryKey: ['account-status'] });
       const requestedState = pendingStateRef.current as AgeReviewState | undefined;
       // Surface only actual failed enforcement legs. `not_attempted` is valid
       // for transitions where a leg does not apply.
@@ -258,8 +261,9 @@ export function AgeReviewDetail({ caseData: c }: Props) {
     queryFn: () => api.getAgeReviewConfig(),
   });
 
-  // Keycast-backed protected-minor status (verified_minor). Best-effort: a
-  // keycast blip resolves to success:false, so we show status unavailable.
+  // Protected-minor status from keycast (verified_minor) and the D1 registry
+  // (protected_minor). Best-effort: a keycast blip resolves to success:false, and
+  // without a registry answer we show status unavailable.
   // Normalized once here: the case pubkey is stored verbatim from the report's
   // `p` tag, which is untrusted, while relays and the worker both require
   // lowercase hex. Passing it raw makes a mixed-case tag look like an account
@@ -333,10 +337,11 @@ export function AgeReviewDetail({ caseData: c }: Props) {
                 ) : null}
               </>
             ) : protectedMinorStatusUnavailable ? (
-              // Couldn't determine (keycast down/misconfig) — don't let a blip
-              // read the same as a confirmed non-minor; keep the safety signal.
-              // not_found (self-custody) is definitive, not an error, so it is
-              // excluded here — the account-type indicator states it directly.
+              // Couldn't determine (keycast down/misconfig, or no registry
+              // answer): don't let a blip read the same as a confirmed non-minor;
+              // keep the safety signal. Self-custody (not_found) is definitive
+              // for keycast but not for protection, which only the registry
+              // knows for those accounts, so it is unavailable without one.
               <span className="text-xs text-muted-foreground">
                 protected-minor status unavailable
               </span>
@@ -696,7 +701,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
               </div>
               {protectedMinor.protected && (
                 <p className="text-xs text-muted-foreground">
-                  Already an approved protected minor. "Not a minor" closes this case and keeps protections on.
+                  Already an approved protected minor. "Not a minor" closes this case and keeps protections on; Deny bans the account and removes them.
                 </p>
               )}
 

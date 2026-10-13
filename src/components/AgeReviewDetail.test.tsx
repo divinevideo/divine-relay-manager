@@ -26,7 +26,7 @@ const updateAgeReviewCase = vi.fn().mockResolvedValue({ success: true });
 const getAgeReviewConfig = vi.fn().mockResolvedValue({ auto_delete_on_deny: false });
 const getAccountStatus = vi
   .fn()
-  .mockResolvedValue({ success: true, status: 'active', verified_minor: false });
+  .mockResolvedValue({ success: true, status: 'active', verified_minor: false, protected_minor: false });
 const writeText = vi.fn().mockResolvedValue(undefined);
 const toast = vi.fn();
 
@@ -104,7 +104,7 @@ describe('AgeReviewDetail', () => {
     getAgeReviewConfig.mockClear();
     getAgeReviewConfig.mockResolvedValue({ auto_delete_on_deny: false });
     getAccountStatus.mockClear();
-    getAccountStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: false });
+    getAccountStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: false, protected_minor: false });
     toast.mockClear();
     writeText.mockClear();
     Object.assign(navigator, {
@@ -406,7 +406,7 @@ describe('AgeReviewDetail', () => {
   });
 
   it('does not show the protected-minor badge when verified_minor is false', async () => {
-    getAccountStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: false });
+    getAccountStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: false, protected_minor: false });
 
     const { queryClient } = renderDetail(makeCase());
 
@@ -487,7 +487,7 @@ describe('AgeReviewDetail', () => {
   });
 
   it('does not show the protections block when verified_minor is false', async () => {
-    getAccountStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: false });
+    getAccountStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: false, protected_minor: false });
 
     const { queryClient } = renderDetail(makeCase());
 
@@ -580,7 +580,35 @@ describe('AgeReviewDetail', () => {
 
       renderDetail(makeCase());
 
-      expect(await screen.findByText('Already an approved protected minor. "Not a minor" closes this case and keeps protections on.')).toBeInTheDocument();
+      expect(await screen.findByText('Already an approved protected minor. "Not a minor" closes this case and keeps protections on; Deny bans the account and removes them.')).toBeInTheDocument();
+    });
+
+    it('shows that note for a minor only the registry knows, one who holds their own key', async () => {
+      getAccountStatus.mockResolvedValue({ success: false, not_found: true, protected_minor: true });
+
+      renderDetail(makeCase());
+
+      expect(await screen.findByText('Already an approved protected minor. "Not a minor" closes this case and keeps protections on; Deny bans the account and removes them.')).toBeInTheDocument();
+    });
+
+    it('refetches account status after a decision so the badge follows the registry', async () => {
+      getAccountStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: false, protected_minor: false });
+      const { queryClient } = renderDetail(makeCase());
+      await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+      const callsBefore = getAccountStatus.mock.calls.length;
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Clear: not a minor' }));
+
+      await waitFor(() => expect(getAccountStatus.mock.calls.length).toBeGreaterThan(callsBefore));
+    });
+
+    it('does not show "status unavailable" while account status is still loading', async () => {
+      getAccountStatus.mockReturnValue(new Promise(() => {}));
+
+      renderDetail(makeCase());
+
+      await screen.findByRole('button', { name: 'Clear: not a minor' });
+      expect(screen.queryByText(/protected-minor status unavailable/i)).not.toBeInTheDocument();
     });
 
     it('omits that note when the account is not protected', async () => {
@@ -600,7 +628,7 @@ describe('AgeReviewDetail', () => {
       await waitFor(() => expect(queryClient.isFetching()).toBe(0));
       fireEvent.click(await screen.findByRole('button', { name: /Approve as protected minor/ }));
 
-      expect(await screen.findByText(/This account holds its own key, so Divine can't apply minor DM limits/)).toBeInTheDocument();
+      expect(await screen.findByText(/This account holds its own key, so Divine can't apply the adult content lock/)).toBeInTheDocument();
     });
 
     it('approve confirm promises app protections for a Divine login account', async () => {
@@ -610,7 +638,7 @@ describe('AgeReviewDetail', () => {
       await waitFor(() => expect(queryClient.isFetching()).toBe(0));
       fireEvent.click(await screen.findByRole('button', { name: /Approve as protected minor/ }));
 
-      expect(await screen.findByText(/Minor DM limits and the adult content lock apply, key export is blocked/)).toBeInTheDocument();
+      expect(await screen.findByText(/The adult content lock applies, key export is blocked, minor DM limits are rolling out/)).toBeInTheDocument();
     });
   });
 
@@ -676,7 +704,7 @@ describe('AgeReviewDetail', () => {
       await waitFor(() => expect(queryClient.isFetching()).toBe(0));
       fireEvent.click(await screen.findByRole('button', { name: /Approve as protected minor/ }));
       expect(await screen.findByText(
-        'This account is restored and marked as an approved 13-15 minor, and future under-16 reports clear automatically. For Divine login accounts, minor DM limits and the adult content lock also apply and key export is blocked.',
+        'This account is restored and marked as an approved 13-15 minor, and future under-16 reports clear automatically. For Divine login accounts, the adult content lock also applies, key export is blocked, and minor DM limits are rolling out.',
       )).toBeInTheDocument();
     });
 

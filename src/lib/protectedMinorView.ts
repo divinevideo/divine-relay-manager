@@ -14,13 +14,15 @@ export interface ProtectedMinorView {
   approveSummary: string;
 }
 
-// The app's minor protections (DM limits, adult content lock) and the key-export
-// block all key on keycast's verified_minor, so they reach only Divine login
-// accounts. An account holding its own key gets the registry's report auto-clear.
+// The app protections (adult content lock, DM limits) and the key-export block
+// all key on keycast's verified_minor, so they reach only Divine login accounts.
+// An account holding its own key gets the registry's report auto-clear. DM limits
+// say "rolling out" to match the protections panel in the same view
+// (TODO(divinevideo/support-trust-safety#176) there): change both together.
 const APPROVE_SUMMARY: Record<AccountType, string> = {
-  divine: 'This account is restored and marked as an approved 13-15 minor. Minor DM limits and the adult content lock apply, key export is blocked, and future under-16 reports clear automatically.',
-  self_custody: "This account holds its own key, so Divine can't apply minor DM limits, the adult content lock or a key-export block. Approving restores it and makes future under-16 reports clear automatically.",
-  unknown: 'This account is restored and marked as an approved 13-15 minor, and future under-16 reports clear automatically. For Divine login accounts, minor DM limits and the adult content lock also apply and key export is blocked.',
+  divine: 'This account is restored and marked as an approved 13-15 minor. The adult content lock applies, key export is blocked, minor DM limits are rolling out, and future under-16 reports clear automatically.',
+  self_custody: "This account holds its own key, so Divine can't apply the adult content lock, minor DM limits or a key-export block. Approving restores it and makes future under-16 reports clear automatically.",
+  unknown: 'This account is restored and marked as an approved 13-15 minor, and future under-16 reports clear automatically. For Divine login accounts, the adult content lock also applies, key export is blocked, and minor DM limits are rolling out.',
 };
 
 export function deriveProtectedMinorView(input: {
@@ -39,11 +41,11 @@ export function deriveProtectedMinorView(input: {
       : 'app protections unknown: keycast unavailable';
   }
 
-  // A self-custody account's protection lives only in the registry, so an
-  // unreadable registry leaves it unknown, exactly like a keycast outage does.
+  // Unknown unless both sources answered: an unreadable registry (null, or absent
+  // from a worker that predates it) can hide an approval whose keycast flag is
+  // still pending, and is the only source for an account holding its own key.
   const statusUnavailable = !isProtected && (
-    accountType === 'unknown'
-    || (accountType === 'self_custody' && accountStatus?.protected_minor == null)
+    accountType === 'unknown' || accountStatus?.protected_minor == null
   );
 
   return { protected: isProtected, note, statusUnavailable, approveSummary: APPROVE_SUMMARY[accountType] };

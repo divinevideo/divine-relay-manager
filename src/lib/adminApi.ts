@@ -1423,9 +1423,9 @@ export async function getActiveAgeReviewCase(
   return apiRequest<ActiveAgeReviewCaseResponse>(apiUrl, `/api/age-review/active-case?pubkey=${encodeURIComponent(pubkey)}`, 'GET');
 }
 
-/** Keycast-backed account status for moderators: surfaces the durable
- * `verified_minor` flag (approved protected minor 13-15). A keycast blip returns
- * `{ success: false }` (HTTP 200), so callers degrade to "status unavailable". */
+/** Account status for moderators: keycast's durable `verified_minor` flag and the
+ * D1 registry's `protected_minor` (approved protected minor 13-15). A keycast blip
+ * returns `{ success: false }` (HTTP 200) with the registry answer still set. */
 export interface AccountStatusResponse {
   success: boolean;
   pubkey?: string;

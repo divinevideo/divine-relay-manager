@@ -122,6 +122,25 @@ describe('handleAccountStatus', () => {
     expect(await res.json()).toMatchObject({ success: true, verified_minor: true, protected_minor: null });
   });
 
+  it('keeps the registry answer when resolving the keycast token throws', async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+    const KEYCAST_SERVICE_TOKEN = { get: () => Promise.reject(new Error('secrets store unavailable')) };
+    const DB = {
+      prepare: () => ({ bind: () => ({ first: () => Promise.resolve({ subject_id: 'subject-1' }) }) }),
+    } as unknown as D1Database;
+
+    const res = await handleAccountStatus(
+      VALID_PUBKEY,
+      { ...makeEnv(), KEYCAST_SERVICE_TOKEN, DB } as unknown as KeycastEnv & { DB: D1Database },
+      CORS,
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ success: false, protected_minor: true });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it('surfaces not_found (self-custody) for a keycast 404, distinct from unavailable', async () => {
     vi.stubGlobal(
       'fetch',

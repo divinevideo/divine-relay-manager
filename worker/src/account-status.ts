@@ -1,7 +1,7 @@
 // ABOUTME: Moderator-facing account-status endpoint. Surfaces keycast's durable
 // ABOUTME: verified_minor flag and the D1 protected-minor registry for the age-review view.
 
-import { getUserStatus, HEX_64, type KeycastEnv } from './keycast-client';
+import { getUserStatus, HEX_64, type KeycastEnv, type UserStatusResult } from './keycast-client';
 import { resolveByPubkey } from './protected-minors';
 
 function json(
@@ -43,7 +43,12 @@ export async function handleAccountStatus(
   }
 
   const [result, protected_minor] = await Promise.all([
-    getUserStatus(pubkey, env),
+    // getUserStatus resolves its Secrets Store token outside its own try, so a
+    // throw there must not cost the moderator the registry answer.
+    getUserStatus(pubkey, env).catch((error): UserStatusResult => {
+      console.error('[account-status] Keycast status lookup threw:', error);
+      return { success: false, error: 'unavailable' };
+    }),
     registryProtection(pubkey, env.DB),
   ]);
   if (!result.success) {
