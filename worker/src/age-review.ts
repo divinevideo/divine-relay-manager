@@ -1004,6 +1004,48 @@ export async function handleCreateMinorAccount(
 // Mobile-facing endpoints (behind NIP-98 user auth)
 // ---------------------------------------------------------------------------
 
+/** Opens the same private 13–15 consent review used by the email path.
+ * A voluntary application is not a moderator-imposed restriction or approval.
+ * The conditional insert runs atomically so retried starts reuse one case.
+ */
+export async function handleStartGreenlight(
+  userPubkey: string,
+  env: AgeReviewEnv,
+  corsHeaders: Record<string, string>,
+): Promise<Response> {
+  if (!env.DB) return json({ success: false, error: 'Database not configured' }, 503, corsHeaders);
+  const result = await env.DB.prepare(`INSERT INTO age_review_cases
+    (id, pubkey, suspected_age_band, state, allowed_resolution, created_via, greenlight_requested_at)
+    SELECT ?, ?, 'age_13_15', 'open_reported', 'parent_video_or_email', 'greenlight_application', datetime('now')
+    WHERE NOT EXISTS (SELECT 1 FROM age_review_cases WHERE pubkey = ? AND state NOT IN ('cleared', 'denied_closed'))`)
+    .bind(crypto.randomUUID(), userPubkey, userPubkey).run();
+  // A report may already exist before a moderator has reviewed it. Attach
+  // the family's request to that case rather than replacing the report or
+  // creating a second active case. Existing restricted cases are untouched.
+  await env.DB.prepare(`UPDATE age_review_cases SET greenlight_requested_at = COALESCE(greenlight_requested_at, datetime('now'))
+    WHERE pubkey = ? AND state = 'open_reported' AND moderator_pubkey IS NULL
+      AND suspected_age_band = 'age_13_15' AND allowed_resolution = 'parent_video_or_email'`)
+    .bind(userPubkey).run();
+  const reviewCase = await getActiveAgeReviewCase(userPubkey, env);
+  if (!reviewCase || reviewCase.suspected_age_band !== 'age_13_15' || reviewCase.allowed_resolution !== 'parent_video_or_email'
+      || (reviewCase.state === 'open_reported' && !isVoluntaryGreenlightCase(reviewCase))) {
+    return json({ success: false, error: 'This account already has a different age-review process; contact support' }, 409, corsHeaders);
+  }
+  const status = await handleGetModerationStatus(userPubkey, env, corsHeaders);
+  return json(await status.json(), result.meta?.changes === 1 ? 201 : 200, corsHeaders);
+}
+
+function isVoluntaryGreenlightCase(reviewCase: AgeReviewCase): boolean {
+  return (reviewCase.greenlight_requested_at != null || reviewCase.created_via === 'greenlight_application')
+    && reviewCase.moderator_pubkey === null
+    && ['open_reported', 'submitted_for_review'].includes(reviewCase.state);
+}
+
+function canSubmitParentConsent(reviewCase: AgeReviewCase): boolean {
+  return (isVoluntaryGreenlightCase(reviewCase) && reviewCase.state === 'open_reported')
+    || !!VALID_TRANSITIONS[reviewCase.state]?.includes('submitted_for_review');
+}
+
 export async function handleGetModerationStatus(
   userPubkey: string,
   env: AgeReviewEnv,
@@ -1035,7 +1077,8 @@ export async function handleGetModerationStatus(
   ];
   const activeCase = await env.DB.prepare(`
     SELECT * FROM age_review_cases
-    WHERE pubkey = ? AND state IN (${RESTRICTED_STATES.map(() => '?').join(',')})
+    WHERE pubkey = ? AND (state IN (${RESTRICTED_STATES.map(() => '?').join(',')})
+      OR ((greenlight_requested_at IS NOT NULL OR created_via = 'greenlight_application') AND state = 'open_reported'))
     ORDER BY created_at DESC LIMIT 1
   `).bind(userPubkey, ...RESTRICTED_STATES).first<AgeReviewCase>();
 
@@ -1044,9 +1087,7 @@ export async function handleGetModerationStatus(
   }
 
   const now = new Date();
-  return json({
-    restriction: { status: 'restricted_minor_review' },
-    minorReviewCase: {
+  const minorReviewCase = {
       id: activeCase.id,
       state: activeCase.state,
       suspectedAgeBand: activeCase.suspected_age_band,
@@ -1056,8 +1097,11 @@ export async function handleGetModerationStatus(
       moderationConversationPubkey: null,
       moderationConversationId: null,
       responseDeadline: deriveResponseClock(activeCase, now),
-    },
-  } satisfies ModerationStatusResponse, 200, corsHeaders);
+  };
+  const status: ModerationStatusResponse = isVoluntaryGreenlightCase(activeCase)
+    ? { restriction: { status: 'active' }, minorReviewCase }
+    : { restriction: { status: 'restricted_minor_review' }, minorReviewCase };
+  return json(status, 200, corsHeaders);
 }
 
 export async function handleParentContact(
@@ -1199,7 +1243,7 @@ export async function handleParentConsent(
   if (current.allowed_resolution !== 'parent_video_or_email') {
     return json({ success: false, error: 'Parent consent video is not available for this case' }, 400, corsHeaders);
   }
-  if (!VALID_TRANSITIONS[current.state as AgeReviewState]?.includes('submitted_for_review')) {
+  if (!canSubmitParentConsent(current)) {
     return json({ success: false, error: `Cannot submit parent consent from state '${current.state}'` }, 400, corsHeaders);
   }
   if (!request.headers.get('Content-Type')?.toLowerCase().startsWith('multipart/form-data;')) {
@@ -1405,7 +1449,7 @@ export async function handleParentConsent(
 
   for (let attempt = 0; attempt < 2 && current; attempt++) {
     if (current.state === 'submitted_for_review') return json({ success: true }, 200, corsHeaders);
-    if (!VALID_TRANSITIONS[current.state as AgeReviewState]?.includes('submitted_for_review')) {
+    if (!canSubmitParentConsent(current)) {
       return json({ success: false, error: 'Case changed during submission' }, 409, corsHeaders);
     }
     const now = new Date();

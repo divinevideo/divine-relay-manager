@@ -30,6 +30,7 @@ import {
   handleUpdateAgeReviewCase,
   handleCreateMinorAccount,
   handleGetModerationStatus,
+  handleStartGreenlight,
   handleParentContact,
   handleParentConsent,
   handleAgeReviewReplyWebhook,
@@ -479,6 +480,13 @@ export default {
         if (!authResult.valid || !authResult.pubkey) return jsonResponse({ success: false, error: authResult.error ?? 'Unauthorized' }, 401, corsHeaders);
         if (env.DB) await ensureSchemaOnce(env.DB);
         return handleGetModerationStatus(authResult.pubkey, env, corsHeaders);
+      }
+
+      if (path === '/v1/minor-review-cases/greenlight' && request.method === 'POST') {
+        const authResult = await verifyNip98Auth(request, request.url, getNip98AllowedHosts(env));
+        if (!authResult.valid || !authResult.pubkey) return jsonResponse({ success: false, error: authResult.error ?? 'Unauthorized' }, 401, corsHeaders);
+        if (env.DB) await ensureSchemaOnce(env.DB);
+        return handleStartGreenlight(authResult.pubkey, env, corsHeaders);
       }
 
       if (path.startsWith('/v1/minor-review-cases/') && path.endsWith('/parent-contact') && request.method === 'POST') {
