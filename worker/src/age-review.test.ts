@@ -370,7 +370,7 @@ describe('handleUpdateAgeReviewCase', () => {
 
     const req = new Request('https://api.test/api/age-review/cases/case-1', {
       method: 'PATCH',
-      body: JSON.stringify({ state: 'cleared', resolution_note: 'Age verified' }),
+      body: JSON.stringify({ state: 'cleared', resolution: 'not_minor', resolution_note: 'Age verified' }),
     });
     const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(reviewDb, {
       ZENDESK_SUBDOMAIN: 'test',
@@ -594,7 +594,7 @@ describe('Keycast suspension wiring', () => {
 
     const req = new Request('https://api.test/api/age-review/cases/case-1', {
       method: 'PATCH',
-      body: JSON.stringify({ state: 'cleared' }),
+      body: JSON.stringify({ state: 'cleared', resolution: 'not_minor' }),
     });
     const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
     const body = await res.json() as { success: boolean; keycastUpdated: boolean };
@@ -628,7 +628,7 @@ describe('Keycast suspension wiring', () => {
 
     const req = new Request('https://api.test/api/age-review/cases/case-1', {
       method: 'PATCH',
-      body: JSON.stringify({ state: 'cleared' }),
+      body: JSON.stringify({ state: 'cleared', resolution: 'not_minor' }),
     });
     const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
     const body = await res.json() as { success: boolean; keycastUpdated: boolean };
@@ -695,7 +695,7 @@ describe('Keycast suspension wiring', () => {
 
     const req = new Request('https://api.test/api/age-review/cases/case-1', {
       method: 'PATCH',
-      body: JSON.stringify({ state: 'cleared' }),
+      body: JSON.stringify({ state: 'cleared', resolution: 'not_minor' }),
     });
     const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
     const body = await res.json() as { success: boolean; keycastUpdated: boolean };
@@ -728,7 +728,7 @@ describe('Keycast suspension wiring', () => {
 
     const req = new Request('https://api.test/api/age-review/cases/case-1', {
       method: 'PATCH',
-      body: JSON.stringify({ state: 'cleared' }),
+      body: JSON.stringify({ state: 'cleared', resolution: 'not_minor' }),
     });
     const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
     const body = await res.json() as { success: boolean; keycastUpdated: boolean };
@@ -877,7 +877,7 @@ describe('Keycast suspension wiring', () => {
 
     const req = new Request('https://api.test/api/age-review/cases/case-1', {
       method: 'PATCH',
-      body: JSON.stringify({ state: 'cleared' }),
+      body: JSON.stringify({ state: 'cleared', resolution: 'not_minor' }),
     });
     const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(makeDbFor(restrictedCase, updatedCase)), corsHeaders);
 
@@ -1092,7 +1092,7 @@ describe('Relay pubkey enforcement wiring', () => {
     const c = makeCase({ state: before as AgeReviewCase['state'] });
     const db = dbReturning(c, { ...c, state: to as AgeReviewCase['state'] });
     const req = new Request('https://api.test/api/age-review/cases/case-1', {
-      method: 'PATCH', body: JSON.stringify({ state: to }),
+      method: 'PATCH', body: JSON.stringify(to === 'cleared' ? { state: to, resolution: 'not_minor' } : { state: to }),
     });
     await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
     return c;

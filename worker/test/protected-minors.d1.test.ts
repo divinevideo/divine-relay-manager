@@ -293,6 +293,8 @@ describe('protected-minor registry on real D1', () => {
         cases: number; subjects: number; bindings: number; operations: number;
       }>();
     expect(counts).toEqual({ cases: 1, subjects: 1, bindings: 1, operations: 1 });
+    const onboardCase = await DB.prepare('SELECT clear_resolution FROM age_review_cases').first<{ clear_resolution: string | null }>();
+    expect(onboardCase!.clear_resolution).toBe('approved_minor');
     expect(fetchMock).toHaveBeenCalledTimes(2);
     vi.unstubAllGlobals();
   });

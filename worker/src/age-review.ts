@@ -13,6 +13,8 @@ import {
   type ModerationStatusResponse,
   DEADLINE_DAYS,
   defaultResolutionForBand,
+  CLEAR_RESOLUTIONS,
+  isClearResolution,
   type EnforcementLegStatus,
   type AgeReviewEnforcement,
   type AgeReviewCaseResponse,
@@ -339,6 +341,30 @@ export async function handleUpdateAgeReviewCase(
     binds.push(body.suspected_age_band);
     updates.push('allowed_resolution = ?');
     binds.push(defaultResolutionForBand(body.suspected_age_band as AgeBand));
+  }
+
+  // Clear resolution (#192). The moderator states which kind of Clear this is,
+  // because only an explicit 13-15 approval may confer durable protected-minor
+  // status; dismissing a report on a default-band case must not.
+  if (body.resolution !== undefined || body.state === 'cleared') {
+    if (body.state !== 'cleared') {
+      return json({ success: false, error: "resolution is only valid with state 'cleared'" }, 400, corsHeaders);
+    }
+    if (!isClearResolution(body.resolution)) {
+      return json({
+        success: false,
+        error: `resolution must be one of: ${CLEAR_RESOLUTIONS.join(', ')}`,
+      }, 400, corsHeaders);
+    }
+    // Band validity was checked above, so the post-update band is one of AGE_BANDS.
+    const effectiveBand = typeof body.suspected_age_band === 'string'
+      ? body.suspected_age_band
+      : existing.suspected_age_band;
+    if (body.resolution === 'approved_minor' && effectiveBand !== 'age_13_15') {
+      return json({ success: false, error: 'approved_minor requires the 13-15 age band' }, 400, corsHeaders);
+    }
+    updates.push('clear_resolution = ?');
+    binds.push(body.resolution);
   }
 
   // Clock pause/resume
@@ -808,8 +834,8 @@ export async function handleCreateMinorAccount(
     await env.DB.batch([env.DB.prepare(`
       INSERT INTO age_review_cases
       (id, pubkey, suspected_age_band, state, allowed_resolution, resolution_note, created_via, claim_link_url, claim_link_expires_at, zendesk_ticket_id,
-       account_name, account_nip05, account_vine_username, identity_captured_at, closed_at)
-      VALUES (?, ?, 'age_13_15', 'cleared', 'parent_video_or_email', 'Approved via parental consent (minor onboarding)', 'minor_onboarding', NULL, ?, ?, ?, ?, ?, ?, ?)
+       account_name, account_nip05, account_vine_username, identity_captured_at, closed_at, clear_resolution)
+      VALUES (?, ?, 'age_13_15', 'cleared', 'parent_video_or_email', 'Approved via parental consent (minor onboarding)', 'minor_onboarding', NULL, ?, ?, ?, ?, ?, ?, ?, 'approved_minor')
     `).bind(
       caseId,
       result.pubkey,

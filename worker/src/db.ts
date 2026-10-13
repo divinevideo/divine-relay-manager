@@ -82,6 +82,7 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       claim_link_expires_at TEXT,
       closed_at TEXT,
       redacted_at TEXT,
+      clear_resolution TEXT CHECK (clear_resolution IN ('approved_minor', 'not_minor')),
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
       version INTEGER NOT NULL DEFAULT 0
@@ -149,7 +150,11 @@ export async function ensureSchema(db: D1Database): Promise<void> {
     // Column already exists
   }
 
-  for (const column of [`closed_at TEXT`, `redacted_at TEXT`]) {
+  for (const column of [
+    `closed_at TEXT`,
+    `redacted_at TEXT`,
+    `clear_resolution TEXT CHECK (clear_resolution IN ('approved_minor', 'not_minor'))`,
+  ]) {
     try {
       await db.prepare(`ALTER TABLE age_review_cases ADD COLUMN ${column}`).run();
     } catch {

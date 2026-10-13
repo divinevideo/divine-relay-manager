@@ -291,3 +291,77 @@ describe('protected-minor projection on a self-custody deny', () => {
     vi.restoreAllMocks();
   });
 });
+
+describe('clear resolution on the PATCH', () => {
+  beforeEach(async () => {
+    await reset();
+    for (const table of ['protected_minor_projection_jobs', 'protected_minor_account_bindings', 'protected_minor_subjects']) {
+      await DB.prepare(`DELETE FROM ${table}`).run();
+    }
+  });
+
+  // Hex pubkey: once Task 4 lands, an approval binds it and the bindings table CHECKs the shape.
+  async function insertBandCase(id: string, band: string) {
+    await DB.prepare(
+      `INSERT INTO age_review_cases (id, pubkey, state, suspected_age_band, deadline_at, clock_paused, version)
+       VALUES (?, ?, 'under_moderator_review', ?, ?, 0, 0)`,
+    ).bind(id, 'a'.repeat(64), band, new Date(Date.now() + 9 * 864e5).toISOString()).run();
+  }
+  const caseRow = (id: string) => DB.prepare('SELECT state, clear_resolution FROM age_review_cases WHERE id = ?')
+    .bind(id).first<{ state: string; clear_resolution: string | null }>();
+
+  it('rejects a Clear with no resolution and leaves the case open', async () => {
+    await insertBandCase('r-none', 'age_13_15');
+    const res = await patch('r-none', { state: 'cleared' });
+    expect(res.status).toBe(400);
+    expect(await caseRow('r-none')).toEqual({ state: 'under_moderator_review', clear_resolution: null });
+  });
+
+  it('rejects an unknown resolution', async () => {
+    await insertBandCase('r-bad', 'age_13_15');
+    const res = await patch('r-bad', { state: 'cleared', resolution: 'maybe' });
+    expect(res.status).toBe(400);
+    expect((await caseRow('r-bad'))!.state).toBe('under_moderator_review');
+  });
+
+  it('rejects a resolution sent without a Clear', async () => {
+    await insertBandCase('r-orphan', 'age_13_15');
+    const res = await patch('r-orphan', { state: 'needs_follow_up', resolution: 'not_minor' });
+    expect(res.status).toBe(400);
+    expect((await caseRow('r-orphan'))!.state).toBe('under_moderator_review');
+  });
+
+  it('rejects approved_minor outside the 13-15 band', async () => {
+    await insertBandCase('r-adult', 'age_16_plus_claimed');
+    const res = await patch('r-adult', { state: 'cleared', resolution: 'approved_minor' });
+    expect(res.status).toBe(400);
+    expect((await caseRow('r-adult'))!.state).toBe('under_moderator_review');
+  });
+
+  it('uses the post-update band when the same PATCH sets 13-15 and approves', async () => {
+    await insertBandCase('r-reband', 'age_16_plus_claimed');
+    const res = await patch('r-reband', {
+      state: 'cleared', resolution: 'approved_minor', suspected_age_band: 'age_13_15',
+    });
+    expect(res.status).not.toBe(400);
+    expect(await caseRow('r-reband')).toEqual({ state: 'cleared', clear_resolution: 'approved_minor' });
+  });
+
+  it('persists not_minor and writes no protected-minor subject', async () => {
+    await insertBandCase('r-dismiss', 'age_13_15');
+    const res = await patch('r-dismiss', { state: 'cleared', resolution: 'not_minor' });
+    expect(res.status).not.toBe(400);
+    expect(await caseRow('r-dismiss')).toEqual({ state: 'cleared', clear_resolution: 'not_minor' });
+    const subjects = await DB.prepare(
+      "SELECT COUNT(*) AS c FROM protected_minor_subjects WHERE source_case_id = 'r-dismiss'",
+    ).first<{ c: number }>();
+    expect(subjects!.c).toBe(0);
+  });
+
+  it('ensureSchema adds clear_resolution idempotently', async () => {
+    await ensureSchema(DB);
+    await ensureSchema(DB);
+    const cols = await DB.prepare('PRAGMA table_info(age_review_cases)').all<{ name: string }>();
+    expect(cols.results.map((c) => c.name)).toContain('clear_resolution');
+  });
+});

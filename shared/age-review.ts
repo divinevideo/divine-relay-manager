@@ -1,6 +1,15 @@
 export const AGE_BANDS = ['under_13', 'age_13_15', 'age_16_plus_claimed'] as const;
 export type AgeBand = typeof AGE_BANDS[number];
 
+// How a `cleared` case was resolved (#192). `cleared` alone is overloaded: a
+// confirmed 13-15 minor and a dismissed report both end there, and only the
+// former may confer durable protected-minor status.
+export const CLEAR_RESOLUTIONS = ['approved_minor', 'not_minor'] as const;
+export type ClearResolution = typeof CLEAR_RESOLUTIONS[number];
+export function isClearResolution(value: unknown): value is ClearResolution {
+  return typeof value === 'string' && (CLEAR_RESOLUTIONS as readonly string[]).includes(value);
+}
+
 // States match MinorReviewCaseState from divine-mobile PR #3531
 export const AGE_REVIEW_STATES = [
   'open_reported',
@@ -230,6 +239,8 @@ export interface AgeReviewCase {
   /** Added by the retention rollout; optional for older worker responses. */
   closed_at?: string | null;
   redacted_at?: string | null;
+  /** Set when a case is cleared (#192). Null on cases cleared before it existed. */
+  clear_resolution?: ClearResolution | null;
   /**
    * Human-readable identity for the reported account, captured when the case was
    * created. Enforcement hides a suspended account's content from relay queries,
@@ -280,6 +291,11 @@ export interface AgeReviewEnforcement {
   /** Durable protected-subject clear. It precedes the Keycast projection clear. */
   subjectClear?: EnforcementLegStatus;
   subjectClearError?: string;
+  /** Protected-minor subject recorded with an approval; atomic with the case update (#192). */
+  subjectActivate?: EnforcementLegStatus;
+  /** Keycast verified_minor set on approval; retried by the projection cron (#192). */
+  keycastMinorSet?: EnforcementLegStatus;
+  keycastMinorSetError?: string;
 }
 
 // Response body for a case GET/PATCH. On a partial-enforcement PATCH the worker
