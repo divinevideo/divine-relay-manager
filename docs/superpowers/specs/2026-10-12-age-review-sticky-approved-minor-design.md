@@ -285,13 +285,16 @@ these win.
   so the retention overdue-projection alarm still fires for a persistently failing projection.
 - **Superseded clear jobs settle without keycast.** A cleared subject's job whose pubkey now has a
   live binding to a different active subject is completed without a DELETE: keycast must mirror the
-  pubkey's current protection.
+  pubkey's current protection. Settling it still converges (re-arms the live subject's set), because
+  an earlier attempt at that DELETE may have failed from the worker's side yet landed in keycast
+  after the new subject's set.
 - **Convergence after every projection.** After any keycast verified_minor call that landed
   (success or no account), on every path (inline approve, inline deny, expiry, cron),
   `convergeProjection` re-arms the opposite projection when a racing write left keycast
   disagreeing with D1: after a clear, the pubkey's live active subject's set; after a set, with no
-  live active subject, its most recent cleared subject's clear. A refused (`account_unclaimed`) or
-  failed call changed nothing in keycast and needs none.
+  live active subject, its most recent cleared subject's clear. A refused (`account_unclaimed`)
+  call changed nothing in keycast and needs none. A failed call may still have landed; its job
+  stays pending and converges when it settles.
 - **Non-hex pubkeys are a 400.** `approved_minor` for a case whose pubkey cannot be bound (the
   bindings table requires 64 lowercase hex) is refused before any write.
 - **keycast's set uses an explicit transaction** rather than the single-statement CTE described in

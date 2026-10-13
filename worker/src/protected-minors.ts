@@ -227,9 +227,12 @@ export async function pendingProjectionJobs(db: D1Database): Promise<Array<{
  *   and its most recent bound subject is cleared, re-arm that subject's clear job.
  *
  * The two conditions cannot both hold for one D1 state, so convergence cannot
- * ping-pong. With no race it costs one extra idempotent keycast call. A call
- * keycast refused (account_unclaimed) or that failed changed nothing there, so it
- * cannot have overwritten a racing projection and needs no convergence.
+ * ping-pong. With no race neither condition holds, so it re-arms nothing and
+ * costs one D1 write that matches no row. A call keycast refused
+ * (account_unclaimed) changed nothing there and needs no convergence. A call
+ * that failed from our side may still have landed (a timeout); its job stays
+ * pending and converges when it settles, including when the cron settles it as
+ * superseded.
  */
 export async function convergeProjection(
   db: D1Database, pubkey: string, projected: 'active' | 'cleared',

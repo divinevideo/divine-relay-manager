@@ -531,5 +531,45 @@ describe('age-review cron on real D1', () => {
       expect(flagged).toBe(false);
       expect(await pendingCount()).toBe(0);
     });
+
+    // An in-doubt clear: keycast answers 504 but applies the DELETE after a racing
+    // approval's PUT. The clear job stays pending, then settles as superseded by the
+    // new subject without a keycast call, so settling must converge too.
+    it('an in-doubt clear settled as superseded re-arms the live subject', async () => {
+      const P = 'e4'.repeat(32);
+      await createSubjectWithBinding(DB, 'onboarding', P);
+      await DB.prepare(`INSERT INTO age_review_cases (id, pubkey, state, deadline_at, clock_paused)
+        VALUES ('x3-expired', ?, 'restricted_pending_user_response', ?, 0)`)
+        .bind(P, new Date(Date.now() - 60_000).toISOString()).run();
+      let raced = false;
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+        if (!String(input).includes('/verified-minor')) return new Response('ok', { status: 200 });
+        const method = init?.method ?? 'GET';
+        calls.push(method);
+        if (method === 'DELETE' && !raced) {
+          raced = true;
+          // The approval creates S2 and completes its PUT while the expiry's DELETE is in flight.
+          await DB.prepare(`INSERT INTO age_review_cases (id, pubkey, state, clear_resolution, updated_at)
+            VALUES ('x3-approve', ?, 'cleared', 'approved_minor', datetime('now', '+2 seconds'))`).bind(P).run();
+          const { subjectId: s2 } = await createSubjectWithBinding(DB, 'x3-approve', P);
+          const now = new Date().toISOString();
+          await DB.prepare(`INSERT INTO protected_minor_projection_jobs
+            (subject_id, pubkey, reason, state, created_at, updated_at)
+            VALUES (?, ?, 'age_review_approved', 'complete', ?, ?)`).bind(s2, P, now, now).run();
+          // S2's PUT flagged the account; this DELETE then applies after it, but reports failure.
+          flagged = false;
+          return new Response('gateway timeout', { status: 504 });
+        }
+        flagged = method === 'PUT';
+        return new Response('{}', { status: 200 });
+      });
+
+      for (let tick = 0; tick < 3; tick += 1) await checkAgeReviewDeadlines(env());
+
+      expect(calls[0]).toBe('DELETE');
+      expect(calls.at(-1)).toBe('PUT');
+      expect(flagged).toBe(true);
+      expect(await pendingCount()).toBe(0);
+    });
   });
 });

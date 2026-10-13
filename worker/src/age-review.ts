@@ -2448,6 +2448,10 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
       // account's live protected subject; the newer approval owns the flag.
       if (job.superseded) {
         await settleSupersededClear(env.DB, job.subjectId);
+        // An earlier attempt at this clear may have failed from our side yet
+        // landed in keycast after the new subject's set (a timeout). Re-arm the
+        // live subject so the set is re-applied: one extra idempotent PUT.
+        await convergeAfterProjection(env.DB, job.pubkey, 'cleared');
         continue;
       }
       const result = job.classification === 'active'
