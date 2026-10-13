@@ -68,6 +68,18 @@ describe('parseConsentMultipart', () => {
     await expect(parseConsentMultipart(big.body, big.contentType, { videoLimit: 10 }, { onVideoChunk: () => {} }))
       .rejects.toBeInstanceOf(ConsentUploadError);
   });
+
+  it('rejects a second video part with 400 before starting a second upload', async () => {
+    const { body, contentType } = multipartBody([
+      { name: 'video', filename: 'a.mp4', type: 'video/mp4', value: 'aaaa' },
+      { name: 'video', filename: 'b.mp4', type: 'video/mp4', value: 'bbbbbbbb' },
+      { name: 'email', value: 'parent@example.com' },
+    ]);
+    const onVideoStart = vi.fn();
+    await expect(parseConsentMultipart(body, contentType, {}, { onVideoStart, onVideoChunk: () => {} }))
+      .rejects.toMatchObject({ status: 400 });
+    expect(onVideoStart).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('R2MultipartVideoWriter', () => {

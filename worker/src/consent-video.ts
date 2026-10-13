@@ -173,6 +173,9 @@ export async function parseConsentMultipart(
       const type = headerText.match(/(?:^|\r\n)Content-Type:\s*([^\r\n]+)/i)?.[1]?.trim().toLowerCase() ?? '';
       partIsVideo = partName === 'video' && filename !== undefined;
       if (partIsVideo) {
+        // One clip per submission: a second part would start another upload
+        // to the same object and leave the recorded size the sum of both.
+        if (sawVideo) throw new ConsentUploadError(400, 'Only one video file part is allowed');
         if (!type.startsWith('video/')) {
           throw new ConsentUploadError(415, 'video/* content type is required');
         }
