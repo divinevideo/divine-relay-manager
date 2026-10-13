@@ -251,8 +251,8 @@ export async function pendingProjectionJobs(db: D1Database): Promise<Array<{
 }
 
 /**
- * Keycast convergence after a projection call that landed (#192). Call it after
- * every keycast verified_minor call that succeeded or found no account, on every
+ * Keycast convergence after a projection call that landed or may have (#192). Call
+ * it after every keycast verified_minor call except one keycast refused, on every
  * path (inline approve, inline deny, expiry, cron), with the classification that
  * call projected. Two races leave keycast disagreeing with D1 and nothing pending:
  *
@@ -269,9 +269,9 @@ export async function pendingProjectionJobs(db: D1Database): Promise<Array<{
  * ping-pong. With no race neither condition holds, so it re-arms nothing and
  * costs one D1 write that matches no row. A call keycast refused
  * (account_unclaimed) changed nothing there and needs no convergence. A call
- * that failed from our side may still have landed (a timeout); its job stays
- * pending and converges when it settles, including when the cron settles it as
- * superseded.
+ * that failed from our side may still have landed (a timeout), and its job may
+ * already be complete (a racing caller for the same subject succeeded first), so
+ * nothing pending would retry it: failed calls converge too.
  */
 export async function convergeProjection(
   db: D1Database, pubkey: string, projected: 'active' | 'cleared',

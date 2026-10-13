@@ -705,6 +705,11 @@ export async function handleUpdateAgeReviewCase(
         // itself succeeded, so do not turn an applied denial into a 500.
         console.error('[age-review] Failed to mark protected-minor projection complete:', error);
       }
+    }
+    // A failed call is in doubt: it may have landed (a timeout), and a racing
+    // caller may already have completed this subject's job, so nothing would
+    // retry. Converge after every attempt, not only after a success.
+    if (deniedCase && keycastMinorClear !== 'not_attempted' && env.DB) {
       await convergeAfterProjection(env.DB, minorProjectionPubkey, 'cleared');
     }
 
@@ -741,11 +746,12 @@ export async function handleUpdateAgeReviewCase(
       } catch (error) {
         console.error('[age-review] Failed to mark approval projection complete:', error);
       }
-      // A refused (unclaimed) set changed nothing in keycast, so it cannot have
-      // overwritten a racing clear.
-      if (keycastMinorSet === 'ok' || keycastMinorSet === 'not_applicable') {
-        await convergeAfterProjection(env.DB, existing.pubkey, 'active');
-      }
+    }
+    // Converge after every attempted set, including an in-doubt failure. A refused
+    // (unclaimed) set changed nothing in keycast, so it cannot have overwritten a
+    // racing clear.
+    if (approvingMinor && env.DB && keycastMinorSet !== 'not_attempted' && !minorSetResult?.unclaimed) {
+      await convergeAfterProjection(env.DB, existing.pubkey, 'active');
     }
   }
 
@@ -2405,8 +2411,9 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
         // so leaving it pending only defers the same answer to the cron's retry.
         if (clearResult.success || clearResult.notFound) {
           await markProjectionComplete(env.DB, projectionPubkey, 'cleared');
-          await convergeAfterProjection(env.DB, projectionPubkey, 'cleared');
         } else console.error(`[age-review] Keycast verified_minor clear failed for expired case: ${clearResult.error}`);
+        // In doubt on failure too: it may have landed after a racing approval's set.
+        await convergeAfterProjection(env.DB, projectionPubkey, 'cleared');
       } catch (error) {
         console.error('[age-review] Keycast verified_minor clear failed for expired case:', error);
       }
@@ -2472,14 +2479,15 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
       // overdue-projection alarm.
       if (result.success || result.notFound || result.unclaimed) {
         await markProjectionComplete(env.DB, job.pubkey, job.classification);
-        // A call that landed may have raced an opposite projection for the same
-        // pubkey; a refused (unclaimed) one changed nothing in keycast.
-        if (result.success || result.notFound) {
-          await convergeAfterProjection(env.DB, job.pubkey, job.classification);
-        }
       } else {
         await markProjectionAttempt(env.DB, job.pubkey);
         console.error(`[age-review] Keycast protected-minor projection retry failed: ${result.error}`);
+      }
+      // A call that landed, or may have (a failure is in doubt, and a racing
+      // caller may already have completed this job), can have raced an opposite
+      // projection for the same pubkey. A refused (unclaimed) one changed nothing.
+      if (!result.unclaimed) {
+        await convergeAfterProjection(env.DB, job.pubkey, job.classification);
       }
     } catch (error) {
       try {

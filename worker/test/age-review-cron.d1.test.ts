@@ -497,6 +497,71 @@ describe('age-review cron on real D1', () => {
     expect(await jobState(s2)).toBe('complete');
   });
 
+  // A failed call is in doubt: it may have landed, and a racing caller may already
+  // have completed the same job, so no pending job would retry it.
+  describe('convergence after an in-doubt failure', () => {
+    const env = () => ({ ...cronEnv, KEYCAST_URL: 'https://keycast.invalid', KEYCAST_SERVICE_TOKEN: 'test-token' });
+    const jobState = async (id: string) => (await DB.prepare(
+      'SELECT state FROM protected_minor_projection_jobs WHERE subject_id = ?',
+    ).bind(id).first<{ state: string }>())!.state;
+
+    beforeEach(async () => {
+      for (const t of ['protected_minor_projection_jobs', 'protected_minor_account_bindings', 'protected_minor_subjects']) {
+        await DB.prepare(`DELETE FROM ${t}`).run();
+      }
+    });
+
+    it('re-arms the live subject when a clear that reports 504 races a newer approval', async () => {
+      const P = 'c3'.repeat(32);
+      const { subjectId: s1 } = await createSubjectWithBinding(DB, 'old-case', P);
+      await clearSubject(DB, P, undefined, 'age_review_denied', s1); // S1 cleared, clear job pending
+      let s2 = '';
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+        if (!String(input).includes('/verified-minor')) return new Response('ok', { status: 200 });
+        if (init?.method === 'DELETE' && !s2) {
+          // An overlapping caller completes S1's clear; a newer approval creates S2
+          // and completes its PUT; this DELETE then lands last but reports 504.
+          await markProjectionComplete(DB, P, 'cleared');
+          s2 = (await createSubjectWithBinding(DB, 'new-case', P)).subjectId;
+          const now = new Date().toISOString();
+          await DB.prepare(`INSERT INTO protected_minor_projection_jobs
+            (subject_id, pubkey, reason, state, created_at, updated_at)
+            VALUES (?, ?, 'age_review_approved', 'complete', ?, ?)`).bind(s2, P, now, now).run();
+          return new Response('gateway timeout', { status: 504 });
+        }
+        return new Response('{}', { status: 200 });
+      });
+
+      await checkAgeReviewDeadlines(env());
+
+      expect(await jobState(s2)).toBe('pending');
+    });
+
+    it('re-arms the clear when a set that reports 504 races a newer denial', async () => {
+      const P = 'd4'.repeat(32);
+      const { subjectId } = await createSubjectWithBinding(DB, 'approve-case', P);
+      await rearmLiveSubjectProjection(DB, P); // set job pending
+      let denied = false;
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+        if (!String(input).includes('/verified-minor')) return new Response('ok', { status: 200 });
+        if (init?.method === 'PUT' && !denied) {
+          // A denial clears the subject and completes its DELETE; this PUT then
+          // lands last but reports 504.
+          denied = true;
+          await clearSubject(DB, P, undefined, 'age_review_denied');
+          await markProjectionComplete(DB, P, 'cleared');
+          return new Response('gateway timeout', { status: 504 });
+        }
+        return new Response('{}', { status: 200 });
+      });
+
+      await checkAgeReviewDeadlines(env());
+
+      expect(denied).toBe(true);
+      expect(await jobState(subjectId)).toBe('pending');
+    });
+  });
+
   it('re-arming keeps the age of an already-pending live job', async () => {
     for (const t of ['protected_minor_projection_jobs', 'protected_minor_account_bindings', 'protected_minor_subjects']) {
       await DB.prepare(`DELETE FROM ${t}`).run();

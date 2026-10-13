@@ -289,12 +289,13 @@ these win.
   an earlier attempt at that DELETE may have failed from the worker's side yet landed in keycast
   after the new subject's set.
 - **Convergence after every projection.** After any keycast verified_minor call that landed
-  (success or no account), on every path (inline approve, inline deny, expiry, cron),
+  or may have (success, no account, or a failure, which is in doubt), on every path (inline approve, inline deny, expiry, cron),
   `convergeProjection` re-arms the opposite projection when a racing write left keycast
   disagreeing with D1: after a clear, the pubkey's live active subject's set; after a set, with no
   live active subject, its most recent cleared subject's clear. A refused (`account_unclaimed`)
-  call changed nothing in keycast and needs none. A failed call may still have landed; its job
-  stays pending and converges when it settles.
+  call changed nothing in keycast and needs none. A failed call may still have landed after a
+  racing caller already completed the same job, so nothing pending would retry it; it converges
+  at once like a success.
 - **Non-hex pubkeys are a 400.** `approved_minor` for a case whose pubkey cannot be bound (the
   bindings table requires 64 lowercase hex) is refused before any write.
 - **keycast's set uses an explicit transaction** rather than the single-statement CTE described in
