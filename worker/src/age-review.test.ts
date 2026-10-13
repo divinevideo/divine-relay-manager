@@ -1801,6 +1801,26 @@ describe('handleParentConsent', () => {
     expect(z.comment()).not.toContain('old-receipt');
   });
 
+  it('alerts Slack when a consent submission needs manual reconciliation', async () => {
+    const c = makeCase({ state: 'restricted_pending_parental_consent' });
+    const { db } = consentDb(c, { status: 'stored', upload_token: null, ticket_id: null, lease_until: 0, receipt_id: 'r-old', object_key: 'k-old', case_version: null, ticket_attempt_at: Math.floor(Date.now() / 1000) - 60 * 60, created_at: 1 });
+    const bucket = fakeBucket();
+    bucket.objects.set('k-old', new TextEncoder().encode('clip'));
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal('fetch', mockFetch);
+    const res = await handleParentConsent(request(), c.id, c.pubkey, consentEnv(db, {
+      ZENDESK_SUBDOMAIN: 'test', ZENDESK_EMAIL: 'agent@test.com', ZENDESK_API_TOKEN: 'token', CONSENT_VIDEO_BUCKET: bucket,
+      SLACK_WEBHOOK_URL: 'https://hooks.slack.test/x',
+    } as Partial<AgeReviewEnv>), corsHeaders);
+    expect(res.status).toBe(409);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(mockFetch.mock.calls[0][0]).toBe('https://hooks.slack.test/x');
+    const text = JSON.parse(mockFetch.mock.calls[0][1].body).text as string;
+    expect(text).toContain('manual reconciliation');
+    expect(text).not.toContain(c.id);
+    expect(text).not.toContain(c.pubkey);
+  });
+
   it('returns a non-retryable 409 when ticket creation needs manual reconciliation', async () => {
     const c = makeCase({ state: 'restricted_pending_parental_consent' });
     const { db } = consentDb(c, { status: 'stored', upload_token: null, ticket_id: null, lease_until: 0, receipt_id: 'r-old', object_key: 'k-old', case_version: null, ticket_attempt_at: Math.floor(Date.now() / 1000) - 60 * 60, created_at: 1 });

@@ -1204,7 +1204,10 @@ export async function handleParentConsent(
         && submission.ticket_attempt_at !== null
         && nowSeconds - submission.ticket_attempt_at >= 50 * 60) {
         // Non-retryable on purpose: automatic retries stop here and support
-        // reconciles by hand, rather than the client looping on a 503.
+        // reconciles by hand, rather than the client looping on a 503. Support
+        // only knows to do that if this is logged and alerted.
+        console.error('[age-review] Consent submission needs manual reconciliation: ticket creation outcome unknown');
+        if (env.SLACK_WEBHOOK_URL) await sendSlackAlert(env.SLACK_WEBHOOK_URL, 'consent_needs_reconciliation', [current]);
         return json({ success: false, error: 'Consent submission needs manual review; contact support' }, 409, corsHeaders);
       }
       const hasReviewLink = async (ticketId: number): Promise<boolean> => {
@@ -2380,7 +2383,7 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
 
 async function sendSlackAlert(
   webhookUrl: string,
-  alertType: 'approaching' | 'expired' | 'expired_needs_action',
+  alertType: 'approaching' | 'expired' | 'expired_needs_action' | 'consent_needs_reconciliation',
   cases: AgeReviewCase[],
 ): Promise<boolean> {
   const emoji = alertType === 'approaching' ? ':warning:' : ':rotating_light:';
@@ -2388,7 +2391,9 @@ async function sendSlackAlert(
     ? `${emoji} ${cases.length} age review case(s) approaching deadline`
     : alertType === 'expired'
       ? `${emoji} ${cases.length} age review case(s) expired`
-      : `${emoji} ${cases.length} age review case(s) past deadline awaiting moderator action`;
+      : alertType === 'expired_needs_action'
+        ? `${emoji} ${cases.length} age review case(s) past deadline awaiting moderator action`
+        : `${emoji} ${cases.length} parent consent submission(s) need manual reconciliation: the Zendesk ticket may or may not exist`;
 
   const lines = cases.map(c => {
     const deadline = c.deadline_at ? new Date(c.deadline_at).toISOString().split('T')[0] : 'no deadline';
