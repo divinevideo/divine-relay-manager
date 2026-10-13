@@ -37,8 +37,10 @@ import {
   fingerprintProvisioningRequest,
   markProjectionAttempt,
   markProjectionComplete,
+  markProjectionUnclaimed,
   pendingProjectionJobs,
   pendingSubjectClears,
+  rearmUnclaimedProjections,
   settleSupersededClear,
   UUID_RE,
 } from './protected-minors';
@@ -743,13 +745,17 @@ export async function handleUpdateAgeReviewCase(
     keycastMinorSet = minorSetLeg.status;
     keycastMinorSetError = minorSetLeg.error;
     keycastMinorSetUnclaimed = minorSetResult?.unclaimed === true;
-    // `unclaimed` is reported as failed (a human must look) but settled: keycast
-    // refuses that row permanently, so a retry would only re-fail every tick.
-    // TODO(#304): nothing sets the flag if the account is claimed later.
+    // `unclaimed` is reported as failed (the flag is not applied) but settled:
+    // keycast refuses that row until the account is claimed, so a retry every
+    // tick would only re-fail. The cron tries it again on a slower schedule (#304).
     if (approvingMinor && env.DB
       && (keycastMinorSet === 'ok' || keycastMinorSet === 'not_applicable' || minorSetResult?.unclaimed)) {
       try {
-        await markProjectionComplete(env.DB, existing.pubkey, 'active');
+        if (minorSetResult?.unclaimed) {
+          await markProjectionUnclaimed(env.DB, existing.pubkey);
+        } else {
+          await markProjectionComplete(env.DB, existing.pubkey, 'active');
+        }
       } catch (error) {
         console.error('[age-review] Failed to mark approval projection complete:', error);
       }
@@ -2466,6 +2472,14 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
     }
   }
 
+  // A set keycast refused as account_unclaimed is settled, not pending. Re-arm
+  // the ones due another try so the pass below sends them (#304).
+  try {
+    await rearmUnclaimedProjections(env.DB);
+  } catch (error) {
+    console.error('[age-review] Failed to re-arm protected-minor projections refused as unclaimed:', error);
+  }
+
   // Durable retry boundary for Keycast projection failures after the subject
   // clear commits.
   let projectionJobs: Awaited<ReturnType<typeof pendingProjectionJobs>> = [];
@@ -2489,12 +2503,15 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
       const result = job.classification === 'active'
         ? await setVerifiedMinor(job.pubkey, undefined, job.reason as KeycastReason, env)
         : await clearVerifiedMinor(job.pubkey, undefined, job.reason as KeycastReason, env);
-      // Settled when there is nothing left a retry could change: applied, no
+      // Settled when a retry on the next tick could change nothing: applied, no
       // keycast account (notFound), or a row keycast refuses to flag (unclaimed).
       // Left pending, those re-call keycast every tick and trip the retention
-      // overdue-projection alarm. TODO(#304): an unclaimed refusal settled here
-      // is only logged, and nothing sets the flag if the account is claimed later.
-      if (result.success || result.notFound || result.unclaimed) {
+      // overdue-projection alarm. A refused set is stamped instead, and
+      // rearmUnclaimedProjections tries it again later: the refusal lifts once
+      // the account is claimed (#304).
+      if (result.unclaimed && job.classification === 'active') {
+        await markProjectionUnclaimed(env.DB, job.pubkey);
+      } else if (result.success || result.notFound || result.unclaimed) {
         await markProjectionComplete(env.DB, job.pubkey, job.classification);
       } else {
         await markProjectionAttempt(env.DB, job.pubkey);

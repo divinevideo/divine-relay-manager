@@ -596,6 +596,35 @@ describe('approving a 13-15 minor', () => {
     expect(await pendingJobs()).toBe(0);
   });
 
+  it('the cron sets the flag an approval was refused, once the account is claimed (#304)', async () => {
+    vi.restoreAllMocks();
+    vi.useFakeTimers({ toFake: ['Date'], now: new Date() });
+    try {
+      let claimed = false;
+      const puts: number[] = [];
+      vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+        if (!String(input).includes('/verified-minor') || init?.method !== 'PUT') {
+          return Promise.resolve(new Response('{}', { status: 200 }));
+        }
+        const status = claimed ? 200 : 409;
+        puts.push(status);
+        return Promise.resolve(claimed
+          ? new Response('{}', { status })
+          : new Response('{"error":"account_unclaimed: account has no login credentials"}', { status }));
+      });
+      await approve();
+      claimed = true;
+      vi.setSystemTime(Date.now() + 61 * 60 * 1000);
+
+      await checkAgeReviewDeadlines(keycastEnv());
+
+      expect(puts).toEqual([409, 200]);
+      expect(await pendingJobs()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('a second Approve on the closed case is refused and writes nothing', async () => {
     await approve();
     const again = await approve();

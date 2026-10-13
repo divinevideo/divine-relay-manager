@@ -322,6 +322,14 @@ export async function ensureSchema(db: D1Database): Promise<void> {
     )
   `).run();
 
+  // When keycast last refused this job's set because the account has no login
+  // credentials (#304). The job is settled, and retried once this is an hour old.
+  try {
+    await db.prepare(`ALTER TABLE protected_minor_projection_jobs ADD COLUMN unclaimed_at TEXT`).run();
+  } catch (error) {
+    if (!String(error).includes('duplicate column name')) throw error;
+  }
+
   await db.prepare(`CREATE UNIQUE INDEX IF NOT EXISTS idx_protected_minor_active_subject_binding
     ON protected_minor_account_bindings(subject_id) WHERE unbound_at IS NULL`).run();
   await db.prepare(`CREATE UNIQUE INDEX IF NOT EXISTS idx_protected_minor_active_pubkey_binding

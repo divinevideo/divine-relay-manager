@@ -206,11 +206,49 @@ export async function clearSubject(
 export async function markProjectionComplete(
   db: D1Database, pubkey: string, projected: 'active' | 'cleared',
 ): Promise<void> {
-  await db.prepare(`UPDATE protected_minor_projection_jobs SET state = 'complete', updated_at = ?
+  await db.prepare(`UPDATE protected_minor_projection_jobs SET state = 'complete', updated_at = ?, unclaimed_at = NULL
     WHERE pubkey = ? AND state = 'pending'
       AND (SELECT classification_state FROM protected_minor_subjects s
         WHERE s.subject_id = protected_minor_projection_jobs.subject_id) = ?`)
     .bind(new Date().toISOString(), pubkey, projected).run();
+}
+
+/** How long a set keycast refused as account_unclaimed waits before the next try. */
+const UNCLAIMED_RETRY_MS = 60 * 60 * 1000;
+
+/**
+ * Settles a set keycast refused because the account has no login credentials
+ * (account_unclaimed), and stamps it for rearmUnclaimedProjections: the refusal
+ * lifts once the account is claimed (#304). Settled rather than left pending, so
+ * it is not re-sent every tick and retention's overdue-projection alert does not
+ * count it. Same guard as markProjectionComplete.
+ */
+export async function markProjectionUnclaimed(db: D1Database, pubkey: string): Promise<void> {
+  await db.prepare(`UPDATE protected_minor_projection_jobs SET state = 'complete', updated_at = ?1, unclaimed_at = ?1
+    WHERE pubkey = ?2 AND state = 'pending'
+      AND (SELECT classification_state FROM protected_minor_subjects s
+        WHERE s.subject_id = protected_minor_projection_jobs.subject_id) = 'active'`)
+    .bind(new Date().toISOString(), pubkey).run();
+}
+
+/**
+ * Re-arms sets that were refused as account_unclaimed at least an hour ago, so
+ * the next projection pass tries them again (#304). Only while the job's pubkey
+ * is still the live binding of an active subject: a job can keep its stamp after
+ * its subject is cleared (settleSupersededClear) or its binding is closed (a
+ * deleted account), and neither has an account left to flag. A job that is no
+ * longer re-armed stops being updated, so retention deletes it as usual.
+ */
+export async function rearmUnclaimedProjections(db: D1Database): Promise<void> {
+  const now = new Date();
+  await db.prepare(`UPDATE protected_minor_projection_jobs SET state = 'pending', created_at = ?1, updated_at = ?1
+    WHERE state = 'complete' AND unclaimed_at IS NOT NULL AND datetime(unclaimed_at) <= datetime(?2)
+      AND EXISTS (SELECT 1 FROM protected_minor_account_bindings b
+        JOIN protected_minor_subjects s ON s.subject_id = b.subject_id
+        WHERE b.subject_id = protected_minor_projection_jobs.subject_id
+          AND b.pubkey = protected_minor_projection_jobs.pubkey
+          AND b.unbound_at IS NULL AND s.classification_state = 'active')`)
+    .bind(now.toISOString(), new Date(now.getTime() - UNCLAIMED_RETRY_MS).toISOString()).run();
 }
 
 export async function markProjectionAttempt(db: D1Database, pubkey: string): Promise<void> {
