@@ -291,8 +291,10 @@ export interface AgeReviewEnforcement {
   /** Durable protected-subject clear. It precedes the Keycast projection clear. */
   subjectClear?: EnforcementLegStatus;
   subjectClearError?: string;
-  /** Protected-minor subject recorded with an approval; atomic with the case update (#192). */
+  /** Protected-minor subject recorded with an approval; atomic with the case update and
+   * observed from the batch: `failed` when the batch armed no projection job (#192). */
   subjectActivate?: EnforcementLegStatus;
+  subjectActivateError?: string;
   /** Keycast verified_minor set on approval; retried by the projection cron (#192). */
   keycastMinorSet?: EnforcementLegStatus;
   keycastMinorSetError?: string;

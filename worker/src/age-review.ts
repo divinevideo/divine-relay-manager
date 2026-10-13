@@ -469,9 +469,12 @@ export async function handleUpdateAgeReviewCase(
   // An approval records the protected-minor subject in the same transaction as the
   // CAS, so a case is never approved without its durable record (#192).
   let updateResult: D1Result;
+  // Observed, not assumed: the approval's last registry statement arms the
+  // projection job, and only an armed job means D1 holds an active subject.
+  let approvalJobArmed = false;
   if (approvingMinor) {
     try {
-      [updateResult] = await env.DB.batch([
+      const results = await env.DB.batch([
         casStatement,
         ...approvalRegistryStatements(env.DB, {
           caseId,
@@ -480,6 +483,8 @@ export async function handleUpdateAgeReviewCase(
           now: new Date().toISOString(),
         }),
       ]);
+      updateResult = results[0];
+      approvalJobArmed = results[results.length - 1].meta?.changes === 1;
     } catch (error) {
       console.error('[age-review] Approval batch failed; nothing was written:', error);
       return json({ success: false, error: 'Approval may not have been recorded. Reload the case before retrying.' }, 500, corsHeaders);
@@ -562,6 +567,7 @@ export async function handleUpdateAgeReviewCase(
   let subjectClear: EnforcementLegStatus = 'not_attempted';
   let subjectClearError: string | undefined;
   let subjectActivate: EnforcementLegStatus = 'not_attempted';
+  let subjectActivateError: string | undefined;
   let keycastMinorSet: EnforcementLegStatus = 'not_attempted';
   let keycastMinorSetError: string | undefined;
   let minorProjectionPubkey = existing.pubkey;
@@ -697,12 +703,24 @@ export async function handleUpdateAgeReviewCase(
       await convergeAfterProjection(env.DB, minorProjectionPubkey, 'cleared');
     }
 
-    // Approval (#192): the subject committed with the CAS above. Project it onto
-    // keycast now; anything a retry could still fix stays pending for the cron.
-    if (approvingMinor) subjectActivate = 'ok';
+    // Approval (#192): the subject committed with the CAS above, and its armed job
+    // proves it. Project it onto keycast now; anything a retry could still fix
+    // stays pending for the cron.
+    if (approvingMinor && approvalJobArmed) {
+      subjectActivate = 'ok';
+    } else if (approvingMinor) {
+      // The case is approved but D1 holds no active subject for this pubkey (a
+      // registry invariant break, such as a live binding to a cleared subject).
+      // Setting keycast would project a classification D1 does not hold, and
+      // convergence would then undo it; a human has to look.
+      subjectActivate = 'failed';
+      subjectActivateError = 'Approval recorded, but no protected-minor projection was armed: '
+        + 'the account has no active protected subject. Check the registry before retrying.';
+      console.error(`[age-review] Protected subject activation failed: ${subjectActivateError}`);
+    }
     let minorSetResult: KeycastResult | undefined;
     const minorSetLeg = await runStatusLeg('Keycast verified_minor set', () =>
-      approvingMinor
+      subjectActivate === 'ok'
         ? setVerifiedMinor(existing.pubkey, minorFlagActor, 'age_review_approved', env)
           .then((result) => { minorSetResult = result; return result; })
         : undefined);
@@ -738,10 +756,11 @@ export async function handleUpdateAgeReviewCase(
   const enforcement: AgeReviewEnforcement = {
     relay, relayError, bulk, bulkError, keycast, keycastError,
     keycastMinorClear, keycastMinorClearError, subjectClear, subjectClearError,
-    subjectActivate, keycastMinorSet, keycastMinorSetError,
+    subjectActivate, subjectActivateError, keycastMinorSet, keycastMinorSetError,
   };
   const enforcementComplete = relay !== 'failed' && bulk !== 'failed' && keycast !== 'failed'
-    && keycastMinorClear !== 'failed' && subjectClear !== 'failed' && keycastMinorSet !== 'failed';
+    && keycastMinorClear !== 'failed' && subjectClear !== 'failed'
+    && subjectActivate !== 'failed' && keycastMinorSet !== 'failed';
   const response: AgeReviewCaseResponse = {
     success: enforcementComplete,
     case: updated,

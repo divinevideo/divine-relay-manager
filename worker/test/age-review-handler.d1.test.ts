@@ -498,6 +498,32 @@ describe('approving a 13-15 minor', () => {
     });
   });
 
+  // subjectActivate is observed from the batch, not assumed. A live binding to a
+  // CLEARED subject (an invariant break) blocks a new subject and gives the job
+  // upsert no active subject to arm: the case is approved but nothing is protected.
+  it('reports subjectActivate failed (207) and skips the keycast set when the batch arms no job', async () => {
+    const now = new Date().toISOString();
+    await DB.prepare(`INSERT INTO protected_minor_subjects
+      (subject_id, classification_state, classified_at, cleared_at, clear_reason, clear_reason_class)
+      VALUES ('22222222-2222-4222-8222-222222222222', 'cleared', ?, ?, 'age_review_denied', 'valid_prior')`)
+      .bind(now, now).run();
+    await DB.prepare(`INSERT INTO protected_minor_account_bindings (id, subject_id, pubkey, bound_at)
+      VALUES ('broken-binding', '22222222-2222-4222-8222-222222222222', ?, ?)`).bind(pubkey, now).run();
+
+    const res = await approve();
+    const body = await res.json() as {
+      enforcementComplete: boolean;
+      enforcement: { subjectActivate: string; subjectActivateError?: string; keycastMinorSet: string };
+    };
+    expect(res.status).toBe(207);
+    expect(body.enforcementComplete).toBe(false);
+    expect(body.enforcement.subjectActivate).toBe('failed');
+    expect(body.enforcement.subjectActivateError).toMatch(/no protected-minor projection/i);
+    expect(body.enforcement.keycastMinorSet).toBe('not_attempted');
+    expect(keycastPuts).toEqual([]);
+    expect(await rowCount('protected_minor_projection_jobs')).toBe(0);
+  });
+
   it('reuses an existing active subject instead of creating a second one', async () => {
     await createSubjectWithBinding(DB, 'onboarding-case', pubkey);
     const res = await approve();
