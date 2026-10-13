@@ -10,6 +10,7 @@ import { Miniflare } from 'miniflare';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { ensureSchema } from '../src/db';
 import { checkAgeReviewDeadlines } from '../src/age-review';
+import { clearSubject, createSubjectWithBinding } from '../src/protected-minors';
 
 let mf: Miniflare;
 let DB: D1Database;
@@ -248,5 +249,42 @@ describe('age-review cron on real D1', () => {
     const row = await DB.prepare("SELECT state FROM protected_minor_projection_jobs WHERE subject_id = 'subj-unclaimed'")
       .first<{ state: string }>();
     expect(row!.state).toBe('complete');
+  });
+
+  it('a deny that re-arms a job mid-projection survives the in-flight completion', async () => {
+    await DB.prepare('DELETE FROM protected_minor_projection_jobs').run();
+    await DB.prepare('DELETE FROM protected_minor_account_bindings').run();
+    await DB.prepare('DELETE FROM protected_minor_subjects').run();
+    const pubkey = '8'.repeat(64);
+    const { subjectId } = await createSubjectWithBinding(DB, 'case-race', pubkey);
+    const earlier = '2026-01-01T00:00:00.000Z';
+    await DB.prepare(`INSERT INTO protected_minor_projection_jobs
+      (subject_id, pubkey, reason, state, created_at, updated_at)
+      VALUES (?, ?, 'age_review_approved', 'pending', ?, ?)`).bind(subjectId, pubkey, earlier, earlier).run();
+    const methods: string[] = [];
+    let denied = false;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      if (!String(input).includes('/verified-minor')) return new Response('ok', { status: 200 });
+      methods.push(init?.method ?? 'GET');
+      if (!denied) {
+        denied = true;
+        // A concurrent deny lands while the PUT is in flight.
+        await clearSubject(DB, pubkey, undefined, 'age_review_denied');
+      }
+      return new Response('{}', { status: 200 });
+    });
+    const env = { ...cronEnv, KEYCAST_URL: 'https://login.test.divine.video', KEYCAST_SERVICE_TOKEN: 'test-token' };
+
+    await checkAgeReviewDeadlines(env);
+    expect(methods).toEqual(['PUT']);
+    const job = await DB.prepare('SELECT state, reason FROM protected_minor_projection_jobs WHERE subject_id = ?')
+      .bind(subjectId).first<{ state: string; reason: string }>();
+    expect(job).toEqual({ state: 'pending', reason: 'age_review_denied' });
+
+    await checkAgeReviewDeadlines(env);
+    expect(methods).toEqual(['PUT', 'DELETE']);
+    const done = await DB.prepare('SELECT state FROM protected_minor_projection_jobs WHERE subject_id = ?')
+      .bind(subjectId).first<{ state: string }>();
+    expect(done!.state).toBe('complete');
   });
 });

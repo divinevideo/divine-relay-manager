@@ -616,7 +616,7 @@ export async function handleUpdateAgeReviewCase(
     // identical answer to a cron tick.
     if (deniedCase && (keycastMinorClear === 'ok' || keycastMinorClear === 'not_applicable') && env.DB) {
       try {
-        await markProjectionComplete(env.DB, minorProjectionPubkey);
+        await markProjectionComplete(env.DB, minorProjectionPubkey, 'cleared');
       } catch (error) {
         // The pending job remains a safe retry boundary after the projection
         // itself succeeded, so do not turn an applied denial into a 500.
@@ -2274,7 +2274,7 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
         const clearResult = await clearVerifiedMinor(projectionPubkey, undefined, 'age_review_expired', env);
         // notFound settles the job here too: there is no account to project onto,
         // so leaving it pending only defers the same answer to the cron's retry.
-        if (clearResult.success || clearResult.notFound) await markProjectionComplete(env.DB, projectionPubkey);
+        if (clearResult.success || clearResult.notFound) await markProjectionComplete(env.DB, projectionPubkey, 'cleared');
         else console.error(`[age-review] Keycast verified_minor clear failed for expired case: ${clearResult.error}`);
       } catch (error) {
         console.error('[age-review] Keycast verified_minor clear failed for expired case:', error);
@@ -2329,7 +2329,7 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
       // keycast account (notFound), or a row keycast refuses to flag (unclaimed).
       // Left pending, those re-call keycast every tick and trip the retention
       // overdue-projection alarm.
-      if (result.success || result.notFound || result.unclaimed) await markProjectionComplete(env.DB, job.pubkey);
+      if (result.success || result.notFound || result.unclaimed) await markProjectionComplete(env.DB, job.pubkey, job.classification);
       else {
         await markProjectionAttempt(env.DB, job.pubkey);
         console.error(`[age-review] Keycast protected-minor projection retry failed: ${result.error}`);

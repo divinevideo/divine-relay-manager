@@ -101,7 +101,7 @@ export async function clearSubject(
         (subject_id, pubkey, reason, state, created_at, updated_at)
         VALUES (?, ?, ?, 'pending', ?, ?)
         ON CONFLICT(subject_id) DO UPDATE SET pubkey = excluded.pubkey, reason = excluded.reason,
-          state = 'pending', updated_at = excluded.updated_at`)
+          state = 'pending', created_at = excluded.created_at, updated_at = excluded.updated_at`)
         .bind(subject.subject_id, projectionPubkey, reason, now, now),
     ]);
     return { success: true, projectionPubkey };
@@ -110,9 +110,21 @@ export async function clearSubject(
   }
 }
 
-export async function markProjectionComplete(db: D1Database, pubkey: string): Promise<void> {
+/**
+ * Completes a pending job only while its subject is still in the classification
+ * that was actually projected. A re-arm (a deny after an approval, #192) can land
+ * between a caller loading the job and finishing the keycast call; completing by
+ * pubkey alone would mark that re-armed row done and the revocation would never
+ * be sent.
+ */
+export async function markProjectionComplete(
+  db: D1Database, pubkey: string, projected: 'active' | 'cleared',
+): Promise<void> {
   await db.prepare(`UPDATE protected_minor_projection_jobs SET state = 'complete', updated_at = ?
-    WHERE pubkey = ? AND state = 'pending'`).bind(new Date().toISOString(), pubkey).run();
+    WHERE pubkey = ? AND state = 'pending'
+      AND (SELECT classification_state FROM protected_minor_subjects s
+        WHERE s.subject_id = protected_minor_projection_jobs.subject_id) = ?`)
+    .bind(new Date().toISOString(), pubkey, projected).run();
 }
 
 export async function markProjectionAttempt(db: D1Database, pubkey: string): Promise<void> {

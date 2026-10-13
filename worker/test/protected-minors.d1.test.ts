@@ -55,6 +55,10 @@ describe('protected-minor registry on real D1', () => {
     const job = await DB.prepare(`SELECT state, reason FROM protected_minor_projection_jobs WHERE subject_id = ?`)
       .bind(subjectId).first<{ state: string; reason: string }>();
     expect(job).toEqual({ state: 'pending', reason: 'age_review_denied' });
+    // Retention's overdue alarm ages pending jobs from created_at, so a re-arm restarts it.
+    const rearmed = await DB.prepare(`SELECT created_at FROM protected_minor_projection_jobs WHERE subject_id = ?`)
+      .bind(subjectId).first<{ created_at: string }>();
+    expect(rearmed!.created_at > earlier).toBe(true);
     const jobs = await pendingProjectionJobs(DB);
     expect(jobs).toContainEqual({ pubkey, reason: 'age_review_denied', classification: 'cleared' });
   });
