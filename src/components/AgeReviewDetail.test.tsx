@@ -777,16 +777,22 @@ describe('AgeReviewDetail', () => {
       expect(toast).not.toHaveBeenCalledWith(expect.objectContaining({ title: 'Case updated' }));
     });
 
-    it('still reports other failed legs alongside an unclaimed refusal', async () => {
+    // The app's toast store keeps one toast (TOAST_LIMIT = 1), so a second toast()
+    // call evicts the first. The permanent refusal must reach the moderator in the
+    // same toast that names the other failed legs.
+    it('reports other failed legs in the same toast as an unclaimed refusal', async () => {
       updateAgeReviewCase.mockResolvedValueOnce({
         ...approvalOk, success: false, enforcementComplete: false,
         enforcement: { ...approvalOk.enforcement, relay: 'failed', keycastMinorSet: 'failed', keycastMinorSetUnclaimed: true },
       });
       await confirmApproval();
-      await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({
-        title: 'Enforcement incomplete',
-        description: expect.stringContaining('these did not apply: relay (existing posts and feed).'),
-      })));
+      await waitFor(() => expect(toast).toHaveBeenCalled());
+      expect(toast).toHaveBeenCalledTimes(1);
+      expect(toast).toHaveBeenCalledWith(expect.objectContaining({
+        title: 'Approved, but keycast refused the minor flag',
+        description: expect.stringMatching(/Keycast refused the minor flag.*Also did not apply: relay \(existing posts and feed\)\. Automated retry will continue/),
+        variant: 'destructive',
+      }));
     });
 
     it('does not report success when the worker did not record a protected subject', async () => {

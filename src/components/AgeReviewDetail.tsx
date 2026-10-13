@@ -217,21 +217,25 @@ export function AgeReviewDetail({ caseData: c }: Props) {
         // keycast refuses to flag a row with no login credentials, permanently, so
         // the worker settles it: it must not sit under "automated retry will continue".
         const unclaimed = enforcement?.keycastMinorSetUnclaimed === true;
+        const retryable = unclaimed ? failed.filter((leg) => leg !== 'protected-minor account flag') : failed;
         if (unclaimed) {
+          // One toast: the store keeps only the newest, so a second toast for the
+          // other failed legs would evict this permanent refusal.
+          const others = data.enforcementComplete === false && retryable.length > 0
+            ? ` Also did not apply: ${retryable.join(', ')}. Automated retry will continue where supported.`
+            : '';
           toast({
             title: 'Approved, but keycast refused the minor flag',
-            description: 'Recorded as a protected minor, so future under-16 reports clear automatically. Keycast refused the minor flag because this account has no login credentials, so the app protections and key-export block do not apply. Nothing re-applies the flag if the account is claimed later; escalate if it is.',
+            description: 'Recorded as a protected minor, so future under-16 reports clear automatically. Keycast refused the minor flag because this account has no login credentials, so the app protections and key-export block do not apply. Nothing re-applies the flag if the account is claimed later; escalate if it is.' + others,
             variant: 'destructive',
           });
-        }
-        const retryable = unclaimed ? failed.filter((leg) => leg !== 'protected-minor account flag') : failed;
-        if (data.enforcementComplete === false && (!unclaimed || retryable.length > 0)) {
+        } else if (data.enforcementComplete === false) {
           toast({
             title: 'Enforcement incomplete',
             description: `Case updated, but these did not apply: ${retryable.join(', ') || 'one or more enforcement steps'}. The case is now closed; automated retry will continue where supported. Escalate if enforcement does not converge.`,
             variant: 'destructive',
           });
-        } else if (enforcement?.keycast === 'not_applicable' && !unclaimed) {
+        } else if (enforcement?.keycast === 'not_applicable') {
           // Enforcement is complete, so this is not a failure and must not read
           // as one, but it cannot be silent either. Without it the moderator
           // walks away believing a sign-in was blocked when the account has no
