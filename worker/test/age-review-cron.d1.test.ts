@@ -355,7 +355,7 @@ describe('age-review cron on real D1', () => {
       expect((await pendingSubjectClears(DB)).map((r) => r.subjectId)).toEqual([subjectId]);
     });
 
-    it('(f) same-second deny and approval: the later row (higher rowid) wins', async () => {
+    it('(f) same-second deny and approval: the later-created case (higher rowid) wins', async () => {
       await createSubjectWithBinding(DB, 'onboarding-case', P);
       await caseAt('deny-case', 'denied_closed', null, '2026-03-01 00:00:00');
       await caseAt('approve-case', 'cleared', 'approved_minor', '2026-03-01 00:00:00');

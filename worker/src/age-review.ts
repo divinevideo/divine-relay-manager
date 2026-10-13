@@ -673,6 +673,10 @@ export async function handleUpdateAgeReviewCase(
     const minorFlagActor = (updated?.moderator_pubkey ?? existing.moderator_pubkey) ?? undefined;
     // A newer approval of this account landed while this denial ran its other
     // legs: latest decision wins, so its protections, keycast flag included, stay.
+    // The denial's relay ban, purge and keycast ban above have already run and
+    // stand; they are deliberately not reported or undone. Only an approval
+    // through another case for the same protected minor, landing while this
+    // handler runs, can get here.
     let subjectKeptActive = false;
     if (deniedCase && env.DB) {
       try {
@@ -2430,6 +2434,8 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
 
     // purge the user's events at the relay (one-way) -- the case is closed
     // by deadline, matching the deny outcome. Best-effort; logged on failure.
+    // Runs even when a newer approval kept the subject active: as on inline
+    // deny, the denial's bans stand and only the protections follow the approval.
     try {
       const relayBan = failUnlessPurgeConfirmed(await banPubkey(row.pubkey, 'age_review_expired', env));
       if (relayBan.success) {

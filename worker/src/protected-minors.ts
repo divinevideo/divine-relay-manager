@@ -112,7 +112,9 @@ export function approvalRegistryStatements(
 }
 
 // True when the subject has an explicit approval newer than the denial row
-// `denial` (latest decision wins, #192). Same-second ties go to the later row.
+// `denial` (latest decision wins, #192). `updated_at` has whole-second
+// precision, so a same-second tie goes to the later-CREATED case (higher rowid),
+// which is not necessarily the later decision.
 function newerApprovalThan(subject: string, denial: string): string {
   return `EXISTS (SELECT 1 FROM age_review_cases a
     JOIN protected_minor_account_bindings b3 ON b3.pubkey = a.pubkey
