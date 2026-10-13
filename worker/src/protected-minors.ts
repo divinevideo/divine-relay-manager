@@ -66,6 +66,45 @@ export async function createSubjectWithBinding(
   return { subjectId };
 }
 
+/**
+ * Registry writes for an age-review approval (#192), run in the SAME db.batch as
+ * the case's compare-and-swap UPDATE and after it. Every write is gated on the CAS
+ * having landed (the case at the bumped version, resolved as approved_minor), so a
+ * lost CAS writes nothing, and the batch's transaction means an approved case never
+ * exists without its subject. A pubkey that already holds an active binding (an
+ * onboarded account, say) keeps its subject; only the projection job is (re)armed.
+ * The "no active binding" test matches idx_protected_minor_active_pubkey_binding,
+ * so these inserts can never trip it and roll the approval back.
+ */
+export function approvalRegistryStatements(
+  db: D1Database,
+  input: { caseId: string; pubkey: string; landedVersion: number; now: string },
+): D1PreparedStatement[] {
+  const subjectId = crypto.randomUUID();
+  const bindingId = crypto.randomUUID();
+  const landed = `EXISTS (SELECT 1 FROM age_review_cases
+    WHERE id = ?1 AND version = ?2 AND clear_resolution = 'approved_minor')`;
+  const noActiveBinding = `NOT EXISTS (SELECT 1 FROM protected_minor_account_bindings
+    WHERE pubkey = ?3 AND unbound_at IS NULL)`;
+  return [
+    db.prepare(`INSERT INTO protected_minor_subjects (subject_id, source_case_id, classification_state, classified_at)
+      SELECT ?5, ?1, 'active', ?4 WHERE ${landed} AND ${noActiveBinding}`)
+      .bind(input.caseId, input.landedVersion, input.pubkey, input.now, subjectId),
+    db.prepare(`INSERT INTO protected_minor_account_bindings (id, subject_id, pubkey, bound_at)
+      SELECT ?6, subject_id, ?3, ?4 FROM protected_minor_subjects
+      WHERE subject_id = ?5 AND ${landed} AND ${noActiveBinding}`)
+      .bind(input.caseId, input.landedVersion, input.pubkey, input.now, subjectId, bindingId),
+    db.prepare(`INSERT INTO protected_minor_projection_jobs (subject_id, pubkey, reason, state, created_at, updated_at)
+      SELECT b.subject_id, ?3, 'age_review_approved', 'pending', ?4, ?4
+      FROM protected_minor_account_bindings b
+      JOIN protected_minor_subjects s ON s.subject_id = b.subject_id
+      WHERE b.pubkey = ?3 AND b.unbound_at IS NULL AND s.classification_state = 'active' AND ${landed}
+      ON CONFLICT(subject_id) DO UPDATE SET pubkey = excluded.pubkey, reason = excluded.reason,
+        state = 'pending', created_at = excluded.created_at, updated_at = excluded.updated_at`)
+      .bind(input.caseId, input.landedVersion, input.pubkey, input.now),
+  ];
+}
+
 export async function clearSubject(
   db: D1Database,
   pubkey: string,

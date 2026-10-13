@@ -26,10 +26,11 @@ import { runBulkModeration, type BulkModerateEnv } from './bulk-moderate';
 import { getActiveAgeReviewCase } from './age-review-lookup';
 import { resolveZendeskCreds } from './zendesk-sync';
 import type { AccountBulkAction } from '../../shared/bulk-moderation';
-import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, setVerifiedMinor, createMinorAccount, type KeycastEnv, type KeycastReason } from './keycast-client';
+import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, setVerifiedMinor, createMinorAccount, type KeycastEnv, type KeycastReason, type KeycastResult } from './keycast-client';
 import { suspendPubkey, unsuspendPubkey, banPubkey, type BanPubkeyResult, type SecretStoreSecret } from './nip86';
 import { buildAgeReviewIdentityBlock, buildClaimedParentName, toNpub } from './report-note';
 import {
+  approvalRegistryStatements,
   clearSubject,
   fingerprintProvisioningRequest,
   markProjectionAttempt,
@@ -366,6 +367,7 @@ export async function handleUpdateAgeReviewCase(
     updates.push('clear_resolution = ?');
     binds.push(body.resolution);
   }
+  const approvingMinor = body.state === 'cleared' && body.resolution === 'approved_minor';
 
   // Clock pause/resume
   if (body.clock_paused === true && !existing.clock_paused) {
@@ -440,9 +442,31 @@ export async function handleUpdateAgeReviewCase(
   // read and this write, changes === 0 and we abort BEFORE running any
   // enforcement -- the loser must not apply side effects for a state it no
   // longer owns.
-  const updateResult = await env.DB.prepare(
+  const casStatement = env.DB.prepare(
     `UPDATE age_review_cases SET ${updates.join(', ')} WHERE id = ? AND version = ?`
-  ).bind(...binds, caseId, existing.version).run();
+  ).bind(...binds, caseId, existing.version);
+
+  // An approval records the protected-minor subject in the same transaction as the
+  // CAS, so a case is never approved without its durable record (#192).
+  let updateResult: D1Result;
+  if (approvingMinor) {
+    try {
+      [updateResult] = await env.DB.batch([
+        casStatement,
+        ...approvalRegistryStatements(env.DB, {
+          caseId,
+          pubkey: existing.pubkey,
+          landedVersion: existing.version + 1,
+          now: new Date().toISOString(),
+        }),
+      ]);
+    } catch (error) {
+      console.error('[age-review] Approval batch failed; nothing was written:', error);
+      return json({ success: false, error: 'Approval could not be recorded. Nothing was changed; retry.' }, 500, corsHeaders);
+    }
+  } else {
+    updateResult = await casStatement.run();
+  }
 
   if (updateResult.meta?.changes !== 1) {
     // A concurrent writer bumped the version between our read and this write, so
@@ -517,6 +541,9 @@ export async function handleUpdateAgeReviewCase(
   let keycastMinorClearError: string | undefined;
   let subjectClear: EnforcementLegStatus = 'not_attempted';
   let subjectClearError: string | undefined;
+  let subjectActivate: EnforcementLegStatus = 'not_attempted';
+  let keycastMinorSet: EnforcementLegStatus = 'not_attempted';
+  let keycastMinorSetError: string | undefined;
   let minorProjectionPubkey = existing.pubkey;
 
   // Shared wrapper for the relay and Keycast legs (both resolve to
@@ -600,25 +627,24 @@ export async function handleUpdateAgeReviewCase(
     // only lifts the protected-minor flag so protections release across
     // clients (#174).
     //
-    // Deliberately NOT on `cleared`: `cleared` is the favorable outcome and
-    // is overloaded. For a 13-15 consent-verified case it "restores the
-    // account" (age-review-process.md, 13-15 band) — a *confirmed protected
-    // minor* who must KEEP verified_minor. Clearing there would strip
-    // protection from a minor, the worst failure direction on this path. The
-    // 16+ mistaken-flag case also uses `cleared`, where the flag is a no-op;
-    // we cannot distinguish the two from the transition alone, so we leave the
-    // flag untouched on `cleared` (an over-protected mistaken adult is the safe
-    // side). Only deny/revoke removes it. keycast's clear is an idempotent
-    // no-op for never-minor accounts, so no pre-read is needed.
+    // Deliberately NOT on `cleared`: `cleared` is the favorable outcome and is
+    // overloaded. For an approved 13-15 minor it keeps the account open, and that
+    // confirmed protected minor must KEEP verified_minor; clearing there would
+    // strip protection from a minor, the worst failure direction on this path.
+    // The flag is therefore cleared only on deny/revoke, and SET only on an
+    // explicit `approved_minor` Clear (the set leg below, #192). A `not_minor`
+    // Clear touches neither: an over-protected mistaken adult is the safe side.
+    // keycast's clear is an idempotent no-op for never-minor accounts, so no
+    // pre-read is needed.
     //
-    // actor = the case's assigned moderator (best-effort: relay-manager auths
-    // with a shared admin pubkey, so there's no per-actor signal, and
-    // moderator_pubkey is unvalidated on write). A malformed/absent actor is
-    // dropped server-side in clearVerifiedMinor → keycast logs-only.
-    const minorClearActor = (updated?.moderator_pubkey ?? existing.moderator_pubkey) ?? undefined;
+    // actor (clear and set alike) = the case's assigned moderator (best-effort:
+    // relay-manager auths with a shared admin pubkey, so there's no per-actor
+    // signal, and moderator_pubkey is unvalidated on write). A malformed/absent
+    // actor is dropped server-side by keycast-client → keycast logs-only.
+    const minorFlagActor = (updated?.moderator_pubkey ?? existing.moderator_pubkey) ?? undefined;
     if (deniedCase && env.DB) {
       try {
-        const result = await clearSubject(env.DB, existing.pubkey, minorClearActor, 'age_review_denied');
+        const result = await clearSubject(env.DB, existing.pubkey, minorFlagActor, 'age_review_denied');
         subjectClear = result.success ? 'ok' : 'failed';
         subjectClearError = result.error;
         minorProjectionPubkey = result.projectionPubkey ?? existing.pubkey;
@@ -633,7 +659,7 @@ export async function handleUpdateAgeReviewCase(
     }
     const minorClearLeg = await runStatusLeg('Keycast verified_minor clear', () =>
       deniedCase && subjectClear !== 'failed'
-        ? clearVerifiedMinor(minorProjectionPubkey, minorClearActor, 'age_review_denied', env)
+        ? clearVerifiedMinor(minorProjectionPubkey, minorFlagActor, 'age_review_denied', env)
         : undefined);
     keycastMinorClear = minorClearLeg.status;
     keycastMinorClearError = minorClearLeg.error;
@@ -647,6 +673,28 @@ export async function handleUpdateAgeReviewCase(
         // The pending job remains a safe retry boundary after the projection
         // itself succeeded, so do not turn an applied denial into a 500.
         console.error('[age-review] Failed to mark protected-minor projection complete:', error);
+      }
+    }
+
+    // Approval (#192): the subject committed with the CAS above. Project it onto
+    // keycast now; anything a retry could still fix stays pending for the cron.
+    if (approvingMinor) subjectActivate = 'ok';
+    let minorSetResult: KeycastResult | undefined;
+    const minorSetLeg = await runStatusLeg('Keycast verified_minor set', () =>
+      approvingMinor
+        ? setVerifiedMinor(existing.pubkey, minorFlagActor, 'age_review_approved', env)
+          .then((result) => { minorSetResult = result; return result; })
+        : undefined);
+    keycastMinorSet = minorSetLeg.status;
+    keycastMinorSetError = minorSetLeg.error;
+    // `unclaimed` is reported as failed (a human must look) but settled: keycast
+    // refuses that row permanently, so a retry would only re-fail every tick.
+    if (approvingMinor && env.DB
+      && (keycastMinorSet === 'ok' || keycastMinorSet === 'not_applicable' || minorSetResult?.unclaimed)) {
+      try {
+        await markProjectionComplete(env.DB, existing.pubkey, 'active');
+      } catch (error) {
+        console.error('[age-review] Failed to mark approval projection complete:', error);
       }
     }
   }
@@ -664,9 +712,10 @@ export async function handleUpdateAgeReviewCase(
   const enforcement: AgeReviewEnforcement = {
     relay, relayError, bulk, bulkError, keycast, keycastError,
     keycastMinorClear, keycastMinorClearError, subjectClear, subjectClearError,
+    subjectActivate, keycastMinorSet, keycastMinorSetError,
   };
   const enforcementComplete = relay !== 'failed' && bulk !== 'failed' && keycast !== 'failed'
-    && keycastMinorClear !== 'failed' && subjectClear !== 'failed';
+    && keycastMinorClear !== 'failed' && subjectClear !== 'failed' && keycastMinorSet !== 'failed';
   const response: AgeReviewCaseResponse = {
     success: enforcementComplete,
     case: updated,
