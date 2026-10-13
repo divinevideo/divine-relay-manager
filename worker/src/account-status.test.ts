@@ -88,6 +88,40 @@ describe('handleAccountStatus', () => {
     expect(body.not_found).toBeFalsy();
   });
 
+  it('reports protected_minor as unknown (null) without a D1 binding', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ pubkey: VALID_PUBKEY, status: 'active', verified_minor: true }),
+      }),
+    );
+
+    const body = await (await handleAccountStatus(VALID_PUBKEY, makeEnv(), CORS)).json();
+
+    expect(body).toMatchObject({ success: true, verified_minor: true, protected_minor: null });
+  });
+
+  it('keeps the keycast status and reports protected_minor null when the registry read throws', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ pubkey: VALID_PUBKEY, status: 'active', verified_minor: true }),
+      }),
+    );
+    const DB = {
+      prepare: () => { throw new Error('D1_ERROR: no such table'); },
+    } as unknown as D1Database;
+
+    const res = await handleAccountStatus(VALID_PUBKEY, { ...makeEnv(), DB }, CORS);
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ success: true, verified_minor: true, protected_minor: null });
+  });
+
   it('surfaces not_found (self-custody) for a keycast 404, distinct from unavailable', async () => {
     vi.stubGlobal(
       'fetch',
