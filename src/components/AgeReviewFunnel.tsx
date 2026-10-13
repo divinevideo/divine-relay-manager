@@ -95,7 +95,7 @@ export function AgeReviewFunnel() {
       label: "Denied / expired",
       value: data.moderation.denied_expired,
       sub: "moderation",
-      tip: "13-15 case closed without approval, or the 15-day consent clock lapsed.",
+      tip: "13-15 case denied, or the 15-day consent clock lapsed.",
       criteria: "D1 · band age_13_15 · state denied_closed",
     },
   ];

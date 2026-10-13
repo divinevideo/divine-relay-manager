@@ -227,10 +227,10 @@ Replace the single green **Clear** with two actions:
   > [Cancel] [Approve]
 
   Fires `{ state: 'cleared', resolution: 'approved_minor', ... }`.
-- **Clear: not a minor**: immediate, fires `{ state: 'cleared', resolution: 'not_minor', ... }`.
+- **Clear without approval**: immediate, fires `{ state: 'cleared', resolution: 'not_minor', ... }`.
 
 The partial-failure toast names the new legs (`protected-minor registry`, `protected-minor account
-projection`). A closed case shows its resolution ("Approved minor" / "Not a minor") beside the
+projection`). A closed case shows its resolution ("Approved minor" / "Cleared without approval") beside the
 state badge. `adminApi.updateAgeReviewCase` and the `useAdminApi` wrapper forward `resolution`
 (the wrapper has silently dropped new args before).
 
