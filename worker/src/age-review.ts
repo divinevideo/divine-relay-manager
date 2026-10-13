@@ -2428,17 +2428,27 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
  */
 async function alertReconciliationOnce(env: AgeReviewEnv, ageCase: AgeReviewCase): Promise<void> {
   if (!env.SLACK_WEBHOOK_URL || !env.DB) return;
-  const before = await env.DB.prepare(`SELECT reconciliation_alerted_at FROM age_review_parent_consent_submissions
+  // The alert is a side effect: a failure here must not turn the
+  // non-retryable 409 its caller returns into the retryable 503 around it.
+  try {
+    await claimAndSendReconciliationAlert(env.DB, env.SLACK_WEBHOOK_URL, ageCase);
+  } catch (error) {
+    console.error(`[age-review] Could not record or send the reconciliation alert for case ${ageCase.id}:`, error);
+  }
+}
+
+async function claimAndSendReconciliationAlert(db: D1Database, webhookUrl: string, ageCase: AgeReviewCase): Promise<void> {
+  const before = await db.prepare(`SELECT reconciliation_alerted_at FROM age_review_parent_consent_submissions
     WHERE case_id = ?`).bind(ageCase.id).first<{ reconciliation_alerted_at: string | null }>();
-  const claimed = await env.DB.prepare(`UPDATE age_review_parent_consent_submissions
+  const claimed = await db.prepare(`UPDATE age_review_parent_consent_submissions
     SET reconciliation_alerted_at = datetime('now')
     WHERE case_id = ? AND (reconciliation_alerted_at IS NULL
       OR reconciliation_alerted_at < datetime('now', '-12 hours'))`)
     .bind(ageCase.id).run();
   if (claimed.meta?.changes !== 1) return;
-  const sent = await sendSlackAlert(env.SLACK_WEBHOOK_URL, 'consent_needs_reconciliation', [ageCase]);
+  const sent = await sendSlackAlert(webhookUrl, 'consent_needs_reconciliation', [ageCase]);
   if (!sent) {
-    await env.DB.prepare(`UPDATE age_review_parent_consent_submissions SET reconciliation_alerted_at = ?
+    await db.prepare(`UPDATE age_review_parent_consent_submissions SET reconciliation_alerted_at = ?
       WHERE case_id = ?`).bind(before?.reconciliation_alerted_at ?? null, ageCase.id).run();
   }
 }

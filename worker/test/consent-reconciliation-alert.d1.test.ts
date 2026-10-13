@@ -96,6 +96,27 @@ describe('the manual-reconciliation alert', () => {
     expect(slackCalls(spy)).toBe(1);
   });
 
+  it('still answers the non-retryable 409 when the alert bookkeeping fails', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('ok', { status: 200 }));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const failing = new Proxy(DB, {
+      get(target, prop) {
+        if (prop !== 'prepare') return Reflect.get(target, prop).bind(target);
+        return (sql: string) => {
+          if (sql.includes('reconciliation_alerted_at')) throw new Error('D1 unavailable');
+          return target.prepare(sql);
+        };
+      },
+    }) as D1Database;
+    const form = new FormData();
+    form.set('email', 'parent@example.com');
+    form.set('video', new File(['clip'], 'clip.mp4', { type: 'video/mp4' }));
+    const res = await handleParentConsent(
+      new Request('https://api.test/v1/minor-review-cases/stuck-case/parent-consent', { method: 'POST', body: form }),
+      'stuck-case', OWNER, { ...env(), DB: failing }, {});
+    expect(res.status).toBe(409);
+  });
+
   it('leaves the case deadline throttle alone', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('ok', { status: 200 }));
     await retry();
