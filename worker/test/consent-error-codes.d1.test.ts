@@ -76,25 +76,48 @@ async function submit(db: D1Database) {
   return { status: res.status, code: ((await res.json()) as { code?: string }).code };
 }
 
+// Zendesk accepts the reviewer-link comment and then lists it.
+function zendeskAccepts() {
+  let comment = '';
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const url = String(input);
+    if (url.endsWith('/tickets/42')) {
+      comment = (JSON.parse(String(init?.body)) as { ticket: { comment: { body: string } } }).ticket.comment.body;
+      return new Response('{}', { status: 200 });
+    }
+    if (url.includes('/tickets/42/comments?')) return new Response(JSON.stringify({ comments: [{ body: comment }] }), { status: 200 });
+    throw new Error(`Unexpected request: ${url}`);
+  });
+}
+
 describe('parent-consent conflict codes', () => {
   it('answers submission_changed when another request claims the row first', async () => {
     expect(await submit(racing('INSERT OR IGNORE INTO age_review_parent_consent_submissions')))
       .toEqual({ status: 409, code: 'submission_changed' });
   });
 
-  it('answers case_changed when the case moves on while the clip is linked', async () => {
-    // Zendesk accepts the reviewer-link comment and then lists it.
-    let comment = '';
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
-      const url = String(input);
-      if (url.endsWith('/tickets/42')) {
-        comment = (JSON.parse(String(init?.body)) as { ticket: { comment: { body: string } } }).ticket.comment.body;
-        return new Response('{}', { status: 200 });
-      }
-      if (url.includes('/tickets/42/comments?')) return new Response(JSON.stringify({ comments: [{ body: comment }] }), { status: 200 });
-      throw new Error(`Unexpected request: ${url}`);
-    });
+  it('answers case_changed, a retry, when the case keeps changing while the clip is linked', async () => {
+    zendeskAccepts();
     expect(await submit(racing("SET parent_contact_email = ?, state = 'submitted_for_review'")))
       .toEqual({ status: 409, code: 'case_changed' });
+  });
+
+  it('answers case_no_longer_eligible, not a retry, when the case closes while the clip is linked', async () => {
+    zendeskAccepts();
+    // A moderator closes the case just before the submission advances it.
+    const closesFirst = new Proxy(DB, {
+      get(target, prop) {
+        if (prop !== 'prepare') return Reflect.get(target, prop).bind(target);
+        return (sql: string) => {
+          const stmt = target.prepare(sql);
+          if (!sql.includes("SET parent_contact_email = ?, state = 'submitted_for_review'")) return stmt;
+          return { bind: () => ({ run: async () => {
+            await target.prepare("UPDATE age_review_cases SET state = 'denied_closed', version = version + 1 WHERE id = 'code-case'").run();
+            return { meta: { changes: 0 } };
+          } }) };
+        };
+      },
+    }) as D1Database;
+    expect(await submit(closesFirst)).toEqual({ status: 409, code: 'case_no_longer_eligible' });
   });
 });

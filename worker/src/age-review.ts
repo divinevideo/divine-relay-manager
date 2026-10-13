@@ -1309,7 +1309,9 @@ export async function handleParentConsent(
   for (let attempt = 0; attempt < 2 && current; attempt++) {
     if (current.state === 'submitted_for_review') return json({ success: true }, 200, corsHeaders);
     if (!VALID_TRANSITIONS[current.state as AgeReviewState]?.includes('submitted_for_review')) {
-      return json({ success: false, code: 'case_changed', error: 'Case changed during submission' }, 409, corsHeaders);
+      // The case moved somewhere a submission cannot follow, such as closed,
+      // so a retry cannot succeed. Distinct from the retryable case_changed.
+      return json({ success: false, code: 'case_no_longer_eligible', error: 'Case changed during submission' }, 409, corsHeaders);
     }
     const now = new Date();
     const deadline = current.deadline_at ? new Date(current.deadline_at) : null;
