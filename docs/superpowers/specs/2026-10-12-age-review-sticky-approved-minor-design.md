@@ -312,9 +312,10 @@ these win.
 - **The DM restriction is an applied protection.** It shipped in mobile 1.0.16 (app stores carry
   1.0.23), so the panel's "Rolling out" section is gone and the panel also lists the key-export
   block.
-- **The second Clear is labelled "Clear: not a protected minor"** (resolution label "Not a
-  protected minor"). A cleared 16+ case can still be a 16-17 year old minor; the stored value stays
-  `not_minor`.
+- **The second Clear is labelled "Clear without approval"** (resolution label "Cleared without
+  approval"). It names the action, not the person: "not a minor" would be false for a 16-17 year
+  old on a 16+ case, and "not a protected minor" for an account that is already an approved minor
+  (whose protections this Clear leaves on). The stored value stays `not_minor`.
 - **An `account_unclaimed` refusal is reported as permanent** (`keycastMinorSetUnclaimed`), with
   its own toast, since the job is settled and nothing retries it.
 

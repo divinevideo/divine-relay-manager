@@ -573,12 +573,12 @@ describe('AgeReviewDetail', () => {
       expect(await screen.findByText(/protected-minor status unavailable/i)).toBeInTheDocument();
     });
 
-    it('tells the moderator "not a protected minor" keeps protections on when the account is protected', async () => {
+    it('tells the moderator "clear without approval" keeps protections on when the account is protected', async () => {
       getAccountStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: true, protected_minor: true });
 
       renderDetail(makeCase());
 
-      expect(await screen.findByText('Already an approved protected minor. "Not a protected minor" closes this case and keeps protections on; Deny bans the account and lifts its protections.')).toBeInTheDocument();
+      expect(await screen.findByText('Already an approved protected minor. "Clear without approval" closes this case and keeps protections on; Deny bans the account and lifts its protections.')).toBeInTheDocument();
     });
 
     it('shows that note for a minor only the registry knows, one who holds their own key', async () => {
@@ -586,7 +586,7 @@ describe('AgeReviewDetail', () => {
 
       renderDetail(makeCase());
 
-      expect(await screen.findByText('Already an approved protected minor. "Not a protected minor" closes this case and keeps protections on; Deny bans the account and lifts its protections.')).toBeInTheDocument();
+      expect(await screen.findByText('Already an approved protected minor. "Clear without approval" closes this case and keeps protections on; Deny bans the account and lifts its protections.')).toBeInTheDocument();
     });
 
     it('refetches account status after a decision so the badge follows the registry', async () => {
@@ -595,7 +595,7 @@ describe('AgeReviewDetail', () => {
       await waitFor(() => expect(queryClient.isFetching()).toBe(0));
       const callsBefore = getAccountStatus.mock.calls.length;
 
-      fireEvent.click(await screen.findByRole('button', { name: 'Clear: not a protected minor' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Clear without approval' }));
 
       await waitFor(() => expect(getAccountStatus.mock.calls.length).toBeGreaterThan(callsBefore));
     });
@@ -608,7 +608,7 @@ describe('AgeReviewDetail', () => {
       await waitFor(() => expect(queryClient.isFetching()).toBe(0));
       const callsBefore = getAccountStatus.mock.calls.length;
 
-      fireEvent.click(await screen.findByRole('button', { name: 'Clear: not a protected minor' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Clear without approval' }));
 
       await waitFor(() => expect(getAccountStatus.mock.calls.length).toBeGreaterThan(callsBefore));
     });
@@ -618,7 +618,7 @@ describe('AgeReviewDetail', () => {
 
       renderDetail(makeCase());
 
-      await screen.findByRole('button', { name: 'Clear: not a protected minor' });
+      await screen.findByRole('button', { name: 'Clear without approval' });
       expect(screen.queryByText(/protected-minor status unavailable/i)).not.toBeInTheDocument();
     });
 
@@ -627,7 +627,7 @@ describe('AgeReviewDetail', () => {
 
       const { queryClient } = renderDetail(makeCase());
 
-      await screen.findByRole('button', { name: 'Clear: not a protected minor' });
+      await screen.findByRole('button', { name: 'Clear without approval' });
       await waitFor(() => expect(queryClient.isFetching()).toBe(0));
       expect(screen.queryByText(/Already an approved protected minor/)).not.toBeInTheDocument();
     });
@@ -657,12 +657,12 @@ describe('AgeReviewDetail', () => {
     it('offers approval as a protected minor only on a 13-15 case', async () => {
       renderDetail(makeCase({ suspected_age_band: 'age_13_15' }));
       expect(await screen.findByRole('button', { name: /Approve as protected minor/ })).toBeInTheDocument();
-      expect(screen.getByRole('button', { name: 'Clear: not a protected minor' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Clear without approval' })).toBeInTheDocument();
     });
 
     it('hides approval outside the 13-15 band', async () => {
       renderDetail(makeCase({ suspected_age_band: 'age_16_plus_claimed' }));
-      await screen.findByRole('button', { name: 'Clear: not a protected minor' });
+      await screen.findByRole('button', { name: 'Clear without approval' });
       expect(screen.queryByRole('button', { name: /Approve as protected minor/ })).not.toBeInTheDocument();
     });
 
@@ -683,9 +683,9 @@ describe('AgeReviewDetail', () => {
       expect(updateAgeReviewCase).not.toHaveBeenCalled();
     });
 
-    it('Clear: not a protected minor sends not_minor immediately', async () => {
+    it('Clear without approval sends not_minor immediately', async () => {
       renderDetail(makeCase({ suspected_age_band: 'age_13_15' }));
-      fireEvent.click(await screen.findByRole('button', { name: 'Clear: not a protected minor' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Clear without approval' }));
       await waitFor(() => expect(updateAgeReviewCase).toHaveBeenCalledWith(
         'case-1', expect.objectContaining({ state: 'cleared', resolution: 'not_minor' }),
       ));
@@ -696,9 +696,9 @@ describe('AgeReviewDetail', () => {
       expect(await screen.findByText('Approved minor')).toBeInTheDocument();
     });
 
-    it('labels a not_minor resolution as "Not a protected minor", true for a 16-17 year old too', async () => {
+    it('labels a not_minor resolution by the action, "Cleared without approval", true for any account', async () => {
       renderDetail(makeCase({ state: 'cleared', clear_resolution: 'not_minor', suspected_age_band: 'age_16_plus_claimed' }));
-      expect(await screen.findByText('Not a protected minor')).toBeInTheDocument();
+      expect(await screen.findByText('Cleared without approval')).toBeInTheDocument();
     });
 
     async function confirmApproval() {
@@ -833,7 +833,7 @@ describe('AgeReviewDetail', () => {
     it('applies the not-recorded check only to approvals', async () => {
       updateAgeReviewCase.mockResolvedValueOnce({ success: true, enforcementComplete: true, enforcement: { relay: 'ok' } });
       renderDetail(makeCase({ suspected_age_band: 'age_13_15' }));
-      fireEvent.click(await screen.findByRole('button', { name: 'Clear: not a protected minor' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Clear without approval' }));
       await waitFor(() => expect(updateAgeReviewCase).toHaveBeenCalled());
       expect(toast).not.toHaveBeenCalledWith(anyNotRecorded);
     });
@@ -844,7 +844,7 @@ describe('AgeReviewDetail', () => {
         enforcement: { relay: 'ok', bulk: 'ok', keycast: 'ok', subjectActivate: 'ok', keycastMinorSet: 'failed' },
       });
       renderDetail(makeCase({ suspected_age_band: 'age_13_15' }));
-      fireEvent.click(await screen.findByRole('button', { name: 'Clear: not a protected minor' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Clear without approval' }));
       await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({
         description: expect.stringContaining('protected-minor account flag'),
       })));

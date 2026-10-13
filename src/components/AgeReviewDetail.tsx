@@ -66,8 +66,9 @@ const STATE_LABELS: Record<AgeReviewState, string> = {
 
 const CLEAR_RESOLUTION_LABELS: Record<ClearResolution, string> = {
   approved_minor: 'Approved minor',
-  // "Protected": a cleared 16+ case can still be a 16-17 year old minor.
-  not_minor: 'Not a protected minor',
+  // Names the action, not the person: the account may be a 16-17 year old, or
+  // already an approved minor whose protections this Clear leaves on.
+  not_minor: 'Cleared without approval',
 };
 
 const BAND_LABELS: Record<AgeBand, string> = {
@@ -682,7 +683,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
                   })}
                 >
                   <CheckCircle className="h-3 w-3 mr-1" />
-                  Clear: not a protected minor
+                  Clear without approval
                 </Button>
                 {ageReviewConfig?.auto_delete_on_deny ? (
                   <DeleteConfirmDialog
@@ -720,7 +721,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
               </div>
               {protectedMinor.protected && (
                 <p className="text-xs text-muted-foreground">
-                  Already an approved protected minor. "Not a protected minor" closes this case and keeps protections on; Deny bans the account and lifts its protections.
+                  Already an approved protected minor. "Clear without approval" closes this case and keeps protections on; Deny bans the account and lifts its protections.
                 </p>
               )}
 

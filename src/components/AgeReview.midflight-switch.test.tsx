@@ -122,7 +122,7 @@ describe('mid-flight case switch (adversarial)', () => {
     );
 
     // Case A's detail is open with active controls
-    const clearButton = await screen.findByRole('button', { name: 'Clear: not a protected minor' });
+    const clearButton = await screen.findByRole('button', { name: 'Clear without approval' });
     fireEvent.click(clearButton);
     await waitFor(() => expect(updateAgeReviewCase).toHaveBeenCalledTimes(1));
     expect(updateAgeReviewCase.mock.calls[0][0]).toBe('case-a');
