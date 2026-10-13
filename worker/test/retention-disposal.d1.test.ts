@@ -1,7 +1,7 @@
 import { Miniflare } from 'miniflare';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ensureSchema } from '../src/db';
-import { clearSubject, createSubjectWithBinding, fingerprintProvisioningRequest } from '../src/protected-minors';
+import { clearSubject, createSubjectWithBinding, fingerprintProvisioningRequest, pendingSubjectClears } from '../src/protected-minors';
 import { digestProvisioningFingerprint, runRetentionDisposal } from '../src/retention';
 
 const PUBKEY_A = 'a'.repeat(64);
@@ -152,6 +152,45 @@ describe('protected-record retention on real D1', () => {
     await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY });
     expect(await DB.prepare('SELECT 1 FROM protected_minor_subjects WHERE subject_id = ?').bind(before.subjectId).first()).not.toBeNull();
     expect(await DB.prepare('SELECT 1 FROM protected_minor_subjects WHERE subject_id = ?').bind(after.subjectId).first()).toBeNull();
+  });
+
+  // Latest decision wins (#192): an approval that reused an active subject is the
+  // only record that an older denial of it was overruled. Deleting it while the
+  // denial survives would turn the denial back into a clear retry.
+  describe('approval of a reused subject', () => {
+    async function closedCase(id: string, state: string, resolution: string | null, daysAgo: number) {
+      await DB.prepare(`INSERT INTO age_review_cases (id, pubkey, state, clear_resolution, updated_at, closed_at)
+        VALUES (?, ?, ?, ?, datetime('now', ?), datetime('now', ?))`)
+        .bind(id, PUBKEY_A, state, resolution, `-${daysAgo} days`, `-${daysAgo} days`).run();
+    }
+
+    it('keeps the approval while an older held denial of the still-active subject survives', async () => {
+      await createSubjectWithBinding(DB, 'original-approval', PUBKEY_A, OLD_30);
+      await closedCase('original-approval', 'cleared', 'approved_minor', 500);
+      await closedCase('held-denial', 'denied_closed', null, 450); // its subject clear failed: S stays active
+      await closedCase('later-approval', 'cleared', 'approved_minor', 400); // reused S
+      await DB.prepare(`INSERT INTO retention_legal_holds
+        (id, record_type, record_key, disposal_stage, authorized_role, starts_at, review_at)
+        VALUES ('hold-denial', 'age_review_case', 'held-denial', 'deletion', 'privacy/legal', ?, ?)`)
+        .bind(OLD_30, '2099-01-01T00:00:00Z').run();
+      expect(await pendingSubjectClears(DB)).toEqual([]);
+
+      await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY });
+
+      expect(await DB.prepare("SELECT id FROM age_review_cases WHERE id = 'later-approval'").first()).not.toBeNull();
+      expect(await pendingSubjectClears(DB)).toEqual([]);
+    });
+
+    it('deletes the approval on schedule once no older denial survives', async () => {
+      await createSubjectWithBinding(DB, 'original-approval', PUBKEY_A, OLD_30);
+      await closedCase('original-approval', 'cleared', 'approved_minor', 500);
+      await closedCase('later-approval', 'cleared', 'approved_minor', 400);
+
+      await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY });
+
+      expect(await DB.prepare("SELECT id FROM age_review_cases WHERE id = 'later-approval'").first()).toBeNull();
+      expect(await DB.prepare("SELECT id FROM age_review_cases WHERE id = 'original-approval'").first()).not.toBeNull();
+    });
   });
 
   it('keeps active and held records and resumes the original clock after release', async () => {
