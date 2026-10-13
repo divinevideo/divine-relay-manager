@@ -1207,6 +1207,15 @@ export async function handleParentConsent(
     submission = prior;
   }
 
+  // The submission is accepted: the body validated and this request holds the
+  // row. Record the address the parent typed on the case now, before storage
+  // is marked and before Zendesk, so a submission that stops for manual
+  // reconciliation still leaves support a way to reach the parent. Same
+  // column the email flow writes, cleared by retention 30 days after close.
+  // Version is left alone so the final compare-and-swap still applies.
+  await env.DB.prepare(`UPDATE age_review_cases SET parent_contact_email = ?, updated_at = datetime('now')
+    WHERE id = ? AND pubkey = ?`).bind(email, caseId, userPubkey).run();
+
   const db = env.DB;
   const releaseLease = async (): Promise<void> => {
     try {

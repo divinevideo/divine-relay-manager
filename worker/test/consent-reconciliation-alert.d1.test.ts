@@ -117,6 +117,16 @@ describe('the manual-reconciliation alert', () => {
     expect(res.status).toBe(409);
   });
 
+  it('keeps the parent email on the case when the submission needs manual reconciliation', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('ok', { status: 200 }));
+    expect((await retry()).status).toBe(409);
+    const row = await DB.prepare("SELECT parent_contact_email, state FROM age_review_cases WHERE id = 'stuck-case'")
+      .first<{ parent_contact_email: string | null; state: string }>();
+    // Support reconciles by hand and needs the address the parent typed; the
+    // case has not advanced, so it is still pending.
+    expect(row).toEqual({ parent_contact_email: 'parent@example.com', state: 'restricted_pending_parental_consent' });
+  });
+
   it('leaves the case deadline throttle alone', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('ok', { status: 200 }));
     await retry();

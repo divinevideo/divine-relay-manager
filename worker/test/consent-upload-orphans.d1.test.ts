@@ -80,6 +80,9 @@ describe('a consent upload rejected after its clip is stored', () => {
       'orphan-case', OWNER, envWith(bucket), {});
     expect(res.status).toBe(400);
     expect([...objects]).toEqual([]);
+    const row = await DB.prepare("SELECT parent_contact_email FROM age_review_cases WHERE id = 'orphan-case'")
+      .first<{ parent_contact_email: string | null }>();
+    expect(row?.parent_contact_email).toBeNull();
   });
 
   it('leaves no clip behind when another upload holds the retry lease', async () => {
