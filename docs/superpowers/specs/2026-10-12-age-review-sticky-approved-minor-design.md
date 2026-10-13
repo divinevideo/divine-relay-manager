@@ -39,9 +39,9 @@ of dismissing a report.
 
 ## Decisions
 
-Ratified by Matt on 2026-10-12: the first three below. Proposed and awaiting ratification: the
-keycast `account_unclaimed` guard, and settling (not retrying) a projection job that keycast
-refuses with it.
+All ratified by Matt on 2026-10-12, including the keycast `account_unclaimed` guard and settling
+(not retrying) a projection job keycast refuses with it. Credential-less rows are not keycast
+logins and are not part of this flow; the guard only makes that explicit.
 
 
 - **Explicit action, not an inferred one.** `cleared` stays overloaded on the transition, and the
