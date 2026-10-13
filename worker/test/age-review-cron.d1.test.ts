@@ -10,7 +10,7 @@ import { Miniflare } from 'miniflare';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { ensureSchema } from '../src/db';
 import { checkAgeReviewDeadlines } from '../src/age-review';
-import { clearSubject, createSubjectWithBinding, pendingSubjectClears } from '../src/protected-minors';
+import { clearSubject, createSubjectWithBinding, pendingSubjectClears, rearmLiveSubjectProjection } from '../src/protected-minors';
 
 let mf: Miniflare;
 let DB: D1Database;
@@ -214,7 +214,10 @@ describe('age-review cron on real D1', () => {
       return Promise.resolve(new Response('ok', { status: 200 }));
     });
 
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
     await checkAgeReviewDeadlines({ ...cronEnv, KEYCAST_URL: 'https://keycast.invalid', KEYCAST_SERVICE_TOKEN: 'test-token' });
+    // A settled job must not fall through to the failure branch (retry rotation + error log).
+    expect(errors.mock.calls.filter((c) => String(c[0]).includes('projection retry failed'))).toEqual([]);
 
     expect(calls).toContainEqual({
       url: `https://keycast.invalid/api/admin/users/${activeKey}/verified-minor?reason=age_review_approved`,
@@ -244,7 +247,9 @@ describe('age-review cron on real D1', () => {
         ? new Response('{"error":"account_unclaimed: account has no login credentials"}', { status: 409 })
         : new Response('ok', { status: 200 })));
 
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
     await checkAgeReviewDeadlines({ ...cronEnv, KEYCAST_URL: 'https://keycast.invalid', KEYCAST_SERVICE_TOKEN: 'test-token' });
+    expect(errors.mock.calls.filter((c) => String(c[0]).includes('projection retry failed'))).toEqual([]);
 
     const row = await DB.prepare("SELECT state FROM protected_minor_projection_jobs WHERE subject_id = 'subj-unclaimed'")
       .first<{ state: string }>();
@@ -390,6 +395,7 @@ describe('age-review cron on real D1', () => {
       .bind(s2).first<{ classification_state: string }>();
     expect(s2row!.classification_state).toBe('active');
   });
+
   it('re-arms the live subject when a clear lands after a racing approval completed its set', async () => {
     for (const t of ['protected_minor_projection_jobs', 'protected_minor_account_bindings', 'protected_minor_subjects']) {
       await DB.prepare(`DELETE FROM ${t}`).run();
@@ -425,5 +431,20 @@ describe('age-review cron on real D1', () => {
     await checkAgeReviewDeadlines(env);
     expect(calls).toEqual(['DELETE', 'PUT']);
     expect(await jobState(s2)).toBe('complete');
+  });
+  it('re-arming keeps the age of an already-pending live job', async () => {
+    for (const t of ['protected_minor_projection_jobs', 'protected_minor_account_bindings', 'protected_minor_subjects']) {
+      await DB.prepare(`DELETE FROM ${t}`).run();
+    }
+    const P = 'b2'.repeat(32);
+    const { subjectId } = await createSubjectWithBinding(DB, 'live-case', P);
+    const old = '2026-01-01T00:00:00.000Z';
+    await DB.prepare(`INSERT INTO protected_minor_projection_jobs
+      (subject_id, pubkey, reason, state, created_at, updated_at)
+      VALUES (?, ?, 'age_review_approved', 'pending', ?, ?)`).bind(subjectId, P, old, old).run();
+    await rearmLiveSubjectProjection(DB, P);
+    const job = await DB.prepare('SELECT state, created_at FROM protected_minor_projection_jobs WHERE subject_id = ?')
+      .bind(subjectId).first<{ state: string; created_at: string }>();
+    expect(job).toEqual({ state: 'pending', created_at: old });
   });
 });

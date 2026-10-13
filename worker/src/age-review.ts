@@ -2417,12 +2417,13 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
       // keycast account (notFound), or a row keycast refuses to flag (unclaimed).
       // Left pending, those re-call keycast every tick and trip the retention
       // overdue-projection alarm.
-      if (result.success || result.notFound || result.unclaimed) await markProjectionComplete(env.DB, job.pubkey, job.classification);
-      // A clear that landed may have raced a new approval's set for the same pubkey.
-      if (job.classification === 'cleared' && (result.success || result.notFound)) {
-        await rearmLiveSubjectProjection(env.DB, job.pubkey);
-      }
-      else {
+      if (result.success || result.notFound || result.unclaimed) {
+        await markProjectionComplete(env.DB, job.pubkey, job.classification);
+        // A clear that landed may have raced a new approval's set for the same pubkey.
+        if (job.classification === 'cleared' && (result.success || result.notFound)) {
+          await rearmLiveSubjectProjection(env.DB, job.pubkey);
+        }
+      } else {
         await markProjectionAttempt(env.DB, job.pubkey);
         console.error(`[age-review] Keycast protected-minor projection retry failed: ${result.error}`);
       }
