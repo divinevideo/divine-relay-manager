@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest';
-import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, getUserStatus, createMinorAccount, type KeycastEnv } from './keycast-client';
+import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, setVerifiedMinor, getUserStatus, createMinorAccount, type KeycastEnv } from './keycast-client';
 
 const VALID_PUBKEY = 'a'.repeat(64);
 
@@ -110,6 +110,55 @@ describe('keycast-client', () => {
     it('reports not configured when env is missing', async () => {
       const result = await clearVerifiedMinor(VALID_PUBKEY, undefined, undefined, makeEnv({ KEYCAST_URL: undefined }));
       expect(result).toEqual({ success: false, error: 'not configured' });
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('setVerifiedMinor', () => {
+    it('sends PUT to the verified-minor endpoint with actor and reason', async () => {
+      const actor = 'b'.repeat(64);
+      const result = await setVerifiedMinor(VALID_PUBKEY, actor, 'age_review_approved', makeEnv());
+      expect(result).toEqual({ success: true });
+      const [url, opts] = fetchMock.mock.calls[0];
+      expect(url).toBe(
+        `https://login.test.divine.video/api/admin/users/${VALID_PUBKEY}/verified-minor?actor=${actor}&reason=age_review_approved`,
+      );
+      expect(opts.method).toBe('PUT');
+      expect(opts.headers['Authorization']).toBe('Bearer test-service-token');
+    });
+
+    it("reports keycast's own user-not-found as notFound (self-custody)", async () => {
+      fetchMock.mockResolvedValue({ ok: false, status: 404, text: () => Promise.resolve('{"error":"user not found"}') });
+      const result = await setVerifiedMinor(VALID_PUBKEY, undefined, 'age_review_approved', makeEnv());
+      expect(result).toMatchObject({ success: false, status: 404, notFound: true });
+    });
+
+    it('treats a 404 without keycast\'s body (route not deployed) as a failure, not notFound', async () => {
+      fetchMock.mockResolvedValue({ ok: false, status: 404, text: () => Promise.resolve('Not Found') });
+      const result = await setVerifiedMinor(VALID_PUBKEY, undefined, 'age_review_approved', makeEnv());
+      expect(result.success).toBe(false);
+      expect(result.notFound).toBeUndefined();
+      expect(result.unclaimed).toBeUndefined();
+    });
+
+    it('reports a 409 account_unclaimed refusal as unclaimed', async () => {
+      fetchMock.mockResolvedValue({
+        ok: false, status: 409,
+        text: () => Promise.resolve('{"error":"account_unclaimed: account has no login credentials"}'),
+      });
+      const result = await setVerifiedMinor(VALID_PUBKEY, undefined, 'age_review_approved', makeEnv());
+      expect(result).toMatchObject({ success: false, status: 409, unclaimed: true });
+    });
+
+    it('does not treat an unrelated 409 as unclaimed', async () => {
+      fetchMock.mockResolvedValue({ ok: false, status: 409, text: () => Promise.resolve('{"error":"conflict"}') });
+      const result = await setVerifiedMinor(VALID_PUBKEY, undefined, 'age_review_approved', makeEnv());
+      expect(result.unclaimed).toBeUndefined();
+    });
+
+    it('refuses a malformed pubkey without calling keycast', async () => {
+      const result = await setVerifiedMinor('nope', undefined, 'age_review_approved', makeEnv());
+      expect(result).toEqual({ success: false, error: 'invalid pubkey: must be 64 hex chars' });
       expect(fetchMock).not.toHaveBeenCalled();
     });
   });
