@@ -1242,9 +1242,10 @@ export async function handleParentConsent(
         && nowSeconds - submission.ticket_attempt_at >= 50 * 60) {
         // Non-retryable on purpose: automatic retries stop here and support
         // reconciles by hand, rather than the client looping on a 503. Support
-        // only knows to do that if this is logged and alerted.
-        console.error('[age-review] Consent submission needs manual reconciliation: ticket creation outcome unknown');
-        if (env.SLACK_WEBHOOK_URL) await sendSlackAlert(env.SLACK_WEBHOOK_URL, 'consent_needs_reconciliation', [current]);
+        // only knows to do that if this is logged and alerted. The case ID
+        // finds the ticket, whose subject carries it.
+        console.error(`[age-review] Consent submission for case ${caseId} needs manual reconciliation: ticket creation outcome unknown`);
+        await alertReconciliationOnce(env, current);
         return json({ success: false, error: 'Consent submission needs manual review; contact support' }, 409, corsHeaders);
       }
       const hasReviewLink = async (ticketId: number): Promise<boolean> => {
@@ -2418,6 +2419,30 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
   }
 }
 
+/**
+ * Alerts Slack that a consent submission needs manual reconciliation, at most
+ * once per 12 hours per submission, the window the deadline alerts use. The
+ * submission keeps its own timestamp so this cannot silence the case's
+ * deadline alerts. The window is claimed before sending, so two retries
+ * cannot both alert, and released again if Slack refuses the alert.
+ */
+async function alertReconciliationOnce(env: AgeReviewEnv, ageCase: AgeReviewCase): Promise<void> {
+  if (!env.SLACK_WEBHOOK_URL || !env.DB) return;
+  const before = await env.DB.prepare(`SELECT reconciliation_alerted_at FROM age_review_parent_consent_submissions
+    WHERE case_id = ?`).bind(ageCase.id).first<{ reconciliation_alerted_at: string | null }>();
+  const claimed = await env.DB.prepare(`UPDATE age_review_parent_consent_submissions
+    SET reconciliation_alerted_at = datetime('now')
+    WHERE case_id = ? AND (reconciliation_alerted_at IS NULL
+      OR reconciliation_alerted_at < datetime('now', '-12 hours'))`)
+    .bind(ageCase.id).run();
+  if (claimed.meta?.changes !== 1) return;
+  const sent = await sendSlackAlert(env.SLACK_WEBHOOK_URL, 'consent_needs_reconciliation', [ageCase]);
+  if (!sent) {
+    await env.DB.prepare(`UPDATE age_review_parent_consent_submissions SET reconciliation_alerted_at = ?
+      WHERE case_id = ?`).bind(before?.reconciliation_alerted_at ?? null, ageCase.id).run();
+  }
+}
+
 async function sendSlackAlert(
   webhookUrl: string,
   alertType: 'approaching' | 'expired' | 'expired_needs_action' | 'consent_needs_reconciliation',
@@ -2434,7 +2459,9 @@ async function sendSlackAlert(
 
   const lines = cases.map(c => {
     const deadline = c.deadline_at ? new Date(c.deadline_at).toISOString().split('T')[0] : 'no deadline';
-    return `• ${c.suspected_age_band} — deadline: ${deadline} — state: ${c.state}`;
+    // Support reconciles one submission by hand, so that alert names the case.
+    const caseRef = alertType === 'consent_needs_reconciliation' ? `case ${c.id} — ` : '';
+    return `• ${caseRef}${c.suspected_age_band} — deadline: ${deadline} — state: ${c.state}`;
   });
 
   try {

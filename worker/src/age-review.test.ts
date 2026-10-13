@@ -1805,6 +1805,7 @@ describe('handleParentConsent', () => {
   });
 
   it('alerts Slack when a consent submission needs manual reconciliation', async () => {
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
     const c = makeCase({ state: 'restricted_pending_parental_consent' });
     const { db } = consentDb(c, { status: 'stored', upload_token: null, ticket_id: null, lease_until: 0, receipt_id: 'r-old', object_key: 'k-old', case_version: null, ticket_attempt_at: Math.floor(Date.now() / 1000) - 60 * 60, created_at: 1 });
     const bucket = fakeBucket();
@@ -1820,8 +1821,11 @@ describe('handleParentConsent', () => {
     expect(mockFetch.mock.calls[0][0]).toBe('https://hooks.slack.test/x');
     const text = JSON.parse(mockFetch.mock.calls[0][1].body).text as string;
     expect(text).toContain('manual reconciliation');
-    expect(text).not.toContain(c.id);
+    // The internal case ID lets support find the ticket by its subject; no
+    // account identifier rides along.
+    expect(text).toContain(c.id);
     expect(text).not.toContain(c.pubkey);
+    expect(errorLog.mock.calls.some(([line]) => String(line).includes(c.id))).toBe(true);
   });
 
   it('returns a non-retryable 409 when ticket creation needs manual reconciliation', async () => {
