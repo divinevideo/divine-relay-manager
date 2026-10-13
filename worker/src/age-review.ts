@@ -1138,6 +1138,11 @@ export async function handleParentConsent(
   // no row naming it, and both disposal sweeps start from rows. Delete only a
   // key this request minted and wrote, and only while no row names it, so a
   // clip a submission or an earlier round records is never touched.
+  //
+  // This deletes even when the case is under a legal hold, on purpose. A hold
+  // preserves the case's record, and a refused upload never joined it: no row
+  // names it, no reviewer link points at it, and nothing on the case refers
+  // to it. Keeping it would leave a clip nothing could find or dispose of.
   const discardUnrecordedUpload = async (): Promise<void> => {
     if (!wroteObject || !freshObjectKey || !bucket) return;
     try {
