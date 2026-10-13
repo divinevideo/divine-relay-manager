@@ -256,10 +256,13 @@ export function AgeReviewDetail({ caseData: c }: Props) {
     // every decision can change sign-in status. Settled, not success: a conflict
     // or a lost response can follow a write that did commit. Only this case's
     // account can have changed, and only by a state change: a clock or band edit
-    // leaves both statuses alone. Key shape: ['account-status', apiUrl, pubkey],
-    // lowercased as useAccountStatus is called.
-    onSettled: (_data, _error, updates, ctx) => {
-      if (updates.state === undefined || !ctx) return;
+    // leaves both statuses alone, unless it lost a version conflict, since the
+    // winning write may have been a decision. Key shape:
+    // ['account-status', apiUrl, pubkey], lowercased as useAccountStatus is called.
+    onSettled: (_data, error, updates, ctx) => {
+      if (!ctx) return;
+      const conflict = error instanceof ApiError && error.code === 'version_conflict';
+      if (updates.state === undefined && !conflict) return;
       const subject = ctx.casePubkey.toLowerCase();
       queryClient.invalidateQueries({
         queryKey: ['account-status'],

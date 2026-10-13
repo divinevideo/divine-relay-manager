@@ -643,6 +643,20 @@ describe('AgeReviewDetail', () => {
       await waitFor(() => expect(getAccountStatus.mock.calls.length).toBeGreaterThan(callsBefore));
     });
 
+    // The edit that lost was not a decision, but the write that won may have been.
+    it('refetches account status when a clock edit loses a version conflict', async () => {
+      updateAgeReviewCase.mockRejectedValueOnce(
+        new ApiError('Case was modified by another request', 409, 'Conflict', 'version_conflict', 5),
+      );
+      const { queryClient } = renderDetail(makeCase());
+      await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+      const callsBefore = getAccountStatus.mock.calls.length;
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Pause Clock' }));
+
+      await waitFor(() => expect(getAccountStatus.mock.calls.length).toBeGreaterThan(callsBefore));
+    });
+
     it('does not show "status unavailable" while account status is still loading', async () => {
       getAccountStatus.mockReturnValue(new Promise(() => {}));
 
