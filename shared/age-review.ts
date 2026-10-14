@@ -299,7 +299,8 @@ export interface AgeReviewEnforcement {
   keycastMinorSet?: EnforcementLegStatus;
   keycastMinorSetError?: string;
   /** The set failed because keycast refuses to flag a row without login credentials
-   * (409 account_unclaimed). Permanent: the job is settled and never retried. */
+   * (409 account_unclaimed). The job is settled and retried hourly, so the flag
+   * is set once the account is claimed (#304). */
   keycastMinorSetUnclaimed?: boolean;
 }
 

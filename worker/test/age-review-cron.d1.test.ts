@@ -233,7 +233,7 @@ describe('age-review cron on real D1', () => {
     expect(pending!.c).toBe(0);
   });
 
-  it('settles a set refused as account_unclaimed rather than retrying it forever', async () => {
+  it('settles a set refused as account_unclaimed rather than retrying it every tick', async () => {
     await DB.prepare('DELETE FROM protected_minor_projection_jobs').run();
     await DB.prepare('DELETE FROM protected_minor_subjects').run();
     const now = new Date().toISOString();
@@ -254,6 +254,166 @@ describe('age-review cron on real D1', () => {
     const row = await DB.prepare("SELECT state FROM protected_minor_projection_jobs WHERE subject_id = 'subj-unclaimed'")
       .first<{ state: string }>();
     expect(row!.state).toBe('complete');
+  });
+
+  describe('a set refused as account_unclaimed is retried hourly (#304)', () => {
+    const P = 'a'.repeat(64);
+    const env = () => ({ ...cronEnv, KEYCAST_URL: 'https://keycast.invalid', KEYCAST_SERVICE_TOKEN: 'test-token' });
+    // Keycast as two bits: whether the account has login credentials, and its flag.
+    // It refuses a set while the account has none, as keycast#433 does.
+    let keycast: { claimed: boolean; flag: boolean; calls: string[] };
+    let subjectId: string;
+    const anHourLater = () => vi.setSystemTime(Date.now() + 61 * 60 * 1000);
+    const jobState = async () => (await DB.prepare('SELECT state FROM protected_minor_projection_jobs WHERE subject_id = ?')
+      .bind(subjectId).first<{ state: string }>())?.state;
+
+    beforeEach(async () => {
+      vi.useFakeTimers({ toFake: ['Date'], now: new Date() });
+      for (const table of ['protected_minor_projection_jobs', 'protected_minor_account_bindings', 'protected_minor_subjects']) {
+        await DB.prepare(`DELETE FROM ${table}`).run();
+      }
+      ({ subjectId } = await createSubjectWithBinding(DB, 'approval-case', P));
+      const now = new Date().toISOString();
+      await DB.prepare(`INSERT INTO protected_minor_projection_jobs
+        (subject_id, pubkey, reason, state, created_at, updated_at)
+        VALUES (?, ?, 'age_review_approved', 'pending', ?, ?)`).bind(subjectId, P, now, now).run();
+      keycast = { claimed: false, flag: false, calls: [] };
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+        if (!String(input).includes('/verified-minor')) return new Response('ok', { status: 200 });
+        const method = init?.method ?? 'GET';
+        keycast.calls.push(method);
+        if (method === 'DELETE') {
+          keycast.flag = false;
+          return new Response('{}', { status: 200 });
+        }
+        if (!keycast.claimed) {
+          return new Response('{"error":"account_unclaimed: account has no login credentials"}', { status: 409 });
+        }
+        keycast.flag = true;
+        return new Response('{}', { status: 200 });
+      });
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+    });
+    afterEach(() => vi.useRealTimers());
+
+    it('sets the flag once the account has been claimed', async () => {
+      await checkAgeReviewDeadlines(env());
+      expect(keycast.flag).toBe(false);
+
+      keycast.claimed = true;
+      anHourLater();
+      await checkAgeReviewDeadlines(env());
+
+      expect(keycast.flag).toBe(true);
+      expect(keycast.calls).toEqual(['PUT', 'PUT']);
+      expect(await jobState()).toBe('complete');
+    });
+
+    it('waits an hour before trying again', async () => {
+      await checkAgeReviewDeadlines(env());
+      keycast.claimed = true;
+
+      await checkAgeReviewDeadlines(env());
+      vi.setSystemTime(Date.now() + 59 * 60 * 1000);
+      await checkAgeReviewDeadlines(env());
+      expect(keycast.calls).toEqual(['PUT']);
+
+      vi.setSystemTime(Date.now() + 2 * 60 * 1000);
+      await checkAgeReviewDeadlines(env());
+      expect(keycast.calls).toEqual(['PUT', 'PUT']);
+    });
+
+    // A job left pending between tries would be re-sent every tick and counted by
+    // retention's overdue-projection alert after a day.
+    it('keeps trying while the account stays unclaimed, settling the job after each try', async () => {
+      await checkAgeReviewDeadlines(env());
+      expect(await jobState()).toBe('complete');
+
+      for (const expected of [2, 3]) {
+        anHourLater();
+        await checkAgeReviewDeadlines(env());
+        expect(keycast.calls).toEqual(Array(expected).fill('PUT'));
+        expect(await jobState()).toBe('complete');
+      }
+      expect(keycast.flag).toBe(false);
+    });
+
+    it('stops trying once the flag is set', async () => {
+      await checkAgeReviewDeadlines(env());
+      keycast.claimed = true;
+      anHourLater();
+      await checkAgeReviewDeadlines(env());
+      expect(keycast.flag).toBe(true);
+
+      anHourLater();
+      await checkAgeReviewDeadlines(env());
+      expect(keycast.calls).toEqual(['PUT', 'PUT']);
+    });
+
+    it('a denial while waiting sends its clear on the next tick and ends the retries', async () => {
+      await checkAgeReviewDeadlines(env());
+      await clearSubject(DB, P, undefined, 'age_review_denied');
+
+      await checkAgeReviewDeadlines(env());
+      expect(keycast.calls).toEqual(['PUT', 'DELETE']);
+
+      keycast.claimed = true;
+      anHourLater();
+      await checkAgeReviewDeadlines(env());
+      expect(keycast.calls).toEqual(['PUT', 'DELETE']);
+      expect(keycast.flag).toBe(false);
+    });
+
+    // A denial's clear that a newer approval made moot is settled without a keycast
+    // call, so nothing tells the job it is finished. Re-arming it would repeat that
+    // settle, and the live subject's set with it, every hour.
+    it('does not retry the job of a subject that was cleared', async () => {
+      await checkAgeReviewDeadlines(env());
+      await clearSubject(DB, P, undefined, 'age_review_denied');
+      await createSubjectWithBinding(DB, 'second-approval', P);
+      keycast.claimed = true;
+      await checkAgeReviewDeadlines(env()); // the superseded clear settles; the new subject's set is armed
+      await checkAgeReviewDeadlines(env()); // and lands
+      expect(keycast.flag).toBe(true);
+      const calls = [...keycast.calls];
+
+      anHourLater();
+      await checkAgeReviewDeadlines(env());
+      await checkAgeReviewDeadlines(env());
+      expect(keycast.calls).toEqual(calls);
+    });
+
+    // clearSubject unbinds as it clears, so this state is a registry invariant
+    // break. The retry must still follow the registry's own test for a protected
+    // account (resolveByPubkey): a live binding AND an active subject.
+    it('does not retry a cleared subject whose binding was left live', async () => {
+      await checkAgeReviewDeadlines(env());
+      await DB.prepare(`UPDATE protected_minor_subjects
+        SET classification_state = 'cleared', cleared_at = ?, clear_reason = 'age_review_denied',
+          clear_reason_class = 'valid_prior' WHERE subject_id = ?`)
+        .bind(new Date().toISOString(), subjectId).run();
+
+      keycast.claimed = true;
+      anHourLater();
+      await checkAgeReviewDeadlines(env());
+
+      expect(keycast.calls).toEqual(['PUT']);
+    });
+
+    // A closed binding is a deleted account: the subject stays active, but no
+    // account is left to flag.
+    it('does not retry an account whose binding was closed', async () => {
+      await checkAgeReviewDeadlines(env());
+      await DB.prepare('UPDATE protected_minor_account_bindings SET unbound_at = ? WHERE pubkey = ?')
+        .bind(new Date().toISOString(), P).run();
+
+      keycast.claimed = true;
+      anHourLater();
+      await checkAgeReviewDeadlines(env());
+
+      expect(keycast.calls).toEqual(['PUT']);
+      expect(keycast.flag).toBe(false);
+    });
   });
 
   it('a deny that re-arms a job mid-projection survives the in-flight completion', async () => {

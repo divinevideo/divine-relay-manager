@@ -819,7 +819,7 @@ describe('AgeReviewDetail', () => {
       })));
     });
 
-    it('says an unclaimed refusal is permanent rather than promising a retry', async () => {
+    it('says an unclaimed refusal is retried and applies once the account is claimed', async () => {
       updateAgeReviewCase.mockResolvedValueOnce({
         ...approvalOk, success: false, enforcementComplete: false,
         enforcement: { ...approvalOk.enforcement, keycastMinorSet: 'failed', keycastMinorSetUnclaimed: true },
@@ -827,7 +827,7 @@ describe('AgeReviewDetail', () => {
       await confirmApproval();
       await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({
         title: 'Approved, but keycast refused the minor flag',
-        description: "Recorded as a protected minor, so future under-16 reports clear automatically. Keycast refused the minor flag because this account has no login credentials, so the app protections and key-export block do not apply. Nothing re-applies the flag if the account is claimed later; escalate if it is.",
+        description: "Recorded as a protected minor, so future under-16 reports clear automatically. Keycast refused the minor flag because this account has no login credentials, so the app protections and key-export block do not apply yet. The flag is retried automatically and applies once the account is claimed.",
         variant: 'destructive',
       })));
       expect(toast).not.toHaveBeenCalledWith(expect.objectContaining({ title: 'Enforcement incomplete' }));
@@ -844,7 +844,7 @@ describe('AgeReviewDetail', () => {
     });
 
     // The app's toast store keeps one toast (TOAST_LIMIT = 1), so a second toast()
-    // call evicts the first. The permanent refusal must reach the moderator in the
+    // call evicts the first. The refusal must reach the moderator in the
     // same toast that names the other failed legs.
     it('reports other failed legs in the same toast as an unclaimed refusal', async () => {
       updateAgeReviewCase.mockResolvedValueOnce({

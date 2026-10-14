@@ -17,7 +17,7 @@ export interface KeycastResult {
   notFound?: boolean;
   /**
    * Keycast refused to flag this row because it has no login credentials
-   * (409 account_unclaimed). Permanent for this account: a retry cannot succeed.
+   * (409 account_unclaimed). A retry cannot succeed until the account is claimed.
    */
   unclaimed?: boolean;
 }
@@ -48,9 +48,10 @@ function isKeycastUserNotFound(text: string): boolean {
 }
 
 /**
- * True only for keycast's permanent refusal to flag a credential-less row
- * (409 account_unclaimed). A retry cannot succeed, so callers must tell it
- * apart from a transient failure; an unrelated 409 must not match.
+ * True only for keycast's refusal to flag a credential-less row (409
+ * account_unclaimed). A retry cannot succeed until the account is claimed, so
+ * callers must tell it apart from a transient failure; an unrelated 409 must
+ * not match.
  */
 function isKeycastAccountUnclaimed(text: string): boolean {
   try {
