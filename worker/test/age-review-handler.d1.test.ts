@@ -4,9 +4,10 @@
 //   enforcement failures are surfaced (success:false / HTTP 207), not
 //         masked as success, while the state transition still persists.
 import { Miniflare } from 'miniflare';
+import type { ModerationStatusResponse } from '../../shared/age-review';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { ensureSchema } from '../src/db';
-import { handleUpdateAgeReviewCase, handleAgeReviewReplyWebhook, handleParentConsent, checkAgeReviewDeadlines } from '../src/age-review';
+import { handleUpdateAgeReviewCase, handleAgeReviewReplyWebhook, handleParentConsent, checkAgeReviewDeadlines, handleGetModerationStatus, handleStartGreenlight } from '../src/age-review';
 import { createSubjectWithBinding, approvalRegistryStatements, resolveByPubkey, clearSubject, markProjectionComplete } from '../src/protected-minors';
 
 let mf: Miniflare;
@@ -63,12 +64,27 @@ async function rowOf(id: string) {
 describe('age-review handler on real D1', () => {
   beforeEach(reset);
 
-  it('stores one consent submission in R2 and advances the case only after the ticket has the reviewer link', async () => {
+  it.each([
+    ['moderator restriction', 'restricted_pending_parental_consent', 'report', 'restricted_minor_review', null],
+    ['voluntary application', 'open_reported', 'greenlight_application', 'active', null],
+    ['reported voluntary application', 'open_reported', 'report', 'active', '2026-10-01T00:00:00Z'],
+    ['moderated family application', 'open_reported', 'greenlight_application', 'restricted_minor_review', null],
+    ['moderated attached report', 'open_reported', 'report', 'restricted_minor_review', '2026-10-01T00:00:00Z'],
+  ])('stores one consent submission for a %s and advances only after the reviewer link exists', async (label, initialState, createdVia, restriction, requestedAt) => {
     const owner = 'a'.repeat(64);
     await DB.prepare(`INSERT INTO age_review_cases
-      (id, pubkey, state, suspected_age_band, zendesk_ticket_id, deadline_at, clock_paused, version)
-      VALUES ('consent-case', ?, 'restricted_pending_parental_consent', 'age_13_15', 42, ?, 0, 2)`)
-      .bind(owner, new Date(Date.now() + 9 * 864e5).toISOString()).run();
+      (id, pubkey, state, suspected_age_band, zendesk_ticket_id, deadline_at, clock_paused, version, created_via, greenlight_requested_at)
+      VALUES ('consent-case', ?, ?, 'age_13_15', 42, ?, 0, 2, ?, ?)`)
+      .bind(owner, initialState, new Date(Date.now() + 9 * 864e5).toISOString(), createdVia, requestedAt).run();
+    if (createdVia === 'report' && initialState === 'open_reported') {
+      await DB.prepare("UPDATE age_review_cases SET greenlight_requested_at = NULL WHERE id = 'consent-case'").run();
+      expect((await handleStartGreenlight(owner, env, cors)).status).toBe(200);
+    }
+    const moderated = label.startsWith('moderated');
+    if (moderated) {
+      await patch('consent-case', { state: 'under_moderator_review' });
+      await patch('consent-case', { state: 'restricted_pending_user_response' });
+    }
     const calls: string[] = [];
     let commentBody = '';
     const objects = new Map<string, Uint8Array>();
@@ -102,9 +118,11 @@ describe('age-review handler on real D1', () => {
     try {
       const consentEnv = { ...env, ZENDESK_SUBDOMAIN: 'test', ZENDESK_EMAIL: 'agent@test.com', ZENDESK_API_TOKEN: 'token', CONSENT_VIDEO_BUCKET: bucket as unknown as R2Bucket };
       expect((await handleParentConsent(request(), 'consent-case', owner, consentEnv, cors)).status).toBe(200);
+      const status = await (await handleGetModerationStatus(owner, consentEnv, cors)).json() as ModerationStatusResponse;
+      expect(status.restriction.status).toBe(restriction);
       const caseRow = await DB.prepare('SELECT state, version, clock_paused, parent_contact_email FROM age_review_cases WHERE id = ?')
         .bind('consent-case').first<{ state: string; version: number; clock_paused: number; parent_contact_email: string }>();
-      expect(caseRow).toMatchObject({ state: 'submitted_for_review', version: 3, clock_paused: 1, parent_contact_email: 'parent@example.com' });
+      expect(caseRow).toMatchObject({ state: 'submitted_for_review', version: moderated ? 5 : 3, clock_paused: 1, parent_contact_email: 'parent@example.com' });
       const submission = await DB.prepare('SELECT status, lease_until, receipt_id, object_key, size_bytes FROM age_review_parent_consent_submissions WHERE case_id = ?')
         .bind('consent-case').first<{ status: string; lease_until: number; receipt_id: string; object_key: string; size_bytes: number }>();
       expect(submission).toMatchObject({ status: 'commented', lease_until: 0, size_bytes: 4 });

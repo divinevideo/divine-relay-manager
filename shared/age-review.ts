@@ -95,22 +95,21 @@ export interface MinorReviewResponseDeadline {
   remainingDaysWhenPaused: number | null;
 }
 
+type MobileMinorReviewCase = {
+  id: string;
+  state: AgeReviewState;
+  suspectedAgeBand: AgeBand;
+  allowedResolution: ResolutionType;
+  instructions: string | null;
+  supportEmail: string;
+  moderationConversationPubkey: string | null;
+  moderationConversationId: string | null;
+  responseDeadline: MinorReviewResponseDeadline;
+};
+
 export type ModerationStatusResponse =
-  | { restriction: { status: 'active' } }
-  | {
-      restriction: { status: 'restricted_minor_review' };
-      minorReviewCase: {
-        id: string;
-        state: AgeReviewState;
-        suspectedAgeBand: AgeBand;
-        allowedResolution: ResolutionType;
-        instructions: string | null;
-        supportEmail: string;
-        moderationConversationPubkey: string | null;
-        moderationConversationId: string | null;
-        responseDeadline: MinorReviewResponseDeadline;
-      };
-    };
+  | { restriction: { status: 'active' }; minorReviewCase?: MobileMinorReviewCase }
+  | { restriction: { status: 'restricted_minor_review' }; minorReviewCase: MobileMinorReviewCase };
 
 /** Normalize stored ISO or SQLite datetime values to absolute UTC ISO-8601. */
 export function toUtcIso(value: string | null): string | null {
@@ -234,6 +233,9 @@ export interface AgeReviewCase {
   last_alerted_at: string | null;
   zendesk_ticket_id: number | null;
   created_via: string | null;
+  greenlight_requested_at?: string | null;
+  /** First moderator state transition; independent of optional attribution. */
+  moderation_started_at?: string | null;
   claim_link_url: string | null;
   claim_link_expires_at: string | null;
   /** Added by the retention rollout; optional for older worker responses. */

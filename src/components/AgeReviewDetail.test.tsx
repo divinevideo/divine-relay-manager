@@ -98,6 +98,11 @@ function renderDetail(caseData: AgeReviewCase) {
 }
 
 describe('AgeReviewDetail', () => {
+  it.each(['greenlight_application', 'report'])('identifies the family consent request on a %s case', (created_via) => {
+    renderDetail(makeCase({ created_via, greenlight_requested_at: '2026-10-01T00:00:00Z' }));
+    expect(screen.getByText('Family requested Greenlight')).toBeInTheDocument();
+  });
+
   beforeEach(() => {
     updateAgeReviewCase.mockClear();
     updateAgeReviewCase.mockResolvedValue({ success: true });

@@ -1368,6 +1368,16 @@ export class ReportWatcher implements DurableObject {
     return keycastStatus.success && keycastStatus.verified_minor === true ? 'keycast' : null;
   }
 
+  private async attachReportToFamilyApplication(event: ReportEvent, reportedPubkey: string): Promise<void> {
+    // Keep the first report visible without overwriting provenance or opening a
+    // second case. The predicate also handles a family start winning the insert race.
+    await this.env.DB!.prepare(`UPDATE age_review_cases
+      SET report_id = ?, reporter_pubkey = ?, updated_at = datetime('now'), version = version + 1
+      WHERE pubkey = ? AND state NOT IN (${TERMINAL_STATES.map(() => '?').join(',')}) AND created_via = 'greenlight_application'
+        AND report_id IS NULL AND reporter_pubkey IS NULL`)
+      .bind(event.id, event.pubkey, reportedPubkey, ...TERMINAL_STATES).run();
+  }
+
   private async createAgeReviewCase(event: ReportEvent, reportedPubkey: string): Promise<void> {
     if (!this.env.DB) {
       console.warn('[ReportWatcher] D1 database not available, cannot create age review case');
@@ -1392,6 +1402,7 @@ export class ReportWatcher implements DurableObject {
     `).bind(reportedPubkey, ...TERMINAL_STATES).first<{ id: string; state: string }>();
 
     if (existing) {
+      await this.attachReportToFamilyApplication(event, reportedPubkey);
       console.log('[ReportWatcher] Active age review case already exists; skipping duplicate');
       return;
     }
@@ -1470,11 +1481,15 @@ export class ReportWatcher implements DurableObject {
     // hides the profile and makes the loss permanent.
     const identityCapturedAt = lookup.completed ? new Date().toISOString() : null;
 
-    await this.env.DB.prepare(`
+    // A family can start Greenlight during the identity lookup above. Check
+    // inside the insert too, so the two entry points keep one active case.
+    const inserted = await this.env.DB.prepare(`
       INSERT INTO age_review_cases
       (id, pubkey, reporter_pubkey, report_id, suspected_age_band, state, allowed_resolution, deadline_at,
        account_name, account_nip05, account_vine_username, identity_captured_at)
-      VALUES (?, ?, ?, ?, ?, 'open_reported', ?, ?, ?, ?, ?, ?)
+      SELECT ?, ?, ?, ?, ?, 'open_reported', ?, ?, ?, ?, ?, ?
+      WHERE NOT EXISTS (SELECT 1 FROM age_review_cases WHERE pubkey = ?
+        AND state NOT IN (${TERMINAL_STATES.map(() => '?').join(',')}))
     `).bind(
       caseId,
       reportedPubkey,
@@ -1487,7 +1502,22 @@ export class ReportWatcher implements DurableObject {
       identity?.nip05 ?? null,
       identity?.vineUsername ?? null,
       identityCapturedAt,
+      reportedPubkey,
+      ...TERMINAL_STATES,
     ).run();
+    if (inserted.meta?.changes === 0) {
+      await this.attachReportToFamilyApplication(event, reportedPubkey);
+      // Keep this capture if the family case opened without one.
+      if (identityCapturedAt) {
+        await this.env.DB.prepare(`UPDATE age_review_cases
+          SET account_name = ?, account_nip05 = ?, account_vine_username = ?, identity_captured_at = ?
+          WHERE pubkey = ? AND state NOT IN (${TERMINAL_STATES.map(() => '?').join(',')})
+            AND created_via = 'greenlight_application' AND identity_captured_at IS NULL`)
+          .bind(identity?.name ?? null, identity?.nip05 ?? null, identity?.vineUsername ?? null, identityCapturedAt,
+            reportedPubkey, ...TERMINAL_STATES).run();
+      }
+      return;
+    }
 
     await this.logDecision({
       targetType: 'pubkey',

@@ -3592,3 +3592,20 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
     expect(body.error).toMatch(/closed before/i);
   });
 });
+
+describe('starting Greenlight requires the account’s NIP-98 identity', () => {
+  const url = 'https://api-relay-prod.divine.video/v1/minor-review-cases/greenlight';
+  it('rejects an unauthenticated start', async () => {
+    const response = await worker.fetch(new Request(url, { method: 'POST', body: '{}' }), {} as never, ctx);
+    expect(response.status).toBe(401);
+  });
+  it('authenticates a valid start before reporting unavailable storage', async () => {
+    const event = finalizeEvent({ kind: 27235, content: '',
+      tags: [['u', url], ['method', 'POST']], created_at: Math.floor(Date.now() / 1000),
+    }, generateSecretKey());
+    const response = await worker.fetch(new Request(url, { method: 'POST', body: '{}',
+      headers: { Authorization: 'Nostr ' + btoa(JSON.stringify(event)) },
+    }), {} as never, ctx);
+    expect(response.status).toBe(503);
+  });
+});

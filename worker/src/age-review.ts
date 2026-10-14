@@ -30,6 +30,7 @@ import type { AccountBulkAction } from '../../shared/bulk-moderation';
 import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, setVerifiedMinor, createMinorAccount, HEX_64, type KeycastEnv, type KeycastReason, type KeycastResult } from './keycast-client';
 import { suspendPubkey, unsuspendPubkey, banPubkey, type BanPubkeyResult, type SecretStoreSecret } from './nip86';
 import { buildAgeReviewIdentityBlock, buildClaimedParentName, toNpub } from './report-note';
+import { fetchAccountIdentity } from './relay-profile';
 import {
   approvalRegistryStatements,
   convergeProjection,
@@ -331,6 +332,7 @@ export async function handleUpdateAgeReviewCase(
   const body = await request.json() as Record<string, unknown>;
   const updates: string[] = [];
   const binds: unknown[] = [];
+  let responseDeadline = existing.deadline_at;
 
   // State transition
   if (body.state && typeof body.state === 'string') {
@@ -346,6 +348,12 @@ export async function handleUpdateAgeReviewCase(
     }
     updates.push('state = ?');
     binds.push(body.state);
+    updates.push("moderation_started_at = COALESCE(moderation_started_at, datetime('now'))");
+    // A voluntary application has no response clock until a human restricts it.
+    // Use the existing standard deadline, preserving any report's current clock.
+    if (isAccountRestrictedAgeReviewState(body.state as AgeReviewState) && !existing.deadline_at) {
+      responseDeadline = new Date(Date.now() + DEADLINE_DAYS * 24 * 60 * 60 * 1000).toISOString();
+    }
     if (TERMINAL_STATES.includes(body.state as AgeReviewState)) {
       updates.push("closed_at = COALESCE(closed_at, datetime('now'))", 'claim_link_url = NULL');
     }
@@ -395,7 +403,7 @@ export async function handleUpdateAgeReviewCase(
   // Clock pause/resume
   if (body.clock_paused === true && !existing.clock_paused) {
     const now = new Date();
-    const deadline = existing.deadline_at ? new Date(existing.deadline_at) : null;
+    const deadline = responseDeadline ? new Date(responseDeadline) : null;
     const remainingDays = deadline
       ? Math.max(0, (deadline.getTime() - now.getTime()) / (24 * 60 * 60 * 1000))
       : null;
@@ -404,8 +412,13 @@ export async function handleUpdateAgeReviewCase(
   } else if (body.clock_paused === false && existing.clock_paused) {
     const remaining = existing.remaining_days_when_paused ?? DEADLINE_DAYS;
     const newDeadline = new Date(Date.now() + remaining * 24 * 60 * 60 * 1000).toISOString();
-    updates.push('clock_paused = 0', 'clock_paused_at = NULL', 'remaining_days_when_paused = NULL', 'deadline_at = ?');
-    binds.push(newDeadline);
+    updates.push('clock_paused = 0', 'clock_paused_at = NULL', 'remaining_days_when_paused = NULL');
+    responseDeadline = newDeadline;
+  }
+
+  if (responseDeadline !== existing.deadline_at) {
+    updates.push('deadline_at = ?');
+    binds.push(responseDeadline);
   }
 
   // Moderator assignment
@@ -1004,6 +1017,68 @@ export async function handleCreateMinorAccount(
 // Mobile-facing endpoints (behind NIP-98 user auth)
 // ---------------------------------------------------------------------------
 
+/** Opens the same private 13–15 consent review used by the email path.
+ * A voluntary application is not a moderator-imposed restriction or approval.
+ * The conditional insert runs atomically so retried starts reuse one case.
+ */
+export async function handleStartGreenlight(
+  userPubkey: string,
+  env: AgeReviewEnv,
+  corsHeaders: Record<string, string>,
+): Promise<Response> {
+  if (!env.DB) return json({ success: false, error: 'Database not configured' }, 503, corsHeaders);
+  // A moderator may restrict this case, and suspension hides the profile, so
+  // capture a readable identifier while it is visible, as the report path does.
+  // An existing case captured when it opened. Null unless the relay answered.
+  const lookup = await getActiveAgeReviewCase(userPubkey, env)
+    ? null
+    : await fetchAccountIdentity(userPubkey, env.RELAY_URL).catch(() => ({ completed: false, profile: null }));
+  const identity = lookup?.profile;
+  const identityCapturedAt = lookup?.completed ? new Date().toISOString() : null;
+  const result = await env.DB.prepare(`INSERT INTO age_review_cases
+    (id, pubkey, suspected_age_band, state, allowed_resolution, created_via, greenlight_requested_at,
+     account_name, account_nip05, account_vine_username, identity_captured_at)
+    SELECT ?, ?, 'age_13_15', 'open_reported', 'parent_video_or_email', 'greenlight_application', datetime('now'), ?, ?, ?, ?
+    WHERE NOT EXISTS (SELECT 1 FROM age_review_cases WHERE pubkey = ?
+      AND state NOT IN (${TERMINAL_STATES.map(() => '?').join(',')}))`)
+    .bind(crypto.randomUUID(), userPubkey, identity?.name ?? null, identity?.nip05 ?? null, identity?.vineUsername ?? null,
+      identityCapturedAt, userPubkey, ...TERMINAL_STATES).run();
+  // A report case may have opened during the lookup. Keep this capture if it has none.
+  if (result.meta?.changes === 0 && identityCapturedAt) {
+    await env.DB.prepare(`UPDATE age_review_cases
+      SET account_name = ?, account_nip05 = ?, account_vine_username = ?, identity_captured_at = ?
+      WHERE pubkey = ? AND state NOT IN (${TERMINAL_STATES.map(() => '?').join(',')}) AND identity_captured_at IS NULL`)
+      .bind(identity?.name ?? null, identity?.nip05 ?? null, identity?.vineUsername ?? null, identityCapturedAt,
+        userPubkey, ...TERMINAL_STATES).run();
+  }
+  // A report may already exist before a moderator has reviewed it. Attach
+  // the family's request to that case rather than replacing the report or
+  // creating a second active case. Existing restricted cases are untouched.
+  await env.DB.prepare(`UPDATE age_review_cases SET greenlight_requested_at = COALESCE(greenlight_requested_at, datetime('now'))
+    WHERE pubkey = ? AND state = 'open_reported' AND moderator_pubkey IS NULL AND moderation_started_at IS NULL
+      AND suspected_age_band = 'age_13_15' AND allowed_resolution = 'parent_video_or_email'`)
+    .bind(userPubkey).run();
+  const reviewCase = await getActiveAgeReviewCase(userPubkey, env);
+  if (!reviewCase || reviewCase.suspected_age_band !== 'age_13_15' || reviewCase.allowed_resolution !== 'parent_video_or_email'
+      || (reviewCase.state === 'open_reported' && !isVoluntaryGreenlightCase(reviewCase))) {
+    return json({ success: false, error: 'This account already has a different age-review process; contact support' }, 409, corsHeaders);
+  }
+  const status = await handleGetModerationStatus(userPubkey, env, corsHeaders);
+  return json(await status.json(), result.meta?.changes === 1 ? 201 : 200, corsHeaders);
+}
+
+function isVoluntaryGreenlightCase(reviewCase: AgeReviewCase): boolean {
+  return (reviewCase.greenlight_requested_at != null || reviewCase.created_via === 'greenlight_application')
+    && reviewCase.moderator_pubkey === null
+    && reviewCase.moderation_started_at == null
+    && ['open_reported', 'submitted_for_review'].includes(reviewCase.state);
+}
+
+function canSubmitParentConsent(reviewCase: AgeReviewCase): boolean {
+  return (isVoluntaryGreenlightCase(reviewCase) && reviewCase.state === 'open_reported')
+    || !!VALID_TRANSITIONS[reviewCase.state]?.includes('submitted_for_review');
+}
+
 export async function handleGetModerationStatus(
   userPubkey: string,
   env: AgeReviewEnv,
@@ -1035,7 +1110,8 @@ export async function handleGetModerationStatus(
   ];
   const activeCase = await env.DB.prepare(`
     SELECT * FROM age_review_cases
-    WHERE pubkey = ? AND state IN (${RESTRICTED_STATES.map(() => '?').join(',')})
+    WHERE pubkey = ? AND (state IN (${RESTRICTED_STATES.map(() => '?').join(',')})
+      OR ((greenlight_requested_at IS NOT NULL OR created_via = 'greenlight_application') AND state = 'open_reported'))
     ORDER BY created_at DESC LIMIT 1
   `).bind(userPubkey, ...RESTRICTED_STATES).first<AgeReviewCase>();
 
@@ -1044,9 +1120,7 @@ export async function handleGetModerationStatus(
   }
 
   const now = new Date();
-  return json({
-    restriction: { status: 'restricted_minor_review' },
-    minorReviewCase: {
+  const minorReviewCase = {
       id: activeCase.id,
       state: activeCase.state,
       suspectedAgeBand: activeCase.suspected_age_band,
@@ -1056,8 +1130,11 @@ export async function handleGetModerationStatus(
       moderationConversationPubkey: null,
       moderationConversationId: null,
       responseDeadline: deriveResponseClock(activeCase, now),
-    },
-  } satisfies ModerationStatusResponse, 200, corsHeaders);
+  };
+  const status: ModerationStatusResponse = isVoluntaryGreenlightCase(activeCase)
+    ? { restriction: { status: 'active' }, minorReviewCase }
+    : { restriction: { status: 'restricted_minor_review' }, minorReviewCase };
+  return json(status, 200, corsHeaders);
 }
 
 export async function handleParentContact(
@@ -1199,7 +1276,7 @@ export async function handleParentConsent(
   if (current.allowed_resolution !== 'parent_video_or_email') {
     return json({ success: false, error: 'Parent consent video is not available for this case' }, 400, corsHeaders);
   }
-  if (!VALID_TRANSITIONS[current.state as AgeReviewState]?.includes('submitted_for_review')) {
+  if (!canSubmitParentConsent(current)) {
     return json({ success: false, error: `Cannot submit parent consent from state '${current.state}'` }, 400, corsHeaders);
   }
   if (!request.headers.get('Content-Type')?.toLowerCase().startsWith('multipart/form-data;')) {
@@ -1405,7 +1482,7 @@ export async function handleParentConsent(
 
   for (let attempt = 0; attempt < 2 && current; attempt++) {
     if (current.state === 'submitted_for_review') return json({ success: true }, 200, corsHeaders);
-    if (!VALID_TRANSITIONS[current.state as AgeReviewState]?.includes('submitted_for_review')) {
+    if (!canSubmitParentConsent(current)) {
       return json({ success: false, error: 'Case changed during submission' }, 409, corsHeaders);
     }
     const now = new Date();
