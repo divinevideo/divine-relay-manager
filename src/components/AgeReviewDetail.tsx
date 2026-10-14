@@ -497,6 +497,9 @@ export function AgeReviewDetail({ caseData: c }: Props) {
               View in Users tab
             </a>
           </div>
+          {(c.created_via === 'greenlight_application' || c.greenlight_requested_at) && (
+            <p className="text-xs text-muted-foreground">Family requested Greenlight</p>
+          )}
           {c.reporter_pubkey && (
             <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
               <span>Reported by:</span>

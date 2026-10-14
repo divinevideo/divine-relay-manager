@@ -331,6 +331,7 @@ export async function handleUpdateAgeReviewCase(
   const body = await request.json() as Record<string, unknown>;
   const updates: string[] = [];
   const binds: unknown[] = [];
+  let responseDeadline = existing.deadline_at;
 
   // State transition
   if (body.state && typeof body.state === 'string') {
@@ -346,6 +347,12 @@ export async function handleUpdateAgeReviewCase(
     }
     updates.push('state = ?');
     binds.push(body.state);
+    updates.push("moderation_started_at = COALESCE(moderation_started_at, datetime('now'))");
+    // A voluntary application has no response clock until a human restricts it.
+    // Use the existing standard deadline, preserving any report's current clock.
+    if (isAccountRestrictedAgeReviewState(body.state as AgeReviewState) && !existing.deadline_at) {
+      responseDeadline = new Date(Date.now() + DEADLINE_DAYS * 864e5).toISOString();
+    }
     if (TERMINAL_STATES.includes(body.state as AgeReviewState)) {
       updates.push("closed_at = COALESCE(closed_at, datetime('now'))", 'claim_link_url = NULL');
     }
@@ -395,7 +402,7 @@ export async function handleUpdateAgeReviewCase(
   // Clock pause/resume
   if (body.clock_paused === true && !existing.clock_paused) {
     const now = new Date();
-    const deadline = existing.deadline_at ? new Date(existing.deadline_at) : null;
+    const deadline = responseDeadline ? new Date(responseDeadline) : null;
     const remainingDays = deadline
       ? Math.max(0, (deadline.getTime() - now.getTime()) / (24 * 60 * 60 * 1000))
       : null;
@@ -404,8 +411,13 @@ export async function handleUpdateAgeReviewCase(
   } else if (body.clock_paused === false && existing.clock_paused) {
     const remaining = existing.remaining_days_when_paused ?? DEADLINE_DAYS;
     const newDeadline = new Date(Date.now() + remaining * 24 * 60 * 60 * 1000).toISOString();
-    updates.push('clock_paused = 0', 'clock_paused_at = NULL', 'remaining_days_when_paused = NULL', 'deadline_at = ?');
-    binds.push(newDeadline);
+    updates.push('clock_paused = 0', 'clock_paused_at = NULL', 'remaining_days_when_paused = NULL');
+    responseDeadline = newDeadline;
+  }
+
+  if (responseDeadline !== existing.deadline_at) {
+    updates.push('deadline_at = ?');
+    binds.push(responseDeadline);
   }
 
   // Moderator assignment
@@ -1024,7 +1036,7 @@ export async function handleStartGreenlight(
   // the family's request to that case rather than replacing the report or
   // creating a second active case. Existing restricted cases are untouched.
   await env.DB.prepare(`UPDATE age_review_cases SET greenlight_requested_at = COALESCE(greenlight_requested_at, datetime('now'))
-    WHERE pubkey = ? AND state = 'open_reported' AND moderator_pubkey IS NULL
+    WHERE pubkey = ? AND state = 'open_reported' AND moderator_pubkey IS NULL AND moderation_started_at IS NULL
       AND suspected_age_band = 'age_13_15' AND allowed_resolution = 'parent_video_or_email'`)
     .bind(userPubkey).run();
   const reviewCase = await getActiveAgeReviewCase(userPubkey, env);
@@ -1039,6 +1051,7 @@ export async function handleStartGreenlight(
 function isVoluntaryGreenlightCase(reviewCase: AgeReviewCase): boolean {
   return (reviewCase.greenlight_requested_at != null || reviewCase.created_via === 'greenlight_application')
     && reviewCase.moderator_pubkey === null
+    && reviewCase.moderation_started_at == null
     && ['open_reported', 'submitted_for_review'].includes(reviewCase.state);
 }
 

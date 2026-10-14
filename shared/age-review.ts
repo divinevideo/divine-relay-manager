@@ -234,6 +234,8 @@ export interface AgeReviewCase {
   zendesk_ticket_id: number | null;
   created_via: string | null;
   greenlight_requested_at?: string | null;
+  /** First moderator state transition; independent of optional attribution. */
+  moderation_started_at?: string | null;
   claim_link_url: string | null;
   claim_link_expires_at: string | null;
   /** Added by the retention rollout; optional for older worker responses. */

@@ -1,8 +1,8 @@
 import { Miniflare } from 'miniflare';
-import type { AgeReviewCase } from '../../shared/age-review';
+import { DEADLINE_DAYS, type AgeReviewCase } from '../../shared/age-review';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { ensureSchema } from '../src/db';
-import { handleStartGreenlight, handleGetModerationStatus } from '../src/age-review';
+import { handleStartGreenlight, handleGetModerationStatus, handleUpdateAgeReviewCase } from '../src/age-review';
 
 type StartResponse = {
   restriction: { status: string };
@@ -46,6 +46,38 @@ describe('starting the existing Greenlight consent process', () => {
     expect(reloaded.restriction.status).toBe('active');
     expect(reloaded.minorReviewCase.id).toBe(status.minorReviewCase.id);
     expect(reloaded.minorReviewCase.responseDeadline.clock).toBe('not_applicable');
+  });
+  it('records moderator intervention without attribution and starts the existing response clock on restriction', async () => {
+    const body = await (await start()).json() as StartResponse;
+    const id = body.minorReviewCase.id;
+    const patch = (state: string) => handleUpdateAgeReviewCase(new Request('https://api.test/case', {
+      method: 'PATCH', body: JSON.stringify({ state }),
+    }), id, { DB }, {});
+    await patch('under_moderator_review');
+    const reviewed = await DB.prepare('SELECT * FROM age_review_cases WHERE id = ?').bind(id).first<AgeReviewCase>();
+    expect(reviewed?.moderation_started_at).toBeTruthy();
+    expect(reviewed?.moderator_pubkey).toBeNull();
+    expect(reviewed?.deadline_at).toBeNull();
+    const before = Date.now();
+    await patch('restricted_pending_user_response');
+    const restricted = await DB.prepare('SELECT * FROM age_review_cases WHERE id = ?').bind(id).first<AgeReviewCase>();
+    expect(Date.parse(restricted!.deadline_at!)).toBeGreaterThanOrEqual(before + DEADLINE_DAYS * 864e5);
+    expect(Date.parse(restricted!.deadline_at!)).toBeLessThanOrEqual(Date.now() + DEADLINE_DAYS * 864e5);
+    expect(restricted?.moderation_started_at).toBe(reviewed?.moderation_started_at);
+    const status = await (await handleGetModerationStatus(owner, { DB }, {})).json() as StartResponse;
+    expect(status.restriction.status).toBe('restricted_minor_review');
+    expect(status.minorReviewCase.responseDeadline.clock).toBe('running');
+  });
+  it('can pause the response clock in the same moderator action that first restricts a family case', async () => {
+    const body = await (await start()).json() as StartResponse;
+    const id = body.minorReviewCase.id;
+    const patch = (body: Record<string, unknown>) => handleUpdateAgeReviewCase(new Request('https://api.test/case', {
+      method: 'PATCH', body: JSON.stringify(body),
+    }), id, { DB }, {});
+    await patch({ state: 'under_moderator_review' });
+    await patch({ state: 'restricted_pending_user_response', clock_paused: true });
+    const status = await (await handleGetModerationStatus(owner, { DB }, {})).json() as StartResponse;
+    expect(status.minorReviewCase.responseDeadline.clock).toBe('paused');
   });
   it('resumes the same case on retries and concurrent starts', async () => {
     const responses = await Promise.all([start(), start(), start()]);
