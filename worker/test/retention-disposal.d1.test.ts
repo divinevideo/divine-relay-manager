@@ -193,7 +193,7 @@ describe('protected-record retention on real D1', () => {
     await DB.prepare('DELETE FROM protected_minor_account_bindings WHERE subject_id = ?').bind(subjectIds[2]).run();
 
     await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY });
-    const exists = (table: string, subjectId: string) =>
+    const exists = (table: 'protected_minor_account_bindings' | 'protected_minor_subjects', subjectId: string) =>
       DB.prepare(`SELECT 1 FROM ${table} WHERE subject_id = ?`).bind(subjectId).first();
     expect(await exists('protected_minor_account_bindings', subjectIds[0]), rows[0].name).not.toBeNull();
     expect(await exists('protected_minor_account_bindings', subjectIds[1]), rows[1].name).not.toBeNull();
