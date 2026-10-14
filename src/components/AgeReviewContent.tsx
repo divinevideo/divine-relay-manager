@@ -12,6 +12,7 @@ import type { NostrEvent } from "@nostrify/nostrify";
 import type { AccountStatusResponse } from "@/lib/adminApi";
 import type { ReportedEventResult } from "@/hooks/useReportedEvent";
 import { MediaPreview } from "@/components/MediaPreview";
+import { CopyableId } from "@/components/CopyableId";
 import { getKindName } from "@/lib/kindNames";
 import { deriveContentVisibility } from "@/lib/contentVisibility";
 
@@ -49,8 +50,9 @@ function ContentCard({ event }: { event: NostrEvent }) {
         <span>·</span>
         <span>{new Date(event.created_at * 1000).toLocaleString()}</span>
         <span>·</span>
-        {/* Author is shown so content can never be attributed by position alone. */}
-        <span className="font-mono">{event.pubkey.slice(0, 12)}…</span>
+        {/* Author is shown so content can never be attributed by position alone,
+            in full on hover and copy so the moderator can look them up. */}
+        <CopyableId value={event.pubkey} type="hex" />
       </div>
       <MediaPreview event={event} maxItems={4} />
       {event.content ? (
@@ -138,7 +140,7 @@ export function AgeReviewContent({
       <div className="space-y-1.5">
         <div className="rounded-md border border-amber-500/40 p-2.5 text-xs text-amber-700 dark:text-amber-400">
           This post was authored by{" "}
-          <span className="font-mono">{shown.event.pubkey.slice(0, 12)}…</span>, not by this case's
+          <CopyableId value={shown.event.pubkey} type="hex" className="text-amber-700 dark:text-amber-400" />, not by this case's
           subject. Do not judge this account by it without confirming the connection.
         </div>
         <ContentCard key={shown.event.id} event={shown.event} />

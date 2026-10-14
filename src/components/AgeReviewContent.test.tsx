@@ -1,5 +1,5 @@
-import { render, screen } from "@testing-library/react";
-import { describe, it, expect, vi } from "vitest";
+import { fireEvent, render, screen, within } from "@testing-library/react";
+import { beforeEach, describe, it, expect, vi } from "vitest";
 import { AgeReviewContent } from "./AgeReviewContent";
 import type { AccountStatusResponse } from "@/lib/adminApi";
 import type { ReportedEventResult } from "@/hooks/useReportedEvent";
@@ -260,5 +260,36 @@ describe("AgeReviewContent: reported content", () => {
     // something failed to render.
     render(<AgeReviewContent {...base} hasReportId reportedEvent={undefined} reportedEventLoading={false} />);
     expect(screen.queryByText(/reported content/i)).not.toBeInTheDocument();
+  });
+});
+
+// The author is shown so content is never attributed by position alone; a
+// moderator has to be able to look that author up, which takes the whole key.
+describe("AgeReviewContent: author attribution", () => {
+  const author = "0123456789abcdef".repeat(4);
+  const writeText = vi.fn().mockResolvedValue(undefined);
+
+  beforeEach(() => {
+    writeText.mockClear();
+    Object.assign(navigator, { clipboard: { writeText } });
+  });
+
+  function byAuthor(id: string) {
+    return { id, pubkey: author, created_at: 1751000000, kind: 34235, tags: [], content: "a clip", sig: "" } as never;
+  }
+
+  it("lets a moderator copy the full author pubkey of a content card", () => {
+    render(<AgeReviewContent {...base} postCount={1} recentPosts={[byAuthor("1".repeat(64))]} />);
+    fireEvent.click(screen.getByRole("button", { name: /0123456789ab/ }));
+    expect(writeText).toHaveBeenCalledWith(author);
+  });
+
+  it("lets a moderator copy the full pubkey of a foreign post's author from the warning", () => {
+    render(
+      <AgeReviewContent {...base} hasReportId reportedEvent={{ status: "target_foreign", event: byAuthor("c".repeat(64)), banned: false }} />,
+    );
+    const warning = screen.getByText(/not by this case's subject/i);
+    fireEvent.click(within(warning).getByRole("button"));
+    expect(writeText).toHaveBeenCalledWith(author);
   });
 });
