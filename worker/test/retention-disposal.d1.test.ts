@@ -164,7 +164,8 @@ describe('protected-record retention on real D1', () => {
   });
 
   // The test above keeps its inside row through three conditions at once: the
-  // binding's unbound_at, the binding's cleared_at, and the subject's cleared_at.
+  // binding's unbound_at and its subject's cleared_at, both checked when deleting
+  // the binding, and the subject's cleared_at, checked when deleting the subject.
   // Each covered for the others, so loosening any one went unnoticed. Here each
   // row has exactly one condition inside the window.
   it('holds each false-positive condition to the 30-day window on its own', async () => {
@@ -172,7 +173,7 @@ describe('protected-record retention on real D1', () => {
     const inside = ['-30 days', '+1 minute'] as const;
     const outside = ['-40 days', '+0 seconds'] as const;
     const rows = [
-      { name: 'binding kept by cleared_at', caseId: 'case-clear', pubkey: 'c'.repeat(64), cleared: inside, unbound: outside },
+      { name: 'binding kept by subject cleared_at', caseId: 'case-clear', pubkey: 'c'.repeat(64), cleared: inside, unbound: outside },
       { name: 'binding kept by unbound_at', caseId: 'case-unbind', pubkey: 'd'.repeat(64), cleared: outside, unbound: inside },
       { name: 'subject kept by cleared_at', caseId: 'case-subject', pubkey: 'e'.repeat(64), cleared: inside, unbound: outside },
     ];
