@@ -135,18 +135,24 @@ describe('protected-record retention on real D1', () => {
       WHERE provisioning_operation_id = 'op-no-key'`).first()).toBeNull();
   });
 
-  it('honors the false-positive boundary immediately before and after 30 days', async () => {
+  it('honors the false-positive boundary just before and just after 30 days', async () => {
     const before = await createSubjectWithBinding(DB, 'case-before', PUBKEY_A, OLD_30);
     const after = await createSubjectWithBinding(DB, 'case-after', PUBKEY_B, OLD_30);
     await clearSubject(DB, PUBKEY_A, undefined, 'false_positive');
     await clearSubject(DB, PUBKEY_B, undefined, 'false_positive');
-    for (const [subjectId, days, seconds] of [[before.subjectId, '-30 days', '+1 second'], [after.subjectId, '-30 days', '-1 second']] as const) {
+    // Retention compares against datetime('now'), in whole seconds, and the clock
+    // moves between this setup and the disposal run. A one-second margin inside the
+    // window was crossed whenever it ticked over (#308), so the inside row sits a
+    // minute in. The outside row stays a second out: time only moves it further past.
+    for (const [subjectId, days, seconds] of [[before.subjectId, '-30 days', '+1 minute'], [after.subjectId, '-30 days', '-1 second']] as const) {
       await DB.prepare(`UPDATE protected_minor_subjects SET cleared_at = datetime('now', ?, ?) WHERE subject_id = ?`)
         .bind(days, seconds, subjectId).run();
       await DB.prepare(`UPDATE protected_minor_account_bindings SET unbound_at = datetime('now', ?, ?) WHERE subject_id = ?`)
         .bind(days, seconds, subjectId).run();
-      await DB.prepare(`UPDATE protected_minor_projection_jobs SET state = 'complete', updated_at = datetime('now', ?, ?) WHERE subject_id = ?`)
-        .bind(days, seconds, subjectId).run();
+      // Past its own 30-day window for both subjects: a job on the boundary kept the
+      // "before" subject by itself, so the false-positive window went untested.
+      await DB.prepare(`UPDATE protected_minor_projection_jobs SET state = 'complete', updated_at = datetime('now', '-40 days') WHERE subject_id = ?`)
+        .bind(subjectId).run();
     }
 
     await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY });
