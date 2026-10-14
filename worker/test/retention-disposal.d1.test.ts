@@ -172,10 +172,11 @@ describe('protected-record retention on real D1', () => {
     // [days, seconds] for datetime('now', ?, ?): a minute inside the window, or well past it.
     const inside = ['-30 days', '+1 minute'] as const;
     const outside = ['-40 days', '+0 seconds'] as const;
+    // unbound: null removes the binding, so only the subject's own cleared_at can keep it.
     const rows = [
       { name: 'binding kept by subject cleared_at', caseId: 'case-clear', pubkey: 'c'.repeat(64), cleared: inside, unbound: outside },
       { name: 'binding kept by unbound_at', caseId: 'case-unbind', pubkey: 'd'.repeat(64), cleared: outside, unbound: inside },
-      { name: 'subject kept by cleared_at', caseId: 'case-subject', pubkey: 'e'.repeat(64), cleared: inside, unbound: outside },
+      { name: 'subject kept by cleared_at', caseId: 'case-subject', pubkey: 'e'.repeat(64), cleared: inside, unbound: null },
     ];
     const subjectIds: string[] = [];
     for (const row of rows) {
@@ -183,14 +184,16 @@ describe('protected-record retention on real D1', () => {
       await clearSubject(DB, row.pubkey, undefined, 'false_positive');
       await DB.prepare(`UPDATE protected_minor_subjects SET cleared_at = datetime('now', ?, ?) WHERE subject_id = ?`)
         .bind(...row.cleared, subjectId).run();
-      await DB.prepare(`UPDATE protected_minor_account_bindings SET unbound_at = datetime('now', ?, ?) WHERE subject_id = ?`)
-        .bind(...row.unbound, subjectId).run();
+      if (row.unbound) {
+        await DB.prepare(`UPDATE protected_minor_account_bindings SET unbound_at = datetime('now', ?, ?) WHERE subject_id = ?`)
+          .bind(...row.unbound, subjectId).run();
+      } else {
+        await DB.prepare('DELETE FROM protected_minor_account_bindings WHERE subject_id = ?').bind(subjectId).run();
+      }
       await DB.prepare(`UPDATE protected_minor_projection_jobs SET state = 'complete', updated_at = datetime('now', ?) WHERE subject_id = ?`)
         .bind(PAST_PROJECTION, subjectId).run();
       subjectIds.push(subjectId);
     }
-    // With no binding left, only the subject's own cleared_at can keep it.
-    await DB.prepare('DELETE FROM protected_minor_account_bindings WHERE subject_id = ?').bind(subjectIds[2]).run();
 
     await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY });
     const exists = (table: 'protected_minor_account_bindings' | 'protected_minor_subjects', subjectId: string) =>
