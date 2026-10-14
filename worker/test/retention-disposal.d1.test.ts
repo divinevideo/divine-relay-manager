@@ -3,12 +3,15 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { ensureSchema } from '../src/db';
 import { clearSubject, createSubjectWithBinding, fingerprintProvisioningRequest, pendingSubjectClears } from '../src/protected-minors';
 import { digestProvisioningFingerprint, runRetentionDisposal } from '../src/retention';
+import { RETENTION_DAYS } from '../../shared/retention';
 
 const PUBKEY_A = 'a'.repeat(64);
 const PUBKEY_B = 'b'.repeat(64);
 const OLD_30 = '2020-01-01T00:00:00Z';
 const RECENT = new Date().toISOString();
 const KEY = 'synthetic-retention-key-for-tests';
+// Past the projection job's own window, so a job never keeps a row by itself.
+const PAST_PROJECTION = `-${RETENTION_DAYS.projectionComplete + 10} days`;
 let mf: Miniflare;
 let DB: D1Database;
 
@@ -135,23 +138,60 @@ describe('protected-record retention on real D1', () => {
       WHERE provisioning_operation_id = 'op-no-key'`).first()).toBeNull();
   });
 
-  it('honors the false-positive boundary immediately before and after 30 days', async () => {
-    const before = await createSubjectWithBinding(DB, 'case-before', PUBKEY_A, OLD_30);
-    const after = await createSubjectWithBinding(DB, 'case-after', PUBKEY_B, OLD_30);
-    await clearSubject(DB, PUBKEY_A, undefined, 'false_positive');
-    await clearSubject(DB, PUBKEY_B, undefined, 'false_positive');
-    for (const [subjectId, days, seconds] of [[before.subjectId, '-30 days', '+1 second'], [after.subjectId, '-30 days', '-1 second']] as const) {
+  // Three conditions decide when a false-positive record goes: the binding's
+  // unbound_at and its subject's cleared_at, both checked when deleting the
+  // binding, and the subject's cleared_at, checked when deleting the subject. A row
+  // that met all three at once let each cover for the others, so loosening any one
+  // went unnoticed. Here each condition gets a row just inside the window, which
+  // must be kept, and a row just past it, which must be deleted, with every other
+  // value far past. A condition moved either way fails its own row.
+  it('honors the false-positive boundary on both sides of 30 days, one condition at a time', async () => {
+    // The policy under test, written out rather than read from RETENTION_DAYS so a
+    // change to the constant fails here instead of moving the test along with it.
+    const boundary = '-30 days';
+    // Modifiers for datetime('now', ?, ?). Retention compares against datetime('now'),
+    // in whole seconds, and the clock moves between this setup and the disposal run.
+    // A one-second margin inside the window was crossed whenever it ticked over
+    // (#308), so inside rows sit a minute in. Just-past rows stay a second out: time
+    // only moves them further past.
+    const inside = [boundary, '+1 minute'] as const;
+    const justPast = [boundary, '-1 second'] as const;
+    const farPast = [boundary, '-10 days'] as const;
+    const bindings = 'protected_minor_account_bindings';
+    const subjects = 'protected_minor_subjects';
+    // unbound: null removes the binding, so only the subject's own cleared_at decides.
+    const rows = [
+      { name: 'binding kept by subject cleared_at', cleared: inside, unbound: farPast, table: bindings, kept: true },
+      { name: 'binding deleted past subject cleared_at', cleared: justPast, unbound: farPast, table: bindings, kept: false },
+      { name: 'binding kept by unbound_at', cleared: farPast, unbound: inside, table: bindings, kept: true },
+      { name: 'binding deleted past unbound_at', cleared: farPast, unbound: justPast, table: bindings, kept: false },
+      { name: 'subject kept by cleared_at', cleared: inside, unbound: null, table: subjects, kept: true },
+      { name: 'subject deleted past cleared_at', cleared: justPast, unbound: null, table: subjects, kept: false },
+    ] as const;
+    const subjectIds: string[] = [];
+    for (const [i, row] of rows.entries()) {
+      const pubkey = String(i + 1).repeat(64);
+      const { subjectId } = await createSubjectWithBinding(DB, `case-${i + 1}`, pubkey, OLD_30);
+      await clearSubject(DB, pubkey, undefined, 'false_positive');
       await DB.prepare(`UPDATE protected_minor_subjects SET cleared_at = datetime('now', ?, ?) WHERE subject_id = ?`)
-        .bind(days, seconds, subjectId).run();
-      await DB.prepare(`UPDATE protected_minor_account_bindings SET unbound_at = datetime('now', ?, ?) WHERE subject_id = ?`)
-        .bind(days, seconds, subjectId).run();
-      await DB.prepare(`UPDATE protected_minor_projection_jobs SET state = 'complete', updated_at = datetime('now', ?, ?) WHERE subject_id = ?`)
-        .bind(days, seconds, subjectId).run();
+        .bind(...row.cleared, subjectId).run();
+      if (row.unbound) {
+        await DB.prepare(`UPDATE protected_minor_account_bindings SET unbound_at = datetime('now', ?, ?) WHERE subject_id = ?`)
+          .bind(...row.unbound, subjectId).run();
+      } else {
+        await DB.prepare('DELETE FROM protected_minor_account_bindings WHERE subject_id = ?').bind(subjectId).run();
+      }
+      await DB.prepare(`UPDATE protected_minor_projection_jobs SET state = 'complete', updated_at = datetime('now', ?) WHERE subject_id = ?`)
+        .bind(PAST_PROJECTION, subjectId).run();
+      subjectIds.push(subjectId);
     }
 
     await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY });
-    expect(await DB.prepare('SELECT 1 FROM protected_minor_subjects WHERE subject_id = ?').bind(before.subjectId).first()).not.toBeNull();
-    expect(await DB.prepare('SELECT 1 FROM protected_minor_subjects WHERE subject_id = ?').bind(after.subjectId).first()).toBeNull();
+    const exists = async (table: typeof bindings | typeof subjects, subjectId: string) =>
+      (await DB.prepare(`SELECT 1 FROM ${table} WHERE subject_id = ?`).bind(subjectId).first()) !== null;
+    for (const [i, row] of rows.entries()) {
+      expect(await exists(row.table, subjectIds[i]), row.name).toBe(row.kept);
+    }
   });
 
   // Latest decision wins (#192): an approval that reused an active subject is the
