@@ -3,7 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { ensureSchema } from '../src/db';
 import { clearSubject, createSubjectWithBinding, fingerprintProvisioningRequest, pendingSubjectClears } from '../src/protected-minors';
 import { digestProvisioningFingerprint, runRetentionDisposal } from '../src/retention';
-import { echoedFragments } from '../src/test-helpers/secret-echo';
+import { echoedFragments, MALFORMED_WEBHOOK, rejectLikeWorkersRuntime } from '../src/test-helpers/secret-echo';
 
 const PUBKEY_A = 'a'.repeat(64);
 const PUBKEY_B = 'b'.repeat(64);
@@ -240,20 +240,39 @@ describe('protected-record retention on real D1', () => {
     await DB.prepare(`INSERT INTO protected_minor_subjects
       (subject_id, classification_state, classified_at, cleared_at, clear_reason, clear_reason_class)
       VALUES ('unknown-subject', 'cleared', ?, ?, 'legacy narrative', 'unclassified')`).bind(OLD_30, OLD_30).run();
-    // A malformed (scheme-less) synthetic URL. The Workers runtime rejects a
-    // fetch to one with `TypeError: Invalid URL: <the url>`; reproduce that.
-    const webhook = 'hooks.example.test/services/T0SYNTHETIC/B0SYNTHETIC/synthetic-webhook-token';
-    const fetchMock = vi.fn(async (url: string) => {
-      throw new TypeError(`Invalid URL: ${url}`, { cause: { input: url } });
-    });
+    const fetchMock = rejectLikeWorkersRuntime();
     vi.stubGlobal('fetch', fetchMock);
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const result = await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY, SLACK_WEBHOOK_URL: webhook });
-    expect(result.unknownReasonsAlerted).toBe(1);
-    expect(fetchMock).toHaveBeenCalledWith(webhook, expect.anything());
-    expect(errorSpy).toHaveBeenCalled();
-    expect(echoedFragments(errorSpy.mock.calls.flat(), webhook)).toEqual([]);
-    vi.unstubAllGlobals();
+    // beforeEach restores spies but not global stubs; unstub even on failure.
+    try {
+      const result = await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY, SLACK_WEBHOOK_URL: MALFORMED_WEBHOOK });
+      expect(result.unknownReasonsAlerted).toBe(1);
+      expect(fetchMock).toHaveBeenCalledWith(MALFORMED_WEBHOOK, expect.anything());
+      expect(errorSpy).toHaveBeenCalled();
+      expect(echoedFragments(errorSpy.mock.calls.flat(), MALFORMED_WEBHOOK)).toEqual([]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('logs the status of a non-OK alert response and records no alert state', async () => {
+    await DB.prepare(`INSERT INTO protected_minor_provisioning_operations
+      (provisioning_operation_id, kind, request_fingerprint, state, created_at, updated_at)
+      VALUES ('pending-op', 'onboarding', 'synthetic', 'pending', ?, ?)`)
+      .bind(OLD_30, OLD_30).run();
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 500 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const result = await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY, SLACK_WEBHOOK_URL: 'https://hooks.test' });
+      expect(result.pendingOperationsOverdue).toBe(1);
+      expect(fetchMock).toHaveBeenCalled();
+      expect(errorSpy).toHaveBeenCalledWith('[retention] alert delivery returned 500');
+      const state = await DB.prepare('SELECT COUNT(*) AS n FROM retention_alert_state').first<{ n: number }>();
+      expect(state?.n).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('isolates a failing disposal stage so later stages still dispose eligible records', async () => {

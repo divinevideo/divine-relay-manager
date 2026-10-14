@@ -50,6 +50,7 @@ import { AUTO_HIDE_STATE_ACTIONS } from '../../shared/autohide';
 import { getResolvedTargets, getAutoHideStates } from './resolution-state';
 import { readResolutionLabelTargets } from './resolution-labels';
 import { runRetentionDisposal } from './retention';
+import { errorNameOnly } from './error-name';
 import { handleConsentVideo, type ConsentVideoEnv } from './consent-video';
 
 const COORDINATED_AUTO_HIDE_ACTIONS = new Set<string>(AUTO_HIDE_STATE_ACTIONS);
@@ -920,7 +921,7 @@ export default {
       try {
         await sendDbUnavailableAlert(env.SLACK_WEBHOOK_URL, env.ENVIRONMENT ?? 'unknown');
       } catch (error) {
-        console.error('[scheduled] Failed to send DB-unavailable Slack alert:', error);
+        console.error('[scheduled] Failed to send DB-unavailable Slack alert:', errorNameOnly(error));
       }
     }
   },
@@ -3271,14 +3272,6 @@ async function handleParseReport(
   try {
     const bodyText = await request.text();
 
-    // Debug: log what headers we're receiving
-    const debugHeaders: Record<string, string> = {};
-    request.headers.forEach((value, key) => {
-      if (key.toLowerCase().includes('webhook') || key.toLowerCase().includes('zendesk') || key.toLowerCase() === 'x-webhook-key') {
-        debugHeaders[key] = value.substring(0, 20) + '...';  // Truncate for safety
-      }
-    });
-    console.log('[handleParseReport] Headers received:', JSON.stringify(debugHeaders));
     console.log('[handleParseReport] Secret configured:', env.ZENDESK_PARSE_REPORT_SECRET ? 'yes' : 'no');
 
     // Verify webhook signature

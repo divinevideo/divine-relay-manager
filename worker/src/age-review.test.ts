@@ -27,20 +27,7 @@ import { deriveResponseClock, FUNNEL_ZENDESK_QUERIES, toUtcIso } from '../../sha
 import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, createMinorAccount } from './keycast-client';
 import { suspendPubkey, unsuspendPubkey, banPubkey } from './nip86';
 import { runBulkModeration } from './bulk-moderate';
-import { echoedFragments } from './test-helpers/secret-echo';
-
-// A malformed webhook URL (no scheme), as a misconfigured secret would be.
-// Synthetic: not a real webhook.
-const MALFORMED_WEBHOOK = 'hooks.example.test/services/T0SYNTHETIC/B0SYNTHETIC/synthetic-webhook-token';
-
-// The Workers runtime rejects a fetch to a malformed URL with
-// `TypeError: Invalid URL: <the url>`. Reproduce that so the tests do not
-// depend on the test runtime's own wording.
-function rejectLikeWorkersRuntime() {
-  return vi.fn(async (url: string) => {
-    throw new TypeError(`Invalid URL: ${url}`, { cause: { input: url } });
-  });
-}
+import { echoedFragments, MALFORMED_WEBHOOK, rejectLikeWorkersRuntime } from './test-helpers/secret-echo';
 
 vi.mock('./keycast-client', () => ({
   suspendUser: vi.fn().mockResolvedValue({ success: true }),
@@ -2018,14 +2005,18 @@ describe('checkAgeReviewDeadlines', () => {
       })),
     };
 
-    await checkAgeReviewDeadlines(makeEnv(db, { SLACK_WEBHOOK_URL: MALFORMED_WEBHOOK }));
+    // Restore in finally: this describe has no afterEach, and a failed
+    // assertion must not leave the rejecting fetch or the muted log in place.
+    try {
+      await checkAgeReviewDeadlines(makeEnv(db, { SLACK_WEBHOOK_URL: MALFORMED_WEBHOOK }));
 
-    expect(mockFetch).toHaveBeenCalledWith(MALFORMED_WEBHOOK, expect.anything());
-    expect(errorSpy).toHaveBeenCalled();
-    expect(echoedFragments(errorSpy.mock.calls.flat(), MALFORMED_WEBHOOK)).toEqual([]);
-
-    errorSpy.mockRestore();
-    vi.unstubAllGlobals();
+      expect(mockFetch).toHaveBeenCalledWith(MALFORMED_WEBHOOK, expect.anything());
+      expect(errorSpy).toHaveBeenCalled();
+      expect(echoedFragments(errorSpy.mock.calls.flat(), MALFORMED_WEBHOOK)).toEqual([]);
+    } finally {
+      errorSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
   });
 });
 
