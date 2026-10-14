@@ -167,24 +167,33 @@ describe('protected-record retention on real D1', () => {
   // binding's unbound_at and its subject's cleared_at, both checked when deleting
   // the binding, and the subject's cleared_at, checked when deleting the subject.
   // Each covered for the others, so loosening any one went unnoticed. Here each
-  // row has exactly one condition inside the window.
+  // condition gets a row just inside the window, which must be kept, and a row just
+  // past it, which must be deleted, with every other value far past. A condition
+  // moved either way fails its own row.
   it('holds each false-positive condition to the 30-day window on its own', async () => {
     // The policy under test, written out rather than read from RETENTION_DAYS so a
     // change to the constant fails here instead of moving the test along with it.
     const boundary = '-30 days';
-    // Modifiers for datetime('now', ?, ?): a minute inside the window, or well past it.
+    // Modifiers for datetime('now', ?, ?).
     const inside = [boundary, '+1 minute'] as const;
-    const outside = [boundary, '-10 days'] as const;
-    // unbound: null removes the binding, so only the subject's own cleared_at can keep it.
+    const justPast = [boundary, '-1 second'] as const;
+    const farPast = [boundary, '-10 days'] as const;
+    const bindings = 'protected_minor_account_bindings';
+    const subjects = 'protected_minor_subjects';
+    // unbound: null removes the binding, so only the subject's own cleared_at decides.
     const rows = [
-      { name: 'binding kept by subject cleared_at', caseId: 'case-clear', pubkey: 'c'.repeat(64), cleared: inside, unbound: outside },
-      { name: 'binding kept by unbound_at', caseId: 'case-unbind', pubkey: 'd'.repeat(64), cleared: outside, unbound: inside },
-      { name: 'subject kept by cleared_at', caseId: 'case-subject', pubkey: 'e'.repeat(64), cleared: inside, unbound: null },
-    ];
+      { name: 'binding kept by subject cleared_at', cleared: inside, unbound: farPast, table: bindings, kept: true },
+      { name: 'binding deleted past subject cleared_at', cleared: justPast, unbound: farPast, table: bindings, kept: false },
+      { name: 'binding kept by unbound_at', cleared: farPast, unbound: inside, table: bindings, kept: true },
+      { name: 'binding deleted past unbound_at', cleared: farPast, unbound: justPast, table: bindings, kept: false },
+      { name: 'subject kept by cleared_at', cleared: inside, unbound: null, table: subjects, kept: true },
+      { name: 'subject deleted past cleared_at', cleared: justPast, unbound: null, table: subjects, kept: false },
+    ] as const;
     const subjectIds: string[] = [];
-    for (const row of rows) {
-      const { subjectId } = await createSubjectWithBinding(DB, row.caseId, row.pubkey, OLD_30);
-      await clearSubject(DB, row.pubkey, undefined, 'false_positive');
+    for (const [i, row] of rows.entries()) {
+      const pubkey = String(i + 1).repeat(64);
+      const { subjectId } = await createSubjectWithBinding(DB, `case-${i + 1}`, pubkey, OLD_30);
+      await clearSubject(DB, pubkey, undefined, 'false_positive');
       await DB.prepare(`UPDATE protected_minor_subjects SET cleared_at = datetime('now', ?, ?) WHERE subject_id = ?`)
         .bind(...row.cleared, subjectId).run();
       if (row.unbound) {
@@ -199,11 +208,11 @@ describe('protected-record retention on real D1', () => {
     }
 
     await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY });
-    const exists = (table: 'protected_minor_account_bindings' | 'protected_minor_subjects', subjectId: string) =>
-      DB.prepare(`SELECT 1 FROM ${table} WHERE subject_id = ?`).bind(subjectId).first();
-    expect(await exists('protected_minor_account_bindings', subjectIds[0]), rows[0].name).not.toBeNull();
-    expect(await exists('protected_minor_account_bindings', subjectIds[1]), rows[1].name).not.toBeNull();
-    expect(await exists('protected_minor_subjects', subjectIds[2]), rows[2].name).not.toBeNull();
+    const exists = async (table: typeof bindings | typeof subjects, subjectId: string) =>
+      (await DB.prepare(`SELECT 1 FROM ${table} WHERE subject_id = ?`).bind(subjectId).first()) !== null;
+    for (const [i, row] of rows.entries()) {
+      expect(await exists(row.table, subjectIds[i]), row.name).toBe(row.kept);
+    }
   });
 
   // Latest decision wins (#192): an approval that reused an active subject is the
