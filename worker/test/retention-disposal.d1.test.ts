@@ -3,12 +3,15 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { ensureSchema } from '../src/db';
 import { clearSubject, createSubjectWithBinding, fingerprintProvisioningRequest, pendingSubjectClears } from '../src/protected-minors';
 import { digestProvisioningFingerprint, runRetentionDisposal } from '../src/retention';
+import { RETENTION_DAYS } from '../../shared/retention';
 
 const PUBKEY_A = 'a'.repeat(64);
 const PUBKEY_B = 'b'.repeat(64);
 const OLD_30 = '2020-01-01T00:00:00Z';
 const RECENT = new Date().toISOString();
 const KEY = 'synthetic-retention-key-for-tests';
+// Past the projection job's own window, so a job never keeps a row by itself.
+const PAST_PROJECTION = `-${RETENTION_DAYS.projectionComplete + 10} days`;
 let mf: Miniflare;
 let DB: D1Database;
 
@@ -149,15 +152,51 @@ describe('protected-record retention on real D1', () => {
         .bind(days, seconds, subjectId).run();
       await DB.prepare(`UPDATE protected_minor_account_bindings SET unbound_at = datetime('now', ?, ?) WHERE subject_id = ?`)
         .bind(days, seconds, subjectId).run();
-      // Past its own 30-day window for both subjects: a job on the boundary kept the
+      // Past its own window for both subjects: a job on the boundary kept the
       // "before" subject by itself, so the false-positive window went untested.
-      await DB.prepare(`UPDATE protected_minor_projection_jobs SET state = 'complete', updated_at = datetime('now', '-40 days') WHERE subject_id = ?`)
-        .bind(subjectId).run();
+      await DB.prepare(`UPDATE protected_minor_projection_jobs SET state = 'complete', updated_at = datetime('now', ?) WHERE subject_id = ?`)
+        .bind(PAST_PROJECTION, subjectId).run();
     }
 
     await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY });
     expect(await DB.prepare('SELECT 1 FROM protected_minor_subjects WHERE subject_id = ?').bind(before.subjectId).first()).not.toBeNull();
     expect(await DB.prepare('SELECT 1 FROM protected_minor_subjects WHERE subject_id = ?').bind(after.subjectId).first()).toBeNull();
+  });
+
+  // The test above keeps its inside row through three conditions at once: the
+  // binding's unbound_at, the binding's cleared_at, and the subject's cleared_at.
+  // Each covered for the others, so loosening any one went unnoticed. Here each
+  // row has exactly one condition inside the window.
+  it('holds each false-positive condition to the 30-day window on its own', async () => {
+    // [days, seconds] for datetime('now', ?, ?): a minute inside the window, or well past it.
+    const inside = ['-30 days', '+1 minute'] as const;
+    const outside = ['-40 days', '+0 seconds'] as const;
+    const rows = [
+      { name: 'binding kept by cleared_at', caseId: 'case-clear', pubkey: 'c'.repeat(64), cleared: inside, unbound: outside },
+      { name: 'binding kept by unbound_at', caseId: 'case-unbind', pubkey: 'd'.repeat(64), cleared: outside, unbound: inside },
+      { name: 'subject kept by cleared_at', caseId: 'case-subject', pubkey: 'e'.repeat(64), cleared: inside, unbound: outside },
+    ];
+    const subjectIds: string[] = [];
+    for (const row of rows) {
+      const { subjectId } = await createSubjectWithBinding(DB, row.caseId, row.pubkey, OLD_30);
+      await clearSubject(DB, row.pubkey, undefined, 'false_positive');
+      await DB.prepare(`UPDATE protected_minor_subjects SET cleared_at = datetime('now', ?, ?) WHERE subject_id = ?`)
+        .bind(...row.cleared, subjectId).run();
+      await DB.prepare(`UPDATE protected_minor_account_bindings SET unbound_at = datetime('now', ?, ?) WHERE subject_id = ?`)
+        .bind(...row.unbound, subjectId).run();
+      await DB.prepare(`UPDATE protected_minor_projection_jobs SET state = 'complete', updated_at = datetime('now', ?) WHERE subject_id = ?`)
+        .bind(PAST_PROJECTION, subjectId).run();
+      subjectIds.push(subjectId);
+    }
+    // With no binding left, only the subject's own cleared_at can keep it.
+    await DB.prepare('DELETE FROM protected_minor_account_bindings WHERE subject_id = ?').bind(subjectIds[2]).run();
+
+    await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY });
+    const exists = (table: string, subjectId: string) =>
+      DB.prepare(`SELECT 1 FROM ${table} WHERE subject_id = ?`).bind(subjectId).first();
+    expect(await exists('protected_minor_account_bindings', subjectIds[0]), rows[0].name).not.toBeNull();
+    expect(await exists('protected_minor_account_bindings', subjectIds[1]), rows[1].name).not.toBeNull();
+    expect(await exists('protected_minor_subjects', subjectIds[2]), rows[2].name).not.toBeNull();
   });
 
   // Latest decision wins (#192): an approval that reused an active subject is the
