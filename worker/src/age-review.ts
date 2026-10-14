@@ -1017,8 +1017,9 @@ export async function handleStartGreenlight(
   const result = await env.DB.prepare(`INSERT INTO age_review_cases
     (id, pubkey, suspected_age_band, state, allowed_resolution, created_via, greenlight_requested_at)
     SELECT ?, ?, 'age_13_15', 'open_reported', 'parent_video_or_email', 'greenlight_application', datetime('now')
-    WHERE NOT EXISTS (SELECT 1 FROM age_review_cases WHERE pubkey = ? AND state NOT IN ('cleared', 'denied_closed'))`)
-    .bind(crypto.randomUUID(), userPubkey, userPubkey).run();
+    WHERE NOT EXISTS (SELECT 1 FROM age_review_cases WHERE pubkey = ?
+      AND state NOT IN (${TERMINAL_STATES.map(() => '?').join(',')}))`)
+    .bind(crypto.randomUUID(), userPubkey, userPubkey, ...TERMINAL_STATES).run();
   // A report may already exist before a moderator has reviewed it. Attach
   // the family's request to that case rather than replacing the report or
   // creating a second active case. Existing restricted cases are untouched.
