@@ -4,6 +4,7 @@
 import { RETENTION_DAYS } from '../../shared/retention';
 import { disposeDueConsentVideos } from './consent-video';
 import type { SecretStoreSecret } from './nip86';
+import { errorNameOnly } from './error-name';
 
 const BATCH_LIMIT = 100;
 
@@ -97,13 +98,17 @@ async function notify(env: RetentionEnv, message: string): Promise<boolean> {
     const response = await fetch(env.SLACK_WEBHOOK_URL, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: message }),
     });
-    if (!response.ok) throw new Error(`retention alert returned ${response.status}`);
+    if (!response.ok) {
+      console.error(`[retention] alert delivery returned ${response.status}`);
+      return false;
+    }
     return true;
   } catch (error) {
     // Alert delivery is operationally important, but must never block an
     // otherwise-safe disposal run. Keep this log generic: the alert payload is
-    // deliberately aggregate-only and protected identifiers never belong here.
-    console.error('[retention] alert delivery failed:', error);
+    // deliberately aggregate-only and protected identifiers never belong here,
+    // and the error's message can repeat the webhook URL.
+    console.error('[retention] alert delivery failed:', errorNameOnly(error));
     return false;
   }
 }

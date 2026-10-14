@@ -3,6 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { ensureSchema } from '../src/db';
 import { clearSubject, createSubjectWithBinding, fingerprintProvisioningRequest, pendingSubjectClears } from '../src/protected-minors';
 import { digestProvisioningFingerprint, runRetentionDisposal } from '../src/retention';
+import { echoedFragments } from '../src/test-helpers/secret-echo';
 
 const PUBKEY_A = 'a'.repeat(64);
 const PUBKEY_B = 'b'.repeat(64);
@@ -232,6 +233,26 @@ describe('protected-record retention on real D1', () => {
     const payload = JSON.stringify(fetchMock.mock.calls);
     expect(payload).not.toContain('unknown-subject');
     expect(payload).not.toContain('pending-op');
+    vi.unstubAllGlobals();
+  });
+
+  it('keeps the webhook URL out of the log when an alert fails', async () => {
+    await DB.prepare(`INSERT INTO protected_minor_subjects
+      (subject_id, classification_state, classified_at, cleared_at, clear_reason, clear_reason_class)
+      VALUES ('unknown-subject', 'cleared', ?, ?, 'legacy narrative', 'unclassified')`).bind(OLD_30, OLD_30).run();
+    // A malformed (scheme-less) synthetic URL. The Workers runtime rejects a
+    // fetch to one with `TypeError: Invalid URL: <the url>`; reproduce that.
+    const webhook = 'hooks.example.test/services/T0SYNTHETIC/B0SYNTHETIC/synthetic-webhook-token';
+    const fetchMock = vi.fn(async (url: string) => {
+      throw new TypeError(`Invalid URL: ${url}`, { cause: { input: url } });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const result = await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY, SLACK_WEBHOOK_URL: webhook });
+    expect(result.unknownReasonsAlerted).toBe(1);
+    expect(fetchMock).toHaveBeenCalledWith(webhook, expect.anything());
+    expect(errorSpy).toHaveBeenCalled();
+    expect(echoedFragments(errorSpy.mock.calls.flat(), webhook)).toEqual([]);
     vi.unstubAllGlobals();
   });
 

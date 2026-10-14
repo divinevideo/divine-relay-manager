@@ -48,6 +48,8 @@ function isTimeout(error: unknown): boolean {
   return (error as { name?: unknown } | null)?.name === 'TimeoutError';
 }
 
+const INVALID_NSEC_MESSAGE = 'NOSTR_NSEC is not a valid nsec';
+
 /**
  * Get the secret key from env (handles both string and Secrets Store)
  */
@@ -60,12 +62,20 @@ export async function getSecretKey(env: Pick<Nip86Env, 'NOSTR_NSEC'>): Promise<U
     throw new Error('NOSTR_NSEC secret not configured');
   }
 
-  const decoded = nip19.decode(nsec);
+  // nip19.decode puts the whole input in its error message, so a malformed
+  // value would be repeated wherever the error is reported. Replace it with a
+  // fixed message and do not chain the original as `cause`.
+  let decoded: ReturnType<typeof nip19.decode>;
+  try {
+    decoded = nip19.decode(nsec);
+  } catch {
+    throw new Error(INVALID_NSEC_MESSAGE);
+  }
   if (decoded.type !== 'nsec') {
-    throw new Error('Invalid NOSTR_NSEC format - must be nsec1...');
+    throw new Error(INVALID_NSEC_MESSAGE);
   }
 
-  return decoded.data as Uint8Array;
+  return decoded.data;
 }
 
 /**

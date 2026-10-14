@@ -27,6 +27,20 @@ import { deriveResponseClock, FUNNEL_ZENDESK_QUERIES, toUtcIso } from '../../sha
 import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, createMinorAccount } from './keycast-client';
 import { suspendPubkey, unsuspendPubkey, banPubkey } from './nip86';
 import { runBulkModeration } from './bulk-moderate';
+import { echoedFragments } from './test-helpers/secret-echo';
+
+// A malformed webhook URL (no scheme), as a misconfigured secret would be.
+// Synthetic: not a real webhook.
+const MALFORMED_WEBHOOK = 'hooks.example.test/services/T0SYNTHETIC/B0SYNTHETIC/synthetic-webhook-token';
+
+// The Workers runtime rejects a fetch to a malformed URL with
+// `TypeError: Invalid URL: <the url>`. Reproduce that so the tests do not
+// depend on the test runtime's own wording.
+function rejectLikeWorkersRuntime() {
+  return vi.fn(async (url: string) => {
+    throw new TypeError(`Invalid URL: ${url}`, { cause: { input: url } });
+  });
+}
 
 vi.mock('./keycast-client', () => ({
   suspendUser: vi.fn().mockResolvedValue({ success: true }),
@@ -1390,6 +1404,17 @@ describe('sendDbUnavailableAlert', () => {
 
     expect(result).toBe(false);
   });
+
+  it('keeps the webhook URL out of the failure log', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.stubGlobal('fetch', rejectLikeWorkersRuntime());
+
+    const result = await sendDbUnavailableAlert(MALFORMED_WEBHOOK, 'production');
+
+    expect(result).toBe(false);
+    expect(errorSpy).toHaveBeenCalled();
+    expect(echoedFragments(errorSpy.mock.calls.flat(), MALFORMED_WEBHOOK)).toEqual([]);
+  });
 });
 
 // -- handleParentContact ------------------------------------------------------
@@ -1970,6 +1995,36 @@ describe('checkAgeReviewDeadlines', () => {
     await checkAgeReviewDeadlines(makeEnv(db));
     expect(mockFetch).not.toHaveBeenCalled();
 
+    vi.unstubAllGlobals();
+  });
+
+  it('keeps the webhook URL out of the log when the Slack alert fails', async () => {
+    const approachingCase = makeCase({
+      deadline_at: new Date(Date.now() + 1 * 24 * 60 * 60 * 1000).toISOString(),
+      state: 'restricted_pending_user_response',
+    });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const mockFetch = rejectLikeWorkersRuntime();
+    vi.stubGlobal('fetch', mockFetch);
+
+    const db = {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        bind: vi.fn().mockReturnValue({
+          all: vi.fn().mockResolvedValue({
+            results: sql.includes('+2 days') ? [approachingCase] : [],
+          }),
+          run: vi.fn().mockResolvedValue({ meta: { changes: 0 } }),
+        }),
+      })),
+    };
+
+    await checkAgeReviewDeadlines(makeEnv(db, { SLACK_WEBHOOK_URL: MALFORMED_WEBHOOK }));
+
+    expect(mockFetch).toHaveBeenCalledWith(MALFORMED_WEBHOOK, expect.anything());
+    expect(errorSpy).toHaveBeenCalled();
+    expect(echoedFragments(errorSpy.mock.calls.flat(), MALFORMED_WEBHOOK)).toEqual([]);
+
+    errorSpy.mockRestore();
     vi.unstubAllGlobals();
   });
 });
