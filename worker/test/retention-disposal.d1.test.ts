@@ -169,9 +169,12 @@ describe('protected-record retention on real D1', () => {
   // Each covered for the others, so loosening any one went unnoticed. Here each
   // row has exactly one condition inside the window.
   it('holds each false-positive condition to the 30-day window on its own', async () => {
-    // [days, seconds] for datetime('now', ?, ?): a minute inside the window, or well past it.
-    const inside = ['-30 days', '+1 minute'] as const;
-    const outside = ['-40 days', '+0 seconds'] as const;
+    // The policy under test, written out rather than read from RETENTION_DAYS so a
+    // change to the constant fails here instead of moving the test along with it.
+    const boundary = '-30 days';
+    // Modifiers for datetime('now', ?, ?): a minute inside the window, or well past it.
+    const inside = [boundary, '+1 minute'] as const;
+    const outside = [boundary, '-10 days'] as const;
     // unbound: null removes the binding, so only the subject's own cleared_at can keep it.
     const rows = [
       { name: 'binding kept by subject cleared_at', caseId: 'case-clear', pubkey: 'c'.repeat(64), cleared: inside, unbound: outside },
