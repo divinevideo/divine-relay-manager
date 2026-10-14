@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 import { AgeReviewContent } from "./AgeReviewContent";
 import type { AccountStatusResponse } from "@/lib/adminApi";
@@ -16,8 +16,8 @@ const suspended: AccountStatusResponse = { success: true, status: "suspended" };
 const banned: AccountStatusResponse = { success: true, status: "banned" };
 const statusUnavailable: AccountStatusResponse = { success: false };
 
-function ev(id: string) {
-  return { id, pubkey: "b".repeat(64), created_at: 1751000000, kind: 34235, tags: [], content: "a clip", sig: "" } as never;
+function ev(id: string, pubkey = "b".repeat(64)) {
+  return { id, pubkey, created_at: 1751000000, kind: 34235, tags: [], content: "a clip", sig: "" } as never;
 }
 
 const found = (event: ReturnType<typeof ev>, isBanned = false): ReportedEventResult =>
@@ -274,22 +274,18 @@ describe("AgeReviewContent: author attribution", () => {
     Object.assign(navigator, { clipboard: { writeText } });
   });
 
-  function byAuthor(id: string) {
-    return { id, pubkey: author, created_at: 1751000000, kind: 34235, tags: [], content: "a clip", sig: "" } as never;
-  }
-
-  it("lets a moderator copy the full author pubkey of a content card", () => {
-    render(<AgeReviewContent {...base} postCount={1} recentPosts={[byAuthor("1".repeat(64))]} />);
+  it("lets a moderator copy the full author pubkey of a content card", async () => {
+    render(<AgeReviewContent {...base} postCount={1} recentPosts={[ev("1".repeat(64), author)]} />);
     fireEvent.click(screen.getByRole("button", { name: /0123456789ab/ }));
-    expect(writeText).toHaveBeenCalledWith(author);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(author));
   });
 
-  it("lets a moderator copy the full pubkey of a foreign post's author from the warning", () => {
+  it("lets a moderator copy the full pubkey of a foreign post's author from the warning", async () => {
     render(
-      <AgeReviewContent {...base} hasReportId reportedEvent={{ status: "target_foreign", event: byAuthor("c".repeat(64)), banned: false }} />,
+      <AgeReviewContent {...base} hasReportId reportedEvent={{ status: "target_foreign", event: ev("c".repeat(64), author), banned: false }} />,
     );
     const warning = screen.getByText(/not by this case's subject/i);
     fireEvent.click(within(warning).getByRole("button"));
-    expect(writeText).toHaveBeenCalledWith(author);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(author));
   });
 });
