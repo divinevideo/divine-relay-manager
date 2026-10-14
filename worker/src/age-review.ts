@@ -352,7 +352,7 @@ export async function handleUpdateAgeReviewCase(
     // A voluntary application has no response clock until a human restricts it.
     // Use the existing standard deadline, preserving any report's current clock.
     if (isAccountRestrictedAgeReviewState(body.state as AgeReviewState) && !existing.deadline_at) {
-      responseDeadline = new Date(Date.now() + DEADLINE_DAYS * 864e5).toISOString();
+      responseDeadline = new Date(Date.now() + DEADLINE_DAYS * 24 * 60 * 60 * 1000).toISOString();
     }
     if (TERMINAL_STATES.includes(body.state as AgeReviewState)) {
       updates.push("closed_at = COALESCE(closed_at, datetime('now'))", 'claim_link_url = NULL');
