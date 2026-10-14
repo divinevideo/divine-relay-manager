@@ -30,6 +30,7 @@ import type { AccountBulkAction } from '../../shared/bulk-moderation';
 import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, setVerifiedMinor, createMinorAccount, HEX_64, type KeycastEnv, type KeycastReason, type KeycastResult } from './keycast-client';
 import { suspendPubkey, unsuspendPubkey, banPubkey, type BanPubkeyResult, type SecretStoreSecret } from './nip86';
 import { buildAgeReviewIdentityBlock, buildClaimedParentName, toNpub } from './report-note';
+import { fetchAccountIdentity } from './relay-profile';
 import {
   approvalRegistryStatements,
   convergeProjection,
@@ -1026,12 +1027,21 @@ export async function handleStartGreenlight(
   corsHeaders: Record<string, string>,
 ): Promise<Response> {
   if (!env.DB) return json({ success: false, error: 'Database not configured' }, 503, corsHeaders);
+  // A moderator may restrict this case, and suspension hides the profile, so
+  // capture a readable identifier while it is visible, as the report path does.
+  // An existing case captured when it opened. Null unless the relay answered.
+  const lookup = await getActiveAgeReviewCase(userPubkey, env)
+    ? null
+    : await fetchAccountIdentity(userPubkey, env.RELAY_URL).catch(() => ({ completed: false, profile: null }));
+  const identity = lookup?.profile;
   const result = await env.DB.prepare(`INSERT INTO age_review_cases
-    (id, pubkey, suspected_age_band, state, allowed_resolution, created_via, greenlight_requested_at)
-    SELECT ?, ?, 'age_13_15', 'open_reported', 'parent_video_or_email', 'greenlight_application', datetime('now')
+    (id, pubkey, suspected_age_band, state, allowed_resolution, created_via, greenlight_requested_at,
+     account_name, account_nip05, account_vine_username, identity_captured_at)
+    SELECT ?, ?, 'age_13_15', 'open_reported', 'parent_video_or_email', 'greenlight_application', datetime('now'), ?, ?, ?, ?
     WHERE NOT EXISTS (SELECT 1 FROM age_review_cases WHERE pubkey = ?
       AND state NOT IN (${TERMINAL_STATES.map(() => '?').join(',')}))`)
-    .bind(crypto.randomUUID(), userPubkey, userPubkey, ...TERMINAL_STATES).run();
+    .bind(crypto.randomUUID(), userPubkey, identity?.name ?? null, identity?.nip05 ?? null, identity?.vineUsername ?? null,
+      lookup?.completed ? new Date().toISOString() : null, userPubkey, ...TERMINAL_STATES).run();
   // A report may already exist before a moderator has reviewed it. Attach
   // the family's request to that case rather than replacing the report or
   // creating a second active case. Existing restricted cases are untouched.

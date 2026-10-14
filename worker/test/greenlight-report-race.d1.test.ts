@@ -39,10 +39,13 @@ describe('a Greenlight start racing an incoming age report', () => {
     let lookupStarted!: () => void;
     const lookupGate = new Promise<void>((resolve) => { releaseLookup = resolve; });
     const lookupEntered = new Promise<void>((resolve) => { lookupStarted = resolve; });
-    vi.mocked(fetchAccountIdentity).mockImplementation(async () => {
+    // Only the watcher's lookup is paused; the family start captures its own.
+    vi.mocked(fetchAccountIdentity).mockClear();
+    vi.mocked(fetchAccountIdentity).mockResolvedValue({ completed: true, profile: null });
+    vi.mocked(fetchAccountIdentity).mockImplementationOnce(async () => {
       lookupStarted();
       await lookupGate;
-      return { completed: true, profile: null };
+      return { completed: true, profile: { name: 'Synthetic name', nip05: null, vineUsername: 'synthetic' } };
     });
     const state = {
       storage: { get: async () => undefined, put: async () => {} },
@@ -62,7 +65,52 @@ describe('a Greenlight start racing an incoming age report', () => {
     expect(response.status).toBe(201);
     const row = await DB.prepare('SELECT report_id, reporter_pubkey FROM age_review_cases WHERE pubkey = ?').bind(owner).first<{ report_id: string; reporter_pubkey: string }>();
     expect(row).toEqual({ report_id: event.id, reporter_pubkey: event.pubkey });
+    expect(fetchAccountIdentity).toHaveBeenCalledTimes(2);
     expect((await DB.prepare("SELECT COUNT(*) AS count FROM age_review_cases WHERE pubkey = ? AND state NOT IN ('cleared', 'denied_closed')").bind(owner).first<{ count: number }>())?.count).toBe(1);
     expect((await DB.prepare("SELECT COUNT(*) AS count FROM moderation_decisions WHERE action = 'age_review_case_created'").first<{ count: number }>())?.count).toBe(0);
+  });
+  it('keeps the report identity when the family case opened without a completed capture', async () => {
+    await DB.prepare('DELETE FROM age_review_cases').run();
+    let releaseLookup!: () => void;
+    let lookupStarted!: () => void;
+    const lookupGate = new Promise<void>((resolve) => { releaseLookup = resolve; });
+    const lookupEntered = new Promise<void>((resolve) => { lookupStarted = resolve; });
+    vi.mocked(fetchAccountIdentity).mockResolvedValue({ completed: false, profile: null });
+    vi.mocked(fetchAccountIdentity).mockImplementationOnce(async () => {
+      lookupStarted();
+      await lookupGate;
+      return { completed: true, profile: { name: 'Synthetic name', nip05: null, vineUsername: 'synthetic' } };
+    });
+    const state = {
+      storage: { get: async () => undefined, put: async () => {} },
+      blockConcurrencyWhile: async (callback: () => Promise<void>) => callback(),
+    } as unknown as DurableObjectState;
+    const watcher = new ReportWatcher(state, { DB });
+    const owner = '3'.repeat(64);
+    const event: ReportEvent = { id: '4'.repeat(64), pubkey: '5'.repeat(64), kind: 1984,
+      content: '', tags: [['p', owner]], created_at: Math.floor(Date.now() / 1000) };
+    const report = watcher['createAgeReviewCase'](event, owner);
+    await lookupEntered;
+    await handleStartGreenlight(owner, { DB }, {});
+    releaseLookup();
+    await report;
+    const row = await DB.prepare('SELECT account_name, account_vine_username, identity_captured_at FROM age_review_cases WHERE pubkey = ?')
+      .bind(owner).first<{ account_name: string; account_vine_username: string; identity_captured_at: string | null }>();
+    expect(row).toMatchObject({ account_name: 'Synthetic name', account_vine_username: 'synthetic' });
+    expect(row?.identity_captured_at).toBeTruthy();
+  });
+  it('captures the account identity when a family starts, before any restriction can hide it', async () => {
+    await DB.prepare('DELETE FROM age_review_cases').run();
+    vi.mocked(fetchAccountIdentity).mockReset();
+    vi.mocked(fetchAccountIdentity).mockResolvedValue({ completed: true, profile: { name: 'Synthetic name', nip05: null, vineUsername: 'synthetic' } });
+    const owner = '6'.repeat(64);
+    await handleStartGreenlight(owner, { DB }, {});
+    // A resume reuses the case and does not look again.
+    await handleStartGreenlight(owner, { DB }, {});
+    expect(fetchAccountIdentity).toHaveBeenCalledTimes(1);
+    const row = await DB.prepare('SELECT account_name, account_vine_username, identity_captured_at FROM age_review_cases WHERE pubkey = ?')
+      .bind(owner).first<{ account_name: string; account_vine_username: string; identity_captured_at: string | null }>();
+    expect(row).toMatchObject({ account_name: 'Synthetic name', account_vine_username: 'synthetic' });
+    expect(row?.identity_captured_at).toBeTruthy();
   });
 });

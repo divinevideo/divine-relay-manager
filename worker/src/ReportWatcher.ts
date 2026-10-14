@@ -1507,6 +1507,15 @@ export class ReportWatcher implements DurableObject {
     ).run();
     if (inserted.meta?.changes === 0) {
       await this.attachReportToFamilyApplication(event, reportedPubkey);
+      // Keep this capture if the family case opened without one.
+      if (identityCapturedAt) {
+        await this.env.DB.prepare(`UPDATE age_review_cases
+          SET account_name = ?, account_nip05 = ?, account_vine_username = ?, identity_captured_at = ?
+          WHERE pubkey = ? AND state NOT IN (${TERMINAL_STATES.map(() => '?').join(',')})
+            AND created_via = 'greenlight_application' AND identity_captured_at IS NULL`)
+          .bind(identity?.name ?? null, identity?.nip05 ?? null, identity?.vineUsername ?? null, identityCapturedAt,
+            reportedPubkey, ...TERMINAL_STATES).run();
+      }
       return;
     }
 
