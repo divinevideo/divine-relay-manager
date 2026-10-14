@@ -1438,6 +1438,13 @@ type RelayRpcResult = Nip86RpcResult & Partial<BanPubkeyResult>;
 
 // "Banned, but content removal unconfirmed", copied from a ban result onto a
 // response. Empty for a clean ban.
+//
+// See banPubkey for what sets contentRemovalUnconfirmed. In funnelcake's
+// `deferred` mode the ban is acknowledged before any purge, so this is empty
+// even while the purge is still pending; funnelcake's janitor retries a failed
+// purge, and it is alerted in the infra monitoring (BanPurgeJobFailed) once
+// overdue or stopped part-way. An empty result means "ban in effect, purge
+// scheduled", not "purge done".
 function unconfirmedRemovalFields(result: Partial<BanPubkeyResult>) {
   return result.contentRemovalUnconfirmed
     ? {
