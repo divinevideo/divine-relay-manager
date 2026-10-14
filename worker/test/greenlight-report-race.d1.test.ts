@@ -144,4 +144,45 @@ describe('a Greenlight start racing an incoming age report', () => {
     expect(row).toMatchObject({ report_id: event.id, account_name: 'Synthetic name', account_vine_username: 'synthetic' });
     expect(row?.identity_captured_at).toBeTruthy();
   });
+  it.each(['report', 'family'])('keeps an existing capture when the %s side loses the insert', async (loser) => {
+    await DB.prepare('DELETE FROM age_review_cases').run();
+    let releaseLookup!: () => void;
+    let lookupStarted!: () => void;
+    const lookupGate = new Promise<void>((resolve) => { releaseLookup = resolve; });
+    const lookupEntered = new Promise<void>((resolve) => { lookupStarted = resolve; });
+    const winner = { completed: true, profile: { name: 'Winner name', nip05: null, vineUsername: 'winner' } };
+    vi.mocked(fetchAccountIdentity).mockReset();
+    vi.mocked(fetchAccountIdentity).mockResolvedValue(winner);
+    // The losing side's lookup is paused until the winner's case, with its own
+    // completed capture, has opened.
+    vi.mocked(fetchAccountIdentity).mockImplementationOnce(async () => {
+      lookupStarted();
+      await lookupGate;
+      return { completed: true, profile: { name: 'Loser name', nip05: null, vineUsername: 'loser' } };
+    });
+    const state = {
+      storage: { get: async () => undefined, put: async () => {} },
+      blockConcurrencyWhile: async (callback: () => Promise<void>) => callback(),
+    } as unknown as DurableObjectState;
+    const watcher = new ReportWatcher(state, { DB });
+    const owner = loser === 'report' ? 'b'.repeat(64) : 'c'.repeat(64);
+    const event: ReportEvent = { id: '0'.repeat(64), pubkey: 'e'.repeat(64), kind: 1984,
+      content: '', tags: [['p', owner]], created_at: Math.floor(Date.now() / 1000) };
+    if (loser === 'report') {
+      const report = watcher['createAgeReviewCase'](event, owner);
+      await lookupEntered;
+      await handleStartGreenlight(owner, { DB }, {});
+      releaseLookup();
+      await report;
+    } else {
+      const start = handleStartGreenlight(owner, { DB }, {});
+      await lookupEntered;
+      await watcher['createAgeReviewCase'](event, owner);
+      releaseLookup();
+      await start;
+    }
+    const row = await DB.prepare('SELECT account_name, account_vine_username FROM age_review_cases WHERE pubkey = ?')
+      .bind(owner).first<{ account_name: string; account_vine_username: string }>();
+    expect(row).toEqual({ account_name: 'Winner name', account_vine_username: 'winner' });
+  });
 });
