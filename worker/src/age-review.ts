@@ -1034,6 +1034,7 @@ export async function handleStartGreenlight(
     ? null
     : await fetchAccountIdentity(userPubkey, env.RELAY_URL).catch(() => ({ completed: false, profile: null }));
   const identity = lookup?.profile;
+  const identityCapturedAt = lookup?.completed ? new Date().toISOString() : null;
   const result = await env.DB.prepare(`INSERT INTO age_review_cases
     (id, pubkey, suspected_age_band, state, allowed_resolution, created_via, greenlight_requested_at,
      account_name, account_nip05, account_vine_username, identity_captured_at)
@@ -1041,7 +1042,15 @@ export async function handleStartGreenlight(
     WHERE NOT EXISTS (SELECT 1 FROM age_review_cases WHERE pubkey = ?
       AND state NOT IN (${TERMINAL_STATES.map(() => '?').join(',')}))`)
     .bind(crypto.randomUUID(), userPubkey, identity?.name ?? null, identity?.nip05 ?? null, identity?.vineUsername ?? null,
-      lookup?.completed ? new Date().toISOString() : null, userPubkey, ...TERMINAL_STATES).run();
+      identityCapturedAt, userPubkey, ...TERMINAL_STATES).run();
+  // A report case may have opened during the lookup. Keep this capture if it has none.
+  if (result.meta?.changes === 0 && identityCapturedAt) {
+    await env.DB.prepare(`UPDATE age_review_cases
+      SET account_name = ?, account_nip05 = ?, account_vine_username = ?, identity_captured_at = ?
+      WHERE pubkey = ? AND state NOT IN (${TERMINAL_STATES.map(() => '?').join(',')}) AND identity_captured_at IS NULL`)
+      .bind(identity?.name ?? null, identity?.nip05 ?? null, identity?.vineUsername ?? null, identityCapturedAt,
+        userPubkey, ...TERMINAL_STATES).run();
+  }
   // A report may already exist before a moderator has reviewed it. Attach
   // the family's request to that case rather than replacing the report or
   // creating a second active case. Existing restricted cases are untouched.

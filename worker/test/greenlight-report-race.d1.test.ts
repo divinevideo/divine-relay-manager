@@ -113,4 +113,35 @@ describe('a Greenlight start racing an incoming age report', () => {
     expect(row).toMatchObject({ account_name: 'Synthetic name', account_vine_username: 'synthetic' });
     expect(row?.identity_captured_at).toBeTruthy();
   });
+  it('keeps the family identity when a report case without a completed capture wins the insert', async () => {
+    await DB.prepare('DELETE FROM age_review_cases').run();
+    let releaseLookup!: () => void;
+    let lookupStarted!: () => void;
+    const lookupGate = new Promise<void>((resolve) => { releaseLookup = resolve; });
+    const lookupEntered = new Promise<void>((resolve) => { lookupStarted = resolve; });
+    vi.mocked(fetchAccountIdentity).mockReset();
+    vi.mocked(fetchAccountIdentity).mockResolvedValue({ completed: false, profile: null });
+    vi.mocked(fetchAccountIdentity).mockImplementationOnce(async () => {
+      lookupStarted();
+      await lookupGate;
+      return { completed: true, profile: { name: 'Synthetic name', nip05: null, vineUsername: 'synthetic' } };
+    });
+    const state = {
+      storage: { get: async () => undefined, put: async () => {} },
+      blockConcurrencyWhile: async (callback: () => Promise<void>) => callback(),
+    } as unknown as DurableObjectState;
+    const watcher = new ReportWatcher(state, { DB });
+    const owner = '7'.repeat(64);
+    const event: ReportEvent = { id: '8'.repeat(64), pubkey: '9'.repeat(64), kind: 1984,
+      content: '', tags: [['p', owner]], created_at: Math.floor(Date.now() / 1000) };
+    const start = handleStartGreenlight(owner, { DB }, {});
+    await lookupEntered;
+    await watcher['createAgeReviewCase'](event, owner);
+    releaseLookup();
+    expect((await start).status).toBe(200);
+    const row = await DB.prepare('SELECT report_id, account_name, account_vine_username, identity_captured_at FROM age_review_cases WHERE pubkey = ?')
+      .bind(owner).first<{ report_id: string; account_name: string; account_vine_username: string; identity_captured_at: string | null }>();
+    expect(row).toMatchObject({ report_id: event.id, account_name: 'Synthetic name', account_vine_username: 'synthetic' });
+    expect(row?.identity_captured_at).toBeTruthy();
+  });
 });
