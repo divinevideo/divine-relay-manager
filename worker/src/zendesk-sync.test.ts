@@ -4,6 +4,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import worker from './index';
 import { syncZendeskAfterAction, getLinkedTickets, closeTicketById } from './zendesk-sync';
+import { echoedFragments } from './test-helpers/secret-echo';
 
 const WEBHOOK_SECRET = 'test-parse-report-secret';
 const TEST_NSEC = 'nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5';
@@ -278,6 +279,49 @@ function mockRelay(events: Array<Record<string, unknown>>) {
     };
   } as unknown as typeof WebSocket));
 }
+
+describe('handleParseReport keeps secret values out of logs', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('logs no part of the webhook key or the zendesk-named header values', async () => {
+    // Synthetic random hex. No two values share an 8-character run, so a
+    // match names the header it came from.
+    const webhookKey = '3f9c1e7a52d84b06e1a7c9f2';
+    const headerValues: Record<string, string> = {
+      'X-Webhook-Key': webhookKey,
+      'X-Zendesk-Webhook-Signature': '8b2d6f0a4e91c37d5a0f8e64',
+      'X-Zendesk-Webhook-Signature-Timestamp': 'c47e09b3f1d26a85b9e3074c',
+      'X-Zendesk-Webhook-Id': '61a5d8c2e07f93b4d2c6a1e8',
+    };
+    const windows = Object.values(headerValues).map(
+      (v) => new Set(Array.from({ length: v.length - 7 }, (_, i) => v.slice(i, i + 8))),
+    );
+    for (let a = 0; a < windows.length; a++) {
+      for (let b = a + 1; b < windows.length; b++) {
+        expect([...windows[a]].filter((w) => windows[b].has(w))).toEqual([]);
+      }
+    }
+    const spies = (['log', 'info', 'warn', 'error', 'debug', 'dir', 'trace', 'table'] as const)
+      .map((method) => vi.spyOn(console, method).mockImplementation(() => {}));
+
+    const request = new Request('https://api-relay-prod.divine.video/api/zendesk/parse-report', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...headerValues },
+      // No ticket_id: the handler answers 400 after verifying the key, without
+      // touching the relay or Zendesk.
+      body: JSON.stringify({}),
+    });
+    const response = await worker.fetch(request, makeEnv({ ZENDESK_PARSE_REPORT_SECRET: webhookKey }), ctx);
+
+    expect(response.status).toBe(400);
+    const logged = spies.flatMap((spy) => spy.mock.calls.flat());
+    for (const value of Object.values(headerValues)) {
+      expect(echoedFragments(logged, value)).toEqual([]);
+    }
+  });
+});
 
 describe('handleParseReport author derivation', () => {
   afterEach(() => {

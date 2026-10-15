@@ -46,6 +46,7 @@ import {
   UUID_RE,
 } from './protected-minors';
 import { digestProvisioningFingerprint, findProvisioningTombstone, resolveTombstoneKey } from './retention';
+import { errorNameOnly } from './error-name';
 import {
   parseConsentMultipart,
   R2MultipartVideoWriter,
@@ -2672,7 +2673,7 @@ async function sendSlackAlert(
     }
     return true;
   } catch (error) {
-    console.error('[age-review] Failed to send Slack alert:', error);
+    console.error('[age-review] Failed to send Slack alert:', errorNameOnly(error));
     return false;
   }
 }
@@ -2695,7 +2696,7 @@ export async function sendDbUnavailableAlert(webhookUrl: string, environment: st
     }
     return true;
   } catch (error) {
-    console.error('[age-review] Failed to send DB-unavailable Slack alert:', error);
+    console.error('[age-review] Failed to send DB-unavailable Slack alert:', errorNameOnly(error));
     return false;
   }
 }

@@ -2,6 +2,7 @@
 // ABOUTME: Uses vitest with mocked fetch for relay calls
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { generateSecretKey, getPublicKey, nip19 } from 'nostr-tools';
 import {
   getSecretKey,
   getAdminPubkey,
@@ -15,6 +16,7 @@ import {
   unsuspendPubkey,
   type Nip86Env,
 } from './nip86';
+import { echoedFragments } from './test-helpers/secret-echo';
 
 // Test nsec (DO NOT USE IN PRODUCTION - this is a throwaway test key)
 const TEST_NSEC = 'nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5';
@@ -54,6 +56,43 @@ describe('getSecretKey', () => {
   it('should throw on invalid format', async () => {
     const env = { NOSTR_NSEC: 'npub1invalid' };
     await expect(getSecretKey(env)).rejects.toThrow();
+  });
+
+  describe('keeps secret values out of error messages', () => {
+    async function rejectionOf(env: Pick<Nip86Env, 'NOSTR_NSEC'>): Promise<unknown> {
+      try {
+        await getSecretKey(env);
+      } catch (error) {
+        return error;
+      }
+      throw new Error('expected getSecretKey to reject');
+    }
+
+    // Generated per run: never a real key.
+    const generatedNsec = nip19.nsecEncode(generateSecretKey());
+    const lastChar = generatedNsec.at(-1) === 'q' ? 'p' : 'q';
+
+    const malformed: Array<[string, string]> = [
+      ['a bad checksum', generatedNsec.slice(0, -1) + lastChar],
+      ['a wrong prefix', 'nsex1' + generatedNsec.slice('nsec1'.length)],
+      ['a valid npub', nip19.npubEncode(getPublicKey(generateSecretKey()))],
+      ['garbage', 'garbage1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz'],
+    ];
+
+    it.each(malformed)('rejects %s with a fixed message', async (_label, value) => {
+      const error = await rejectionOf({ NOSTR_NSEC: value });
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe('NOSTR_NSEC is not a valid nsec');
+      expect((error as Error).cause).toBeUndefined();
+      expect(echoedFragments([error], value)).toEqual([]);
+    });
+
+    it('rejects a bad checksum from the Secrets Store without echoing it', async () => {
+      const value = generatedNsec.slice(0, -1) + lastChar;
+      const error = await rejectionOf({ NOSTR_NSEC: { get: async () => value } });
+      expect((error as Error).message).toBe('NOSTR_NSEC is not a valid nsec');
+      expect(echoedFragments([error], value)).toEqual([]);
+    });
   });
 });
 
