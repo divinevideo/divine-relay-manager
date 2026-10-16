@@ -32,6 +32,7 @@ import { ThreadContext } from "@/components/ThreadContext";
 import { UserProfileCard } from "@/components/UserProfileCard";
 import { UserIdentifier } from "@/components/UserIdentifier";
 import { ReporterInline } from "@/components/ReporterCard";
+import { ReportClientText } from "@/components/ReportClientText";
 import { AISummary } from "@/components/AISummary";
 
 import { ThreadModal } from "@/components/ThreadModal";
@@ -754,16 +755,19 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                 </Badge>
               )}
             </div>
-            <span className="text-xs text-muted-foreground">
-              Reported: {new Date(report.created_at * 1000).toLocaleString(undefined, {
-                year: 'numeric',
-                month: 'short',
-                day: 'numeric',
-                hour: 'numeric',
-                minute: '2-digit',
-                timeZoneName: 'short'
-              })}
-            </span>
+            <div className="flex flex-col items-end gap-0.5 min-w-0 text-right">
+              <span className="text-xs text-muted-foreground">
+                Reported: {new Date(report.created_at * 1000).toLocaleString(undefined, {
+                  year: 'numeric',
+                  month: 'short',
+                  day: 'numeric',
+                  hour: 'numeric',
+                  minute: '2-digit',
+                  timeZoneName: 'short'
+                })}
+              </span>
+              <ReportClientText reports={[report]} />
+            </div>
           </div>
 
           {/* Linked Zendesk ticket(s), when the report has a valid lookup target. */}
@@ -800,11 +804,12 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                         />
                       </div>
                       {/* Report details */}
-                      <div className="flex items-center gap-2 mb-1">
+                      <div className="flex items-center gap-2 mb-1 min-w-0">
                         <Badge variant="destructive" className="text-xs">{catLabel}</Badge>
                         <span className="text-xs text-muted-foreground">
                           {new Date(r.created_at * 1000).toLocaleDateString()}
                         </span>
+                        <ReportClientText reports={[r]} />
                       </div>
                       {r.content ? (
                         <p className="text-sm text-muted-foreground">{r.content}</p>

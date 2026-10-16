@@ -46,6 +46,7 @@ import { ReportDetail } from "@/components/ReportDetail";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { ReportDetailErrorFallback } from "@/components/ReportDetailErrorFallback";
 import { DeepLinkFallback } from "@/components/DeepLinkFallback";
+import { ReportClientText } from "@/components/ReportClientText";
 import { classifyTargetedFetch, reportsMatchingTarget, type DeepLinkStatus } from "@/lib/deepLinkResolution";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { useBannedPubkeys, useBannedEvents } from "@/hooks/useRelayBanLists";
@@ -329,6 +330,7 @@ function ConsolidatedReportItem({
             {reporterCount} reporter{reporterCount !== 1 ? 's' : ''}
           </span>
         </div>
+        <ReportClientText reports={consolidated.reports} />
 
         {/* Target ID - full bech32 with CSS truncation */}
         <TargetId value={consolidated.target.value} type={consolidated.target.type} />
@@ -394,6 +396,7 @@ function IndividualReportItem({
             {new Date(report.created_at * 1000).toLocaleDateString()}
           </div>
         </div>
+        <ReportClientText reports={[report]} />
         {target && (
           <TargetId value={target.value} type={target.type} />
         )}

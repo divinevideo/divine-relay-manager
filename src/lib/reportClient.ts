@@ -21,12 +21,7 @@ export function getReportClientName(event: NostrEvent): string | undefined {
   return name || undefined;
 }
 
-export function describeReportClient(event: NostrEvent): string {
-  const name = getReportClientName(event);
-  return name ? `Filed via ${name}` : NO_APP_NAMED;
-}
-
-/** One line for a group of reports on the same target, for the queue card. */
+/** One line for one report, or for every report in a queue group. */
 export function describeReportClients(events: NostrEvent[]): string {
   const names: string[] = [];
   let unnamed = 0;

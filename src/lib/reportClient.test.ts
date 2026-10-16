@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { NostrEvent } from '@nostrify/nostrify';
-import { describeReportClient, describeReportClients, getReportClientName } from './reportClient';
+import { describeReportClients, getReportClientName } from './reportClient';
 
 function report(tags: string[][]): NostrEvent {
   return {
@@ -48,17 +48,15 @@ describe('getReportClientName', () => {
   });
 });
 
-describe('describeReportClient', () => {
-  it('says which app the report names', () => {
-    expect(describeReportClient(report([['client', 'Example App']]))).toBe('Filed via Example App');
-  });
-
-  it('says so neutrally when the report names no app', () => {
-    expect(describeReportClient(report([]))).toBe('No app named');
-  });
-});
-
 describe('describeReportClients', () => {
+  it('says which app a single report names', () => {
+    expect(describeReportClients([report([['client', 'Example App']])])).toBe('Filed via Example App');
+  });
+
+  it('says so neutrally when a single report names no app', () => {
+    expect(describeReportClients([report([])])).toBe('No app named');
+  });
+
   it('lists each named app once, in the order first seen', () => {
     const reports = [
       report([['client', 'Example App']]),
