@@ -72,6 +72,56 @@ describe('ReporterInline relay-profile badge', () => {
   });
 });
 
+describe('ReporterInline report count', () => {
+  // getTrustLevel used to badge 50+ filings as "Trusted": a count dressed as a
+  // judgment of the reporter. Only the count is known.
+  it('shows the count of reports filed without a trust label', async () => {
+    relayHas(60);
+    renderInline();
+    expect(await screen.findByText('60 reports filed')).toBeInTheDocument();
+    for (const label of ['Trusted', 'Active', 'Regular', 'New', 'First-time']) {
+      expect(screen.queryByText(label)).not.toBeInTheDocument();
+    }
+  });
+
+  it('marks a count that reached the read limit as a floor', async () => {
+    relayHas(100);
+    renderInline();
+    expect(await screen.findByText('100+ reports filed')).toBeInTheDocument();
+  });
+
+  it('does not print a failed read as zero reports', async () => {
+    relay.query.mockResolvedValue([]); // NPool.query's answer to a failed read
+    relay.req.mockImplementation(async function* () {
+      yield ['CLOSED', 'sub', 'error: could not complete query'];
+    });
+    renderInline();
+    expect(await screen.findByText('report count unavailable')).toBeInTheDocument();
+    expect(screen.queryByText('0 reports filed')).not.toBeInTheDocument();
+  });
+});
+
+describe('ReporterInline nip05', () => {
+  it('shows the nip05 the profile claims, marked unverified', () => {
+    authorState.data = { metadata: { name: 'synthetic-reporter', nip05: 'synthetic@example.test' }, isFunnelcakeUser: true };
+    renderInline();
+    expect(screen.getByText('synthetic@example.test')).toBeInTheDocument();
+    expect(screen.getByText('(unverified)')).toBeInTheDocument();
+  });
+
+  it('shows nothing for a reporter with no nip05', () => {
+    renderInline();
+    expect(screen.queryByText('(unverified)')).not.toBeInTheDocument();
+  });
+
+  it('shows nothing for a reporter with no profile at all', () => {
+    authorState.data = { isFunnelcakeUser: false };
+    renderInline();
+    expect(screen.queryByText('(unverified)')).not.toBeInTheDocument();
+    expect(screen.getByText('No relay profile')).toBeInTheDocument();
+  });
+});
+
 // The current Divine app's profile CSAM report shape.
 function profileReport(idChar: string, reporterChar: string): NostrEvent {
   return {

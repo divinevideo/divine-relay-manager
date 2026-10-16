@@ -1301,7 +1301,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
             REMOVED: Redundant reporter section (Jan 2026)
             - Was showing ReporterList (multiple) or ReporterInfo (single) here
             - Now redundant because "Why This Was Reported" section above shows reporters
-              with trust level badges via ReporterInline component
+              with their report counts via the ReporterInline component
             - To restore: use <ReporterList reports={allReportsForTarget} maxVisible={5} />
               for multiple reports, or <ReporterInfo profile={context.reporter.profile}
               pubkey={context.reporter.pubkey} reportCount={context.reporter.reportCount} />

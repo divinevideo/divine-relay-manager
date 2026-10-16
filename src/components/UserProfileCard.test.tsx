@@ -224,3 +224,15 @@ describe('UserProfileCard comment context', () => {
     expect(titleCalls.targets.at(-1)).toEqual([]);
   });
 });
+
+describe('UserProfileCard nip05', () => {
+  // Nothing checks a profile's nip05 against the domain's nostr.json, and any
+  // account can claim any domain, so it must not carry a verified check (#132).
+  it('shows the claimed nip05 as unverified, with no check mark', () => {
+    render(<UserProfileCard pubkey={PUBKEY} stats={stats([])} profile={{ name: 'synthetic', nip05: 'synthetic@example.test' }} />);
+    const nip05 = screen.getByText('synthetic@example.test');
+    const row = nip05.parentElement!;
+    expect(row).toHaveTextContent('(unverified)');
+    expect(row.querySelector('svg')).toBeNull();
+  });
+});

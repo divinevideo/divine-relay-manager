@@ -9,11 +9,12 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useApiUrl } from "@/hooks/useAdminApi";
-import { User, FileText, Flag, Tag, CheckCircle, ChevronDown, ChevronUp, Copy, Check, ArrowUpRight, Trash2, Globe, ExternalLink, Activity, Eye, EyeOff } from "lucide-react";
+import { User, FileText, Flag, Tag, ChevronDown, ChevronUp, Copy, Check, ArrowUpRight, Trash2, Globe, ExternalLink, Activity, Eye, EyeOff } from "lucide-react";
 import { InlineMediaPreview } from "@/components/MediaPreview";
 import type { NostrEvent, NostrMetadata } from "@nostrify/nostrify";
 import type { UserStats } from "@/hooks/useUserStats";
 import { RELAY_PROFILE_BADGE, getProfileUrl, getPublicEventUrl } from "@/lib/constants";
+import { ClaimedNip05 } from "@/components/ClaimedNip05";
 import { parseRepostForDisplay } from "@/lib/nip18";
 import { KindBadge } from "@/components/KindBadge";
 import { getCommentTarget, formatCommentActivity } from "@/lib/commentActivity";
@@ -183,12 +184,7 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
                 </a>
               )}
             </div>
-            {nip05 && (
-              <div className="flex items-center gap-1 text-sm text-muted-foreground min-w-0">
-                <CheckCircle className="h-3 w-3 text-green-500 shrink-0" />
-                <span className="truncate min-w-0">{nip05}</span>
-              </div>
-            )}
+            <ClaimedNip05 nip05={nip05} className="text-sm" />
             <div className="flex items-center gap-1 min-w-0">
               <code className="text-xs text-muted-foreground font-mono block truncate min-w-0 flex-1">
                 {npub}

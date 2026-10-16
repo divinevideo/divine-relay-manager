@@ -13,6 +13,9 @@ import { useState } from "react";
 import { nip19 } from "nostr-tools";
 import type { NostrEvent } from "@nostrify/nostrify";
 import { RELAY_PROFILE_BADGE, getCategoryLabel, getProfileUrl, getReportCategory } from "@/lib/constants";
+import { reportsFiledLabel } from "@/lib/historyCount";
+import { queryStrict } from "@/lib/relayRead";
+import { ClaimedNip05 } from "@/components/ClaimedNip05";
 
 interface ReporterCardProps {
   pubkey: string;
@@ -236,14 +239,8 @@ export function ReporterList({
   );
 }
 
-// Trust level based on report count
-function getTrustLevel(reportCount: number): { level: string; color: string } {
-  if (reportCount >= 50) return { level: 'Trusted', color: 'text-green-600 border-green-300 bg-green-50' };
-  if (reportCount >= 20) return { level: 'Active', color: 'text-blue-600 border-blue-300 bg-blue-50' };
-  if (reportCount >= 10) return { level: 'Regular', color: 'text-yellow-600 border-yellow-300 bg-yellow-50' };
-  if (reportCount >= 3) return { level: 'New', color: 'text-orange-600 border-orange-300 bg-orange-50' };
-  return { level: 'First-time', color: 'text-gray-600 border-gray-300 bg-gray-50' };
-}
+// The filing-history read stops here, so a count that reaches it is a floor.
+const REPORTER_COUNT_LIMIT = 100;
 
 // Inline reporter info - shows who filed a report with their report count
 interface ReporterInlineProps {
@@ -256,13 +253,16 @@ export function ReporterInline({ pubkey, onViewProfile }: ReporterInlineProps) {
   const author = useAuthor(pubkey);
   const profile = author.data?.metadata;
 
-  // Count how many reports this user has filed
-  const { data: reportCount = 0 } = useQuery({
+  // Count how many reports this user has filed. queryStrict, not nostr.query:
+  // NPool.query answers a failed or timed-out read with partial results, which
+  // would print as a smaller count than the reporter really has.
+  const reportCount = useQuery({
     queryKey: ['reporter-count', pubkey],
     queryFn: async ({ signal }) => {
-      const reports = await nostr.query(
-        [{ kinds: [1984], authors: [pubkey], limit: 100 }],
-        { signal: AbortSignal.any([signal, AbortSignal.timeout(3000)]) }
+      const reports = await queryStrict(
+        nostr,
+        [{ kinds: [1984], authors: [pubkey], limit: REPORTER_COUNT_LIMIT }],
+        { signal, timeoutMs: 3000 },
       );
       return reports.length;
     },
@@ -278,7 +278,6 @@ export function ReporterInline({ pubkey, onViewProfile }: ReporterInlineProps) {
   }
 
   const displayName = profile?.display_name || profile?.name || `${npub.slice(0, 12)}...`;
-  const trust = getTrustLevel(reportCount);
 
   if (author.isLoading) {
     return (
@@ -307,13 +306,15 @@ export function ReporterInline({ pubkey, onViewProfile }: ReporterInlineProps) {
         </Avatar>
         <span className="text-sm font-medium hover:underline">{displayName}</span>
       </a>
-      <span className="text-xs text-muted-foreground flex items-center gap-1">
-        <Flag className="h-3 w-3" />
-        {reportCount} report{reportCount !== 1 ? 's' : ''} filed
-      </span>
-      <Badge variant="outline" className={`text-xs ${trust.color}`}>
-        {trust.level}
-      </Badge>
+      <ClaimedNip05 nip05={profile?.nip05} className="text-xs max-w-full" />
+      {!reportCount.isPending && (
+        <span className="text-xs text-muted-foreground flex items-center gap-1">
+          <Flag className="h-3 w-3" />
+          {reportCount.isError
+            ? 'report count unavailable'
+            : reportsFiledLabel(reportCount.data, REPORTER_COUNT_LIMIT)}
+        </span>
+      )}
       {isFunnelcakeUser ? (
         <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80" title={RELAY_PROFILE_BADGE.present.title}>
           <Badge variant="outline" className="text-xs text-green-600 border-green-300 bg-green-50 gap-1">
