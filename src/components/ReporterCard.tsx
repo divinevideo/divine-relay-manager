@@ -12,7 +12,7 @@ import { FileText, Copy, Check, Flag, Globe } from "lucide-react";
 import { useState } from "react";
 import { nip19 } from "nostr-tools";
 import type { NostrEvent } from "@nostrify/nostrify";
-import { getCategoryLabel, getProfileUrl, getReportCategory } from "@/lib/constants";
+import { RELAY_PROFILE_BADGE, getCategoryLabel, getProfileUrl, getReportCategory } from "@/lib/constants";
 
 interface ReporterCardProps {
   pubkey: string;
@@ -315,16 +315,16 @@ export function ReporterInline({ pubkey, onViewProfile }: ReporterInlineProps) {
         {trust.level}
       </Badge>
       {isFunnelcakeUser ? (
-        <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80">
+        <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80" title={RELAY_PROFILE_BADGE.present.title}>
           <Badge variant="outline" className="text-xs text-green-600 border-green-300 bg-green-50 gap-1">
-            Divine
+            {RELAY_PROFILE_BADGE.present.label}
           </Badge>
         </a>
       ) : (
-        <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80">
+        <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80" title={RELAY_PROFILE_BADGE.absent.title}>
           <Badge variant="outline" className="text-xs text-purple-600 border-purple-300 bg-purple-50 gap-1">
             <Globe className="h-3 w-3" />
-            Nostr
+            {RELAY_PROFILE_BADGE.absent.label}
           </Badge>
         </a>
       )}

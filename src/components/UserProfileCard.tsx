@@ -13,7 +13,7 @@ import { User, FileText, Flag, Tag, CheckCircle, ChevronDown, ChevronUp, Copy, C
 import { InlineMediaPreview } from "@/components/MediaPreview";
 import type { NostrEvent, NostrMetadata } from "@nostrify/nostrify";
 import type { UserStats } from "@/hooks/useUserStats";
-import { getProfileUrl, getPublicEventUrl } from "@/lib/constants";
+import { RELAY_PROFILE_BADGE, getProfileUrl, getPublicEventUrl } from "@/lib/constants";
 import { parseRepostForDisplay } from "@/lib/nip18";
 import { KindBadge } from "@/components/KindBadge";
 import { getCommentTarget, formatCommentActivity } from "@/lib/commentActivity";
@@ -172,13 +172,13 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
                 </CardTitle>
               </a>
               {isFunnelcakeUser ? (
-                <a href={profileUrl} target="_blank" rel="noopener noreferrer">
-                  <Badge variant="outline" className="text-xs text-green-600 border-green-300 bg-green-50 shrink-0">Divine</Badge>
+                <a href={profileUrl} target="_blank" rel="noopener noreferrer" title={RELAY_PROFILE_BADGE.present.title}>
+                  <Badge variant="outline" className="text-xs text-green-600 border-green-300 bg-green-50 shrink-0">{RELAY_PROFILE_BADGE.present.label}</Badge>
                 </a>
               ) : (
-                <a href={profileUrl} target="_blank" rel="noopener noreferrer">
+                <a href={profileUrl} target="_blank" rel="noopener noreferrer" title={RELAY_PROFILE_BADGE.absent.title}>
                   <Badge variant="outline" className="text-xs text-purple-600 border-purple-300 bg-purple-50 gap-1 shrink-0">
-                    <Globe className="h-3 w-3" />Nostr
+                    <Globe className="h-3 w-3" />{RELAY_PROFILE_BADGE.absent.label}
                   </Badge>
                 </a>
               )}

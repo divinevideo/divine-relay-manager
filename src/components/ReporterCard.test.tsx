@@ -1,15 +1,76 @@
-// ABOUTME: Reporter cards in an event's related reports show category names,
-// ABOUTME: the same labels the reports list uses, in both card layouts
+// ABOUTME: Tests that reporter labels say only what is known (#132) and that reporter
+// ABOUTME: cards show category names, the same labels the reports list uses.
 
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { NostrEvent } from '@nostrify/nostrify';
-import { ReporterList } from './ReporterCard';
+import { ReporterInline, ReporterList } from './ReporterCard';
 
-// The profile lookup is a network read the category badge does not use.
-vi.mock('@/hooks/useAuthor', () => ({
-  useAuthor: () => ({ data: undefined, isLoading: false }),
+const relay = vi.hoisted(() => ({ query: vi.fn(), req: vi.fn() }));
+vi.mock('@nostrify/react', () => ({ useNostr: () => ({ nostr: relay }) }));
+
+const authorState = vi.hoisted(() => ({
+  data: undefined as { metadata?: Record<string, string>; isFunnelcakeUser: boolean } | undefined,
 }));
+vi.mock('@/hooks/useAuthor', () => ({
+  useAuthor: () => ({ data: authorState.data, isLoading: false }),
+}));
+
+const REPORTER = 'a'.repeat(64);
+
+function reportEvent(n: number): NostrEvent {
+  return {
+    id: n.toString(16).padStart(64, '0'),
+    pubkey: REPORTER,
+    kind: 1984,
+    content: '',
+    tags: [],
+    created_at: 1_750_000_000 + n,
+    sig: 'f'.repeat(128),
+  };
+}
+
+/** The reporter's filing history as the relay returns it: events, then EOSE. */
+function relayHas(count: number) {
+  const events = Array.from({ length: count }, (_, i) => reportEvent(i));
+  relay.query.mockResolvedValue(events);
+  relay.req.mockImplementation(async function* () {
+    for (const e of events) yield ['EVENT', 'sub', e];
+    yield ['EOSE', 'sub'];
+  });
+}
+
+function renderInline() {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={client}>
+      <ReporterInline pubkey={REPORTER} />
+    </QueryClientProvider>,
+  );
+}
+
+beforeEach(() => {
+  relay.query.mockReset();
+  relay.req.mockReset();
+  relayHas(0);
+  authorState.data = { metadata: { name: 'synthetic-reporter' }, isFunnelcakeUser: false };
+});
+
+describe('ReporterInline relay-profile badge', () => {
+  it('says the profile is on the relay, not that the reporter is a Divine user', () => {
+    authorState.data = { metadata: { name: 'synthetic-reporter' }, isFunnelcakeUser: true };
+    renderInline();
+    expect(screen.getByText('Profile on relay')).toBeInTheDocument();
+    expect(screen.queryByText('Divine')).not.toBeInTheDocument();
+  });
+
+  it('says no relay profile was returned, not that the reporter is a Nostr user', () => {
+    renderInline();
+    expect(screen.getByText('No relay profile')).toBeInTheDocument();
+    expect(screen.queryByText('Nostr')).not.toBeInTheDocument();
+  });
+});
 
 // The current Divine app's profile CSAM report shape.
 function profileReport(idChar: string, reporterChar: string): NostrEvent {
