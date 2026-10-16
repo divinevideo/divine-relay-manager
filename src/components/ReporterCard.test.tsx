@@ -96,7 +96,9 @@ describe('ReporterInline report count', () => {
       yield ['CLOSED', 'sub', 'error: could not complete query'];
     });
     renderInline();
-    expect(await screen.findByText('report count unavailable')).toBeInTheDocument();
+    // The count query retries once (about a second) before it gives up.
+    expect(await screen.findByText('report count unavailable', undefined, { timeout: 3000 })).toBeInTheDocument();
+    expect(relay.req).toHaveBeenCalledTimes(2);
     expect(screen.queryByText('0 reports filed')).not.toBeInTheDocument();
   });
 });

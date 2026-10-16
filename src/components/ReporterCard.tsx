@@ -266,6 +266,9 @@ export function ReporterInline({ pubkey, onViewProfile }: ReporterInlineProps) {
       );
       return reports.length;
     },
+    // nostr.query never threw, so this never retried; keep a failed read from
+    // leaving the count blank for the default three retries.
+    retry: 1,
     staleTime: 5 * 60 * 1000,
   });
 
