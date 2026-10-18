@@ -1,5 +1,11 @@
 # Parent-consent private media design
 
+## Upload body authentication
+
+The mobile client freezes the multipart body before signing. Its NIP-98 event carries one lowercase SHA-256 `payload` tag covering all bytes, including the email field, video, and multipart framing. The Worker obtains the digest from the verified event and hashes the full incoming stream with bounded memory. It completes the R2 multipart object only after the digest and email validate; otherwise it aborts that upload without replacing the previous round or advancing the case. Retries still verify their complete body before returning success.
+
+Roll out the coordinated mobile client and Worker contract together. Older flag-enabled clients that send an empty-body digest cannot use this endpoint once enforcement is deployed. The recording flag stays off by default, and the controlled staging/device submission, private playback, and approval/recovery walkthrough remains a merge gate for mobile PR #9451. Local unit or D1 tests do not establish deployment or reviewer access.
+
 ## Decision and scope
 
 The in-app parent-consent endpoint keeps its mobile contract: `POST /v1/minor-review-cases/{caseId}/parent-consent` with multipart `email` and `video`, authenticated with NIP-98. The video will be stored in a private Cloudflare R2 bucket. Zendesk will receive a private ticket comment with a reviewer link instead of an attachment. The existing email and private-link fallback remains available.

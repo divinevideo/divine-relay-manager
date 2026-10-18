@@ -60,6 +60,32 @@ describe('parseConsentMultipart', () => {
     expect(new Uint8Array(got)).toEqual(video);
   });
 
+  it('binds binary chunks and the complete multipart epilogue', async () => {
+    const data = multipartBody([
+      { name: 'email', value: 'parent@example.com' },
+      { name: 'video', filename: 'clip.mp4', type: 'video/mp4', value: new Uint8Array([0, 128, 255]) },
+    ]);
+    const raw = new Uint8Array(await new Response(data.body).arrayBuffer());
+    const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', raw)), b => b.toString(16).padStart(2, '0')).join('');
+    const result = await parseConsentMultipart(streamOf([raw], 1), data.contentType, { payloadHash: digest }, { onVideoChunk: () => {} });
+    expect(result.videoSize).toBe(3);
+    await expect(parseConsentMultipart(streamOf([raw, new TextEncoder().encode('extra')], 1), data.contentType,
+      { payloadHash: digest }, { onVideoChunk: () => {} })).rejects.toMatchObject({ status: 401 });
+    await expect(parseConsentMultipart(streamOf([raw, new Uint8Array(10)], 1), data.contentType,
+      { bodyLimit: raw.length + 1, payloadHash: digest }, { onVideoChunk: () => {} })).rejects.toMatchObject({ status: 413 });
+  });
+
+  it('rejects a second video before replacing the active multipart writer', async () => {
+    const body = multipartBody([
+      { name: 'video', filename: 'first.mp4', type: 'video/mp4', value: 'first' },
+      { name: 'video', filename: 'second.mp4', type: 'video/mp4', value: 'second' },
+    ]);
+    const start = vi.fn();
+    await expect(parseConsentMultipart(body.body, body.contentType, {}, { onVideoStart: start, onVideoChunk: () => {} }))
+      .rejects.toMatchObject({ status: 400 });
+    expect(start).toHaveBeenCalledTimes(1);
+  });
+
   it('rejects a non-video part with 415 and oversize video with 413', async () => {
     const bad = multipartBody([{ name: 'video', filename: 'x.txt', type: 'text/plain', value: 'hi' }]);
     await expect(parseConsentMultipart(bad.body, bad.contentType, {}, { onVideoChunk: () => {} }))

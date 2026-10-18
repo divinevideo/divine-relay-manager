@@ -1,6 +1,7 @@
 // ABOUTME: Private R2 storage for Greenlight parent-consent videos: streaming
 // ABOUTME: multipart parsing, Access-gated reviewer playback, and disposal.
 
+import { sha256 } from '@noble/hashes/sha256';
 import { RETENTION_DAYS } from '../../shared/retention';
 
 export const CONSENT_VIDEO_LIMIT = 80_000_000;
@@ -66,7 +67,7 @@ function concat(a: Uint8Array, b: Uint8Array): Uint8Array<ArrayBuffer> {
 export async function parseConsentMultipart(
   body: ReadableStream<Uint8Array>,
   contentType: string,
-  limits: { bodyLimit?: number; videoLimit?: number },
+  limits: { bodyLimit?: number; videoLimit?: number; payloadHash?: string },
   sink: ConsentMultipartSink,
 ): Promise<ConsentMultipartResult> {
   const bodyLimit = limits.bodyLimit ?? CONSENT_BODY_LIMIT;
@@ -79,6 +80,7 @@ export async function parseConsentMultipart(
   const marker = enc.encode(`\r\n--${boundary}`);
   const headerSep = enc.encode('\r\n\r\n');
   const reader = body.getReader();
+  const digest = limits.payloadHash ? sha256.create() : null;
 
   // The leading CRLF makes the first boundary match the same marker as the rest.
   let buf = enc.encode('\r\n');
@@ -173,6 +175,7 @@ export async function parseConsentMultipart(
       const type = headerText.match(/(?:^|\r\n)Content-Type:\s*([^\r\n]+)/i)?.[1]?.trim().toLowerCase() ?? '';
       partIsVideo = partName === 'video' && filename !== undefined;
       if (partIsVideo) {
+        if (sawVideo) throw new ConsentUploadError(400, 'Exactly one video file part is required');
         if (!type.startsWith('video/')) {
           throw new ConsentUploadError(415, 'video/* content type is required');
         }
@@ -184,19 +187,33 @@ export async function parseConsentMultipart(
     }
   };
 
-  for (;;) {
-    const next = await reader.read();
-    if (next.done) break;
-    totalBytes += next.value.byteLength;
-    if (totalBytes > bodyLimit) {
-      await reader.cancel();
-      throw new ConsentUploadError(413, 'Consent upload exceeds 82 MB');
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      totalBytes += next.value.byteLength;
+      if (totalBytes > bodyLimit) {
+        throw new ConsentUploadError(413, 'Consent upload exceeds 82 MB');
+      }
+      digest?.update(next.value);
+      // Consume and hash the entire HTTP body, including any epilogue after
+      // the closing boundary. Do not retain that epilogue in memory.
+      if ((state as string) !== 'done') {
+        buf = concat(buf, next.value);
+        await processBuffer(false);
+      }
     }
-    buf = concat(buf, next.value);
-    await processBuffer(false);
-    if ((state as string) === 'done') break;
+    if ((state as string) !== 'done') await processBuffer(true);
+    if (digest) {
+      const actual = Array.from(digest.digest(), b => b.toString(16).padStart(2, '0')).join('');
+      if (actual !== limits.payloadHash) throw new ConsentUploadError(401, 'Invalid consent payload');
+    }
+  } catch (error) {
+    await reader.cancel().catch(() => {});
+    throw error;
+  } finally {
+    reader.releaseLock();
   }
-  if ((state as string) !== 'done') await processBuffer(true);
   if (!sawVideo) throw new ConsentUploadError(400, 'A video file part is required');
   if (videoSize === 0) throw new ConsentUploadError(400, 'A non-empty video file is required');
 

@@ -1,3 +1,4 @@
+import type { AgeReviewEnv } from '../src/age-review';
 // Real-D1 (Miniflare SQLite) validation for the age-review handler fixes:
 //   optimistic concurrency: a compare-and-swap on a version column so two
 //         racing writers can't clobber each other / double-fire enforcement.
@@ -7,7 +8,7 @@ import { Miniflare } from 'miniflare';
 import type { ModerationStatusResponse } from '../../shared/age-review';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { ensureSchema } from '../src/db';
-import { handleUpdateAgeReviewCase, handleAgeReviewReplyWebhook, handleParentConsent, checkAgeReviewDeadlines, handleGetModerationStatus, handleStartGreenlight } from '../src/age-review';
+import { handleUpdateAgeReviewCase, handleAgeReviewReplyWebhook, handleParentConsent as submitBoundConsent, checkAgeReviewDeadlines, handleGetModerationStatus, handleStartGreenlight } from '../src/age-review';
 import { createSubjectWithBinding, approvalRegistryStatements, resolveByPubkey, clearSubject, markProjectionComplete } from '../src/protected-minors';
 
 let mf: Miniflare;
@@ -59,6 +60,18 @@ async function rowOf(id: string) {
     .bind(id).first<{ state: string; version: number }>();
   if (!row) throw new Error(`row not found: ${id}`);
   return row;
+}
+
+
+async function handleParentConsent(
+  request: Request, caseId: string, pubkey: string, env: AgeReviewEnv,
+  cors: Record<string, string>,
+  payloadHash = 'auto',
+) {
+  const hash = payloadHash === 'auto'
+    ? Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', await request.clone().arrayBuffer())), b => b.toString(16).padStart(2, '0')).join('')
+    : payloadHash;
+  return submitBoundConsent(request, caseId, pubkey, env, cors, hash || undefined);
 }
 
 describe('age-review handler on real D1', () => {

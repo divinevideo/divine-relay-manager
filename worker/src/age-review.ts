@@ -1260,14 +1260,18 @@ export async function handleParentConsent(
   userPubkey: string,
   env: AgeReviewEnv,
   corsHeaders: Record<string, string>,
+  payloadHash: string | undefined,
 ): Promise<Response> {
+  if (!payloadHash || !/^[0-9a-f]{64}$/.test(payloadHash)) {
+    return json({ success: false, error: 'A signed consent payload is required' }, 401, corsHeaders);
+  }
   if (!env.DB) return json({ success: false, error: 'Database not configured' }, 500, corsHeaders);
 
   let current = await env.DB.prepare('SELECT * FROM age_review_cases WHERE id = ? AND pubkey = ?')
     .bind(caseId, userPubkey).first<AgeReviewCase>();
   if (!current) return json({ success: false, error: 'Case not found' }, 404, corsHeaders);
   // A successful retry must not re-upload the video or add another comment.
-  if (current.state === 'submitted_for_review') return json({ success: true }, 200, corsHeaders);
+  const alreadySubmitted = current.state === 'submitted_for_review';
   if (TERMINAL_STATES.includes(current.state as AgeReviewState)) {
     return json({ success: false, error: 'Case is already closed' }, 400, corsHeaders);
   }
@@ -1277,7 +1281,7 @@ export async function handleParentConsent(
   if (current.allowed_resolution !== 'parent_video_or_email') {
     return json({ success: false, error: 'Parent consent video is not available for this case' }, 400, corsHeaders);
   }
-  if (!canSubmitParentConsent(current)) {
+  if (!alreadySubmitted && !canSubmitParentConsent(current)) {
     return json({ success: false, error: `Cannot submit parent consent from state '${current.state}'` }, 400, corsHeaders);
   }
   if (!request.headers.get('Content-Type')?.toLowerCase().startsWith('multipart/form-data;')) {
@@ -1288,6 +1292,16 @@ export async function handleParentConsent(
     return json({ success: false, error: 'Consent upload exceeds 82 MB' }, 413, corsHeaders);
   }
   if (!request.body) return json({ success: false, error: 'email and video are required' }, 400, corsHeaders);
+
+  if (alreadySubmitted) {
+    try {
+      await parseConsentMultipart(request.body, request.headers.get('Content-Type')!, { payloadHash }, { onVideoChunk: () => {} });
+      return json({ success: true }, 200, corsHeaders);
+    } catch (error) {
+      if (error instanceof ConsentUploadError) return json({ success: false, error: error.message }, error.status, corsHeaders);
+      return json({ success: false, error: 'Could not read consent video; retry' }, 503, corsHeaders);
+    }
+  }
 
   const nowSeconds = Math.floor(Date.now() / 1000);
   const leaseUntil = nowSeconds + 10 * 60;
@@ -1315,13 +1329,6 @@ export async function handleParentConsent(
   const isNewRound = (submission.status === 'commented' || submission.status === 'attached')
     && submission.case_version != null && submission.case_version !== current.version;
   if (isNewRound) {
-    if (env.CONSENT_VIDEO_BUCKET && submission.object_key) {
-      try { await env.CONSENT_VIDEO_BUCKET.delete(submission.object_key); } catch { /* replaced below; disposal sweeps orphans */ }
-    }
-    await env.DB.prepare(`UPDATE age_review_parent_consent_submissions
-      SET status = 'processing', receipt_id = NULL, object_key = NULL, content_type = NULL,
-        size_bytes = NULL, case_version = NULL, ticket_attempt_at = NULL, upload_token = NULL
-      WHERE case_id = ?`).bind(caseId).run();
     submission = { ...submission, status: 'processing', receipt_id: null, object_key: null, case_version: null, ticket_attempt_at: null };
   }
   const receiptId = submission.receipt_id ?? crypto.randomUUID();
@@ -1342,7 +1349,7 @@ export async function handleParentConsent(
   let writer: R2MultipartVideoWriter | null = null;
   let parsed: ConsentMultipartResult;
   try {
-    parsed = await parseConsentMultipart(request.body, request.headers.get('Content-Type')!, {}, {
+    parsed = await parseConsentMultipart(request.body, request.headers.get('Content-Type')!, { payloadHash }, {
       onVideoStart: async (contentType) => {
         if (needUpload && bucket) {
           writer = new R2MultipartVideoWriter(bucket, objectKey);
@@ -1350,8 +1357,13 @@ export async function handleParentConsent(
         }
       },
       onVideoChunk: async (chunk) => { await writer?.write(chunk); },
-      onVideoEnd: async () => { await writer?.finish(); },
     });
+    if (!parsed.email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(parsed.email) || parsed.email.length > 254) {
+      throw new ConsentUploadError(400, 'Invalid email format');
+    }
+    // Keep R2 multipart parts unreadable until the entire signed body and
+    // email have validated. A mismatch only aborts this upload.
+    await (writer as R2MultipartVideoWriter | null)?.finish();
   } catch (error) {
     await (writer as R2MultipartVideoWriter | null)?.abort();
     if (error instanceof ConsentUploadError) {
@@ -1362,11 +1374,17 @@ export async function handleParentConsent(
   }
 
   const email = parsed.email;
-  if (typeof email !== 'string' || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) || email.length > 254) {
-    return json({ success: false, error: 'Invalid email format' }, 400, corsHeaders);
-  }
   if (!bucket && needUpload) {
     return json({ success: false, error: 'Consent upload is not configured' }, 503, corsHeaders);
+  }
+
+  // A new round may replace an older stored clip only after verification.
+  if (isNewRound) {
+    if (bucket && prior?.object_key) await bucket.delete(prior.object_key);
+    await env.DB.prepare(`UPDATE age_review_parent_consent_submissions
+      SET status = 'processing', receipt_id = NULL, object_key = NULL, content_type = NULL,
+        size_bytes = NULL, case_version = NULL, ticket_attempt_at = NULL, upload_token = NULL
+      WHERE case_id = ?`).bind(caseId).run();
   }
 
   // Claim the submission row only after the body has validated, then take
