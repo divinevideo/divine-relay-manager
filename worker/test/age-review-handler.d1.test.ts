@@ -269,7 +269,7 @@ describe('age-review handler on real D1', () => {
   });
 });
 
-describe('parent-consent new round on real D1', () => {
+describe('concurrent parent-consent submissions on real D1', () => {
   beforeEach(reset);
   afterEach(() => vi.restoreAllMocks());
 
@@ -396,7 +396,43 @@ describe('parent-consent new round on real D1', () => {
     expect((await first).status).toBe(200);
 
     expect(await submissionRow()).toMatchObject({ status: 'commented', object_key: aKeys[0], case_version: 9 });
+    expect([...objects.entries()]).toEqual([[aKeys[0], 'clipA']]);
     expect(comments).toHaveLength(1);
+  });
+
+  async function seedOpenCase() {
+    await DB.prepare(`INSERT INTO age_review_cases
+      (id, pubkey, state, suspected_age_band, zendesk_ticket_id, deadline_at, clock_paused, version)
+      VALUES ('round-case', ?, 'restricted_pending_parental_consent', 'age_13_15', 42, ?, 0, 2)`)
+      .bind(owner, new Date(Date.now() + 9 * 864e5).toISOString()).run();
+  }
+
+  it('deletes its own clip when another request claims the first submission', async () => {
+    await seedOpenCase();
+    const objects = new Map<string, string>();
+    const comments = zendesk();
+    const claimFirst = async () => {
+      await DB.prepare(`INSERT INTO age_review_parent_consent_submissions (case_id, lease_until, created_at, receipt_id, object_key)
+        VALUES ('round-case', ?, 1, 'other-receipt', 'other-key')`).bind(Math.floor(Date.now() / 1000) + 600).run();
+    };
+    const res = await handleParentConsent(upload('clipB'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, [], claimFirst) }, cors);
+    expect(res.status).toBe(409);
+    expect(objects.size).toBe(0);
+    expect(await submissionRow()).toMatchObject({ receipt_id: 'other-receipt', object_key: 'other-key' });
+    expect(comments).toHaveLength(0);
+  });
+
+  it('never deletes a clip key it resumed from a submission another request holds', async () => {
+    await seedOpenCase();
+    await DB.prepare(`INSERT INTO age_review_parent_consent_submissions (case_id, lease_until, created_at, receipt_id, object_key)
+      VALUES ('round-case', ?, 1, 'held-receipt', 'held-key')`).bind(Math.floor(Date.now() / 1000) + 600).run();
+    const objects = new Map<string, string>();
+    zendesk();
+    const keys: string[] = [];
+    const res = await handleParentConsent(upload('clipB'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, keys) }, cors);
+    expect(res.status).toBe(409);
+    expect(keys).toEqual(['held-key']);
+    expect(objects.has('held-key')).toBe(true);
   });
 });
 

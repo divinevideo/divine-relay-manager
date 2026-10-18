@@ -1425,12 +1425,16 @@ export async function handleParentConsent(
     (case_id, lease_until, created_at, receipt_id, object_key) VALUES (?, ?, ?, ?, ?)`)
     .bind(caseId, leaseUntil, nowSeconds, receiptId, objectKey).run();
   if (inserted.meta?.changes !== 1) {
-    if (!prior) return json({ success: false, error: 'Submission changed; retry' }, 409, corsHeaders);
+    if (!prior) {
+      await discardOwnClip();
+      return json({ success: false, error: 'Submission changed; retry' }, 409, corsHeaders);
+    }
     if (prior.status !== 'commented' && prior.status !== 'attached') {
       const lock = await env.DB.prepare(`UPDATE age_review_parent_consent_submissions
         SET lease_until = ? WHERE case_id = ? AND status IN ('processing', 'stored') AND lease_until < ?`)
         .bind(leaseUntil, caseId, nowSeconds).run();
       if (lock.meta?.changes !== 1) {
+        await discardOwnClip();
         return json({ success: false, error: 'Consent submission is already in progress; retry' }, 409, corsHeaders);
       }
     }
@@ -1453,6 +1457,7 @@ export async function handleParentConsent(
       .bind(parsed.videoContentType, parsed.videoSize, receiptId, objectKey, leaseUntil, caseId).run();
     if (marked.meta?.changes !== 1) {
       await releaseLease();
+      await discardOwnClip();
       return json({ success: false, error: 'Submission changed; retry' }, 409, corsHeaders);
     }
     submission.status = 'stored';
