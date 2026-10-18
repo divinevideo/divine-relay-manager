@@ -1404,10 +1404,19 @@ export async function handleParentConsent(
         return json({ success: false, error: 'Could not store consent video; retry' }, 503, corsHeaders);
       }
     }
-    await env.DB.prepare(`UPDATE age_review_parent_consent_submissions
+    // Reset only the round this request read, and take the retry lease with
+    // it. A slower request for the same round must not wipe a round that a
+    // concurrent request has already recorded.
+    const reset = await env.DB.prepare(`UPDATE age_review_parent_consent_submissions
       SET status = 'processing', receipt_id = NULL, object_key = NULL, content_type = NULL,
-        size_bytes = NULL, case_version = NULL, ticket_attempt_at = NULL, upload_token = NULL
-      WHERE case_id = ?`).bind(caseId).run();
+        size_bytes = NULL, case_version = NULL, ticket_attempt_at = NULL, upload_token = NULL,
+        lease_until = ?
+      WHERE case_id = ? AND status = ? AND case_version = ?`)
+      .bind(leaseUntil, caseId, prior!.status, prior!.case_version).run();
+    if (reset.meta?.changes !== 1) {
+      await discardOwnClip();
+      return json({ success: false, error: 'Submission changed; retry' }, 409, corsHeaders);
+    }
   }
 
   // Claim the submission row only after the body has validated, then take
