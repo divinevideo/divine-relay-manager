@@ -1843,6 +1843,27 @@ describe('handleParentConsent', () => {
     expect(z.comment()).not.toContain('old-receipt');
   });
 
+  it('keeps the earlier round and drops the new clip when the old clip cannot be deleted', async () => {
+    const c = makeCase({ state: 'restricted_pending_parental_consent', zendesk_ticket_id: 42, version: 9 });
+    const prior = { status: 'commented', upload_token: null, ticket_id: 42, lease_until: 0, receipt_id: 'old-receipt', object_key: 'old-key', case_version: 7, ticket_attempt_at: null, created_at: 1 };
+    const { db, calls } = consentDb(c, prior);
+    const bucket = fakeBucket();
+    bucket.objects.set('old-key', new TextEncoder().encode('old'));
+    vi.mocked(bucket.delete).mockImplementation(async (key) => {
+      if (key === 'old-key') throw new Error('r2 down');
+      bucket.objects.delete(key as string);
+    });
+    const mockFetch = vi.fn();
+    vi.stubGlobal('fetch', mockFetch);
+    const res = await handleParentConsent(request(), c.id, c.pubkey, makeEnv(db, { CONSENT_VIDEO_BUCKET: bucket } as Partial<AgeReviewEnv>), corsHeaders);
+    expect(res.status).toBe(503);
+    expect([...bucket.objects.keys()]).toEqual(['old-key']);
+    expect(calls).toEqual([]);
+    expect(prior).toMatchObject({ status: 'commented', receipt_id: 'old-receipt', object_key: 'old-key', case_version: 7 });
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(c.state).toBe('restricted_pending_parental_consent');
+  });
+
   it('returns a non-retryable 409 when ticket creation needs manual reconciliation', async () => {
     const c = makeCase({ state: 'restricted_pending_parental_consent' });
     const { db } = consentDb(c, { status: 'stored', upload_token: null, ticket_id: null, lease_until: 0, receipt_id: 'r-old', object_key: 'k-old', case_version: null, ticket_attempt_at: Math.floor(Date.now() / 1000) - 60 * 60, created_at: 1 });

@@ -1332,6 +1332,7 @@ export async function handleParentConsent(
     submission = { ...submission, status: 'processing', receipt_id: null, object_key: null, case_version: null, ticket_attempt_at: null };
   }
   const receiptId = submission.receipt_id ?? crypto.randomUUID();
+  const ownsObjectKey = submission.object_key == null;
   const objectKey = submission.object_key ?? crypto.randomUUID();
 
   const alreadyCommented = !isNewRound
@@ -1378,9 +1379,31 @@ export async function handleParentConsent(
     return json({ success: false, error: 'Consent upload is not configured' }, 503, corsHeaders);
   }
 
+  // A request that stops before recording its clip deletes it: no D1 row
+  // names that key, so retention would never dispose of it. A key read from
+  // the prior row can belong to a concurrent request and is left alone.
+  const discardOwnClip = async (): Promise<void> => {
+    if (!needUpload || !ownsObjectKey || !bucket) return;
+    try {
+      await bucket.delete(objectKey);
+    } catch (error) {
+      console.error('[age-review] Failed to delete unrecorded consent video:', error);
+    }
+  };
+
   // A new round may replace an older stored clip only after verification.
+  // If the old clip cannot be deleted, keep the earlier round recorded so
+  // retention still disposes of it, and let the parent retry.
   if (isNewRound) {
-    if (bucket && prior?.object_key) await bucket.delete(prior.object_key);
+    if (bucket && prior?.object_key) {
+      try {
+        await bucket.delete(prior.object_key);
+      } catch (error) {
+        console.error('[age-review] Failed to delete the previous consent video:', error);
+        await discardOwnClip();
+        return json({ success: false, error: 'Could not store consent video; retry' }, 503, corsHeaders);
+      }
+    }
     await env.DB.prepare(`UPDATE age_review_parent_consent_submissions
       SET status = 'processing', receipt_id = NULL, object_key = NULL, content_type = NULL,
         size_bytes = NULL, case_version = NULL, ticket_attempt_at = NULL, upload_token = NULL
