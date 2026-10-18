@@ -1,4 +1,3 @@
-import type { AgeReviewEnv } from '../src/age-review';
 // Real-D1 (Miniflare SQLite) validation for the age-review handler fixes:
 //   optimistic concurrency: a compare-and-swap on a version column so two
 //         racing writers can't clobber each other / double-fire enforcement.
@@ -8,8 +7,9 @@ import { Miniflare } from 'miniflare';
 import type { ModerationStatusResponse } from '../../shared/age-review';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { ensureSchema } from '../src/db';
-import { handleUpdateAgeReviewCase, handleAgeReviewReplyWebhook, handleParentConsent as submitBoundConsent, checkAgeReviewDeadlines, handleGetModerationStatus, handleStartGreenlight } from '../src/age-review';
+import { handleUpdateAgeReviewCase, handleAgeReviewReplyWebhook, checkAgeReviewDeadlines, handleGetModerationStatus, handleStartGreenlight } from '../src/age-review';
 import { createSubjectWithBinding, approvalRegistryStatements, resolveByPubkey, clearSubject, markProjectionComplete } from '../src/protected-minors';
+import { submitSignedConsent } from '../src/test-helpers/signed-consent';
 
 let mf: Miniflare;
 let DB: D1Database;
@@ -60,18 +60,6 @@ async function rowOf(id: string) {
     .bind(id).first<{ state: string; version: number }>();
   if (!row) throw new Error(`row not found: ${id}`);
   return row;
-}
-
-
-async function handleParentConsent(
-  request: Request, caseId: string, pubkey: string, env: AgeReviewEnv,
-  cors: Record<string, string>,
-  payloadHash = 'auto',
-) {
-  const hash = payloadHash === 'auto'
-    ? Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', await request.clone().arrayBuffer())), b => b.toString(16).padStart(2, '0')).join('')
-    : payloadHash;
-  return submitBoundConsent(request, caseId, pubkey, env, cors, hash || undefined);
 }
 
 describe('age-review handler on real D1', () => {
@@ -130,7 +118,7 @@ describe('age-review handler on real D1', () => {
     });
     try {
       const consentEnv = { ...env, ZENDESK_SUBDOMAIN: 'test', ZENDESK_EMAIL: 'agent@test.com', ZENDESK_API_TOKEN: 'token', CONSENT_VIDEO_BUCKET: bucket as unknown as R2Bucket };
-      expect((await handleParentConsent(request(), 'consent-case', owner, consentEnv, cors)).status).toBe(200);
+      expect((await submitSignedConsent(request(), 'consent-case', owner, consentEnv, cors)).status).toBe(200);
       const status = await (await handleGetModerationStatus(owner, consentEnv, cors)).json() as ModerationStatusResponse;
       expect(status.restriction.status).toBe(restriction);
       const caseRow = await DB.prepare('SELECT state, version, clock_paused, parent_contact_email FROM age_review_cases WHERE id = ?')
@@ -143,7 +131,7 @@ describe('age-review handler on real D1', () => {
       expect(objects.get(submission!.object_key)).toEqual(new TextEncoder().encode('clip'));
       expect(commentBody).toContain(`/api/age-review/consent-video/${submission!.receipt_id}`);
       expect(calls).toHaveLength(3);
-      expect((await handleParentConsent(request(), 'consent-case', owner, consentEnv, cors)).status).toBe(200);
+      expect((await submitSignedConsent(request(), 'consent-case', owner, consentEnv, cors)).status).toBe(200);
       expect(fetchSpy).toHaveBeenCalledTimes(3);
     } finally {
       fetchSpy.mockRestore();
@@ -162,7 +150,7 @@ describe('age-review handler on real D1', () => {
     form.set('video', new File(['clip'], 'clip.mp4', { type: 'video/mp4' }));
     const request = new Request('https://api.test/v1/minor-review-cases/consent-case-404/parent-consent', { method: 'POST', body: form });
     try {
-      const res = await handleParentConsent(request, 'consent-case-404', 'b'.repeat(64), { ...env }, cors);
+      const res = await submitSignedConsent(request, 'consent-case-404', 'b'.repeat(64), { ...env }, cors);
       expect(res.status).toBe(404);
       expect(fetchSpy).not.toHaveBeenCalled();
       const row = await DB.prepare('SELECT 1 FROM age_review_parent_consent_submissions WHERE case_id = ?').bind('consent-case-404').first();
@@ -349,10 +337,10 @@ describe('concurrent parent-consent submissions on real D1', () => {
     let releaseB!: () => void;
     const bGate = new Promise<void>((resolve) => { releaseB = resolve; });
     const bucketB = bucketView(objects, bKeys, async () => { bReady(); await bGate; });
-    const slower = handleParentConsent(upload('clipB'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketB }, cors);
+    const slower = submitSignedConsent(upload('clipB'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketB }, cors);
     await bAtComplete;
 
-    const first = await handleParentConsent(upload('clipA'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, aKeys) }, cors);
+    const first = await submitSignedConsent(upload('clipA'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, aKeys) }, cors);
     expect(first.status).toBe(200);
     releaseB();
     expect((await slower).status).toBe(409);
@@ -387,10 +375,10 @@ describe('concurrent parent-consent submissions on real D1', () => {
       },
     } as unknown as D1Database;
     const aKeys: string[] = [];
-    const first = handleParentConsent(upload('clipA'), 'round-case', owner, { ...env, DB: heldDb, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, aKeys) }, cors);
+    const first = submitSignedConsent(upload('clipA'), 'round-case', owner, { ...env, DB: heldDb, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, aKeys) }, cors);
     await aAfterReset;
 
-    const second = await handleParentConsent(upload('clipB'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, []) }, cors);
+    const second = await submitSignedConsent(upload('clipB'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, []) }, cors);
     expect(second.status).toBe(409);
     releaseA();
     expect((await first).status).toBe(200);
@@ -415,7 +403,7 @@ describe('concurrent parent-consent submissions on real D1', () => {
       await DB.prepare(`INSERT INTO age_review_parent_consent_submissions (case_id, lease_until, created_at, receipt_id, object_key)
         VALUES ('round-case', ?, 1, 'other-receipt', 'other-key')`).bind(Math.floor(Date.now() / 1000) + 600).run();
     };
-    const res = await handleParentConsent(upload('clipB'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, [], claimFirst) }, cors);
+    const res = await submitSignedConsent(upload('clipB'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, [], claimFirst) }, cors);
     expect(res.status).toBe(409);
     expect(objects.size).toBe(0);
     expect(await submissionRow()).toMatchObject({ receipt_id: 'other-receipt', object_key: 'other-key' });
@@ -429,7 +417,7 @@ describe('concurrent parent-consent submissions on real D1', () => {
     const objects = new Map<string, string>();
     zendesk();
     const keys: string[] = [];
-    const res = await handleParentConsent(upload('clipB'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, keys) }, cors);
+    const res = await submitSignedConsent(upload('clipB'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, keys) }, cors);
     expect(res.status).toBe(409);
     expect(keys).toEqual(['held-key']);
     expect(objects.has('held-key')).toBe(true);
