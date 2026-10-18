@@ -52,7 +52,6 @@ describe('parseConsentMultipart', () => {
     const result = await parseConsentMultipart(body, contentType, {}, {
       onVideoStart: (t) => { started = t; },
       onVideoChunk: (c) => { got.push(...c); },
-      onVideoEnd: () => {},
     });
     expect(started).toBe('video/mp4');
     expect(result.email).toBe('parent@example.com');
@@ -150,8 +149,8 @@ describe('large clip streaming', () => {
     const result = await parseConsentMultipart(body, contentType, {}, {
       onVideoStart: (t) => writer.start(t),
       onVideoChunk: (c) => writer.write(c),
-      onVideoEnd: () => writer.finish(),
     });
+    await writer.finish();
     expect(result.videoSize).toBe(size);
     expect(partSizes).toEqual([5 * 1024 * 1024, size - 5 * 1024 * 1024]);
   });

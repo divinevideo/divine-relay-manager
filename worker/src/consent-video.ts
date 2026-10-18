@@ -38,7 +38,6 @@ function json(body: unknown, status: number, cors: Record<string, string>): Resp
 export interface ConsentMultipartSink {
   onVideoStart?: (contentType: string) => void | Promise<void>;
   onVideoChunk: (chunk: Uint8Array) => void | Promise<void>;
-  onVideoEnd?: () => void | Promise<unknown>;
 }
 
 export interface ConsentMultipartResult {
@@ -109,10 +108,8 @@ export async function parseConsentMultipart(
     }
   };
 
-  const finishPart = async (): Promise<void> => {
-    if (partIsVideo) {
-      await sink.onVideoEnd?.();
-    } else if (partName) {
+  const finishPart = (): void => {
+    if (!partIsVideo && partName) {
       const value = new TextDecoder().decode(concatAll(fieldChunks));
       fields.set(partName, value);
     }
@@ -152,7 +149,7 @@ export async function parseConsentMultipart(
         if (state === 'data') await emitData(buf.slice(0, idx));
         const trailer = new TextDecoder().decode(buf.slice(idx + marker.length, idx + marker.length + 2));
         buf = buf.slice(idx + marker.length + 2);
-        if (state === 'data') await finishPart();
+        if (state === 'data') finishPart();
         if (trailer === '--') {
           state = 'done';
           return;
