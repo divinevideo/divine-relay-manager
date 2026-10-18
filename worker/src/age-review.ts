@@ -1299,6 +1299,7 @@ export async function handleParentConsent(
       return json({ success: true }, 200, corsHeaders);
     } catch (error) {
       if (error instanceof ConsentUploadError) return json({ success: false, error: error.message }, error.status, corsHeaders);
+      console.error('[age-review] Failed to read consent retry:', error);
       return json({ success: false, error: 'Could not read consent video; retry' }, 503, corsHeaders);
     }
   }

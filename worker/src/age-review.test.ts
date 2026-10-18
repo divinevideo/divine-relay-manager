@@ -1731,6 +1731,24 @@ describe('handleParentConsent', () => {
     expect(calls).toEqual([]);
   });
 
+  it('logs a retry whose body cannot be read', async () => {
+    const c = makeCase({ state: 'submitted_for_review' });
+    const { db } = consentDb(c);
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const broken = new Request('https://api.test/v1/minor-review-cases/case-1/parent-consent', {
+      method: 'POST', headers: { 'Content-Type': 'multipart/form-data; boundary=test' },
+      body: new ReadableStream({ pull(controller) { controller.error(new Error('connection reset')); } }),
+      duplex: 'half',
+    } as RequestInit);
+    try {
+      const res = await handleParentConsent(broken, c.id, c.pubkey, makeEnv(db), corsHeaders, 'a'.repeat(64));
+      expect(res.status).toBe(503);
+      expect(errorSpy).toHaveBeenCalledWith('[age-review] Failed to read consent retry:', expect.objectContaining({ message: 'connection reset' }));
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
   it('stores the clip in R2 and comments the reviewer link before advancing the case', async () => {
     const c = makeCase({ state: 'restricted_pending_parental_consent', zendesk_ticket_id: 42, version: 7 });
     const { db, calls } = consentDb(c);
