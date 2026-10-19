@@ -5,7 +5,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { NostrEvent } from '@nostrify/nostrify';
-import { ReporterInline, ReporterList } from './ReporterCard';
+import { RELAY_PROFILE_BADGE } from '@/lib/constants';
+import { ReporterCard, ReporterInline, ReporterList } from './ReporterCard';
 
 const relay = vi.hoisted(() => ({ query: vi.fn(), req: vi.fn() }));
 vi.mock('@nostrify/react', () => ({ useNostr: () => ({ nostr: relay }) }));
@@ -157,6 +158,29 @@ describe('ReporterInline nip05', () => {
     renderInline();
     expect(screen.queryByText('(unverified)')).not.toBeInTheDocument();
     expect(screen.getByText('No relay profile found')).toBeInTheDocument();
+  });
+});
+
+describe('ReporterCard relay-profile globe', () => {
+  const globe = () => screen.queryByRole('img', { name: RELAY_PROFILE_BADGE.absent.title });
+
+  describe.each([['full', false], ['compact', true]] as const)('%s layout', (_name, compact) => {
+    it('shows no globe when the profile lookup produced no answer', () => {
+      authorState.data = undefined;
+      render(<ReporterCard pubkey={REPORTER} compact={compact} />);
+      expect(globe()).not.toBeInTheDocument();
+    });
+
+    it('shows the globe once the lookup answers that the relay has no profile', () => {
+      render(<ReporterCard pubkey={REPORTER} compact={compact} />);
+      expect(globe()).toBeInTheDocument();
+    });
+
+    it('shows no globe when the relay has a profile', () => {
+      authorState.data = { metadata: { name: 'synthetic-reporter' }, isFunnelcakeUser: true };
+      render(<ReporterCard pubkey={REPORTER} compact={compact} />);
+      expect(globe()).not.toBeInTheDocument();
+    });
   });
 });
 

@@ -86,13 +86,14 @@ function PostCard({
       return event.pubkey.slice(0, 8) + '...';
     }
   })();
-  const isFunnelcakeUser = author.data?.isFunnelcakeUser ?? false;
+  // Undefined until the profile lookup answers; the globe waits for a definite "none".
+  const isFunnelcakeUser = author.data?.isFunnelcakeUser;
   const displayName = author.data?.metadata?.display_name || author.data?.metadata?.name || npubFallback;
   const avatar = author.data?.metadata?.picture;
   const date = new Date(event.created_at * 1000);
   const profileUrl = (() => {
     try {
-      return getProfileUrl(nip19.npubEncode(event.pubkey), isFunnelcakeUser);
+      return getProfileUrl(nip19.npubEncode(event.pubkey), isFunnelcakeUser ?? false);
     } catch {
       return undefined;
     }
@@ -119,7 +120,7 @@ function PostCard({
               <div className="flex items-center gap-2 flex-wrap">
                 <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:opacity-80">
                   <span className="font-medium text-sm">{displayName}</span>
-                  {!isFunnelcakeUser && <NoRelayProfileIcon />}
+                  {isFunnelcakeUser === false && <NoRelayProfileIcon />}
                 </a>
                 <span className="text-xs text-muted-foreground">
                   {date.toLocaleDateString()} {date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}

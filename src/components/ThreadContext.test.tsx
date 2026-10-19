@@ -2,15 +2,21 @@
 
 import { render, screen, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { ThreadContext } from './ThreadContext';
 import { RELAY_PROFILE_BADGE } from '@/lib/constants';
 
 // Author metadata is useAuthor's concern (tested elsewhere); stub it so these
 // tests exercise the comments section, not profile fetching.
+const authorState = vi.hoisted(() => ({
+  result: { data: undefined, isLoading: false } as {
+    data: { isFunnelcakeUser: boolean } | undefined;
+    isLoading: boolean;
+  },
+}));
 vi.mock('@/hooks/useAuthor', () => ({
-  useAuthor: () => ({ data: undefined, isLoading: false }),
+  useAuthor: () => authorState.result,
 }));
 
 const REPORTED_USER = 'a'.repeat(64);
@@ -142,10 +148,21 @@ describe('ThreadContext moderation status summary', () => {
 });
 
 describe('ThreadContext relay-profile globe (#132)', () => {
+  beforeEach(() => {
+    authorState.result = { data: undefined, isLoading: false };
+  });
+
   // The bare purple globe beside an author our relay returned no profile for
   // used to carry no explanation at all.
   it('labels the globe with what an absent relay profile means', () => {
+    authorState.result = { data: { isFunnelcakeUser: false }, isLoading: false };
     renderThread({ replies: [], reportedPubkey: REPORTED_USER });
     expect(screen.getAllByRole('img', { name: RELAY_PROFILE_BADGE.absent.title }).length).toBeGreaterThan(0);
+  });
+
+  it('shows no globe while the profile lookup is unresolved', () => {
+    authorState.result = { data: undefined, isLoading: true };
+    renderThread({ replies: [], reportedPubkey: REPORTED_USER });
+    expect(screen.queryByRole('img', { name: RELAY_PROFILE_BADGE.absent.title })).not.toBeInTheDocument();
   });
 });

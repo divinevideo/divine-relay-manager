@@ -25,10 +25,11 @@ export function ReportedBy({ pubkey, timestamp }: ReportedByProps) {
     npub = pubkey;
   }
 
-  const isFunnelcakeUser = author.data?.isFunnelcakeUser ?? false;
+  // Undefined until the profile lookup answers; the globe waits for a definite "none".
+  const isFunnelcakeUser = author.data?.isFunnelcakeUser;
   const displayName = metadata?.display_name || metadata?.name || `${npub.slice(0, 12)}...`;
   const date = new Date(timestamp * 1000);
-  const profileUrl = getProfileUrl(npub, isFunnelcakeUser);
+  const profileUrl = getProfileUrl(npub, isFunnelcakeUser ?? false);
 
   return (
     <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -38,7 +39,7 @@ export function ReportedBy({ pubkey, timestamp }: ReportedByProps) {
           <AvatarFallback className="text-xs">{displayName.slice(0, 2).toUpperCase()}</AvatarFallback>
         </Avatar>
         <span className={metadata?.name ? "font-medium" : "font-mono"}>{displayName}</span>
-        {!isFunnelcakeUser && <NoRelayProfileIcon />}
+        {isFunnelcakeUser === false && <NoRelayProfileIcon />}
       </a>
       <span>•</span>
       <span>{date.toLocaleDateString()}</span>

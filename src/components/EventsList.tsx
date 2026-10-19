@@ -84,12 +84,13 @@ function EventCard({
   const [moderationReason, setModerationReason] = useState('');
 
   const metadata = author.data?.metadata;
-  const isFunnelcakeUser = author.data?.isFunnelcakeUser ?? false;
+  // Undefined until the profile lookup answers; the globe waits for a definite "none".
+  const isFunnelcakeUser = author.data?.isFunnelcakeUser;
   const displayName = metadata?.name || nip19.npubEncode(event.pubkey).slice(0, 12) + '...';
   const profileImage = metadata?.picture;
   const profileUrl = (() => {
     try {
-      return getProfileUrl(nip19.npubEncode(event.pubkey), isFunnelcakeUser);
+      return getProfileUrl(nip19.npubEncode(event.pubkey), isFunnelcakeUser ?? false);
     } catch {
       return undefined;
     }
@@ -145,7 +146,7 @@ function EventCard({
             <div className="min-w-0">
               <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:opacity-80" onClick={(e) => e.stopPropagation()}>
                 <p className="font-medium text-sm truncate">{displayName}</p>
-                {!isFunnelcakeUser && <NoRelayProfileIcon />}
+                {isFunnelcakeUser === false && <NoRelayProfileIcon />}
               </a>
               <p className="text-xs text-muted-foreground font-mono">
                 {(() => {

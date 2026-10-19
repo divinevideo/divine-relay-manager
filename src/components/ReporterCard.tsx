@@ -48,10 +48,11 @@ export function ReporterCard({
     npub = pubkey;
   }
 
-  const isFunnelcakeUser = author.data?.isFunnelcakeUser ?? false;
+  // Undefined until the profile lookup answers; the globe waits for a definite "none".
+  const isFunnelcakeUser = author.data?.isFunnelcakeUser;
   const displayName = profile?.display_name || profile?.name || `${npub.slice(0, 12)}...`;
   const npubDisplay = `${npub.slice(0, 12)}...${npub.slice(-6)}`;
-  const profileUrl = getProfileUrl(npub, isFunnelcakeUser);
+  const profileUrl = getProfileUrl(npub, isFunnelcakeUser ?? false);
 
   const copyPubkey = async () => {
     try {
@@ -90,7 +91,7 @@ export function ReporterCard({
         <div className="flex-1 min-w-0">
           <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:opacity-80">
             <p className="text-sm font-medium truncate">{displayName}</p>
-            {!isFunnelcakeUser && <NoRelayProfileIcon />}
+            {isFunnelcakeUser === false && <NoRelayProfileIcon />}
           </a>
           <p className="text-xs text-muted-foreground font-mono truncate">{npubDisplay}</p>
         </div>
@@ -120,7 +121,7 @@ export function ReporterCard({
           <div className="flex items-center gap-2">
             <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:opacity-80">
               <p className="font-medium truncate">{displayName}</p>
-              {!isFunnelcakeUser && <NoRelayProfileIcon />}
+              {isFunnelcakeUser === false && <NoRelayProfileIcon />}
             </a>
             {category && (
               <Badge variant="outline" className="text-xs shrink-0">{getCategoryLabel(category)}</Badge>

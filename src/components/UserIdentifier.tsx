@@ -55,7 +55,8 @@ export function UserIdentifier({
   }
 
   const metadata = author.data?.metadata;
-  const isFunnelcakeUser = author.data?.isFunnelcakeUser ?? false;
+  // Undefined until the profile lookup answers; the globe waits for a definite "none".
+  const isFunnelcakeUser = author.data?.isFunnelcakeUser;
   const displayName = metadata?.display_name || metadata?.name;
   const nip05 = metadata?.nip05;
   const picture = metadata?.picture;
@@ -90,7 +91,7 @@ export function UserIdentifier({
   // Full npub -- CSS truncation handles overflow based on available space
   const displayNpub = npub;
 
-  const profileUrl = getProfileUrl(npub, isFunnelcakeUser);
+  const profileUrl = getProfileUrl(npub, isFunnelcakeUser ?? false);
   // Radix remembers that an image loaded and hides the initials even after
   // AvatarImage unmounts, so a fresh root per state brings them back.
   const avatarKey = hideAvatarImage ? "hidden" : "image";
@@ -127,7 +128,7 @@ export function UserIdentifier({
                 )}
               >
                 {content}
-                {!isFunnelcakeUser && <NoRelayProfileIcon />}
+                {isFunnelcakeUser === false && <NoRelayProfileIcon />}
               </a>
             ) : (
               <span
@@ -201,7 +202,7 @@ export function UserIdentifier({
               className="inline-flex items-center gap-1 hover:opacity-80"
             >
               {nameElement}
-              {!isFunnelcakeUser && <NoRelayProfileIcon />}
+              {isFunnelcakeUser === false && <NoRelayProfileIcon />}
             </a>
           ) : (
             nameElement
@@ -282,7 +283,7 @@ export function UserIdentifier({
           className="inline-flex items-center gap-1 hover:opacity-80"
         >
           {inlineContent}
-          {!isFunnelcakeUser && <NoRelayProfileIcon />}
+          {isFunnelcakeUser === false && <NoRelayProfileIcon />}
         </a>
       ) : (
         inlineContent
@@ -321,7 +322,8 @@ export function UserDisplayName({
 }: UserDisplayNameProps) {
   const author = useAuthor(pubkey);
   const metadata = author.data?.metadata;
-  const isFunnelcakeUser = author.data?.isFunnelcakeUser ?? false;
+  // Undefined until the profile lookup answers; the globe waits for a definite "none".
+  const isFunnelcakeUser = author.data?.isFunnelcakeUser;
   const displayName = metadata?.display_name || metadata?.name;
 
   let npub = "";
@@ -342,13 +344,13 @@ export function UserDisplayName({
   if (linkToProfile) {
     return (
       <a
-        href={getProfileUrl(npub, isFunnelcakeUser)}
+        href={getProfileUrl(npub, isFunnelcakeUser ?? false)}
         target="_blank"
         rel="noopener noreferrer"
         className="inline-flex items-center gap-1 min-w-0 overflow-hidden hover:opacity-80"
       >
         {content}
-        {!isFunnelcakeUser && <NoRelayProfileIcon />}
+        {isFunnelcakeUser === false && <NoRelayProfileIcon />}
       </a>
     );
   }
