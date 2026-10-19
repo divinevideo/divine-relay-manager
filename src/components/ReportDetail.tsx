@@ -1300,12 +1300,10 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
           {/*
             REMOVED: Redundant reporter section (Jan 2026)
             - Was showing ReporterList (multiple) or ReporterInfo (single) here
-            - Now redundant because "Why This Was Reported" section above shows reporters
-              with their report counts via the ReporterInline component
-            - To restore: use <ReporterList reports={allReportsForTarget} maxVisible={5} />
-              for multiple reports, or <ReporterInfo profile={context.reporter.profile}
-              pubkey={context.reporter.pubkey} reportCount={context.reporter.reportCount} />
-              for single reporter
+            - Now redundant because "Why This Was Reported" section above shows each
+              reporter via ReporterInline (claimed nip05, relay-scoped report count)
+            - ReporterInfo, with its report-count "trust level" badge, was deleted in
+              #132; restore reporter rows with ReporterInline, not a trust label
           */}
 
           <Separator />
