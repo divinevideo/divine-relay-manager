@@ -236,3 +236,17 @@ describe('UserProfileCard nip05', () => {
     expect(row.querySelector('svg')).toBeNull();
   });
 });
+
+describe('UserProfileCard relay-profile badge', () => {
+  it('says the profile is on the relay when Funnelcake returned one', () => {
+    render(<UserProfileCard pubkey={PUBKEY} stats={stats([])} profile={{ name: 'synthetic' }} isFunnelcakeUser={true} />);
+    expect(screen.getByText('Profile on relay')).toBeInTheDocument();
+    expect(screen.queryByText('Divine')).not.toBeInTheDocument();
+  });
+
+  it('says no relay profile was found when Funnelcake returned none', () => {
+    render(<UserProfileCard pubkey={PUBKEY} stats={stats([])} profile={{ name: 'synthetic' }} isFunnelcakeUser={false} />);
+    expect(screen.getByText('No relay profile found')).toBeInTheDocument();
+    expect(screen.queryByText('Nostr')).not.toBeInTheDocument();
+  });
+});

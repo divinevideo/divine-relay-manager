@@ -132,15 +132,18 @@ export function getProfileUrl(npub: string, isFunnelcakeUser: boolean): string {
 // Wording for the badge driven by isFunnelcakeUser. It means Funnelcake returned
 // a stored profile for the pubkey, nothing more: the relay is open-write and
 // stores outside Nostr accounts' profiles too, so it must not read as "signed up
-// with Divine" (#132). Absent covers both "no stored profile" and a failed lookup.
+// with Divine" (#132). Absent is only "the REST lookup returned nothing", which
+// is also what a failed or not-yet-indexed lookup looks like. useAuthor then
+// falls back to a WebSocket read of our relay plus the profile indexers, so a
+// name and avatar shown beside the absent badge may come from another relay.
 export const RELAY_PROFILE_BADGE = {
   present: {
     label: 'Profile on relay',
     title: 'Our relay has a profile for this account. Outside Nostr accounts get this too; it does not mean they signed up with Divine.',
   },
   absent: {
-    label: 'No relay profile',
-    title: 'Our relay returned no profile for this account (none stored, or the lookup failed).',
+    label: 'No relay profile found',
+    title: "Our relay's profile lookup returned nothing: none stored, the lookup failed, or not indexed yet. A name shown here may come from another relay.",
   },
 } as const;
 

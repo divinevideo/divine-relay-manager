@@ -65,9 +65,9 @@ describe('ReporterInline relay-profile badge', () => {
     expect(screen.queryByText('Divine')).not.toBeInTheDocument();
   });
 
-  it('says no relay profile was returned, not that the reporter is a Nostr user', () => {
+  it('says no relay profile was found, not that the reporter is a Nostr user', () => {
     renderInline();
-    expect(screen.getByText('No relay profile')).toBeInTheDocument();
+    expect(screen.getByText('No relay profile found')).toBeInTheDocument();
     expect(screen.queryByText('Nostr')).not.toBeInTheDocument();
   });
 });
@@ -120,7 +120,7 @@ describe('ReporterInline nip05', () => {
     authorState.data = { isFunnelcakeUser: false };
     renderInline();
     expect(screen.queryByText('(unverified)')).not.toBeInTheDocument();
-    expect(screen.getByText('No relay profile')).toBeInTheDocument();
+    expect(screen.getByText('No relay profile found')).toBeInTheDocument();
   });
 });
 
