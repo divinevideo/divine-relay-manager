@@ -291,8 +291,9 @@ export function ReporterInline({ pubkey, onViewProfile }: ReporterInlineProps) {
     );
   }
 
-  const isFunnelcakeUser = author.data?.isFunnelcakeUser ?? false;
-  const profileUrl = getProfileUrl(npub, isFunnelcakeUser);
+  // Undefined when the lookup produced no answer: then no badge claims either way.
+  const isFunnelcakeUser = author.data?.isFunnelcakeUser;
+  const profileUrl = getProfileUrl(npub, isFunnelcakeUser ?? false);
 
   return (
     <div className="flex items-center gap-2 flex-wrap">
@@ -318,13 +319,13 @@ export function ReporterInline({ pubkey, onViewProfile }: ReporterInlineProps) {
             : reportsFiledLabel(reportCount.data, REPORTER_COUNT_LIMIT)}
         </span>
       )}
-      {isFunnelcakeUser ? (
+      {isFunnelcakeUser === true ? (
         <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80" title={RELAY_PROFILE_BADGE.present.title}>
           <Badge variant="outline" className="text-xs text-green-600 border-green-300 bg-green-50 gap-1">
             {RELAY_PROFILE_BADGE.present.label}
           </Badge>
         </a>
-      ) : (
+      ) : isFunnelcakeUser === false && (
         <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80" title={RELAY_PROFILE_BADGE.absent.title}>
           <Badge variant="outline" className="text-xs text-purple-600 border-purple-300 bg-purple-50 gap-1">
             <Globe className="h-3 w-3" />

@@ -96,14 +96,15 @@ export function useReportContext(report: NostrEvent | null) {
     reportedUser: {
       profile: reportedUser.data?.metadata,
       pubkey: targetPubkey,
-      isFunnelcakeUser: reportedUser.data?.isFunnelcakeUser ?? false,
+      /** Undefined until the profile lookup answers, so no badge claims either way. */
+      isFunnelcakeUser: reportedUser.data?.isFunnelcakeUser,
     },
     userStats: userStats.data,
     reporter: {
       profile: reporter.data?.metadata,
       pubkey: reporterPubkey,
       reportCount: reporterStats.data?.reportCount || 0,
-      isFunnelcakeUser: reporter.data?.isFunnelcakeUser ?? false,
+      isFunnelcakeUser: reporter.data?.isFunnelcakeUser,
     },
     isLoading,
     error,

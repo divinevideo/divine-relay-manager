@@ -249,4 +249,12 @@ describe('UserProfileCard relay-profile badge', () => {
     expect(screen.getByText('No relay profile found')).toBeInTheDocument();
     expect(screen.queryByText('Nostr')).not.toBeInTheDocument();
   });
+
+  // Report detail renders this card before the reported user's profile lookup
+  // has answered; it must not claim either way until it does.
+  it('shows no badge while the profile lookup is unresolved', () => {
+    render(<UserProfileCard pubkey={PUBKEY} stats={stats([])} isFunnelcakeUser={undefined} />);
+    expect(screen.queryByText('Profile on relay')).not.toBeInTheDocument();
+    expect(screen.queryByText('No relay profile found')).not.toBeInTheDocument();
+  });
 });

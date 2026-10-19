@@ -70,6 +70,13 @@ describe('ReporterInline relay-profile badge', () => {
     expect(screen.getByText('No relay profile found')).toBeInTheDocument();
     expect(screen.queryByText('Nostr')).not.toBeInTheDocument();
   });
+
+  it('shows no badge when the profile lookup produced no answer', () => {
+    authorState.data = undefined;
+    renderInline();
+    expect(screen.queryByText('Profile on relay')).not.toBeInTheDocument();
+    expect(screen.queryByText('No relay profile found')).not.toBeInTheDocument();
+  });
 });
 
 describe('ReporterInline report count', () => {

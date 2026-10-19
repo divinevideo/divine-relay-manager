@@ -38,10 +38,11 @@ export function UserProfilePreview({ pubkey, className }: UserProfilePreviewProp
   });
 
   const metadata = author?.metadata;
-  const isFunnelcakeUser = author?.isFunnelcakeUser ?? false;
+  // Undefined when the lookup produced no answer: then no badge claims either way.
+  const isFunnelcakeUser = author?.isFunnelcakeUser;
   const npub = nip19.npubEncode(pubkey);
   const isBot = metadata?.bot;
-  const profileUrl = getProfileUrl(npub, isFunnelcakeUser);
+  const profileUrl = getProfileUrl(npub, isFunnelcakeUser ?? false);
 
   if (loadingProfile) {
     return (
@@ -81,11 +82,11 @@ export function UserProfilePreview({ pubkey, className }: UserProfilePreviewProp
               <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:opacity-80">
                 <h4 className="font-semibold truncate">{displayName}</h4>
               </a>
-              {isFunnelcakeUser ? (
+              {isFunnelcakeUser === true ? (
                 <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80" title={RELAY_PROFILE_BADGE.present.title}>
                   <Badge variant="outline" className="text-xs text-green-600 border-green-300 bg-green-50">{RELAY_PROFILE_BADGE.present.label}</Badge>
                 </a>
-              ) : (
+              ) : isFunnelcakeUser === false && (
                 <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80" title={RELAY_PROFILE_BADGE.absent.title}>
                   <Badge variant="outline" className="text-xs text-purple-600 border-purple-300 bg-purple-50 gap-1">
                     <Globe className="h-3 w-3" />{RELAY_PROFILE_BADGE.absent.label}
