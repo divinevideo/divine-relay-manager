@@ -2,6 +2,7 @@
 // ABOUTME: Shows reporter identity and links to view their profile/posts
 
 import { useAuthor } from "@/hooks/useAuthor";
+import { useAppContext } from "@/hooks/useAppContext";
 import { useNostr } from "@nostrify/react";
 import { useQuery } from "@tanstack/react-query";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -250,6 +251,7 @@ interface ReporterInlineProps {
 
 export function ReporterInline({ pubkey, onViewProfile }: ReporterInlineProps) {
   const { nostr } = useNostr();
+  const { config } = useAppContext();
   const author = useAuthor(pubkey);
   const profile = author.data?.metadata;
 
@@ -257,7 +259,9 @@ export function ReporterInline({ pubkey, onViewProfile }: ReporterInlineProps) {
   // NPool.query answers a failed or timed-out read with partial results, which
   // would print as a smaller count than the reporter really has.
   const reportCount = useQuery({
-    queryKey: ['reporter-count', pubkey],
+    // Env key (apiUrl): singleton QueryClient + per-env NPool — without it a
+    // count read from one environment's relay is shown in another
+    queryKey: ['reporter-count', config.apiUrl, pubkey],
     queryFn: async ({ signal }) => {
       const reports = await queryStrict(
         nostr,
