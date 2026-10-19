@@ -8,7 +8,6 @@ import type { ReactNode } from 'react';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { useReportContext } from './useReportContext';
 
-vi.mock('@nostrify/react', () => ({ useNostr: () => ({ nostr: { query: async () => [] } }) }));
 vi.mock('@/hooks/useAppContext', () => ({ useAppContext: () => ({ config: { apiUrl: 'https://api.example.test' } }) }));
 vi.mock('@/hooks/useThread', () => ({ useThread: () => ({ data: undefined, isLoading: false, error: null }) }));
 vi.mock('@/hooks/useUserStats', () => ({ useUserStats: () => ({ data: undefined, isLoading: false, error: null }) }));

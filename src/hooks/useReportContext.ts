@@ -1,8 +1,6 @@
 // ABOUTME: Aggregates all context needed for moderating a report
 // ABOUTME: Combines thread, user stats, reporter info into single hook
 
-import { useNostr } from "@nostrify/react";
-import { useQuery } from "@tanstack/react-query";
 import { useAuthor } from "@/hooks/useAuthor";
 import { useThread } from "@/hooks/useThread";
 import { useUserStats } from "@/hooks/useUserStats";
@@ -42,7 +40,6 @@ function getRelayHint(event: NostrEvent): string | undefined {
 }
 
 export function useReportContext(report: NostrEvent | null) {
-  const { nostr } = useNostr();
   const { config } = useAppContext();
   const apiUrl = config.apiUrl;
 
@@ -65,23 +62,6 @@ export function useReportContext(report: NostrEvent | null) {
   // Get reporter's profile
   const reporter = useAuthor(reporterPubkey);
 
-  // Get reporter's report count
-  const reporterStats = useQuery({
-    queryKey: ['reporter-stats', reporterPubkey],
-    queryFn: async ({ signal }) => {
-      if (!reporterPubkey) return { reportCount: 0 };
-
-      const reports = await nostr.query(
-        [{ kinds: [1984], authors: [reporterPubkey], limit: 100 }],
-        { signal: AbortSignal.any([signal, AbortSignal.timeout(3000)]) }
-      );
-
-      return { reportCount: reports.length };
-    },
-    enabled: !!reporterPubkey,
-    staleTime: 5 * 60_000,
-  });
-
   const isLoading = thread.isLoading || reportedUser.isLoading ||
                     userStats.isLoading || reporter.isLoading;
 
@@ -103,7 +83,6 @@ export function useReportContext(report: NostrEvent | null) {
     reporter: {
       profile: reporter.data?.metadata,
       pubkey: reporterPubkey,
-      reportCount: reporterStats.data?.reportCount || 0,
       isFunnelcakeUser: reporter.data?.isFunnelcakeUser,
     },
     isLoading,
