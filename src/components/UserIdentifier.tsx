@@ -3,7 +3,8 @@
 
 import { useState } from "react";
 import { nip19 } from "nostr-tools";
-import { Copy, Check, Globe } from "lucide-react";
+import { Copy, Check } from "lucide-react";
+import { NoRelayProfileIcon } from "@/components/NoRelayProfileIcon";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import {
@@ -126,7 +127,7 @@ export function UserIdentifier({
                 )}
               >
                 {content}
-                {!isFunnelcakeUser && <Globe className="h-3 w-3 text-purple-500 shrink-0" />}
+                {!isFunnelcakeUser && <NoRelayProfileIcon />}
               </a>
             ) : (
               <span
@@ -200,7 +201,7 @@ export function UserIdentifier({
               className="inline-flex items-center gap-1 hover:opacity-80"
             >
               {nameElement}
-              {!isFunnelcakeUser && <Globe className="h-3 w-3 text-purple-500 shrink-0" />}
+              {!isFunnelcakeUser && <NoRelayProfileIcon />}
             </a>
           ) : (
             nameElement
@@ -281,7 +282,7 @@ export function UserIdentifier({
           className="inline-flex items-center gap-1 hover:opacity-80"
         >
           {inlineContent}
-          {!isFunnelcakeUser && <Globe className="h-3 w-3 text-purple-500 shrink-0" />}
+          {!isFunnelcakeUser && <NoRelayProfileIcon />}
         </a>
       ) : (
         inlineContent
@@ -347,7 +348,7 @@ export function UserDisplayName({
         className="inline-flex items-center gap-1 min-w-0 overflow-hidden hover:opacity-80"
       >
         {content}
-        {!isFunnelcakeUser && <Globe className="h-3 w-3 text-purple-500 shrink-0" />}
+        {!isFunnelcakeUser && <NoRelayProfileIcon />}
       </a>
     );
   }

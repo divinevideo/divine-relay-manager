@@ -16,7 +16,8 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAuthor } from "@/hooks/useAuthor";
 import { useAppContext } from "@/hooks/useAppContext";
-import { MessageSquare, Globe } from "lucide-react";
+import { MessageSquare } from "lucide-react";
+import { NoRelayProfileIcon } from "@/components/NoRelayProfileIcon";
 import { getProfileUrl } from "@/lib/constants";
 import { buildThreadReplyFilters } from "@/lib/threadFilters";
 import { buildThreadTree, type ThreadNode } from "@/lib/threadTree";
@@ -87,7 +88,7 @@ function ThreadPost({
             <div className="flex items-center gap-2 flex-wrap">
               <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:opacity-80">
                 <span className="text-sm font-medium">{displayName}</span>
-                {!isFunnelcakeUser && <Globe className="h-3 w-3 text-purple-500 shrink-0" />}
+                {!isFunnelcakeUser && <NoRelayProfileIcon />}
               </a>
               <span className="text-xs text-muted-foreground">
                 {date.toLocaleString()}

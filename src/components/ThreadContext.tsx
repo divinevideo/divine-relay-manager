@@ -11,6 +11,7 @@ import {
   ExternalLink, ChevronDown, ChevronUp,
   AlertTriangle, Globe, Search, Ban, RefreshCw, ShieldX,
 } from "lucide-react";
+import { NoRelayProfileIcon } from "@/components/NoRelayProfileIcon";
 import { useState } from "react";
 import type { NostrEvent } from "@nostrify/nostrify";
 import { getProfileUrl, getPublicEventUrl } from "@/lib/constants";
@@ -118,7 +119,7 @@ function PostCard({
               <div className="flex items-center gap-2 flex-wrap">
                 <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:opacity-80">
                   <span className="font-medium text-sm">{displayName}</span>
-                  {!isFunnelcakeUser && <Globe className="h-3 w-3 text-purple-500 shrink-0" />}
+                  {!isFunnelcakeUser && <NoRelayProfileIcon />}
                 </a>
                 <span className="text-xs text-muted-foreground">
                   {date.toLocaleDateString()} {date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}

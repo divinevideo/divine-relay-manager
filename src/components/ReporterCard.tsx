@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { FileText, Copy, Check, Flag, Globe } from "lucide-react";
+import { NoRelayProfileIcon } from "@/components/NoRelayProfileIcon";
 import { useState } from "react";
 import { nip19 } from "nostr-tools";
 import type { NostrEvent } from "@nostrify/nostrify";
@@ -89,7 +90,7 @@ export function ReporterCard({
         <div className="flex-1 min-w-0">
           <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:opacity-80">
             <p className="text-sm font-medium truncate">{displayName}</p>
-            {!isFunnelcakeUser && <Globe className="h-3 w-3 text-purple-500 shrink-0" />}
+            {!isFunnelcakeUser && <NoRelayProfileIcon />}
           </a>
           <p className="text-xs text-muted-foreground font-mono truncate">{npubDisplay}</p>
         </div>
@@ -119,7 +120,7 @@ export function ReporterCard({
           <div className="flex items-center gap-2">
             <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:opacity-80">
               <p className="font-medium truncate">{displayName}</p>
-              {!isFunnelcakeUser && <Globe className="h-3 w-3 text-purple-500 shrink-0" />}
+              {!isFunnelcakeUser && <NoRelayProfileIcon />}
             </a>
             {category && (
               <Badge variant="outline" className="text-xs shrink-0">{getCategoryLabel(category)}</Badge>

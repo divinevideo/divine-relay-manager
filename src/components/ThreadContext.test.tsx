@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { describe, expect, it, vi } from 'vitest';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { ThreadContext } from './ThreadContext';
+import { RELAY_PROFILE_BADGE } from '@/lib/constants';
 
 // Author metadata is useAuthor's concern (tested elsewhere); stub it so these
 // tests exercise the comments section, not profile fetching.
@@ -137,5 +138,14 @@ describe('ThreadContext moderation status summary', () => {
 
     expect(screen.getByText('Last known: banned. The latest check could not confirm it.')).toBeInTheDocument();
     expect(screen.queryByText(/Checking now/)).not.toBeInTheDocument();
+  });
+});
+
+describe('ThreadContext relay-profile globe (#132)', () => {
+  // The bare purple globe beside an author our relay returned no profile for
+  // used to carry no explanation at all.
+  it('labels the globe with what an absent relay profile means', () => {
+    renderThread({ replies: [], reportedPubkey: REPORTED_USER });
+    expect(screen.getAllByRole('img', { name: RELAY_PROFILE_BADGE.absent.title }).length).toBeGreaterThan(0);
   });
 });
