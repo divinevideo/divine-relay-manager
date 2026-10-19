@@ -94,6 +94,15 @@ describe('ReporterInline report count', () => {
     }
   });
 
+  // The count is kind 1984 events this relay holds, not every report the account
+  // has filed anywhere; the hover text says so.
+  it('says on hover that the count is only what this relay stores', async () => {
+    relayHas(4);
+    renderInline();
+    const count = await screen.findByText('4 reports filed');
+    expect(count).toHaveAttribute('title', 'Reports by this account stored on this relay');
+  });
+
   it('marks a count that reached the read limit as a floor', async () => {
     relayHas(100);
     renderInline();

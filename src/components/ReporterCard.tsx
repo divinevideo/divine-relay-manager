@@ -316,7 +316,7 @@ export function ReporterInline({ pubkey, onViewProfile }: ReporterInlineProps) {
       </a>
       <ClaimedNip05 nip05={profile?.nip05} className="text-xs max-w-full" />
       {!reportCount.isPending && (
-        <span className="text-xs text-muted-foreground flex items-center gap-1">
+        <span className="text-xs text-muted-foreground flex items-center gap-1" title="Reports by this account stored on this relay">
           <Flag className="h-3 w-3" />
           {reportCount.isError
             ? 'report count unavailable'
