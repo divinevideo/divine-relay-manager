@@ -410,17 +410,127 @@ describe('concurrent parent-consent submissions on real D1', () => {
     expect(comments).toHaveLength(0);
   });
 
-  it('never deletes a clip key it resumed from a submission another request holds', async () => {
+  // The held row is what a concurrent winner leaves between its claim and
+  // its mark ('processing', clip already at its key), or a stored row whose
+  // object is missing. Either way the loser must not write into that key.
+  it.each([
+    ['processing', [['held-key', 'clipA']]],
+    ['stored', []],
+  ] as const)('leaves a %s submission another request holds untouched and keeps none of its own upload', async (status, held) => {
     await seedOpenCase();
-    await DB.prepare(`INSERT INTO age_review_parent_consent_submissions (case_id, lease_until, created_at, receipt_id, object_key)
-      VALUES ('round-case', ?, 1, 'held-receipt', 'held-key')`).bind(Math.floor(Date.now() / 1000) + 600).run();
-    const objects = new Map<string, string>();
-    zendesk();
+    await DB.prepare(`INSERT INTO age_review_parent_consent_submissions (case_id, status, lease_until, created_at, receipt_id, object_key, content_type, size_bytes)
+      VALUES ('round-case', ?, ?, 1, 'held-receipt', 'held-key', 'video/mp4', 5)`).bind(status, Math.floor(Date.now() / 1000) + 600).run();
+    const objects = new Map<string, string>(held.map(([k, v]) => [k, v]));
+    const comments = zendesk();
     const keys: string[] = [];
     const res = await submitSignedConsent(upload('clipB'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, keys) }, cors);
     expect(res.status).toBe(409);
-    expect(keys).toEqual(['held-key']);
-    expect(objects.has('held-key')).toBe(true);
+    expect(keys).toHaveLength(1);
+    expect([...objects.entries()]).toEqual(held);
+    expect(await submissionRow()).toMatchObject({ status, receipt_id: 'held-receipt', object_key: 'held-key' });
+    expect(comments).toHaveLength(0);
+  });
+
+  it.each([
+    ['processing', [['crashed-key', 'clipA']]],
+    ['stored', []],
+  ] as const)('resumes a crashed %s submission with its own clip and deletes the crashed key', async (status, crashed) => {
+    await seedOpenCase();
+    await DB.prepare(`INSERT INTO age_review_parent_consent_submissions (case_id, status, lease_until, created_at, receipt_id, object_key, content_type, size_bytes)
+      VALUES ('round-case', ?, 1, 1, 'crashed-receipt', 'crashed-key', 'video/mp4', 5)`).bind(status).run();
+    const objects = new Map<string, string>(crashed.map(([k, v]) => [k, v]));
+    const comments = zendesk();
+    const keys: string[] = [];
+    const res = await submitSignedConsent(upload('clipB'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, keys) }, cors);
+    expect(res.status).toBe(200);
+    const row = await submissionRow();
+    expect(row).toMatchObject({ status: 'commented', receipt_id: 'crashed-receipt', object_key: keys[0] });
+    expect([...objects.entries()]).toEqual([[keys[0], 'clipB']]);
+    expect(comments).toHaveLength(1);
+    expect(comments[0]).toContain('crashed-receipt');
+    expect(await rowOf('round-case')).toMatchObject({ state: 'submitted_for_review' });
+  });
+
+  it('a resume that loses the row to a request that recorded its clip first keeps none of its own upload', async () => {
+    await seedOpenCase();
+    await DB.prepare(`INSERT INTO age_review_parent_consent_submissions (case_id, status, lease_until, created_at, receipt_id, object_key)
+      VALUES ('round-case', 'processing', 1, 1, 'crashed-receipt', 'crashed-key')`).run();
+    const objects = new Map([['crashed-key', 'clip0']]);
+    // Zendesk is down, so the other request records its clip, releases the
+    // lease and answers retry.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 500 }));
+    let bReady!: () => void;
+    const bAtComplete = new Promise<void>((resolve) => { bReady = resolve; });
+    let releaseB!: () => void;
+    const bGate = new Promise<void>((resolve) => { releaseB = resolve; });
+    const bKeys: string[] = [];
+    const slower = submitSignedConsent(upload('clipB'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, bKeys, async () => { bReady(); await bGate; }) }, cors);
+    await bAtComplete;
+
+    const cKeys: string[] = [];
+    const other = await submitSignedConsent(upload('clipC'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, cKeys) }, cors);
+    expect(other.status).toBe(503);
+    releaseB();
+    expect((await slower).status).toBe(409);
+
+    expect(await submissionRow()).toMatchObject({ status: 'stored', receipt_id: 'crashed-receipt', object_key: cKeys[0] });
+    expect([...objects.entries()]).toEqual([[cKeys[0], 'clipC']]);
+  });
+
+  it('a stalled request whose lease another request took over cannot repoint the submission or free the lease', async () => {
+    await seedOpenCase();
+    const objects = new Map<string, string>();
+    // Hold the second request at its first Zendesk call, after it has
+    // recorded its clip and while it still holds the lease.
+    let bAtZendesk!: () => void;
+    const bLinking = new Promise<void>((resolve) => { bAtZendesk = resolve; });
+    let releaseB!: () => void;
+    const bGate = new Promise<void>((resolve) => { releaseB = resolve; });
+    let gated = false;
+    const comments = zendesk();
+    const zendeskFetch = vi.mocked(globalThis.fetch).getMockImplementation()!;
+    vi.mocked(globalThis.fetch).mockImplementation(async (input, init) => {
+      if (!gated) { gated = true; bAtZendesk(); await bGate; }
+      return zendeskFetch(input, init);
+    });
+    let aAtMark!: () => void;
+    const aMarking = new Promise<void>((resolve) => { aAtMark = resolve; });
+    let releaseA!: () => void;
+    const aGate = new Promise<void>((resolve) => { releaseA = resolve; });
+    // Hold the first request after its claim, just before it marks its clip stored.
+    const heldDb = {
+      prepare: (sql: string) => {
+        const statement = DB.prepare(sql);
+        if (!sql.includes("SET status = 'stored'")) return statement;
+        return {
+          bind: (...args: unknown[]) => {
+            const bound = statement.bind(...args);
+            return { run: async () => { aAtMark(); await aGate; return bound.run(); } };
+          },
+        };
+      },
+    } as unknown as D1Database;
+    const aKeys: string[] = [];
+    const first = submitSignedConsent(upload('clipA'), 'round-case', owner, { ...env, DB: heldDb, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, aKeys) }, cors);
+    await aMarking;
+    // The first request's lease runs out while it is stalled.
+    await DB.prepare("UPDATE age_review_parent_consent_submissions SET lease_until = 1 WHERE case_id = 'round-case'").run();
+
+    const bKeys: string[] = [];
+    const second = submitSignedConsent(upload('clipB'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, bKeys) }, cors);
+    await bLinking;
+    releaseA();
+    expect((await first).status).toBe(409);
+    const held = await DB.prepare("SELECT status, object_key, lease_until FROM age_review_parent_consent_submissions WHERE case_id = 'round-case'")
+      .first<{ status: string; object_key: string; lease_until: number }>();
+    expect(held).toMatchObject({ status: 'stored', object_key: bKeys[0] });
+    expect(held!.lease_until).toBeGreaterThan(Math.floor(Date.now() / 1000));
+    releaseB();
+    expect((await second).status).toBe(200);
+
+    expect(await submissionRow()).toMatchObject({ status: 'commented', object_key: bKeys[0] });
+    expect([...objects.entries()]).toEqual([[bKeys[0], 'clipB']]);
+    expect(comments).toHaveLength(1);
   });
 });
 

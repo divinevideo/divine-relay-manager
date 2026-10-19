@@ -1333,17 +1333,20 @@ export async function handleParentConsent(
     submission = { ...submission, status: 'processing', receipt_id: null, object_key: null, case_version: null, ticket_attempt_at: null };
   }
   const receiptId = submission.receipt_id ?? crypto.randomUUID();
-  const ownsObjectKey = submission.object_key == null;
-  const objectKey = submission.object_key ?? crypto.randomUUID();
+  const recordedObjectKey = submission.object_key;
 
   const alreadyCommented = !isNewRound
     && (submission.status === 'commented' || submission.status === 'attached');
   const bucket = env.CONSENT_VIDEO_BUCKET;
   let alreadyStored = alreadyCommented;
-  if (!alreadyStored && submission.status === 'stored' && bucket && objectKey) {
-    alreadyStored = (await bucket.head(objectKey)) !== null;
+  if (!alreadyStored && submission.status === 'stored' && bucket && recordedObjectKey) {
+    alreadyStored = (await bucket.head(recordedObjectKey)) !== null;
   }
   const needUpload = !alreadyStored;
+  // An upload always goes to a key of its own. The key a prior row names can
+  // belong to a concurrent request that still holds the lease, and this
+  // request only learns whether it won after the upload has completed.
+  const objectKey = needUpload ? crypto.randomUUID() : recordedObjectKey ?? crypto.randomUUID();
 
   // Stream the multipart body: the video goes straight into R2 (or is
   // discarded on a resume where the object is already stored), and only the
@@ -1381,10 +1384,9 @@ export async function handleParentConsent(
   }
 
   // A request that stops before recording its clip deletes it: no D1 row
-  // names that key, so retention would never dispose of it. A key read from
-  // the prior row can belong to a concurrent request and is left alone.
+  // names that key, so retention would never dispose of it.
   const discardOwnClip = async (): Promise<void> => {
-    if (!needUpload || !ownsObjectKey || !bucket) return;
+    if (!needUpload || !bucket) return;
     try {
       await bucket.delete(objectKey);
     } catch (error) {
@@ -1422,6 +1424,11 @@ export async function handleParentConsent(
 
   // Claim the submission row only after the body has validated, then take
   // the retry lease so two live submissions cannot comment twice.
+  // claimedObjectKey is the key this request expects the row to name when it
+  // marks its clip stored: its own on a fresh claim, none after a new round's
+  // reset, and the earlier read's on a resume. If another request recorded a
+  // clip since that read, the mark misses and this request answers retry.
+  let claimedObjectKey: string | null = objectKey;
   const inserted = await env.DB.prepare(`INSERT OR IGNORE INTO age_review_parent_consent_submissions
     (case_id, lease_until, created_at, receipt_id, object_key) VALUES (?, ?, ?, ?, ?)`)
     .bind(caseId, leaseUntil, nowSeconds, receiptId, objectKey).run();
@@ -1430,6 +1437,7 @@ export async function handleParentConsent(
       await discardOwnClip();
       return json({ success: false, error: 'Submission changed; retry' }, 409, corsHeaders);
     }
+    claimedObjectKey = isNewRound ? null : prior.object_key;
     if (prior.status !== 'commented' && prior.status !== 'attached') {
       const lock = await env.DB.prepare(`UPDATE age_review_parent_consent_submissions
         SET lease_until = ? WHERE case_id = ? AND status IN ('processing', 'stored') AND lease_until < ?`)
@@ -1453,15 +1461,29 @@ export async function handleParentConsent(
   };
 
   if (needUpload) {
+    // Adopt this request's clip only if the row still names the key it held
+    // when it claimed the row. A request that stalled past its lease must
+    // not repoint the row at a clip the next holder has already replaced.
+    // Losing here means another request holds the row, so its lease stays.
     const marked = await env.DB.prepare(`UPDATE age_review_parent_consent_submissions
-      SET status = 'stored', content_type = ?, size_bytes = ?, receipt_id = ?, object_key = ?, lease_until = ? WHERE case_id = ?`)
-      .bind(parsed.videoContentType, parsed.videoSize, receiptId, objectKey, leaseUntil, caseId).run();
+      SET status = 'stored', content_type = ?, size_bytes = ?, receipt_id = ?, object_key = ?, lease_until = ?
+      WHERE case_id = ? AND object_key IS ?`)
+      .bind(parsed.videoContentType, parsed.videoSize, receiptId, objectKey, leaseUntil, caseId, claimedObjectKey).run();
     if (marked.meta?.changes !== 1) {
-      await releaseLease();
       await discardOwnClip();
       return json({ success: false, error: 'Submission changed; retry' }, 409, corsHeaders);
     }
     submission.status = 'stored';
+    // The clip this one replaces is no longer named by any row, so
+    // retention would never dispose of it. Best effort: a failed delete
+    // leaves an orphaned object, not a wrong one.
+    if (claimedObjectKey && claimedObjectKey !== objectKey && bucket) {
+      try {
+        await bucket.delete(claimedObjectKey);
+      } catch (error) {
+        console.error('[age-review] Failed to delete the replaced consent video:', error);
+      }
+    }
   }
 
   // The reviewer link must be on the ticket before the case advances. A
