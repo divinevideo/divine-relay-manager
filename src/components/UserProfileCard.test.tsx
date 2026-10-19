@@ -230,10 +230,12 @@ describe('UserProfileCard nip05', () => {
   // account can claim any domain, so it must not carry a verified check (#132).
   it('shows the claimed nip05 as unverified, with no check mark', () => {
     render(<UserProfileCard pubkey={PUBKEY} stats={stats([])} profile={{ name: 'synthetic', nip05: 'synthetic@example.test' }} />);
-    const nip05 = screen.getByText('synthetic@example.test');
-    const row = nip05.parentElement!;
-    expect(row).toHaveTextContent('(unverified)');
-    expect(row.querySelector('svg')).toBeNull();
+    expect(screen.getByText('synthetic@example.test').parentElement).toHaveTextContent('(unverified)');
+    // The whole profile header (name, badge, nip05, npub), so a check icon placed
+    // beside the nip05 rather than inside it is caught too.
+    const header = screen.getByText('synthetic').closest('.flex-1')!;
+    expect(header).toContainElement(screen.getByText('synthetic@example.test'));
+    expect(header.querySelector('[class*="circle-check"], [class*="check-circle"]')).toBeNull();
   });
 });
 
