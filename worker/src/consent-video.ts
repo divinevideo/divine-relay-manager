@@ -458,25 +458,30 @@ export async function disposeDueConsentVideos(db: D1Database, bucket: R2Bucket):
   // Claim only unreferenced attempts after a day. Adoption requires 'pending',
   // so a stalled request cannot resurrect a key a sweep has already claimed.
   // Keep failed deletes in 'deleting' for the next cron, including across crashes.
-  const orphaned = await db.prepare(`UPDATE age_review_consent_objects SET state = 'deleting'
-    WHERE object_key IN (
-      SELECT o.object_key FROM age_review_consent_objects o
-      WHERE o.created_at <= ?
-        AND NOT EXISTS (SELECT 1 FROM age_review_parent_consent_submissions s WHERE s.object_key = o.object_key)
-        AND NOT EXISTS (SELECT 1 FROM retention_legal_holds h
-          WHERE h.record_type = 'age_review_case' AND (h.record_key IS NULL OR h.record_key = o.case_id)
-            AND h.disposal_stage IN ('all', 'consent_video')
-            AND datetime(h.starts_at) <= datetime('now') AND h.released_at IS NULL
-            AND (h.expires_at IS NULL OR datetime(h.expires_at) > datetime('now')))
-      LIMIT 100
-    ) RETURNING object_key`).bind(Math.floor(Date.now() / 1000) - 86400).all<{ object_key: string }>();
-  for (const row of orphaned.results) {
-    try {
-      await deleteTrackedConsentObject(db, bucket, row.object_key);
-      disposed++;
-    } catch (error) {
-      console.error('[retention] unreferenced consent video delete failed:', error);
+  // A failure here must not skip the retention deletes below for this run.
+  try {
+    const orphaned = await db.prepare(`UPDATE age_review_consent_objects SET state = 'deleting'
+      WHERE object_key IN (
+        SELECT o.object_key FROM age_review_consent_objects o
+        WHERE o.created_at <= ?
+          AND NOT EXISTS (SELECT 1 FROM age_review_parent_consent_submissions s WHERE s.object_key = o.object_key)
+          AND NOT EXISTS (SELECT 1 FROM retention_legal_holds h
+            WHERE h.record_type = 'age_review_case' AND (h.record_key IS NULL OR h.record_key = o.case_id)
+              AND h.disposal_stage IN ('all', 'consent_video')
+              AND datetime(h.starts_at) <= datetime('now') AND h.released_at IS NULL
+              AND (h.expires_at IS NULL OR datetime(h.expires_at) > datetime('now')))
+        LIMIT 100
+      ) RETURNING object_key`).bind(Math.floor(Date.now() / 1000) - 86400).all<{ object_key: string }>();
+    for (const row of orphaned.results) {
+      try {
+        await deleteTrackedConsentObject(db, bucket, row.object_key);
+        disposed++;
+      } catch (error) {
+        console.error('[retention] unreferenced consent video delete failed:', error);
+      }
     }
+  } catch (error) {
+    console.error('[retention] unreferenced consent video sweep failed:', error);
   }
   const due = await db.prepare(
     `SELECT s.case_id, s.object_key FROM age_review_parent_consent_submissions s

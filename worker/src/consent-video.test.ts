@@ -223,4 +223,21 @@ describe('disposeDueConsentVideos', () => {
     // precedes the update that marks this row disposed.
     expect(order).toEqual(['db', 'r2', 'db', 'db']);
   });
+
+  it('still disposes due clips when the unreferenced-upload sweep fails', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const rows = [{ case_id: 'c1', object_key: 'obj1' }];
+    const db = { prepare: vi.fn((sql: string) => ({ bind: vi.fn(() => ({
+      all: vi.fn(async () => {
+        if (sql.includes("SET state = 'deleting'")) throw new Error('D1 unavailable');
+        return { results: sql.includes('SELECT s.case_id') && sql.includes('closed_at') ? rows : [] };
+      }),
+      run: vi.fn(async () => ({ meta: { changes: 1 } })),
+    })) })) };
+    const bucket = { delete: vi.fn(async () => {}) };
+    expect(await disposeDueConsentVideos(db as never, bucket as never)).toBe(1);
+    expect(bucket.delete).toHaveBeenCalledWith('obj1');
+    expect(logged).toHaveBeenCalled();
+    logged.mockRestore();
+  });
 });
