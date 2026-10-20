@@ -49,6 +49,8 @@ import { digestProvisioningFingerprint, findProvisioningTombstone, resolveTombst
 import { errorNameOnly } from './error-name';
 import {
   parseConsentMultipart,
+  trackConsentObject,
+  deleteTrackedConsentObject,
   R2MultipartVideoWriter,
   ConsentUploadError,
   CONSENT_BODY_LIMIT,
@@ -1296,6 +1298,11 @@ export async function handleParentConsent(
   if (alreadySubmitted) {
     try {
       await parseConsentMultipart(request.body, request.headers.get('Content-Type')!, { payloadHash }, { onVideoChunk: () => {} });
+      const accepted = await env.DB.prepare('SELECT payload_hash FROM age_review_parent_consent_submissions WHERE case_id = ?')
+        .bind(caseId).first<{ payload_hash: string | null }>();
+      if (accepted?.payload_hash !== payloadHash) {
+        return json({ success: false, error: 'A different consent upload is already recorded; contact support for a new submission' }, 409, corsHeaders);
+      }
       return json({ success: true }, 200, corsHeaders);
     } catch (error) {
       if (error instanceof ConsentUploadError) return json({ success: false, error: error.message }, error.status, corsHeaders);
@@ -1309,18 +1316,18 @@ export async function handleParentConsent(
   type Submission = {
     status: string; ticket_id: number | null; lease_until: number; created_at: number;
     receipt_id: string | null; object_key: string | null;
-    case_version: number | null; ticket_attempt_at: number | null;
+    case_version: number | null; ticket_attempt_at: number | null; payload_hash: string | null;
   };
   // Read any prior submission before consuming the body: a retry resumes
   // against its stored object and receipt, and an invalid body must be
   // rejected without creating a submission row.
-  const prior = await env.DB.prepare(`SELECT status, ticket_id, lease_until, created_at, receipt_id, object_key, case_version, ticket_attempt_at
+  const prior = await env.DB.prepare(`SELECT status, ticket_id, lease_until, created_at, receipt_id, object_key, case_version, ticket_attempt_at, payload_hash
     FROM age_review_parent_consent_submissions WHERE case_id = ?`)
     .bind(caseId).first<Submission>();
   let submission: Submission = prior ?? {
     status: 'processing', ticket_id: null, lease_until: leaseUntil,
     created_at: nowSeconds, receipt_id: null, object_key: null,
-    case_version: null, ticket_attempt_at: null,
+    case_version: null, ticket_attempt_at: null, payload_hash: null,
   };
   // A moderator can send a submitted case back for a fresh clip. That round
   // must not inherit the old submission: the case version moved on, so the
@@ -1330,7 +1337,7 @@ export async function handleParentConsent(
   const isNewRound = (submission.status === 'commented' || submission.status === 'attached')
     && submission.case_version != null && submission.case_version !== current.version;
   if (isNewRound) {
-    submission = { ...submission, status: 'processing', receipt_id: null, object_key: null, case_version: null, ticket_attempt_at: null };
+    submission = { ...submission, status: 'processing', receipt_id: null, object_key: null, case_version: null, ticket_attempt_at: null, payload_hash: null };
   }
   const receiptId = submission.receipt_id ?? crypto.randomUUID();
   const recordedObjectKey = submission.object_key;
@@ -1342,7 +1349,12 @@ export async function handleParentConsent(
   if (!alreadyStored && submission.status === 'stored' && bucket && recordedObjectKey) {
     alreadyStored = (await bucket.head(recordedObjectKey)) !== null;
   }
-  const needUpload = !alreadyStored;
+  // Legacy stored rows have no trustworthy body identity: do not bless a
+  // different body as a retry. A moderator must start a new round.
+  const conflictingBody = !isNewRound && prior != null
+    && (prior.payload_hash != null || ['stored', 'commented', 'attached'].includes(prior.status))
+    && prior.payload_hash !== payloadHash;
+  const needUpload = !alreadyStored && !conflictingBody;
   // An upload always goes to a key of its own. The key a prior row names can
   // belong to a concurrent request that still holds the lease, and this
   // request only learns whether it won after the upload has completed.
@@ -1366,9 +1378,15 @@ export async function handleParentConsent(
     if (!parsed.email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(parsed.email) || parsed.email.length > 254) {
       throw new ConsentUploadError(400, 'Invalid email format');
     }
+    if (conflictingBody) {
+      throw new ConsentUploadError(409, 'A different consent upload is already recorded; contact support for a new submission');
+    }
     // Keep R2 multipart parts unreadable until the entire signed body and
     // email have validated. A mismatch only aborts this upload.
-    await (writer as R2MultipartVideoWriter | null)?.finish();
+    if (writer) {
+      await trackConsentObject(env.DB, caseId, objectKey);
+      await (writer as R2MultipartVideoWriter).finish();
+    }
   } catch (error) {
     await (writer as R2MultipartVideoWriter | null)?.abort();
     if (error instanceof ConsentUploadError) {
@@ -1384,11 +1402,11 @@ export async function handleParentConsent(
   }
 
   // A request that stops before recording its clip deletes it: no D1 row
-  // names that key, so retention would never dispose of it.
+  // names that key. The inventory keeps failed deletes retryable.
   const discardOwnClip = async (): Promise<void> => {
     if (!needUpload || !bucket) return;
     try {
-      await bucket.delete(objectKey);
+      await deleteTrackedConsentObject(env.DB!, bucket, objectKey);
     } catch (error) {
       console.error('[age-review] Failed to delete unrecorded consent video:', error);
     }
@@ -1400,7 +1418,8 @@ export async function handleParentConsent(
   if (isNewRound) {
     if (bucket && prior?.object_key) {
       try {
-        await bucket.delete(prior.object_key);
+        await trackConsentObject(env.DB, caseId, prior.object_key);
+        await deleteTrackedConsentObject(env.DB, bucket, prior.object_key);
       } catch (error) {
         console.error('[age-review] Failed to delete the previous consent video:', error);
         await discardOwnClip();
@@ -1412,7 +1431,7 @@ export async function handleParentConsent(
     // concurrent request has already recorded.
     const reset = await env.DB.prepare(`UPDATE age_review_parent_consent_submissions
       SET status = 'processing', receipt_id = NULL, object_key = NULL, content_type = NULL,
-        size_bytes = NULL, case_version = NULL, ticket_attempt_at = NULL, upload_token = NULL,
+        size_bytes = NULL, case_version = NULL, ticket_attempt_at = NULL, upload_token = NULL, payload_hash = NULL,
         lease_until = ?
       WHERE case_id = ? AND status = ? AND case_version = ?`)
       .bind(leaseUntil, caseId, prior!.status, prior!.case_version).run();
@@ -1429,19 +1448,24 @@ export async function handleParentConsent(
   // reset, and the earlier read's on a resume. If another request recorded a
   // clip since that read, the mark misses and this request answers retry.
   let claimedObjectKey: string | null = objectKey;
+  let claimedPayloadHash: string | null = payloadHash;
   const inserted = await env.DB.prepare(`INSERT OR IGNORE INTO age_review_parent_consent_submissions
-    (case_id, lease_until, created_at, receipt_id, object_key) VALUES (?, ?, ?, ?, ?)`)
-    .bind(caseId, leaseUntil, nowSeconds, receiptId, objectKey).run();
+    (case_id, lease_until, created_at, receipt_id, object_key, payload_hash)
+    SELECT ?, ?, ?, ?, ?, ?
+    WHERE EXISTS (SELECT 1 FROM age_review_consent_objects WHERE object_key = ? AND state = 'pending')`)
+    .bind(caseId, leaseUntil, nowSeconds, receiptId, objectKey, payloadHash, objectKey).run();
   if (inserted.meta?.changes !== 1) {
     if (!prior) {
       await discardOwnClip();
       return json({ success: false, error: 'Submission changed; retry' }, 409, corsHeaders);
     }
     claimedObjectKey = isNewRound ? null : prior.object_key;
+    claimedPayloadHash = isNewRound ? null : prior.payload_hash;
     if (prior.status !== 'commented' && prior.status !== 'attached') {
       const lock = await env.DB.prepare(`UPDATE age_review_parent_consent_submissions
-        SET lease_until = ? WHERE case_id = ? AND status IN ('processing', 'stored') AND lease_until < ?`)
-        .bind(leaseUntil, caseId, nowSeconds).run();
+        SET lease_until = ? WHERE case_id = ? AND status IN ('processing', 'stored') AND lease_until < ?
+          AND object_key IS ? AND payload_hash IS ?`)
+        .bind(leaseUntil, caseId, nowSeconds, prior.object_key, prior.payload_hash).run();
       if (lock.meta?.changes !== 1) {
         await discardOwnClip();
         return json({ success: false, error: 'Consent submission is already in progress; retry' }, 409, corsHeaders);
@@ -1454,32 +1478,36 @@ export async function handleParentConsent(
   const releaseLease = async (): Promise<void> => {
     try {
       await db.prepare(`UPDATE age_review_parent_consent_submissions SET lease_until = 0
-        WHERE case_id = ? AND status IN ('processing', 'stored')`).bind(caseId).run();
+        WHERE case_id = ? AND status IN ('processing', 'stored')
+          AND object_key = ? AND payload_hash = ? AND lease_until = ?`).bind(caseId, objectKey, payloadHash, leaseUntil).run();
     } catch (releaseError) {
       console.error('[age-review] Failed to release parent consent retry lease:', releaseError);
     }
   };
 
   if (needUpload) {
+    if (claimedObjectKey && claimedObjectKey !== objectKey) {
+      await trackConsentObject(env.DB, caseId, claimedObjectKey);
+    }
     // Adopt this request's clip only if the row still names the key it held
     // when it claimed the row. A request that stalled past its lease must
     // not repoint the row at a clip the next holder has already replaced.
     // Losing here means another request holds the row, so its lease stays.
     const marked = await env.DB.prepare(`UPDATE age_review_parent_consent_submissions
-      SET status = 'stored', content_type = ?, size_bytes = ?, receipt_id = ?, object_key = ?, lease_until = ?
-      WHERE case_id = ? AND object_key IS ?`)
-      .bind(parsed.videoContentType, parsed.videoSize, receiptId, objectKey, leaseUntil, caseId, claimedObjectKey).run();
+      SET status = 'stored', content_type = ?, size_bytes = ?, receipt_id = ?, object_key = ?, lease_until = ?, payload_hash = ?
+      WHERE case_id = ? AND object_key IS ? AND payload_hash IS ?
+        AND EXISTS (SELECT 1 FROM age_review_consent_objects WHERE object_key = ? AND state = 'pending')`)
+      .bind(parsed.videoContentType, parsed.videoSize, receiptId, objectKey, leaseUntil, payloadHash, caseId, claimedObjectKey, claimedPayloadHash, objectKey).run();
     if (marked.meta?.changes !== 1) {
       await discardOwnClip();
       return json({ success: false, error: 'Submission changed; retry' }, 409, corsHeaders);
     }
     submission.status = 'stored';
     // The clip this one replaces is no longer named by any row, so
-    // retention would never dispose of it. Best effort: a failed delete
-    // leaves an orphaned object, not a wrong one.
+    // the independent inventory keeps it discoverable if deletion fails.
     if (claimedObjectKey && claimedObjectKey !== objectKey && bucket) {
       try {
-        await bucket.delete(claimedObjectKey);
+        await deleteTrackedConsentObject(env.DB, bucket, claimedObjectKey);
       } catch (error) {
         console.error('[age-review] Failed to delete the replaced consent video:', error);
       }
@@ -1549,8 +1577,9 @@ export async function handleParentConsent(
         submission.ticket_id = linkedTicketId;
       }
       const marked = await env.DB.prepare(`UPDATE age_review_parent_consent_submissions
-        SET status = 'commented', ticket_id = ?, lease_until = 0, upload_token = NULL, case_version = ? WHERE case_id = ?`)
-        .bind(submission.ticket_id ?? existingTicketId, current.version, caseId).run();
+        SET status = 'commented', ticket_id = ?, lease_until = 0, upload_token = NULL, case_version = ?
+        WHERE case_id = ? AND object_key = ? AND payload_hash = ? AND lease_until = ?`)
+        .bind(submission.ticket_id ?? existingTicketId, current.version, caseId, objectKey, payloadHash, leaseUntil).run();
       if (marked.meta?.changes !== 1) throw new Error('D1 did not record consent reviewer link');
     }
   } catch (error) {
@@ -1560,7 +1589,13 @@ export async function handleParentConsent(
   }
 
   for (let attempt = 0; attempt < 2 && current; attempt++) {
-    if (current.state === 'submitted_for_review') return json({ success: true }, 200, corsHeaders);
+    if (current.state === 'submitted_for_review') {
+      const accepted = await db.prepare('SELECT payload_hash FROM age_review_parent_consent_submissions WHERE case_id = ?')
+        .bind(caseId).first<{ payload_hash: string | null }>();
+      return accepted?.payload_hash === payloadHash
+        ? json({ success: true }, 200, corsHeaders)
+        : json({ success: false, error: 'Submission changed; retry' }, 409, corsHeaders);
+    }
     if (!canSubmitParentConsent(current)) {
       return json({ success: false, error: 'Case changed during submission' }, 409, corsHeaders);
     }
@@ -1574,7 +1609,9 @@ export async function handleParentConsent(
         clock_paused = 1, clock_paused_at = ?, remaining_days_when_paused = ?,
         updated_at = datetime('now'), version = version + 1
       WHERE id = ? AND pubkey = ? AND version = ?
-    `).bind(email, now.toISOString(), remainingDays, caseId, userPubkey, current.version).run();
+        AND EXISTS (SELECT 1 FROM age_review_parent_consent_submissions
+          WHERE case_id = ? AND object_key = ? AND payload_hash = ? AND status = 'commented')
+    `).bind(email, now.toISOString(), remainingDays, caseId, userPubkey, current.version, caseId, objectKey, payloadHash).run();
     if (result.meta?.changes === 1) return json({ success: true }, 200, corsHeaders);
     current = await env.DB.prepare('SELECT * FROM age_review_cases WHERE id = ? AND pubkey = ?')
       .bind(caseId, userPubkey).first<AgeReviewCase>();

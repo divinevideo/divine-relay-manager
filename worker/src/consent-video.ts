@@ -66,9 +66,12 @@ function concat(a: Uint8Array, b: Uint8Array): Uint8Array<ArrayBuffer> {
 export async function parseConsentMultipart(
   body: ReadableStream<Uint8Array>,
   contentType: string,
-  limits: { bodyLimit?: number; videoLimit?: number; payloadHash?: string },
+  limits: { bodyLimit?: number; videoLimit?: number; payloadHash: string },
   sink: ConsentMultipartSink,
 ): Promise<ConsentMultipartResult> {
+  if (!/^[0-9a-f]{64}$/.test(limits.payloadHash ?? '')) {
+    throw new ConsentUploadError(401, 'A signed consent payload is required');
+  }
   const bodyLimit = limits.bodyLimit ?? CONSENT_BODY_LIMIT;
   const videoLimit = limits.videoLimit ?? CONSENT_VIDEO_LIMIT;
   const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;\s]+))/i);
@@ -79,7 +82,7 @@ export async function parseConsentMultipart(
   const marker = enc.encode(`\r\n--${boundary}`);
   const headerSep = enc.encode('\r\n\r\n');
   const reader = body.getReader();
-  const digest = limits.payloadHash ? sha256.create() : null;
+  const digest = sha256.create();
 
   // The leading CRLF makes the first boundary match the same marker as the rest.
   let buf = enc.encode('\r\n');
@@ -192,7 +195,7 @@ export async function parseConsentMultipart(
       if (totalBytes > bodyLimit) {
         throw new ConsentUploadError(413, 'Consent upload exceeds 82 MB');
       }
-      digest?.update(next.value);
+      digest.update(next.value);
       // Consume and hash the entire HTTP body, including any epilogue after
       // the closing boundary. Do not retain that epilogue in memory.
       if ((state as string) !== 'done') {
@@ -201,10 +204,8 @@ export async function parseConsentMultipart(
       }
     }
     if ((state as string) !== 'done') await processBuffer(true);
-    if (digest) {
-      const actual = Array.from(digest.digest(), b => b.toString(16).padStart(2, '0')).join('');
-      if (actual !== limits.payloadHash) throw new ConsentUploadError(401, 'Invalid consent payload');
-    }
+    const actual = Array.from(digest.digest(), b => b.toString(16).padStart(2, '0')).join('');
+    if (actual !== limits.payloadHash) throw new ConsentUploadError(401, 'Invalid consent payload');
   } catch (error) {
     await reader.cancel().catch(() => {});
     throw error;
@@ -440,8 +441,43 @@ export async function handleConsentVideo(
 // so a failed delete stays retryable on the next run.
 // ---------------------------------------------------------------------------
 
+// Register before completion or replacement so even a crash or failed delete
+// leaves an object discoverable independently of the single submission row.
+export async function trackConsentObject(db: D1Database, caseId: string, objectKey: string): Promise<void> {
+  await db.prepare(`INSERT OR IGNORE INTO age_review_consent_objects (object_key, case_id, created_at)
+    VALUES (?, ?, ?)`).bind(objectKey, caseId, Math.floor(Date.now() / 1000)).run();
+}
+
+export async function deleteTrackedConsentObject(db: D1Database, bucket: R2Bucket, objectKey: string): Promise<void> {
+  await bucket.delete(objectKey);
+  await db.prepare('DELETE FROM age_review_consent_objects WHERE object_key = ?').bind(objectKey).run();
+}
+
 export async function disposeDueConsentVideos(db: D1Database, bucket: R2Bucket): Promise<number> {
   let disposed = 0;
+  // Claim only unreferenced attempts after a day. Adoption requires 'pending',
+  // so a stalled request cannot resurrect a key a sweep has already claimed.
+  // Keep failed deletes in 'deleting' for the next cron, including across crashes.
+  const orphaned = await db.prepare(`UPDATE age_review_consent_objects SET state = 'deleting'
+    WHERE object_key IN (
+      SELECT o.object_key FROM age_review_consent_objects o
+      WHERE o.created_at <= ?
+        AND NOT EXISTS (SELECT 1 FROM age_review_parent_consent_submissions s WHERE s.object_key = o.object_key)
+        AND NOT EXISTS (SELECT 1 FROM retention_legal_holds h
+          WHERE h.record_type = 'age_review_case' AND (h.record_key IS NULL OR h.record_key = o.case_id)
+            AND h.disposal_stage IN ('all', 'consent_video')
+            AND datetime(h.starts_at) <= datetime('now') AND h.released_at IS NULL
+            AND (h.expires_at IS NULL OR datetime(h.expires_at) > datetime('now')))
+      LIMIT 100
+    ) RETURNING object_key`).bind(Math.floor(Date.now() / 1000) - 86400).all<{ object_key: string }>();
+  for (const row of orphaned.results) {
+    try {
+      await deleteTrackedConsentObject(db, bucket, row.object_key);
+      disposed++;
+    } catch (error) {
+      console.error('[retention] unreferenced consent video delete failed:', error);
+    }
+  }
   const due = await db.prepare(
     `SELECT s.case_id, s.object_key FROM age_review_parent_consent_submissions s
      JOIN age_review_cases c ON c.id = s.case_id
@@ -479,7 +515,7 @@ export async function disposeDueConsentVideos(db: D1Database, bucket: R2Bucket):
     if (seen.has(row.object_key)) continue;
     seen.add(row.object_key);
     try {
-      await bucket.delete(row.object_key);
+      await deleteTrackedConsentObject(db, bucket, row.object_key);
     } catch (error) {
       console.error('[retention] consent video delete failed:', error);
       continue;

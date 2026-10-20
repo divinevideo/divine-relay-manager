@@ -3,6 +3,10 @@
 // Not imported by the worker itself.
 import { handleParentConsent, type AgeReviewEnv } from '../age-review';
 
+export async function consentPayloadHash(request: Request): Promise<string> {
+  return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', await request.clone().arrayBuffer())), b => b.toString(16).padStart(2, '0')).join('');
+}
+
 // Pass payloadHash to send that digest instead; an empty string sends none.
 export async function submitSignedConsent(
   request: Request, caseId: string, pubkey: string, env: AgeReviewEnv,
@@ -10,7 +14,7 @@ export async function submitSignedConsent(
   payloadHash = 'auto',
 ): Promise<Response> {
   const hash = payloadHash === 'auto'
-    ? Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', await request.clone().arrayBuffer())), b => b.toString(16).padStart(2, '0')).join('')
+    ? await consentPayloadHash(request)
     : payloadHash;
   return handleParentConsent(request, caseId, pubkey, env, cors, hash || undefined);
 }

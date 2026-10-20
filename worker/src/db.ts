@@ -107,11 +107,12 @@ export async function ensureSchema(db: D1Database): Promise<void> {
     size_bytes INTEGER,
     disposed_at INTEGER,
     case_version INTEGER,
-    ticket_attempt_at INTEGER
+    ticket_attempt_at INTEGER,
+    payload_hash TEXT
   )`).run();
 
-  // Columns added by migration 0015 for deployments whose table predates it.
-  for (const column of ['receipt_id TEXT', 'object_key TEXT', 'content_type TEXT', 'size_bytes INTEGER', 'disposed_at INTEGER', 'case_version INTEGER', 'ticket_attempt_at INTEGER']) {
+  // Columns added by migrations 0015 and 0018 for deployments whose table predates it.
+  for (const column of ['receipt_id TEXT', 'object_key TEXT', 'content_type TEXT', 'size_bytes INTEGER', 'disposed_at INTEGER', 'case_version INTEGER', 'ticket_attempt_at INTEGER', 'payload_hash TEXT']) {
     try {
       await db.prepare(`ALTER TABLE age_review_parent_consent_submissions ADD COLUMN ${column}`).run();
     } catch {
@@ -120,6 +121,19 @@ export async function ensureSchema(db: D1Database): Promise<void> {
   }
   await db.prepare(`CREATE INDEX IF NOT EXISTS idx_parent_consent_receipt
     ON age_review_parent_consent_submissions (receipt_id)`).run();
+
+  // Track completed upload attempts independently of the winning submission.
+  await db.prepare(`CREATE TABLE IF NOT EXISTS age_review_consent_objects (
+    object_key TEXT PRIMARY KEY,
+    case_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'deleting'))
+  )`).run();
+
+  await db.prepare(`CREATE INDEX IF NOT EXISTS idx_parent_consent_object
+    ON age_review_parent_consent_submissions (object_key)`).run();
+  await db.prepare(`CREATE INDEX IF NOT EXISTS idx_consent_objects_created
+    ON age_review_consent_objects (created_at)`).run();
 
   // Add columns to existing tables that were created without them
   try {

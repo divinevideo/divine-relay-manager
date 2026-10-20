@@ -6,6 +6,12 @@ The mobile client freezes the multipart body before signing. Its NIP-98 event ca
 
 Roll out the coordinated mobile client and Worker contract together. Older flag-enabled clients that send an empty-body digest cannot use this endpoint once enforcement is deployed. The recording flag stays off by default, and the controlled staging/device submission, private playback, and approval/recovery walkthrough remains a merge gate for mobile PR #9451. Local unit or D1 tests do not establish deployment or reviewer access.
 
+## Retry identity and cleanup
+
+The server records the authenticated whole-body SHA-256 digest with the consent round. Once an upload is recorded, only the exact same multipart bytes may resume it or receive idempotent success. A different email, video, or multipart boundary returns 409 without changing the recorded consent. Clients must retain and resend their frozen multipart body for a retry. A moderator send-back starts a new round and permits a new body. Stored/commented legacy rows without a digest fail closed and need support reconciliation; no fingerprint is inferred from a later request. Parent-contact body binding is outside this upload change.
+
+Migration `0018_parent_consent_payload.sql` adds the digest and an independent object inventory; lazy schema initialization adds the same fields. Each verified upload attempt is inventoried before storage completion, and replaced keys are inventoried before adoption. Immediate deletion remains the first attempt. Retention retries deletion of unreferenced inventoried objects after a one-day grace period, honors consent-video legal holds, and marks an object as deleting before deleting it so a stalled upload cannot adopt it. Referenced clips retain the existing closure-based retention period. This cannot discover orphaned keys created before inventory tracking was deployed.
+
 ## Decision and scope
 
 The in-app parent-consent endpoint keeps its mobile contract: `POST /v1/minor-review-cases/{caseId}/parent-consent` with multipart `email` and `video`, authenticated with NIP-98. The video will be stored in a private Cloudflare R2 bucket. Zendesk will receive a private ticket comment with a reviewer link instead of an attachment. The existing email and private-link fallback remains available.

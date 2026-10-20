@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
-  parseConsentMultipart,
+  parseConsentMultipart as parseAuthenticatedMultipart,
   R2MultipartVideoWriter,
   verifyConsentAccessJwt,
   handleConsentVideo,
@@ -8,6 +8,19 @@ import {
   ConsentUploadError,
   type ConsentVideoEnv,
 } from './consent-video';
+
+// Generate a digest only for parser fixtures that are not testing a supplied digest.
+async function parseConsentMultipart(
+  body: ReadableStream<Uint8Array>, contentType: string,
+  limits: { bodyLimit?: number; videoLimit?: number; payloadHash?: string },
+  sink: Parameters<typeof parseAuthenticatedMultipart>[3],
+) {
+  if (limits.payloadHash) return parseAuthenticatedMultipart(body, contentType, { ...limits, payloadHash: limits.payloadHash }, sink);
+  const [input, digestInput] = body.tee();
+  const digest = await crypto.subtle.digest('SHA-256', await new Response(digestInput).arrayBuffer());
+  const payloadHash = Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
+  return parseAuthenticatedMultipart(input, contentType, { ...limits, payloadHash }, sink);
+}
 
 const cors = { 'Access-Control-Allow-Origin': '*' };
 
@@ -41,6 +54,13 @@ function multipartBody(parts: Array<{ name: string; filename?: string; type?: st
 }
 
 describe('parseConsentMultipart', () => {
+  it('fails closed without a canonical signed digest', async () => {
+    const sink = { onVideoChunk: vi.fn() };
+    await expect(parseAuthenticatedMultipart(streamOf([]), 'multipart/form-data; boundary=test',
+      { payloadHash: '' }, sink)).rejects.toMatchObject({ status: 401 });
+    expect(sink.onVideoChunk).not.toHaveBeenCalled();
+  });
+
   it('streams video bytes intact across tiny chunks and parses fields after the file', async () => {
     const video = new Uint8Array(Array.from({ length: 500 }, (_, i) => i % 251));
     const { body, contentType } = multipartBody([
@@ -193,7 +213,7 @@ describe('disposeDueConsentVideos', () => {
     const order: string[] = [];
     const rows = [{ case_id: 'c1', object_key: 'obj1' }];
     const db = { prepare: vi.fn((sql: string) => ({ bind: vi.fn(() => ({
-      all: vi.fn(async () => ({ results: sql.includes('closed_at') ? rows : [] })),
+      all: vi.fn(async () => ({ results: sql.includes('SELECT s.case_id') && sql.includes('closed_at') ? rows : [] })),
       run: vi.fn(async () => { order.push('db'); return { meta: { changes: 1 } }; }),
     })) })) };
     const bucket = { delete: vi.fn(async () => { order.push('r2'); }) };
@@ -201,6 +221,6 @@ describe('disposeDueConsentVideos', () => {
     expect(count).toBe(1);
     // First 'db' is the disposed-row cleanup; the object delete still
     // precedes the update that marks this row disposed.
-    expect(order).toEqual(['db', 'r2', 'db']);
+    expect(order).toEqual(['db', 'r2', 'db', 'db']);
   });
 });

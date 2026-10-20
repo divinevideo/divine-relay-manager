@@ -6,10 +6,11 @@
 import { Miniflare } from 'miniflare';
 import type { ModerationStatusResponse } from '../../shared/age-review';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
+import { disposeDueConsentVideos } from '../src/consent-video';
 import { ensureSchema } from '../src/db';
 import { handleUpdateAgeReviewCase, handleAgeReviewReplyWebhook, checkAgeReviewDeadlines, handleGetModerationStatus, handleStartGreenlight } from '../src/age-review';
 import { createSubjectWithBinding, approvalRegistryStatements, resolveByPubkey, clearSubject, markProjectionComplete } from '../src/protected-minors';
-import { submitSignedConsent } from '../src/test-helpers/signed-consent';
+import { submitSignedConsent, consentPayloadHash } from '../src/test-helpers/signed-consent';
 
 let mf: Miniflare;
 let DB: D1Database;
@@ -34,6 +35,7 @@ afterAll(async () => { await mf?.dispose(); });
 async function reset() {
   await ensureSchema(DB);
   await DB.prepare('DELETE FROM age_review_parent_consent_submissions').run();
+  await DB.prepare('DELETE FROM age_review_consent_objects').run();
   await DB.prepare('DELETE FROM age_review_cases').run();
   await DB.prepare(
     "INSERT OR REPLACE INTO age_review_config (key, value) VALUES ('auto_delete_on_deny', 'false')",
@@ -113,9 +115,10 @@ describe('age-review handler on real D1', () => {
     const form = new FormData();
     form.set('email', 'parent@example.com');
     form.set('video', new File(['clip'], 'clip.mp4', { type: 'video/mp4' }));
-    const request = () => new Request('https://api.test/v1/minor-review-cases/consent-case/parent-consent', {
+    const original = new Request('https://api.test/v1/minor-review-cases/consent-case/parent-consent', {
       method: 'POST', body: form,
     });
+    const request = () => original.clone();
     try {
       const consentEnv = { ...env, ZENDESK_SUBDOMAIN: 'test', ZENDESK_EMAIL: 'agent@test.com', ZENDESK_API_TOKEN: 'token', CONSENT_VIDEO_BUCKET: bucket as unknown as R2Bucket };
       expect((await submitSignedConsent(request(), 'consent-case', owner, consentEnv, cors)).status).toBe(200);
@@ -388,6 +391,115 @@ describe('concurrent parent-consent submissions on real D1', () => {
     expect(comments).toHaveLength(1);
   });
 
+  it.each(['stored', 'commented', 'submitted'].flatMap(stage => ['email', 'video', 'boundary'].map(change => [stage, change])))('refuses a different signed body on a %s retry (%s) without changing its email or clip', async (stage, change) => {
+    await seedOpenCase();
+    const objects = new Map<string, string>();
+    const comments = zendesk();
+    const bucket = bucketView(objects, []);
+    const consentEnv = { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucket };
+    expect((await submitSignedConsent(upload('first'), 'round-case', owner, consentEnv, cors)).status).toBe(200);
+    if (stage !== 'submitted') {
+      await DB.prepare("UPDATE age_review_cases SET state = 'restricted_pending_parental_consent', version = 2 WHERE id = 'round-case'").run();
+      await DB.prepare('UPDATE age_review_parent_consent_submissions SET status = ?, lease_until = 0 WHERE case_id = ?').bind(stage, 'round-case').run();
+    }
+    const before = await submissionRow();
+    const changed = upload(change === 'video' ? 'second' : 'first');
+    let raw = await changed.text();
+    if (change === 'email') raw = raw.replace('parent@example.com', 'different@example.com');
+    if (change === 'boundary') {
+      raw = raw.replaceAll(boundary, 'new-boundary');
+      changed.headers.set('Content-Type', 'multipart/form-data; boundary=new-boundary');
+    }
+    const response = await submitSignedConsent(new Request(url, { method: 'POST', headers: changed.headers, body: raw }), 'round-case', owner, consentEnv, cors);
+    expect(response.status).toBe(409);
+    expect(await submissionRow()).toEqual(before);
+    expect([...objects.values()]).toEqual(['first']);
+    expect(await DB.prepare("SELECT parent_contact_email FROM age_review_cases WHERE id = 'round-case'").first()).toEqual({ parent_contact_email: 'parent@example.com' });
+    expect(comments).toHaveLength(1);
+    expect((await submitSignedConsent(upload('first'), 'round-case', owner, consentEnv, cors)).status).toBe(200);
+    expect(comments).toHaveLength(1);
+  });
+
+  it('retention retries a failed delete of a losing upload without deleting the accepted clip', async () => {
+    await seedOpenCase();
+    const objects = new Map<string, string>();
+    const comments = zendesk();
+    let ready!: () => void;
+    const atComplete = new Promise<void>((resolve) => { ready = resolve; });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const losingKeys: string[] = [];
+    const losingBucket = bucketView(objects, losingKeys, async () => { ready(); await gate; });
+    losingBucket.delete = vi.fn().mockRejectedValue(new Error('temporary storage failure'));
+    const losing = submitSignedConsent(upload('loser'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: losingBucket }, cors);
+    await atComplete;
+    const winnerBucket = bucketView(objects, []);
+    expect((await submitSignedConsent(upload('winner'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: winnerBucket }, cors)).status).toBe(200);
+    release();
+    expect((await losing).status).toBe(409);
+    expect(objects.size).toBe(2);
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 2 * 864e5);
+    await disposeDueConsentVideos(DB, winnerBucket);
+    expect([...objects.values()]).toEqual(['winner']);
+    expect(comments).toHaveLength(1);
+  });
+
+  it.each(['stored', 'commented', 'submitted'])('refuses a legacy %s retry with no saved fingerprint', async (stage) => {
+    await seedOpenCase();
+    const objects = new Map<string, string>();
+    zendesk();
+    const consentEnv = { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, []) };
+    expect((await submitSignedConsent(upload('original'), 'round-case', owner, consentEnv, cors)).status).toBe(200);
+    await DB.prepare("UPDATE age_review_parent_consent_submissions SET payload_hash = NULL WHERE case_id = 'round-case'").run();
+    if (stage !== 'submitted') {
+      await DB.prepare("UPDATE age_review_cases SET state = 'restricted_pending_parental_consent', version = 2 WHERE id = 'round-case'").run();
+      await DB.prepare("UPDATE age_review_parent_consent_submissions SET status = ?, lease_until = 0 WHERE case_id = 'round-case'").bind(stage).run();
+    }
+    expect((await submitSignedConsent(upload('original'), 'round-case', owner, consentEnv, cors)).status).toBe(409);
+    expect([...objects.values()]).toEqual(['original']);
+  });
+
+  it('cannot adopt a stalled upload after retention has claimed its unreferenced key', async () => {
+    await seedOpenCase();
+    const objects = new Map<string, string>();
+    const comments = zendesk();
+    const bucket = bucketView(objects, [], async () => {
+      const now = Date.now();
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(now + 2 * 864e5);
+      await disposeDueConsentVideos(DB, bucket);
+      clock.mockRestore();
+    });
+    expect((await submitSignedConsent(upload('stalled'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucket }, cors)).status).toBe(409);
+    expect(objects.size).toBe(0);
+    expect(comments).toHaveLength(0);
+    expect(await submissionRow()).toBeNull();
+  });
+
+  it('keeps failed replacement cleanup retryable and honors legal holds', async () => {
+    await seedOpenCase();
+    await DB.prepare(`INSERT INTO age_review_parent_consent_submissions (case_id, status, lease_until, created_at, receipt_id, object_key)
+      VALUES ('round-case', 'processing', 1, 1, 'old-receipt', 'old-key')`).run();
+    const objects = new Map([['old-key', 'old']]);
+    zendesk();
+    const bucket = bucketView(objects, []);
+    const remove = bucket.delete.bind(bucket);
+    bucket.delete = vi.fn().mockRejectedValue(new Error('temporary deletion failure'));
+    expect((await submitSignedConsent(upload('new'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucket }, cors)).status).toBe(200);
+    expect(objects.size).toBe(2);
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 2 * 864e5);
+    await disposeDueConsentVideos(DB, bucket);
+    expect(await DB.prepare("SELECT state FROM age_review_consent_objects WHERE object_key = 'old-key'").first()).toEqual({ state: 'deleting' });
+    await DB.prepare(`INSERT INTO retention_legal_holds (id, record_type, record_key, disposal_stage, authorized_role, starts_at, review_at)
+      VALUES ('cleanup-hold', 'age_review_case', 'round-case', 'consent_video', 'privacy/legal', '2020-01-01', '2030-01-01')`).run();
+    bucket.delete = vi.fn(remove);
+    await disposeDueConsentVideos(DB, bucket);
+    expect(bucket.delete).not.toHaveBeenCalled();
+    await DB.prepare("DELETE FROM retention_legal_holds WHERE id = 'cleanup-hold'").run();
+    await disposeDueConsentVideos(DB, bucket);
+    expect([...objects.values()]).toEqual(['new']);
+    expect(await DB.prepare("SELECT 1 FROM age_review_consent_objects WHERE object_key = 'old-key'").first()).toBeNull();
+  });
+
   async function seedOpenCase() {
     await DB.prepare(`INSERT INTO age_review_cases
       (id, pubkey, state, suspected_age_band, zendesk_ticket_id, deadline_at, clock_paused, version)
@@ -420,6 +532,7 @@ describe('concurrent parent-consent submissions on real D1', () => {
     await seedOpenCase();
     await DB.prepare(`INSERT INTO age_review_parent_consent_submissions (case_id, status, lease_until, created_at, receipt_id, object_key, content_type, size_bytes)
       VALUES ('round-case', ?, ?, 1, 'held-receipt', 'held-key', 'video/mp4', 5)`).bind(status, Math.floor(Date.now() / 1000) + 600).run();
+    await DB.prepare("UPDATE age_review_parent_consent_submissions SET payload_hash = ? WHERE case_id = 'round-case'").bind(await consentPayloadHash(upload('clipB'))).run();
     const objects = new Map<string, string>(held.map(([k, v]) => [k, v]));
     const comments = zendesk();
     const keys: string[] = [];
@@ -438,6 +551,7 @@ describe('concurrent parent-consent submissions on real D1', () => {
     await seedOpenCase();
     await DB.prepare(`INSERT INTO age_review_parent_consent_submissions (case_id, status, lease_until, created_at, receipt_id, object_key, content_type, size_bytes)
       VALUES ('round-case', ?, 1, 1, 'crashed-receipt', 'crashed-key', 'video/mp4', 5)`).bind(status).run();
+    await DB.prepare("UPDATE age_review_parent_consent_submissions SET payload_hash = ? WHERE case_id = 'round-case'").bind(await consentPayloadHash(upload('clipB'))).run();
     const objects = new Map<string, string>(crashed.map(([k, v]) => [k, v]));
     const comments = zendesk();
     const keys: string[] = [];
@@ -517,7 +631,7 @@ describe('concurrent parent-consent submissions on real D1', () => {
     await DB.prepare("UPDATE age_review_parent_consent_submissions SET lease_until = 1 WHERE case_id = 'round-case'").run();
 
     const bKeys: string[] = [];
-    const second = submitSignedConsent(upload('clipB'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, bKeys) }, cors);
+    const second = submitSignedConsent(upload('clipA'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, bKeys) }, cors);
     await bLinking;
     releaseA();
     expect((await first).status).toBe(409);
@@ -529,7 +643,7 @@ describe('concurrent parent-consent submissions on real D1', () => {
     expect((await second).status).toBe(200);
 
     expect(await submissionRow()).toMatchObject({ status: 'commented', object_key: bKeys[0] });
-    expect([...objects.entries()]).toEqual([[bKeys[0], 'clipB']]);
+    expect([...objects.entries()]).toEqual([[bKeys[0], 'clipA']]);
     expect(comments).toHaveLength(1);
   });
 });
