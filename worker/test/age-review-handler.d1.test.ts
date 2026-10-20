@@ -459,6 +459,41 @@ describe('concurrent parent-consent submissions on real D1', () => {
     expect([...objects.values()]).toEqual(['original']);
   });
 
+  // Change one identity column on the commented row just before the case
+  // advances; the advance must submit the case only against a row that
+  // still holds this request's clip and fingerprint.
+  it.each([
+    ['object_key', 'other-key'],
+    ['payload_hash', 'f'.repeat(64)],
+    ['status', 'stored'],
+  ])('does not submit the case when the row\'s %s changes before the advance', async (column, value) => {
+    await seedOpenCase();
+    const objects = new Map<string, string>();
+    zendesk();
+    let swapped = false;
+    const racingDb = new Proxy(DB, {
+      get(target, prop) {
+        if (prop === 'prepare') {
+          return (sql: string) => {
+            const stmt = target.prepare(sql);
+            if (swapped || !sql.includes("state = 'submitted_for_review'") || !sql.includes('EXISTS')) return stmt;
+            return { bind: (...args: unknown[]) => ({ run: async () => {
+              swapped = true;
+              await target.prepare(`UPDATE age_review_parent_consent_submissions SET ${column} = ? WHERE case_id = 'round-case'`).bind(value).run();
+              return stmt.bind(...args).run();
+            } }) };
+          };
+        }
+        const member = Reflect.get(target, prop);
+        return typeof member === 'function' ? member.bind(target) : member;
+      },
+    });
+    const res = await submitSignedConsent(upload('clip'), 'round-case', owner, { ...env, DB: racingDb, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, []) }, cors);
+    expect(swapped).toBe(true);
+    expect(res.status).toBe(409);
+    expect(await rowOf('round-case')).toMatchObject({ state: 'restricted_pending_parental_consent', version: 2 });
+  });
+
   it('cannot adopt a stalled upload after retention has claimed its unreferenced key', async () => {
     await seedOpenCase();
     const objects = new Map<string, string>();
