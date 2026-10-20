@@ -525,6 +525,33 @@ describe('concurrent parent-consent submissions on real D1', () => {
     expect(await submissionRow()).toBeNull();
   });
 
+  // A first claim checks the inventory when it inserts the row; a resumed
+  // claim checks it when it marks the clip stored.
+  it.each([
+    ['a first', false],
+    ['a resumed', true],
+  ])('cannot adopt %s stalled upload that retention has marked for deletion', async (_label, resumed) => {
+    await seedOpenCase();
+    if (resumed) {
+      await DB.prepare(`INSERT INTO age_review_parent_consent_submissions (case_id, status, lease_until, created_at, receipt_id, object_key)
+        VALUES ('round-case', 'processing', 1, 1, 'old-receipt', 'old-key')`).run();
+    }
+    const objects = new Map<string, string>();
+    const comments = zendesk();
+    const failingDelete = vi.fn().mockRejectedValue(new Error('temporary deletion failure'));
+    const bucket = bucketView(objects, [], async () => {
+      const now = Date.now();
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(now + 2 * 864e5);
+      await disposeDueConsentVideos(DB, { ...bucket, delete: failingDelete } as unknown as R2Bucket);
+      clock.mockRestore();
+    });
+    expect((await submitSignedConsent(upload('stalled'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucket }, cors)).status).toBe(409);
+    expect(failingDelete).toHaveBeenCalled();
+    expect(comments).toHaveLength(0);
+    if (resumed) expect(await submissionRow()).toMatchObject({ status: 'processing', object_key: 'old-key' });
+    else expect(await submissionRow()).toBeNull();
+  });
+
   it('keeps failed replacement cleanup retryable and honors legal holds', async () => {
     await seedOpenCase();
     await DB.prepare(`INSERT INTO age_review_parent_consent_submissions (case_id, status, lease_until, created_at, receipt_id, object_key)
