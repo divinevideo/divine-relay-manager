@@ -23,7 +23,17 @@ describe('consent payload schema upgrade', () => {
     await migrate('0015_parent_consent_r2.sql');
     await db.prepare(`INSERT INTO age_review_parent_consent_submissions
       (case_id, status, created_at, object_key) VALUES ('legacy', 'stored', 1, 'legacy-key')`).run();
-    if (mode === 'migration') await migrate('0018_parent_consent_payload.sql');
+    if (mode === 'migration') {
+      await migrate('0018_parent_consent_payload.sql');
+      // Assert the migration's schema before lazy initialization can repair it.
+      expect(await db.prepare("SELECT payload_hash FROM age_review_parent_consent_submissions WHERE case_id = 'legacy'").first())
+        .toEqual({ payload_hash: null });
+      expect(await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'age_review_consent_objects'").first())
+        .toEqual({ name: 'age_review_consent_objects' });
+      const indexes = await db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name IN ('idx_parent_consent_object', 'idx_consent_objects_created') ORDER BY name")
+        .all<{ name: string }>();
+      expect(indexes.results).toEqual([{ name: 'idx_consent_objects_created' }, { name: 'idx_parent_consent_object' }]);
+    }
     await ensureSchema(db);
     await ensureSchema(db);
     expect(await db.prepare("SELECT status, object_key, payload_hash FROM age_review_parent_consent_submissions WHERE case_id = 'legacy'").first())
