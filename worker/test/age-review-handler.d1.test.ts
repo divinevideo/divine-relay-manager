@@ -6,7 +6,7 @@
 import { Miniflare } from 'miniflare';
 import type { ModerationStatusResponse } from '../../shared/age-review';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
-import { disposeDueConsentVideos } from '../src/consent-video';
+import { disposeDueConsentVideos, trackConsentObject } from '../src/consent-video';
 import { ensureSchema } from '../src/db';
 import { handleUpdateAgeReviewCase, handleAgeReviewReplyWebhook, checkAgeReviewDeadlines, handleGetModerationStatus, handleStartGreenlight } from '../src/age-review';
 import { createSubjectWithBinding, approvalRegistryStatements, resolveByPubkey, clearSubject, markProjectionComplete } from '../src/protected-minors';
@@ -492,6 +492,21 @@ describe('concurrent parent-consent submissions on real D1', () => {
     expect(swapped).toBe(true);
     expect(res.status).toBe(409);
     expect(await rowOf('round-case')).toMatchObject({ state: 'restricted_pending_parental_consent', version: 2 });
+  });
+
+  it('leaves an unreferenced upload in storage for its first day', async () => {
+    await seedOpenCase();
+    const start = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(start);
+    await trackConsentObject(DB, 'round-case', 'fresh-key');
+    const objects = new Map([['fresh-key', 'fresh']]);
+    const bucket = bucketView(objects, []);
+    clock.mockReturnValue(start + 23 * 3600 * 1000);
+    await disposeDueConsentVideos(DB, bucket);
+    expect([...objects.keys()]).toEqual(['fresh-key']);
+    clock.mockReturnValue(start + 25 * 3600 * 1000);
+    await disposeDueConsentVideos(DB, bucket);
+    expect(objects.size).toBe(0);
   });
 
   it('cannot adopt a stalled upload after retention has claimed its unreferenced key', async () => {
