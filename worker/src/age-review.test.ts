@@ -1875,16 +1875,19 @@ describe('handleParentConsent', () => {
   });
 
   it('returns a non-retryable 409 when ticket creation needs manual reconciliation', async () => {
+    const req = request();
+    const payload_hash = await consentPayloadHash(req);
     const c = makeCase({ state: 'restricted_pending_parental_consent' });
-    const { db } = consentDb(c, { status: 'stored', upload_token: null, ticket_id: null, lease_until: 0, receipt_id: 'r-old', object_key: 'k-old', case_version: null, ticket_attempt_at: Math.floor(Date.now() / 1000) - 60 * 60, created_at: 1 });
+    const { db } = consentDb(c, { payload_hash, status: 'stored', upload_token: null, ticket_id: null, lease_until: 0, receipt_id: 'r-old', object_key: 'k-old', case_version: null, ticket_attempt_at: Math.floor(Date.now() / 1000) - 60 * 60, created_at: 1 });
     const bucket = fakeBucket();
     bucket.objects.set('k-old', new TextEncoder().encode('clip'));
     const mockFetch = vi.fn();
     vi.stubGlobal('fetch', mockFetch);
-    const res = await submitSignedConsent(request(), c.id, c.pubkey, makeEnv(db, {
+    const res = await submitSignedConsent(req, c.id, c.pubkey, makeEnv(db, {
       ZENDESK_SUBDOMAIN: 'test', ZENDESK_EMAIL: 'agent@test.com', ZENDESK_API_TOKEN: 'token', CONSENT_VIDEO_BUCKET: bucket,
     } as Partial<AgeReviewEnv>), corsHeaders);
     expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ error: 'Consent submission needs manual review; contact support' });
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
