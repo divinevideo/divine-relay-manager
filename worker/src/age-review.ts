@@ -1295,25 +1295,6 @@ export async function handleParentConsent(
   }
   if (!request.body) return json({ success: false, error: 'email and video are required' }, 400, corsHeaders);
 
-  if (alreadySubmitted) {
-    try {
-      await parseConsentMultipart(request.body, request.headers.get('Content-Type')!, { payloadHash }, { onVideoChunk: () => {} });
-      const accepted = await env.DB.prepare('SELECT payload_hash FROM age_review_parent_consent_submissions WHERE case_id = ?')
-        .bind(caseId).first<{ payload_hash: string | null }>();
-      if (!accepted) {
-        return json({ success: false, error: 'This case was already submitted for review' }, 409, corsHeaders);
-      }
-      if (accepted?.payload_hash !== payloadHash) {
-        return json({ success: false, error: 'A different consent upload is already recorded; contact support for a new submission' }, 409, corsHeaders);
-      }
-      return json({ success: true }, 200, corsHeaders);
-    } catch (error) {
-      if (error instanceof ConsentUploadError) return json({ success: false, error: error.message }, error.status, corsHeaders);
-      console.error('[age-review] Failed to read consent retry:', error);
-      return json({ success: false, error: 'Could not read consent video; retry' }, 503, corsHeaders);
-    }
-  }
-
   const nowSeconds = Math.floor(Date.now() / 1000);
   const leaseUntil = nowSeconds + 10 * 60;
   type Submission = {
@@ -1327,6 +1308,29 @@ export async function handleParentConsent(
   const prior = await env.DB.prepare(`SELECT status, ticket_id, lease_until, created_at, receipt_id, object_key, case_version, ticket_attempt_at, payload_hash
     FROM age_review_parent_consent_submissions WHERE case_id = ?`)
     .bind(caseId).first<Submission>();
+  if (alreadySubmitted && (!prior || prior.payload_hash !== payloadHash
+    || prior.status === 'commented' || prior.status === 'attached')) {
+    try {
+      await parseConsentMultipart(request.body, request.headers.get('Content-Type')!, { payloadHash }, { onVideoChunk: () => {} });
+      const accepted = await env.DB.prepare('SELECT payload_hash, status FROM age_review_parent_consent_submissions WHERE case_id = ?')
+        .bind(caseId).first<{ payload_hash: string | null; status: string }>();
+      if (!accepted) {
+        return json({ success: false, error: 'This case was already submitted for review' }, 409, corsHeaders);
+      }
+      if (accepted?.payload_hash !== payloadHash) {
+        return json({ success: false, error: 'A different consent upload is already recorded; contact support for a new submission' }, 409, corsHeaders);
+      }
+      if (accepted.status !== 'commented' && accepted.status !== 'attached') {
+        return json({ success: false, error: 'Consent submission is already in progress; retry' }, 409, corsHeaders);
+      }
+      return json({ success: true }, 200, corsHeaders);
+    } catch (error) {
+      if (error instanceof ConsentUploadError) return json({ success: false, error: error.message }, error.status, corsHeaders);
+      console.error('[age-review] Failed to read consent retry:', error);
+      return json({ success: false, error: 'Could not read consent video; retry' }, 503, corsHeaders);
+    }
+  }
+
   let submission: Submission = prior ?? {
     status: 'processing', ticket_id: null, lease_until: leaseUntil,
     created_at: nowSeconds, receipt_id: null, object_key: null,
@@ -1337,28 +1341,31 @@ export async function handleParentConsent(
   // commented row is consumed and a new receipt/object pair starts. A retry
   // inside the same round resumes only when its saved body digest matches.
   // Legacy recorded uploads without a digest require reconciliation.
-  const isNewRound = (submission.status === 'commented' || submission.status === 'attached')
+  const isNewRound = !alreadySubmitted && (submission.status === 'commented' || submission.status === 'attached')
     && submission.case_version != null && submission.case_version !== current.version;
   if (isNewRound) {
     submission = { ...submission, status: 'processing', receipt_id: null, object_key: null, case_version: null, ticket_attempt_at: null, payload_hash: null };
   }
-  const receiptId = submission.receipt_id ?? crypto.randomUUID();
+  const replacingStored = !alreadySubmitted && prior?.status === 'stored'
+    && prior.payload_hash != null && prior.payload_hash !== payloadHash;
+  const receiptId = replacingStored ? crypto.randomUUID() : submission.receipt_id ?? crypto.randomUUID();
   const recordedObjectKey = submission.object_key;
 
   const alreadyCommented = !isNewRound
     && (submission.status === 'commented' || submission.status === 'attached');
   const bucket = env.CONSENT_VIDEO_BUCKET;
   let alreadyStored = alreadyCommented;
-  if (!alreadyStored && submission.status === 'stored' && bucket && recordedObjectKey) {
+  if (!replacingStored && !alreadyStored && submission.status === 'stored' && bucket && recordedObjectKey) {
     alreadyStored = (await bucket.head(recordedObjectKey)) !== null;
   }
   // Legacy stored rows have no trustworthy body identity: do not bless a
-  // different body as a retry. Send-back resets linked rounds only;
-  // stored, unlinked uploads still require support reconciliation.
-  const conflictingBody = !isNewRound && prior != null
+  // different body as a retry. Recorded legacy uploads need reconciliation;
+  // a known stored body may be replaced only before its reviewer link exists.
+  const conflictingBody = !isNewRound && !replacingStored && prior != null
     && (prior.payload_hash != null || ['stored', 'commented', 'attached'].includes(prior.status))
     && prior.payload_hash !== payloadHash;
-  const needUpload = !alreadyStored && !conflictingBody;
+  const replayedRound = isNewRound && prior?.payload_hash === payloadHash;
+  const needUpload = !alreadyStored && !conflictingBody && !replayedRound;
   // An upload always goes to a key of its own. The key a prior row names can
   // belong to a concurrent request that still holds the lease, and this
   // request only learns whether it won after the upload has completed.
@@ -1381,6 +1388,9 @@ export async function handleParentConsent(
     });
     if (!parsed.email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(parsed.email) || parsed.email.length > 254) {
       throw new ConsentUploadError(400, 'Invalid email format');
+    }
+    if (replayedRound) {
+      throw new ConsentUploadError(409, 'A new consent upload is required after send-back');
     }
     if (conflictingBody) {
       throw new ConsentUploadError(409, 'A different consent upload is already recorded; contact support for a new submission');
@@ -1479,15 +1489,39 @@ export async function handleParentConsent(
   }
 
   const db = env.DB;
-  const releaseLease = async (): Promise<void> => {
+  const releaseLease = async (key: string | null = objectKey, hash: string | null = payloadHash): Promise<void> => {
     try {
       await db.prepare(`UPDATE age_review_parent_consent_submissions SET lease_until = 0
         WHERE case_id = ? AND status IN ('processing', 'stored')
-          AND object_key = ? AND payload_hash = ? AND lease_until = ?`).bind(caseId, objectKey, payloadHash, leaseUntil).run();
+          AND object_key IS ? AND payload_hash IS ? AND lease_until = ?`).bind(caseId, key, hash, leaseUntil).run();
     } catch (releaseError) {
       console.error('[age-review] Failed to release parent consent retry lease:', releaseError);
     }
   };
+
+  if (replacingStored) {
+    // A failed response may still have posted the old link. Do not repoint
+    // that receipt at a different recording. Check while holding the lease.
+    try {
+      const existingTicketId = prior.ticket_id ?? current.zendesk_ticket_id;
+      if (!existingTicketId && prior.ticket_attempt_at != null) {
+        throw new ConsentUploadError(409, 'Consent submission needs manual review; contact support');
+      }
+      if (existingTicketId) {
+        const zendesk = await getZendeskClientConfig(env);
+        if (!zendesk) throw new Error('Zendesk credentials unavailable');
+        if (!prior.receipt_id || await hasConsentReviewLink(zendesk, existingTicketId, prior.receipt_id)) {
+          throw new ConsentUploadError(409, 'A different consent upload is already recorded; contact support for a new submission');
+        }
+      }
+    } catch (error) {
+      await discardOwnClip();
+      await releaseLease(prior.object_key, prior.payload_hash);
+      if (error instanceof ConsentUploadError) return json({ success: false, error: error.message }, error.status, corsHeaders);
+      console.error('[age-review] Failed to check previous consent reviewer link:', error);
+      return json({ success: false, error: 'Could not submit consent video; retry' }, 503, corsHeaders);
+    }
+  }
 
   if (needUpload) {
     if (claimedObjectKey && claimedObjectKey !== objectKey) {
@@ -1498,12 +1532,20 @@ export async function handleParentConsent(
     // not repoint the row at a clip the next holder has already replaced.
     // Losing here means another request holds the row, so its lease stays.
     const marked = await env.DB.prepare(`UPDATE age_review_parent_consent_submissions
-      SET status = 'stored', content_type = ?, size_bytes = ?, receipt_id = ?, object_key = ?, lease_until = ?, payload_hash = ?
+      SET status = 'stored', content_type = ?, size_bytes = ?, receipt_id = ?, object_key = ?, lease_until = ?, payload_hash = ?,
+        disposed_at = NULL, created_at = CASE WHEN ? THEN ? ELSE created_at END
       WHERE case_id = ? AND object_key IS ? AND payload_hash IS ?
+        AND status IN ('processing', 'stored') AND lease_until = ?
+        AND (? = 0 OR (ticket_id IS ? AND ticket_attempt_at IS ?
+          AND EXISTS (SELECT 1 FROM age_review_cases WHERE id = ? AND version = ? AND state = ?)))
         AND EXISTS (SELECT 1 FROM age_review_consent_objects WHERE object_key = ? AND state = 'pending')`)
-      .bind(parsed.videoContentType, parsed.videoSize, receiptId, objectKey, leaseUntil, payloadHash, caseId, claimedObjectKey, claimedPayloadHash, objectKey).run();
+      .bind(parsed.videoContentType, parsed.videoSize, receiptId, objectKey, leaseUntil, payloadHash,
+        replacingStored ? 1 : 0, nowSeconds, caseId, claimedObjectKey, claimedPayloadHash, leaseUntil,
+        replacingStored ? 1 : 0, prior?.ticket_id ?? null, prior?.ticket_attempt_at ?? null,
+        caseId, current.version, current.state, objectKey).run();
     if (marked.meta?.changes !== 1) {
       await discardOwnClip();
+      await releaseLease(claimedObjectKey, claimedPayloadHash);
       return json({ success: false, error: 'Submission changed; retry' }, 409, corsHeaders);
     }
     submission.status = 'stored';
@@ -1538,18 +1580,9 @@ export async function handleParentConsent(
         // reconciles by hand, rather than the client looping on a 503.
         return json({ success: false, error: 'Consent submission needs manual review; contact support' }, 409, corsHeaders);
       }
-      const hasReviewLink = async (ticketId: number): Promise<boolean> => {
-        const comments = await fetch(`${zendesk.baseUrl}/tickets/${ticketId}/comments?sort_order=desc&per_page=100`, {
-          headers: { Authorization: `Basic ${zendesk.auth}`, Accept: 'application/json' },
-        });
-        if (!comments.ok) throw new Error(`Zendesk comment lookup failed: ${comments.status}`);
-        const data = await comments.json() as { comments?: Array<{ body?: string; plain_body?: string }> };
-        return !!data.comments?.some((comment) =>
-          (comment.body?.includes(receiptId) || comment.plain_body?.includes(receiptId)));
-      };
       let alreadyLinked = false;
       if (existingTicketId) {
-        alreadyLinked = await hasReviewLink(existingTicketId);
+        alreadyLinked = await hasConsentReviewLink(zendesk, existingTicketId, receiptId);
       }
 
       if (!alreadyLinked) {
@@ -1575,7 +1608,7 @@ export async function handleParentConsent(
           await env.DB.prepare(`UPDATE age_review_parent_consent_submissions SET ticket_id = ? WHERE case_id = ?`)
             .bind(ticketId, caseId).run();
         }
-        if (!linkedTicketId || !(await hasReviewLink(linkedTicketId))) {
+        if (!linkedTicketId || !(await hasConsentReviewLink(zendesk, linkedTicketId, receiptId))) {
           throw new Error('Zendesk did not show the consent reviewer link on the ticket');
         }
         submission.ticket_id = linkedTicketId;
@@ -1594,9 +1627,9 @@ export async function handleParentConsent(
 
   for (let attempt = 0; attempt < 2 && current; attempt++) {
     if (current.state === 'submitted_for_review') {
-      const accepted = await db.prepare('SELECT payload_hash FROM age_review_parent_consent_submissions WHERE case_id = ?')
-        .bind(caseId).first<{ payload_hash: string | null }>();
-      return accepted?.payload_hash === payloadHash
+      const accepted = await db.prepare('SELECT payload_hash, object_key, status FROM age_review_parent_consent_submissions WHERE case_id = ?')
+        .bind(caseId).first<{ payload_hash: string | null; object_key: string | null; status: string }>();
+      return accepted?.payload_hash === payloadHash && accepted.object_key === objectKey && accepted.status === 'commented'
         ? json({ success: true }, 200, corsHeaders)
         : json({ success: false, error: 'Submission changed; retry' }, 409, corsHeaders);
     }
@@ -1632,6 +1665,22 @@ const BAND_DISPLAY: Record<AgeBand, string> = {
   age_13_15: '13-15',
   age_16_plus_claimed: '16+ (claimed)',
 };
+
+async function hasConsentReviewLink(zendesk: ZendeskClientConfig, ticketId: number, receiptId: string): Promise<boolean> {
+  for (let page = 1; page <= 10; page++) {
+    const pagination = page === 1 ? '' : `&page=${page}`;
+    const comments = await fetch(`${zendesk.baseUrl}/tickets/${ticketId}/comments?sort_order=desc&per_page=100${pagination}`, {
+      headers: { Authorization: `Basic ${zendesk.auth}`, Accept: 'application/json' },
+    });
+    if (!comments.ok) throw new Error(`Zendesk comment lookup failed: ${comments.status}`);
+    const data = await comments.json() as { comments?: Array<{ body?: string; plain_body?: string }>; next_page?: string | null };
+    if (!Array.isArray(data.comments)) throw new Error('Zendesk comment lookup returned no comments list');
+    if (data.comments.some((comment) => comment.body?.includes(receiptId) || comment.plain_body?.includes(receiptId))) return true;
+    if (!data.next_page) return false;
+  }
+  // Absence on the first page is not proof that an older link was never posted.
+  throw new Error('Zendesk comment lookup exceeded pagination limit');
+}
 
 async function getZendeskClientConfig(env: AgeReviewEnv): Promise<ZendeskClientConfig | null> {
   const creds = await resolveZendeskCreds(env);
