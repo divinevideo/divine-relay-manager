@@ -1300,6 +1300,9 @@ export async function handleParentConsent(
       await parseConsentMultipart(request.body, request.headers.get('Content-Type')!, { payloadHash }, { onVideoChunk: () => {} });
       const accepted = await env.DB.prepare('SELECT payload_hash FROM age_review_parent_consent_submissions WHERE case_id = ?')
         .bind(caseId).first<{ payload_hash: string | null }>();
+      if (!accepted) {
+        return json({ success: false, error: 'This case was already submitted for review' }, 409, corsHeaders);
+      }
       if (accepted?.payload_hash !== payloadHash) {
         return json({ success: false, error: 'A different consent upload is already recorded; contact support for a new submission' }, 409, corsHeaders);
       }
@@ -1332,8 +1335,8 @@ export async function handleParentConsent(
   // A moderator can send a submitted case back for a fresh clip. That round
   // must not inherit the old submission: the case version moved on, so the
   // commented row is consumed and a new receipt/object pair starts. A retry
-  // inside the same round (case_version unchanged, or a legacy row that
-  // never recorded one) still resumes.
+  // inside the same round resumes only when its saved body digest matches.
+  // Legacy recorded uploads without a digest require reconciliation.
   const isNewRound = (submission.status === 'commented' || submission.status === 'attached')
     && submission.case_version != null && submission.case_version !== current.version;
   if (isNewRound) {
@@ -1350,7 +1353,8 @@ export async function handleParentConsent(
     alreadyStored = (await bucket.head(recordedObjectKey)) !== null;
   }
   // Legacy stored rows have no trustworthy body identity: do not bless a
-  // different body as a retry. A moderator must start a new round.
+  // different body as a retry. Send-back resets linked rounds only;
+  // stored, unlinked uploads still require support reconciliation.
   const conflictingBody = !isNewRound && prior != null
     && (prior.payload_hash != null || ['stored', 'commented', 'attached'].includes(prior.status))
     && prior.payload_hash !== payloadHash;

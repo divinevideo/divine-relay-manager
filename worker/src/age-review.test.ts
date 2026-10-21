@@ -1719,6 +1719,15 @@ describe('handleParentConsent', () => {
     expect(calls).toEqual([]);
   });
 
+  it('explains an already submitted case without claiming a video was recorded', async () => {
+    const c = makeCase({ state: 'submitted_for_review' });
+    const { db, calls } = consentDb(c);
+    const res = await submitSignedConsent(request(), c.id, c.pubkey, makeEnv(db), corsHeaders);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ success: false, error: 'This case was already submitted for review' });
+    expect(calls).toEqual([]);
+  });
+
   it('logs a retry whose body cannot be read', async () => {
     const c = makeCase({ state: 'submitted_for_review' });
     const { db } = consentDb(c);
