@@ -76,7 +76,7 @@ export async function parseConsentMultipart(
   const videoLimit = limits.videoLimit ?? CONSENT_VIDEO_LIMIT;
   const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;\s]+))/i);
   const boundary = boundaryMatch?.[1] ?? boundaryMatch?.[2];
-  if (!boundary) throw new ConsentUploadError(400, 'Invalid multipart body');
+  if (!boundary || /[\r\n]/.test(boundary)) throw new ConsentUploadError(400, 'Invalid multipart body');
 
   const enc = new TextEncoder();
   const marker = enc.encode(`\r\n--${boundary}`);
@@ -95,6 +95,15 @@ export async function parseConsentMultipart(
   let sawVideo = false;
   const fields = new Map<string, string>();
   let fieldChunks: Uint8Array[] = [];
+  let closingBytes = 0;
+  const consumeClosing = (bytes: Uint8Array): void => {
+    for (const byte of bytes) {
+      if (closingBytes >= 2 || byte !== (closingBytes === 0 ? 13 : 10)) {
+        throw new ConsentUploadError(400, 'Invalid multipart body');
+      }
+      closingBytes++;
+    }
+  };
 
   const emitData = async (data: Uint8Array): Promise<void> => {
     if (data.length === 0) return;
@@ -134,12 +143,15 @@ export async function parseConsentMultipart(
               await emitData(buf.slice(0, safe));
               buf = buf.slice(safe);
             }
-          } else if (buf.length > marker.length) {
-            buf = buf.slice(buf.length - marker.length);
+          } else if (buf.length > marker.length || buf.some((byte, i) => byte !== marker[i])) {
+            throw new ConsentUploadError(400, 'Invalid multipart body');
           }
           if (final) throw new ConsentUploadError(400, 'Invalid multipart body');
           return;
         }
+        // The unsigned boundary must describe the very start of the signed
+        // body, not select a different multipart message inside a preamble.
+        if (state === 'preamble' && idx !== 0) throw new ConsentUploadError(400, 'Invalid multipart body');
         // Need the two bytes after the marker to tell end-of-body from next part.
         if (buf.length < idx + marker.length + 2) {
           if (final) throw new ConsentUploadError(400, 'Invalid multipart body');
@@ -155,6 +167,8 @@ export async function parseConsentMultipart(
         if (state === 'data') finishPart();
         if (trailer === '--') {
           state = 'done';
+          consumeClosing(buf);
+          buf = new Uint8Array(0);
           return;
         }
         if (trailer !== '\r\n') throw new ConsentUploadError(400, 'Invalid multipart body');
@@ -196,14 +210,17 @@ export async function parseConsentMultipart(
         throw new ConsentUploadError(413, 'Consent upload exceeds 82 MB');
       }
       digest.update(next.value);
-      // Consume and hash the entire HTTP body, including any epilogue after
-      // the closing boundary. Do not retain that epilogue in memory.
+      // Hash the complete canonical body, allowing only an optional CRLF
+      // after its closing delimiter. Never buffer an epilogue.
       if ((state as string) !== 'done') {
         buf = concat(buf, next.value);
         await processBuffer(false);
+      } else {
+        consumeClosing(next.value);
       }
     }
     if ((state as string) !== 'done') await processBuffer(true);
+    if (closingBytes === 1) throw new ConsentUploadError(400, 'Invalid multipart body');
     const actual = Array.from(digest.digest(), b => b.toString(16).padStart(2, '0')).join('');
     if (actual !== limits.payloadHash) throw new ConsentUploadError(401, 'Invalid consent payload');
   } catch (error) {

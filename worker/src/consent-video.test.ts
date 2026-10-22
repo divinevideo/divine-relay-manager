@@ -54,6 +54,39 @@ function multipartBody(parts: Array<{ name: string; filename?: string; type?: st
 }
 
 describe('parseConsentMultipart', () => {
+  it('rejects a boundary containing a line break', async () => {
+    const data = multipartBody([{ name: 'video', filename: 'clip.mp4', type: 'video/mp4', value: 'clip' }], 'first\r\nsecond');
+    await expect(parseConsentMultipart(data.body, 'multipart/form-data; boundary="first\r\nsecond"',
+      {}, { onVideoChunk: () => {} })).rejects.toMatchObject({ status: 400 });
+  });
+
+  it.each(['first', 'second'])('rejects an ambiguous signed body selected with the %s boundary', async (selected) => {
+    const first = multipartBody([
+      { name: 'email', value: 'first@example.com' },
+      { name: 'video', filename: 'first.mp4', type: 'video/mp4', value: 'first clip' },
+    ], 'first-boundary');
+    const second = multipartBody([
+      { name: 'email', value: 'second@example.com' },
+      { name: 'video', filename: 'second.mp4', type: 'video/mp4', value: 'second clip' },
+    ], 'second-boundary');
+    const a = new Uint8Array(await new Response(first.body).arrayBuffer());
+    const b = new Uint8Array(await new Response(second.body).arrayBuffer());
+    // The helper signs these same bytes whichever unsigned boundary is selected.
+    await expect(parseConsentMultipart(streamOf([a, b], 1), selected === 'first' ? first.contentType : second.contentType,
+      {}, { onVideoChunk: () => {} })).rejects.toMatchObject({ status: 400 });
+  });
+
+  it('accepts only an optional complete CRLF after the closing boundary', async () => {
+    const data = multipartBody([{ name: 'video', filename: 'clip.mp4', type: 'video/mp4', value: 'clip' }]);
+    const raw = new Uint8Array(await new Response(data.body).arrayBuffer());
+    for (const body of [raw, raw.slice(0, -2)]) {
+      const parsed = await parseConsentMultipart(streamOf([body], 1), data.contentType, {}, { onVideoChunk: () => {} });
+      expect(parsed.videoSize).toBe(4);
+    }
+    await expect(parseConsentMultipart(streamOf([raw.slice(0, -1)], 1), data.contentType,
+      {}, { onVideoChunk: () => {} })).rejects.toMatchObject({ status: 400 });
+  });
+
   it('fails closed without a canonical signed digest', async () => {
     const sink = { onVideoChunk: vi.fn() };
     await expect(parseAuthenticatedMultipart(streamOf([]), 'multipart/form-data; boundary=test',
@@ -79,7 +112,7 @@ describe('parseConsentMultipart', () => {
     expect(new Uint8Array(got)).toEqual(video);
   });
 
-  it('binds binary chunks and the complete multipart epilogue', async () => {
+  it('binds binary chunks and rejects data beyond the closing delimiter', async () => {
     const data = multipartBody([
       { name: 'email', value: 'parent@example.com' },
       { name: 'video', filename: 'clip.mp4', type: 'video/mp4', value: new Uint8Array([0, 128, 255]) },
@@ -89,9 +122,9 @@ describe('parseConsentMultipart', () => {
     const result = await parseConsentMultipart(streamOf([raw], 1), data.contentType, { payloadHash: digest }, { onVideoChunk: () => {} });
     expect(result.videoSize).toBe(3);
     await expect(parseConsentMultipart(streamOf([raw, new TextEncoder().encode('extra')], 1), data.contentType,
-      { payloadHash: digest }, { onVideoChunk: () => {} })).rejects.toMatchObject({ status: 401 });
-    await expect(parseConsentMultipart(streamOf([raw, new Uint8Array(10)], 1), data.contentType,
-      { bodyLimit: raw.length + 1, payloadHash: digest }, { onVideoChunk: () => {} })).rejects.toMatchObject({ status: 413 });
+      { payloadHash: digest }, { onVideoChunk: () => {} })).rejects.toMatchObject({ status: 400 });
+    await expect(parseConsentMultipart(streamOf([raw], 1), data.contentType,
+      { bodyLimit: raw.length - 1, payloadHash: digest }, { onVideoChunk: () => {} })).rejects.toMatchObject({ status: 413 });
   });
 
   it('rejects a second video before replacing the active multipart writer', async () => {
