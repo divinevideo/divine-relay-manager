@@ -477,7 +477,7 @@ describe('concurrent parent-consent submissions on real D1', () => {
     expect(await submissionRow()).toMatchObject({ status: 'commented' });
   });
 
-  it.each(['lookup failure', 'older linked comment', 'unknown ticket creation'])('preserves a stored upload on replacement with %s', async (scenario) => {
+  it.each(['lookup failure', 'lookup error status', 'malformed lookup', 'unbounded lookup', 'older linked comment', 'unknown ticket creation'])('preserves a stored upload on replacement with %s', async (scenario) => {
     await seedOpenCase();
     const objects = new Map<string, string>();
     const consentEnv = { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, []) };
@@ -491,12 +491,15 @@ describe('concurrent parent-consent submissions on real D1', () => {
         .bind(Math.floor(Date.now() / 1000)).run();
     }
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      if (scenario === 'lookup error status') return new Response('', { status: 500 });
+      if (scenario === 'malformed lookup') return new Response(JSON.stringify({}));
+      if (scenario === 'unbounded lookup') return new Response(JSON.stringify({ comments: [], next_page: 'more' }));
       if (scenario !== 'older linked comment') throw new Error('Zendesk unavailable');
       if (String(input).includes('&page=2')) return new Response(JSON.stringify({ comments: [{ body: before!.receipt_id }], next_page: null }));
       return new Response(JSON.stringify({ comments: [], next_page: 'page-two' }));
     });
     const res = await submitSignedConsent(upload('second'), 'round-case', owner, consentEnv, cors);
-    expect(res.status).toBe(scenario === 'lookup failure' ? 503 : 409);
+    expect(res.status).toBe(scenario === 'older linked comment' || scenario === 'unknown ticket creation' ? 409 : 503);
     expect(await submissionRow()).toEqual(before);
     expect([...objects.values()]).toEqual(['first']);
     expect(await DB.prepare("SELECT lease_until FROM age_review_parent_consent_submissions WHERE case_id = 'round-case'").first())
@@ -505,7 +508,7 @@ describe('concurrent parent-consent submissions on real D1', () => {
     if (scenario === 'older linked comment') expect(fetchSpy).toHaveBeenCalledTimes(2);
   });
 
-  it.each(['lease owner', 'email submission', 'ticket identity'])('does not adopt a replacement after the %s changes during its lookup', async (scenario) => {
+  it.each(['lease owner', 'email submission', 'ticket identity', 'ticket attempt', 'case version', 'case state'])('does not adopt a replacement after the %s changes during its lookup', async (scenario) => {
     await seedOpenCase();
     const objects = new Map<string, string>();
     const consentEnv = { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, []) };
@@ -519,6 +522,12 @@ describe('concurrent parent-consent submissions on real D1', () => {
         await DB.prepare("UPDATE age_review_parent_consent_submissions SET lease_until = ? WHERE case_id = 'round-case'").bind(nextLease).run();
       } else if (scenario === 'ticket identity') {
         await DB.prepare("UPDATE age_review_parent_consent_submissions SET ticket_id = 99 WHERE case_id = 'round-case'").run();
+      } else if (scenario === 'ticket attempt') {
+        await DB.prepare("UPDATE age_review_parent_consent_submissions SET ticket_attempt_at = 1 WHERE case_id = 'round-case'").run();
+      } else if (scenario === 'case version') {
+        await DB.prepare("UPDATE age_review_cases SET version = version + 1 WHERE id = 'round-case'").run();
+      } else if (scenario === 'case state') {
+        await DB.prepare("UPDATE age_review_cases SET state = 'submitted_for_review' WHERE id = 'round-case'").run();
       } else {
         await DB.prepare("UPDATE age_review_cases SET state = 'submitted_for_review', version = version + 1 WHERE id = 'round-case'").run();
       }
@@ -527,10 +536,8 @@ describe('concurrent parent-consent submissions on real D1', () => {
     expect((await submitSignedConsent(upload('second'), 'round-case', owner, consentEnv, cors)).status).toBe(409);
     expect(await submissionRow()).toEqual(before);
     expect([...objects.values()]).toEqual(['first']);
-    if (scenario === 'lease owner') {
-      expect(await DB.prepare("SELECT lease_until FROM age_review_parent_consent_submissions WHERE case_id = 'round-case'").first())
-        .toEqual({ lease_until: nextLease });
-    }
+    expect(await DB.prepare("SELECT lease_until FROM age_review_parent_consent_submissions WHERE case_id = 'round-case'").first())
+      .toEqual({ lease_until: scenario === 'lease owner' ? nextLease : 0 });
   });
 
   it('keeps a failed replacement cleanup tracked and renews the abandoned-upload clock', async () => {
@@ -600,6 +607,21 @@ describe('concurrent parent-consent submissions on real D1', () => {
     expect((await submitSignedConsent(upload('first'), 'round-case', owner, consentEnv, cors)).status).toBe(200);
     expect(comments).toHaveLength(1);
     expect((await submitSignedConsent(upload('different'), 'round-case', owner, consentEnv, cors)).status).toBe(409);
+  });
+
+  it('opens a sent-back round with a new body while the previous round\'s link is on the ticket', async () => {
+    await seedSentBackRound();
+    await DB.prepare("UPDATE age_review_parent_consent_submissions SET payload_hash = ? WHERE case_id = 'round-case'")
+      .bind(await consentPayloadHash(upload('old'))).run();
+    const objects = new Map([['old-key', 'old']]);
+    const comments = zendesk();
+    // After a real send-back the earlier round's reviewer link is on the ticket.
+    comments.push('Parent consent video submitted for review. Review the private consent video: https://api.test/api/age-review/consent-video/old-receipt');
+    const consentEnv = { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, []) };
+    expect((await submitSignedConsent(upload('new'), 'round-case', owner, consentEnv, cors)).status).toBe(200);
+    expect([...objects.values()]).toEqual(['new']);
+    expect(comments).toHaveLength(2);
+    expect(await rowOf('round-case')).toMatchObject({ state: 'submitted_for_review' });
   });
 
   it('retention retries a failed delete of a losing upload without deleting the accepted clip', async () => {
