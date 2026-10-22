@@ -1482,10 +1482,12 @@ export async function handleParentConsent(
     claimedObjectKey = isNewRound ? null : prior.object_key;
     claimedPayloadHash = isNewRound ? null : prior.payload_hash;
     if (prior.status !== 'commented' && prior.status !== 'attached') {
+      // A processing takeover must not skip the stored-replacement link check
+      // if another request stored its clip while this body was streaming.
       const lock = await env.DB.prepare(`UPDATE age_review_parent_consent_submissions
         SET lease_until = ? WHERE case_id = ? AND status IN ('processing', 'stored') AND lease_until < ?
-          AND object_key IS ? AND payload_hash IS ?`)
-        .bind(leaseUntil, caseId, nowSeconds, prior.object_key, prior.payload_hash).run();
+          AND object_key IS ? AND payload_hash IS ? AND status = ?`)
+        .bind(leaseUntil, caseId, nowSeconds, prior.object_key, prior.payload_hash, prior.status).run();
       if (lock.meta?.changes !== 1) {
         await discardOwnClip();
         return json({ success: false, error: 'Consent submission is already in progress; retry' }, 409, corsHeaders);

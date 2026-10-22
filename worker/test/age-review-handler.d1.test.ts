@@ -692,6 +692,31 @@ describe('concurrent parent-consent submissions on real D1', () => {
     expect(await rowOf('round-case')).toMatchObject({ state: 'submitted_for_review' });
   });
 
+  it('does not take over a processing upload that became stored before the lease claim', async () => {
+    await seedOpenCase();
+    const now = Math.floor(Date.now() / 1000);
+    await DB.prepare(`INSERT INTO age_review_parent_consent_submissions
+      (case_id, status, lease_until, created_at, receipt_id, object_key, payload_hash)
+      VALUES ('round-case', 'processing', ?, ?, 'stalled-receipt', 'stalled-key', ?)`)
+      .bind(now - 1, now - 601, await consentPayloadHash(upload('first'))).run();
+    await trackConsentObject(DB, 'round-case', 'stalled-key');
+    const objects = new Map([['stalled-key', 'first']]);
+    const comments = zendesk();
+    const bucket = bucketView(objects, [], async () => {
+      // The expired holder finishes storing and posts its link after this
+      // request read 'processing', but before this request claims the lease.
+      await DB.prepare("UPDATE age_review_parent_consent_submissions SET status = 'stored' WHERE case_id = 'round-case'").run();
+      comments.push('Review: https://api.test/api/age-review/consent-video/stalled-receipt');
+    });
+    const res = await submitSignedConsent(upload('second'), 'round-case', owner,
+      { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucket }, cors);
+    expect(res.status).toBe(409);
+    expect(await submissionRow()).toMatchObject({ status: 'stored', receipt_id: 'stalled-receipt', object_key: 'stalled-key' });
+    expect([...objects.entries()]).toEqual([['stalled-key', 'first']]);
+    expect(comments).toHaveLength(1);
+    expect(await rowOf('round-case')).toMatchObject({ state: 'restricted_pending_parental_consent', version: 2 });
+  });
+
   it('retention retries a failed delete of a losing upload without deleting the accepted clip', async () => {
     await seedOpenCase();
     const objects = new Map<string, string>();
