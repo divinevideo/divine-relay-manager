@@ -899,6 +899,73 @@ describe('concurrent parent-consent submissions on real D1', () => {
     expect(objects.size).toBe(0);
   });
 
+  async function holdConsentVideos() {
+    await DB.prepare(`INSERT INTO retention_legal_holds (id, record_type, record_key, disposal_stage, authorized_role, starts_at, review_at)
+      VALUES ('request-hold', 'age_review_case', 'round-case', 'consent_video', 'privacy/legal', '2020-01-01', '2030-01-01')`).run();
+  }
+
+  // A held clip stays inventoried and unreferenced, survives the sweep while
+  // the hold lasts, and goes on the first sweep after the hold is released.
+  async function expectKeptUntilHoldReleased(objects: Map<string, string>, key: string) {
+    expect(objects.has(key)).toBe(true);
+    expect(await DB.prepare('SELECT state FROM age_review_consent_objects WHERE object_key = ?').bind(key).first()).toEqual({ state: 'pending' });
+    expect(await DB.prepare('SELECT 1 FROM age_review_parent_consent_submissions WHERE object_key = ?').bind(key).first()).toBeNull();
+    const sweepBucket = bucketView(objects, []);
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 2 * 864e5);
+    await disposeDueConsentVideos(DB, sweepBucket);
+    expect(objects.has(key)).toBe(true);
+    await DB.prepare("DELETE FROM retention_legal_holds WHERE id = 'request-hold'").run();
+    await disposeDueConsentVideos(DB, sweepBucket);
+    expect(objects.has(key)).toBe(false);
+  }
+
+  it('keeps a sent-back round\'s clip under a legal hold until the hold is released', async () => {
+    await seedSentBackRound();
+    await DB.prepare("UPDATE age_review_parent_consent_submissions SET payload_hash = ? WHERE case_id = 'round-case'")
+      .bind(await consentPayloadHash(upload('old'))).run();
+    await holdConsentVideos();
+    const objects = new Map([['old-key', 'old']]);
+    zendesk();
+    const res = await submitSignedConsent(upload('new'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, []) }, cors);
+    expect(res.status).toBe(200);
+    await expectKeptUntilHoldReleased(objects, 'old-key');
+  });
+
+  it('keeps a losing request\'s own clip under a legal hold until the hold is released', async () => {
+    await seedOpenCase();
+    await holdConsentVideos();
+    const objects = new Map<string, string>();
+    zendesk();
+    const keys: string[] = [];
+    const claimFirst = async () => {
+      await DB.prepare(`INSERT INTO age_review_parent_consent_submissions (case_id, lease_until, created_at, receipt_id, object_key)
+        VALUES ('round-case', ?, 1, 'other-receipt', 'other-key')`).bind(Math.floor(Date.now() / 1000) + 600).run();
+    };
+    const res = await submitSignedConsent(upload('lost'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, keys, claimFirst) }, cors);
+    expect(res.status).toBe(409);
+    await expectKeptUntilHoldReleased(objects, keys[0]);
+  });
+
+  it('keeps a replaced clip when the legal-hold lookup fails', async () => {
+    await seedOpenCase();
+    await DB.prepare(`INSERT INTO age_review_parent_consent_submissions (case_id, status, lease_until, created_at, receipt_id, object_key, payload_hash)
+      VALUES ('round-case', 'stored', 1, 1, 'old-receipt', 'old-key', ?)`).bind(await consentPayloadHash(upload('old'))).run();
+    await trackConsentObject(DB, 'round-case', 'old-key');
+    const objects = new Map([['old-key', 'old']]);
+    zendesk();
+    // Only the hold lookup fails; an unknown hold state must not permit the delete.
+    const failingHoldLookup = {
+      prepare: (sql: string) => (sql.includes(' AS held')
+        ? { bind: () => ({ first: async () => { throw new Error('D1 unavailable'); } }) }
+        : DB.prepare(sql)),
+    } as unknown as D1Database;
+    const res = await submitSignedConsent(upload('new'), 'round-case', owner,
+      { ...env, DB: failingHoldLookup, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, []) }, cors);
+    expect(res.status).toBe(200);
+    expect(objects.get('old-key')).toBe('old');
+    expect(await DB.prepare("SELECT state FROM age_review_consent_objects WHERE object_key = 'old-key'").first()).toEqual({ state: 'pending' });
+  });
+
   it('keeps failed replacement cleanup retryable and honors legal holds', async () => {
     await seedOpenCase();
     await DB.prepare(`INSERT INTO age_review_parent_consent_submissions (case_id, status, lease_until, created_at, receipt_id, object_key)
