@@ -50,7 +50,7 @@ import { errorNameOnly } from './error-name';
 import {
   parseConsentMultipart,
   trackConsentObject,
-  deleteTrackedConsentObject,
+  deleteConsentObjectUnlessHeld,
   R2MultipartVideoWriter,
   ConsentUploadError,
   CONSENT_BODY_LIMIT,
@@ -1423,7 +1423,7 @@ export async function handleParentConsent(
   const discardOwnClip = async (): Promise<void> => {
     if (!needUpload || !bucket) return;
     try {
-      await deleteTrackedConsentObject(env.DB!, bucket, objectKey);
+      await deleteConsentObjectUnlessHeld(env.DB!, bucket, caseId, objectKey);
     } catch (error) {
       console.error('[age-review] Failed to delete unrecorded consent video:', error);
     }
@@ -1454,7 +1454,7 @@ export async function handleParentConsent(
     // that loses the reset never removes the clip its case was submitted with.
     if (bucket && previousObjectKey) {
       try {
-        await deleteTrackedConsentObject(env.DB, bucket, previousObjectKey);
+        await deleteConsentObjectUnlessHeld(env.DB, bucket, caseId, previousObjectKey);
       } catch (error) {
         console.error('[age-review] Failed to delete the previous consent video:', error);
       }
@@ -1561,7 +1561,7 @@ export async function handleParentConsent(
     // the independent inventory keeps it discoverable if deletion fails.
     if (claimedObjectKey && claimedObjectKey !== objectKey && bucket) {
       try {
-        await deleteTrackedConsentObject(env.DB, bucket, claimedObjectKey);
+        await deleteConsentObjectUnlessHeld(env.DB, bucket, caseId, claimedObjectKey);
       } catch (error) {
         console.error('[age-review] Failed to delete the replaced consent video:', error);
       }

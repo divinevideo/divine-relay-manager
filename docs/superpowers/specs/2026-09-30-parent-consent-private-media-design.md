@@ -18,6 +18,8 @@ Known replay and retry limits: resetting the submission row clears the preceding
 
 Migration `0018_parent_consent_payload.sql` adds the digest and an independent object inventory; lazy schema initialization adds the same fields. Each verified upload attempt is inventoried before storage completion, and replaced keys are inventoried before adoption. Immediate deletion remains the first attempt. Retention retries deletion of unreferenced inventoried objects after a one-day grace period, honors consent-video legal holds, and marks an object as deleting before deleting it so a stalled upload cannot adopt it. Referenced clips retain the existing closure-based retention period. This cannot discover orphaned keys created before inventory tracking was deployed.
 
+Active case-level `all` or `consent_video` legal holds also pause immediate loser, replacement, and send-back cleanup, not just scheduled deletion. Held objects keep their inventory entries for a later eligible sweep. The abandoned-upload sweep observes the same holds; it does not mark a held clip disposed. A failed hold lookup does not permit immediate deletion.
+
 ## Decision and scope
 
 The in-app parent-consent endpoint keeps its mobile contract: `POST /v1/minor-review-cases/{caseId}/parent-consent` with multipart `email` and `video`, authenticated with NIP-98. The video will be stored in a private Cloudflare R2 bucket. Zendesk will receive a private ticket comment with a reviewer link instead of an attachment. The existing email and private-link fallback remains available.

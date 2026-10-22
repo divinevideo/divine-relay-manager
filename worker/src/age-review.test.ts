@@ -1633,7 +1633,8 @@ describe('handleParentConsent', () => {
     const db = { prepare: vi.fn().mockImplementation((sql: string) => ({
       bind: vi.fn().mockImplementation((...args: unknown[]) => ({
         first: vi.fn().mockResolvedValue(
-          sql.includes('FROM age_review_parent_consent_submissions') ? row : c),
+          sql.includes('FROM retention_legal_holds') ? { held: 0 }
+            : sql.includes('FROM age_review_parent_consent_submissions') ? row : c),
         run: vi.fn().mockImplementation(async () => {
           if (!sql.startsWith('INSERT OR IGNORE INTO age_review_consent_objects') && !sql.startsWith('DELETE FROM age_review_consent_objects')) calls.push(sql);
           if (sql.includes('INSERT OR IGNORE INTO age_review_parent_consent_submissions')) {
@@ -4067,4 +4068,3 @@ describe('ageReviewActiveGuard — non-canonical pubkey', () => {
     expect(response).toBeNull();
   });
 });
-

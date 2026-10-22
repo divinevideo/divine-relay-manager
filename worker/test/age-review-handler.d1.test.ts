@@ -849,6 +849,56 @@ describe('concurrent parent-consent submissions on real D1', () => {
     else expect(await submissionRow()).toBeNull();
   });
 
+  it('preserves a superseded clip when a case hold precedes healthy replacement cleanup', async () => {
+    await seedOpenCase();
+    const objects = new Map<string, string>();
+    const bucket = bucketView(objects, []);
+    const consentEnv = { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucket };
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Zendesk unavailable'));
+    expect((await submitSignedConsent(upload('first'), 'round-case', owner, consentEnv, cors)).status).toBe(503);
+    const before = await submissionRow();
+    vi.restoreAllMocks();
+    zendesk();
+    await DB.prepare(`INSERT INTO retention_legal_holds (id, record_type, record_key, disposal_stage, authorized_role, starts_at, review_at)
+      VALUES ('inline-hold', 'age_review_case', 'round-case', 'consent_video', 'privacy/legal', '2020-01-01', '2030-01-01')`).run();
+    try {
+      expect((await submitSignedConsent(upload('second'), 'round-case', owner, consentEnv, cors)).status).toBe(200);
+      expect([...objects.values()]).toEqual(['first', 'second']);
+      expect(await DB.prepare('SELECT object_key FROM age_review_consent_objects WHERE object_key = ?').bind(before!.object_key).first())
+        .toEqual({ object_key: before!.object_key });
+      await DB.prepare('UPDATE age_review_consent_objects SET created_at = 1 WHERE object_key = ?').bind(before!.object_key).run();
+      await disposeDueConsentVideos(DB, bucket);
+      expect([...objects.values()]).toEqual(['first', 'second']);
+    } finally {
+      await DB.prepare("DELETE FROM retention_legal_holds WHERE id = 'inline-hold'").run();
+    }
+    await disposeDueConsentVideos(DB, bucket);
+    expect([...objects.values()]).toEqual(['second']);
+    expect(await DB.prepare('SELECT 1 FROM age_review_consent_objects WHERE object_key = ?').bind(before!.object_key).first()).toBeNull();
+  });
+
+  it('preserves an abandoned clip under a global consent hold until release', async () => {
+    await seedOpenCase();
+    await DB.prepare("UPDATE age_review_cases SET state = 'denied_closed', closed_at = datetime('now') WHERE id = 'round-case'").run();
+    await DB.prepare(`INSERT INTO age_review_parent_consent_submissions
+      (case_id, status, lease_until, created_at, receipt_id, object_key)
+      VALUES ('round-case', 'processing', 0, 1, 'abandoned-receipt', 'abandoned-key')`).run();
+    const objects = new Map([['abandoned-key', 'clip']]);
+    const bucket = bucketView(objects, []);
+    await DB.prepare(`INSERT INTO retention_legal_holds (id, record_type, record_key, disposal_stage, authorized_role, starts_at, review_at)
+      VALUES ('abandoned-hold', 'age_review_case', NULL, 'all', 'privacy/legal', '2020-01-01', '2030-01-01')`).run();
+    try {
+      expect(await disposeDueConsentVideos(DB, bucket)).toBe(0);
+      expect(objects.has('abandoned-key')).toBe(true);
+      expect(await DB.prepare("SELECT status, disposed_at FROM age_review_parent_consent_submissions WHERE case_id = 'round-case'").first())
+        .toEqual({ status: 'processing', disposed_at: null });
+    } finally {
+      await DB.prepare("DELETE FROM retention_legal_holds WHERE id = 'abandoned-hold'").run();
+    }
+    expect(await disposeDueConsentVideos(DB, bucket)).toBe(1);
+    expect(objects.size).toBe(0);
+  });
+
   it('keeps failed replacement cleanup retryable and honors legal holds', async () => {
     await seedOpenCase();
     await DB.prepare(`INSERT INTO age_review_parent_consent_submissions (case_id, status, lease_until, created_at, receipt_id, object_key)

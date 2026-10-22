@@ -465,7 +465,21 @@ export async function trackConsentObject(db: D1Database, caseId: string, objectK
     VALUES (?, ?, ?)`).bind(objectKey, caseId, Math.floor(Date.now() / 1000)).run();
 }
 
-export async function deleteTrackedConsentObject(db: D1Database, bucket: R2Bucket, objectKey: string): Promise<void> {
+export async function deleteConsentObjectUnlessHeld(db: D1Database, bucket: R2Bucket, caseId: string, objectKey: string): Promise<void> {
+  const hold = await db.prepare(`SELECT EXISTS (SELECT 1 FROM retention_legal_holds h
+    WHERE h.record_type = 'age_review_case' AND (h.record_key IS NULL OR h.record_key = ?)
+      AND h.disposal_stage IN ('all', 'consent_video')
+      AND datetime(h.starts_at) <= datetime('now') AND h.released_at IS NULL
+      AND (h.expires_at IS NULL OR datetime(h.expires_at) > datetime('now'))) AS held`)
+    .bind(caseId).first<{ held: number }>();
+  if (!hold || (hold.held !== 0 && hold.held !== 1)) throw new Error('Could not determine consent video legal hold');
+  // Retain both the blob and its inventory entry for a later eligible sweep.
+  if (hold.held === 1) return;
+  await deleteTrackedConsentObject(db, bucket, objectKey);
+}
+
+// Cron callers select hold-eligible rows before reaching this private helper.
+async function deleteTrackedConsentObject(db: D1Database, bucket: R2Bucket, objectKey: string): Promise<void> {
   await bucket.delete(objectKey);
   await db.prepare('DELETE FROM age_review_consent_objects WHERE object_key = ?').bind(objectKey).run();
 }
@@ -520,6 +534,11 @@ export async function disposeDueConsentVideos(db: D1Database, bucket: R2Bucket):
      WHERE s.object_key IS NOT NULL AND s.disposed_at IS NULL AND s.status = 'processing'
        AND s.created_at <= unixepoch('now', '-7 days')
        AND NOT EXISTS (SELECT 1 FROM age_review_cases c WHERE c.id = s.case_id AND c.closed_at IS NULL)
+       AND NOT EXISTS (SELECT 1 FROM retention_legal_holds h
+         WHERE h.record_type = 'age_review_case' AND (h.record_key IS NULL OR h.record_key = s.case_id)
+           AND h.disposal_stage IN ('all', 'consent_video')
+           AND datetime(h.starts_at) <= datetime('now') AND h.released_at IS NULL
+           AND (h.expires_at IS NULL OR datetime(h.expires_at) > datetime('now')))
      LIMIT 100`,
   ).bind().all<{ case_id: string; object_key: string }>();
 
