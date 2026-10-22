@@ -1728,6 +1728,16 @@ describe('handleParentConsent', () => {
     expect(calls).toEqual([]);
   });
 
+  it('explains an already submitted case whose sent-back round never recorded a clip', async () => {
+    const c = makeCase({ state: 'submitted_for_review' });
+    // A send-back reset cleared the row, then an email reply submitted the case.
+    const { db, calls } = consentDb(c, { status: 'processing', upload_token: null, ticket_id: 42, lease_until: 0, receipt_id: null, object_key: null, case_version: null, ticket_attempt_at: null, created_at: 1, payload_hash: null });
+    const res = await submitSignedConsent(request(), c.id, c.pubkey, makeEnv(db), corsHeaders);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ success: false, error: 'This case was already submitted for review' });
+    expect(calls).toEqual([]);
+  });
+
   it('logs a retry whose body cannot be read', async () => {
     const c = makeCase({ state: 'submitted_for_review' });
     const { db } = consentDb(c);

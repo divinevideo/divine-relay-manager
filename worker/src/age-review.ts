@@ -1312,9 +1312,10 @@ export async function handleParentConsent(
     || prior.status === 'commented' || prior.status === 'attached')) {
     try {
       await parseConsentMultipart(request.body, request.headers.get('Content-Type')!, { payloadHash }, { onVideoChunk: () => {} });
-      const accepted = await env.DB.prepare('SELECT payload_hash, status FROM age_review_parent_consent_submissions WHERE case_id = ?')
-        .bind(caseId).first<{ payload_hash: string | null; status: string }>();
-      if (!accepted) {
+      const accepted = await env.DB.prepare('SELECT payload_hash, object_key, status FROM age_review_parent_consent_submissions WHERE case_id = ?')
+        .bind(caseId).first<{ payload_hash: string | null; object_key: string | null; status: string }>();
+      // A row a send-back reset cleared holds no clip either.
+      if (!accepted || accepted.object_key == null) {
         return json({ success: false, error: 'This case was already submitted for review' }, 409, corsHeaders);
       }
       if (accepted?.payload_hash !== payloadHash) {
