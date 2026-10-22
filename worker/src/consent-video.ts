@@ -1,6 +1,7 @@
 // ABOUTME: Private R2 storage for Greenlight parent-consent videos: streaming
 // ABOUTME: multipart parsing, Access-gated reviewer playback, and disposal.
 
+import { sha256 } from '@noble/hashes/sha256';
 import { RETENTION_DAYS } from '../../shared/retention';
 
 export const CONSENT_VIDEO_LIMIT = 80_000_000;
@@ -37,7 +38,6 @@ function json(body: unknown, status: number, cors: Record<string, string>): Resp
 export interface ConsentMultipartSink {
   onVideoStart?: (contentType: string) => void | Promise<void>;
   onVideoChunk: (chunk: Uint8Array) => void | Promise<void>;
-  onVideoEnd?: () => void | Promise<unknown>;
 }
 
 export interface ConsentMultipartResult {
@@ -66,19 +66,23 @@ function concat(a: Uint8Array, b: Uint8Array): Uint8Array<ArrayBuffer> {
 export async function parseConsentMultipart(
   body: ReadableStream<Uint8Array>,
   contentType: string,
-  limits: { bodyLimit?: number; videoLimit?: number },
+  limits: { bodyLimit?: number; videoLimit?: number; payloadHash: string },
   sink: ConsentMultipartSink,
 ): Promise<ConsentMultipartResult> {
+  if (!/^[0-9a-f]{64}$/.test(limits.payloadHash ?? '')) {
+    throw new ConsentUploadError(401, 'A signed consent payload is required');
+  }
   const bodyLimit = limits.bodyLimit ?? CONSENT_BODY_LIMIT;
   const videoLimit = limits.videoLimit ?? CONSENT_VIDEO_LIMIT;
   const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;\s]+))/i);
   const boundary = boundaryMatch?.[1] ?? boundaryMatch?.[2];
-  if (!boundary) throw new ConsentUploadError(400, 'Invalid multipart body');
+  if (!boundary || /[\r\n]/.test(boundary)) throw new ConsentUploadError(400, 'Invalid multipart body');
 
   const enc = new TextEncoder();
   const marker = enc.encode(`\r\n--${boundary}`);
   const headerSep = enc.encode('\r\n\r\n');
   const reader = body.getReader();
+  const digest = sha256.create();
 
   // The leading CRLF makes the first boundary match the same marker as the rest.
   let buf = enc.encode('\r\n');
@@ -91,6 +95,15 @@ export async function parseConsentMultipart(
   let sawVideo = false;
   const fields = new Map<string, string>();
   let fieldChunks: Uint8Array[] = [];
+  let closingBytes = 0;
+  const consumeClosing = (bytes: Uint8Array): void => {
+    for (const byte of bytes) {
+      if (closingBytes >= 2 || byte !== (closingBytes === 0 ? 13 : 10)) {
+        throw new ConsentUploadError(400, 'Invalid multipart body');
+      }
+      closingBytes++;
+    }
+  };
 
   const emitData = async (data: Uint8Array): Promise<void> => {
     if (data.length === 0) return;
@@ -107,10 +120,8 @@ export async function parseConsentMultipart(
     }
   };
 
-  const finishPart = async (): Promise<void> => {
-    if (partIsVideo) {
-      await sink.onVideoEnd?.();
-    } else if (partName) {
+  const finishPart = (): void => {
+    if (!partIsVideo && partName) {
       const value = new TextDecoder().decode(concatAll(fieldChunks));
       fields.set(partName, value);
     }
@@ -132,12 +143,15 @@ export async function parseConsentMultipart(
               await emitData(buf.slice(0, safe));
               buf = buf.slice(safe);
             }
-          } else if (buf.length > marker.length) {
-            buf = buf.slice(buf.length - marker.length);
+          } else if (buf.length > marker.length || buf.some((byte, i) => byte !== marker[i])) {
+            throw new ConsentUploadError(400, 'Invalid multipart body');
           }
           if (final) throw new ConsentUploadError(400, 'Invalid multipart body');
           return;
         }
+        // The unsigned boundary must describe the very start of the signed
+        // body, not select a different multipart message inside a preamble.
+        if (state === 'preamble' && idx !== 0) throw new ConsentUploadError(400, 'Invalid multipart body');
         // Need the two bytes after the marker to tell end-of-body from next part.
         if (buf.length < idx + marker.length + 2) {
           if (final) throw new ConsentUploadError(400, 'Invalid multipart body');
@@ -150,9 +164,11 @@ export async function parseConsentMultipart(
         if (state === 'data') await emitData(buf.slice(0, idx));
         const trailer = new TextDecoder().decode(buf.slice(idx + marker.length, idx + marker.length + 2));
         buf = buf.slice(idx + marker.length + 2);
-        if (state === 'data') await finishPart();
+        if (state === 'data') finishPart();
         if (trailer === '--') {
           state = 'done';
+          consumeClosing(buf);
+          buf = new Uint8Array(0);
           return;
         }
         if (trailer !== '\r\n') throw new ConsentUploadError(400, 'Invalid multipart body');
@@ -173,6 +189,7 @@ export async function parseConsentMultipart(
       const type = headerText.match(/(?:^|\r\n)Content-Type:\s*([^\r\n]+)/i)?.[1]?.trim().toLowerCase() ?? '';
       partIsVideo = partName === 'video' && filename !== undefined;
       if (partIsVideo) {
+        if (sawVideo) throw new ConsentUploadError(400, 'Exactly one video file part is required');
         if (!type.startsWith('video/')) {
           throw new ConsentUploadError(415, 'video/* content type is required');
         }
@@ -184,19 +201,34 @@ export async function parseConsentMultipart(
     }
   };
 
-  for (;;) {
-    const next = await reader.read();
-    if (next.done) break;
-    totalBytes += next.value.byteLength;
-    if (totalBytes > bodyLimit) {
-      await reader.cancel();
-      throw new ConsentUploadError(413, 'Consent upload exceeds 82 MB');
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      totalBytes += next.value.byteLength;
+      if (totalBytes > bodyLimit) {
+        throw new ConsentUploadError(413, 'Consent upload exceeds 82 MB');
+      }
+      digest.update(next.value);
+      // Hash the complete canonical body, allowing only an optional CRLF
+      // after its closing delimiter. Never buffer an epilogue.
+      if ((state as string) !== 'done') {
+        buf = concat(buf, next.value);
+        await processBuffer(false);
+      } else {
+        consumeClosing(next.value);
+      }
     }
-    buf = concat(buf, next.value);
-    await processBuffer(false);
-    if ((state as string) === 'done') break;
+    if ((state as string) !== 'done') await processBuffer(true);
+    if (closingBytes === 1) throw new ConsentUploadError(400, 'Invalid multipart body');
+    const actual = Array.from(digest.digest(), b => b.toString(16).padStart(2, '0')).join('');
+    if (actual !== limits.payloadHash) throw new ConsentUploadError(401, 'Invalid consent payload');
+  } catch (error) {
+    await reader.cancel().catch(() => {});
+    throw error;
+  } finally {
+    reader.releaseLock();
   }
-  if ((state as string) !== 'done') await processBuffer(true);
   if (!sawVideo) throw new ConsentUploadError(400, 'A video file part is required');
   if (videoSize === 0) throw new ConsentUploadError(400, 'A non-empty video file is required');
 
@@ -426,21 +458,72 @@ export async function handleConsentVideo(
 // so a failed delete stays retryable on the next run.
 // ---------------------------------------------------------------------------
 
+// Register before completion or replacement so even a crash or failed delete
+// leaves an object discoverable independently of the single submission row.
+export async function trackConsentObject(db: D1Database, caseId: string, objectKey: string): Promise<void> {
+  await db.prepare(`INSERT OR IGNORE INTO age_review_consent_objects (object_key, case_id, created_at)
+    VALUES (?, ?, ?)`).bind(objectKey, caseId, Math.floor(Date.now() / 1000)).run();
+}
+
+// An active legal hold pausing consent-video disposal for the case that
+// caseIdSql names: a column reference or a bound parameter. Every consent
+// delete path checks holds through this one predicate.
+function activeConsentVideoHold(caseIdSql: string): string {
+  return `EXISTS (SELECT 1 FROM retention_legal_holds h
+    WHERE h.record_type = 'age_review_case' AND (h.record_key IS NULL OR h.record_key = ${caseIdSql})
+      AND h.disposal_stage IN ('all', 'consent_video')
+      AND datetime(h.starts_at) <= datetime('now') AND h.released_at IS NULL
+      AND (h.expires_at IS NULL OR datetime(h.expires_at) > datetime('now')))`;
+}
+
+export async function deleteConsentObjectUnlessHeld(db: D1Database, bucket: R2Bucket, caseId: string, objectKey: string): Promise<void> {
+  const hold = await db.prepare(`SELECT ${activeConsentVideoHold('?')} AS held`)
+    .bind(caseId).first<{ held: number }>();
+  if (!hold || (hold.held !== 0 && hold.held !== 1)) throw new Error('Could not determine consent video legal hold');
+  // Retain both the blob and its inventory entry for a later eligible sweep.
+  if (hold.held === 1) return;
+  await deleteTrackedConsentObject(db, bucket, objectKey);
+}
+
+// Cron callers select hold-eligible rows before reaching this private helper.
+async function deleteTrackedConsentObject(db: D1Database, bucket: R2Bucket, objectKey: string): Promise<void> {
+  await bucket.delete(objectKey);
+  await db.prepare('DELETE FROM age_review_consent_objects WHERE object_key = ?').bind(objectKey).run();
+}
+
 export async function disposeDueConsentVideos(db: D1Database, bucket: R2Bucket): Promise<number> {
   let disposed = 0;
+  // Claim only unreferenced attempts after a day. Adoption requires 'pending',
+  // so a stalled request cannot resurrect a key a sweep has already claimed.
+  // Keep failed deletes in 'deleting' for the next cron, including across crashes.
+  // A failure here must not skip the retention deletes below for this run.
+  try {
+    const orphaned = await db.prepare(`UPDATE age_review_consent_objects SET state = 'deleting'
+      WHERE object_key IN (
+        SELECT o.object_key FROM age_review_consent_objects o
+        WHERE o.created_at <= ?
+          AND NOT EXISTS (SELECT 1 FROM age_review_parent_consent_submissions s WHERE s.object_key = o.object_key)
+          AND NOT ${activeConsentVideoHold('o.case_id')}
+        LIMIT 100
+      ) RETURNING object_key`).bind(Math.floor(Date.now() / 1000) - 86400).all<{ object_key: string }>();
+    for (const row of orphaned.results) {
+      try {
+        await deleteTrackedConsentObject(db, bucket, row.object_key);
+        disposed++;
+      } catch (error) {
+        console.error('[retention] unreferenced consent video delete failed:', error);
+      }
+    }
+  } catch (error) {
+    console.error('[retention] unreferenced consent video sweep failed:', error);
+  }
   const due = await db.prepare(
     `SELECT s.case_id, s.object_key FROM age_review_parent_consent_submissions s
      JOIN age_review_cases c ON c.id = s.case_id
      WHERE s.object_key IS NOT NULL AND s.disposed_at IS NULL
        AND c.closed_at IS NOT NULL
        AND datetime(c.closed_at) <= datetime('now', '-${RETENTION_DAYS.consentVideo} days')
-       AND NOT EXISTS (SELECT 1 FROM retention_legal_holds h
-         WHERE h.record_type = 'age_review_case'
-           AND (h.record_key IS NULL OR h.record_key = s.case_id)
-           AND (h.disposal_stage = 'all' OR h.disposal_stage = 'consent_video')
-           AND datetime(h.starts_at) <= datetime('now')
-           AND h.released_at IS NULL
-           AND (h.expires_at IS NULL OR datetime(h.expires_at) > datetime('now')))
+       AND NOT ${activeConsentVideoHold('s.case_id')}
      LIMIT 100`,
   ).bind().all<{ case_id: string; object_key: string }>();
   const abandoned = await db.prepare(
@@ -448,6 +531,7 @@ export async function disposeDueConsentVideos(db: D1Database, bucket: R2Bucket):
      WHERE s.object_key IS NOT NULL AND s.disposed_at IS NULL AND s.status = 'processing'
        AND s.created_at <= unixepoch('now', '-7 days')
        AND NOT EXISTS (SELECT 1 FROM age_review_cases c WHERE c.id = s.case_id AND c.closed_at IS NULL)
+       AND NOT ${activeConsentVideoHold('s.case_id')}
      LIMIT 100`,
   ).bind().all<{ case_id: string; object_key: string }>();
 
@@ -465,7 +549,7 @@ export async function disposeDueConsentVideos(db: D1Database, bucket: R2Bucket):
     if (seen.has(row.object_key)) continue;
     seen.add(row.object_key);
     try {
-      await bucket.delete(row.object_key);
+      await deleteTrackedConsentObject(db, bucket, row.object_key);
     } catch (error) {
       console.error('[retention] consent video delete failed:', error);
       continue;
