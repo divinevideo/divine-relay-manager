@@ -1361,8 +1361,10 @@ export async function handleParentConsent(
   // Legacy stored rows have no trustworthy body identity: do not bless a
   // different body as a retry. Recorded legacy uploads need reconciliation;
   // a known stored body may be replaced only before its reviewer link exists.
+  // An upload that stopped before it was stored was never linked, so a
+  // different body may take it over once its lease has lapsed.
   const conflictingBody = !isNewRound && !replacingStored && prior != null
-    && (prior.payload_hash != null || ['stored', 'commented', 'attached'].includes(prior.status))
+    && ['stored', 'commented', 'attached'].includes(prior.status)
     && prior.payload_hash !== payloadHash;
   const replayedRound = isNewRound && prior?.payload_hash === payloadHash;
   const needUpload = !alreadyStored && !conflictingBody && !replayedRound;

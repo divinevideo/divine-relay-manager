@@ -673,6 +673,25 @@ describe('concurrent parent-consent submissions on real D1', () => {
     expect(await DB.prepare("SELECT 1 FROM age_review_consent_objects WHERE object_key = 'old-key'").first()).toBeNull();
   });
 
+  it('lets a new body take over an upload that stopped before it was stored', async () => {
+    await seedOpenCase();
+    // A request inserted its row and then died before marking the clip stored,
+    // so no reviewer link can exist for it.
+    await DB.prepare(`INSERT INTO age_review_parent_consent_submissions (case_id, status, lease_until, created_at, receipt_id, object_key, payload_hash)
+      VALUES ('round-case', 'processing', 1, 1, 'stalled-receipt', 'stalled-key', ?)`).bind(await consentPayloadHash(upload('first'))).run();
+    await trackConsentObject(DB, 'round-case', 'stalled-key');
+    const objects = new Map([['stalled-key', 'first']]);
+    const comments = zendesk();
+    const keys: string[] = [];
+    const res = await submitSignedConsent(upload('second'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, keys) }, cors);
+    expect(res.status).toBe(200);
+    expect(await submissionRow()).toMatchObject({ status: 'commented', object_key: keys[0] });
+    expect([...objects.entries()]).toEqual([[keys[0], 'second']]);
+    expect(await DB.prepare("SELECT 1 FROM age_review_consent_objects WHERE object_key = 'stalled-key'").first()).toBeNull();
+    expect(comments).toHaveLength(1);
+    expect(await rowOf('round-case')).toMatchObject({ state: 'submitted_for_review' });
+  });
+
   it('retention retries a failed delete of a losing upload without deleting the accepted clip', async () => {
     await seedOpenCase();
     const objects = new Map<string, string>();
