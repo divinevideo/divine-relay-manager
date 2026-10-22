@@ -1427,31 +1427,34 @@ export async function handleParentConsent(
   };
 
   // A new round may replace an older stored clip only after verification.
-  // If the old clip cannot be deleted, keep the earlier round recorded so
-  // retention still disposes of it, and let the parent retry.
   if (isNewRound) {
-    if (bucket && prior?.object_key) {
-      try {
-        await trackConsentObject(env.DB, caseId, prior.object_key);
-        await deleteTrackedConsentObject(env.DB, bucket, prior.object_key);
-      } catch (error) {
-        console.error('[age-review] Failed to delete the previous consent video:', error);
-        await discardOwnClip();
-        return json({ success: false, error: 'Could not store consent video; retry' }, 503, corsHeaders);
-      }
-    }
-    // Reset only the round this request read, and take the retry lease with
-    // it. A slower request for the same round must not wipe a round that a
-    // concurrent request has already recorded.
+    // Inventory the old clip first: once the reset below lands, no row names
+    // it, and retention retries a failed delete from the inventory.
+    const previousObjectKey = prior?.object_key ?? null;
+    if (previousObjectKey) await trackConsentObject(env.DB, caseId, previousObjectKey);
+    // Reset only the round this request read, while its case is still where
+    // this request read it, and take the retry lease with it. A slower
+    // request must not wipe a round another request recorded, and must not
+    // reopen a case another request has since submitted.
     const reset = await env.DB.prepare(`UPDATE age_review_parent_consent_submissions
       SET status = 'processing', receipt_id = NULL, object_key = NULL, content_type = NULL,
         size_bytes = NULL, case_version = NULL, ticket_attempt_at = NULL, upload_token = NULL, payload_hash = NULL,
         lease_until = ?
-      WHERE case_id = ? AND status = ? AND case_version = ?`)
-      .bind(leaseUntil, caseId, prior!.status, prior!.case_version).run();
+      WHERE case_id = ? AND status = ? AND case_version = ?
+        AND EXISTS (SELECT 1 FROM age_review_cases WHERE id = ? AND version = ? AND state = ?)`)
+      .bind(leaseUntil, caseId, prior!.status, prior!.case_version, caseId, current.version, current.state).run();
     if (reset.meta?.changes !== 1) {
       await discardOwnClip();
       return json({ success: false, error: 'Submission changed; retry' }, 409, corsHeaders);
+    }
+    // Delete the old clip only once this round owns the row, so a request
+    // that loses the reset never removes the clip its case was submitted with.
+    if (bucket && previousObjectKey) {
+      try {
+        await deleteTrackedConsentObject(env.DB, bucket, previousObjectKey);
+      } catch (error) {
+        console.error('[age-review] Failed to delete the previous consent video:', error);
+      }
     }
   }
 

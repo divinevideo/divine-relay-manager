@@ -624,6 +624,55 @@ describe('concurrent parent-consent submissions on real D1', () => {
     expect(await rowOf('round-case')).toMatchObject({ state: 'submitted_for_review' });
   });
 
+  it('does not open a sent-back round once another request has submitted the case', async () => {
+    await seedSentBackRound();
+    await DB.prepare("UPDATE age_review_parent_consent_submissions SET payload_hash = ? WHERE case_id = 'round-case'")
+      .bind(await consentPayloadHash(upload('old'))).run();
+    const objects = new Map([['old-key', 'old']]);
+    const comments = zendesk();
+    let newAtComplete!: () => void;
+    const newReady = new Promise<void>((resolve) => { newAtComplete = resolve; });
+    let releaseNew!: () => void;
+    const newGate = new Promise<void>((resolve) => { releaseNew = resolve; });
+    const opening = submitSignedConsent(upload('new'), 'round-case', owner,
+      { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, [], async () => { newAtComplete(); await newGate; }) }, cors);
+    await newReady;
+    // An exact retry of the earlier round finishes its case advance meanwhile.
+    await DB.prepare("UPDATE age_review_cases SET state = 'submitted_for_review', version = version + 1, parent_contact_email = 'earlier@example.com' WHERE id = 'round-case'").run();
+    releaseNew();
+    expect((await opening).status).toBe(409);
+
+    expect(await submissionRow()).toMatchObject({ status: 'commented', receipt_id: 'old-receipt', object_key: 'old-key', case_version: 7 });
+    expect([...objects.entries()]).toEqual([['old-key', 'old']]);
+    expect(comments).toHaveLength(0);
+  });
+
+  it('opens a sent-back round when the old clip cannot be deleted, leaving it to retention', async () => {
+    await seedSentBackRound();
+    await DB.prepare("UPDATE age_review_parent_consent_submissions SET payload_hash = ? WHERE case_id = 'round-case'")
+      .bind(await consentPayloadHash(upload('old'))).run();
+    const objects = new Map([['old-key', 'old']]);
+    const comments = zendesk();
+    const keys: string[] = [];
+    const failingOldDelete = Object.assign(bucketView(objects, keys), {
+      delete: async (key: string) => {
+        if (key === 'old-key') throw new Error('r2 down');
+        objects.delete(key);
+      },
+    });
+    const res = await submitSignedConsent(upload('new'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: failingOldDelete }, cors);
+    expect(res.status).toBe(200);
+    expect(await submissionRow()).toMatchObject({ status: 'commented', object_key: keys[0], case_version: 9 });
+    expect(comments).toHaveLength(1);
+    expect(objects.get('old-key')).toBe('old');
+
+    // The old key is inventoried and no row names it, so the sweep deletes it.
+    await DB.prepare("UPDATE age_review_consent_objects SET created_at = 1 WHERE object_key = 'old-key'").run();
+    await disposeDueConsentVideos(DB, bucketView(objects, []));
+    expect([...objects.entries()]).toEqual([[keys[0], 'new']]);
+    expect(await DB.prepare("SELECT 1 FROM age_review_consent_objects WHERE object_key = 'old-key'").first()).toBeNull();
+  });
+
   it('retention retries a failed delete of a losing upload without deleting the accepted clip', async () => {
     await seedOpenCase();
     const objects = new Map<string, string>();
