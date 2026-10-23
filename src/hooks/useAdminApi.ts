@@ -96,8 +96,8 @@ export function useAdminApi() {
     // Media moderation
     moderateMedia: (sha256: string, action: adminApi.ModerationAction, reason?: string) =>
       adminApi.moderateMedia(apiUrl, sha256, action, reason),
-    checkMediaStatus: (sha256: string) =>
-      adminApi.checkMediaStatus(apiUrl, sha256),
+    readMediaStatus: (sha256: string) =>
+      adminApi.readMediaStatus(apiUrl, sha256),
     unblockMedia: (sha256: string, reason?: string) =>
       adminApi.unblockMedia(apiUrl, sha256, reason),
 
