@@ -100,14 +100,16 @@ export function EventActions({
   };
   const allFiles = [...mediaHashes, ...thumbnails];
   const statusOf = (hash: string) => mediaHashStatuses.find((s) => s.hash === hash);
-  // Age Restrict never touches a thumbnail that is blocked, or whose status could
-  // not be read and so might be: that would weaken it. When the video's own status
-  // could not be read, Age Restrict is withheld. (The buttons only offer it when
-  // the video is not known to be blocked.)
+  // Age Restrict never touches a thumbnail that is blocked or deleted, or whose
+  // status could not be read and so might be: that would weaken it. (The media
+  // server restores a deleted file to whatever status it is sent.) When the
+  // video's own status could not be read, Age Restrict is withheld. (The buttons
+  // only offer it when the video is not known to be blocked.)
   const videoUnreadable = mediaHashes.some((hash) => statusOf(hash)?.unreadable);
-  const filesToRestrict = allFiles.filter(
-    (hash) => !(thumbnails.includes(hash) && (statusOf(hash)?.isBlocked || statusOf(hash)?.unreadable)),
-  );
+  const filesToRestrict = allFiles.filter((hash) => {
+    const status = statusOf(hash);
+    return !(thumbnails.includes(hash) && (status?.isBlocked || status?.unreadable || status?.action === 'DELETE'));
+  });
   // Undo reaches a thumbnail only when its stored action matches a gated video
   // file's, so a different gate on the thumbnail, such as an automated quarantine
   // under a moderator's block, stays.

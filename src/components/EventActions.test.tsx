@@ -851,5 +851,22 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
     await waitFor(() => expect(toast).toHaveBeenCalledWith({ title: 'Age restricted 1 media file(s)' }));
     expect(api.moderateMedia.mock.calls).toEqual([[VIDEO, 'AGE_RESTRICTED', 'Age restricted by moderator']]);
   });
+
+  it('never age restricts a thumbnail that was deleted', async () => {
+    // The media server restores a soft-deleted file to whatever status it is sent
+    // (divine-blossom handle_admin_moderate_action), so this would serve it again.
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: false, isRestricted: false },
+          { hash: THUMB, isBlocked: false, isRestricted: false, action: 'DELETE' },
+        ]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Age Restrict (1)' }));
+
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({ title: 'Age restricted 1 media file(s)' }));
+    expect(api.moderateMedia.mock.calls).toEqual([[VIDEO, 'AGE_RESTRICTED', 'Age restricted by moderator']]);
+  });
 });
 
