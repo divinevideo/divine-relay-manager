@@ -14,6 +14,7 @@ const MOD_PUBKEY = 'e'.repeat(64);
 // Full-length 64-char hex hashes, never truncated.
 const VIDEO = '81661ca024bec2be842557ff7e07c833660038f134203f10293568f5ea11863f';
 const THUMB = 'b06e68dbec25463be257e44b06b0bcbb376d3cd1d5fa47e41747ead9e290e068';
+const OTHER_VIDEO = 'c3d0f1a2b4e5968778695a4b3c2d1e0f9a8b7c6d5e4f30211203f4e5d6c7b8a9';
 const VIDEO_EVENT_ID = 'c'.repeat(64);
 const VIDEO_EVENT = vi.hoisted(() => ({
   value: {
@@ -237,7 +238,11 @@ describe('ReportDetail for a reported video with its own thumbnail', () => {
     expect(eventActionsProps.value).toMatchObject({ mediaHashes: [VIDEO], thumbnailHashes: [THUMB] });
   });
 
-  it('reads no files from the text of a repost whose content is not an event', () => {
+  it.each([
+    ['an object that is not an event', JSON.stringify({ id: VIDEO_EVENT_ID, pubkey: REPORTED_PUBKEY })],
+    ['cut off', `{"id":"${VIDEO_EVENT_ID}","pubkey":"${REPORTED_PUBKEY}"`],
+    ['an array', JSON.stringify([VIDEO_EVENT_ID, REPORTED_PUBKEY])],
+  ])('reads no files from the text of a repost whose content is JSON %s', (_, content) => {
     repost.resolved = false;
     repost.value = {
       id: '9'.repeat(64),
@@ -245,13 +250,35 @@ describe('ReportDetail for a reported video with its own thumbnail', () => {
       created_at: 1751000100,
       kind: 6,
       tags: [['e', VIDEO_EVENT_ID], ['p', REPORTED_PUBKEY]],
-      content: `{"id":"${VIDEO_EVENT_ID}","pubkey":"${REPORTED_PUBKEY}"`,
+      content,
       sig: 'b'.repeat(128),
     };
 
     renderDetail();
 
     expect(eventActionsProps.value).toMatchObject({ mediaHashes: [], thumbnailHashes: [] });
+  });
+
+  it.each([
+    ['unresolved', false, [OTHER_VIDEO], []],
+    ['resolved', true, [VIDEO, OTHER_VIDEO], [THUMB]],
+  ])('still reads the media of a %s repost whose content is plain text', (_, resolved, media, thumbnails) => {
+    // Out of spec, but some reposts carry a media URL as text, and the post
+    // preview shows it, so the buttons must reach it too.
+    repost.resolved = resolved;
+    repost.value = {
+      id: '9'.repeat(64),
+      pubkey: '8'.repeat(64),
+      created_at: 1751000100,
+      kind: 6,
+      tags: [['e', VIDEO_EVENT_ID], ['p', REPORTED_PUBKEY]],
+      content: `https://media.divine.video/${OTHER_VIDEO}.mp4`,
+      sig: 'b'.repeat(128),
+    };
+
+    renderDetail();
+
+    expect(eventActionsProps.value).toMatchObject({ mediaHashes: media, thumbnailHashes: thumbnails });
   });
 
   it('hands the buttons the video and its thumbnail separately', () => {

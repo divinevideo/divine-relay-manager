@@ -385,13 +385,17 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
     };
     // A repost's content is the original event as JSON (useThread parses it), so
     // scanning that text would read the original's id and author key as files.
-    // Its tags still count; the original's files come from repostedEvent, or from
-    // parsing the content when useThread found none (a banned repost shown from
-    // the ban list, or one whose e-tag fetch missed).
+    // Its tags still count, and the original's files come from repostedEvent, or
+    // out of the content's JSON when useThread found none (a banned repost shown
+    // from the ban list, or one whose e-tag fetch missed). Some out-of-spec
+    // reposts carry a media URL as plain text instead, which the preview shows,
+    // so that is read too, but never text that looks like JSON.
     if (displayEvent && isRepostKind(displayEvent.kind)) {
       add('', displayEvent.tags);
-      const original = repostedEvent ?? parseRepostedEvent(displayEvent.content);
+      const inner = parseRepostedEvent(displayEvent.content);
+      const original = repostedEvent ?? inner;
       if (original) add(original.content, original.tags);
+      if (!inner && !/^\s*[[{]/.test(displayEvent.content)) add(displayEvent.content, []);
     } else if (displayEvent) {
       add(displayEvent.content, displayEvent.tags);
     }
