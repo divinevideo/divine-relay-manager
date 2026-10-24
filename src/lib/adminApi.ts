@@ -709,7 +709,8 @@ export type MediaStatusAction = ModerationAction;
 
 export interface MediaStatus {
   sha256: string;
-  action: MediaStatusAction;
+  /** Absent when there is no decision (moderation-service's status 'unknown'). */
+  action?: MediaStatusAction;
   reason?: string;
   created_at?: string;
   source?: string;
