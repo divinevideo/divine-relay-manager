@@ -15,10 +15,12 @@ const api = vi.hoisted(() => ({
   logDecision: vi.fn(),
 }));
 const toast = vi.hoisted(() => vi.fn());
+// What useToast reports on screen; empty unless a test puts a toast there.
+const toastsOnScreen = vi.hoisted(() => ({ value: [] as Array<{ id: string; open: boolean }> }));
 const MOD_PUBKEY = 'e'.repeat(64);
 
 vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => api }));
-vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast }) }));
+vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast, toasts: toastsOnScreen.value }) }));
 // Logged-in moderator, so audit writes carry attribution (#178).
 vi.mock('@/hooks/useCurrentUser', () => ({
   useCurrentUser: () => ({ user: { pubkey: MOD_PUBKEY }, getModeratorPubkey: async () => MOD_PUBKEY }),
@@ -26,6 +28,7 @@ vi.mock('@/hooks/useCurrentUser', () => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
+  toastsOnScreen.value = [];
   api.hideEvent.mockResolvedValue({ success: true, recorded: true });
   api.restoreEvent.mockResolvedValue({ success: true, recorded: true, reconciled: true });
   api.deleteEvent.mockResolvedValue({ success: true });
@@ -411,25 +414,83 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
     })));
   });
 
-  it('keeps the warning on screen when the audit write fails too', async () => {
-    // One toast shows at a time (TOAST_LIMIT is 1), and the audit write settles
-    // after the action's own toast, so its failure toast replaces the warning.
+  // One toast shows at a time (TOAST_LIMIT is 1), and the audit write settles
+  // after the action's own toast, so a failure toast of its own would replace the
+  // warning. While the warning is open, it is added to the warning instead.
+  const slowAuditFailure = () => new Promise((_, reject) => setTimeout(() => reject(new Error('audit down')), 20));
+  const warningHandle = (open = true) => {
+    toastsOnScreen.value = [{ id: 'warning-toast', open }];
+    return { id: 'warning-toast', update: vi.fn(), dismiss: vi.fn() };
+  };
+
+  it('adds a failed audit write to the warning instead of replacing it', async () => {
     api.moderateMedia.mockImplementation(failing({ [THUMB]: 500 }));
-    api.logDecision.mockImplementation(
-      () => new Promise((_, reject) => setTimeout(() => reject(new Error('audit down')), 10)),
-    );
+    api.logDecision.mockImplementation(slowAuditFailure);
+    const shown = warningHandle();
+    toast.mockReturnValueOnce(shown);
     renderWithProvider(
       <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]} />
     );
 
     fireEvent.click(screen.getByRole('button', { name: 'Age Restrict (2)' }));
 
-    await waitFor(() => expect(toast).toHaveBeenCalledTimes(2));
-    expect(toast).toHaveBeenLastCalledWith({
+    await waitFor(() => expect(shown.update).toHaveBeenCalledWith({
+      id: 'warning-toast',
       title: 'Video age restricted; thumbnail NOT age restricted',
       description: `${workerError(THUMB, 500)}; audit log not recorded`,
       variant: 'destructive',
-    });
+    }));
+    expect(toast).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports a failed audit write on its own once the warning is closed', async () => {
+    // The moderator has read and closed it, or a later toast replaced it, so it
+    // is not brought back.
+    api.moderateMedia.mockImplementation(failing({ [THUMB]: 500 }));
+    api.logDecision.mockImplementation(slowAuditFailure);
+    const shown = warningHandle(false);
+    toast.mockReturnValueOnce(shown);
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Age Restrict (2)' }));
+
+    await waitFor(() => expect(toast).toHaveBeenLastCalledWith({ title: 'Action applied; audit log not recorded' }));
+    expect(shown.update).not.toHaveBeenCalled();
+  });
+
+  it("adds the combined delete's first audit failure to its warning too", async () => {
+    // The event's own audit write starts before the media is deleted, so it can
+    // settle after the warning.
+    api.deleteMedia.mockImplementation(failing({ [THUMB]: 500 }));
+    api.logDecision.mockImplementation((params: { action: string }) =>
+      params.action === 'delete_event' ? slowAuditFailure() : Promise.resolve());
+    const shown = warningHandle();
+    toast.mockReturnValueOnce(shown);
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Event & Media' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm Delete' }));
+
+    await waitFor(() => expect(shown.update).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'Event and video deleted; thumbnail NOT deleted',
+      description: expect.stringMatching(/; audit log not recorded$/),
+    })));
+    expect(toast).toHaveBeenCalledTimes(1);
+  });
+
+  it('still reports a failed audit write after a plain success', async () => {
+    api.logDecision.mockImplementation(slowAuditFailure);
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Age Restrict (2)' }));
+
+    await waitFor(() => expect(toast).toHaveBeenLastCalledWith({ title: 'Action applied; audit log not recorded' }));
   });
 
   it('keeps a not-found thumbnail a quiet note, in the real worker wording', async () => {

@@ -1,7 +1,9 @@
+import { useEffect, useRef } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useToast } from '@/hooks/useToast';
+import type { toast as showToast } from '@/hooks/useToast';
 import { useAdminApi } from '@/hooks/useAdminApi';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { DeleteConfirmDialog } from './DeleteConfirmDialog';
@@ -22,6 +24,13 @@ interface DoneToast {
   title: string;
   description?: string;
   variant?: 'destructive';
+}
+
+// A media action's toast, and once shown, the handle that changes it in place.
+// Filled in after the audit writes have started, so they can reach it.
+interface ShownToast {
+  toast?: DoneToast;
+  handle?: ReturnType<typeof showToast>;
 }
 
 interface EventActionsProps {
@@ -51,7 +60,12 @@ export function EventActions({
   mediaStatusLoading = false,
   onActionComplete,
 }: EventActionsProps) {
-  const { toast } = useToast();
+  const { toast, toasts } = useToast();
+  // The toasts on screen as of the last render, for an audit write that settles later.
+  const toastsOnScreen = useRef(toasts);
+  useEffect(() => {
+    toastsOnScreen.current = toasts;
+  });
   const api = useAdminApi();
   const { getModeratorPubkey } = useCurrentUser();
   const queryClient = useQueryClient();
@@ -144,7 +158,7 @@ export function EventActions({
   const unreadNote = unreadThumbnails === 0
     ? undefined
     : `${thumbnailWord(unreadThumbnails)} skipped: ${unreadThumbnails === 1 ? 'its' : 'their'} status could not be read`;
-  // Built before the audit write starts, so a failed write can keep a warning.
+  // Built before the audit write settles, so a failed write can reach a warning.
   const doneToast = (
     title: string,
     warningTitle: (what: string) => string,
@@ -183,12 +197,14 @@ export function EventActions({
   // reused across every write in the action. Waits for the in-flight identity,
   // attributes or falls back to null, and never blocks the action.
   // One toast shows at a time and the write usually settles after the action's
-  // own toast, so a failure re-shows that toast when it is a warning (`shown`),
-  // rather than replacing the only sign that a thumbnail was left open.
+  // own toast, so a failure toast of its own would replace a warning, the only
+  // sign that a thumbnail was left open. While the warning is open, a failure is
+  // added to it instead; once it is closed or replaced, the failure gets the
+  // usual toast, and an out-of-date warning never comes back.
   const logAudit = (
     moderator: Promise<string | undefined>,
     params: Parameters<typeof api.logDecision>[0],
-    shown?: DoneToast,
+    shown?: ShownToast,
   ) =>
     void moderator.then((moderatorPubkey) =>
       api.logDecision({ ...params, moderatorPubkey })
@@ -198,10 +214,23 @@ export function EventActions({
         })
         .catch((e) => {
           console.warn('[EventActions] audit log failed', e);
-          toast(shown?.variant === 'destructive'
-            ? { ...shown, description: joinNotes(shown.description, 'audit log not recorded') }
-            : { title: 'Action applied; audit log not recorded' });
+          const warning = shown?.toast?.variant === 'destructive' ? shown.toast : undefined;
+          const handle = shown?.handle;
+          if (warning && handle && toastsOnScreen.current?.some((t) => t.id === handle.id && t.open)) {
+            handle.update({
+              ...warning,
+              id: handle.id,
+              description: joinNotes(warning.description, 'audit log not recorded'),
+            });
+          } else {
+            toast({ title: 'Action applied; audit log not recorded' });
+          }
         }));
+
+  const showDone = (shown: ShownToast) => {
+    if (shown.toast) shown.handle = toast(shown.toast);
+    onActionComplete?.();
+  };
 
   const banEventMutation = useMutation({
     mutationFn: async () => {
@@ -278,19 +307,16 @@ export function EventActions({
     mutationFn: async () => {
       const moderator = getModeratorPubkey(); // capture before the authoritative request
       const result = await actOnFiles(allFiles, (hash) => api.moderateMedia(hash, 'PERMANENT_BAN', 'Blocked by moderator'));
-      const done = doneToast(`Blocked ${result.changed} media file(s)`, (what) => `Video blocked; ${what} NOT blocked`, result);
+      const shown: ShownToast = { toast: doneToast(`Blocked ${result.changed} media file(s)`, (what) => `Video blocked; ${what} NOT blocked`, result) };
       logAudit(moderator, {
         targetType: 'event',
         targetId: eventId,
         action: 'block_media',
         reason: withNote(`Blocked ${result.changed} media file(s)`, result.thumbnailNote),
-      }, done);
-      return done;
+      }, shown);
+      return shown;
     },
-    onSuccess: (done) => {
-      toast(done);
-      onActionComplete?.();
-    },
+    onSuccess: showDone,
     onError: (error: Error) => {
       toast({ title: 'Failed to block media', description: error.message, variant: 'destructive' });
     },
@@ -308,19 +334,16 @@ export function EventActions({
             thumbnailsLeftOpen: (acted.thumbnailsLeftOpen ?? 0) + unreadThumbnails,
           }
         : acted;
-      const done = doneToast(`Age restricted ${result.changed} media file(s)`, (what) => `Video age restricted; ${what} NOT age restricted`, result);
+      const shown: ShownToast = { toast: doneToast(`Age restricted ${result.changed} media file(s)`, (what) => `Video age restricted; ${what} NOT age restricted`, result) };
       logAudit(moderator, {
         targetType: 'event',
         targetId: eventId,
         action: 'age_restrict_media',
         reason: withNote(`Age restricted ${result.changed} media file(s)`, result.thumbnailNote, unreadNote),
-      }, done);
-      return done;
+      }, shown);
+      return shown;
     },
-    onSuccess: (done) => {
-      toast(done);
-      onActionComplete?.();
-    },
+    onSuccess: showDone,
     onError: (error: Error) => {
       toast({ title: 'Failed to age restrict', description: error.message, variant: 'destructive' });
     },
@@ -329,24 +352,21 @@ export function EventActions({
   const unblockMediaMutation = useMutation({
     mutationFn: async () => {
       const { files, leftAlone } = undoFiles((s) => s.isBlocked);
-      if (files.length === 0) return { title: 'Media unblocked' };
+      if (files.length === 0) return { toast: { title: 'Media unblocked' } };
       const moderator = getModeratorPubkey(); // capture before the authoritative request
       const result = await actOnFiles(files, (hash) => api.moderateMedia(hash, 'SAFE', 'Unblocked by moderator'));
       const left = leftAloneNote(leftAlone, 'blocked');
-      const done = doneToast('Media unblocked', (what) => `Video unblocked; ${what} still blocked`,
-        { ...result, thumbnailToastNote: joinNotes(result.thumbnailToastNote, left, unreadNote) });
+      const shown: ShownToast = { toast: doneToast('Media unblocked', (what) => `Video unblocked; ${what} still blocked`,
+        { ...result, thumbnailToastNote: joinNotes(result.thumbnailToastNote, left, unreadNote) }) };
       logAudit(moderator, {
         targetType: 'event',
         targetId: eventId,
         action: 'unblock_media',
         reason: withNote(`Unblocked ${result.changed} media file(s)`, result.thumbnailNote, left, unreadNote),
-      }, done);
-      return done;
+      }, shown);
+      return shown;
     },
-    onSuccess: (done) => {
-      toast(done);
-      onActionComplete?.();
-    },
+    onSuccess: showDone,
     onError: (error: Error) => {
       toast({ title: 'Failed to unblock media', description: error.message, variant: 'destructive' });
     },
@@ -355,24 +375,21 @@ export function EventActions({
   const removeRestrictionMutation = useMutation({
     mutationFn: async () => {
       const { files, leftAlone } = undoFiles((s) => s.isRestricted);
-      if (files.length === 0) return { title: 'Restriction removed' };
+      if (files.length === 0) return { toast: { title: 'Restriction removed' } };
       const moderator = getModeratorPubkey(); // capture before the authoritative request
       const result = await actOnFiles(files, (hash) => api.moderateMedia(hash, 'SAFE', 'Restriction removed by moderator'));
       const left = leftAloneNote(leftAlone, 'restricted');
-      const done = doneToast('Restriction removed', (what) => `Restriction removed from video; ${what} still restricted`,
-        { ...result, thumbnailToastNote: joinNotes(result.thumbnailToastNote, left, unreadNote) });
+      const shown: ShownToast = { toast: doneToast('Restriction removed', (what) => `Restriction removed from video; ${what} still restricted`,
+        { ...result, thumbnailToastNote: joinNotes(result.thumbnailToastNote, left, unreadNote) }) };
       logAudit(moderator, {
         targetType: 'event',
         targetId: eventId,
         action: 'remove_restriction',
         reason: withNote(`Removed restriction from ${result.changed} media file(s)`, result.thumbnailNote, left, unreadNote),
-      }, done);
-      return done;
+      }, shown);
+      return shown;
     },
-    onSuccess: (done) => {
-      toast(done);
-      onActionComplete?.();
-    },
+    onSuccess: showDone,
     onError: (error: Error) => {
       toast({ title: 'Failed to remove restriction', description: error.message, variant: 'destructive' });
     },
@@ -382,19 +399,16 @@ export function EventActions({
     mutationFn: async () => {
       const moderator = getModeratorPubkey(); // capture before the authoritative request
       const result = await actOnFiles(allFiles, (hash) => api.deleteMedia(hash, 'Permanently deleted by moderator'));
-      const done = doneToast(`Deleted ${result.changed} media file(s)`, (what) => `Video deleted; ${what} NOT deleted`, result);
+      const shown: ShownToast = { toast: doneToast(`Deleted ${result.changed} media file(s)`, (what) => `Video deleted; ${what} NOT deleted`, result) };
       logAudit(moderator, {
         targetType: 'event',
         targetId: eventId,
         action: 'delete_media',
         reason: withNote(`Deleted ${result.changed} media file(s)`, result.thumbnailNote),
-      }, done);
-      return done;
+      }, shown);
+      return shown;
     },
-    onSuccess: (done) => {
-      toast(done);
-      onActionComplete?.();
-    },
+    onSuccess: showDone,
     onError: (error: Error) => {
       toast({ title: 'Failed to delete media', description: error.message, variant: 'destructive' });
     },
@@ -404,18 +418,20 @@ export function EventActions({
     mutationFn: async () => {
       const moderator = getModeratorPubkey(); // capture before the authoritative request
       const completed: string[] = [];
+      // Shared by both audit writes: the first can settle after the toast too.
+      const shown: ShownToast = {};
       try {
         await api.deleteEvent(eventId, 'Permanently deleted by moderator', pubkey);
         completed.push('event_deleted');
-        logAudit(moderator, { targetType: 'event', targetId: eventId, action: 'delete_event', reason: 'Permanently deleted (combined)' });
+        logAudit(moderator, { targetType: 'event', targetId: eventId, action: 'delete_event', reason: 'Permanently deleted (combined)' }, shown);
 
         const result = await actOnFiles(allFiles, async (hash) => {
           await api.deleteMedia(hash, 'Permanently deleted by moderator');
           completed.push(`media_${hash}`);
         });
-        const done = doneToast('Event and media permanently deleted', (what) => `Event and video deleted; ${what} NOT deleted`, result);
-        logAudit(moderator, { targetType: 'event', targetId: eventId, action: 'delete_event_and_media', reason: withNote(`Permanently deleted event + ${result.changed} media file(s)`, result.thumbnailNote) }, done);
-        return done;
+        shown.toast = doneToast('Event and media permanently deleted', (what) => `Event and video deleted; ${what} NOT deleted`, result);
+        logAudit(moderator, { targetType: 'event', targetId: eventId, action: 'delete_event_and_media', reason: withNote(`Permanently deleted event + ${result.changed} media file(s)`, result.thumbnailNote) }, shown);
+        return shown;
       } catch (error) {
         // Reached only when a real action (deleteEvent or a deleteMedia) failed —
         // not the audit log, which is now fire-and-forget. So "media deletion failed"
@@ -426,10 +442,7 @@ export function EventActions({
         throw Object.assign(error instanceof Error ? error : new Error('Unknown error'), { completed });
       }
     },
-    onSuccess: (done) => {
-      toast(done);
-      onActionComplete?.();
-    },
+    onSuccess: showDone,
     onError: (error: Error & { completed?: string[] }) => {
       const completed = error.completed ?? [];
       if (completed.length > 0) {
