@@ -266,17 +266,17 @@ export interface BanPubkeyResult extends Nip86RpcResult {
  * Funnelcake records the ban plus a durable purge job, and its BAN_PURGE_MODE
  * decides what happens before it answers. In `inline` (the default) it runs
  * one purge attempt first, so a purge error or a slow purge can reach us as an
- * error or a timeout. In `deferred` it answers once the ban is recorded,
- * before any snapshot or purge, so banpubkey cannot report a purge failure:
- * contentRemovalUnconfirmed then comes only from a timeout or from a non-purge
- * relay or network error after the ban landed, and a purge-related relayError
- * can only come from `inline` mode. The job is recorded normally but not
- * guaranteed: if the job write fails, funnelcake still answers ok, logs it and
- * counts it in ban_purge_job_write_failures_total, and that account's purge is
- * then not retried. A purge that fails or never finishes is retried by
- * funnelcake's janitor, and alerted in the infra monitoring (BanPurgeJobFailed)
- * once a purge is overdue or stopped part-way. A plain success therefore means
- * "ban in effect, purge scheduled", not "purge done".
+ * error or a timeout. In `deferred` it answers once the ban and its job are
+ * recorded, before any snapshot or purge. In both modes a failure to record
+ * the job is an error, not an ok: the ban is already in effect, nothing will
+ * purge it, and re-issuing the ban records a new job.
+ * Those errors arrive after the ban landed, so they surface as
+ * contentRemovalUnconfirmed, as do timeouts and non-purge relay or network
+ * errors. A purge that fails or never finishes is retried by funnelcake's
+ * janitor. The infra monitoring alerts (BanPurgeJobFailed) once a purge is
+ * overdue, or once an unban was seen after its deletes may have started. A
+ * plain success therefore means "ban in effect, purge scheduled", not "purge
+ * done".
  */
 export async function banPubkey(
   pubkey: string,
