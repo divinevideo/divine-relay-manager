@@ -411,6 +411,27 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
     })));
   });
 
+  it('keeps the warning on screen when the audit write fails too', async () => {
+    // One toast shows at a time (TOAST_LIMIT is 1), and the audit write settles
+    // after the action's own toast, so its failure toast replaces the warning.
+    api.moderateMedia.mockImplementation(failing({ [THUMB]: 500 }));
+    api.logDecision.mockImplementation(
+      () => new Promise((_, reject) => setTimeout(() => reject(new Error('audit down')), 10)),
+    );
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Age Restrict (2)' }));
+
+    await waitFor(() => expect(toast).toHaveBeenCalledTimes(2));
+    expect(toast).toHaveBeenLastCalledWith({
+      title: 'Video age restricted; thumbnail NOT age restricted',
+      description: `${workerError(THUMB, 500)}; audit log not recorded`,
+      variant: 'destructive',
+    });
+  });
+
   it('keeps a not-found thumbnail a quiet note, in the real worker wording', async () => {
     api.moderateMedia.mockImplementation(failing({ [THUMB]: 404 }));
     renderWithProvider(
