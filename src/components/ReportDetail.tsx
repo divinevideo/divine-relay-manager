@@ -24,7 +24,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { useToast } from "@/hooks/useToast";
 import { ToastAction } from "@/components/ui/toast";
 import { useReportContext } from "@/hooks/useReportContext";
-import { isRepostKind } from "@/lib/nip18";
+import { isRepostKind, parseRepostedEvent } from "@/lib/nip18";
 import { useBannedEvent } from "@/hooks/useBannedEvent";
 import { useUserSummary } from "@/hooks/useUserSummary";
 import { useModerationStatus } from "@/hooks/useModerationStatus";
@@ -385,9 +385,16 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
     };
     // A repost's content is the original event as JSON (useThread parses it), so
     // scanning that text would read the original's id and author key as files.
-    // Its tags still count; the original's files come from repostedEvent.
-    if (displayEvent) add(repostedEvent ? '' : displayEvent.content, displayEvent.tags);
-    if (repostedEvent) add(repostedEvent.content, repostedEvent.tags);
+    // Its tags still count; the original's files come from repostedEvent, or from
+    // parsing the content when useThread found none (a banned repost shown from
+    // the ban list, or one whose e-tag fetch missed).
+    if (displayEvent && isRepostKind(displayEvent.kind)) {
+      add('', displayEvent.tags);
+      const original = repostedEvent ?? parseRepostedEvent(displayEvent.content);
+      if (original) add(original.content, original.tags);
+    } else if (displayEvent) {
+      add(displayEvent.content, displayEvent.tags);
+    }
     return {
       mediaHashes: Array.from(media),
       thumbnailHashes: Array.from(thumbnails).filter(h => !media.has(h)),

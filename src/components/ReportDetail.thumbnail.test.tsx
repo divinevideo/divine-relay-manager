@@ -97,12 +97,13 @@ vi.mock('@/hooks/useMediaStatus', () => ({
 }));
 
 // When set, the report is on a kind 6 repost whose content is the video's JSON.
-const repost = vi.hoisted(() => ({ value: null as NostrEvent | null }));
+// Unresolved, useThread found no original for it (repostedEvent null).
+const repost = vi.hoisted(() => ({ value: null as NostrEvent | null, resolved: true }));
 vi.mock('@/hooks/useReportContext', () => ({
   useReportContext: () => ({
     target: { type: 'event', value: VIDEO_EVENT_ID },
     thread: repost.value
-      ? { event: repost.value, repostedEvent: VIDEO_EVENT.value, ancestors: [], replies: [] }
+      ? { event: repost.value, repostedEvent: repost.resolved ? VIDEO_EVENT.value : null, ancestors: [], replies: [] }
       : { event: VIDEO_EVENT.value, ancestors: [], replies: [] },
     threadLoading: false,
     reportedUser: { profile: undefined, pubkey: REPORTED_PUBKEY, isFunnelcakeUser: false },
@@ -163,6 +164,7 @@ describe('ReportDetail for a reported video with its own thumbnail', () => {
     mediaStatusCalls.value = [];
     eventActionsProps.value = null;
     repost.value = null;
+    repost.resolved = true;
     mediaStatusLoading.loading = false;
     mediaStatusLoading.fetching = false;
     mediaStatusLoading.paused = false;
@@ -214,6 +216,42 @@ describe('ReportDetail for a reported video with its own thumbnail', () => {
     renderDetail();
 
     expect(eventActionsProps.value).toMatchObject({ mediaHashes: [VIDEO], thumbnailHashes: [THUMB] });
+  });
+
+  it("reads an unresolved repost's files from its content, not from its JSON text", () => {
+    // useThread had no original for it: a banned repost shown from the ban list,
+    // or one whose e-tag fetch missed. The repost still carries it as JSON.
+    repost.resolved = false;
+    repost.value = {
+      id: '9'.repeat(64),
+      pubkey: '8'.repeat(64),
+      created_at: 1751000100,
+      kind: 6,
+      tags: [['e', VIDEO_EVENT_ID], ['p', REPORTED_PUBKEY]],
+      content: JSON.stringify(VIDEO_EVENT.value),
+      sig: 'b'.repeat(128),
+    };
+
+    renderDetail();
+
+    expect(eventActionsProps.value).toMatchObject({ mediaHashes: [VIDEO], thumbnailHashes: [THUMB] });
+  });
+
+  it('reads no files from the text of a repost whose content is not an event', () => {
+    repost.resolved = false;
+    repost.value = {
+      id: '9'.repeat(64),
+      pubkey: '8'.repeat(64),
+      created_at: 1751000100,
+      kind: 6,
+      tags: [['e', VIDEO_EVENT_ID], ['p', REPORTED_PUBKEY]],
+      content: `{"id":"${VIDEO_EVENT_ID}","pubkey":"${REPORTED_PUBKEY}"`,
+      sig: 'b'.repeat(128),
+    };
+
+    renderDetail();
+
+    expect(eventActionsProps.value).toMatchObject({ mediaHashes: [], thumbnailHashes: [] });
   });
 
   it('hands the buttons the video and its thumbnail separately', () => {
