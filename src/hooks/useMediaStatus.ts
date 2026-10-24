@@ -8,26 +8,40 @@ import { isBlockedMediaAction, type MediaStatus } from "@/lib/adminApi";
 export interface MediaStatusResult {
   hash: string;
   status: MediaStatus | null;
+  /** The stored action, or null when there is none or it could not be read. */
+  action: MediaStatus['action'] | null;
   isBlocked: boolean;
   isRestricted: boolean;
+  /** The moderation service did not answer for this file, so its state is unknown. */
+  unreadable: boolean;
 }
 
 export function useMediaStatus(hashes: string[]) {
-  const { checkMediaStatus } = useAdminApi();
+  const { readMediaStatus } = useAdminApi();
 
-  const { data, isLoading, error, refetch } = useQuery({
+  const { data, isLoading, isPending, isFetching, error, refetch } = useQuery({
     queryKey: ['media-status', ...hashes],
     queryFn: async () => {
       if (hashes.length === 0) return [];
 
       const results = await Promise.all(
-        hashes.map(async (hash) => {
-          const status = await checkMediaStatus(hash);
+        hashes.map(async (hash): Promise<MediaStatusResult> => {
+          // A file whose status could not be read is unknown, not open: read as
+          // open, a blocked file would be offered Age Restrict, which weakens it.
+          let status: MediaStatus | null;
+          try {
+            status = await readMediaStatus(hash);
+          } catch (error) {
+            console.error('Failed to check media status:', error);
+            return { hash, status: null, action: null, isBlocked: false, isRestricted: false, unreadable: true };
+          }
           return {
             hash,
             status,
+            action: status?.action ?? null,
             isBlocked: isBlockedMediaAction(status?.action),
             isRestricted: status?.action === 'AGE_RESTRICTED',
+            unreadable: false,
           };
         })
       );
@@ -38,15 +52,9 @@ export function useMediaStatus(hashes: string[]) {
     staleTime: 30000, // Cache for 30 seconds
   });
 
-  // Check if any media is blocked or restricted
-  const hasBlockedMedia = data?.some(r => r.isBlocked) ?? false;
-  const hasRestrictedMedia = data?.some(r => r.isRestricted) ?? false;
-  const hasModeratedMedia = hasBlockedMedia || hasRestrictedMedia;
-
-  // Count by state
-  const blockedCount = data?.filter(r => r.isBlocked).length ?? 0;
-  const restrictedCount = data?.filter(r => r.isRestricted).length ?? 0;
-  const unblockedCount = data?.filter(r => !r.isBlocked && !r.isRestricted).length ?? 0;
+  // No whole-list totals: the list now holds thumbnails as well as videos, and a
+  // file whose status could not be read is neither blocked nor open. Callers
+  // decide from each file's own result.
 
   // Get status for a specific hash
   const getStatus = (hash: string): MediaStatusResult | undefined => {
@@ -55,14 +63,10 @@ export function useMediaStatus(hashes: string[]) {
 
   return {
     results: data || [],
-    hasBlockedMedia,
-    hasRestrictedMedia,
-    hasModeratedMedia,
-    blockedCount,
-    restrictedCount,
-    unblockedCount,
     getStatus,
     isLoading,
+    isPending,
+    isFetching,
     error,
     refetch,
   };

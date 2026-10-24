@@ -24,7 +24,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { useToast } from "@/hooks/useToast";
 import { ToastAction } from "@/components/ui/toast";
 import { useReportContext } from "@/hooks/useReportContext";
-import { isRepostKind } from "@/lib/nip18";
+import { isRepostKind, parseRepostedEvent } from "@/lib/nip18";
 import { useBannedEvent } from "@/hooks/useBannedEvent";
 import { useUserSummary } from "@/hooks/useUserSummary";
 import { useModerationStatus } from "@/hooks/useModerationStatus";
@@ -39,7 +39,7 @@ import { useAdminApi } from "@/hooks/useAdminApi";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { useAppContext } from "@/hooks/useAppContext";
 import { historyCount } from "@/lib/historyCount";
-import { extractMediaHashes, type ResolutionStatus } from "@/lib/adminApi";
+import { extractMediaFiles, type ResolutionStatus } from "@/lib/adminApi";
 import { useMediaStatus } from "@/hooks/useMediaStatus";
 import { useDecisionLog } from "@/hooks/useDecisionLog";
 import { HiveAIReport } from "@/components/HiveAIReport";
@@ -371,27 +371,49 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
     },
   });
 
-  // Extract media hashes from the reported event AND reposted event if it's a repost
-  const mediaHashes = useMemo(() => {
-    const hashes = new Set<string>();
-
-    // From the reported event itself (or banned event fallback)
-    if (displayEvent) {
-      const eventHashes = extractMediaHashes(displayEvent.content, displayEvent.tags);
-      eventHashes.forEach(h => hashes.add(h));
+  // Extract media hashes from the reported event AND reposted event if it's a repost.
+  // A video's own thumbnails are kept apart so EventActions acts on them after the
+  // video, and a thumbnail failure never fails the video's action.
+  const { mediaHashes, thumbnailHashes } = useMemo(() => {
+    const media = new Set<string>();
+    const thumbnails = new Set<string>();
+    const repostedEvent = context.thread?.repostedEvent;
+    const add = (content: string, tags: string[][]) => {
+      const files = extractMediaFiles(content, tags);
+      files.media.forEach(h => media.add(h));
+      files.thumbnails.forEach(h => thumbnails.add(h));
+    };
+    // A repost's content is the original event as JSON (useThread parses it), so
+    // scanning that text would read the original's id and author key as files.
+    // Its tags still count, and the original's files come from repostedEvent, or
+    // out of the content's JSON when useThread found none (a banned repost shown
+    // from the ban list, or one whose e-tag fetch missed). Some out-of-spec
+    // reposts carry a media URL as plain text instead, which the preview shows,
+    // so that is read too, but never text that looks like JSON.
+    if (displayEvent && isRepostKind(displayEvent.kind)) {
+      add('', displayEvent.tags);
+      const inner = parseRepostedEvent(displayEvent.content);
+      const original = repostedEvent ?? inner;
+      if (original) add(original.content, original.tags);
+      if (!inner && !/^\s*[[{]/.test(displayEvent.content)) add(displayEvent.content, []);
+    } else if (displayEvent) {
+      add(displayEvent.content, displayEvent.tags);
     }
-
-    // From the reposted original event
-    if (context.thread?.repostedEvent) {
-      const repostHashes = extractMediaHashes(context.thread.repostedEvent.content, context.thread.repostedEvent.tags);
-      repostHashes.forEach(h => hashes.add(h));
-    }
-
-    return Array.from(hashes);
+    return {
+      mediaHashes: Array.from(media),
+      thumbnailHashes: Array.from(thumbnails).filter(h => !media.has(h)),
+    };
   }, [displayEvent, context.thread?.repostedEvent]);
 
-  // Check media status from moderation service
-  const mediaStatus = useMediaStatus(mediaHashes);
+  // Check media status from moderation service. Thumbnails are included, so the
+  // undo buttons reach a gated thumbnail and Age Restrict skips a blocked one.
+  const allMediaHashes = useMemo(() => [...mediaHashes, ...thumbnailHashes], [mediaHashes, thumbnailHashes]);
+  const mediaStatus = useMediaStatus(allMediaHashes);
+  // Which buttons show follows the video, so a thumbnail blocked on its own can't
+  // swap the video's Block and Age Restrict for the undo buttons.
+  const videoStatuses = mediaStatus.results.filter(r => mediaHashes.includes(r.hash));
+  const videoIsBlocked = videoStatuses.some(r => r.isBlocked);
+  const videoIsRestricted = videoStatuses.some(r => r.isRestricted);
 
   // undefined while loading, then true/false once reports are available
   const hasHighPriorityReports = useMemo(() => {
@@ -1327,10 +1349,16 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                 eventId={context.target.value}
                 pubkey={context.reportedUser.pubkey || ''}
                 mediaHashes={mediaHashes}
+                thumbnailHashes={thumbnailHashes}
                 mediaHashStatuses={mediaStatus.results}
                 isEventBanned={isEventDeleted ?? undefined}
-                hasBlockedMedia={mediaStatus.hasBlockedMedia}
-                hasRestrictedMedia={mediaStatus.hasRestrictedMedia}
+                hasBlockedMedia={videoIsBlocked}
+                hasRestrictedMedia={videoIsRestricted}
+                // Not isLoading, which covers only a first load that is fetching. A
+                // re-check after an action keeps showing the old status until it
+                // answers (isFetching), and a first load held back offline has no
+                // status at all yet (isPending).
+                mediaStatusLoading={mediaStatus.isPending || mediaStatus.isFetching}
                 onActionComplete={handleActionComplete}
               />
             )}

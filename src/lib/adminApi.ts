@@ -13,7 +13,11 @@ import {
   type BulkKindCounts,
   KIND_COUNTS_REQUEST_TIMEOUT_MS,
 } from "../../shared/bulk-moderation";
-import { extractMediaHashes as extractSharedMediaHashes } from "../../shared/media-hashes";
+import {
+  extractMediaFiles as extractSharedMediaFiles,
+  extractMediaHashes as extractSharedMediaHashes,
+  type MediaFiles,
+} from "../../shared/media-hashes";
 import type { AgeReviewCaseResponse } from "../../shared/age-review";
 
 // Build headers with CF Access service token for cross-origin API requests.
@@ -705,7 +709,8 @@ export type MediaStatusAction = ModerationAction;
 
 export interface MediaStatus {
   sha256: string;
-  action: MediaStatusAction;
+  /** Absent when there is no decision (moderation-service's status 'unknown'). */
+  action?: MediaStatusAction;
   reason?: string;
   created_at?: string;
   source?: string;
@@ -732,23 +737,31 @@ export async function moderateMedia(
   return data;
 }
 
-// Check media moderation status
+// Read media moderation status. A status that could not be read throws, so a
+// caller can tell "unknown" from "no decision". No decision comes back as a
+// record with no action (moderation-service's status 'unknown'), or as null from
+// a worker deployed before its check-result proxy stopped turning an upstream
+// 404 into null. Any failed response, a 404 included, is unread.
+export async function readMediaStatus(apiUrl: string, sha256: string): Promise<MediaStatus | null> {
+  const response = await fetchWithTimeout(`${apiUrl}/api/check-result/${sha256}`, {
+    method: 'GET',
+    headers: getApiHeaders(),
+  }, 'Media status check', { mutates: false });
+
+  if (!response.ok) {
+    throw new ApiError(`HTTP ${response.status}: ${response.statusText}`);
+  }
+
+  const data = await response.json();
+  if (data === null) return null;
+  return data as MediaStatus;
+}
+
+// Check media moderation status, reading a status that could not be read as null.
+// Kept for the verify helpers, which only ask whether an action landed.
 export async function checkMediaStatus(apiUrl: string, sha256: string): Promise<MediaStatus | null> {
   try {
-    const response = await fetchWithTimeout(`${apiUrl}/api/check-result/${sha256}`, {
-      method: 'GET',
-      headers: getApiHeaders(),
-    }, 'Media status check', { mutates: false });
-
-    if (!response.ok) {
-      if (response.status === 404) return null;
-      throw new ApiError(`HTTP ${response.status}: ${response.statusText}`);
-    }
-
-    const data = await response.json();
-    // Returns null if no moderation action exists
-    if (data === null) return null;
-    return data as MediaStatus;
+    return await readMediaStatus(apiUrl, sha256);
   } catch (error) {
     console.error('Failed to check media status:', error);
     return null;
@@ -1035,6 +1048,11 @@ export async function verifyModerationAction(
 // Extract sha256 hashes from media URLs in content or tags
 export function extractMediaHashes(content: string, tags: string[][]): string[] {
   return extractSharedMediaHashes(content, tags);
+}
+
+// The same files, with a video's separately uploaded thumbnails kept apart
+export function extractMediaFiles(content: string, tags: string[][]): MediaFiles {
+  return extractSharedMediaFiles(content, tags);
 }
 
 // Scene classification from VLM
