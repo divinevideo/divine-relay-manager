@@ -79,8 +79,9 @@ export function EventActions({
     thumbnailsLeftOpen?: number;
   }> => {
     const isThumbnail = (hash: string) => thumbnails.includes(hash);
-    for (const hash of hashes.filter((h) => !isThumbnail(h))) await act(hash);
-    let changed = hashes.filter((h) => !isThumbnail(h)).length;
+    const videos = hashes.filter((h) => !isThumbnail(h));
+    for (const hash of videos) await act(hash);
+    let changed = videos.length;
     const errors: string[] = [];
     for (const hash of hashes.filter(isThumbnail)) {
       try {
@@ -134,8 +135,8 @@ export function EventActions({
       ? `thumbnail left ${state}: it was ${state} separately`
       : `${count} thumbnails left ${state}: they were ${state} separately`;
   };
-  const withNote = (reason: string, note?: string) => (note ? `${reason}; ${note}` : reason);
   const joinNotes = (...notes: (string | undefined)[]) => notes.filter(Boolean).join('; ') || undefined;
+  const withNote = (reason: string, ...notes: (string | undefined)[]) => joinNotes(reason, ...notes) ?? reason;
   const thumbnailWord = (count: number) => (count === 1 ? 'thumbnail' : `${count} thumbnails`);
   // A thumbnail whose status could not be read is never age restricted and never
   // undone, and the moderator is told so rather than left to assume it was.
@@ -312,7 +313,7 @@ export function EventActions({
         targetType: 'event',
         targetId: eventId,
         action: 'age_restrict_media',
-        reason: withNote(withNote(`Age restricted ${result.changed} media file(s)`, result.thumbnailNote), unreadNote),
+        reason: withNote(`Age restricted ${result.changed} media file(s)`, result.thumbnailNote, unreadNote),
       }, done);
       return done;
     },
@@ -338,7 +339,7 @@ export function EventActions({
         targetType: 'event',
         targetId: eventId,
         action: 'unblock_media',
-        reason: withNote(withNote(withNote(`Unblocked ${result.changed} media file(s)`, result.thumbnailNote), left), unreadNote),
+        reason: withNote(`Unblocked ${result.changed} media file(s)`, result.thumbnailNote, left, unreadNote),
       }, done);
       return done;
     },
@@ -364,7 +365,7 @@ export function EventActions({
         targetType: 'event',
         targetId: eventId,
         action: 'remove_restriction',
-        reason: withNote(withNote(withNote(`Removed restriction from ${result.changed} media file(s)`, result.thumbnailNote), left), unreadNote),
+        reason: withNote(`Removed restriction from ${result.changed} media file(s)`, result.thumbnailNote, left, unreadNote),
       }, done);
       return done;
     },
