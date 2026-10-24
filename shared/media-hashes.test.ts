@@ -133,6 +133,32 @@ describe('extractMediaFiles', () => {
     expect(extractMediaFiles('', tags)).toEqual({ media: [VIDEO], thumbnails: [THUMB] });
   });
 
+  it('does not let a bare key with no value swallow the mime entry', () => {
+    // Read as alternating, 'blurhash' would take 'm video/mp4' as its value, the
+    // tag would not read as a video, and the thumbnail would join the video files.
+    const tags = [[
+      'imeta',
+      `url https://media.divine.video/${VIDEO}`,
+      'blurhash',
+      'm video/mp4',
+      `image https://media.divine.video/${THUMB}`,
+    ]];
+
+    expect(extractMediaFiles('', tags)).toEqual({ media: [VIDEO], thumbnails: [THUMB] });
+  });
+
+  it('does not let a bare key with no value swallow the video url', () => {
+    const tags = [[
+      'imeta',
+      'blurhash',
+      `url https://media.divine.video/${VIDEO}`,
+      'm video/mp4',
+      `image https://media.divine.video/${THUMB}`,
+    ]];
+
+    expect(extractMediaFiles('', tags)).toEqual({ media: [VIDEO], thumbnails: [THUMB] });
+  });
+
   it('reads the mime key in any case', () => {
     const tags = [['imeta', `url https://media.divine.video/${VIDEO}`, 'M video/mp4', `image https://media.divine.video/${THUMB}`]];
 

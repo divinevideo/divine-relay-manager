@@ -24,23 +24,20 @@ function hashesIn(value: string): string[] {
 // imeta comes in two shapes: NIP-92 "key value" entries (divine-mobile), and
 // alternating key, value elements (divine-web's publishVideoTags). Read both, so
 // a web post's thumbnail is told apart from its video the same way. Element by
-// element: one with a space is "key value" (an empty value, like 'alt ', still
-// counts); a bare one is a key whose value is the next element; an empty one is
-// skipped. Keys are lowercased.
+// element: each is read as "key value" (an empty value, like 'alt ', still
+// counts), and a bare one is also read as a key whose value is the next element.
+// Reading a bare one both ways keeps a key with no value, such as a lone
+// 'blurhash' among "key value" entries, from swallowing the entry after it. An
+// empty element is skipped. Keys are lowercased.
 function imetaEntries(tag: string[]): Array<[string, string]> {
   const parts = tag.slice(1);
   const entries: Array<[string, string]> = [];
-  for (let i = 0; i < parts.length; i++) {
-    const part = parts[i];
-    if (part.trim() === '') continue;
-    if (/\s/.test(part)) {
-      const [key, ...values] = part.trim().split(/\s+/);
-      entries.push([key.toLowerCase(), values.join(' ')]);
-    } else {
-      entries.push([part.toLowerCase(), parts[i + 1] ?? '']);
-      i++;
-    }
-  }
+  parts.forEach((part, i) => {
+    if (part.trim() === '') return;
+    const [key, ...values] = part.trim().split(/\s+/);
+    entries.push([key.toLowerCase(), values.join(' ')]);
+    if (!/\s/.test(part) && i + 1 < parts.length) entries.push([key.toLowerCase(), parts[i + 1]]);
+  });
   return entries;
 }
 
@@ -54,8 +51,7 @@ export function extractMediaFiles(content: string, tags: string[][]): MediaFiles
   for (const tag of tags) {
     if (tag[0] === 'imeta') {
       const entries = imetaEntries(tag);
-      const mime = entries.find(([key]) => key === 'm')?.[1];
-      if (mime?.toLowerCase().startsWith('video/')) {
+      if (entries.some(([key, value]) => key === 'm' && value.toLowerCase().startsWith('video/'))) {
         hasVideo = true;
         for (const [key, value] of entries) {
           if (key === 'url' || key === 'x') hashesIn(value).forEach((hash) => media.add(hash));
