@@ -1042,6 +1042,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
             stats={context.userStats}
             isLoading={false}
             isFunnelcakeUser={context.reportedUser.isFunnelcakeUser}
+            hideMediaByDefault={hasHighPriorityReports !== false}
             onViewActivity={reportedPubkey ? () => {
               // Same drill-down the reporter rows get: Events tab filtered to this
               // user (#156). Encoded: the p tag comes from an attacker-authored

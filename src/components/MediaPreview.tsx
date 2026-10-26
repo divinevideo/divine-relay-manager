@@ -395,17 +395,28 @@ export function InlineMediaPreview({
   content,
   tags,
   className,
+  showByDefault = true,
 }: {
   content: string;
   tags: string[][];
   className?: string;
+  showByDefault?: boolean;
 }) {
-  const [showMedia, setShowMedia] = useState(true);
+  const [showMedia, setShowMedia] = useState(showByDefault);
+  const userToggledRef = useRef(false);
   const [failedUrls, setFailedUrls] = useState<Map<string, 'unavailable' | 'error'>>(new Map());
   const [proxyUrls, setProxyUrls] = useState<Map<string, string>>(new Map());
   const proxyUrlsRef = useRef(proxyUrls);
   proxyUrlsRef.current = proxyUrls;
   const apiUrl = useApiUrl();
+
+  // The default can arrive after mount (report classification loads async).
+  // Follow it until the moderator makes their own choice.
+  useEffect(() => {
+    if (!userToggledRef.current) {
+      setShowMedia(showByDefault);
+    }
+  }, [showByDefault]);
 
   useEffect(() => {
     return () => {
@@ -454,7 +465,7 @@ export function InlineMediaPreview({
         <Button
           variant="ghost"
           size="sm"
-          onClick={() => setShowMedia(!showMedia)}
+          onClick={() => { userToggledRef.current = true; setShowMedia(!showMedia); }}
           className="h-6 px-2 text-xs"
         >
           {showMedia ? <EyeOff className="h-3 w-3 mr-1" /> : <Eye className="h-3 w-3 mr-1" />}

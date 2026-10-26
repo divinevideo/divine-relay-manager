@@ -94,7 +94,11 @@ vi.mock('@/hooks/useReportContext', () => ({
 }));
 
 vi.mock('@/components/ThreadContext', () => ({ ThreadContext: () => null }));
-vi.mock('@/components/UserProfileCard', () => ({ UserProfileCard: () => null }));
+vi.mock('@/components/UserProfileCard', () => ({
+  UserProfileCard: ({ hideMediaByDefault }: { hideMediaByDefault?: boolean }) => (
+    <div data-testid="profile-card" data-hide={String(hideMediaByDefault)} />
+  ),
+}));
 vi.mock('@/components/AISummary', () => ({ AISummary: () => null }));
 vi.mock('@/components/HiveAIReport', () => ({ HiveAIReport: () => null }));
 vi.mock('@/components/AIDetectionReport', () => ({ AIDetectionReport: () => null }));
@@ -127,14 +131,14 @@ const OLD_BUILD = makeReport(
 );
 const PLAIN_ILLEGAL = makeReport([['e', E, 'illegal'], ['p', P, 'illegal']], 'bad');
 
-function renderDetail(report: NostrEvent, allReportsForTarget: NostrEvent[] = [report]) {
+function renderDetail(report: NostrEvent, allReportsForTarget: NostrEvent[] | null = [report]) {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   return render(
     <QueryClientProvider client={qc}>
       <TooltipProvider>
-        <ReportDetail report={report} allReportsForTarget={allReportsForTarget} />
+        <ReportDetail report={report} allReportsForTarget={allReportsForTarget ?? undefined} />
       </TooltipProvider>
     </QueryClientProvider>,
   );
@@ -151,6 +155,21 @@ describe('ReportDetail for an old-build CSAM report', () => {
   it('hides media by default', () => {
     renderDetail(OLD_BUILD);
     expect(screen.getAllByTestId('media').every(m => m.dataset.show === 'false')).toBe(true);
+  });
+
+  it('hides the reported account images by default', () => {
+    renderDetail(OLD_BUILD);
+    expect(screen.getByTestId('profile-card').dataset.hide).toBe('true');
+  });
+
+  it('shows the reported account images for a bare illegal report (control)', () => {
+    renderDetail(PLAIN_ILLEGAL);
+    expect(screen.getByTestId('profile-card').dataset.hide).toBe('false');
+  });
+
+  it('hides the reported account images while the report set is still loading', () => {
+    renderDetail(PLAIN_ILLEGAL, null);
+    expect(screen.getByTestId('profile-card').dataset.hide).toBe('true');
   });
 
   it('shows media by default for a bare illegal report (control)', () => {
