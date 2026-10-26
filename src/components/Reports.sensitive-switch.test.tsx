@@ -5,6 +5,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import { QueryClient } from '@tanstack/react-query';
+import { useLocation } from 'react-router-dom';
 import { nip19 } from 'nostr-tools';
 import TestApp from '@/test/TestApp';
 import { Reports } from './Reports';
@@ -61,14 +62,22 @@ function stubFetch({
   events,
   states = [],
   labels = () => Promise.resolve([] as LabelTarget[]),
+  targeted = {},
 }: {
   events: unknown[];
   states?: State[];
   labels?: () => Promise<LabelTarget[]>;
+  // A deep link's targeted lookup (/api/reports?event= or ?pubkey=), keyed by
+  // the target's hex. A target with no entry gets an empty result.
+  targeted?: Record<string, unknown[]>;
 }) {
   const calls = { labels: 0, resolutionState: 0 };
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input instanceof Request ? input.url : input);
+    if (url.includes('/api/reports?')) {
+      const hit = Object.keys(targeted).find((hex) => url.includes(hex));
+      return jsonResponse({ success: true, events: hit ? targeted[hit] : [] });
+    }
     if (url.includes('/api/reports')) return jsonResponse({ success: true, events });
     if (url.includes('/api/resolution-label-targets')) {
       calls.labels += 1;
@@ -108,6 +117,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
   consoleError.mockRestore();
+  window.history.pushState({}, '', '/');
 });
 
 describe('Reports sensitive pending-review switch', () => {
@@ -332,6 +342,237 @@ describe('Reports sensitive pending-review switch', () => {
       expect(hideResolved).toBeChecked();
       expect(hideResolved).toBeEnabled();
       expect(screen.getByText(NOTE_SPAM)).toBeInTheDocument();
+    });
+  });
+
+  describe('when a link lands on a report behind the switch', () => {
+    // An auto-hidden target the bulk list does not carry, so only the deep
+    // link's targeted lookup can find it.
+    const LOOKUP_EVENT = '2'.repeat(64);
+    const LOOKUP_REPORT = report('e'.repeat(64), 1751000200, [
+      ['e', LOOKUP_EVENT, 'spam'],
+      ['p', '6'.repeat(64), 'spam'],
+    ]);
+    const HIDDEN_STATES: State[] = [
+      { target_type: 'event', target_id: HIDDEN_EVENT, action: 'auto_hidden' },
+      { target_type: 'event', target_id: LOOKUP_EVENT, action: 'auto_hidden' },
+    ];
+
+    // Mirrors the app's route: /reports/<id> hands Reports the id to select.
+    function RoutedReports() {
+      const { pathname } = useLocation();
+      const reportId = pathname.match(/^\/reports\/([0-9a-f]{64})$/)?.[1];
+      return <Reports relayUrl={RELAY_URL} selectedReportId={reportId} />;
+    }
+    function renderAt(path: string, queryClient = newClient()) {
+      window.history.pushState({}, '', path);
+      render(<TestApp queryClient={queryClient}><RoutedReports /></TestApp>);
+      return queryClient;
+    }
+    const pendingSwitch = () => screen.getByRole('switch', { name: /pending review/i });
+    const hideResolvedSwitch = () => screen.getByRole('switch', { name: /hide resolved/i });
+
+    it('opens the switch for ?event= on an auto-hidden target in the list', async () => {
+      stubFetch({ events: [CSAM_REPORT, SPAM_REPORT, HIDDEN_REPORT], states: HIDDEN_STATES });
+      renderAt(`/reports?event=${HIDDEN_EVENT}`);
+
+      await waitFor(() => expect(window.location.pathname).toBe(`/reports/${HIDDEN_REPORT.id}`));
+      await waitFor(() => expect(pendingSwitch()).toBeChecked());
+      expect(within(rowFor(NOTE_HIDDEN)).getByText('Hidden automatically')).toBeInTheDocument();
+    });
+
+    it('opens the switch for ?pubkey= on a profile CSAM target', async () => {
+      stubFetch({ events: [CSAM_REPORT, SPAM_REPORT] });
+      renderAt(`/reports?pubkey=${CSAM_PROFILE}`);
+
+      await waitFor(() => expect(window.location.pathname).toBe(`/reports/${CSAM_REPORT.id}`));
+      await waitFor(() => expect(pendingSwitch()).toBeChecked());
+      expect(within(rowFor(NPUB_CSAM)).getByText('Not hidden, needs review')).toBeInTheDocument();
+    });
+
+    it('opens the switch for ?event= that only the targeted lookup finds', async () => {
+      stubFetch({
+        events: [CSAM_REPORT, SPAM_REPORT, HIDDEN_REPORT],
+        states: HIDDEN_STATES,
+        targeted: { [LOOKUP_EVENT]: [LOOKUP_REPORT] },
+      });
+      renderAt(`/reports?event=${LOOKUP_EVENT}`);
+
+      await waitFor(() => expect(window.location.pathname).toBe(`/reports/${LOOKUP_REPORT.id}`));
+      await waitFor(() => expect(pendingSwitch()).toBeChecked());
+    });
+
+    it('opens the switch when arriving at /reports/<id> directly', async () => {
+      stubFetch({ events: [CSAM_REPORT, SPAM_REPORT] });
+      renderAt(`/reports/${CSAM_REPORT.id}`);
+
+      await waitFor(() => expect(pendingSwitch()).toBeChecked());
+      expect(within(rowFor(NPUB_CSAM)).getByText('Not hidden, needs review')).toBeInTheDocument();
+    });
+
+    it('leaves the switch off when a row picked inside it is left by turning it off', async () => {
+      // A click is not a deep link, so the effect has no business reopening it.
+      stubFetch({ events: [CSAM_REPORT, SPAM_REPORT, HIDDEN_REPORT], states: HIDDEN_STATES });
+      const queryClient = newClient();
+      const user = userEvent.setup();
+      render(<TestApp queryClient={queryClient}><RoutedReports /></TestApp>);
+
+      await screen.findByText(NOTE_SPAM);
+      await turnSwitchOn(user);
+      await user.click(rowFor(NOTE_HIDDEN));
+      await waitFor(() => expect(window.location.pathname).toBe(`/reports/${HIDDEN_REPORT.id}`));
+
+      await user.click(pendingSwitch());
+      await flush();
+      expect(pendingSwitch()).not.toBeChecked();
+      await act(async () => { await queryClient.invalidateQueries(); });
+      await flush();
+      expect(pendingSwitch()).not.toBeChecked();
+    });
+
+    it('stays off across the next poll once turned off after a deep link, and hands Hide resolved back', async () => {
+      const calls = stubFetch({
+        events: [CSAM_REPORT, SPAM_REPORT, HIDDEN_REPORT],
+        states: HIDDEN_STATES,
+      });
+      const user = userEvent.setup();
+      const queryClient = renderAt(`/reports?event=${HIDDEN_EVENT}`);
+
+      await waitFor(() => expect(pendingSwitch()).toBeChecked());
+      expect(hideResolvedSwitch()).not.toBeChecked();
+
+      await user.click(pendingSwitch());
+      await flush();
+      expect(pendingSwitch()).not.toBeChecked();
+
+      // Stands in for the 15s poll: a refetch hands the effect a new
+      // membership map, so it re-runs with the deep-linked report still open.
+      const before = calls.resolutionState;
+      await act(async () => { await queryClient.invalidateQueries(); });
+      await waitFor(() => expect(calls.resolutionState).toBeGreaterThan(before));
+      await flush();
+
+      expect(pendingSwitch()).not.toBeChecked();
+      expect(hideResolvedSwitch()).toBeChecked();
+      expect(screen.getByTestId('detail')).toBeInTheDocument();
+    });
+
+    // Labels answer empty first, then every later load waits for release(),
+    // so a test can resolve the CSAM target after the switch has opened.
+    function stubHeldLabels({
+      firstLoadHeld,
+      events = [CSAM_REPORT, SPAM_REPORT],
+      states = [],
+    }: { firstLoadHeld: boolean; events?: unknown[]; states?: State[] }) {
+      let release: (targets: LabelTarget[]) => void = () => {};
+      let first = true;
+      const calls = stubFetch({
+        events,
+        states,
+        labels: () => {
+          if (first && !firstLoadHeld) {
+            first = false;
+            return Promise.resolve([]);
+          }
+          first = false;
+          return new Promise<LabelTarget[]>((resolve) => { release = resolve; });
+        },
+      });
+      return { calls, release: (targets: LabelTarget[]) => release(targets) };
+    }
+
+    it('closes a switch the link opened once the linked target turns out resolved', async () => {
+      // The labels have not answered when the link lands, so the CSAM target
+      // looks unhandled and the switch opens for it.
+      const { release } = stubHeldLabels({ firstLoadHeld: true });
+      renderAt(`/reports/${CSAM_REPORT.id}`);
+
+      await waitFor(() => expect(pendingSwitch()).toBeChecked());
+      expect(within(rowFor(NPUB_CSAM)).getByText('Not hidden, needs review')).toBeInTheDocument();
+
+      await act(async () => { release([{ type: 'pubkey', value: CSAM_PROFILE }]); });
+
+      await waitFor(() =>
+        expect(screen.queryByRole('switch', { name: /pending review/i })).not.toBeInTheDocument());
+      // Resolved, and the link's courtesy turned Hide resolved off to show it.
+      await waitFor(() => expect(hideResolvedSwitch()).not.toBeChecked());
+      expect(screen.getByText(NPUB_CSAM)).toBeInTheDocument();
+      expect(screen.getByText(NOTE_SPAM)).toBeInTheDocument();
+      expect(window.location.pathname).toBe(`/reports/${CSAM_REPORT.id}`);
+      expect(screen.getByTestId('detail')).toHaveAttribute('data-switch-state', '');
+    });
+
+    it('keeps a switch the moderator turned on when the open target resolves', async () => {
+      const { calls, release } = stubHeldLabels({ firstLoadHeld: false });
+      const queryClient = newClient();
+      const user = userEvent.setup();
+      render(<TestApp queryClient={queryClient}><RoutedReports /></TestApp>);
+
+      await screen.findByText(NOTE_SPAM);
+      await turnSwitchOn(user);
+      await user.click(rowFor(NPUB_CSAM));
+      await waitFor(() => expect(window.location.pathname).toBe(`/reports/${CSAM_REPORT.id}`));
+
+      await act(async () => {
+        void queryClient.resetQueries({ queryKey: ['resolution-label-targets'] });
+      });
+      await waitFor(() => expect(calls.labels).toBe(2));
+      await act(async () => { release([{ type: 'pubkey', value: CSAM_PROFILE }]); });
+      await waitFor(() => expect(screen.queryByText(NPUB_CSAM)).not.toBeInTheDocument());
+      await flush();
+
+      expect(pendingSwitch()).toBeChecked();
+      expect(hideResolvedSwitch()).not.toBeChecked();
+    });
+
+    it('keeps a link-opened switch once the moderator has turned it off and on again', async () => {
+      // Labels land empty first: turning the switch off hands Hide resolved
+      // back on, and a held first load would gate the list behind a skeleton.
+      const { calls, release } = stubHeldLabels({ firstLoadHeld: false });
+      const user = userEvent.setup();
+      const queryClient = renderAt(`/reports/${CSAM_REPORT.id}`);
+
+      await waitFor(() => expect(pendingSwitch()).toBeChecked());
+      await user.click(pendingSwitch());
+      await flush();
+      await user.click(pendingSwitch());
+      await flush();
+      expect(pendingSwitch()).toBeChecked();
+
+      await act(async () => {
+        void queryClient.resetQueries({ queryKey: ['resolution-label-targets'] });
+      });
+      await waitFor(() => expect(calls.labels).toBe(2));
+      await act(async () => { release([{ type: 'pubkey', value: CSAM_PROFILE }]); });
+      await waitFor(() => expect(screen.queryByText(NPUB_CSAM)).not.toBeInTheDocument());
+      await flush();
+
+      expect(pendingSwitch()).toBeChecked();
+    });
+
+    it('keeps a link-opened switch once the moderator picks another row in it', async () => {
+      const { calls, release } = stubHeldLabels({
+        firstLoadHeld: false,
+        events: [CSAM_REPORT, SPAM_REPORT, HIDDEN_REPORT],
+        states: HIDDEN_STATES,
+      });
+      const user = userEvent.setup();
+      const queryClient = renderAt(`/reports/${HIDDEN_REPORT.id}`);
+
+      await waitFor(() => expect(pendingSwitch()).toBeChecked());
+      await user.click(rowFor(NPUB_CSAM));
+      await waitFor(() => expect(window.location.pathname).toBe(`/reports/${CSAM_REPORT.id}`));
+
+      await act(async () => {
+        void queryClient.resetQueries({ queryKey: ['resolution-label-targets'] });
+      });
+      await waitFor(() => expect(calls.labels).toBe(2));
+      await act(async () => { release([{ type: 'pubkey', value: CSAM_PROFILE }]); });
+      await waitFor(() => expect(screen.queryByText(NPUB_CSAM)).not.toBeInTheDocument());
+      await flush();
+
+      expect(pendingSwitch()).toBeChecked();
+      expect(screen.getByText(NOTE_HIDDEN)).toBeInTheDocument();
     });
   });
 });

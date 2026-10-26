@@ -1,7 +1,7 @@
 // ABOUTME: Displays kind 1984 reports with split-pane layout and consolidation
 // ABOUTME: Groups multiple reports on same target, shows count and all reporters
 
-import { useState, useMemo, useEffect, useRef } from "react";
+import { useState, useMemo, useEffect, useRef, useCallback } from "react";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
@@ -458,6 +458,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // clear, so leaving it has to hand both back -- otherwise a look at the
   // auto-hidden queue silently spends settings they chose.
   const prePendingReviewRef = useRef<{ hideResolved: boolean; filterCategory: string | null } | null>(null);
+  // True only while the pending-review switch is on because a deep link
+  // opened it, not the moderator. Only then may the switch close itself when
+  // the linked target leaves it; a switch the moderator turned on is theirs.
+  const switchOpenedByDeepLinkRef = useRef(false);
   const [retryNonce, setRetryNonce] = useState(0); // forces the deep-link effect to re-run on retry
   // Tracks mount state so an in-flight targeted lookup that resolves after the component
   // unmounts (e.g. the moderator switched tabs) can't fire a late navigate() and yank them back.
@@ -1120,6 +1124,71 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     }
   }, [hideResolved, selectedReport, resolvedTargets, bannedPubkeySet, authorByTarget]);
 
+  // Memoized because the deep-link effect below depends on it; it reads
+  // hideResolved and filterCategory, so it changes only when those do.
+  const enterPendingReview = useCallback(() => {
+    setShowPendingReview(true);
+    prePendingReviewRef.current = { hideResolved, filterCategory };
+    setHideResolved(false);
+    setFilterCategory(null);
+  }, [hideResolved, filterCategory]);
+
+  // Memoized for the same reason: the auto-leave effect below depends on it.
+  const leavePendingReview = useCallback(({ keepDeepLinkCourtesy = false } = {}) => {
+    setShowPendingReview(false);
+    // Turning the switch off is a stated preference, so the deep-link arrival
+    // courtesy is spent, as the Hide resolved handler does. Without this the
+    // effect below sees the deep-linked report still open behind the switch
+    // and turns it straight back on, then again on every poll. The auto-leave
+    // is not the moderator's choice, so it keeps the courtesy.
+    if (!keepDeepLinkCourtesy) deepLinkSelectedRef.current = false;
+    const previous = prePendingReviewRef.current;
+    if (previous) {
+      setHideResolved(previous.hideResolved);
+      // Only hand the category back if the moderator did not
+      // choose one inside the view. The chips stay live in
+      // there, so an in-view pick is a deliberate choice, and
+      // overwriting it would be the same silent discard this
+      // is meant to stop.
+      if (filterCategory === null) {
+        setFilterCategory(previous.filterCategory);
+      }
+      prePendingReviewRef.current = null;
+    }
+  }, [filterCategory]);
+
+  // A link that lands on a report behind the pending-review switch opens the
+  // switch, or the report sits in the detail pane with no row in the list.
+  // Same scoping as the resolved-unhide effect above, and for the same reason:
+  // DEEP-LINK selections only. A report the moderator clicked is already in
+  // the view they chose, and switchMembership is rebuilt on every poll, so an
+  // unscoped effect would reopen the switch underneath them every 15s.
+  useEffect(() => {
+    if (showPendingReview || !selectedReport || !deepLinkSelectedRef.current) return;
+    const target = getReportTarget(selectedReport);
+    if (target && switchMembership.has(`${target.type}:${target.value}`)) {
+      enterPendingReview();
+      switchOpenedByDeepLinkRef.current = true;
+    }
+  }, [showPendingReview, selectedReport, switchMembership, enterPendingReview]);
+
+  // The other half: a switch a deep link opened closes again once the linked
+  // target leaves it. While resolution sources load, an unresolved-looking
+  // CSAM target counts as a member, so the effect above can open the switch
+  // for a target that turns out to be resolved. The switch view shows members
+  // only and Hide resolved is off inside it, so the resolved-unhide effect
+  // cannot help, and the open report would have no row. Leaving keeps the
+  // deep-link courtesy, so that effect then shows it in the default view.
+  // A switch the moderator turned on is never closed for them.
+  useEffect(() => {
+    if (!showPendingReview || !switchOpenedByDeepLinkRef.current || !selectedReport) return;
+    const target = getReportTarget(selectedReport);
+    if (target && !switchMembership.has(`${target.type}:${target.value}`)) {
+      switchOpenedByDeepLinkRef.current = false;
+      leavePendingReview({ keepDeepLinkCourtesy: true });
+    }
+  }, [showPendingReview, selectedReport, switchMembership, leavePendingReview]);
+
   // Handle deep linking via query params (?event=... or ?pubkey=... or &env=...)
   useEffect(() => {
     const eventParam = searchParams.get('event');
@@ -1255,6 +1324,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     // A manual pick supersedes any deep link, so the unhide effect must not
     // treat this selection as one.
     deepLinkSelectedRef.current = false;
+    // Nor may the switch close itself under a report the moderator picked.
+    switchOpenedByDeepLinkRef.current = false;
     setSelectedReport(report);
     setDeepLinkStatus('idle'); // clear any deep-link fallback once the user interacts
     // Invalidate any in-flight targeted lookup: a user selection/dismissal
@@ -1617,26 +1688,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                   id="pending-review"
                   checked={showPendingReview}
                   onCheckedChange={(checked) => {
-                    setShowPendingReview(checked);
-                    if (checked) {
-                      prePendingReviewRef.current = { hideResolved, filterCategory };
-                      setHideResolved(false);
-                      setFilterCategory(null);
-                    } else {
-                      const previous = prePendingReviewRef.current;
-                      if (previous) {
-                        setHideResolved(previous.hideResolved);
-                        // Only hand the category back if the moderator did not
-                        // choose one inside the view. The chips stay live in
-                        // there, so an in-view pick is a deliberate choice, and
-                        // overwriting it would be the same silent discard this
-                        // is meant to stop.
-                        if (filterCategory === null) {
-                          setFilterCategory(previous.filterCategory);
-                        }
-                        prePendingReviewRef.current = null;
-                      }
-                    }
+                    // The moderator owns the switch from here on.
+                    switchOpenedByDeepLinkRef.current = false;
+                    if (checked) enterPendingReview();
+                    else leavePendingReview();
                   }}
                 />
               </div>
