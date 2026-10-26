@@ -295,7 +295,8 @@ describe('Reports resolution filtering', () => {
 
 // An old build reports CSAM as NIP-56 'illegal' and names the reason only in
 // the content. The queue must still treat it as high priority, without ever
-// labelling the row as CSAM (the tags do not say so).
+// labelling the row as CSAM (the tags do not say so). Unhandled, it sits
+// behind the pending-review switch, so each test turns the switch on first.
 describe('Reports CSAM signal priority', () => {
   // These tests are about the list, so the detail pane stays quiet.
   // jsdom lacks scrollIntoView, which the Radix Select opens with.
@@ -326,6 +327,10 @@ describe('Reports CSAM signal priority', () => {
     }));
   }
 
+  async function turnPendingReviewOn() {
+    fireEvent.click(await screen.findByRole('switch', { name: /pending review/i }));
+  }
+
   function expectPriorityNotCsam() {
     // 'Illegal' also appears in the category filter chips, so allow several.
     expect(screen.getAllByText('Illegal').length).toBeGreaterThan(0);
@@ -340,6 +345,7 @@ describe('Reports CSAM signal priority', () => {
       </TestApp>
     );
 
+    await turnPendingReviewOn();
     expect(await screen.findByText('Priority')).toBeInTheDocument();
     expectPriorityNotCsam();
   });
@@ -352,6 +358,7 @@ describe('Reports CSAM signal priority', () => {
       </TestApp>
     );
 
+    await turnPendingReviewOn();
     await screen.findByText('Priority');
     fireEvent.mouseDown(await screen.findByRole('tab', { name: /^All/ }), { button: 0 });
     fireEvent.click(screen.getByRole('tab', { name: /^All/, hidden: true }));
@@ -362,7 +369,8 @@ describe('Reports CSAM signal priority', () => {
 
   // The old-build report is 'violence' and the control 'spam', so an
   // alphabetical tie-break alone would put the control first. Only the CSAM
-  // signal can move the old-build target to the top.
+  // signal can move the old-build target to the top. The control is
+  // auto-hidden so that both targets share the switched view the sort runs in.
   const CONTROL_REPORT = {
     ...OLD_BUILD_REPORT,
     id: '2'.repeat(64),
@@ -380,7 +388,13 @@ describe('Reports CSAM signal priority', () => {
       const url = String(input instanceof Request ? input.url : input);
       if (url.includes('/api/reports')) return jsonResponse({ success: true, events: [CONTROL_REPORT, OLD_BUILD_VIOLENCE] });
       if (url.includes('/api/resolution-label-targets')) return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
-      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, resolved: [], states: [] });
+      if (url.includes('/api/resolution-state')) {
+        return jsonResponse({
+          success: true,
+          resolved: [],
+          states: [{ target_type: 'event', target_id: '9'.repeat(64), action: 'auto_hidden' }],
+        });
+      }
       if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
       return jsonResponse({ success: true });
     }));
@@ -389,6 +403,7 @@ describe('Reports CSAM signal priority', () => {
   const rows = () => Array.from(document.querySelectorAll('div.rounded-lg.cursor-pointer'));
 
   async function sortByCategory() {
+    await turnPendingReviewOn();
     await screen.findByText('Priority');
     fireEvent.click(screen.getAllByRole('combobox', { hidden: true })[0]);
     fireEvent.click(await screen.findByRole('option', { name: 'By Category', hidden: true }));

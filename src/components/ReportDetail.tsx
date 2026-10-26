@@ -51,6 +51,7 @@ import { UserActions } from "@/components/UserActions";
 import { LinkedTicketPanel } from "@/components/LinkedTicketPanel";
 import { linkedTicketTarget } from "@/lib/linkedTicketTarget";
 import { CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, getReportCategory, hasCsamSignal } from "@/lib/constants";
+import { SWITCH_STATE_LABELS, type SwitchState } from "@/lib/sensitiveSwitch";
 import { ageReviewCategory, classifyReport } from "../../shared/report-classification";
 import { KIND_NAMES } from "@/lib/kindNames";
 import { Flag, CheckCircle, History, Ban, ShieldX, Link2, User, FileText, Repeat2, FileCode, RefreshCw, EyeOff, Eye } from "lucide-react";
@@ -78,6 +79,10 @@ interface ReportDetailProps {
   allReportsForTargetTruncated?: boolean;
   allReports?: NostrEvent[];
   onDismiss?: () => void;
+  // Which side of the queue's Pending review switch this report's target is
+  // on. Undefined outside it. Only 'not-hidden' gets a badge here: the pane's
+  // own auto-hide banner and badge already describe the auto-hidden states.
+  switchState?: SwitchState;
 }
 
 // Helper to extract report target
@@ -90,7 +95,7 @@ function getReportTarget(event: NostrEvent): { type: 'event' | 'pubkey'; value: 
 }
 
 
-export function ReportDetail({ report, allReportsForTarget, allReportsForTargetTruncated = false, allReports = [], onDismiss }: ReportDetailProps) {
+export function ReportDetail({ report, allReportsForTarget, allReportsForTargetTruncated = false, allReports = [], onDismiss, switchState }: ReportDetailProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const {
@@ -662,6 +667,9 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 flex-wrap">
               <Badge variant={isHighPriorityCategory ? "destructive" : "outline"}>{categoryLabel}</Badge>
+              {switchState === 'not-hidden' && (
+                <Badge variant="outline">{SWITCH_STATE_LABELS['not-hidden']}</Badge>
+              )}
               <Badge variant="secondary">
                 {context.target?.type === 'event' ? 'Event' : 'User'}
               </Badge>

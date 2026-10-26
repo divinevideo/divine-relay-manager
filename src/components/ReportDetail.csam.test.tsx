@@ -177,3 +177,43 @@ describe('ReportDetail for an old-build CSAM report', () => {
     expect(screen.getByTestId('user-actions')).toHaveAttribute('data-report-category', 'NS-spam');
   });
 });
+
+describe('ReportDetail switch label', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    status.value = moderationStatusMock({ isUserBanned: false, isEventGone: false });
+    decisionRows.value = [];
+    decisionRows.handling = false;
+  });
+
+  function renderWithSwitch(props: Partial<Parameters<typeof ReportDetail>[0]>) {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    return render(
+      <QueryClientProvider client={qc}>
+        <TooltipProvider>
+          <ReportDetail report={OLD_BUILD} allReportsForTarget={[OLD_BUILD]} {...props} />
+        </TooltipProvider>
+      </QueryClientProvider>,
+    );
+  }
+
+  it('labels a not-hidden target the way its queue row is labelled', () => {
+    renderWithSwitch({ switchState: 'not-hidden' });
+    expect(screen.getByText('Not hidden, needs review')).toBeInTheDocument();
+  });
+
+  // The pane's own auto-hide banner and badge already describe these states,
+  // so a second badge would only duplicate or contradict them.
+  it('adds no switch badge for an auto-hidden target', () => {
+    const { unmount } = renderWithSwitch({ switchState: 'auto-hidden' });
+    expect(screen.queryByText(/Hidden automatically|Not hidden, needs review|Hide not confirmed/)).not.toBeInTheDocument();
+    unmount();
+    renderWithSwitch({ switchState: 'hide-unconfirmed' });
+    expect(screen.queryByText(/Hidden automatically|Not hidden, needs review|Hide not confirmed/)).not.toBeInTheDocument();
+  });
+
+  it('shows no switch label outside the switch', () => {
+    renderWithSwitch({});
+    expect(screen.queryByText(/Hidden automatically|Not hidden, needs review|Hide not confirmed/)).not.toBeInTheDocument();
+  });
+});
