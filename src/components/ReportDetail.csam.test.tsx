@@ -51,6 +51,8 @@ vi.mock('@/hooks/useAppContext', () => ({
 const decisionRows = vi.hoisted(() => ({
   value: [] as { id: number; action: string; reason: string | null; created_at: string }[],
   handling: false,
+  pending: false,
+  restoreFailed: false,
 }));
 vi.mock('@/hooks/useDecisionLog', () => ({
   useDecisionLog: () => ({
@@ -59,9 +61,10 @@ vi.mock('@/hooks/useDecisionLog', () => ({
     latestHandlingDecision: decisionRows.handling
       ? decisionRows.value.find(row => !row.action.startsWith('auto_hide_'))
       : undefined,
-    isPendingReview: false,
+    isPendingReview: decisionRows.pending,
+    isAutoHideRestoreFailed: decisionRows.restoreFailed,
     isDeleted: false,
-    isAutoHidden: false,
+    isAutoHidden: decisionRows.pending,
     isAutoHideRestored: false,
     decisions: decisionRows.value,
     latestDecision: decisionRows.value[0] ?? null,
@@ -78,10 +81,12 @@ vi.mock('@/hooks/useMediaStatus', () => ({ useMediaStatus: () => ({}) }));
 const reportTarget = vi.hoisted(() => ({
   value: { type: 'event', value: 'c'.repeat(64) } as { type: string; value: string },
 }));
+// Extra thread fields, so a test can make the reported event a repost.
+const threadExtra = vi.hoisted(() => ({ value: {} as Record<string, unknown> }));
 vi.mock('@/hooks/useReportContext', () => ({
   useReportContext: () => ({
     target: reportTarget.value,
-    thread: { event: LIST_EVENT.value, ancestors: [], replies: [] },
+    thread: { event: LIST_EVENT.value, ancestors: [], replies: [], ...threadExtra.value },
     threadLoading: false,
     reportedUser: { profile: undefined, pubkey: REPORTED_PUBKEY, isFunnelcakeUser: false },
     userStats: undefined,
@@ -93,7 +98,11 @@ vi.mock('@/hooks/useReportContext', () => ({
   }),
 }));
 
-vi.mock('@/components/ThreadContext', () => ({ ThreadContext: () => null }));
+vi.mock('@/components/ThreadContext', () => ({
+  ThreadContext: ({ hideAvatars }: { hideAvatars?: boolean }) => (
+    <div data-testid="thread" data-hide-avatars={String(hideAvatars)} />
+  ),
+}));
 vi.mock('@/components/UserProfileCard', () => ({
   UserProfileCard: ({ hideMediaByDefault }: { hideMediaByDefault?: boolean }) => (
     <div data-testid="profile-card" data-hide={String(hideMediaByDefault)} />
@@ -117,7 +126,11 @@ vi.mock('@/components/UserActions', () => ({
 }));
 vi.mock('@/components/BulkDeleteByKind', () => ({ BulkDeleteByKind: () => null }));
 vi.mock('@/components/ReporterCard', () => ({ ReporterInline: () => null }));
-vi.mock('@/components/UserIdentifier', () => ({ UserIdentifier: () => null }));
+vi.mock('@/components/UserIdentifier', () => ({
+  UserIdentifier: ({ pubkey, hideAvatarImage }: { pubkey: string; hideAvatarImage?: boolean }) => (
+    <div data-testid={`identifier-${pubkey}`} data-hide-avatar={String(hideAvatarImage)} />
+  ),
+}));
 
 const E = 'c'.repeat(64);
 const P = REPORTED_PUBKEY;
@@ -150,6 +163,9 @@ describe('ReportDetail for an old-build CSAM report', () => {
     status.value = moderationStatusMock({ isUserBanned: false, isEventGone: false });
     decisionRows.value = [];
     decisionRows.handling = false;
+    decisionRows.pending = false;
+    decisionRows.restoreFailed = false;
+    threadExtra.value = {};
   });
 
   it('hides media by default', () => {
@@ -203,6 +219,9 @@ describe('ReportDetail switch label', () => {
     status.value = moderationStatusMock({ isUserBanned: false, isEventGone: false });
     decisionRows.value = [];
     decisionRows.handling = false;
+    decisionRows.pending = false;
+    decisionRows.restoreFailed = false;
+    threadExtra.value = {};
   });
 
   function renderWithSwitch(props: Partial<Parameters<typeof ReportDetail>[0]>) {
@@ -234,5 +253,91 @@ describe('ReportDetail switch label', () => {
   it('shows no switch label outside the switch', () => {
     renderWithSwitch({});
     expect(screen.queryByText(/Hidden automatically|Not hidden, needs review|Hide not confirmed/)).not.toBeInTheDocument();
+  });
+});
+
+describe('ReportDetail on a sensitive report, elsewhere in the pane', () => {
+  const ORIGINAL_AUTHOR = '9'.repeat(64);
+  const SPAM = makeReport([['e', E, 'spam'], ['p', P, 'spam']], 'buy now');
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    status.value = moderationStatusMock({ isUserBanned: false, isEventGone: false });
+    decisionRows.value = [];
+    decisionRows.handling = false;
+    decisionRows.pending = false;
+    decisionRows.restoreFailed = false;
+    threadExtra.value = {};
+  });
+
+  function makeRepost() {
+    threadExtra.value = {
+      isRepost: true,
+      repostedEvent: { ...LIST_EVENT.value, id: '8'.repeat(64), pubkey: ORIGINAL_AUTHOR },
+    };
+  }
+
+  it('withholds thread participant avatars on a CSAM report', () => {
+    renderDetail(OLD_BUILD);
+    expect(screen.getByTestId('thread').dataset.hideAvatars).toBe('true');
+  });
+
+  it('loads thread participant avatars on a bare illegal report (control)', () => {
+    renderDetail(PLAIN_ILLEGAL);
+    expect(screen.getByTestId('thread').dataset.hideAvatars).toBe('false');
+  });
+
+  it("withholds a repost's original author avatar on a CSAM report", () => {
+    makeRepost();
+    renderDetail(OLD_BUILD);
+    expect(screen.getByTestId(`identifier-${ORIGINAL_AUTHOR}`).dataset.hideAvatar).toBe('true');
+  });
+
+  it("loads a repost's original author avatar on a bare illegal report (control)", () => {
+    makeRepost();
+    renderDetail(PLAIN_ILLEGAL);
+    expect(screen.getByTestId(`identifier-${ORIGINAL_AUTHOR}`).dataset.hideAvatar).toBe('false');
+  });
+
+  // The selected report is the newest; an older report on the same target is
+  // the one carrying the CSAM signal. The queue row goes red on any report.
+  it('styles the header badge as high priority when an older report on the target signals CSAM', () => {
+    renderDetail(SPAM, [SPAM, OLD_BUILD]);
+    expect(screen.getAllByText('Spam')[0].className).toContain('bg-destructive');
+  });
+
+  it('keeps the header badge plain when no report on the target signals CSAM (control)', () => {
+    renderDetail(SPAM, [SPAM, PLAIN_ILLEGAL]);
+    expect(screen.getAllByText('Spam')[0].className).not.toContain('bg-destructive');
+  });
+
+  function renderPending(switchState?: Parameters<typeof ReportDetail>[0]['switchState']) {
+    decisionRows.pending = true;
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    return render(
+      <QueryClientProvider client={qc}>
+        <TooltipProvider>
+          <ReportDetail report={OLD_BUILD} allReportsForTarget={[OLD_BUILD]} switchState={switchState} />
+        </TooltipProvider>
+      </QueryClientProvider>,
+    );
+  }
+
+  it('does not tell the moderator an unconfirmed hide landed', () => {
+    renderPending('hide-unconfirmed');
+    expect(screen.queryByText(/was automatically hidden/)).not.toBeInTheDocument();
+    expect(screen.getByText('An automatic hide may not have landed. Review and confirm or restore.')).toBeInTheDocument();
+  });
+
+  it('says the content was hidden when the hide is not in doubt (control)', () => {
+    renderPending('auto-hidden');
+    expect(screen.getByText(/was automatically hidden/)).toBeInTheDocument();
+    expect(screen.queryByText(/may not have landed/)).not.toBeInTheDocument();
+  });
+
+  it('keeps the restore-failed wording for a failed restore', () => {
+    decisionRows.restoreFailed = true;
+    renderPending('hide-unconfirmed');
+    expect(screen.getByText('An automatic restore failed. Retry restoring this content.')).toBeInTheDocument();
   });
 });

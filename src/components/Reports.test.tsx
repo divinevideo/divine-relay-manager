@@ -428,4 +428,3 @@ describe('Reports CSAM signal priority', () => {
     expect(rows()[0].className).toContain('border-red-300');
   });
 });
-

@@ -7,11 +7,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { EventDetail } from './EventDetail';
 
-// useModerationStatus keeps a ban from the last good read when the latest
-// refresh failed or has not answered since the latest check, and says so with
-// isUserBannedStale. Right after an Unban that can be exactly wrong, so the
-// pane shows it as last known, the way the report pane does.
-
 const REPORTED_PUBKEY = 'd'.repeat(64);
 const MOD_PUBKEY = 'e'.repeat(64);
 

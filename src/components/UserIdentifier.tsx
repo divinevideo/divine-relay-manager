@@ -19,6 +19,8 @@ import { getProfileUrl } from "@/lib/constants";
 interface UserIdentifierProps {
   pubkey: string;
   showAvatar?: boolean;
+  /** Keep the avatar slot (initials) but never mount the image (sensitive reports) */
+  hideAvatarImage?: boolean;
   avatarSize?: "sm" | "md" | "lg";
   showCopyButton?: boolean;
   copyOnClick?: boolean;
@@ -31,6 +33,7 @@ interface UserIdentifierProps {
 export function UserIdentifier({
   pubkey,
   showAvatar = false,
+  hideAvatarImage = false,
   avatarSize = "sm",
   showCopyButton = true,
   copyOnClick = false,
@@ -93,7 +96,7 @@ export function UserIdentifier({
       <>
         {showAvatar && (
           <Avatar className={avatarSizeClasses[avatarSize]}>
-            <AvatarImage src={picture} alt={displayName || npub} />
+            {!hideAvatarImage && <AvatarImage src={picture} alt={displayName || npub} />}
             <AvatarFallback className={avatarTextSizes[avatarSize]}>
               {initials}
             </AvatarFallback>
@@ -160,7 +163,7 @@ export function UserIdentifier({
   if (variant === "block") {
     const avatarElement = showAvatar && (
       <Avatar className={avatarSizeClasses[avatarSize]}>
-        <AvatarImage src={picture} alt={displayName || npub} />
+        {!hideAvatarImage && <AvatarImage src={picture} alt={displayName || npub} />}
         <AvatarFallback className={avatarTextSizes[avatarSize]}>
           {initials}
         </AvatarFallback>
@@ -231,7 +234,7 @@ export function UserIdentifier({
     <>
       {showAvatar && (
         <Avatar className={avatarSizeClasses[avatarSize]}>
-          <AvatarImage src={picture} alt={displayName || npub} />
+          {!hideAvatarImage && <AvatarImage src={picture} alt={displayName || npub} />}
           <AvatarFallback className={avatarTextSizes[avatarSize]}>
             {initials}
           </AvatarFallback>

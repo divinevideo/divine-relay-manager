@@ -1233,8 +1233,15 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     );
 
     if (inBulk) {
-      // If target is resolved and we're hiding resolved, temporarily show it
-      if (hideResolved && isConsolidatedReportResolved(inBulk, resolvedTargets, bannedPubkeySet)) {
+      // If target is resolved and we're hiding resolved, temporarily show it.
+      // Not for a switch member: the switch-opening effect turns Hide resolved
+      // off itself and saves the moderator's setting first. Turning it off here
+      // would make the switch save "off" and hand that back when it closes.
+      if (
+        hideResolved
+        && !switchMembership.has(`${inBulk.target.type}:${inBulk.target.value}`)
+        && isConsolidatedReportResolved(inBulk, resolvedTargets, bannedPubkeySet)
+      ) {
         setHideResolved(false);
       }
       deepLinkSelectedRef.current = true;
@@ -1313,7 +1320,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         setDeepLinkStatus('unavailable');
       }
     })();
-  }, [allConsolidated, searchParams, hideResolved, resolvedTargets, bannedPubkeySet, navigate, isLoading, config.relayUrl, config.apiUrl, updateConfig, queryClient, fetchReportsByTarget, relayUrl, retryNonce]);
+  }, [allConsolidated, searchParams, hideResolved, resolvedTargets, bannedPubkeySet, switchMembership, navigate, isLoading, config.relayUrl, config.apiUrl, updateConfig, queryClient, fetchReportsByTarget, relayUrl, retryNonce]);
 
   // Update URL when report selection changes
   const handleSelectReport = (report: NostrEvent | null) => {

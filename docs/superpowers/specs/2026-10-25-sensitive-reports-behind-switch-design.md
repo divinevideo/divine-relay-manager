@@ -1,6 +1,6 @@
 # Sensitive reports the system didn't act on: avoidable but findable
 
-Status: draft for review. Verified against `origin/main` at `1ef2163`, which matches the deployed frontend for every file named here.
+Status: approved by Matt 2026-10-25. Verified against `origin/main` at `1ef2163`, which matches the deployed frontend for every file named here.
 
 ## Intent
 

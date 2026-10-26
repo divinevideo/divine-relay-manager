@@ -523,8 +523,11 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
 
   const category = getReportCategory(report);
   const categoryLabel = CATEGORY_LABELS[category] || category;
+  // Any report on the target, not just the selected one, so the header agrees
+  // with the queue row when an older report carries the CSAM signal.
   const isHighPriorityCategory = HIGH_PRIORITY_CATEGORIES.includes(category)
-    || classifyReport(report).csamSignal;
+    || classifyReport(report).csamSignal
+    || hasCsamSignal(allReportsForTarget ?? []);
 
   // Scroll the whole pane, not just an inner region. On a short viewport the
   // tall action footer used to starve the content area (it was a shrink-0 block
@@ -602,7 +605,9 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                   <p className="text-sm text-orange-600 dark:text-orange-400">
                     {decisionLog.isAutoHideRestoreFailed
                       ? 'An automatic restore failed. Retry restoring this content.'
-                      : 'This content was automatically hidden based on a report. Please review and confirm or restore.'}
+                      : switchState === 'hide-unconfirmed'
+                        ? 'An automatic hide may not have landed. Review and confirm or restore.'
+                        : 'This content was automatically hidden based on a report. Please review and confirm or restore.'}
                   </p>
                 </div>
               </div>
@@ -890,6 +895,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                 checkedAt={moderationStatus.checkedAt}
                 onRecheck={moderationStatus.recheck}
                 isRechecking={moderationStatus.isChecking}
+                hideAvatars={hasHighPriorityReports !== false}
               />
             </>
           )}
@@ -917,6 +923,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                       <UserIdentifier
                         pubkey={context.thread.repostedEvent.pubkey}
                         showAvatar
+                        hideAvatarImage={hasHighPriorityReports !== false}
                         avatarSize="sm"
                         variant="inline"
                         linkToProfile

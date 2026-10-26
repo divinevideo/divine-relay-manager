@@ -78,6 +78,25 @@ describe('classifyReport', () => {
     expect(classifyReport({ tags: [['p', P]], content: 'Reason: CSAM' }).csamSignal).toBe(true);
   });
 
+  it('reads a Reason line ending in CRLF', () => {
+    // sexual_minors, so the free-text terms cannot be what matched.
+    expect(classifyReport({
+      tags: [['e', E, 'illegal']],
+      content: 'CONTENT REPORT - NIP-56\r\nReason: sexual_minors\r\nDetails: x\r\n',
+    }).csamSignal).toBe(true);
+  });
+
+  it('rejects a Reason line whose value only starts with a CSAM category', () => {
+    expect(classifyReport({ tags: [['e', E, 'illegal']], content: 'Reason: sexual_minorsx\n' }).csamSignal).toBe(false);
+    expect(classifyReport({ tags: [['e', E, 'illegal']], content: 'Reason: childSafety\n' }).csamSignal).toBe(false);
+  });
+
+  it('classifies content made of many newlines in linear time', () => {
+    const start = performance.now();
+    classifyReport({ tags: [['e', E, 'illegal']], content: '\n'.repeat(100_000) });
+    expect(performance.now() - start).toBeLessThan(200);
+  });
+
   it('tolerates malformed input', () => {
     const other = { category: 'other', csamSignal: false };
     expect(classifyReport({ tags: [['l'], ['p']] })).toEqual(other);

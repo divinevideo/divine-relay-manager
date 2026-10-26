@@ -410,7 +410,7 @@ describe('Reports sensitive pending-review switch', () => {
       expect(within(rowFor(NPUB_CSAM)).getByText('Not hidden, needs review')).toBeInTheDocument();
     });
 
-    it('leaves the switch off when a row picked inside it is left by turning it off', async () => {
+    it('does not reopen the switch for a clicked row after the moderator turns it off', async () => {
       // A click is not a deep link, so the effect has no business reopening it.
       stubFetch({ events: [CSAM_REPORT, SPAM_REPORT, HIDDEN_REPORT], states: HIDDEN_STATES });
       const queryClient = newClient();
@@ -455,6 +455,28 @@ describe('Reports sensitive pending-review switch', () => {
       expect(pendingSwitch()).not.toBeChecked();
       expect(hideResolvedSwitch()).toBeChecked();
       expect(screen.getByTestId('detail')).toBeInTheDocument();
+    });
+
+    // The link lands on a target that is both auto-hidden and resolved. The
+    // deep-link handler used to turn Hide resolved off before the switch opened,
+    // so the switch saved "off" as the moderator's setting and handed that back.
+    it('hands Hide resolved back after a link to a resolved auto-hidden target', async () => {
+      stubFetch({
+        events: [CSAM_REPORT, SPAM_REPORT, HIDDEN_REPORT],
+        states: HIDDEN_STATES,
+        labels: () => Promise.resolve([{ type: 'event', value: HIDDEN_EVENT }]),
+      });
+      const user = userEvent.setup();
+      renderAt(`/reports?event=${HIDDEN_EVENT}`);
+
+      await waitFor(() => expect(window.location.pathname).toBe(`/reports/${HIDDEN_REPORT.id}`));
+      await waitFor(() => expect(pendingSwitch()).toBeChecked());
+      expect(hideResolvedSwitch()).not.toBeChecked();
+
+      await user.click(pendingSwitch());
+      await flush();
+      expect(pendingSwitch()).not.toBeChecked();
+      expect(hideResolvedSwitch()).toBeChecked();
     });
 
     // Labels answer empty first, then every later load waits for release(),
