@@ -599,13 +599,18 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
               <div className="flex items-center gap-3 mb-3">
                 <EyeOff className="h-6 w-6 text-orange-600" />
                 <div className="flex-1">
+                  {/* Read from this pane's own decision log, not the switchState
+                      prop: that comes from /api/resolution-state, which may
+                      still be loading or have failed. */}
                   <p className="font-medium text-orange-800 dark:text-orange-300">
-                    Auto-Hidden — Pending Review
+                    {decisionLog.isAutoHideUnresolved || decisionLog.isAutoHideRestoreFailed
+                      ? 'Automatic hide not confirmed'
+                      : 'Auto-Hidden — Pending Review'}
                   </p>
                   <p className="text-sm text-orange-600 dark:text-orange-400">
                     {decisionLog.isAutoHideRestoreFailed
                       ? 'An automatic restore failed. Retry restoring this content.'
-                      : switchState === 'hide-unconfirmed'
+                      : decisionLog.isAutoHideUnresolved
                         ? 'An automatic hide may not have landed. Review and confirm or restore.'
                         : 'This content was automatically hidden based on a report. Please review and confirm or restore.'}
                   </p>

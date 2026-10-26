@@ -22,8 +22,8 @@ const NOS_NAMESPACE = 'social.nos.ontology';
 // Older builds put the reason only in the content, as a "Reason: csam" line.
 // [ \t] rather than \s: \s also matches newlines, which made the leading \s*
 // backtrack quadratically on content made of many blank lines. CRLF still
-// matches: with /m, $ already stops before \r, and \r? spells that out.
-const CSAM_REASON_LINE = /^[ \t]*Reason:[ \t]*(csam|sexual_minors)[ \t]*\r?$/im;
+// matches: with /m, $ also stops before \r, which JS counts as a line end.
+const CSAM_REASON_LINE = /^[ \t]*Reason:[ \t]*(csam|sexual_minors)[ \t]*$/im;
 // Free text from other apps. \b keeps "csamuel" out; "child porn" also matches
 // "child pornography" because only its left edge is anchored.
 const CSAM_FREE_TEXT = /\b(csam|child sexual abuse)\b|\bchild porn/i;

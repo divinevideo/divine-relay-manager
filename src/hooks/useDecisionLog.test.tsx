@@ -33,6 +33,20 @@ describe('useDecisionLog auto-hide state', () => {
     expect(result.current.isAutoHidden).toBe(true);
     expect(result.current.isPendingReview).toBe(true);
     expect(result.current.isAutoHideRestored).toBe(false);
+    expect(result.current.isAutoHideUnresolved).toBe(true);
+  });
+
+  it('does not call a hide unresolved once a newer auto-hide landed', async () => {
+    getDecisions.mockResolvedValue([
+      { action: 'auto_hidden' },
+      { action: 'auto_hide_unresolved' },
+    ]);
+
+    const { result } = renderHook(() => useDecisionLog('event-id'), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    expect(result.current.isPendingReview).toBe(true);
+    expect(result.current.isAutoHideUnresolved).toBe(false);
   });
 
   it('does not reopen controls after a newer restore settles unresolved state', async () => {

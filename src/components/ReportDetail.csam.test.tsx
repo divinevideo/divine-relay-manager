@@ -53,6 +53,7 @@ const decisionRows = vi.hoisted(() => ({
   handling: false,
   pending: false,
   restoreFailed: false,
+  unresolved: false,
 }));
 vi.mock('@/hooks/useDecisionLog', () => ({
   useDecisionLog: () => ({
@@ -63,6 +64,7 @@ vi.mock('@/hooks/useDecisionLog', () => ({
       : undefined,
     isPendingReview: decisionRows.pending,
     isAutoHideRestoreFailed: decisionRows.restoreFailed,
+    isAutoHideUnresolved: decisionRows.unresolved,
     isDeleted: false,
     isAutoHidden: decisionRows.pending,
     isAutoHideRestored: false,
@@ -165,6 +167,7 @@ describe('ReportDetail for an old-build CSAM report', () => {
     decisionRows.handling = false;
     decisionRows.pending = false;
     decisionRows.restoreFailed = false;
+    decisionRows.unresolved = false;
     threadExtra.value = {};
   });
 
@@ -221,6 +224,7 @@ describe('ReportDetail switch label', () => {
     decisionRows.handling = false;
     decisionRows.pending = false;
     decisionRows.restoreFailed = false;
+    decisionRows.unresolved = false;
     threadExtra.value = {};
   });
 
@@ -267,6 +271,7 @@ describe('ReportDetail on a sensitive report, elsewhere in the pane', () => {
     decisionRows.handling = false;
     decisionRows.pending = false;
     decisionRows.restoreFailed = false;
+    decisionRows.unresolved = false;
     threadExtra.value = {};
   });
 
@@ -323,21 +328,30 @@ describe('ReportDetail on a sensitive report, elsewhere in the pane', () => {
     );
   }
 
+  // The pane reads the hide's state from its own decision log, so the switch
+  // state (from /api/resolution-state) is left undefined: it may still be
+  // loading, or have failed.
   it('does not tell the moderator an unconfirmed hide landed', () => {
-    renderPending('hide-unconfirmed');
+    decisionRows.unresolved = true;
+    renderPending(undefined);
     expect(screen.queryByText(/was automatically hidden/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Auto-Hidden — Pending Review')).not.toBeInTheDocument();
+    expect(screen.getByText('Automatic hide not confirmed')).toBeInTheDocument();
     expect(screen.getByText('An automatic hide may not have landed. Review and confirm or restore.')).toBeInTheDocument();
   });
 
   it('says the content was hidden when the hide is not in doubt (control)', () => {
-    renderPending('auto-hidden');
+    renderPending(undefined);
+    expect(screen.getByText('Auto-Hidden — Pending Review')).toBeInTheDocument();
     expect(screen.getByText(/was automatically hidden/)).toBeInTheDocument();
-    expect(screen.queryByText(/may not have landed/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/may not have landed|not confirmed/)).not.toBeInTheDocument();
   });
 
-  it('keeps the restore-failed wording for a failed restore', () => {
+  it('keeps the restore-failed wording for a failed restore, under the unconfirmed heading', () => {
     decisionRows.restoreFailed = true;
-    renderPending('hide-unconfirmed');
+    renderPending(undefined);
+    expect(screen.getByText('Automatic hide not confirmed')).toBeInTheDocument();
+    expect(screen.queryByText('Auto-Hidden — Pending Review')).not.toBeInTheDocument();
     expect(screen.getByText('An automatic restore failed. Retry restoring this content.')).toBeInTheDocument();
   });
 });

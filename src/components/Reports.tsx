@@ -568,6 +568,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   });
   const resolvedDecisionTargets = decisionsResult?.resolved;
   const autoHideStates = decisionsResult?.states;
+  // The switch's auto-hidden members come only from this read, so membership
+  // is known once it has answered. A failed read counts as settled too, so a
+  // deep link's resolved-unhide is held, never stranded: on error it falls
+  // back to unhiding as it did before the hold.
+  const switchMembershipKnown = !decisionsPending;
 
   // The deep-link target, resolved here rather than beside the pane that renders
   // it: the per-target decisions read below is a hook, and the pane sits after
@@ -1112,8 +1117,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // it again. Reloading appeared to fix it only because that drops
   // selectedReport. #274 made it far more frequent by widening resolvedTargets
   // from a week to all of history, which is when moderators started reporting it.
+  //
+  // Held until switch membership is known. Labels or bans can resolve the
+  // target first; unhiding then would turn Hide resolved off before the switch
+  // opens, and the switch would save "off" as the moderator's setting.
   useEffect(() => {
-    if (!hideResolved || !selectedReport || !deepLinkSelectedRef.current) return;
+    if (!hideResolved || !selectedReport || !deepLinkSelectedRef.current || !switchMembershipKnown) return;
     const target = getReportTarget(selectedReport);
     if (target && isConsolidatedReportResolved(
       { target, authorPubkey: authorByTarget.get(`${target.type}:${target.value}`) },
@@ -1122,7 +1131,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     )) {
       setHideResolved(false);
     }
-  }, [hideResolved, selectedReport, resolvedTargets, bannedPubkeySet, authorByTarget]);
+  }, [hideResolved, selectedReport, resolvedTargets, bannedPubkeySet, authorByTarget, switchMembershipKnown]);
 
   // Memoized because the deep-link effect below depends on it; it reads
   // hideResolved and filterCategory, so it changes only when those do.
@@ -1237,8 +1246,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       // Not for a switch member: the switch-opening effect turns Hide resolved
       // off itself and saves the moderator's setting first. Turning it off here
       // would make the switch save "off" and hand that back when it closes.
+      // Held until membership is known; the resolved-unhide effect above
+      // applies it once it is.
       if (
         hideResolved
+        && switchMembershipKnown
         && !switchMembership.has(`${inBulk.target.type}:${inBulk.target.value}`)
         && isConsolidatedReportResolved(inBulk, resolvedTargets, bannedPubkeySet)
       ) {
@@ -1320,7 +1332,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         setDeepLinkStatus('unavailable');
       }
     })();
-  }, [allConsolidated, searchParams, hideResolved, resolvedTargets, bannedPubkeySet, switchMembership, navigate, isLoading, config.relayUrl, config.apiUrl, updateConfig, queryClient, fetchReportsByTarget, relayUrl, retryNonce]);
+  }, [allConsolidated, searchParams, hideResolved, resolvedTargets, bannedPubkeySet, switchMembership, switchMembershipKnown, navigate, isLoading, config.relayUrl, config.apiUrl, updateConfig, queryClient, fetchReportsByTarget, relayUrl, retryNonce]);
 
   // Update URL when report selection changes
   const handleSelectReport = (report: NostrEvent | null) => {

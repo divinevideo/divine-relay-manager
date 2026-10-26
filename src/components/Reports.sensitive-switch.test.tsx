@@ -63,10 +63,16 @@ function stubFetch({
   states = [],
   labels = () => Promise.resolve([] as LabelTarget[]),
   targeted = {},
+  statesGate,
+  statesFail = false,
 }: {
   events: unknown[];
   states?: State[];
   labels?: () => Promise<LabelTarget[]>;
+  // /api/resolution-state waits for this before answering.
+  statesGate?: Promise<void>;
+  // /api/resolution-state answers success: false, so the read fails.
+  statesFail?: boolean;
   // A deep link's targeted lookup (/api/reports?event= or ?pubkey=), keyed by
   // the target's hex. A target with no entry gets an empty result.
   targeted?: Record<string, unknown[]>;
@@ -86,6 +92,8 @@ function stubFetch({
     }
     if (url.includes('/api/resolution-state')) {
       calls.resolutionState += 1;
+      if (statesGate) await statesGate;
+      if (statesFail) return jsonResponse({ success: false, error: 'unavailable' });
       return jsonResponse({ success: true, resolved: [], states });
     }
     if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
@@ -477,6 +485,53 @@ describe('Reports sensitive pending-review switch', () => {
       await flush();
       expect(pendingSwitch()).not.toBeChecked();
       expect(hideResolvedSwitch()).toBeChecked();
+    });
+
+    // Labels resolve the auto-hidden target before /api/resolution-state has
+    // said it is auto-hidden. Unhiding resolved work for the link then would
+    // turn Hide resolved off before the switch opened, and the switch would
+    // save "off" as the moderator's setting.
+    it('holds the link unhide until switch membership is known', async () => {
+      let releaseStates: () => void = () => {};
+      const statesGate = new Promise<void>((resolve) => { releaseStates = resolve; });
+      stubFetch({
+        events: [CSAM_REPORT, SPAM_REPORT, HIDDEN_REPORT],
+        states: HIDDEN_STATES,
+        labels: () => Promise.resolve([{ type: 'event', value: HIDDEN_EVENT }]),
+        statesGate,
+      });
+      const user = userEvent.setup();
+      renderAt(`/reports?event=${HIDDEN_EVENT}`);
+
+      await waitFor(() => expect(window.location.pathname).toBe(`/reports/${HIDDEN_REPORT.id}`));
+      await flush();
+      await act(async () => { releaseStates(); });
+
+      await waitFor(() => expect(pendingSwitch()).toBeChecked());
+      expect(hideResolvedSwitch()).not.toBeChecked();
+      await user.click(pendingSwitch());
+      await flush();
+      expect(pendingSwitch()).not.toBeChecked();
+      expect(hideResolvedSwitch()).toBeChecked();
+    });
+
+    // The hold must not strand the link: a failed read falls back to showing
+    // the linked resolved report, as it did before the hold.
+    it('still shows a resolved linked report when resolution state cannot be read', async () => {
+      stubFetch({
+        events: [CSAM_REPORT, SPAM_REPORT, HIDDEN_REPORT],
+        labels: () => Promise.resolve([{ type: 'event', value: SPAM_EVENT }]),
+        statesFail: true,
+      });
+      const user = userEvent.setup();
+      renderAt(`/reports?event=${SPAM_EVENT}`);
+
+      await waitFor(() => expect(window.location.pathname).toBe(`/reports/${SPAM_REPORT.id}`));
+      await user.click(await screen.findByRole('button', { name: /show the queue anyway/i }));
+      await flush();
+
+      expect(hideResolvedSwitch()).not.toBeChecked();
+      expect(screen.getByText(NOTE_SPAM)).toBeInTheDocument();
     });
 
     // Labels answer empty first, then every later load waits for release(),
