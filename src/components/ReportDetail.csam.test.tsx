@@ -338,6 +338,9 @@ describe('ReportDetail on a sensitive report, elsewhere in the pane', () => {
     expect(screen.queryByText('Auto-Hidden — Pending Review')).not.toBeInTheDocument();
     expect(screen.getByText('Automatic hide not confirmed')).toBeInTheDocument();
     expect(screen.getByText('An automatic hide may not have landed. Review and confirm or restore.')).toBeInTheDocument();
+    // The header badge beside the banner agrees with it and with the row label.
+    expect(screen.getByText('Hide not confirmed')).toBeInTheDocument();
+    expect(screen.queryByText('Auto-Hidden')).not.toBeInTheDocument();
   });
 
   it('says the content was hidden when the hide is not in doubt (control)', () => {
@@ -345,6 +348,7 @@ describe('ReportDetail on a sensitive report, elsewhere in the pane', () => {
     expect(screen.getByText('Auto-Hidden — Pending Review')).toBeInTheDocument();
     expect(screen.getByText(/was automatically hidden/)).toBeInTheDocument();
     expect(screen.queryByText(/may not have landed|not confirmed/)).not.toBeInTheDocument();
+    expect(screen.getByText('Auto-Hidden')).toBeInTheDocument();
   });
 
   it('keeps the restore-failed wording for a failed restore, under the unconfirmed heading', () => {
@@ -353,5 +357,7 @@ describe('ReportDetail on a sensitive report, elsewhere in the pane', () => {
     expect(screen.getByText('Automatic hide not confirmed')).toBeInTheDocument();
     expect(screen.queryByText('Auto-Hidden — Pending Review')).not.toBeInTheDocument();
     expect(screen.getByText('An automatic restore failed. Retry restoring this content.')).toBeInTheDocument();
+    expect(screen.getByText('Hide not confirmed')).toBeInTheDocument();
+    expect(screen.queryByText('Auto-Hidden')).not.toBeInTheDocument();
   });
 });

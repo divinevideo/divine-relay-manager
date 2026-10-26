@@ -740,7 +740,9 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
               {isPendingReview && (
                 <Badge variant="outline" className="flex items-center gap-1 border-orange-500 text-orange-600">
                   <EyeOff className="h-3 w-3" />
-                  Auto-Hidden
+                  {decisionLog.isAutoHideUnresolved || decisionLog.isAutoHideRestoreFailed
+                    ? 'Hide not confirmed'
+                    : 'Auto-Hidden'}
                 </Badge>
               )}
             </div>
