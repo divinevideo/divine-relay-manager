@@ -696,7 +696,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // Targets pending review (auto-hidden but not yet confirmed/restored), keyed
   // to their latest auto-hide state so a row can say when the hide is not
   // confirmed (auto_hide_unresolved / auto_hide_restore_failed).
-  // TODO(#284): adopt pendingReviewTargetKeys from shared/autohide.ts in the queue-screen change.
+  // TODO(#284): share this with pendingReviewTargetKeys in shared/autohide.ts in the
+  // queue-screen change. That helper returns a Set, so it would first need to
+  // return the latest action per key, which the switch labels depend on.
   const pendingReviewTargets = useMemo(() => {
     const pending = new Map<string, string>();
     if (!autoHideStates) return pending;
@@ -793,9 +795,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       // Decisions feeds the switch membership (through pendingReviewTargets)
       // as well as resolvedTargets, and the membership is applied on every
       // path (filtered TO it in the pending view, filtered OUT of it
-      // otherwise). So it gates regardless of
-      // the hide-resolved toggle, which is what the old decisionsLoading guard
-      // did for loading and failed to do for errors.
+      // otherwise). So it gates regardless of the hide-resolved toggle, which
+      // is what the old decisionsLoading guard did for loading and failed to
+      // do for errors.
       key: 'decisions',
       label: 'Moderation decisions',
       hasData: !!resolvedDecisionTargets,

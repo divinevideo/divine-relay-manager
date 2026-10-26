@@ -125,6 +125,11 @@ describe('classifyReport', () => {
   it('falls back to the NIP-56 type on a p tag', () => {
     expect(classifyReport({ tags: [['p', P, 'spam']] }).category).toBe('spam');
   });
+
+  it('skips a malformed NIP-56 type that is not a string', () => {
+    const tags = [['e', P, 42], ['p', P, 'spam']] as unknown as string[][];
+    expect(classifyReport({ tags }).category).toBe('spam');
+  });
 });
 
 describe('ageReviewCategory', () => {

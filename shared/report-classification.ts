@@ -58,9 +58,9 @@ function categoryOf(tags: string[][]): string {
 
   // NIP-56 puts the report type on the target tag.
   const eType = tags.find(t => t[0] === 'e')?.[2];
-  if (eType) return eType;
+  if (typeof eType === 'string' && eType !== '') return eType;
   const pType = tags.find(t => t[0] === 'p')?.[2];
-  if (pType) return pType;
+  if (typeof pType === 'string' && pType !== '') return pType;
 
   return 'other';
 }
@@ -81,7 +81,7 @@ export function classifyReport(event: { tags?: unknown; content?: unknown }): Re
 // (report > nos label > MOD label > e type > p type), including taking the
 // first Divine label rather than the high-priority one: age review is gated
 // on the same value the worker computes.
-// TODO(#NNN): move ReportWatcher onto classifyReport
+// TODO(#322): move ReportWatcher onto classifyReport
 export function ageReviewCategory(event: { tags?: unknown }): string {
   const tags = tagList(event);
   return tags.find(t => t[0] === 'report')?.[1]

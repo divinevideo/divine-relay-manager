@@ -7,8 +7,9 @@ import type { MockInstance } from 'vitest';
 import TestApp from '@/test/TestApp';
 import { Reports } from './Reports';
 
-// Stand-in for a detail pane crashed by hostile event data — always throws,
-// counting attempts so tests can observe boundary resets re-running it.
+// Stand-in for a detail pane crashed by hostile event data. It throws while
+// detailRender.crash is true (the default), counting attempts so tests can
+// observe boundary resets re-running it. Tests about the list turn it off.
 const detailRender = vi.hoisted(() => ({ attempts: 0, crash: true }));
 vi.mock('@/components/ReportDetail', () => ({
   ReportDetail: () => {
@@ -300,11 +301,15 @@ describe('Reports resolution filtering', () => {
 describe('Reports CSAM signal priority', () => {
   // These tests are about the list, so the detail pane stays quiet.
   // jsdom lacks scrollIntoView, which the Radix Select opens with.
+  const originalScrollIntoView = Element.prototype.scrollIntoView;
   beforeEach(() => {
     detailRender.crash = false;
     Element.prototype.scrollIntoView = vi.fn();
   });
-  afterEach(() => { detailRender.crash = true; });
+  afterEach(() => {
+    detailRender.crash = true;
+    Element.prototype.scrollIntoView = originalScrollIntoView;
+  });
 
   const OLD_BUILD_REPORT = {
     id: '1'.repeat(64),

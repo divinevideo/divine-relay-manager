@@ -68,7 +68,7 @@ export type ResolutionStatus = typeof RESOLUTION_STATUSES[number];
 // Categories where media should be hidden by default for moderator safety.
 // Defined in shared/ so the classifier uses the same list; re-exported so
 // existing imports keep working.
-export { HIGH_PRIORITY_CATEGORIES } from '../../shared/report-classification';
+export { HIGH_PRIORITY_CATEGORIES } from "../../shared/report-classification";
 
 // The exact report category that opens an age-review case (ReportWatcher gates
 // on this same literal). Distinct from HIGH_PRIORITY_CATEGORIES: CSAM /

@@ -75,7 +75,7 @@ describe('UserProfileCard hideMediaByDefault', () => {
     expect(screen.queryByRole('button', { name: 'Show profile picture' })).not.toBeInTheDocument();
   });
 
-  it('withholds the avatar image until Show avatar is clicked', () => {
+  it('withholds the avatar image until Show profile picture is clicked', () => {
     renderCard(true);
     expect(screen.queryByTestId('avatar-img')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Show profile picture' }));

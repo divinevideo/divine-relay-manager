@@ -12,7 +12,7 @@ import { moderationStatusMock } from '@/test/moderationStatusMock';
 
 const REPORTED_PUBKEY = 'd'.repeat(64);
 const MOD_PUBKEY = 'e'.repeat(64);
-const LIST_EVENT = vi.hoisted(() => ({
+const REPORTED_EVENT = vi.hoisted(() => ({
   value: {
     id: 'c'.repeat(64),
     pubkey: 'd'.repeat(64),
@@ -47,7 +47,7 @@ vi.mock('@/hooks/useCurrentUser', () => ({
 vi.mock('@/hooks/useAppContext', () => ({
   useAppContext: () => ({ config: { relayUrl: 'wss://relay.example' } }),
 }));
-// The decision log the reported list's id returns. Empty by default.
+// The decision log the reported event's id returns. Empty by default.
 const decisionRows = vi.hoisted(() => ({
   value: [] as { id: number; action: string; reason: string | null; created_at: string }[],
   handling: false,
@@ -88,7 +88,7 @@ const threadExtra = vi.hoisted(() => ({ value: {} as Record<string, unknown> }))
 vi.mock('@/hooks/useReportContext', () => ({
   useReportContext: () => ({
     target: reportTarget.value,
-    thread: { event: LIST_EVENT.value, ancestors: [], replies: [], ...threadExtra.value },
+    thread: { event: REPORTED_EVENT.value, ancestors: [], replies: [], ...threadExtra.value },
     threadLoading: false,
     reportedUser: { profile: undefined, pubkey: REPORTED_PUBKEY, isFunnelcakeUser: false },
     userStats: undefined,
@@ -159,18 +159,18 @@ function renderDetail(report: NostrEvent, allReportsForTarget: NostrEvent[] | nu
   );
 }
 
-describe('ReportDetail for an old-build CSAM report', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    status.value = moderationStatusMock({ isUserBanned: false, isEventGone: false });
-    decisionRows.value = [];
-    decisionRows.handling = false;
-    decisionRows.pending = false;
-    decisionRows.restoreFailed = false;
-    decisionRows.unresolved = false;
-    threadExtra.value = {};
-  });
+beforeEach(() => {
+  vi.clearAllMocks();
+  status.value = moderationStatusMock({ isUserBanned: false, isEventGone: false });
+  decisionRows.value = [];
+  decisionRows.handling = false;
+  decisionRows.pending = false;
+  decisionRows.restoreFailed = false;
+  decisionRows.unresolved = false;
+  threadExtra.value = {};
+});
 
+describe('ReportDetail for an old-build CSAM report', () => {
   it('hides media by default', () => {
     renderDetail(OLD_BUILD);
     expect(screen.getAllByTestId('media').every(m => m.dataset.show === 'false')).toBe(true);
@@ -217,17 +217,6 @@ describe('ReportDetail for an old-build CSAM report', () => {
 });
 
 describe('ReportDetail switch label', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    status.value = moderationStatusMock({ isUserBanned: false, isEventGone: false });
-    decisionRows.value = [];
-    decisionRows.handling = false;
-    decisionRows.pending = false;
-    decisionRows.restoreFailed = false;
-    decisionRows.unresolved = false;
-    threadExtra.value = {};
-  });
-
   function renderWithSwitch(props: Partial<Parameters<typeof ReportDetail>[0]>) {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     return render(
@@ -264,21 +253,10 @@ describe('ReportDetail on a sensitive report, elsewhere in the pane', () => {
   const ORIGINAL_AUTHOR = '9'.repeat(64);
   const SPAM = makeReport([['e', E, 'spam'], ['p', P, 'spam']], 'buy now');
 
-  beforeEach(() => {
-    vi.clearAllMocks();
-    status.value = moderationStatusMock({ isUserBanned: false, isEventGone: false });
-    decisionRows.value = [];
-    decisionRows.handling = false;
-    decisionRows.pending = false;
-    decisionRows.restoreFailed = false;
-    decisionRows.unresolved = false;
-    threadExtra.value = {};
-  });
-
   function makeRepost() {
     threadExtra.value = {
       isRepost: true,
-      repostedEvent: { ...LIST_EVENT.value, id: '8'.repeat(64), pubkey: ORIGINAL_AUTHOR },
+      repostedEvent: { ...REPORTED_EVENT.value, id: '8'.repeat(64), pubkey: ORIGINAL_AUTHOR },
     };
   }
 

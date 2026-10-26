@@ -41,10 +41,8 @@ describe('getReportCategory', () => {
       ],
     })).toBe('spam');
   });
-});
 
-describe('getReportCategory NIP-56 types', () => {
-  it('reads the report type from the e or p tag', () => {
+  it('reads the NIP-56 report type from the e or p tag', () => {
     expect(getReportCategory({ tags: [['p', 'd'.repeat(64), 'spam']] })).toBe('spam');
     expect(getReportCategory({ tags: [['e', 'c'.repeat(64), 'illegal'], ['p', 'd'.repeat(64), 'spam']] })).toBe('illegal');
   });
