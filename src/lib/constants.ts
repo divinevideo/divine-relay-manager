@@ -64,12 +64,10 @@ export const CATEGORY_LABELS: Record<string, string> = {
 export const RESOLUTION_STATUSES = ['reviewed', 'dismissed', 'no-action', 'false-positive'] as const;
 export type ResolutionStatus = typeof RESOLUTION_STATUSES[number];
 
-// Categories where media should be hidden by default for moderator safety
-export const HIGH_PRIORITY_CATEGORIES = [
-  'sexual_minors', 'csam', 'NS-csam',
-  'nonconsensual_sexual_content', 'terrorism_extremism', 'credible_threats',
-  'NS-underageUser', 'NS-childSafety',
-];
+// Categories where media should be hidden by default for moderator safety.
+// Defined in shared/ so the classifier uses the same list; re-exported so
+// existing imports keep working.
+export { HIGH_PRIORITY_CATEGORIES } from '../../shared/report-classification';
 
 // The exact report category that opens an age-review case (ReportWatcher gates
 // on this same literal). Distinct from HIGH_PRIORITY_CATEGORIES: CSAM /
