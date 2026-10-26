@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { CATEGORY_LABELS, getReportCategory, getReportTargetIds, isHex64 } from './constants';
+import { CATEGORY_LABELS, getReportCategory, hasCsamSignal, getReportTargetIds, isHex64 } from './constants';
 
 describe('CATEGORY_LABELS', () => {
   it('maps the divine-mobile NIP-32 labels to existing display labels', () => {
@@ -40,6 +40,34 @@ describe('getReportCategory', () => {
         ['l', 'NS-spam', 'social.nos.ontology'],
       ],
     })).toBe('spam');
+  });
+});
+
+describe('getReportCategory NIP-56 types', () => {
+  it('reads the report type from the e or p tag', () => {
+    expect(getReportCategory({ tags: [['p', 'd'.repeat(64), 'spam']] })).toBe('spam');
+    expect(getReportCategory({ tags: [['e', 'c'.repeat(64), 'illegal'], ['p', 'd'.repeat(64), 'spam']] })).toBe('illegal');
+  });
+});
+
+describe('hasCsamSignal', () => {
+  const oldBuild = {
+    tags: [['e', 'c'.repeat(64), 'illegal'], ['p', 'd'.repeat(64), 'illegal']],
+    content: 'CONTENT REPORT - NIP-56\nReason: csam\n',
+  };
+  const plainIllegal = { tags: [['p', 'd'.repeat(64), 'illegal']], content: 'bad' };
+
+  it('is true for an old-build report whose Reason line says csam', () => {
+    expect(hasCsamSignal([oldBuild])).toBe(true);
+  });
+
+  it('is true when any one report in the set carries the signal', () => {
+    expect(hasCsamSignal([plainIllegal, oldBuild])).toBe(true);
+  });
+
+  it('is false for a bare illegal report and for an empty set', () => {
+    expect(hasCsamSignal([plainIllegal])).toBe(false);
+    expect(hasCsamSignal([])).toBe(false);
   });
 });
 

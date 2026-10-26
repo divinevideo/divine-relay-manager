@@ -12,7 +12,7 @@ import { FileText, Copy, Check, Flag, Globe } from "lucide-react";
 import { useState } from "react";
 import { nip19 } from "nostr-tools";
 import type { NostrEvent } from "@nostrify/nostrify";
-import { getProfileUrl } from "@/lib/constants";
+import { getProfileUrl, getReportCategory } from "@/lib/constants";
 
 interface ReporterCardProps {
   pubkey: string;
@@ -208,15 +208,6 @@ export function ReporterList({
   const visibleReporters = expanded ? uniqueReporters : uniqueReporters.slice(0, maxVisible);
   const hasMore = uniqueReporters.length > maxVisible;
 
-  // Get category from report
-  const getCategory = (event: NostrEvent): string => {
-    const reportTag = event.tags.find(t => t[0] === 'report');
-    if (reportTag?.[1]) return reportTag[1];
-    const lTag = event.tags.find(t => t[0] === 'l');
-    if (lTag?.[1]) return lTag[1];
-    return 'other';
-  };
-
   return (
     <div className="space-y-2">
       {visibleReporters.map(([pubkey, report]) => (
@@ -224,7 +215,7 @@ export function ReporterList({
           key={pubkey}
           pubkey={pubkey}
           reportEvent={report}
-          category={getCategory(report)}
+          category={getReportCategory(report)}
           onViewProfile={onViewProfile}
           onViewPosts={onViewPosts}
           compact={uniqueReporters.length > 3}

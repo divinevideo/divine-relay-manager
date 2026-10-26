@@ -50,7 +50,8 @@ import { EventActions } from "@/components/EventActions";
 import { UserActions } from "@/components/UserActions";
 import { LinkedTicketPanel } from "@/components/LinkedTicketPanel";
 import { linkedTicketTarget } from "@/lib/linkedTicketTarget";
-import { CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, getReportCategory } from "@/lib/constants";
+import { CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, getReportCategory, hasCsamSignal } from "@/lib/constants";
+import { ageReviewCategory, classifyReport } from "../../shared/report-classification";
 import { KIND_NAMES } from "@/lib/kindNames";
 import { Flag, CheckCircle, History, Ban, ShieldX, Link2, User, FileText, Repeat2, FileCode, RefreshCw, EyeOff, Eye } from "lucide-react";
 import { CopyableId, CopyableTags } from "@/components/CopyableId";
@@ -399,7 +400,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
     return allReportsForTarget.some(r => {
       const cat = getReportCategory(r);
       return HIGH_PRIORITY_CATEGORIES.includes(cat);
-    });
+    }) || hasCsamSignal(allReportsForTarget);
   }, [allReportsForTarget]);
 
   // Confirm auto-hidden content (approve the auto-hide decision)
@@ -517,7 +518,8 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
 
   const category = getReportCategory(report);
   const categoryLabel = CATEGORY_LABELS[category] || category;
-  const isHighPriorityCategory = HIGH_PRIORITY_CATEGORIES.includes(category);
+  const isHighPriorityCategory = HIGH_PRIORITY_CATEGORIES.includes(category)
+    || classifyReport(report).csamSignal;
 
   // Scroll the whole pane, not just an inner region. On a short viewport the
   // tall action footer used to starve the content area (it was a shrink-0 block
@@ -1340,7 +1342,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
               <UserActions
                 pubkey={context.reportedUser.pubkey}
                 context="report"
-                reportCategory={category}
+                reportCategory={ageReviewCategory(report)}
                 // Pass null through. `?? undefined` handed UserActions an
                 // absent prop, which its default turned into a confirmed
                 // "not banned" / "not suspended".

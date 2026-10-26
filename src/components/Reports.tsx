@@ -49,7 +49,7 @@ import { DeepLinkFallback } from "@/components/DeepLinkFallback";
 import { classifyTargetedFetch, reportsMatchingTarget, type DeepLinkStatus } from "@/lib/deepLinkResolution";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { useBannedPubkeys, useBannedEvents } from "@/hooks/useRelayBanLists";
-import { AUTO_HIDE_ACTION, CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, RESOLUTION_READ_TIMEOUT_MS, getLatestAutoHideState, getReportCategory, getReportTargetIds } from "@/lib/constants";
+import { AUTO_HIDE_ACTION, CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, RESOLUTION_READ_TIMEOUT_MS, getLatestAutoHideState, getReportCategory, getReportTargetIds, hasCsamSignal } from "@/lib/constants";
 import { isConsolidatedReportResolved } from "@/lib/reportResolution";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
@@ -93,8 +93,8 @@ const MEDIUM_PRIORITY_CATEGORIES = ['doxxing_pii', 'malware_scam', 'illegal_good
 type ResolutionSourceKey = 'labels' | 'banned-pubkeys' | 'banned-events' | 'decisions';
 
 // Category priority for sorting
-function getCategoryPriority(categories: string[]): number {
-  if (categories.some(c => HIGH_PRIORITY_CATEGORIES.includes(c))) return 0;
+function getCategoryPriority(categories: string[], csamSignal = false): number {
+  if (csamSignal || categories.some(c => HIGH_PRIORITY_CATEGORIES.includes(c))) return 0;
   if (categories.some(c => MEDIUM_PRIORITY_CATEGORIES.includes(c))) return 1;
   return 2;
 }
@@ -256,7 +256,8 @@ function ConsolidatedReportItem({
   const reporterCount = consolidated.reporters.length;
   const primaryCategory = consolidated.categories[0];
   const categoryLabel = CATEGORY_LABELS[primaryCategory] || primaryCategory;
-  const isHighPriority = consolidated.categories.some(c => HIGH_PRIORITY_CATEGORIES.includes(c));
+  const isHighPriority = consolidated.categories.some(c => HIGH_PRIORITY_CATEGORIES.includes(c))
+    || hasCsamSignal(consolidated.reports);
   const isMediumPriority = consolidated.categories.some(c => MEDIUM_PRIORITY_CATEGORIES.includes(c));
 
   return (
@@ -333,7 +334,7 @@ function IndividualReportItem({
   const category = getReportCategory(report);
   const target = getReportTarget(report);
   const categoryLabel = CATEGORY_LABELS[category] || category;
-  const isHighPriority = HIGH_PRIORITY_CATEGORIES.includes(category);
+  const isHighPriority = HIGH_PRIORITY_CATEGORIES.includes(category) || hasCsamSignal([report]);
   const isMediumPriority = MEDIUM_PRIORITY_CATEGORIES.includes(category);
 
   return (
@@ -929,8 +930,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
         case 'category': {
           // Sort by priority (CSAM first), then alphabetically by category
-          const aPriority = getCategoryPriority(a.categories);
-          const bPriority = getCategoryPriority(b.categories);
+          const aPriority = getCategoryPriority(a.categories, hasCsamSignal(a.reports));
+          const bPriority = getCategoryPriority(b.categories, hasCsamSignal(b.reports));
           if (aPriority !== bPriority) return aPriority - bPriority;
           // Then by primary category name
           const aCategory = a.categories[0] || 'zzz';
@@ -1013,8 +1014,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         case 'category': {
           const aCat = getReportCategory(a);
           const bCat = getReportCategory(b);
-          const aPriority = getCategoryPriority([aCat]);
-          const bPriority = getCategoryPriority([bCat]);
+          const aPriority = getCategoryPriority([aCat], hasCsamSignal([a]));
+          const bPriority = getCategoryPriority([bCat], hasCsamSignal([b]));
           if (aPriority !== bPriority) return aPriority - bPriority;
           return aCat.localeCompare(bCat);
         }
