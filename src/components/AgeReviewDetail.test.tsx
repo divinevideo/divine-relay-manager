@@ -861,9 +861,10 @@ describe('AgeReviewDetail', () => {
       expect(toast).toHaveBeenCalledTimes(1);
       expect(toast).toHaveBeenCalledWith(expect.objectContaining({
         title: 'Approved, but keycast refused the minor flag',
-        description: expect.stringMatching(/Keycast refused the minor flag.*Also did not apply: relay \(existing posts and feed\)\. Automated retry will continue/),
+        description: expect.stringMatching(/Keycast refused the minor flag.*Also did not apply: relay \(existing posts and feed\)\. These steps are not retried automatically; escalate if they still need to apply\./),
         variant: 'destructive',
       }));
+      expect(toast.mock.calls[0][0].description).not.toMatch(/automated retry will continue/i);
     });
 
     it('does not report success when the worker did not record a protected subject', async () => {
@@ -926,5 +927,59 @@ describe('AgeReviewDetail', () => {
         description: expect.stringContaining('protected-minor account flag'),
       })));
     });
+  });
+});
+
+// Which failed enforcement steps converge on their own: only the
+// protected-minor ones, which the deadline cron retries.
+describe('AgeReviewDetail enforcement-incomplete toast', () => {
+  beforeEach(() => {
+    updateAgeReviewCase.mockReset();
+    toast.mockClear();
+  });
+
+  it('does not promise a retry for steps nothing retries, nor call a restricted case closed', async () => {
+    updateAgeReviewCase.mockResolvedValueOnce({
+      success: false,
+      case: makeCase({ state: 'restricted_pending_user_response' }),
+      enforcementComplete: false,
+      enforcement: { relay: 'ok', bulk: 'failed', keycast: 'ok' },
+    });
+    renderDetail(makeCase());
+    fireEvent.click(screen.getByRole('button', { name: 'Restrict Account' }));
+    await waitFor(() => expect(toast).toHaveBeenCalled());
+    const description = toast.mock.calls[0][0].description as string;
+    expect(description).not.toMatch(/automated retry will continue/i);
+    expect(description).not.toMatch(/now closed/i);
+    expect(description).toMatch(/not retried automatically/i);
+  });
+
+  it('says the protected-minor steps are retried when one of them is what failed', async () => {
+    updateAgeReviewCase.mockResolvedValueOnce({
+      success: false,
+      case: makeCase({ state: 'denied_closed' }),
+      enforcementComplete: false,
+      enforcement: { relay: 'ok', bulk: 'ok', keycast: 'ok', keycastMinorClear: 'failed' },
+    });
+    renderDetail(makeCase({ state: 'restricted_pending_user_response' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Deny & Close' }));
+    await waitFor(() => expect(toast).toHaveBeenCalled());
+    expect(toast.mock.calls[0][0].description).toMatch(/protected-minor steps are retried automatically/i);
+  });
+
+  // The projection cron re-applies a failed minor-flag set (main's #301 leg).
+  it("says the protected-minor steps are retried when the approval's minor flag failed", async () => {
+    updateAgeReviewCase.mockResolvedValueOnce({
+      success: false,
+      case: makeCase({ state: 'cleared' }),
+      enforcementComplete: false,
+      enforcement: { relay: 'ok', bulk: 'ok', keycast: 'ok', subjectActivate: 'ok', keycastMinorSet: 'failed' },
+    });
+    renderDetail(makeCase({ suspected_age_band: 'age_13_15' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Clear without approval' }));
+    await waitFor(() => expect(toast).toHaveBeenCalled());
+    const description = toast.mock.calls[0][0].description as string;
+    expect(description).toMatch(/protected-minor steps are retried automatically/i);
+    expect(description).not.toMatch(/not retried automatically/i);
   });
 });

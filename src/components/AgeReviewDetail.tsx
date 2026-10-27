@@ -224,11 +224,23 @@ export function AgeReviewDetail({ caseData: c }: Props) {
         // continue" would not say what the moderator is waiting for.
         const unclaimed = enforcement?.keycastMinorSetUnclaimed === true;
         const retryable = unclaimed ? failed.filter((leg) => leg !== 'protected-minor account flag') : failed;
+        // Only the protected-minor steps have a retry: the deadline cron
+        // retries the protected-subject clear and the Keycast projection (the
+        // minor flag's clear and set). Nothing retries the relay, media or
+        // sign-in steps, so say so rather than promise one.
+        const minorClearFailed = enforcement?.subjectClear === 'failed' || enforcement?.keycastMinorClear === 'failed';
+        const otherStepFailed = enforcement?.relay === 'failed' || enforcement?.bulk === 'failed' || enforcement?.keycast === 'failed';
+        const retryWords = (minorStepFailed: boolean) => (!minorStepFailed
+          ? 'These steps are not retried automatically; escalate if they still need to apply.'
+          : otherStepFailed
+            ? 'The protected-minor steps are retried automatically; the other steps are not, so escalate if they still need to apply.'
+            : 'The protected-minor steps are retried automatically.');
         if (unclaimed) {
           // One toast: the store keeps only the newest, so a second toast for the
-          // other failed legs would evict this refusal.
+          // other failed legs would evict this refusal. The minor flag's own
+          // retry is said above; `others` are the remaining steps.
           const others = data.enforcementComplete === false && retryable.length > 0
-            ? ` Also did not apply: ${retryable.join(', ')}. Automated retry will continue where supported.`
+            ? ` Also did not apply: ${retryable.join(', ')}. ${retryWords(minorClearFailed)}`
             : '';
           toast({
             title: 'Approved, but keycast refused the minor flag',
@@ -238,7 +250,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
         } else if (data.enforcementComplete === false) {
           toast({
             title: 'Enforcement incomplete',
-            description: `Case updated, but these did not apply: ${retryable.join(', ') || 'one or more enforcement steps'}. The case is now closed; automated retry will continue where supported. Escalate if enforcement does not converge.`,
+            description: `Case updated, but these did not apply: ${retryable.join(', ') || 'one or more enforcement steps'}. ${retryWords(minorClearFailed || enforcement?.keycastMinorSet === 'failed')}`,
             variant: 'destructive',
           });
         } else if (enforcement?.keycast === 'not_applicable') {
