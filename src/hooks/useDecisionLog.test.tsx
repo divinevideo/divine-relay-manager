@@ -117,4 +117,47 @@ describe('useDecisionLog handling decisions', () => {
     expect(result.current.latestDecision?.action).toBe('auto_hide_skipped');
     expect(result.current.latestHandlingDecision?.action).toBe('reviewed');
   });
+
+  // The worker records 'auto' as the moderator on decisions it makes by
+  // itself, such as opening an age-review case. No person handled the report.
+  it('does not count a decision the worker made by itself as handling the report', async () => {
+    getDecisions.mockResolvedValue([
+      { action: 'age_review_case_created', moderator_pubkey: 'auto' },
+    ]);
+
+    const { result } = renderHook(() => useDecisionLog('pubkey-id'), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    expect(result.current.hasDecisions).toBe(true);
+    expect(result.current.hasHandlingDecisions).toBe(false);
+    expect(result.current.latestHandlingDecision).toBeUndefined();
+  });
+
+  it("names a person's decision, not the worker's own logged after it", async () => {
+    getDecisions.mockResolvedValue([
+      { action: 'age_review_case_created', moderator_pubkey: 'auto' },
+      { action: 'reviewed', moderator_pubkey: 'e'.repeat(64) },
+    ]);
+
+    const { result } = renderHook(() => useDecisionLog('pubkey-id'), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    expect(result.current.latestHandlingDecision?.action).toBe('reviewed');
+  });
+
+  // The worker also writes 'auto' on a person's confirm or restore of an
+  // auto-hide that came without a pubkey, and on its own hide. Those keep
+  // counting as they always have.
+  it.each(['auto_hidden', 'auto_hide_confirmed', 'auto_hide_restored'])(
+    'still counts %s recorded with the worker as moderator',
+    async (action) => {
+      getDecisions.mockResolvedValue([{ action, moderator_pubkey: 'auto' }]);
+
+      const { result } = renderHook(() => useDecisionLog('event-id'), { wrapper });
+      await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+      expect(result.current.hasHandlingDecisions).toBe(true);
+      expect(result.current.latestHandlingDecision?.action).toBe(action);
+    },
+  );
 });

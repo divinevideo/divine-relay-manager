@@ -4,6 +4,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { AUTO_HIDE_ACTION, getLatestAutoHideState } from "@/lib/constants";
+import { isAutomatedDecision } from "../../shared/automated-decision";
 
 export function useDecisionLog(targetId: string | null | undefined) {
   const { getDecisions } = useAdminApi();
@@ -25,8 +26,13 @@ export function useDecisionLog(targetId: string | null | undefined) {
   // (a list report, an untrusted client) or is still pending leaves the report
   // waiting for a moderator, so it records history without handling anything,
   // and must not stand in for the moderator's action when it lands later.
+  // Neither does a decision the worker made by itself, such as opening an
+  // age-review case: no person has looked at the report, which is also why the
+  // sensitive switch keeps it.
   const latestHandlingDecision = data?.find(
-    d => d.action !== AUTO_HIDE_ACTION.skipped && d.action !== AUTO_HIDE_ACTION.pending,
+    d => d.action !== AUTO_HIDE_ACTION.skipped
+      && d.action !== AUTO_HIDE_ACTION.pending
+      && !isAutomatedDecision(d),
   );
   const hasHandlingDecisions = latestHandlingDecision !== undefined;
 
