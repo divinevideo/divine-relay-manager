@@ -74,8 +74,8 @@ function getLabelTarget(event: NostrEvent): { type: 'event' | 'pubkey'; value: s
 
 function getLabelColor(label: string): string {
   const lowerLabel = label.toLowerCase();
-  // Try exact match first
-  if (LABEL_COLORS[lowerLabel]) {
+  // Try exact match first, on the map's own keys only
+  if (Object.prototype.hasOwnProperty.call(LABEL_COLORS, lowerLabel)) {
     return LABEL_COLORS[lowerLabel];
   }
   // Fall back to substring matching
