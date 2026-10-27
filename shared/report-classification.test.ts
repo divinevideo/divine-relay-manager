@@ -72,7 +72,9 @@ describe('classifyReport', () => {
     'grandchildporn',
     'child sexual abuser',
     'child sexual abuse2',
-    'wildchild sexual',
+    'wildchild sexual abuse',
+    '1child porn',
+    'child sexualabuse',
   ])('does not route free text %j', content => {
     expect(classifyReport({ tags: [['e', E, 'illegal']], content }).csamSignal).toBe(false);
   });
