@@ -114,7 +114,7 @@ describe('counts beside the queue come from the rows it renders', () => {
     renderQueue();
     await screen.findByText(headerStartingWith('2 pending'));
 
-    expect(pendingBadge()).toHaveTextContent(/auto-hidden\)\s*1$/);
+    expect(pendingBadge()).toHaveTextContent(/sensitive\)\s*1$/);
 
     await user.click(screen.getByRole('switch', { name: /pending review/i }));
     expect(await screen.findByText(nip19.noteEncode(PENDING_EVENT))).toBeInTheDocument();

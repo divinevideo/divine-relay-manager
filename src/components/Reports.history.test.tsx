@@ -232,7 +232,7 @@ describe('the history footer counts the rows on screen', () => {
     await openHistory(user);
     await screen.findByText(note(hex('4')));
 
-    expect(document.querySelector('label[for="pending-review"]')).toHaveTextContent(/auto-hidden\)\s*1$/);
+    expect(document.querySelector('label[for="pending-review"]')).toHaveTextContent(/sensitive\)\s*1$/);
     await user.click(screen.getByRole('switch', { name: /pending review/i }));
     expect(await screen.findByText('Grouped (1)')).toBeInTheDocument();
   });
