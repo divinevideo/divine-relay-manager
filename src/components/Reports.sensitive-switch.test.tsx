@@ -207,10 +207,12 @@ describe('Reports sensitive pending-review switch', () => {
 
     await user.click(rowFor(NOTE_HIDDEN));
     await waitFor(() =>
-      expect(screen.getByTestId('detail')).toHaveAttribute('data-switch-state', 'hide-unconfirmed'));
+      expect(screen.getByTestId('detail')).toHaveAttribute('data-switch-state', 'hidden-needs-check'));
   });
 
-  it('does not claim an unconfirmed hide landed', async () => {
+  // The worker writes auto_hide_unresolved only after the relay ban landed, so
+  // the row says hidden, and that it needs a check.
+  it('labels an unresolved hide as hidden and needing a check', async () => {
     stubFetch({
       events: [SPAM_REPORT, HIDDEN_REPORT],
       states: [
@@ -223,7 +225,7 @@ describe('Reports sensitive pending-review switch', () => {
 
     await screen.findByText(NOTE_SPAM);
     await turnSwitchOn(user);
-    expect(within(rowFor(NOTE_HIDDEN)).getByText('Hide not confirmed')).toBeInTheDocument();
+    expect(within(rowFor(NOTE_HIDDEN)).getByText('Hidden, needs a check')).toBeInTheDocument();
     expect(screen.queryByText('Hidden automatically')).not.toBeInTheDocument();
   });
 

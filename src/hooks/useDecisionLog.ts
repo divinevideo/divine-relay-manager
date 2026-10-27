@@ -43,7 +43,7 @@ export function useDecisionLog(targetId: string | null | undefined) {
   // Auto-hide specific checks
   const latestAutoHideAction = getLatestAutoHideState(data?.map(d => d.action) ?? []);
   const isAutoHideRestoreFailed = latestAutoHideAction === AUTO_HIDE_ACTION.restoreFailed;
-  // The worker could not confirm the hide landed, so it must not be described as hidden
+  // The ban landed, but the worker could not check for a moderator's restore racing it
   const isAutoHideUnresolved = latestAutoHideAction === AUTO_HIDE_ACTION.unresolved;
   const isAutoHidden = latestAutoHideAction === AUTO_HIDE_ACTION.hidden
     || latestAutoHideAction === AUTO_HIDE_ACTION.unresolved

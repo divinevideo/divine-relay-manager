@@ -83,7 +83,7 @@ describe('buildSwitchMembership', () => {
     expect([...m]).toEqual([[`event:${EVENT}`, 'auto-hidden']]);
   });
 
-  it('marks an auto-hidden target whose hide or restore is unconfirmed', () => {
+  it('marks an auto-hidden target that needs a check after an unresolved or failed restore', () => {
     const m = build({
       pendingReview: new Map([
         [`event:${'1'.repeat(64)}`, 'auto_hidden'],
@@ -92,8 +92,8 @@ describe('buildSwitchMembership', () => {
       ]),
     });
     expect(m.get(`event:${'1'.repeat(64)}`)).toBe('auto-hidden');
-    expect(m.get(`event:${'2'.repeat(64)}`)).toBe('hide-unconfirmed');
-    expect(m.get(`event:${'3'.repeat(64)}`)).toBe('hide-unconfirmed');
+    expect(m.get(`event:${'2'.repeat(64)}`)).toBe('hidden-needs-check');
+    expect(m.get(`event:${'3'.repeat(64)}`)).toBe('hidden-needs-check');
   });
 });
 
@@ -120,10 +120,10 @@ describe('humanHandledAutoHideTargets', () => {
 });
 
 describe('SWITCH_STATE_LABELS', () => {
-  it('names each state without claiming an unconfirmed hide landed', () => {
+  it('calls a hide that needs a check hidden, since its ban landed', () => {
     expect(SWITCH_STATE_LABELS).toEqual({
       'auto-hidden': 'Hidden automatically',
-      'hide-unconfirmed': 'Hide not confirmed',
+      'hidden-needs-check': 'Hidden, needs a check',
       'not-hidden': 'Not hidden, needs review',
     });
   });
