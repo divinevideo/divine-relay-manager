@@ -52,8 +52,8 @@ function isCsamValue(value: unknown): boolean {
 }
 
 function categoryOf(tags: string[][]): string {
-  const report = tags.find(t => t[0] === 'report' && hasValue(t));
-  if (report) return report[1];
+  const report = tags.find(t => t[0] === 'report');
+  if (report && hasValue(report)) return report[1];
 
   // Prefer a high-priority Divine label, so a spam label listed first cannot
   // hide a CSAM label listed second.

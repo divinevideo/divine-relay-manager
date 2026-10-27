@@ -122,6 +122,20 @@ describe('classifyReport', () => {
     expect(classifyReport({ tags: [['report', ''], ['l', '', 'social.nos.ontology'], ['p', P, 'spam']] }).category).toBe('spam');
   });
 
+  // Only the first report tag counts, as in age review: an empty one falls
+  // back to the labels, not to a later report tag.
+  it('lets an empty first report tag fall back to labels', () => {
+    const tags = [
+      ['report', ''],
+      ['report', 'spam'],
+      ['L', 'social.nos.ontology'],
+      ['l', 'NS-childSafety', 'social.nos.ontology'],
+      ['p', P],
+    ];
+    expect(classifyReport({ tags }).category).toBe('NS-childSafety');
+    expect(ageReviewCategory({ tags })).toBe('NS-childSafety');
+  });
+
   it('falls back to the NIP-56 type on a p tag', () => {
     expect(classifyReport({ tags: [['p', P, 'spam']] }).category).toBe('spam');
   });
