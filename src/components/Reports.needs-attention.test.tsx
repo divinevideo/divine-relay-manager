@@ -11,18 +11,16 @@ import TestApp from '@/test/TestApp';
 import { EMPTY_RESOLVED_PAGE } from '@/test/resolvedHistory';
 import { Reports } from './Reports';
 
-// Renders only which report the pane opened and how many reports it was given.
+// Renders only which report the pane opened and how many of the target's reports it was given.
 vi.mock('@/components/ReportDetail', () => ({
-  ReportDetail: ({ report, allReportsForTarget, allReports }: {
+  ReportDetail: ({ report, allReportsForTarget }: {
     report: { id: string } | null;
     allReportsForTarget?: unknown[];
-    allReports?: unknown[];
   }) =>
     report ? (
       <div
         data-testid="report-detail"
         data-target-reports={allReportsForTarget?.length ?? 'none'}
-        data-all-reports={allReports?.length ?? 'none'}
       >
         {report.id}
       </div>
@@ -267,7 +265,6 @@ describe('the queue reads the needs-attention feed', () => {
     // The pane still gets the target's reports from the lookup, so "Why This
     // Was Reported" is not blank.
     expect(pane).toHaveAttribute('data-target-reports', '1');
-    expect(pane).toHaveAttribute('data-all-reports', '1');
     expect(screen.getByText(/Failed to load reports/)).toBeInTheDocument();
     expect(screen.queryByText(nip19.noteEncode(RESOLVED_EVENT))).not.toBeInTheDocument();
     expect(screen.queryByText('No reports found')).not.toBeInTheDocument();

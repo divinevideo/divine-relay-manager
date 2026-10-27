@@ -1616,7 +1616,6 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
   // With the queue failed cold there is no list to draw the target's reports
   // from; the deep link's own lookup holds them.
-  const paneReports = listReports ?? deepLinkedReports;
   const paneConsolidated = listReports ? consolidated : consolidateReports(deepLinkedReports);
 
   // Built once and rendered in both the desktop pane and the mobile sheet so
@@ -1669,7 +1668,6 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
             : undefined
         }
         allReportsForTargetTruncated={targetedHistoryTruncated}
-        allReports={paneReports}
         onDismiss={dismissDetail}
         switchState={selectedSwitchKey ? switchMembership.get(selectedSwitchKey) : undefined}
       />

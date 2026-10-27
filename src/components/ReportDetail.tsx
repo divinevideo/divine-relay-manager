@@ -56,12 +56,12 @@ import { HIGH_PRIORITY_CATEGORIES, getCategoryLabel, getReportCategory, hasCsamS
 import { SWITCH_STATE_LABELS, type SwitchState } from "@/lib/sensitiveSwitch";
 import { ageReviewCategory, classifyReport } from "../../shared/report-classification";
 import { KIND_NAMES } from "@/lib/kindNames";
-import { Flag, CheckCircle, History, Ban, ShieldX, Link2, User, FileText, Repeat2, FileCode, RefreshCw, EyeOff, Eye } from "lucide-react";
+import { Flag, CheckCircle, History, Ban, ShieldX, User, Repeat2, FileCode, RefreshCw, EyeOff, Eye } from "lucide-react";
 import { CopyableId, CopyableTags } from "@/components/CopyableId";
+import { RelatedReportsCard } from "@/components/RelatedReportsCard";
 import { ReportedListCard } from "@/components/ReportedListCard";
 import { LIST_KIND_LABEL, isListKind } from "../../shared/list-report";
 import type { NostrEvent } from "@nostrify/nostrify";
-import { getReportTarget, reportTargetKey } from "../../shared/report-target";
 
 function getKindLabel(kind: number): string {
   if (isListKind(kind)) return LIST_KIND_LABEL[kind];
@@ -80,10 +80,6 @@ interface ReportDetailProps {
   report: NostrEvent | null;
   allReportsForTarget?: NostrEvent[];
   allReportsForTargetTruncated?: boolean;
-  // Reports the queue has loaded: needs-attention plus deep-linked, plus any
-  // loaded history. Related Reports counts from these, so its number follows
-  // the view and the pages loaded, not the account's full report history.
-  allReports?: NostrEvent[];
   onDismiss?: () => void;
   // Which side of the queue's Pending review switch this report's target is
   // on. Undefined outside it. Only 'not-hidden' gets a badge here: the pane's
@@ -91,7 +87,7 @@ interface ReportDetailProps {
   switchState?: SwitchState;
 }
 
-export function ReportDetail({ report, allReportsForTarget, allReportsForTargetTruncated = false, allReports = [], onDismiss, switchState }: ReportDetailProps) {
+export function ReportDetail({ report, allReportsForTarget, allReportsForTargetTruncated = false, onDismiss, switchState }: ReportDetailProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const {
@@ -196,38 +192,6 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
 
   // Auto-hide specific status
   const isPendingReview = decisionLog.isPendingReview;
-
-  // Find related reports: reports on this user AND reports on their events
-  const relatedReports = useMemo(() => {
-    if (!context.reportedUser.pubkey || !allReports.length) return { userReports: [], eventReports: [] };
-
-    const userPubkey = context.reportedUser.pubkey;
-    const currentTargetKey = context.target ? reportTargetKey(context.target) : '';
-
-    // Reports directly on this user
-    const userReports = allReports.filter(r => {
-      const target = getReportTarget(r);
-      if (!target) return false;
-      // Don't include current report's target
-      if (reportTargetKey(target) === currentTargetKey) return false;
-      return target.type === 'pubkey' && target.value === userPubkey;
-    });
-
-    // Reports on events by this user (we need to check if event author matches)
-    // For now, we use any 'e' reports where the report references this user via 'p' tag
-    // OR we check if the thread/event was authored by this user
-    const eventReports = allReports.filter(r => {
-      const target = getReportTarget(r);
-      if (!target || target.type !== 'event') return false;
-      // Don't include current report's target
-      if (reportTargetKey(target) === currentTargetKey) return false;
-      // Check if report has a 'p' tag referencing this user
-      const pTag = r.tags.find(t => t[0] === 'p' && t[1] === userPubkey);
-      return !!pTag;
-    });
-
-    return { userReports, eventReports };
-  }, [allReports, context.reportedUser.pubkey, context.target]);
 
   const reviewMutation = useMutation({
     mutationFn: async ({ status, comment }: { status: ResolutionStatus; comment?: string }) => {
@@ -1163,83 +1127,8 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
 
           <Separator />
 
-          {/* Related Reports - show reports on this user AND their events */}
-          {(relatedReports.userReports.length > 0 || relatedReports.eventReports.length > 0) && (
-            <Card className="border-orange-200 bg-orange-50/50 dark:bg-orange-950/20">
-              <CardHeader className="py-3">
-                <CardTitle className="text-sm flex items-center gap-2 text-orange-700 dark:text-orange-400">
-                  <Link2 className="h-4 w-4" />
-                  Related Reports ({relatedReports.userReports.length + relatedReports.eventReports.length} on same user)
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="py-0 pb-3">
-                <div className="space-y-2">
-                  {relatedReports.userReports.length > 0 && (
-                    <div>
-                      <p className="text-xs font-medium flex items-center gap-1 mb-1.5 text-muted-foreground">
-                        <User className="h-3 w-3" />
-                        Reports on this User ({relatedReports.userReports.length})
-                      </p>
-                      <div className="space-y-1">
-                        {relatedReports.userReports.slice(0, 3).map((r) => {
-                          const cat = getReportCategory(r);
-                          const catLabel = getCategoryLabel(cat);
-                          return (
-                            <div key={r.id} className="flex items-center gap-2 text-xs p-1.5 bg-background rounded">
-                              <Badge variant="outline" className="text-xs">{catLabel}</Badge>
-                              <span className="text-muted-foreground truncate flex-1">
-                                {r.content?.slice(0, 40) || 'No description'}
-                                {(r.content?.length || 0) > 40 && '...'}
-                              </span>
-                            </div>
-                          );
-                        })}
-                        {relatedReports.userReports.length > 3 && (
-                          <p className="text-xs text-muted-foreground pl-1">
-                            +{relatedReports.userReports.length - 3} more user reports
-                          </p>
-                        )}
-                      </div>
-                    </div>
-                  )}
-                  {relatedReports.eventReports.length > 0 && (
-                    <div>
-                      <p className="text-xs font-medium flex items-center gap-1 mb-1.5 text-muted-foreground">
-                        <FileText className="h-3 w-3" />
-                        Reports on their Events ({relatedReports.eventReports.length})
-                      </p>
-                      <div className="space-y-1">
-                        {relatedReports.eventReports.slice(0, 3).map((r) => {
-                          const cat = getReportCategory(r);
-                          const catLabel = getCategoryLabel(cat);
-                          const target = getReportTarget(r);
-                          return (
-                            <div key={r.id} className="flex items-center gap-2 text-xs p-1.5 bg-background rounded">
-                              <Badge variant="outline" className="text-xs">{catLabel}</Badge>
-                              {target?.value && (
-                                <CopyableId
-                                  value={target.value}
-                                  type="note"
-                                  truncateStart={10}
-                                  truncateEnd={4}
-                                  size="xs"
-                                />
-                              )}
-                            </div>
-                          );
-                        })}
-                        {relatedReports.eventReports.length > 3 && (
-                          <p className="text-xs text-muted-foreground pl-1">
-                            +{relatedReports.eventReports.length - 3} more event reports
-                          </p>
-                        )}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </CardContent>
-            </Card>
-          )}
+          {/* Related Reports: every report naming this account, read in full, not just the loaded queue */}
+          <RelatedReportsCard pubkey={context.reportedUser.pubkey ?? ''} currentTarget={context.target} />
 
           {/* Section: Technical Details */}
           <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Technical Details</h4>
