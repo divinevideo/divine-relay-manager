@@ -109,7 +109,7 @@ describe('RelatedReportsCard', () => {
     expect(screen.getByText(/Reports on their Events \(4\+\)/)).toBeInTheDocument();
     // No leading "+" next to a trailing one: "2+ more", not "+2+ more".
     expect(screen.getByText('2+ more user reports')).toBeInTheDocument();
-    expect(screen.getByText('1+ more event report')).toBeInTheDocument();
+    expect(screen.getByText('1+ more event reports')).toBeInTheDocument();
   });
 
   it('shows an exact "+N more" for the rest of a complete read', async () => {
@@ -127,10 +127,11 @@ describe('RelatedReportsCard', () => {
     expect(screen.getByText('+1 more event report')).toBeInTheDocument();
   });
 
+  // An exact count of one is singular. "1+" means at least one, so it stays plural.
   it.each([
     [false, '+1 more user report', '+1 more event report'],
-    [true, '1+ more user report', '1+ more event report'],
-  ])('says "report", not "reports", for one more (stopped early: %s)', async (truncated, userLine, eventLine) => {
+    [true, '1+ more user reports', '1+ more event reports'],
+  ])('says "report" only for exactly one more (stopped early: %s)', async (truncated, userLine, eventLine) => {
     fetchReportsByTarget.mockResolvedValue({
       events: [
         userReport(1), userReport(2), userReport(3), userReport(4),

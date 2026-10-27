@@ -30,9 +30,10 @@ export function useRelatedReports(
     queryFn: () => fetchReportsByTarget({ pubkey: key }),
     enabled: !!key,
     staleTime: 60_000,
-    // One retry, as the queue's other relay-backed reads. The default of three
-    // would keep the card on "checking" through four attempts, and a read that
-    // times out takes the full request timeout each time.
+    // One retry, as the queue's resolution reads (labels, decisions, ban
+    // lists). The default of three would keep the card on "checking" through
+    // four attempts, and a read that times out takes the full request timeout
+    // each time.
     retry: 1,
     // The app default is Infinity, and each entry can be a read of tens of
     // thousands of reports. Keep an account's read for a few minutes, not for

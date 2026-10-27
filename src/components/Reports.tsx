@@ -1417,7 +1417,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
     // The target isn't in what is listed: not in the needs-attention feed (so
     // most likely resolved or gone, unless that read failed or stopped early),
-    // nor in any history page loaded so far. Do one targeted relay fetch per
+    // nor, in the history view, in any history page loaded so far (outside it
+    // the list is the feed alone). Do one targeted relay fetch per
     // target to tell those apart from "still loading". Key the attempt on the
     // full target identity (relay + type + value) so a same-value target across
     // type, or a relay/environment switch, re-resolves instead of reusing the
