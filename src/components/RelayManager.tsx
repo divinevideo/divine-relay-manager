@@ -130,7 +130,13 @@ export function RelayManager() {
   const holdReports = environmentChanged;
   const clearedForKey = useRef(environmentKey);
   useEffect(() => {
-    if (!environmentChanged) return;
+    if (!environmentChanged) {
+      // Settled, or a change undone before it settled: what was last cleared
+      // for is the settled key again, so the next real change to the key an
+      // undone one had reached is cleared too.
+      clearedForKey.current = environmentKey;
+      return;
+    }
     if (clearedForKey.current !== environmentKey) {
       queryClient.clear();
       clearedForKey.current = environmentKey;

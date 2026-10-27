@@ -83,9 +83,9 @@ const SUSPENDED_PUBKEYS_KEY = ['suspended-pubkeys'];
 // only increases for as long as that query exists, and only while nothing
 // writes these keys with setQueryData, which nothing here does.
 // queryClient.clear() replaces the query with a new one that counts from zero:
-// on an environment switch, and also when the moderator re-selects the
-// environment already in use, with no apiUrl change. So a count means nothing
-// without the query it belongs to.
+// on an environment switch (RelayManager clears on every real change), and
+// anywhere else the cache is cleared with no apiUrl change. So a count means
+// nothing without the query it belongs to.
 interface ListReads {
   query: Query | undefined;
   reads: number;

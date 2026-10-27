@@ -84,8 +84,8 @@ async function switchToB(
   stalled: Read,
 ) {
   env.current = 'b';
-  // What EnvironmentSelector does: drop every cached read; the screen then
-  // re-renders against the new relay.
+  // What RelayManager does on a real environment change: drop every cached
+  // read; the screen then re-renders against the new relay.
   act(() => { queryClient.clear(); });
   rerender(tree(queryClient, RELAY_B));
   // Every read except the stalled one has answered for B, so the stalled read

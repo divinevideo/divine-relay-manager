@@ -1412,9 +1412,10 @@ describe('useModerationStatus', () => {
   });
 
   it('does not hold a cleared cache behind the old marks when the environment stays the same', async () => {
-    // EnvironmentSelector clears the cache even when the moderator re-selects
-    // the environment already in use, so the lists' queries are replaced and
-    // count from zero with no apiUrl change.
+    // A cleared cache replaces the lists' queries, which then count from zero
+    // with no apiUrl change. (RelayManager clears only on a real environment
+    // change now, not on a re-select, but nothing else guarantees the cache is
+    // never cleared under one apiUrl.)
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const clientWrapper = ({ children }: { children: ReactNode }) => (
       <QueryClientProvider client={client}>{children}</QueryClientProvider>

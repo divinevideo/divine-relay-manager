@@ -649,14 +649,14 @@ describe('the history footer never mistakes a stop for an end', () => {
     });
 
     // The query that holds the Load more error can be replaced: an environment
-    // switch gives a new key, and re-selecting an environment clears the cache.
+    // switch gives a new key and clears the cache (RelayManager does both).
     // A new query counts its errors from zero again, so the first error there
     // must not be taken for the old Load more error. It is a real refresh
     // failure, and hiding it would leave a stale "More further back" or "End of
     // resolved history" on screen (#221).
     describe.each([
       ['switching to another relay', async (_qc: QueryClient) => 'wss://relay-two.example'],
-      ['re-selecting the same environment', async (qc: QueryClient) => { qc.clear(); return RELAY_URL; }],
+      ['the cache being cleared under the same relay', async (qc: QueryClient) => { qc.clear(); return RELAY_URL; }],
     ])('after %s', (_name, switchEnvironment) => {
       it('says a failed re-read failed to refresh', async () => {
         let reRead: Reply = () => jsonResponse(resolvedPage([H1, H2], { nextCursor: PAGE_ONE_CURSOR, done: false }));

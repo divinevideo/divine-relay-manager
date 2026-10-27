@@ -3,6 +3,7 @@
 
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { QueryClient } from '@tanstack/react-query';
 import { Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import { nip19 } from 'nostr-tools';
@@ -16,6 +17,23 @@ const { ENV_A, ENV_B } = vi.hoisted(() => ({
   ENV_A: { id: 'alpha', name: 'Alpha', relayUrl: 'wss://relay.nostr.band', apiUrl: 'https://api-relay.divine.video' },
   ENV_B: { id: 'beta', name: 'Beta', relayUrl: 'wss://relay-b.example', apiUrl: 'https://api-b.example' },
 }));
+
+// A router that applies a navigation late models React Router's transition
+// updates (v7, or v6 with v7_startTransition). 0 passes straight through.
+const routerLag = vi.hoisted(() => ({ ms: 0 }));
+vi.mock('react-router-dom', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('react-router-dom')>();
+  return {
+    ...actual,
+    useNavigate: () => {
+      const navigate = actual.useNavigate();
+      return ((to: unknown, options?: unknown) => {
+        if (routerLag.ms === 0) return navigate(to as never, options as never);
+        setTimeout(() => navigate(to as never, options as never), routerLag.ms);
+      }) as typeof navigate;
+    },
+  };
+});
 
 vi.mock('@/lib/environments', () => ({
   environments: [ENV_A, ENV_B],
@@ -85,10 +103,10 @@ function stubWorkers(
   return feedReads;
 }
 
-function renderAppAt(path: string) {
+function renderAppAt(path: string, queryClient?: QueryClient) {
   window.history.pushState({}, '', path);
   return render(
-    <TestApp>
+    <TestApp queryClient={queryClient}>
       <Routes>
         <Route path="/reports/:reportId" element={<RelayManager />} />
         <Route path="/users/:pubkey" element={<RelayManager />} />
@@ -135,6 +153,7 @@ beforeEach(() => {
   consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
 });
 afterEach(() => {
+  routerLag.ms = 0;
   vi.unstubAllGlobals();
   consoleError.mockRestore();
   window.history.pushState({}, '', '/');
@@ -330,7 +349,7 @@ describe('an environment change from another browser tab', () => {
     await expectStartedOver();
   });
 
-  it('starts over from an ?event= link', async () => {
+  it('starts over from a report opened through an ?event= link', async () => {
     stubWorkers({ [ENV_A.apiUrl]: [OPEN_REPORT], [ENV_B.apiUrl]: [OPEN_REPORT, OTHER_REPORT] });
     renderAppAt(`/reports?event=${OPEN_EVENT}`);
     await waitFor(() => expect(screen.getByTestId('detail')).toHaveAttribute('data-report-id', OPEN_REPORT.id));
@@ -348,5 +367,135 @@ describe('a link that names its environment', () => {
 
     await waitFor(() => expect(screen.getByTestId('detail')).toHaveAttribute('data-report-id', OPEN_REPORT.id));
     expect(window.location.pathname).toBe(`/reports/${OPEN_REPORT.id}`);
+  });
+});
+
+describe("the new environment's first reads", () => {
+  // Reports is held for the pass in which the change is seen, so the cache is
+  // cleared before it reads. Mounted in that pass, it would read the old
+  // environment's cache, then be cleared and read again.
+  it('reads the feed and the resolution state once after a switch through the selector', async () => {
+    const feedReads = stubWorkers({ [ENV_A.apiUrl]: [OTHER_REPORT], [ENV_B.apiUrl]: [OTHER_REPORT] });
+    const user = userEvent.setup();
+    renderAppAt('/reports');
+    await screen.findByText(nip19.noteEncode(OTHER_EVENT));
+
+    await selectEnvironment(user, 'Beta');
+    await screen.findByText(nip19.noteEncode(OTHER_EVENT));
+    await flush();
+
+    expect(feedReads[ENV_B.apiUrl]).toBe(1);
+    expect(feedReads[`${ENV_B.apiUrl}/resolution-state`]).toBe(1);
+  });
+
+  it('reads the feed once after a switch from another tab', async () => {
+    const feedReads = stubWorkers({ [ENV_A.apiUrl]: [OTHER_REPORT], [ENV_B.apiUrl]: [OTHER_REPORT] });
+    renderAppAt('/reports');
+    await screen.findByText(nip19.noteEncode(OTHER_EVENT));
+
+    await switchFromAnotherTab(ENV_B);
+    await screen.findByText(nip19.noteEncode(OTHER_EVENT));
+    await flush();
+
+    expect(feedReads[ENV_B.apiUrl]).toBe(1);
+  });
+});
+
+describe('re-selecting the environment in use, with many queries cached', () => {
+  // gcTime is Infinity in the app, so inactive queries pile up over a session. A
+  // re-select refreshes what is on screen; the rest refresh when next used.
+  it('does not re-read inactive cached queries', async () => {
+    stubWorkers(feedsWhereBetaLacksTheReport());
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, retryDelay: 0 } } });
+    const user = userEvent.setup();
+    renderAppAt('/reports', queryClient);
+    await screen.findByText(nip19.noteEncode(OPEN_EVENT));
+    let reads = 0;
+    for (let i = 0; i < 20; i++) {
+      await queryClient.fetchQuery({
+        queryKey: ['inactive-probe', i], queryFn: async () => { reads += 1; return i; }, gcTime: Infinity,
+      });
+    }
+    const before = reads;
+
+    await selectEnvironment(user, 'Alpha');
+    await flush();
+
+    expect(reads - before).toBe(0);
+  });
+});
+
+describe('a change reverted before it settles', () => {
+  // Another tab writes Beta, then Alpha again, and Alpha's write lands between
+  // the URL clean-up and the render that would settle on Beta. The next real
+  // switch to Beta must still clear the cache.
+  it('still clears the cache on the next real change to that environment', async () => {
+    const feedReads = stubWorkers(
+      { [ENV_A.apiUrl]: [OPEN_REPORT, OTHER_REPORT], [ENV_B.apiUrl]: [OTHER_REPORT] },
+      { [ENV_A.apiUrl]: [{ target_type: 'event', target_id: OTHER_EVENT }] },
+    );
+    renderAppAt(`/reports/${OPEN_REPORT.id}`);
+    await waitFor(() => expect(screen.getByTestId('detail')).toHaveAttribute('data-report-id', OPEN_REPORT.id));
+
+    const realReplace = window.history.replaceState.bind(window.history);
+    let reverted = false;
+    const spy = vi.spyOn(window.history, 'replaceState').mockImplementation((...args: Parameters<History['replaceState']>) => {
+      realReplace(...args);
+      if (!reverted && String(args[2]).endsWith('/reports')) {
+        reverted = true;
+        window.dispatchEvent(new StorageEvent('storage', {
+          key: 'test-app-config',
+          newValue: JSON.stringify({ theme: 'light', relayUrl: ENV_A.relayUrl, apiUrl: ENV_A.apiUrl }),
+        }));
+      }
+    });
+    await switchFromAnotherTab(ENV_B);
+    spy.mockRestore();
+    expect(reverted).toBe(true);
+    await flush();
+
+    // Back in Alpha, which resolved OTHER_EVENT: its state is read and cached.
+    await screen.findByRole('switch', { name: /hide resolved/i });
+    await flush();
+    expect(screen.queryByText(nip19.noteEncode(OTHER_EVENT))).not.toBeInTheDocument();
+
+    await switchFromAnotherTab(ENV_B);
+    await flush();
+
+    // Beta has not resolved it; with Alpha's state still cached it would stay hidden.
+    expect(await screen.findByText(nip19.noteEncode(OTHER_EVENT), {}, { timeout: 2000 })).toBeInTheDocument();
+    expect(feedReads[`${ENV_B.apiUrl}/resolution-state`]).toBeGreaterThan(0);
+  });
+});
+
+describe('with a router that applies a navigation late', () => {
+  const sleep = (ms: number) => act(async () => { await new Promise(r => setTimeout(r, ms)); });
+
+  // The screen settles on the new environment only once the URL no longer
+  // carries the old report. Settling in the same pass as the navigation would
+  // mount Reports on the old URL while the navigation is still pending.
+  it('does not reopen the old report in the new environment after a cross-tab switch', async () => {
+    routerLag.ms = 50;
+    stubWorkers({ [ENV_A.apiUrl]: [OPEN_REPORT], [ENV_B.apiUrl]: [OPEN_REPORT, OTHER_REPORT] });
+    renderAppAt(`/reports/${OPEN_REPORT.id}`);
+    await waitFor(() => expect(screen.getByTestId('detail')).toHaveAttribute('data-report-id', OPEN_REPORT.id));
+
+    await switchFromAnotherTab(ENV_B);
+    await sleep(300);
+
+    await expectStartedOver();
+  });
+
+  it('does not reopen the old report in the new environment after a switch through the selector', async () => {
+    routerLag.ms = 50;
+    stubWorkers({ [ENV_A.apiUrl]: [OPEN_REPORT], [ENV_B.apiUrl]: [OPEN_REPORT, OTHER_REPORT] });
+    const user = userEvent.setup();
+    renderAppAt(`/reports/${OPEN_REPORT.id}`);
+    await waitFor(() => expect(screen.getByTestId('detail')).toHaveAttribute('data-report-id', OPEN_REPORT.id));
+
+    await selectEnvironment(user, 'Beta');
+    await sleep(300);
+
+    await expectStartedOver();
   });
 });
