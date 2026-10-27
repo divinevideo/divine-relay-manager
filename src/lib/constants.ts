@@ -12,7 +12,9 @@ export {
 // ABOUTME: Shared constants for moderation categories and labels
 // ABOUTME: DTSP (Digital Trust & Safety Partnership) category mappings
 
-export const CATEGORY_LABELS: Record<string, string> = {
+// A null prototype, so even a raw lookup by a report's category finds only
+// these labels, never an inherited object key.
+export const CATEGORY_LABELS: Record<string, string> = Object.assign(Object.create(null), {
   'sexual_minors': 'CSAM',
   'csam': 'CSAM',
   'NS-csam': 'CSAM',
@@ -62,7 +64,7 @@ export const CATEGORY_LABELS: Record<string, string> = {
   'other': 'Other',
   'NS-underageUser': 'Under 16',
   'NS-childSafety': 'Child Safety',
-};
+});
 
 export const RESOLUTION_STATUSES = ['reviewed', 'dismissed', 'no-action', 'false-positive'] as const;
 export type ResolutionStatus = typeof RESOLUTION_STATUSES[number];

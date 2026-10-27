@@ -20,6 +20,11 @@ describe('CATEGORY_LABELS', () => {
     expect(CATEGORY_LABELS['NS-false-information']).toBe('Misinformation');
     expect(CATEGORY_LABELS['NS-ai-generated']).toBe('AI Generated');
   });
+
+  // Even a raw lookup by a report's category finds only the map's own labels.
+  it.each(['__proto__', 'constructor', 'toString', 'hasOwnProperty', 'valueOf'])('has no inherited %s entry', key => {
+    expect(CATEGORY_LABELS[key]).toBeUndefined();
+  });
 });
 
 // Labels come from the map's own keys only, so inherited object keys render
