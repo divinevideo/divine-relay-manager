@@ -161,6 +161,12 @@ export function parseOverflowMarker(failure: string): number | null {
   return match ? Number(match[1]) : null;
 }
 
+// How many problems a job's failures stand for: each stored failure is one,
+// except the "+N more" overflow marker, which stands for N.
+export function countIssues(failures: string[]): number {
+  return failures.reduce((n, failure) => n + (parseOverflowMarker(failure) ?? 1), 0);
+}
+
 export function eventFailure(eventId: string, error: string): string {
   return `event:${eventId}:${error}`;
 }

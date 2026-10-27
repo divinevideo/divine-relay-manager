@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   ABANDONED_REASON,
+  countIssues,
   enumerationWarning,
   eventFailure,
   formatOverflowMarker,
@@ -71,5 +72,13 @@ describe('bulk failure strings', () => {
     expect(isListingGapWarning(unpaginatedGapWarning(PUBKEY, 'actioned a partial set'))).toBe(true);
     expect(isListingGapWarning(enumerationWarning(PUBKEY, 'relay returned 1 event(s) outside the requested author or kind; ignored them'))).toBe(false);
     expect(isListingGapWarning(eventFailure(EVENT_ID, 'relay could not be fully paginated'))).toBe(false);
+  });
+});
+
+describe('countIssues', () => {
+  it('counts each stored failure once and an overflow marker as the failures it stands for', () => {
+    expect(countIssues([])).toBe(0);
+    expect(countIssues(['event:e1:refused', 'media:m1:nope'])).toBe(2);
+    expect(countIssues(['event:e1:refused', formatOverflowMarker(10)])).toBe(11);
   });
 });
