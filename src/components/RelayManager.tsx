@@ -1,7 +1,8 @@
 // ABOUTME: Main relay administration interface with tabs for events, users, reports, and labels
 // ABOUTME: Integrates all NIP-86 moderation tools into a unified dashboard with URL routing
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { EventsList } from "@/components/EventsList";
 import { UserManagement } from "@/components/UserManagement";
@@ -84,33 +85,63 @@ export function RelayManager() {
   const { config } = useAppContext();
 
   const currentTab = getTabFromPath(location.pathname);
+  const queryClient = useQueryClient();
 
-  // The Reports screen starts over, URL included, whenever the environment
-  // actually changes, wherever the change is observed: the selector, another
-  // browser tab's storage event, or a link that names its environment. A report
-  // or link in the URL belongs to the environment it was read from; left there,
-  // the screen the change remounts would look it up in the new one, reopening it
-  // or opening history to search for it. This is decided here, during render,
-  // because an effect runs after the remounted screen's own mount effects, which
-  // would already have acted on the old URL: while the URL still carries the
-  // old report, Reports is not rendered at all for that pass.
+  // The Reports screen starts over whenever the environment actually changes,
+  // wherever the change is observed: the selector, another browser tab's
+  // storage event, or a link that names its environment.
+  //
+  // The cache is cleared on every change. Several reads carry no environment in
+  // their key (resolution state, the ban lists, most of the detail pane's), so
+  // they would otherwise serve the old environment's data in the new one, which
+  // the selector's own clear missed for a change made in another tab.
+  //
+  // A report or link in the URL belongs to the environment it was read from;
+  // left there, the screen the change remounts would look it up in the new one,
+  // reopening it or opening history to search for it. So it is dropped, except
+  // a genuine ?event= / ?pubkey= deep link whose &env= names the environment
+  // just switched to: the switch was made to open that link.
+  //
+  // Both are decided here, during render: Reports is not rendered at all for the
+  // pass in which the change is seen. An effect runs after the remounted
+  // screen's own mount effects, which would already have read the old cache and
+  // acted on the old URL. The effect clears the cache and cleans the URL, and
+  // settles only once the URL no longer carries the old report, so it does not
+  // depend on the router applying the navigation in the same pass.
+  //
+  // Not handled here: browser Back from the new environment's queue can still
+  // return to an earlier report URL of the old environment. That is deferred,
+  // with Back and Forward between report URLs, to the follow-up issue.
   const environmentKey = `${config.relayUrl}|${config.apiUrl}`;
   const [settledEnvironmentKey, setSettledEnvironmentKey] = useState(environmentKey);
   const environmentChanged = settledEnvironmentKey !== environmentKey;
   const urlCarriesReport = location.pathname.startsWith('/reports')
     && (location.pathname !== '/reports' || location.search !== '');
-  // An &env= link names the environment it is for. When that is the one just
-  // switched to, the switch was made to open this very link, so it is kept.
-  const linkEnvironment = getEnvironmentById(new URLSearchParams(location.search).get('env') ?? '');
-  const linkIsForThisEnvironment = !!linkEnvironment
+  // Only what Reports itself acts on counts as a link: /reports with ?event= or
+  // ?pubkey=, and its &env= naming an environment. A report id alongside ?env=
+  // is not one, and carries the old report into the new environment.
+  const searchParams = new URLSearchParams(location.search);
+  const isDeepLink = location.pathname === '/reports'
+    && (searchParams.has('event') || searchParams.has('pubkey'));
+  const linkEnvironment = getEnvironmentById(searchParams.get('env') ?? '');
+  const linkIsForThisEnvironment = isDeepLink && !!linkEnvironment
     && linkEnvironment.relayUrl === config.relayUrl && linkEnvironment.apiUrl === config.apiUrl;
-  const holdReports = environmentChanged && urlCarriesReport && !linkIsForThisEnvironment;
+  const stripUrl = environmentChanged && urlCarriesReport && !linkIsForThisEnvironment;
+  const holdReports = environmentChanged;
+  const clearedForKey = useRef(environmentKey);
   useEffect(() => {
     if (!environmentChanged) return;
-    // Replace, so Back does not return to the old environment's report.
-    if (holdReports) navigate('/reports', { replace: true });
+    if (clearedForKey.current !== environmentKey) {
+      queryClient.clear();
+      clearedForKey.current = environmentKey;
+    }
+    if (stripUrl) {
+      // Replace: the old environment's report URL does not stay as an entry.
+      navigate('/reports', { replace: true });
+      return; // settle on the next pass, once the URL is clean
+    }
     setSettledEnvironmentKey(environmentKey);
-  }, [environmentChanged, holdReports, environmentKey, navigate]);
+  }, [environmentChanged, stripUrl, environmentKey, navigate, queryClient]);
 
   // Tab order state with localStorage persistence
   const [tabOrder, setTabOrder] = useState<TabId[]>(loadTabOrder);

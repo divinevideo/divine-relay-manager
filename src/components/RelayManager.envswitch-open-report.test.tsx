@@ -53,7 +53,10 @@ function jsonResponse(body: unknown) {
 
 // Each environment's worker holds its own feed. A request to a host with no
 // feed fails the test, so a read can never be answered by the wrong environment.
-function stubWorkers(feeds: Record<string, unknown[]>) {
+function stubWorkers(
+  feeds: Record<string, unknown[]>,
+  resolvedByHost: Record<string, { target_type: string; target_id: string }[]> = {},
+) {
   const feedReads: Record<string, number> = {};
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input instanceof Request ? input.url : input);
@@ -72,7 +75,10 @@ function stubWorkers(feeds: Record<string, unknown[]>) {
     if (url.includes('/api/resolution-label-targets')) {
       return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
     }
-    if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, resolved: [], states: [] });
+    if (url.includes('/api/resolution-state')) {
+      feedReads[`${host}/resolution-state`] = (feedReads[`${host}/resolution-state`] ?? 0) + 1;
+      return jsonResponse({ success: true, resolved: resolvedByHost[host] ?? [], states: [] });
+    }
     if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
     return jsonResponse({ success: true });
   }));
@@ -162,7 +168,7 @@ describe('switching environment through the selector', () => {
     await expectStartedOver();
   });
 
-  it('starts over from an ?event= link', async () => {
+  it('starts over from a report opened through an ?event= link', async () => {
     stubWorkers({ [ENV_A.apiUrl]: [OPEN_REPORT], [ENV_B.apiUrl]: [OPEN_REPORT, OTHER_REPORT] });
     const user = userEvent.setup();
     renderAppAt(`/reports?event=${OPEN_EVENT}`);
@@ -173,7 +179,7 @@ describe('switching environment through the selector', () => {
     await expectStartedOver();
   });
 
-  it('starts over from a ?pubkey= link', async () => {
+  it('starts over from a report opened through a ?pubkey= link', async () => {
     stubWorkers({ [ENV_A.apiUrl]: [OPEN_REPORT], [ENV_B.apiUrl]: [OPEN_REPORT, OTHER_REPORT] });
     const user = userEvent.setup();
     renderAppAt(`/reports?pubkey=${PUBKEY}`);
@@ -193,6 +199,49 @@ describe('switching environment through the selector', () => {
     expect(window.location.search).not.toBe('');
 
     await selectEnvironment(user, 'Beta');
+
+    await expectStartedOver();
+  });
+
+  it('starts over from a not-found ?pubkey= link, which stays in the URL', async () => {
+    stubWorkers(feedsWhereBetaLacksTheReport());
+    const user = userEvent.setup();
+    renderAppAt(`/reports?pubkey=${'8'.repeat(64)}`);
+    await waitFor(() => expect(window.location.search).not.toBe(''));
+    await flush();
+
+    await selectEnvironment(user, 'Beta');
+
+    await expectStartedOver();
+  });
+
+  it('does not undo the switch away from a not-found link that names the old environment', async () => {
+    stubWorkers(feedsWhereBetaLacksTheReport());
+    const user = userEvent.setup();
+    renderAppAt(`/reports?event=${'7'.repeat(64)}&env=alpha`);
+    await flush();
+
+    await selectEnvironment(user, 'Beta');
+
+    await expectStartedOver();
+  });
+
+  it('drops a report id carried with ?env=<the new environment>, which is not a link', async () => {
+    stubWorkers(feedsWhereBetaLacksTheReport());
+    const user = userEvent.setup();
+    renderAppAt(`/reports/${OPEN_REPORT.id}?env=beta`);
+    await waitFor(() => expect(screen.getByTestId('detail')).toHaveAttribute('data-report-id', OPEN_REPORT.id));
+
+    await selectEnvironment(user, 'Beta');
+
+    await expectStartedOver();
+  });
+
+  it('drops a report id carried with an ?event= link for another environment, which is not a link', async () => {
+    // The link makes the screen switch to Beta on its own; with a report id in
+    // the path it is not a deep link, so the id is not carried into Beta.
+    stubWorkers({ [ENV_A.apiUrl]: [OPEN_REPORT], [ENV_B.apiUrl]: [OPEN_REPORT, OTHER_REPORT] });
+    renderAppAt(`/reports/${OPEN_REPORT.id}?event=${OPEN_EVENT}&env=beta`);
 
     await expectStartedOver();
   });
@@ -224,7 +273,53 @@ describe('re-selecting the environment already in use', () => {
   });
 });
 
+describe('re-selecting the environment with a not-found link open', () => {
+  it('re-reads without leaving the lookup stuck: the verdict comes back', async () => {
+    stubWorkers(feedsWhereBetaLacksTheReport());
+    const user = userEvent.setup();
+    renderAppAt(`/reports?event=${'7'.repeat(64)}`);
+    await screen.findByText('Report no longer on relay');
+
+    await selectEnvironment(user, 'Alpha');
+
+    await screen.findByText('Report no longer on relay');
+    expect(screen.queryByText(/looking up this report/i)).not.toBeInTheDocument();
+  });
+});
+
 describe('an environment change from another browser tab', () => {
+  // The other tab's switch never runs this tab's selector, so nothing else
+  // clears the cache. Reads that carry no environment in their key (resolution
+  // state, the ban lists) would serve the old environment's data in the new one.
+  it("reads the new environment's resolution state at once, not the old one's from the cache", async () => {
+    const feedReads = stubWorkers(
+      { [ENV_A.apiUrl]: [OTHER_REPORT], [ENV_B.apiUrl]: [OTHER_REPORT] },
+      { [ENV_A.apiUrl]: [{ target_type: 'event', target_id: OTHER_EVENT }] },
+    );
+    renderAppAt('/reports');
+    await screen.findByRole('switch', { name: /hide resolved/i });
+    // Resolved in Alpha, so Alpha's queue does not list it.
+    await waitFor(() => expect(feedReads[`${ENV_A.apiUrl}/resolution-state`]).toBeGreaterThan(0));
+    expect(screen.queryByText(nip19.noteEncode(OTHER_EVENT))).not.toBeInTheDocument();
+
+    await switchFromAnotherTab(ENV_B);
+
+    // Beta has not resolved it. With Alpha's state still cached it would stay hidden.
+    expect(await screen.findByText(nip19.noteEncode(OTHER_EVENT))).toBeInTheDocument();
+    expect(feedReads[`${ENV_B.apiUrl}/resolution-state`]).toBeGreaterThan(0);
+  });
+
+  it('does not reopen the old report in the new environment', async () => {
+    stubWorkers({ [ENV_A.apiUrl]: [OPEN_REPORT], [ENV_B.apiUrl]: [OPEN_REPORT, OTHER_REPORT] });
+    renderAppAt(`/reports/${OPEN_REPORT.id}`);
+    await waitFor(() => expect(screen.getByTestId('detail')).toHaveAttribute('data-report-id', OPEN_REPORT.id));
+
+    await switchFromAnotherTab(ENV_B);
+    await flush();
+
+    await expectStartedOver();
+  });
+
   it('starts over from /reports/<id> just as a switch here does', async () => {
     stubWorkers(feedsWhereBetaLacksTheReport());
     renderAppAt(`/reports/${OPEN_REPORT.id}`);
