@@ -2018,6 +2018,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           onOpenChange={(open) => !open && handleSelectReport(null)}
         >
           <SheetContent side="right" className="!w-full !max-w-[100vw] pt-10 px-0 pb-0 overflow-y-auto">
+            {/* The sheet covers the list column where the failure is drawn, so say it
+                here too: the moderator can act on this report but must know the queue is not loaded. */}
+            {queueFailedCold && <div className="px-4 pb-3">{queueLoadFailure}</div>}
             {reportDetailPane}
           </SheetContent>
         </Sheet>

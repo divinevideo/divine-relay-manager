@@ -9,7 +9,10 @@ import { QueryClient, useQuery } from '@tanstack/react-query';
 import { nip19 } from 'nostr-tools';
 import TestApp from '@/test/TestApp';
 import { EMPTY_RESOLVED_PAGE } from '@/test/resolvedHistory';
+import { useIsMobile } from '@/hooks/useIsMobile';
 import { Reports } from './Reports';
+
+vi.mock('@/hooks/useIsMobile', () => ({ useIsMobile: vi.fn(() => false) }));
 
 // Renders only which report the pane opened and how many of the target's reports it was given.
 vi.mock('@/components/ReportDetail', () => ({
@@ -126,6 +129,7 @@ beforeEach(() => {
   consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
 });
 afterEach(() => {
+  vi.mocked(useIsMobile).mockReturnValue(false);
   vi.unstubAllGlobals();
   consoleError.mockRestore();
   window.history.pushState({}, '', '/');
@@ -253,6 +257,41 @@ describe('the queue reads the needs-attention feed', () => {
     // relay key, not from the resolution filter.
     expect(screen.getByRole('switch', { name: 'Hide resolved' })).not.toBeChecked();
     expect(screen.queryByText(nip19.noteEncode(RESOLVED_EVENT))).not.toBeInTheDocument();
+  });
+
+  it('shows the queue failure and its Try again inside the open report on a phone', async () => {
+    // The phone's detail sheet covers the list column where the failure is
+    // drawn, so without this the moderator sees no sign the queue failed.
+    vi.mocked(useIsMobile).mockReturnValue(true);
+    stubWorker({ success: false, error: 'Relay query timed out before EOSE' }, 502);
+    window.history.pushState({}, '', `/reports?event=${RESOLVED_EVENT}`);
+    renderQueue();
+
+    const sheet = await screen.findByRole('dialog');
+    expect(within(sheet).getByTestId('report-detail')).toHaveTextContent(RESOLVED_REPORT.id);
+    expect(within(sheet).getByText(/Failed to load reports/)).toBeInTheDocument();
+    expect(within(sheet).getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+  });
+
+  it('shows no queue failure inside the open report on a phone when the queue loaded', async () => {
+    vi.mocked(useIsMobile).mockReturnValue(true);
+    stubWorker({});
+    window.history.pushState({}, '', `/reports?event=${RESOLVED_EVENT}`);
+    renderQueue();
+
+    const sheet = await screen.findByRole('dialog');
+    expect(within(sheet).getByTestId('report-detail')).toBeInTheDocument();
+    expect(within(sheet).queryByText(/Failed to load reports/)).not.toBeInTheDocument();
+  });
+
+  it('does not repeat the queue failure inside the report pane on desktop', async () => {
+    stubWorker({ success: false, error: 'Relay query timed out before EOSE' }, 502);
+    window.history.pushState({}, '', `/reports?event=${RESOLVED_EVENT}`);
+    renderQueue();
+
+    await screen.findByTestId('report-detail');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.getAllByText(/Failed to load reports/)).toHaveLength(1);
   });
 
   it('opens a deep-linked report while the queue fails to load, and still says the queue failed', async () => {
