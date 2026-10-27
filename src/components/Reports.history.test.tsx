@@ -558,6 +558,61 @@ describe('the history footer never mistakes a stop for an end', () => {
     expect(screen.getByRole('button', { name: /load more/i })).toBeEnabled();
   });
 
+  describe('after Load more failed', () => {
+    // query-core keeps the error, and drops the fetch direction, when the next
+    // fetch is a plain re-read of the loaded pages. Without care the footer
+    // reads that old Load more error as a failed refresh for the whole re-read.
+    async function failLoadMore(firstReply: () => Response | Promise<Response>) {
+      stubWorker({
+        pages: {
+          first: firstReply,
+          [PAGE_ONE_CURSOR]: fail,
+        },
+      });
+      const user = userEvent.setup();
+      const queryClient = renderQueue();
+      await openHistory(user);
+      await user.click(await screen.findByRole('button', { name: /load more/i }));
+      expect(await screen.findByText(/couldn't load the next page/i)).toBeInTheDocument();
+      return { user, queryClient };
+    }
+
+    it('does not call a running re-read a failed refresh', async () => {
+      let reRead: Reply = () => jsonResponse(resolvedPage([H1, H2], { nextCursor: PAGE_ONE_CURSOR, done: false }));
+      const { queryClient } = await failLoadMore(() => reRead());
+
+      reRead = hang;
+      await act(async () => { queryClient.invalidateQueries({ queryKey: ['reports-resolved'] }); });
+
+      await waitFor(() => expect(screen.getByRole('button', { name: /load more/i })).toBeDisabled());
+      const footer = screen.getByTestId('resolved-history-footer');
+      expect(footer).not.toHaveTextContent(/couldn't refresh/i);
+      expect(footer).toHaveTextContent('Showing 3 resolved. More further back.');
+    });
+
+    it('still says a re-read that itself failed failed to refresh', async () => {
+      let reRead: Reply = () => jsonResponse(resolvedPage([H1, H2], { nextCursor: PAGE_ONE_CURSOR, done: false }));
+      const { queryClient } = await failLoadMore(() => reRead());
+
+      reRead = fail;
+      await act(async () => { await queryClient.invalidateQueries({ queryKey: ['reports-resolved'] }); });
+
+      expect(await screen.findByText(/couldn't refresh resolved history/i)).toBeInTheDocument();
+    });
+
+    it('still says a failed Load more failed, after an earlier re-read succeeded', async () => {
+      const { queryClient, user } = await failLoadMore(
+        () => jsonResponse(resolvedPage([H1, H2], { nextCursor: PAGE_ONE_CURSOR, done: false })),
+      );
+      await act(async () => { await queryClient.invalidateQueries({ queryKey: ['reports-resolved'] }); });
+      await screen.findByRole('button', { name: /load more/i });
+
+      await user.click(screen.getByRole('button', { name: /load more/i }));
+      expect(await screen.findByText(/couldn't load the next page/i)).toBeInTheDocument();
+      expect(screen.queryByText(/couldn't refresh/i)).not.toBeInTheDocument();
+    });
+  });
+
   it('says resolved history failed to load rather than that there is none', async () => {
     stubWorker({ pages: { first: fail } });
     const user = userEvent.setup();
