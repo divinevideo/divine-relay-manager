@@ -48,6 +48,8 @@ export const CATEGORY_LABELS: Record<string, string> = {
   'harassment': 'Harassment',
   'nudity': 'Nudity',
   'illegal': 'Illegal',
+  'malware': 'Malware',
+  'profanity': 'Profanity',
   'copyright': 'Copyright',
   'aiGenerated': 'AI Generated',
   'ai-generated': 'AI Generated',

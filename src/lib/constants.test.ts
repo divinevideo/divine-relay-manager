@@ -36,6 +36,11 @@ describe('getCategoryLabel', () => {
   it('returns an unknown category unchanged', () => {
     expect(getCategoryLabel('made_up')).toBe('made_up');
   });
+
+  it('names the NIP-56 malware and profanity types', () => {
+    expect(getCategoryLabel('malware')).toBe('Malware');
+    expect(getCategoryLabel('profanity')).toBe('Profanity');
+  });
 });
 
 describe('getReportCategory', () => {

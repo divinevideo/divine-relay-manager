@@ -38,6 +38,14 @@ function hasValue(t: string[]): boolean {
   return typeof t[1] === 'string' && t[1] !== '';
 }
 
+// NIP-01 lets an e or p tag carry a relay URL third, where NIP-56 puts the
+// report type. A relay URL there is a hint, not a type.
+const RELAY_HINT = /^wss?:\/\//i;
+
+function isReportType(value: unknown): value is string {
+  return typeof value === 'string' && value !== '' && !RELAY_HINT.test(value);
+}
+
 function isCsamValue(value: unknown): boolean {
   return typeof value === 'string'
     && CSAM_CATEGORIES.some(c => c.toLowerCase() === value.toLowerCase());
@@ -58,9 +66,9 @@ function categoryOf(tags: string[][]): string {
 
   // NIP-56 puts the report type on the target tag.
   const eType = tags.find(t => t[0] === 'e')?.[2];
-  if (typeof eType === 'string' && eType !== '') return eType;
+  if (isReportType(eType)) return eType;
   const pType = tags.find(t => t[0] === 'p')?.[2];
-  if (typeof pType === 'string' && pType !== '') return pType;
+  if (isReportType(pType)) return pType;
 
   return 'other';
 }

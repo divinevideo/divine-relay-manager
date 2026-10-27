@@ -137,6 +137,17 @@ describe('classifyReport', () => {
     expect(classifyReport({ tags: [['e', P, ''], ['p', P, 'spam']] }).category).toBe('spam');
     expect(classifyReport({ tags: [['p', P, '']] }).category).toBe('other');
   });
+
+  // NIP-01 puts a relay hint third on an e or p tag, where NIP-56 puts the type.
+  it('skips a relay hint where the NIP-56 type goes', () => {
+    expect(classifyReport({ tags: [['e', E, 'wss://relay.example.com'], ['p', P]] }).category).toBe('other');
+    expect(classifyReport({ tags: [['p', P, 'ws://relay.example.com']] }).category).toBe('other');
+    expect(classifyReport({ tags: [['e', E, 'WSS://relay.example.com'], ['p', P, 'spam']] }).category).toBe('spam');
+  });
+
+  it('reads profanity as a NIP-56 type', () => {
+    expect(classifyReport({ tags: [['e', E, 'profanity'], ['p', P, 'profanity']] }).category).toBe('profanity');
+  });
 });
 
 describe('ageReviewCategory', () => {
