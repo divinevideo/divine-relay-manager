@@ -1,7 +1,7 @@
 // ABOUTME: Comprehensive event detail view showing all event information
 // ABOUTME: Includes raw JSON, linked events, author profile, user stats, related reports, and moderation actions
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNostr } from "@/hooks/useNostr";
 import { useAuthor } from "@/hooks/useAuthor";
@@ -365,6 +365,23 @@ function TagsTable({ tags }: { tags: string[][] }) {
   );
 }
 
+// Reports filed against an event or its author, and whether every read of
+// them finished (see the related-reports query in EventDetail).
+interface RelatedReportsRead {
+  reports: NostrEvent[];
+  complete: boolean;
+}
+
+// Each report once, newest first.
+function newestFirstUnique(reports: NostrEvent[]): NostrEvent[] {
+  const seen = new Set<string>();
+  return reports.filter(r => {
+    if (!r.id || seen.has(r.id)) return false;
+    seen.add(r.id);
+    return true;
+  }).sort((a, b) => b.created_at - a.created_at);
+}
+
 export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReports }: EventDetailProps) {
   const { nostr } = useNostr();
   const { toast } = useToast();
@@ -396,6 +413,10 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
   // exactly wrong. Unban stays on isUserBanned, so the undo remains reachable.
   const userBannedConfirmed = moderationStatus.isUserBanned === true && !moderationStatus.isUserBannedStale;
 
+  // Whether the related-reports read in hand was made since this event was
+  // opened, for the query function below, which runs outside render.
+  const readSinceOpenedRef = useRef(false);
+
   // Get reports against this event or user. A read that runs out of time does
   // not fail: NPool.query resolves with whatever had arrived by then. So each
   // read keeps its own timeout signal, and `complete` says whether every read
@@ -403,7 +424,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
   // that returned its full limit may have left older reports on the relay.
   const { data: relatedReportsRead, isFetchedAfterMount } = useQuery({
     queryKey: ['related-reports', event.id, event.pubkey],
-    queryFn: async ({ signal }) => {
+    queryFn: async ({ signal, queryKey }) => {
       const read = async (filter: NostrFilter) => {
         const timeout = AbortSignal.timeout(3000);
         const events = await nostr.query([filter], { signal: AbortSignal.any([signal, timeout]) });
@@ -420,16 +441,20 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
       reads.push(read({ kinds: [1984], '#p': [event.pubkey], limit: 50 }));
 
       const results = await Promise.all(reads);
-      const allReports = results.flatMap(r => r.events);
+      const reports = results.flatMap(r => r.events);
+      const complete = results.every(r => r.complete);
 
-      // Dedupe by event ID
-      const seen = new Set<string>();
-      const reports = allReports.filter(r => {
-        if (!r.id || seen.has(r.id)) return false;
-        seen.add(r.id);
-        return true;
-      }).sort((a, b) => b.created_at - a.created_at);
-      return { reports, complete: results.every(r => r.complete) };
+      // A later read that times out (a refetch on window focus, say) keeps
+      // what an earlier read since the event was opened found: its reports
+      // stay listed, and its verdict stands. One from before the event was
+      // opened is not kept, so it cannot lend this read its clean verdict.
+      const earlier = readSinceOpenedRef.current
+        ? queryClient.getQueryData<RelatedReportsRead>(queryKey)
+        : undefined;
+      if (!complete && earlier) {
+        return { reports: newestFirstUnique([...reports, ...earlier.reports]), complete: earlier.complete };
+      }
+      return { reports: newestFirstUnique(reports), complete };
     },
     // Read again whenever an event is opened, even with a recent read cached:
     // only a read made since then may show its media (hasHighPriorityReports).
@@ -438,6 +463,9 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
     // event re-reads only stale data.
     staleTime: 0,
   });
+  useEffect(() => {
+    readSinceOpenedRef.current = isFetchedAfterMount;
+  }, [isFetchedAfterMount]);
   // Partial when a read timed out. Still listed below, but it cannot rule out
   // a sensitive report.
   const relatedReports = relatedReportsRead?.reports;

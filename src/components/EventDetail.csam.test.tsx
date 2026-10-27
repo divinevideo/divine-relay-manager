@@ -205,6 +205,80 @@ describe('EventDetail media before its reports are known', () => {
   });
 });
 
+// A later read (a refetch on window focus, say) that times out must not undo
+// what an earlier read since the event was opened found.
+describe('EventDetail when a later read of its reports times out', () => {
+  const media = () => screen.getByTestId('media').dataset.show;
+  // Filed after the first read, and found by the event read of the second.
+  const NEW_CSAM: NostrEvent = { ...OLD_BUILD, id: '9'.repeat(64), created_at: 1751000200 };
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function flushTimers() {
+    await act(async () => { await vi.runOnlyPendingTimersAsync(); });
+  }
+
+  // Starts a refetch, then runs its 3 s timeout and the result's hand-off.
+  async function refetchUntilTimeout(queryClient: QueryClient) {
+    await act(async () => { void queryClient.refetchQueries({ queryKey: ['related-reports'] }); });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+      await vi.runOnlyPendingTimersAsync();
+    });
+  }
+
+  it('keeps listing what the earlier read found, and keeps its media shown', async () => {
+    vi.useFakeTimers();
+    reports.value = [SPAM];
+    const { queryClient } = renderDetail();
+    await flushTimers();
+    expect(screen.getByText('1 Related Report')).toBeInTheDocument();
+    expect(media()).toBe('true');
+
+    relay.answer = (_filters, { signal }) => answerOnAbort(signal);
+    await refetchUntilTimeout(queryClient);
+
+    expect(screen.getByText('1 Related Report')).toBeInTheDocument();
+    expect(media()).toBe('true');
+  });
+
+  it('adds what the timed-out read did find', async () => {
+    vi.useFakeTimers();
+    reports.value = [SPAM];
+    const { queryClient } = renderDetail();
+    await flushTimers();
+
+    // The event read now finds a CSAM report; the account read never answers.
+    relay.answer = (filters, { signal }) =>
+      filters[0]['#e'] ? Promise.resolve([NEW_CSAM]) : answerOnAbort(signal);
+    await refetchUntilTimeout(queryClient);
+
+    expect(screen.getByText('2 Related Reports')).toBeInTheDocument();
+    expect(media()).toBe('false');
+  });
+
+  it('does not take a clean verdict from a read made before the event was opened', async () => {
+    vi.useFakeTimers();
+    const queryClient = appQueryClient();
+    reports.value = [SPAM];
+    const firstVisit = renderDetail(queryClient);
+    await flushTimers();
+    firstVisit.unmount();
+
+    // This visit's first read times out with nothing.
+    relay.answer = (_filters, { signal }) => answerOnAbort(signal);
+    renderDetail(queryClient);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+      await vi.runOnlyPendingTimersAsync();
+    });
+
+    expect(media()).toBe('null');
+  });
+});
+
 // A read that returns as many reports as it asked for may have left older ones
 // on the relay, so it cannot rule out a sensitive one.
 describe('EventDetail media when a read returns its full limit', () => {
