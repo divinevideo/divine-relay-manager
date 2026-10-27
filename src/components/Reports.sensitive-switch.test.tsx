@@ -4,7 +4,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
-import { QueryClient } from '@tanstack/react-query';
+import { QueryClient, onlineManager } from '@tanstack/react-query';
 import { useLocation } from 'react-router-dom';
 import { nip19 } from 'nostr-tools';
 import TestApp from '@/test/TestApp';
@@ -534,6 +534,45 @@ describe('Reports sensitive pending-review switch', () => {
 
       expect(hideResolvedSwitch()).not.toBeChecked();
       expect(screen.getByText(NOTE_SPAM)).toBeInTheDocument();
+    });
+
+    describe('while the browser is offline', () => {
+      let offlineClient: QueryClient | undefined;
+      afterEach(() => {
+        // Drop the paused read first. Back online it would resume once the
+        // fetch stub is gone and reach for the network.
+        offlineClient?.clear();
+        offlineClient = undefined;
+        onlineManager.setOnline(true);
+      });
+
+      // The hold must not strand the link offline either. A read that starts
+      // while the browser is offline pauses, and never settles on its own.
+      it('still shows a resolved linked report while the resolution state read is paused', async () => {
+        stubFetch({
+          events: [CSAM_REPORT, SPAM_REPORT, HIDDEN_REPORT],
+          labels: () => Promise.resolve([{ type: 'event', value: SPAM_EVENT }]),
+          // The first read never answers, so membership is unknown when the link lands.
+          statesGate: new Promise<void>(() => {}),
+        });
+        const user = userEvent.setup();
+        const queryClient = renderAt(`/reports?event=${SPAM_EVENT}`);
+        offlineClient = queryClient;
+        await waitFor(() => expect(window.location.pathname).toBe(`/reports/${SPAM_REPORT.id}`));
+
+        // The browser goes offline, then the read starts again, so it pauses.
+        onlineManager.setOnline(false);
+        await act(async () => {
+          void queryClient.resetQueries({ queryKey: ['resolution-state'] });
+        });
+        expect(queryClient.getQueryState(['resolution-state'])?.fetchStatus).toBe('paused');
+
+        await user.click(await screen.findByRole('button', { name: /show the queue anyway/i }));
+        await flush();
+
+        expect(hideResolvedSwitch()).not.toBeChecked();
+        expect(screen.getByText(NOTE_SPAM)).toBeInTheDocument();
+      });
     });
 
     // Labels answer empty first, then every later load waits for release(),

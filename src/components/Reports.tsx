@@ -569,10 +569,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const resolvedDecisionTargets = decisionsResult?.resolved;
   const autoHideStates = decisionsResult?.states;
   // The switch's auto-hidden members come only from this read, so membership
-  // is known once it has answered. A failed read counts as settled too, so a
-  // deep link's resolved-unhide is held, never stranded: on error it falls
-  // back to unhiding as it did before the hold.
-  const switchMembershipKnown = !decisionsPending;
+  // is known once it has answered. A failed read counts as settled too, and so
+  // does one paused because the browser is offline, which never settles on its
+  // own. So a deep link's resolved-unhide is held, never stranded: either way
+  // it falls back to unhiding as it did before the hold.
+  const switchMembershipKnown = !decisionsPending || decisionsFetchStatus === 'paused';
 
   // The deep-link target, resolved here rather than beside the pane that renders
   // it: the per-target decisions read below is a hook, and the pane sits after
