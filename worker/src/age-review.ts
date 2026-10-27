@@ -24,9 +24,10 @@ import {
   FUNNEL_ZENDESK_QUERIES,
 } from '../../shared/age-review';
 import { runBulkModeration, type BulkModerateEnv } from './bulk-moderate';
+import { deleteBulkFailure, ensureBulkNotesTable, storeBulkNotes } from './bulk-notes';
 import { getActiveAgeReviewCase } from './age-review-lookup';
 import { resolveZendeskCreds } from './zendesk-sync';
-import type { AccountBulkAction } from '../../shared/bulk-moderation';
+import { ageReviewNotesJobId, autoDeletePendingWarning, bulkLegStoppedWarning, MAX_NOTES_PER_WRITE, notSavedWarning, type AccountBulkAction, type BulkNote } from '../../shared/bulk-moderation';
 import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, setVerifiedMinor, createMinorAccount, HEX_64, type KeycastEnv, type KeycastReason, type KeycastResult } from './keycast-client';
 import { suspendPubkey, unsuspendPubkey, banPubkey, type BanPubkeyResult, type SecretStoreSecret } from './nip86';
 import { buildAgeReviewIdentityBlock, buildClaimedParentName, toNpub } from './report-note';
@@ -575,6 +576,8 @@ export async function handleUpdateAgeReviewCase(
   // stays non-critical and swallowed.)
   let bulk: EnforcementLegStatus = 'not_attempted';
   let bulkError: string | undefined;
+  let bulkNotes: BulkNote[] = [];
+  let bulkFailures: string[] = [];
   let bulkActionTriggered: string | undefined;
   let relay: EnforcementLegStatus = 'not_attempted';
   let relayError: string | undefined;
@@ -636,17 +639,17 @@ export async function handleUpdateAgeReviewCase(
     // only deletes when auto_delete_on_deny is set).
     try {
       if (enteredRestrictedState) {
-        await triggerBulkModerate(existing.pubkey, 'age-restrict-all', 'Age review restriction', env);
+        ({ notes: bulkNotes } = await triggerBulkModerate(existing.pubkey, 'age-restrict-all', 'Age review restriction', env));
         bulk = 'ok';
         bulkActionTriggered = 'age-restrict-all';
       } else if (clearedCase) {
-        await triggerBulkModerate(existing.pubkey, 'un-age-restrict-all', 'Age review cleared', env);
+        ({ notes: bulkNotes } = await triggerBulkModerate(existing.pubkey, 'un-age-restrict-all', 'Age review cleared', env));
         bulk = 'ok';
         bulkActionTriggered = 'un-age-restrict-all';
       } else if (deniedCase) {
         const config = await getAgeReviewConfig(env.DB!);
         if (config.auto_delete_on_deny) {
-          await triggerBulkModerate(existing.pubkey, 'delete-all', 'Age review denied', env);
+          ({ notes: bulkNotes } = await triggerBulkModerate(existing.pubkey, 'delete-all', 'Age review denied', env));
           bulk = 'ok';
           bulkActionTriggered = 'delete-all';
         }
@@ -654,8 +657,11 @@ export async function handleUpdateAgeReviewCase(
     } catch (error) {
       bulk = 'failed';
       bulkError = error instanceof Error ? error.message : String(error);
+      if (error instanceof BulkLegError) ({ notes: bulkNotes, failures: bulkFailures } = error);
       console.error('[age-review] Bulk action failed:', error);
     }
+    // existing.version + 1: the version this transition's compare-and-swap wrote.
+    await keepBulkNotes(env, caseId, existing.pubkey, existing.version + 1, requestedState, bulkNotes, bulkFailures);
 
     // Keycast account status.
     const keycastLeg = await runStatusLeg('Keycast', () =>
@@ -797,6 +803,11 @@ export async function handleUpdateAgeReviewCase(
     keycastMinorClear, keycastMinorClearError, subjectClear, subjectClearError,
     subjectActivate, subjectActivateError, keycastMinorSet, keycastMinorSetError,
     ...(keycastMinorSetUnclaimed ? { keycastMinorSetUnclaimed: true } : {}),
+    // Kept under the case by keepBulkNotes too; the response lets the case
+    // screen show them at once.
+    ...(bulkNotes.length > 0 ? { bulkNotes } : {}),
+    // Every failure line, for the case screen's panel (bulkError carries three).
+    ...(bulkFailures.length > 0 ? { bulkFailures } : {}),
   };
   const enforcementComplete = relay !== 'failed' && bulk !== 'failed' && keycast !== 'failed'
     && keycastMinorClear !== 'failed' && subjectClear !== 'failed'
@@ -2405,8 +2416,9 @@ const AUTO_CLOSE_NOTE = 'Auto-closed: deadline expired with no response';
 // A close that threw may still have committed. Re-reads the case once:
 //   landed: the cron's own close is what landed, i.e. denied_closed at the
 //     version after the one it read, with the cron's note. A moderator's own
-//     deny also writes denied_closed at that version, so the note is what
-//     tells the two apart. Known limit: an overlapping tick's close of the
+//     deny also writes denied_closed at that version, under the same notes key
+//     (ageReviewNotesJobId(id, version + 1, 'denied_closed')), so the note is
+//     what tells the two apart. Known limit: an overlapping tick's close of the
 //     same case writes the same note at the same version, so it matches too;
 //     its bans and delete are idempotent.
 //   restricted: the case still reads restricted, so the next tick retries it.
@@ -2480,6 +2492,17 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
   // Two passes: every expired case is closed and banned first, and only then
   // auto-deleted (see the second pass for why).
   const closedRows: AgeReviewCase[] = [];
+  // Whether to keep a pending auto-delete line for each case closed below
+  // (keepAutoDeletePending). Read once for the tick; if it cannot be read, no
+  // line is kept, and the second pass reads the config again for each case.
+  let keepPending = false;
+  if (expired.results.length > 0) {
+    try {
+      keepPending = (await getAgeReviewConfig(env.DB)).auto_delete_on_deny;
+    } catch (error) {
+      console.error('[age-review] Could not read the age-review config; no pending auto-delete lines this tick:', error);
+    }
+  }
   for (const row of expired.results) {
     // CAS on the version we read so the cron doesn't auto-close (and then
     // ban/delete) a case a moderator is concurrently acting on. If the row
@@ -2523,6 +2546,9 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
       console.log('[age-review] Close threw but had committed; continuing as closed');
     }
     console.log('[age-review] Auto-closed expired case');
+    // Before the bans: from here on the case is closed, and only the second
+    // pass deletes its files. row.version + 1 is the version the close wrote.
+    if (keepPending) await keepAutoDeletePending(env, row.id, row.pubkey, row.version + 1);
     try {
       await syncAgeReviewTicketResolution(row.id, 'denied_closed', AUTO_CLOSE_NOTE, env);
     } catch (error) {
@@ -2601,8 +2627,29 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
     try {
       const config = await getAgeReviewConfig(env.DB!);
       if (config.auto_delete_on_deny) {
-        await triggerBulkModerate(row.pubkey, 'delete-all', 'Age review expired -- auto-deleted', env);
-        console.log('[age-review] Auto-deleted content for expired case');
+        let notes: BulkNote[] = [];
+        let failures: string[] = [];
+        try {
+          ({ notes } = await triggerBulkModerate(row.pubkey, 'delete-all', 'Age review expired -- auto-deleted', env));
+          console.log(`[age-review] Auto-deleted content for expired case${notes.length > 0 ? `; ${notes.length} note(s) for a person` : ''}`);
+        } catch (error) {
+          if (error instanceof BulkLegError) ({ notes, failures } = error);
+          throw error;
+        } finally {
+          // Kept for the case screen, whether the run succeeded or not: no one
+          // is shown a cron run's result. row.version + 1 is the version the
+          // first pass's close wrote.
+          const kept = await keepBulkNotes(env, row.id, row.pubkey, row.version + 1, 'denied_closed', notes, failures);
+          // The delete has run and its own lines are kept, so the pending line
+          // goes; if they could not be kept, the pending line stays as the only
+          // record.
+          if (keepPending && kept) await clearAutoDeletePending(env, row.id, row.pubkey, row.version + 1);
+        }
+      } else if (keepPending) {
+        // Turned off since the first pass read it: no delete was meant to run,
+        // so the pending line goes. (A read that throws leaves it, and the
+        // line's own words still hold.)
+        await clearAutoDeletePending(env, row.id, row.pubkey, row.version + 1);
       }
     } catch (error) {
       console.error('[age-review] Auto-delete failed for expired case:', error);
@@ -2786,17 +2833,101 @@ export async function sendDbUnavailableAlert(webhookUrl: string, environment: st
 // rather than the async HTTP enqueue path the moderator UI uses. This runs in a
 // webhook/cron context (no UI modal to hang), so synchronous is correct here.
 
+// Keeps a transition's bulk failures and notes (see BulkNote) for the case
+// screen, which reads them back after a reload (see ageReviewNotesJobId). Not
+// part of the transition: awaited, but a failure is logged and nothing else
+// changes. At most MAX_NOTES_PER_WRITE rows in one invocation, failures first;
+// past that the last row is a failure line saying how many more were not
+// saved, so the screen is never silently short. The response still carries
+// every one. Returns false only when the rows could not be stored (nothing to
+// store, or no DB, is true); callers other than the expiry cron ignore it.
+async function keepBulkNotes(
+  env: AgeReviewEnv, caseId: string, pubkey: string, version: number, state: string,
+  notes: BulkNote[], failures: string[],
+): Promise<boolean> {
+  if ((notes.length === 0 && failures.length === 0) || !env.DB) return true;
+  try {
+    let keptFailures = failures;
+    let keptNotes = notes;
+    const total = failures.length + notes.length;
+    if (total > MAX_NOTES_PER_WRITE) {
+      const room = MAX_NOTES_PER_WRITE - 1;
+      keptFailures = failures.slice(0, room);
+      keptNotes = notes.slice(0, room - keptFailures.length);
+      const dropped = total - keptFailures.length - keptNotes.length;
+      keptFailures = [...keptFailures, notSavedWarning(pubkey, dropped)];
+      console.error(`[age-review] kept ${MAX_NOTES_PER_WRITE - 1} of ${total} bulk rows for the case screen`);
+    }
+    await ensureBulkNotesTable(env.DB);
+    await storeBulkNotes(env.DB, ageReviewNotesJobId(caseId, version, state), keptNotes, keptFailures);
+    return true;
+  } catch (error) {
+    console.error('[age-review] could not keep the bulk notes for the case screen:', error);
+    return false;
+  }
+}
+
+// The expiry cron's pending line (see autoDeletePendingWarning): kept for a
+// case as soon as the cron closes it, under the key its auto-delete's notes
+// use, so its screen says so if the delete does not run or its outcome cannot
+// be recorded (the invocation ending first is the usual cause). It does not
+// retry anything. Like keepBulkNotes, a failure is logged and nothing
+// else changes.
+async function keepAutoDeletePending(env: AgeReviewEnv, caseId: string, pubkey: string, version: number): Promise<void> {
+  if (!env.DB) return;
+  try {
+    await ensureBulkNotesTable(env.DB);
+    await storeBulkNotes(env.DB, ageReviewNotesJobId(caseId, version, 'denied_closed'), [], [autoDeletePendingWarning(pubkey)]);
+  } catch (error) {
+    console.error('[age-review] could not keep the pending auto-delete line for the case screen:', error);
+  }
+}
+
+// Clears that line once the case's auto-delete has run, whatever its outcome,
+// and the delete's own lines are kept: a failed delete's failure lines then
+// stand as the problem. If they could not be kept, the caller leaves the line
+// as the only record. Also cleared when auto-delete was turned off before the
+// delete. Exactly that row goes. A failure is logged and nothing else changes.
+async function clearAutoDeletePending(env: AgeReviewEnv, caseId: string, pubkey: string, version: number): Promise<void> {
+  if (!env.DB) return;
+  try {
+    await deleteBulkFailure(env.DB, ageReviewNotesJobId(caseId, version, 'denied_closed'), autoDeletePendingWarning(pubkey));
+  } catch (error) {
+    console.error('[age-review] could not clear the pending auto-delete line:', error);
+  }
+}
+
+// A failed bulk run, carrying its failure lines (for a run that threw, one
+// naming the error) and the notes it still produced.
+class BulkLegError extends Error {
+  constructor(message: string, readonly notes: BulkNote[], readonly failures: string[]) {
+    super(message);
+  }
+}
+
+// Returns the run's notes for a person (see BulkNote). Throws a BulkLegError on
+// a failure, with its failure lines and notes, so the leg reads failed and the
+// case screen still shows both. A run that throws before it can report has no
+// failure lines of its own, so it gets one naming the error.
 async function triggerBulkModerate(
   pubkey: string,
   action: AccountBulkAction,
   reason: string,
   env: AgeReviewEnv,
-): Promise<void> {
-  const result = await runBulkModeration(env, pubkey, action, reason);
+): Promise<{ notes: BulkNote[] }> {
+  let result: Awaited<ReturnType<typeof runBulkModeration>>;
+  try {
+    result = await runBulkModeration(env, pubkey, action, reason);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new BulkLegError(message, [], [bulkLegStoppedWarning(pubkey, message)]);
+  }
+  const notes = result.notes;
   if (!result.success) {
     const summary = result.failures.slice(0, 3).join('; ');
-    throw new Error(summary || 'Bulk moderate failed');
+    throw new BulkLegError(summary || 'Bulk moderate failed', notes, result.failures);
   }
+  return { notes };
 }
 
 // ---------------------------------------------------------------------------

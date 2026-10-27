@@ -2073,17 +2073,20 @@ describe('bulk-moderate kind-counts route', () => {
   });
 });
 
-// #299: the notes route. The SQL behind it is pinned on real SQLite in
-// test/bulk-job-notes.d1.test.ts; this pins that the router hands it the
+// #299: the notes routes. The SQL behind them is pinned on real SQLite in
+// test/bulk-job-notes.d1.test.ts; this pins that the router hands each one the
 // decoded path segment and the query parameters.
 describe('bulk-moderate notes routes', () => {
+  const CASE_ID = '0f8fad5b-d9cb-469f-a165-70867728950e';
   const binds: unknown[][] = [];
   const db = {
     prepare: (sql: string) => {
       const stmt = {
         bind: (...args: unknown[]) => { binds.push([sql, ...args]); return stmt; },
         run: async () => ({ meta: { changes: 0 } }),
-        first: async () => null,
+        first: async () => (/SELECT job_id, created_at FROM bulk_job_notes/.test(sql)
+          ? { job_id: `age-review:${CASE_ID}:3:cleared`, created_at: '2026-10-14T09:00:00.000Z' }
+          : null),
         all: async () => ({ results: [{ id: 5, sha256: 'e'.repeat(64), kind: 'still-hidden', owner: null }] }),
       };
       return stmt;
@@ -2101,8 +2104,15 @@ describe('bulk-moderate notes routes', () => {
 
   beforeEach(() => { binds.length = 0; });
 
-  it('requires admin auth', async () => {
-    expect((await get('/api/bulk-moderate/notes/job-1', {})).status).toBe(401);
+  it.each([`/api/bulk-moderate/case-notes/${CASE_ID}`, '/api/bulk-moderate/notes/job-1'])('requires admin auth for %s', async (path) => {
+    expect((await get(path, {})).status).toBe(401);
+  });
+
+  it("answers an age-review case's latest notes key, scanning only that case's range", async () => {
+    const res = await get(`/api/bulk-moderate/case-notes/${CASE_ID}`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ jobId: `age-review:${CASE_ID}:3:cleared`, state: 'cleared', keptAt: '2026-10-14T09:00:00.000Z' });
+    expect(binds).toContainEqual([expect.stringContaining('FROM bulk_job_notes WHERE job_id >= ?'), `age-review:${CASE_ID}:`, `age-review:${CASE_ID};`]);
   });
 
   it('pages a job\'s notes from the cursor and limit it is given', async () => {

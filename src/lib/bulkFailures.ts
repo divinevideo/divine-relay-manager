@@ -1,6 +1,6 @@
 // ABOUTME: One bulk-job failure line in plain words, for every screen that lists
 // ABOUTME: them (Bulk Delete by Kind). IDs stay whole.
-import { parseFailure } from '../../shared/bulk-moderation';
+import { parseFailure, parseNotSavedMarker } from '../../shared/bulk-moderation';
 
 // The listing error the worker wraps every uploader-list failure in
 // (listAccountVideos in worker/src/media-server.ts); the lines below already
@@ -30,6 +30,8 @@ const LISTING_LINES: Array<[RegExp, (m: RegExpExecArray) => string]> = [
 // A fragment, not a sentence: a caller embeds it ("Reason: ...") or capitalises
 // it for a list.
 export function describeBulkFailure(failure: string): string {
+  const notSaved = parseNotSavedMarker(failure);
+  if (notSaved !== null) return `${notSaved} more files or problems from this step were not saved`;
   const parsed = parseFailure(failure);
   switch (parsed.type) {
     case 'overflow':

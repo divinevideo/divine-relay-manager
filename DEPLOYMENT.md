@@ -276,8 +276,12 @@ negotiation, so order matters and the gap should be minimized:
   `npx wrangler d1 execute divine-moderation-decisions-prod --remote --command "SELECT COUNT(*) FROM bulk_job_notes;"`.
 - **Results to look at (#299).** Files a bulk action left for a person (videos a
   clear left hidden, other accounts' files) are notes, not failures. They are kept
-  in the `bulk_job_notes` table, created on demand in the same D1 as `bulk_jobs`,
-  under the queued job's id.
+  in the `bulk_job_notes` table, created on demand in the same D1 as `bulk_jobs`:
+  a queued job's under its job id, and an age-review transition's under
+  `age-review:<case id>:<case version>:<state>` (the expiry cron's auto-delete
+  too), with that transition's failure lines beside them. Keeping age review's
+  results never fails or alters the transition. A case's kept results are
+  deleted with the case by retention's case-delete stage, under the same hold.
 - **Known limits (#299), not fixed by it:**
   - Some files the media server holds are outside the videos-only filter and are
     not changed. Tracked privately.
@@ -302,6 +306,13 @@ negotiation, so order matters and the gap should be minimized:
     This worker restarts the file walk, so it counts the first page's events again
     and counts the files the previous worker already changed as left as they were.
     The files themselves all end changed.
+  - The expiry cron closes and bans every expired case before any auto-delete. An
+    invocation that ends after a case is closed and before its auto-delete
+    finishes, for example at a CPU or time limit, leaves that case's files in
+    place. Its case screen keeps an 'Auto-delete was not confirmed' line,
+    unless that line itself could not be stored, or that tick could not read
+    the age-review config, and nothing retries the delete. #319 tracks
+    running the cron's delete as a queued job and recovering a lost one.
 
 ### Rollback
 

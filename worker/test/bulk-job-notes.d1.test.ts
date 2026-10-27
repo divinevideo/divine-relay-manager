@@ -4,10 +4,10 @@
 // order stored, and counted on the job's status once it ends. The unit tests'
 // in-memory D1 accepts any SQL, so only real SQL can catch a broken statement.
 import { Miniflare } from 'miniflare';
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { ensureBulkJobsTable, handleBulkJobStatus } from '../src/bulk-moderate';
-import { handleBulkJobNotes, storeBulkNotes } from '../src/bulk-notes';
-import type { BulkJob, BulkNote, BulkNotesPage } from '../../shared/bulk-moderation';
+import { handleBulkJobNotes, handleCaseBulkNotesJob, storeBulkNotes } from '../src/bulk-notes';
+import { ageReviewNotesJobId, type BulkJob, type BulkNote, type BulkNotesPage } from '../../shared/bulk-moderation';
 
 let mf: Miniflare;
 let DB: D1Database;
@@ -116,3 +116,117 @@ describe('bulk_job_notes', () => {
     expect(await readAll('job-c', 50)).toEqual(notesFor(101));
   });
 });
+
+// Age review keeps each transition's notes under age-review:<case>:<version>:<state>
+// (ageReviewNotesJobId), and the case screen asks for its case's latest.
+describe("an age-review case's notes", () => {
+  async function latestFor(caseId: string) {
+    return handleCaseBulkNotesJob(caseId, { DB } as never, {});
+  }
+
+  it("finds the case's most recent transition with notes, and reads its notes back in full", async () => {
+    await ensureBulkJobsTable(DB);
+    await storeBulkNotes(DB, ageReviewNotesJobId('case-1', 2, 'restricted_pending_user_response'), notesFor(3));
+    await storeBulkNotes(DB, ageReviewNotesJobId('case-10', 5, 'cleared'), notesFor(2, 100));
+    await storeBulkNotes(DB, ageReviewNotesJobId('case-1', 3, 'cleared'), notesFor(4, 200));
+    await storeBulkNotes(DB, 'job-unrelated', notesFor(1, 300));
+
+    const one = await latestFor('case-1');
+    expect(one.status).toBe(200);
+    const { jobId, state, keptAt } = await one.json() as { jobId: string | null; state?: string; keptAt?: string };
+    expect(jobId).toBe('age-review:case-1:3:cleared');
+    // The step and its time, so the case screen need not parse the key.
+    expect(state).toBe('cleared');
+    expect(Number.isNaN(Date.parse(keptAt!))).toBe(false);
+    expect(await readAll(jobId!, 3)).toEqual(notesFor(4, 200));
+
+    expect(await (await latestFor('case-10')).json()).toMatchObject({ jobId: 'age-review:case-10:5:cleared' });
+    expect(await (await latestFor('case-2')).json()).toEqual({ jobId: null });
+  });
+
+  it('answers none for a case on a database that has no notes table yet', async () => {
+    const fresh = new Miniflare({
+      modules: true,
+      script: 'export default { fetch() { return new Response("ok"); } };',
+      compatibilityDate: '2024-12-01',
+      compatibilityFlags: ['nodejs_compat'],
+      d1Databases: ['DB'],
+    });
+    try {
+      const empty = (await fresh.getD1Database('DB')) as unknown as D1Database;
+      vi.resetModules();
+      const mod = await import('../src/bulk-notes');
+      const res = await mod.handleCaseBulkNotesJob('case-1', { DB: empty } as never, {});
+      expect(await res.json()).toEqual({ jobId: null });
+    } finally {
+      await fresh.dispose();
+    }
+  });
+
+  it('refuses a case id that could reach into another case', async () => {
+    expect((await latestFor('case-1:3')).status).toBe(400);
+  });
+
+  it('says when the latest transition kept its notes', async () => {
+    await storeBulkNotes(DB, ageReviewNotesJobId('case-when', 2, 'cleared'), notesFor(1));
+    const { jobId, keptAt } = await (await latestFor('case-when')).json() as { jobId: string; keptAt: string };
+    expect(jobId).toBe('age-review:case-when:2:cleared');
+    expect(Number.isNaN(Date.parse(keptAt))).toBe(false);
+  });
+});
+
+// Age review keeps a transition's failures beside its notes (#299), so the
+// case screen can show both after a reload.
+describe('failures kept beside notes', () => {
+  async function readPages(jobId: string, limit: number) {
+    const notes: BulkNote[] = [];
+    const failures: string[] = [];
+    let after: string | null = null;
+    for (;;) {
+      const page = await (await handleBulkJobNotes(jobId, after, String(limit), { DB } as never, {})).json() as BulkNotesPage;
+      notes.push(...page.notes);
+      failures.push(...(page.failures ?? []));
+      if (page.next === null) return { notes, failures };
+      after = page.next;
+    }
+  }
+
+  it('stores failures once each, reads them back apart from the notes, in the order stored', async () => {
+    const failures = ['enumeration:x:list failed', 'media:' + hash(1) + ':write failed', 'enumeration:x:list failed'];
+    await storeBulkNotes(DB, 'age-review:case-f:4:cleared', notesFor(3), failures);
+    const read = await readPages('age-review:case-f:4:cleared', 2);
+    expect(read.failures).toEqual(['enumeration:x:list failed', 'media:' + hash(1) + ':write failed']);
+    expect(read.notes).toEqual(notesFor(3));
+  });
+
+  it('binds at most 100 parameters per statement with failures too', async () => {
+    const binds: number[] = [];
+    const recording = new Proxy(DB, {
+      get(target, prop, receiver) {
+        if (prop === 'prepare') {
+          return (sql: string) => {
+            const stmt = target.prepare(sql);
+            return new Proxy(stmt, {
+              get(s, p, r) {
+                if (p === 'bind') return (...args: unknown[]) => { binds.push(args.length); return s.bind(...args); };
+                const value = Reflect.get(s, p, r);
+                return typeof value === 'function' ? value.bind(s) : value;
+              },
+            });
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const failures = Array.from({ length: 40 }, (_, i) => `media:${hash(i)}:failed`);
+    await storeBulkNotes(recording as D1Database, 'job-mixed', notesFor(60), failures);
+    expect(Math.max(...binds)).toBeLessThanOrEqual(100);
+    const read = await readPages('job-mixed', 1000);
+    expect(read.failures).toHaveLength(40);
+    expect(read.notes).toHaveLength(60);
+  });
+});
+
+// A guarded restore marks the file's still-hidden notes restored (#299), so a
+// reload shows it.

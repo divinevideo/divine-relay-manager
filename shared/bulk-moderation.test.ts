@@ -1,11 +1,17 @@
 import { describe, it, expect } from 'vitest';
 import {
   ABANDONED_REASON,
+  ageReviewNotesJobId,
+  ageReviewNotesStep,
+  ageReviewNotesJobRange,
+  autoDeletePendingWarning,
+  bulkLegStoppedWarning,
   countIssues,
   enumerationWarning,
   eventFailure,
   formatOverflowMarker,
   isListingGapWarning,
+  notSavedWarning,
   jobFailure,
   mediaFailure,
   parseFailure,
@@ -80,5 +86,69 @@ describe('countIssues', () => {
     expect(countIssues([])).toBe(0);
     expect(countIssues(['event:e1:refused', 'media:m1:nope'])).toBe(2);
     expect(countIssues(['event:e1:refused', formatOverflowMarker(10)])).toBe(11);
+  });
+
+  // Age review keeps at most one write of rows; the marker for the rest
+  // counts as the rows it stands for, like "+N more".
+  it('counts a "not saved" marker as the rows it stands for', () => {
+    const marker = notSavedWarning('a'.repeat(64), 4321);
+    expect(marker).toBe(`enumeration:${'a'.repeat(64)}:4321 more file(s) or problem(s) from this step were not saved`);
+    expect(countIssues(['event:e1:refused', marker])).toBe(4322);
+  });
+
+  it('counts an ordinary listing warning that merely mentions "more" as one', () => {
+    expect(countIssues([enumerationWarning('a'.repeat(64), '5 more owned video files still listed unchanged after the walk')])).toBe(1);
+  });
+});
+
+describe('bulkLegStoppedWarning', () => {
+  it('records a bulk run that threw as a listing line naming the error', () => {
+    expect(bulkLegStoppedWarning('a'.repeat(64), 'Funnelcake API error: 503'))
+      .toBe(`enumeration:${'a'.repeat(64)}:the content step stopped before it finished: Funnelcake API error: 503`);
+  });
+});
+
+describe('age review notes keys', () => {
+  it('keys a transition by its case, the case version it wrote, and its state', () => {
+    expect(ageReviewNotesJobId('case-1', 7, 'cleared')).toBe('age-review:case-1:7:cleared');
+  });
+
+  it('reads the step back out of a key, and nothing out of another kind of key', () => {
+    expect(ageReviewNotesStep(ageReviewNotesJobId('case-1', 7, 'restricted_pending_user_response'))).toBe('restricted_pending_user_response');
+    expect(ageReviewNotesStep('job-1')).toBeNull();
+  });
+
+  // A state added later in another shape still reads back, rather than
+  // quietly hiding the step's kept results.
+  it('reads back a state of any shape', () => {
+    expect(ageReviewNotesStep('age-review:case-1:7:Restricted_v2')).toBe('Restricted_v2');
+  });
+
+  // The case's notes are read back as every key in [prefix, end): a key must
+  // fall inside its own case's range and outside every other case's.
+  it("gives each case a range that holds its own keys and no other case's", () => {
+    const { start, end } = ageReviewNotesJobRange('case-1');
+    const inRange = (key: string) => key >= start && key < end;
+    expect(inRange(ageReviewNotesJobId('case-1', 7, 'cleared'))).toBe(true);
+    expect(inRange(ageReviewNotesJobId('case-1', 12, 'denied_closed'))).toBe(true);
+    expect(inRange(ageReviewNotesJobId('case-10', 7, 'cleared'))).toBe(false);
+    expect(inRange(ageReviewNotesJobId('case', 7, 'cleared'))).toBe(false);
+    expect(inRange('job-1')).toBe(false);
+  });
+
+  it('refuses a case id that could reach into another case\'s range', () => {
+    expect(() => ageReviewNotesJobRange('case-1:7')).toThrow();
+    expect(() => ageReviewNotesJobId('', 7, 'cleared')).toThrow();
+  });
+});
+
+// The case screen shows this line in its own words (an enumeration line whose
+// text no listing pattern rewrites), so its wording is pinned here.
+describe('autoDeletePendingWarning', () => {
+  it("says what the moderator should do, under the account's pubkey", () => {
+    const pubkey = 'a'.repeat(64);
+    expect(autoDeletePendingWarning(pubkey)).toBe(
+      `enumeration:${pubkey}:Auto-delete was not confirmed for this account: the expiry run may have stopped before deleting its content. Unless someone has done it since, open the account in the Users tab and run Delete All Content.`,
+    );
   });
 });

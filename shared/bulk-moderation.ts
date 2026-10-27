@@ -50,10 +50,51 @@ export type BulkNote =
 // worker/src/bulk-notes.ts for the D1 limits behind it).
 export const MAX_NOTES_PER_WRITE = 5_000;
 
-// One page of a queued job's notes, oldest first. `next` is the cursor for the
-// following page, or null after the last one.
+// Age review keeps each transition's notes, and its failure lines, in the same
+// table as queued jobs' notes (bulk_job_notes), under
+// age-review:<case id>:<version>:<state>, where version
+// is the case version the transition's compare-and-swap wrote. That is unique
+// per transition and the same on a repeat, so a repeated write stores nothing
+// new. No case storage is added: the case screen asks for its case's latest.
+//
+// A case id is a UUID. Refusing anything but letters, digits and "-" keeps a
+// ":" out, so one case's keys can never fall in another case's range.
+const AGE_REVIEW_CASE_ID = /^[A-Za-z0-9-]+$/;
+
+function ageReviewNotesPrefix(caseId: string): string {
+  if (!AGE_REVIEW_CASE_ID.test(caseId)) throw new Error(`not an age review case id: ${JSON.stringify(caseId)}`);
+  return `age-review:${caseId}:`;
+}
+
+export function ageReviewNotesJobId(caseId: string, version: number, state: string): string {
+  return `${ageReviewNotesPrefix(caseId)}${version}:${state}`;
+}
+
+// The step (case state) a key was kept for, or null for a key that is not an
+// age-review transition's. Whatever follows the version is the state, as
+// written: a state added later in another shape still reads back, rather than
+// quietly hiding its step's kept results.
+export function ageReviewNotesStep(jobId: string): string | null {
+  const match = /^age-review:[A-Za-z0-9-]+:\d+:(.+)$/s.exec(jobId);
+  return match ? match[1] : null;
+}
+
+// Every key of one case's notes is in [start, end): its prefix, up to the same
+// prefix with its last ":" raised to the next character, ";".
+export function ageReviewNotesJobRange(caseId: string): { start: string; end: string } {
+  const start = ageReviewNotesPrefix(caseId);
+  return { start, end: `${start.slice(0, -1)};` };
+}
+
+// One page of a queued job's notes, or of an age-review transition's notes and
+// failure lines, oldest first. `next` is the cursor for the following page, or
+// null after the last one.
+// `failures` are the failure lines age review kept beside a transition's notes
+// (a queued job's stay on its bulk_jobs row); absent from a worker that keeps
+// none.
 export interface BulkNotesPage {
   notes: BulkNote[];
+  failures?: string[];
   next: string | null;
 }
 
@@ -212,10 +253,29 @@ export function parseOverflowMarker(failure: string): number | null {
   return match ? Number(match[1]) : null;
 }
 
+// Age review keeps at most MAX_NOTES_PER_WRITE rows of a step's results; this
+// marker, the last row kept, says how many more there were (notes and
+// failures alike). An enumeration line, so a screen that does not know it
+// still shows it.
+const NOT_SAVED = / more file\(s\) or problem\(s\) from this step were not saved$/;
+
+export function notSavedWarning(pubkey: string, count: number): string {
+  return enumerationWarning(pubkey, `${count} more file(s) or problem(s) from this step were not saved`);
+}
+
+// The count a "not saved" marker stands for, or null for any other string.
+export function parseNotSavedMarker(failure: string): number | null {
+  const parsed = parseFailure(failure);
+  if (parsed.type !== 'enumeration' || !NOT_SAVED.test(parsed.warning)) return null;
+  const count = /^(\d+) /.exec(parsed.warning);
+  return count ? Number(count[1]) : null;
+}
+
 // How many problems a job's failures stand for: each stored failure is one,
-// except the "+N more" overflow marker, which stands for N.
+// except the "+N more" overflow marker and age review's "not saved" marker,
+// which stand for N each.
 export function countIssues(failures: string[]): number {
-  return failures.reduce((n, failure) => n + (parseOverflowMarker(failure) ?? 1), 0);
+  return failures.reduce((n, failure) => n + (parseOverflowMarker(failure) ?? parseNotSavedMarker(failure) ?? 1), 0);
 }
 
 export function eventFailure(eventId: string, error: string): string {
@@ -239,6 +299,23 @@ export function notesOverflowWarning(pubkey: string, count: number): string {
 // A queued job's chunk whose notes D1 would not store.
 export function notesNotStoredWarning(pubkey: string, count: number, error: string): string {
   return enumerationWarning(pubkey, `could not store ${count} note(s) for a person: ${error}`);
+}
+
+// A bulk run that threw before it could report (a list it depends on could
+// not be read, a relay timeout), so it has no failure lines of its own.
+export function bulkLegStoppedWarning(pubkey: string, error: string): string {
+  return enumerationWarning(pubkey, `the content step stopped before it finished: ${error}`);
+}
+
+// The expiry cron keeps this line for a case it closed, before its bans, and
+// clears it once the case's auto-delete has run and its own lines are kept.
+// One still there means the delete did not run, or its outcome could not be
+// recorded; the invocation ending first is the usual cause.
+export function autoDeletePendingWarning(pubkey: string): string {
+  return enumerationWarning(
+    pubkey,
+    'Auto-delete was not confirmed for this account: the expiry run may have stopped before deleting its content. Unless someone has done it since, open the account in the Users tab and run Delete All Content.',
+  );
 }
 
 export function jobFailure(reason: string): string {

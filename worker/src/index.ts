@@ -41,7 +41,7 @@ import {
 } from './age-review';
 import { handleAccountStatus } from './account-status';
 import { handleBulkModerateEnqueue, handleBulkJobStatus, handleBulkKindCounts, processBulkJob, LOOSENS_AGE_REVIEW_HOLD } from './bulk-moderate';
-import { handleBulkJobNotes } from './bulk-notes';
+import { handleBulkJobNotes, handleCaseBulkNotesJob } from './bulk-notes';
 import type { BulkAction, BulkJobMessage } from '../../shared/bulk-moderation';
 import { ensureZendeskTable, addZendeskInternalNote, syncZendeskAfterAction, getLinkedTickets, closeTicketById } from './zendesk-sync';
 import { buildReportNote, parseKind0Profile, type ReportedProfile } from './report-note';
@@ -796,6 +796,12 @@ export default {
         return handleBulkJobNotes(
           decodeURIComponent(bulkNotesMatch[1]), url.searchParams.get('after'), url.searchParams.get('limit'), env, corsHeaders,
         );
+      }
+
+      // The notes key of an age-review case's latest transition that kept any.
+      const caseNotesMatch = path.match(/^\/api\/bulk-moderate\/case-notes\/([^/]+)$/);
+      if (caseNotesMatch && request.method === 'GET') {
+        return handleCaseBulkNotesJob(decodeURIComponent(caseNotesMatch[1]), env, corsHeaders);
       }
 
       // Per-kind event counts for an account, from a paged listing (the by-kind

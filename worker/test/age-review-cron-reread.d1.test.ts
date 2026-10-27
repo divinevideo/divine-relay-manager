@@ -9,6 +9,7 @@ import { ensureSchema } from '../src/db';
 import { checkAgeReviewDeadlines } from '../src/age-review';
 import { ensureBulkNotesTable } from '../src/bulk-notes';
 import { runBulkModeration } from '../src/bulk-moderate';
+import { autoDeletePendingWarning } from '../../shared/bulk-moderation';
 
 vi.mock('../src/bulk-moderate', () => ({ runBulkModeration: vi.fn() }));
 
@@ -94,6 +95,20 @@ describe("the expiry cron's close on real D1", () => {
     expect(console.log).toHaveBeenCalledWith('[age-review] Close threw but had committed; continuing as closed');
     expect(runBulkModeration).toHaveBeenCalledOnce();
     expect(runBulkModeration).toHaveBeenCalledWith(expect.anything(), PUBKEY, 'delete-all', expect.any(String));
+  });
+
+  it('keeps the pending line for a close that committed and then threw, and clears it after the delete', async () => {
+    let finish!: () => void;
+    vi.mocked(runBulkModeration).mockImplementationOnce(() => new Promise((resolve) => { finish = () => resolve(DONE as never); }));
+    const run = checkAgeReviewDeadlines({ DB: commitsThenThrows() } as never);
+    await vi.waitFor(() => expect(runBulkModeration).toHaveBeenCalledOnce());
+
+    const kept = await DB.prepare('SELECT job_id, kind, detail FROM bulk_job_notes').all();
+    expect(kept.results).toEqual([{ job_id: `age-review:${CASE_ID}:4:denied_closed`, kind: 'failure', detail: autoDeletePendingWarning(PUBKEY) }]);
+
+    finish();
+    await run;
+    expect((await DB.prepare('SELECT COUNT(*) AS n FROM bulk_job_notes').first<{ n: number }>())?.n).toBe(0);
   });
 
   // The close's CAS: a moderator who acts between the cron's read and its

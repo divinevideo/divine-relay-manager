@@ -3,6 +3,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { ensureSchema } from '../src/db';
 import { clearSubject, createSubjectWithBinding, fingerprintProvisioningRequest, pendingSubjectClears } from '../src/protected-minors';
 import { digestProvisioningFingerprint, runRetentionDisposal } from '../src/retention';
+import { ensureBulkNotesTable, storeBulkNotes } from '../src/bulk-notes';
+import { ageReviewNotesJobId } from '../../shared/bulk-moderation';
 import { echoedFragments, MALFORMED_WEBHOOK, rejectLikeWorkersRuntime } from '../src/test-helpers/secret-echo';
 import { RETENTION_DAYS } from '../../shared/retention';
 
@@ -59,7 +61,14 @@ beforeEach(async () => {
   await DB.prepare('DELETE FROM protected_minor_subjects').run();
   await DB.prepare('DELETE FROM age_review_parent_consent_submissions').run();
   await DB.prepare('DELETE FROM age_review_cases').run();
+  await ensureBulkNotesTable(DB);
+  await DB.prepare('DELETE FROM bulk_job_notes').run();
 });
+
+async function noteJobs(): Promise<string[]> {
+  const rows = await DB.prepare('SELECT DISTINCT job_id FROM bulk_job_notes ORDER BY job_id').all<{ job_id: string }>();
+  return rows.results.map((row) => row.job_id);
+}
 
 describe('protected-record retention on real D1', () => {
   it('enforces false-positive classification at the schema boundary', async () => {
@@ -350,6 +359,146 @@ describe('protected-record retention on real D1', () => {
     expect(await DB.prepare('SELECT 1 FROM protected_minor_projection_jobs WHERE subject_id = ?').bind(subjectId).first()).not.toBeNull();
     expect(await DB.prepare('SELECT 1 FROM protected_minor_account_bindings WHERE subject_id = ?').bind(subjectId).first()).not.toBeNull();
     expect(await DB.prepare("SELECT 1 FROM age_review_cases WHERE id = 'case-independent'").first()).toBeNull();
+  });
+
+  // A case's kept bulk results (#299) name the case, its step, file hashes,
+  // other accounts' pubkeys and the subject's pubkey: they go with the case,
+  // under the same hold, and nothing else's do.
+  it("deletes a case's kept bulk results with the case, and keeps a held case's, a younger case's and a queued job's", async () => {
+    await DB.prepare(`INSERT INTO age_review_cases (id, pubkey, state, closed_at)
+      VALUES ('case-gone', ?, 'denied_closed', datetime('now', '-366 days')),
+             ('case-held', ?, 'denied_closed', datetime('now', '-366 days')),
+             ('case-young', ?, 'cleared', datetime('now', '-30 days')),
+             ('case-gone-2', ?, 'cleared', datetime('now', '-400 days'))`)
+      .bind(PUBKEY_A, PUBKEY_B, PUBKEY_A, PUBKEY_B).run();
+    await DB.prepare(`INSERT INTO retention_legal_holds
+      (id, record_type, record_key, disposal_stage, authorized_role, starts_at, review_at)
+      VALUES ('hold-notes', 'age_review_case', 'case-held', 'deletion', 'privacy/legal', '2020-01-01T00:00:00Z', '2030-01-01T00:00:00Z')`).run();
+    const note = [{ kind: 'not-owned' as const, sha256: 'c'.repeat(64), owner: PUBKEY_B }];
+    for (const [caseId, version, state] of [
+      ['case-gone', 3, 'restricted_pending_user_response'], ['case-gone', 4, 'denied_closed'],
+      ['case-held', 2, 'denied_closed'], ['case-young', 2, 'cleared'], ['case-gone-2', 2, 'cleared'],
+    ] as const) {
+      await storeBulkNotes(DB, ageReviewNotesJobId(caseId, version, state), note, [`enumeration:${PUBKEY_A}:x`]);
+    }
+    // A case id that is a prefix of another must not take the other's rows.
+    await DB.prepare(`INSERT INTO age_review_cases (id, pubkey, state, closed_at) VALUES ('case-gone-20', ?, 'cleared', datetime('now', '-30 days'))`).bind(PUBKEY_A).run();
+    await storeBulkNotes(DB, ageReviewNotesJobId('case-gone-20', 1, 'cleared'), note);
+    await storeBulkNotes(DB, 'queued-job-1', note);
+
+    const result = await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY });
+
+    expect(result.casesDeleted).toBe(2);
+    expect(await noteJobs()).toEqual([
+      'age-review:case-gone-20:1:cleared',
+      'age-review:case-held:2:denied_closed',
+      'age-review:case-young:2:cleared',
+      'queued-job-1',
+    ]);
+  });
+
+  it("leaves a case and its kept results together when deleting the results fails", async () => {
+    await DB.prepare(`INSERT INTO age_review_cases (id, pubkey, state, closed_at)
+      VALUES ('case-gone', ?, 'denied_closed', datetime('now', '-366 days'))`).bind(PUBKEY_A).run();
+    await storeBulkNotes(DB, ageReviewNotesJobId('case-gone', 4, 'denied_closed'), [{ kind: 'still-hidden', sha256: 'c'.repeat(64) }]);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await runRetentionDisposal({ DB: faultyDb(DB, 'DELETE FROM bulk_job_notes'), PROTECTED_MINOR_TOMBSTONE_KEY: KEY });
+
+    expect(await DB.prepare("SELECT 1 FROM age_review_cases WHERE id = 'case-gone'").first()).not.toBeNull();
+    expect(await noteJobs()).toEqual(['age-review:case-gone:4:denied_closed']);
+  });
+
+  // One batch: a case delete that fails leaves its results too, so neither
+  // outlives the other.
+  it('leaves a case\'s kept results when deleting the case fails', async () => {
+    await DB.prepare(`INSERT INTO age_review_cases (id, pubkey, state, closed_at)
+      VALUES ('case-gone', ?, 'denied_closed', datetime('now', '-366 days'))`).bind(PUBKEY_A).run();
+    await storeBulkNotes(DB, ageReviewNotesJobId('case-gone', 4, 'denied_closed'), [{ kind: 'still-hidden', sha256: 'c'.repeat(64) }]);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await runRetentionDisposal({ DB: faultyDb(DB, 'DELETE FROM age_review_cases'), PROTECTED_MINOR_TOMBSTONE_KEY: KEY });
+
+    expect(await DB.prepare("SELECT 1 FROM age_review_cases WHERE id = 'case-gone'").first()).not.toBeNull();
+    expect(await noteJobs()).toEqual(['age-review:case-gone:4:denied_closed']);
+  });
+
+  // A hold placed after the case was found due, before the delete runs, keeps
+  // the case and its results both.
+  it('keeps a case and its kept results when a hold lands after the case was found due', async () => {
+    await DB.prepare(`INSERT INTO age_review_cases (id, pubkey, state, closed_at)
+      VALUES ('case-raced', ?, 'denied_closed', datetime('now', '-366 days'))`).bind(PUBKEY_A).run();
+    await storeBulkNotes(DB, ageReviewNotesJobId('case-raced', 4, 'denied_closed'), [{ kind: 'still-hidden', sha256: 'c'.repeat(64) }]);
+    const racing = new Proxy(DB, {
+      get(target, prop, receiver) {
+        if (prop === 'prepare') {
+          return (sql: string) => {
+            const statement = target.prepare(sql);
+            if (!sql.startsWith('SELECT c.id FROM age_review_cases c')) return statement;
+            return new Proxy(statement, {
+              get(st, key, rcv) {
+                if (key !== 'all') return Reflect.get(st, key, rcv);
+                return async () => {
+                  const found = await st.all();
+                  await target.prepare(`INSERT INTO retention_legal_holds
+                    (id, record_type, record_key, disposal_stage, authorized_role, starts_at, review_at)
+                    VALUES ('hold-raced', 'age_review_case', 'case-raced', 'deletion', 'privacy/legal', '2020-01-01T00:00:00Z', '2030-01-01T00:00:00Z')`).run();
+                  return found;
+                };
+              },
+            });
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    const result = await runRetentionDisposal({ DB: racing as D1Database, PROTECTED_MINOR_TOMBSTONE_KEY: KEY });
+
+    expect(result.casesDeleted).toBe(0);
+    expect(await DB.prepare("SELECT 1 FROM age_review_cases WHERE id = 'case-raced'").first()).not.toBeNull();
+    expect(await noteJobs()).toEqual(['age-review:case-raced:4:denied_closed']);
+  });
+
+  // An id the notes key cannot hold never had results kept under it: the case
+  // is still deleted.
+  it('still deletes a due case whose id could hold no kept results', async () => {
+    await DB.prepare(`INSERT INTO age_review_cases (id, pubkey, state, closed_at)
+      VALUES ('legacy_case', ?, 'cleared', datetime('now', '-366 days'))`).bind(PUBKEY_A).run();
+    const result = await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY });
+    expect(result.casesDeleted).toBe(1);
+    expect(await DB.prepare("SELECT 1 FROM age_review_cases WHERE id = 'legacy_case'").first()).toBeNull();
+  });
+
+  // The stage deletes from bulk_job_notes in the same batch as the cases, so on
+  // a database no bulk path has touched yet (a fresh D1, or a fresh isolate
+  // after a deploy) it must create the table first, or no case is deleted.
+  it('still deletes a due case on a database that has no notes table yet', async () => {
+    const fresh = new Miniflare({
+      modules: true,
+      script: 'export default { fetch() { return new Response("ok"); } };',
+      compatibilityDate: '2024-12-01',
+      compatibilityFlags: ['nodejs_compat'],
+      d1Databases: ['DB'],
+    });
+    try {
+      const empty = (await fresh.getD1Database('DB')) as unknown as D1Database;
+      await ensureSchema(empty);
+      expect(await empty.prepare("SELECT name FROM sqlite_master WHERE name = 'bulk_job_notes'").first()).toBeNull();
+      await empty.prepare(`INSERT INTO age_review_cases (id, pubkey, state, closed_at)
+        VALUES ('case-gone', ?, 'cleared', datetime('now', '-366 days'))`).bind(PUBKEY_A).run();
+      // A fresh module, so the table-ready flag is cold as in a new isolate.
+      vi.resetModules();
+      const { runRetentionDisposal: freshDisposal } = await import('../src/retention');
+
+      const result = await freshDisposal({ DB: empty, PROTECTED_MINOR_TOMBSTONE_KEY: KEY });
+
+      expect(result.casesDeleted).toBe(1);
+      expect(await empty.prepare("SELECT 1 FROM age_review_cases WHERE id = 'case-gone'").first()).toBeNull();
+    } finally {
+      await fresh.dispose();
+    }
   });
 
   it('deletes a consent clip 120 days after closure and respects a legal hold', async () => {

@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { describeBulkFailure } from './bulkFailures';
 import {
-  ABANDONED_REASON, enumerationWarning, eventFailure, formatOverflowMarker, jobFailure, mediaFailure,
-  notesNotStoredWarning, notesOverflowWarning, unpaginatedGapWarning,
+  ABANDONED_REASON, bulkLegStoppedWarning, enumerationWarning, eventFailure, formatOverflowMarker, jobFailure,
+  mediaFailure, notesNotStoredWarning, notesOverflowWarning, notSavedWarning, unpaginatedGapWarning,
 } from '../../shared/bulk-moderation';
 
 const ACCOUNT = 'a'.repeat(64);
@@ -16,6 +16,7 @@ describe('describeBulkFailure', () => {
     ['a file', mediaFailure(FILE, 'Moderation service returned 500'), `file ${FILE} could not be changed: Moderation service returned 500`],
     ['one more problem past the cap', formatOverflowMarker(1), '1 more problem was not stored'],
     ['more problems past the cap', formatOverflowMarker(12), '12 more problems were not stored'],
+    ['rows age review did not save', notSavedWarning(ACCOUNT, 4321), '4321 more files or problems from this step were not saved'],
     ['a queued job\'s fallback to the relay list',
       enumerationWarning(ACCOUNT, "could not list this account's files: media server returned 500; files were chosen from the relay's list only, so the count of files left as they were may be off"),
       "the media server's list of this account's files could not be read (media server returned 500), so its files were chosen from the relay's list only, and the count of files left as they were may be off"],
@@ -46,6 +47,7 @@ describe('describeBulkFailure', () => {
     ['a relay list read in part',
       unpaginatedGapWarning(ACCOUNT, 'some events may be unprocessed'),
       "the relay's list of events could not be read in full; some events may be unprocessed"],
+    ['a bulk run that threw', bulkLegStoppedWarning(ACCOUNT, 'HTTP 503'), 'the content step stopped before it finished: HTTP 503'],
     ['any other listing line, as written',
       enumerationWarning(ACCOUNT, 'still finding events after 20 sweeps; older versions may remain'),
       'still finding events after 20 sweeps; older versions may remain'],
