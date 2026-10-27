@@ -20,7 +20,7 @@
 const loadMoreFailures = new WeakMap<object, number>();
 
 const isObjectLike = (value: unknown): value is object =>
-  (typeof value === 'object' && value !== null) || typeof value === 'function';
+  typeof value === 'object' && value !== null;
 
 export function rememberLoadMoreFailure(error: unknown, errorUpdatedAt: number): void {
   if (isObjectLike(error)) loadMoreFailures.set(error, errorUpdatedAt);

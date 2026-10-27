@@ -1186,8 +1186,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     // failure (query-core 5.75 infiniteQueryObserver). It stays true for the
     // error a failed Load more left once a later plain re-read starts, because
     // query-core keeps the error and drops the fetch direction. The re-read has
-    // not failed, so that same error is not a refresh failure: a re-read that
-    // fails itself leaves a new error and is.
+    // not failed, so that same error is not a refresh failure. A re-read that
+    // fails itself is told apart by its newer errorUpdatedAt, even when the
+    // error object is shared (see loadMoreFailure.ts).
     refreshFailed: history.isRefetchError && !isLoadMoreLeftover,
     lastPage: lastHistoryPage,
     loadingMore: history.isFetchingNextPage,
