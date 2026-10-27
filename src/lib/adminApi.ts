@@ -518,9 +518,12 @@ function sanitizeRelayEvents(events: unknown): NostrEvent[] {
     }));
 }
 
-// Fetch reports scoped to a single target (reported event id or pubkey) via the
-// worker's /api/reports filter. Used to resolve a deep-link whose target isn't in
-// the bulk window, so we can tell "aged out / vanished" apart from "still loading".
+// Fetch every report scoped to a single target (reported event id or pubkey)
+// via the worker's /api/reports filter, resolved or not, paged to the end.
+// Two callers: the queue's deep link, when its target isn't in the
+// needs-attention feed (a resolved report, or one that is gone), so the screen
+// can tell those apart from "still loading"; and the report pane's Related
+// Reports card, which counts the reported account's reports by pubkey.
 export async function fetchReportsByTarget(
   apiUrl: string,
   target: { event: string } | { pubkey: string }

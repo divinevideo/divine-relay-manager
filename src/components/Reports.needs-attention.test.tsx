@@ -182,6 +182,9 @@ describe('the queue reads the needs-attention feed', () => {
     expect(text).toContain('27');
     expect(text).toContain('2025');
     expect(text).toContain('UTC');
+    // The oldest report read was filed at 04:53 that day, so reports filed earlier
+    // the same day may be missing: the day is not fully covered.
+    expect(text).toContain('on or before Jun 27, 2025');
   });
 
   it('says nothing about missing reports when the walk completed', async () => {

@@ -148,7 +148,7 @@ export function QueueTruncatedBanner({ oldestCovered }: { oldestCovered: number 
       <AlertDescription className="text-xs">
         The queue stopped reading reports early.{' '}
         {date
-          ? `Anything reported before ${date} (UTC) may be missing from this list.`
+          ? `Anything reported on or before ${date} (UTC) may be missing from this list.`
           : 'Some reports may be missing from this list.'}
       </AlertDescription>
     </Alert>

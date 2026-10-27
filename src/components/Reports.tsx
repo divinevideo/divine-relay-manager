@@ -1372,8 +1372,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       : null;
     if (!target) return;
 
-    // In the history view, loaded history rows count as in bulk: the target
-    // is selected from them without the targeted lookup, so no floor mark.
+    // In the history view, loaded history rows count as already listed: the
+    // target is selected from them without the targeted lookup, so no floor mark.
     const inBulk = allConsolidated.find(
       c => c.target.type === target.type && c.target.value === target.value
     );
@@ -1405,8 +1405,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       return;
     }
 
-    // Bulk list is loaded and the target isn't in it. Do one targeted relay fetch
-    // per target to tell "aged out / vanished" apart from "still loading". Key the
+    // The list is loaded and the target isn't in it: the needs-attention feed
+    // holds every report that still needs a moderator, so the target is most
+    // likely resolved, or gone. Do one targeted relay fetch per target to tell
+    // those apart from "still loading". Key the
     // attempt on the full target identity (relay + type + value) so a same-value
     // target across type, or a relay/environment switch, re-resolves instead of
     // reusing the prior attempt or its stale result.
