@@ -271,20 +271,24 @@ describe('human decision persistence', () => {
   });
 
   describe('POST /api/moderate (handleModerate) moderatorPubkey', () => {
-    it('rejects a moderatorPubkey sent as an array, before hiding anything', async () => {
-      const { db } = createMockDB();
-      const operations: unknown[] = [];
-      const env = createEnv(db, operations);
+    // delete_event has its own check; hide_event and allow_event share one.
+    it.each(['delete_event', 'hide_event', 'allow_event'])(
+      'rejects a moderatorPubkey sent as an array for %s, before changing anything',
+      async (action) => {
+        const { db } = createMockDB();
+        const operations: unknown[] = [];
+        const env = createEnv(db, operations);
 
-      const response = await worker.fetch(new Request('http://localhost/api/moderate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
-        body: JSON.stringify({ action: 'delete_event', eventId: 'ab'.repeat(32), moderatorPubkey: ['e'.repeat(64)] }),
-      }), env as never, mockCtx);
+        const response = await worker.fetch(new Request('http://localhost/api/moderate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+          body: JSON.stringify({ action, eventId: 'ab'.repeat(32), moderatorPubkey: ['e'.repeat(64)] }),
+        }), env as never, mockCtx);
 
-      expect(response.status).toBe(400);
-      expect(operations).toEqual([]);
-    });
+        expect(response.status).toBe(400);
+        expect(operations).toEqual([]);
+      },
+    );
   });
 
   describe('DELETE /api/decisions/:targetId (handleDeleteDecisions)', () => {
@@ -323,6 +327,31 @@ describe('human decision persistence', () => {
   });
 
   describe('POST /api/publish (handlePublish, kind 1985 resolution labels)', () => {
+    it('rejects a moderatorPubkey sent as an array before marking anything', async () => {
+      const { db, sqlLog } = createMockDB();
+      const operations: unknown[] = [];
+      const env = createEnv(db, operations);
+
+      const response = await worker.fetch(new Request('http://localhost/api/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        body: JSON.stringify({
+          kind: 1985,
+          content: 'Reviewed',
+          tags: [
+            ['L', 'moderation/resolution'],
+            ['l', 'reviewed', 'moderation/resolution'],
+            ['e', 'ab'.repeat(32)],
+          ],
+          moderatorPubkey: ['e'.repeat(64)],
+        }),
+      }), env as never, mockCtx);
+
+      expect(response.status).toBe(400);
+      expect(operations).toEqual([]);
+      expect(sqlLog.some(s => s.sql.includes('moderation_targets'))).toBe(false);
+    });
+
     it('should call markHumanReviewed for resolution labels', async () => {
       const { db, sqlLog } = createMockDB();
       const env = createEnv(db);

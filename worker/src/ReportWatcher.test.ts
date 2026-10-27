@@ -199,6 +199,9 @@ describe('ReportWatcher', () => {
       ['reportId as an array', { reportId: ['cd'.repeat(32)] }],
       ['reporterPubkey as an array', { reporterPubkey: ['cd'.repeat(32)] }],
       ['an uppercase eventId', { eventId: 'AB'.repeat(32) }],
+      ['an uppercase moderatorPubkey', { moderatorPubkey: 'CD'.repeat(32) }],
+      ['an uppercase reportId', { reportId: 'CD'.repeat(32) }],
+      ['an uppercase reporterPubkey', { reporterPubkey: 'CD'.repeat(32) }],
     ])(
       'rejects %s before touching the relay or D1',
       async (_case, overrides) => {

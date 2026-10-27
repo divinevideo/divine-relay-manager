@@ -1014,6 +1014,7 @@ describe('relay-rpc account-state side effects', () => {
       { reporterPubkey: 'forged' },
       { reportId: ['b'.repeat(64)] },
       { reporterPubkey: ['c'.repeat(64)] },
+      { moderatorPubkey: ['d'.repeat(64)] },
     ]) {
       expect((await request(body)).status).toBe(400);
     }
