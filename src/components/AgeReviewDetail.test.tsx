@@ -1,5 +1,5 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { focusManager, QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
 import { AgeReviewDetail } from './AgeReviewDetail';
@@ -29,6 +29,13 @@ const getAccountStatus = vi
   .mockResolvedValue({ success: true, status: 'active', verified_minor: false, protected_minor: false });
 const writeText = vi.fn().mockResolvedValue(undefined);
 const toast = vi.fn();
+// The case's kept bulk notes (#299): none unless a test says otherwise.
+const getAgeReviewBulkNotesJob = vi.fn().mockResolvedValue({ jobId: null });
+const getBulkJobNotes = vi.fn().mockResolvedValue({ notes: [], next: null });
+const getActiveAgeReviewCase = vi.fn().mockResolvedValue({ success: true, case: null });
+// A note's Restore (#299).
+const moderateMedia = vi.fn().mockResolvedValue({ success: true });
+const logDecision = vi.fn().mockResolvedValue(undefined);
 
 vi.mock('@/hooks/useAdminApi', () => ({
   useApiUrl: () => 'https://api.test.divine.video',
@@ -36,7 +43,15 @@ vi.mock('@/hooks/useAdminApi', () => ({
     updateAgeReviewCase,
     getAgeReviewConfig,
     getAccountStatus,
+    getAgeReviewBulkNotesJob,
+    getBulkJobNotes,
+    getActiveAgeReviewCase,
+    moderateMedia,
+    logDecision,
   }),
+}));
+vi.mock('@/hooks/useCurrentUser', () => ({
+  useCurrentUser: () => ({ user: undefined, users: [], getModeratorPubkey: async () => 'e'.repeat(64) }),
 }));
 
 vi.mock('@/hooks/useToast', () => ({
@@ -1003,7 +1018,7 @@ describe('AgeReviewDetail enforcement-incomplete toast', () => {
       success: false,
       case: makeCase({ state: 'restricted_pending_user_response' }),
       enforcementComplete: false,
-      enforcement: { relay: 'ok', bulk: 'failed', keycast: 'ok' },
+      enforcement: { relay: 'ok', bulk: 'failed', keycast: 'ok', bulkFailures: ['enumeration:x:y'] },
     });
     renderDetail(makeCase());
     fireEvent.click(screen.getByRole('button', { name: 'Restrict Account' }));
@@ -1012,6 +1027,7 @@ describe('AgeReviewDetail enforcement-incomplete toast', () => {
     expect(description).not.toMatch(/automated retry will continue/i);
     expect(description).not.toMatch(/now closed/i);
     expect(description).toMatch(/not retried automatically/i);
+    expect(description).toMatch(/1 problem\(s\) are listed at the top of this case/);
   });
 
   it('says the protected-minor steps are retried when one of them is what failed', async () => {
@@ -1041,5 +1057,359 @@ describe('AgeReviewDetail enforcement-incomplete toast', () => {
     const description = toast.mock.calls[0][0].description as string;
     expect(description).toMatch(/protected-minor steps are retried automatically/i);
     expect(description).not.toMatch(/not retried automatically/i);
+  });
+});
+
+// #299: the bulk leg's results (files a clear left hidden, other accounts'
+// files, and its problems) come back on the transition's response and are kept
+// under the case, so the screen shows them at once and again on reopen, until
+// the moderator dismisses them.
+describe('AgeReviewDetail bulk notes', () => {
+  const HIDDEN_A = '1'.repeat(64);
+  const HIDDEN_B = '2'.repeat(64);
+
+  beforeEach(() => {
+    updateAgeReviewCase.mockReset();
+    toast.mockClear();
+    getAgeReviewBulkNotesJob.mockReset().mockResolvedValue({ jobId: null });
+    getBulkJobNotes.mockReset().mockResolvedValue({ notes: [], next: null });
+  });
+
+  // The case does not store a transition's notes; bulk_job_notes does, under
+  // the case. Opening the case again (a reload) reads them back.
+  it('shows the notes kept from an earlier transition when the case is opened again, until dismissed', async () => {
+    getAgeReviewBulkNotesJob.mockResolvedValue({ jobId: 'age-review:case-1:3:cleared', state: 'cleared' });
+    getBulkJobNotes
+      .mockResolvedValueOnce({ notes: [{ kind: 'still-hidden', sha256: HIDDEN_A }], next: '1' })
+      .mockResolvedValueOnce({ notes: [{ kind: 'still-hidden', sha256: HIDDEN_B }], next: null });
+    renderDetail(makeCase({ state: 'cleared', version: 3 }));
+    expect(await screen.findByText(HIDDEN_A)).toBeInTheDocument();
+    expect(await screen.findByText(HIDDEN_B)).toBeInTheDocument();
+    expect(getAgeReviewBulkNotesJob).toHaveBeenCalledWith('case-1');
+    expect(getBulkJobNotes).toHaveBeenNthCalledWith(1, 'age-review:case-1:3:cleared', undefined);
+    expect(getBulkJobNotes).toHaveBeenNthCalledWith(2, 'age-review:case-1:3:cleared', '1');
+    expect(screen.getAllByRole('button', { name: /restore/i })).toHaveLength(2);
+    fireEvent.click(screen.getByRole('button', { name: /dismiss/i }));
+    expect(screen.queryByText(HIDDEN_A)).not.toBeInTheDocument();
+  });
+
+  it('shows a later transition\'s notes after earlier ones were dismissed, and reads the kept notes again', async () => {
+    getAgeReviewBulkNotesJob.mockResolvedValue({ jobId: 'age-review:case-1:3:restricted_pending_user_response', state: 'restricted_pending_user_response' });
+    getBulkJobNotes.mockResolvedValue({ notes: [{ kind: 'still-hidden', sha256: HIDDEN_A }], next: null });
+    renderDetail(makeCase());
+    expect(await screen.findByText(HIDDEN_A)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /dismiss/i }));
+    expect(screen.queryByText(HIDDEN_A)).not.toBeInTheDocument();
+
+    clearedWith({ bulkNotes: [{ kind: 'still-hidden', sha256: HIDDEN_B }] });
+    const readsBefore = getAgeReviewBulkNotesJob.mock.calls.length;
+    fireEvent.click(screen.getByRole('button', { name: 'Clear without approval' }));
+    expect(await screen.findByText(HIDDEN_B)).toBeInTheDocument();
+    await waitFor(() => expect(getAgeReviewBulkNotesJob.mock.calls.length).toBeGreaterThan(readsBefore));
+  });
+
+  it('lists the failures kept beside the notes, and says which step they came from and when', async () => {
+    getAgeReviewBulkNotesJob.mockResolvedValue({ jobId: 'age-review:case-1:3:cleared', state: 'cleared', keptAt: '2026-10-14T09:30:00.000Z' });
+    getBulkJobNotes.mockResolvedValue({
+      notes: [{ kind: 'still-hidden', sha256: HIDDEN_A }],
+      failures: ['enumeration:x:the list could not be read'],
+      next: null,
+    });
+    renderDetail(makeCase({ state: 'cleared', version: 4 }));
+    const panel = await screen.findByRole('region', { name: /results to look at/i });
+    expect(panel).toHaveTextContent(/When this case was cleared \(/);
+    expect(within(panel).getByRole('heading', { name: /problems \(1\)/i })).toBeInTheDocument();
+    expect(within(panel).getByText('The list could not be read.')).toBeInTheDocument();
+    expect(within(panel).getByText(HIDDEN_A)).toBeInTheDocument();
+  });
+
+  it("labels an earlier step's kept notes with that step, not the case's latest", async () => {
+    getAgeReviewBulkNotesJob.mockResolvedValue({ jobId: 'age-review:case-1:2:cleared', state: 'restricted_pending_user_response', keptAt: '2026-10-13T09:30:00.000Z' });
+    getBulkJobNotes.mockResolvedValue({ notes: [{ kind: 'not-owned', sha256: HIDDEN_A, owner: 'b'.repeat(64) }], next: null });
+    renderDetail(makeCase({ state: 'cleared', version: 5 }));
+    const panel = await screen.findByRole('region', { name: /results to look at/i });
+    expect(panel).toHaveTextContent(/When this case was restricted/);
+    expect(panel).not.toHaveTextContent(/cleared/i);
+  });
+
+  it('says on its own, and not as a finished action, that kept results could not be read', async () => {
+    getAgeReviewBulkNotesJob.mockRejectedValue(new ApiError('HTTP 500: Internal Server Error', 500, 'Internal Server Error'));
+    renderDetail(makeCase({ state: 'open_reported' }));
+    expect(await screen.findByText(/could not check this case for results to look at/i)).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: /results to look at/i })).not.toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/finished/i);
+  });
+
+  it('moves focus to the case summary when the panel is dismissed', async () => {
+    getAgeReviewBulkNotesJob.mockResolvedValue({ jobId: 'age-review:case-1:3:cleared', state: 'cleared' });
+    getBulkJobNotes.mockResolvedValue({ notes: [{ kind: 'still-hidden', sha256: HIDDEN_A }], next: null });
+    renderDetail(makeCase({ state: 'cleared' }));
+    fireEvent.click(await screen.findByRole('button', { name: /dismiss/i }));
+    expect(document.activeElement).toBe(screen.getByRole('group', { name: /case summary/i }));
+  });
+
+  it("points to the panel after a clear that left results, and lists the transition's failures in it", async () => {
+    clearedWith({
+      bulkNotes: [{ kind: 'still-hidden', sha256: HIDDEN_A }, { kind: 'still-hidden', sha256: HIDDEN_B }],
+      bulkFailures: ['enumeration:x:the list could not be read'],
+    });
+    renderDetail(makeCase());
+    fireEvent.click(screen.getByRole('button', { name: 'Clear without approval' }));
+    const panel = await screen.findByRole('region', { name: /results to look at/i });
+    expect(within(panel).getByText('The list could not be read.')).toBeInTheDocument();
+    expect(panel).toHaveTextContent(/When this case was cleared/);
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'Case updated',
+      description: '1 problem(s) and 2 file(s) to check are listed at the top of this case.',
+    })));
+  });
+
+  it('does not say nothing was left outstanding after a self-custody clear that left results', async () => {
+    clearedWith({ keycast: 'not_applicable', bulkNotes: [{ kind: 'still-hidden', sha256: HIDDEN_A }] });
+    renderDetail(makeCase());
+    fireEvent.click(screen.getByRole('button', { name: 'Clear without approval' }));
+    await waitFor(() => expect(toast).toHaveBeenCalled());
+    const description = toast.mock.calls[0][0].description as string;
+    expect(description).toMatch(/no Divine login/i);
+    expect(description).not.toMatch(/nothing else was left outstanding/i);
+    expect(description).toMatch(/1 file\(s\) to check are listed at the top of this case/);
+  });
+
+  it('says nothing else was left outstanding after a self-custody clear that left none', async () => {
+    clearedWith({ keycast: 'not_applicable' });
+    renderDetail(makeCase());
+    fireEvent.click(screen.getByRole('button', { name: 'Clear without approval' }));
+    await waitFor(() => expect(toast).toHaveBeenCalled());
+    expect(toast.mock.calls[0][0].description).toMatch(/nothing else was left outstanding/i);
+  });
+
+  it('reads no notes for a case that kept none', async () => {
+    renderDetail(makeCase({ state: 'cleared' }));
+    await waitFor(() => expect(getAgeReviewBulkNotesJob).toHaveBeenCalled());
+    expect(getBulkJobNotes).not.toHaveBeenCalled();
+    expect(screen.queryByRole('region', { name: /to look at/i })).not.toBeInTheDocument();
+  });
+
+  it('shows no notes, and no error, when the worker predates kept notes', async () => {
+    getAgeReviewBulkNotesJob.mockRejectedValue(new ApiError('Not found', 404, 'Not Found'));
+    renderDetail(makeCase({ state: 'cleared' }));
+    await waitFor(() => expect(getAgeReviewBulkNotesJob).toHaveBeenCalled());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(screen.queryByRole('region', { name: /to look at/i })).not.toBeInTheDocument();
+  });
+
+  it('says why the kept notes could not be loaded, and tries again on request', async () => {
+    getAgeReviewBulkNotesJob
+      .mockRejectedValueOnce(new ApiError('HTTP 500: Internal Server Error', 500, 'Internal Server Error'))
+      .mockResolvedValueOnce({ jobId: 'age-review:case-1:3:cleared', state: 'cleared' });
+    getBulkJobNotes.mockResolvedValue({ notes: [{ kind: 'still-hidden', sha256: HIDDEN_A }], next: null });
+    renderDetail(makeCase({ state: 'cleared' }));
+    expect(await screen.findByText(/HTTP 500/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /try again/i }));
+    expect(await screen.findByText(HIDDEN_A)).toBeInTheDocument();
+  });
+
+  function clearedWith(enforcement: Record<string, unknown>) {
+    updateAgeReviewCase.mockResolvedValueOnce({
+      success: true,
+      case: makeCase({ state: 'cleared' }),
+      enforcementComplete: true,
+      enforcement: { relay: 'ok', bulk: 'ok', keycast: 'ok', ...enforcement },
+    });
+  }
+
+  it('lists the notes from a clear until the moderator dismisses them, without calling the clear a failure', async () => {
+    clearedWith({ bulkNotes: [{ kind: 'still-hidden', sha256: HIDDEN_A }, { kind: 'still-hidden', sha256: HIDDEN_B }] });
+    const { rerender, queryClient } = renderDetail(makeCase());
+    fireEvent.click(screen.getByRole('button', { name: 'Clear without approval' }));
+    expect(await screen.findByText(HIDDEN_A)).toBeInTheDocument();
+    expect(screen.getByText(HIDDEN_B)).toBeInTheDocument();
+    expect(toast).not.toHaveBeenCalledWith(expect.objectContaining({ title: 'Enforcement incomplete' }));
+    // The detail re-renders with the cleared case; the panel stays.
+    rerender(
+      <QueryClientProvider client={queryClient}>
+        <AgeReviewDetail caseData={makeCase({ state: 'cleared', version: 1 })} />
+      </QueryClientProvider>,
+    );
+    expect(screen.getByText(HIDDEN_A)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /dismiss/i }));
+    expect(screen.queryByText(HIDDEN_A)).not.toBeInTheDocument();
+  });
+
+  it('drops the notes when another case is opened', async () => {
+    clearedWith({ bulkNotes: [{ kind: 'still-hidden', sha256: HIDDEN_A }] });
+    const { rerender, queryClient } = renderDetail(makeCase());
+    fireEvent.click(screen.getByRole('button', { name: 'Clear without approval' }));
+    expect(await screen.findByText(HIDDEN_A)).toBeInTheDocument();
+    rerender(
+      <QueryClientProvider client={queryClient}>
+        <AgeReviewDetail caseData={makeCase({ id: 'case-2', pubkey: 'c'.repeat(64) })} />
+      </QueryClientProvider>,
+    );
+    expect(screen.queryByText(HIDDEN_A)).not.toBeInTheDocument();
+  });
+
+  function switchCase(rerender: (ui: React.ReactElement) => void, queryClient: QueryClient, caseData: AgeReviewCase) {
+    rerender(
+      <QueryClientProvider client={queryClient}>
+        <AgeReviewDetail caseData={caseData} />
+      </QueryClientProvider>,
+    );
+  }
+
+  async function restoreFrom(hash: string) {
+    const row = screen.getByText(hash).closest('li') as HTMLElement;
+    const button = within(row).getByRole('button', { name: `Restore file ${hash}` });
+    await waitFor(() => expect(button).toBeEnabled());
+    fireEvent.click(button);
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: /restore file/i }));
+    expect(await within(row).findByText('Restored')).toBeInTheDocument();
+  }
+
+  // The detail stays mounted across a case switch on the page. A file
+  // restored here reads Restored when the case is opened again: the kept
+  // results, read again, carry restoredAt, and the stale response is dropped.
+  it('shows a file restored from a fresh transition as Restored after another case and back', async () => {
+    clearedWith({ bulkNotes: [{ kind: 'still-hidden', sha256: HIDDEN_A }] });
+    const { rerender, queryClient } = renderDetail(makeCase());
+    fireEvent.click(screen.getByRole('button', { name: 'Clear without approval' }));
+    expect(await screen.findByText(HIDDEN_A)).toBeInTheDocument();
+    getAgeReviewBulkNotesJob.mockResolvedValue({ jobId: 'age-review:case-1:2:cleared', state: 'cleared' });
+    getBulkJobNotes.mockResolvedValue({ notes: [{ kind: 'still-hidden', sha256: HIDDEN_A, restoredAt: '2026-10-14T10:00:00.000Z' }], next: null });
+    await restoreFrom(HIDDEN_A);
+
+    switchCase(rerender, queryClient, makeCase({ id: 'case-2', pubkey: 'c'.repeat(64) }));
+    switchCase(rerender, queryClient, makeCase({ state: 'cleared', version: 2 }));
+
+    const row = (await screen.findByText(HIDDEN_A)).closest('li') as HTMLElement;
+    expect(await within(row).findByText('Restored')).toBeInTheDocument();
+    expect(within(row).queryByText(/still hidden/i)).not.toBeInTheDocument();
+    expect(within(row).queryByRole('button', { name: /restore/i })).not.toBeInTheDocument();
+  });
+
+  // The app keeps a query fresh for 60 s; the kept results are read again on
+  // every open regardless, so a restore made meanwhile shows.
+  it('reads the kept results again when the case is opened again within the app\'s fresh window', async () => {
+    getAgeReviewBulkNotesJob.mockResolvedValue({ jobId: 'age-review:case-1:3:cleared', state: 'cleared' });
+    getBulkJobNotes.mockResolvedValueOnce({ notes: [{ kind: 'still-hidden', sha256: HIDDEN_A }], next: null });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 60_000 }, mutations: { retry: false } } });
+    const { rerender } = render(
+      <QueryClientProvider client={queryClient}>
+        <AgeReviewDetail caseData={makeCase({ state: 'cleared' })} />
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText('Still hidden after this step.')).toBeInTheDocument();
+    getBulkJobNotes.mockResolvedValue({ notes: [{ kind: 'still-hidden', sha256: HIDDEN_A, restoredAt: '2026-10-14T10:00:00.000Z' }], next: null });
+    switchCase(rerender, queryClient, makeCase({ id: 'case-2', pubkey: 'c'.repeat(64) }));
+    switchCase(rerender, queryClient, makeCase({ state: 'cleared' }));
+    expect(await screen.findByText('Restored')).toBeInTheDocument();
+  });
+
+  it('shows a file the kept results call restored as Restored, over the transition response that called it hidden', async () => {
+    clearedWith({ bulkNotes: [{ kind: 'still-hidden', sha256: HIDDEN_A }, { kind: 'still-hidden', sha256: HIDDEN_B }] });
+    renderDetail(makeCase());
+    getAgeReviewBulkNotesJob.mockResolvedValue({ jobId: 'age-review:case-1:2:cleared', state: 'cleared' });
+    getBulkJobNotes.mockResolvedValue({
+      notes: [{ kind: 'still-hidden', sha256: HIDDEN_A, restoredAt: '2026-10-14T10:00:00.000Z' }, { kind: 'still-hidden', sha256: HIDDEN_B }],
+      next: null,
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Clear without approval' }));
+    const rowA = (await screen.findByText(HIDDEN_A)).closest('li') as HTMLElement;
+    expect(await within(rowA).findByText('Restored')).toBeInTheDocument();
+    const rowB = screen.getByText(HIDDEN_B).closest('li') as HTMLElement;
+    expect(within(rowB).getByText('Still hidden after this step.')).toBeInTheDocument();
+  });
+
+  // A later step, kept while another case was open, replaces this visit's
+  // response: the panel shows the case's latest results, labelled with their
+  // own step.
+  it("shows the case's latest kept step after another case and back, not an earlier visit's response", async () => {
+    clearedWith({ bulkNotes: [{ kind: 'still-hidden', sha256: HIDDEN_A }] });
+    const { rerender, queryClient } = renderDetail(makeCase());
+    fireEvent.click(screen.getByRole('button', { name: 'Clear without approval' }));
+    expect(await screen.findByText(HIDDEN_A)).toBeInTheDocument();
+    getAgeReviewBulkNotesJob.mockResolvedValue({ jobId: 'age-review:case-1:4:restricted_pending_user_response', state: 'restricted_pending_user_response' });
+    getBulkJobNotes.mockResolvedValue({ notes: [{ kind: 'not-owned', sha256: HIDDEN_B, owner: 'b'.repeat(64) }], next: null });
+
+    switchCase(rerender, queryClient, makeCase({ id: 'case-2', pubkey: 'c'.repeat(64) }));
+    switchCase(rerender, queryClient, makeCase({ state: 'restricted_pending_user_response', version: 4 }));
+
+    const panel = await screen.findByRole('region', { name: /results to look at/i });
+    expect(await within(panel).findByText(HIDDEN_B)).toBeInTheDocument();
+    expect(panel).toHaveTextContent(/When this case was restricted/);
+    expect(within(panel).queryByText(HIDDEN_A)).not.toBeInTheDocument();
+  });
+
+  // Read again on each open, but not on every window focus: that would page
+  // through up to 5,000 rows each time the moderator returns to the tab.
+  it('does not read the kept results again when the window regains focus', async () => {
+    getAgeReviewBulkNotesJob.mockResolvedValue({ jobId: 'age-review:case-1:3:cleared', state: 'cleared' });
+    getBulkJobNotes.mockResolvedValue({ notes: [{ kind: 'still-hidden', sha256: HIDDEN_A }], next: null });
+    renderDetail(makeCase({ state: 'cleared' }));
+    expect(await screen.findByText(HIDDEN_A)).toBeInTheDocument();
+    const before = [getAgeReviewBulkNotesJob.mock.calls.length, getBulkJobNotes.mock.calls.length];
+    try {
+      act(() => { focusManager.setFocused(false); });
+      act(() => { focusManager.setFocused(true); });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    } finally {
+      focusManager.setFocused(undefined);
+    }
+    expect([getAgeReviewBulkNotesJob.mock.calls.length, getBulkJobNotes.mock.calls.length]).toEqual(before);
+  });
+
+  it('shows a dismissed panel again when the case is opened again', async () => {
+    getAgeReviewBulkNotesJob.mockResolvedValue({ jobId: 'age-review:case-1:3:cleared', state: 'cleared' });
+    getBulkJobNotes.mockResolvedValue({ notes: [{ kind: 'still-hidden', sha256: HIDDEN_A }], next: null });
+    const { rerender, queryClient } = renderDetail(makeCase({ state: 'cleared' }));
+    fireEvent.click(await screen.findByRole('button', { name: /dismiss/i }));
+    expect(screen.queryByText(HIDDEN_A)).not.toBeInTheDocument();
+    switchCase(rerender, queryClient, makeCase({ id: 'case-2', pubkey: 'c'.repeat(64) }));
+    switchCase(rerender, queryClient, makeCase({ state: 'cleared' }));
+    expect(await screen.findByText(HIDDEN_A)).toBeInTheDocument();
+  });
+
+  async function confirmApproval() {
+    renderDetail(makeCase({ suspected_age_band: 'age_13_15' }));
+    fireEvent.click(await screen.findByRole('button', { name: /Approve as protected minor/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
+    await waitFor(() => expect(updateAgeReviewCase).toHaveBeenCalled());
+  }
+
+  it('points to the panel from an approval that was not recorded but left results', async () => {
+    updateAgeReviewCase.mockResolvedValueOnce({
+      success: false, enforcementComplete: false,
+      case: makeCase({ state: 'cleared' }),
+      enforcement: { relay: 'ok', bulk: 'ok', keycast: 'ok', subjectActivate: 'failed', bulkNotes: [{ kind: 'still-hidden', sha256: HIDDEN_A }] },
+    });
+    await confirmApproval();
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'Protected-minor approval not recorded',
+      description: expect.stringMatching(/re-approved from this case\. 1 file\(s\) to check are listed at the top of this case\.$/),
+    })));
+  });
+
+  it("points to the panel from an approval keycast's minor flag refused, when it left results", async () => {
+    updateAgeReviewCase.mockResolvedValueOnce({
+      success: false, enforcementComplete: false,
+      case: makeCase({ state: 'cleared' }),
+      enforcement: {
+        relay: 'ok', bulk: 'ok', keycast: 'ok', subjectActivate: 'ok', keycastMinorSet: 'failed', keycastMinorSetUnclaimed: true,
+        bulkNotes: [{ kind: 'still-hidden', sha256: HIDDEN_A }],
+      },
+    });
+    await confirmApproval();
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'Approved, but keycast refused the minor flag',
+      description: expect.stringMatching(/applies once the account is claimed\. 1 file\(s\) to check are listed at the top of this case\.$/),
+    })));
+  });
+
+  it('shows no panel when the response has no notes, as from a worker that predates them', async () => {
+    clearedWith({});
+    renderDetail(makeCase());
+    fireEvent.click(screen.getByRole('button', { name: 'Clear without approval' }));
+    await waitFor(() => expect(updateAgeReviewCase).toHaveBeenCalled());
+    expect(screen.queryByRole('region', { name: /to look at/i })).not.toBeInTheDocument();
   });
 });

@@ -279,9 +279,14 @@ negotiation, so order matters and the gap should be minimized:
   in the `bulk_job_notes` table, created on demand in the same D1 as `bulk_jobs`:
   a queued job's under its job id, and an age-review transition's under
   `age-review:<case id>:<case version>:<state>` (the expiry cron's auto-delete
-  too), with that transition's failure lines beside them. Keeping age review's
+  too), with that transition's failure lines beside them. The Users page lists a
+  job's problems (its stored failures) and notes under the bulk buttons; the
+  age-review case screen lists the problems and notes of its latest step that
+  kept any, labelled with that step, also after a reload. Keeping age review's
   results never fails or alters the transition. A case's kept results are
   deleted with the case by retention's case-delete stage, under the same hold.
+  Deploy the worker first: a frontend without the worker reads no notes (both
+  notes routes answer 404) and shows none.
 - **Restore's account check (#299).** A note's Restore sends the account's pubkey
   to `/api/moderate-media` with its SAFE and `from: 'QUARANTINE'`. When a pubkey is
   sent, the worker refuses while that account has an open age review, or unless
@@ -387,7 +392,9 @@ any build in that range pairs the same way; if the version before this one is
 another build, ask #299's author before rolling back past it. Apart from the
 jobs above, each worker reads the other's queue messages (the older one ignores
 the new fields), and nothing else needs stopping or cleaning up. The
-`bulk_job_notes` table stays and the older worker never reads it. Restore's
+`bulk_job_notes` table stays and the older worker never reads it; while it
+serves, a newer frontend shows no notes, and moderators see owner lines and
+still-hidden files nowhere (the older worker reported neither). Restore's
 account check is gone with it: only `from` is checked.
 
 Rolling back past #290 (to any build that has the job model but not

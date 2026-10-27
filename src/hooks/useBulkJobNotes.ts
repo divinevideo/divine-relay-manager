@@ -1,5 +1,5 @@
-// ABOUTME: Read every note a finished queued bulk job stored for a person (#299),
-// ABOUTME: a page at a time.
+// ABOUTME: Read every note a bulk run stored for a person (#299): a finished
+// ABOUTME: queued job's, or the ones an age-review case kept from its transitions.
 import { useQuery } from '@tanstack/react-query';
 import { useAdminApi } from '@/hooks/useAdminApi';
 import { isTerminal } from '@/hooks/useBulkModerateJob';
@@ -48,6 +48,43 @@ export function useBulkJobNotes(job: BulkJob | undefined) {
         if (noteCount === undefined && routeMissing(error)) return [];
         throw error;
       }
+    },
+  });
+}
+
+// What an age-review case kept from its latest transition that kept anything:
+// the step (`state`), when it ran, its failure lines and notes, as the
+// case-notes route reports them. The case does not store them; the worker
+// keeps them under the case (see ageReviewNotesJobId), so they survive a
+// reload.
+export interface KeptAgeReviewResults {
+  state: string;
+  keptAt?: string;
+  notes: BulkNote[];
+  failures: string[];
+}
+
+export function useAgeReviewBulkNotes(caseId: string) {
+  const api = useAdminApi();
+  return useQuery({
+    queryKey: ['age-review-bulk-notes', caseId],
+    // Read again on every open, not cached for the app's default: a file may
+    // have been restored meanwhile, in another session or on another screen,
+    // and its row should say so. Not on every window focus, though: that
+    // would page through up to MAX_NOTES_PER_WRITE rows each time the
+    // moderator comes back to the tab. A Restore refreshes it itself.
+    staleTime: 0,
+    refetchOnWindowFocus: false,
+    queryFn: async (): Promise<KeptAgeReviewResults | null> => {
+      let found: { jobId: string | null; state?: string; keptAt?: string };
+      try {
+        found = await api.getAgeReviewBulkNotesJob(caseId);
+      } catch (error) {
+        if (routeMissing(error)) return null;
+        throw error;
+      }
+      if (found.jobId === null || !found.state) return null;
+      return { state: found.state, keptAt: found.keptAt, ...await readAllNotes(api, found.jobId) };
     },
   });
 }

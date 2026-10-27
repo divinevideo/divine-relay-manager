@@ -7,12 +7,15 @@ import { useUserStats } from "@/hooks/useUserStats";
 import { AccountTypeIndicator } from "@/components/AccountTypeIndicator";
 import { AgeReviewContent } from "@/components/AgeReviewContent";
 import { useReportedEvent } from "@/hooks/useReportedEvent";
-import { ApiError } from "@/lib/adminApi";
+import { ApiError, type BulkNote } from "@/lib/adminApi";
 import { reconcileCaseIntoList, type AgeReviewListParams } from "@/lib/ageReviewCache";
 import { deriveAccountVerdict } from "@/lib/accountVerdict";
 import { useToast } from "@/hooks/useToast";
 import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
 import { UserActions } from "@/components/UserActions";
+import { BulkNotesPanel } from "@/components/BulkNotesPanel";
+import { countIssues } from "../../shared/bulk-moderation";
+import { useAgeReviewBulkNotes } from "@/hooks/useBulkJobNotes";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -105,6 +108,11 @@ interface Props {
   caseData: AgeReviewCase;
 }
 
+// The worker records an approval only for a lowercase 64-char hex pubkey (HEX_64 in
+// worker/src/keycast-client.ts). A case stores the report's p tag verbatim, so a
+// mixed-case tag is possible and could never be approved.
+const APPROVABLE_PUBKEY = /^[0-9a-f]{64}$/;
+
 // The active-case lookup's cache keys for a case's pubkey: its own first,
 // then any derived one, the lowercase key the hand-off, the Ban warning and
 // the results panel ask with. A case can store an uppercase pubkey (#313), and
@@ -117,10 +125,11 @@ function activeCaseKeys(pubkey: string | undefined): Array<[string, string | und
   return [...new Set([pubkey, pubkey?.toLowerCase()])].map((key) => ['age-review-active-case', key]);
 }
 
-// The worker records an approval only for a lowercase 64-char hex pubkey (HEX_64 in
-// worker/src/keycast-client.ts). A case stores the report's p tag verbatim, so a
-// mixed-case tag is possible and could never be approved.
-const APPROVABLE_PUBKEY = /^[0-9a-f]{64}$/;
+// After a step that left results (#299): where to find them.
+function resultsPointer(problems: number, files: number): string | null {
+  const parts = [problems ? `${problems} problem(s)` : null, files ? `${files} file(s) to check` : null].filter(Boolean);
+  return parts.length ? `${parts.join(' and ')} are listed at the top of this case.` : null;
+}
 
 const ENFORCEMENT_STATES: AgeReviewState[] = [
   'restricted_pending_user_response',
@@ -136,10 +145,29 @@ export function AgeReviewDetail({ caseData: c }: Props) {
   const queryClient = useQueryClient();
   const [resolutionNote, setResolutionNote] = useState(c.resolution_note ?? "");
   const pendingStateRef = useRef<string | undefined>();
+  // The bulk leg's problems and notes for a person (#299). The worker keeps
+  // each transition's under the case, so they are read back when the case is
+  // opened (and after a reload). A transition's own response shows them at
+  // once, for the case it came from. Dismissing hides them until the case is
+  // opened again or a later transition brings new ones.
+  const [freshResults, setFreshResults] = useState<{
+    caseId: string; state: AgeReviewState; at: string; notes: BulkNote[]; failures: string[];
+  } | null>(null);
+  const [notesDismissedFor, setNotesDismissedFor] = useState<string | null>(null);
+  const keptNotes = useAgeReviewBulkNotes(c.id);
+  const summaryRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setResolutionNote(c.resolution_note ?? "");
   }, [c.id, c.resolution_note]);
+
+  // This detail stays mounted when another case is opened, so opening a case
+  // starts it afresh: the kept results (read again) replace a response from
+  // an earlier visit, and a dismissed panel shows again.
+  useEffect(() => {
+    setFreshResults(null);
+    setNotesDismissedFor(null);
+  }, [c.id]);
 
   const isTerminal = TERMINAL_STATES.includes(c.state);
   const daysRemaining = getDaysRemaining(c);
@@ -206,6 +234,19 @@ export function AgeReviewDetail({ caseData: c }: Props) {
       // moderation action moves a case between states, so refresh them alongside
       // the list or the chips disagree with the list until their 30s interval.
       queryClient.invalidateQueries({ queryKey: ['age-review-counts'] });
+      // The transition's own results (#299): its bulk failures and notes, shown
+      // at once at the top of this case. The worker keeps them too, so they are
+      // read back on reopen (keptNotes).
+      const notes = data.enforcement?.bulkNotes ?? [];
+      const failures = data.enforcement?.bulkFailures ?? [];
+      const resultsState = (data.case?.state ?? pendingStateRef.current) as AgeReviewState | undefined;
+      if ((notes.length > 0 || failures.length > 0) && ctx && resultsState) {
+        setFreshResults({ caseId: ctx.caseId, state: resultsState, at: new Date().toISOString(), notes, failures });
+        setNotesDismissedFor(null);
+      }
+      const pointer = resultsPointer(countIssues(failures), notes.length);
+      // The transition may have kept new notes.
+      if (ctx) queryClient.invalidateQueries({ queryKey: ['age-review-bulk-notes', ctx.caseId] });
       const requestedState = pendingStateRef.current as AgeReviewState | undefined;
       // Surface only actual failed enforcement legs. `not_attempted` is valid
       // for transitions where a leg does not apply.
@@ -227,7 +268,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
         const others = failed.length > 0 ? ` Also did not apply: ${failed.join(', ')}.` : '';
         toast({
           title: 'Protected-minor approval not recorded',
-          description: 'The case is closed, but the account was NOT recorded as a protected minor, so it is restored without minor protections. Escalate now; it cannot be re-approved from this case.' + others,
+          description: 'The case is closed, but the account was NOT recorded as a protected minor, so it is restored without minor protections. Escalate now; it cannot be re-approved from this case.' + others + (pointer ? ` ${pointer}` : ''),
           variant: 'destructive',
         });
         return;
@@ -258,24 +299,32 @@ export function AgeReviewDetail({ caseData: c }: Props) {
             : '';
           toast({
             title: 'Approved, but keycast refused the minor flag',
-            description: 'Recorded as a protected minor, so future under-16 reports clear automatically. Keycast refused the minor flag because this account has no login credentials, so the app protections and key-export block do not apply yet. The flag is retried automatically and applies once the account is claimed.' + others,
+            description: 'Recorded as a protected minor, so future under-16 reports clear automatically. Keycast refused the minor flag because this account has no login credentials, so the app protections and key-export block do not apply yet. The flag is retried automatically and applies once the account is claimed.' + others + (pointer ? ` ${pointer}` : ''),
             variant: 'destructive',
           });
         } else if (data.enforcementComplete === false) {
           toast({
             title: 'Enforcement incomplete',
-            description: `Case updated, but these did not apply: ${retryable.join(', ') || 'one or more enforcement steps'}. ${retryWords(minorClearFailed || enforcement?.keycastMinorSet === 'failed')}`,
+            description: [
+              `Case updated, but these did not apply: ${retryable.join(', ') || 'one or more enforcement steps'}.`,
+              retryWords(minorClearFailed || enforcement?.keycastMinorSet === 'failed'),
+              pointer,
+            ].filter(Boolean).join(' '),
             variant: 'destructive',
           });
         } else if (enforcement?.keycast === 'not_applicable') {
           // Enforcement is complete, so this is not a failure and must not read
           // as one, but it cannot be silent either. Without it the moderator
           // walks away believing a sign-in was blocked when the account has no
-          // Divine login and never had one to block (issue #191).
+          // Divine login and never had one to block (issue #191). "Nothing else"
+          // only when the panel has nothing either.
           toast({
             title: 'Case updated',
-            description: 'The sign-in step was not applicable: this account has no Divine login (self-custody), so there was no sign-in to change. Nothing else was left outstanding.',
+            description: `The sign-in step was not applicable: this account has no Divine login (self-custody), so there was no sign-in to change. ${pointer ?? 'Nothing else was left outstanding.'}`,
           });
+        } else if (pointer) {
+          // The panel opens at the top of the case, which may be out of view.
+          toast({ title: 'Case updated', description: pointer });
         }
       }
     },
@@ -370,11 +419,65 @@ export function AgeReviewDetail({ caseData: c }: Props) {
         verifiedMinorAtDate.toLocaleDateString(undefined, { timeZone: 'UTC' })
       : null;
 
+  // The results to show: this visit's transition, else what the case kept
+  // from its latest step that kept any (labelled with that step, not the
+  // case's current state). Dismissing is not stored: they show again on
+  // reopen, with restored files marked Restored. A file is restored for good
+  // once marked (the mark is per file), so the kept results' restoredAt wins
+  // over the transition response, which was read before any Restore.
+  const fresh = freshResults && freshResults.caseId === c.id ? freshResults : null;
+  const kept = keptNotes.data && (keptNotes.data.notes.length > 0 || keptNotes.data.failures.length > 0) ? keptNotes.data : null;
+  const restoredAt = new Map((keptNotes.data?.notes ?? []).flatMap((note) => (
+    note.kind === 'still-hidden' && note.restoredAt ? [[note.sha256, note.restoredAt] as const] : []
+  )));
+  const shown = fresh
+    ? {
+      state: fresh.state,
+      at: fresh.at,
+      notes: fresh.notes.map((note) => (note.kind === 'still-hidden' && restoredAt.has(note.sha256)
+        ? { ...note, restoredAt: restoredAt.get(note.sha256) }
+        : note)),
+      failures: fresh.failures,
+    }
+    : kept
+      ? { state: kept.state as AgeReviewState, at: kept.keptAt, notes: kept.notes, failures: kept.failures }
+      : null;
+  const keptReadFailed = !fresh && keptNotes.isError;
+
   return (
-    <ScrollArea className="h-full">
+    // The viewport's inner wrapper is display: table by default, which sizes it
+    // to its widest line and clips the pane on a narrow window. Block lets
+    // long IDs wrap inside it.
+    <ScrollArea className="h-full [&_[data-radix-scroll-area-viewport]>div]:!block">
       <div className="space-y-4 p-4">
+        {shown && notesDismissedFor !== c.id && (
+          // Below md the case opens in a sheet whose close button sits over
+          // this pane's top right corner, where the panel's Dismiss is: keep
+          // it clear, or a tap meant for Dismiss closes the case.
+          <div className="max-md:pr-8">
+            <BulkNotesPanel
+              pubkey={subjectPubkey}
+              origin={{ kind: 'age-review', state: shown.state, at: shown.at }}
+              failures={shown.failures}
+              notes={shown.notes}
+              onDismiss={() => {
+                setNotesDismissedFor(c.id);
+                summaryRef.current?.focus();
+              }}
+            />
+          </div>
+        )}
+        {keptReadFailed && (
+          <div role="status" className="flex flex-wrap items-center gap-2 text-xs text-red-600">
+            <span>Could not check this case for results to look at: {(keptNotes.error as Error).message}</span>
+            <Button size="sm" variant="outline" className="h-6 px-2 text-xs" onClick={() => { void keptNotes.refetch(); }}>
+              Try again
+            </Button>
+          </div>
+        )}
+
         {/* Header */}
-        <div className="space-y-2">
+        <div ref={summaryRef} role="group" aria-label="Case summary" tabIndex={-1} className="space-y-2 outline-none">
           <div className="flex items-center gap-2 flex-wrap">
             <Badge className={stateColor(c.state)}>{STATE_LABELS[c.state]}</Badge>
             {c.clear_resolution && (

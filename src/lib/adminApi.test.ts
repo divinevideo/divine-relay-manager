@@ -28,6 +28,7 @@ import {
   publishLabelAndBan,
   markAsReviewed,
   moderateMedia,
+  getAgeReviewBulkNotesJob,
   getBulkJobNotes,
   verifyAgeRestricted,
   verifyPubkeyBanned,
@@ -1198,6 +1199,16 @@ describe('adminApi', () => {
 
       const callBody = JSON.parse(mockFetch.mock.calls[0][1].body);
       expect(callBody.tags).toContainEqual(['l', 'reviewed', 'moderation/resolution']);
+    });
+  });
+
+  describe('getAgeReviewBulkNotesJob', () => {
+    it("asks for the case's latest kept notes, with the case id as one path segment", async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ jobId: 'age-review:case-1:3:cleared' }) });
+
+      expect(await getAgeReviewBulkNotesJob(API_URL, 'case/1')).toEqual({ jobId: 'age-review:case-1:3:cleared' });
+      expect(mockFetch.mock.calls[0][0]).toBe(`${API_URL}/api/bulk-moderate/case-notes/case%2F1`);
+      expect(mockFetch.mock.calls[0][1]).toMatchObject({ method: 'GET' });
     });
   });
 

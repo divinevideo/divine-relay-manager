@@ -23,6 +23,7 @@ const bulkModerate = vi.hoisted(() => vi.fn());
 const getBulkKindCounts = vi.hoisted(() => vi.fn());
 const getBulkJobNotes = vi.hoisted(() => vi.fn());
 const moderateMedia = vi.hoisted(() => vi.fn());
+const getAgeReviewBulkNotesJob = vi.hoisted(() => vi.fn());
 vi.mock('@/lib/adminApi', async (orig) => ({
   ...(await orig<typeof import('@/lib/adminApi')>()),
   deleteDecisions,
@@ -33,6 +34,7 @@ vi.mock('@/lib/adminApi', async (orig) => ({
   getBulkKindCounts,
   getBulkJobNotes,
   moderateMedia,
+  getAgeReviewBulkNotesJob,
 }));
 
 describe('useAdminApi', () => {
@@ -45,6 +47,14 @@ describe('useAdminApi', () => {
 
     // The account, too: dropped, the worker's account check never runs.
     expect(moderateMedia).toHaveBeenCalledWith(API_URL, 'f'.repeat(64), 'SAFE', 'r', 'QUARANTINE', 'a'.repeat(64));
+  });
+
+  it("forwards the case id to the case's kept-notes read", () => {
+    const { result } = renderHook(() => useAdminApi());
+
+    result.current.getAgeReviewBulkNotesJob('case-1');
+
+    expect(getAgeReviewBulkNotesJob).toHaveBeenCalledWith(API_URL, 'case-1');
   });
 
   // A dropped page cursor reads the first page of a job's notes forever.

@@ -1559,6 +1559,14 @@ export async function getBulkJobStatus(apiUrl: string, jobId: string): Promise<B
   return apiRequest<BulkJob>(apiUrl, `/api/bulk-moderate/status/${encodeURIComponent(jobId)}`, 'GET');
 }
 
+// The notes key of an age-review case's latest transition that kept bulk
+// results (#299), with its step (`state`) and when it was kept, or a null key.
+// Its notes are then read with getBulkJobNotes. A worker that predates kept
+// notes answers 404.
+export async function getAgeReviewBulkNotesJob(apiUrl: string, caseId: string): Promise<{ jobId: string | null; state?: string; keptAt?: string }> {
+  return apiRequest<{ jobId: string | null; state?: string; keptAt?: string }>(apiUrl, `/api/bulk-moderate/case-notes/${encodeURIComponent(caseId)}`, 'GET');
+}
+
 // One page of a finished job's notes for a person, or of an age-review
 // transition's notes and failure lines (#299), from `after` (a previous page's
 // `next`), or the first page. A worker that predates notes has
