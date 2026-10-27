@@ -60,9 +60,10 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
   // Keyed by pubkey so revealing one account's avatar never carries to the next
   const [avatarRevealedFor, setAvatarRevealedFor] = useState<string | null>(null);
   // The pane is reused across reports, so, as with the post media below, a
-  // reveal is forgotten whenever the pane moves, to another report or another
-  // account, where the avatar is hidden by default: coming back asks again.
-  // Done during render, so the avatar is never mounted for that report.
+  // reveal is forgotten when the pane moves to another account, or when the
+  // default changes, if the avatar is then hidden by default: coming back asks
+  // again. Another report on the same account, with the default unchanged,
+  // keeps it. Done during render, so the avatar is never mounted meanwhile.
   const [revealContext, setRevealContext] = useState({ hideMediaByDefault, pubkey });
   if (hideMediaByDefault !== revealContext.hideMediaByDefault || pubkey !== revealContext.pubkey) {
     setRevealContext({ hideMediaByDefault, pubkey });
