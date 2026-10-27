@@ -974,10 +974,11 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
         )}
 
         {/* Media Preview - collapsed by default until the event's reports are
-            known to hold nothing high-priority */}
+            known to hold nothing high-priority. null while they are not known,
+            so a sensitive verdict still re-hides media revealed meanwhile. */}
         <MediaPreview
           event={event}
-          showByDefault={hasHighPriorityReports === false}
+          showByDefault={hasHighPriorityReports === undefined ? null : !hasHighPriorityReports}
           maxItems={4}
         />
 

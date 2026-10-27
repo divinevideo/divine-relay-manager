@@ -68,8 +68,10 @@ vi.mock('@/components/SceneClassification', () => ({ SceneClassification: () => 
 vi.mock('@/components/TranscriptAnalysis', () => ({ TranscriptAnalysis: () => null }));
 vi.mock('@/components/ReporterCard', () => ({ ReporterList: () => null }));
 // Stand-in that exposes showByDefault, so no media is ever loaded or fetched.
+// 'null' is hidden because the reports are not known yet; 'false' is hidden
+// because they are sensitive.
 vi.mock('@/components/MediaPreview', () => ({
-  MediaPreview: ({ showByDefault }: { showByDefault?: boolean }) => (
+  MediaPreview: ({ showByDefault }: { showByDefault?: boolean | null }) => (
     <div data-testid="media" data-show={String(showByDefault)} />
   ),
 }));
@@ -161,7 +163,7 @@ describe('EventDetail media before its reports are known', () => {
     renderDetail();
     // Checked straight after the first commit, not in waitFor: a browser starts
     // loading whatever media that commit mounts.
-    expect(screen.getByTestId('media').dataset.show).toBe('false');
+    expect(screen.getByTestId('media').dataset.show).toBe('null');
   });
 
   it('keeps media hidden when every reports read times out with nothing', async () => {
@@ -173,7 +175,7 @@ describe('EventDetail media before its reports are known', () => {
     await letReadsTimeOut();
 
     expect(queryClient.isFetching()).toBe(0);
-    expect(screen.getByTestId('media').dataset.show).toBe('false');
+    expect(screen.getByTestId('media').dataset.show).toBe('null');
   });
 
   it('lists what a timed-out read found, and keeps media hidden', async () => {
@@ -187,7 +189,7 @@ describe('EventDetail media before its reports are known', () => {
     await letReadsTimeOut();
 
     expect(screen.getByText('1 Related Report')).toBeInTheDocument();
-    expect(screen.getByTestId('media').dataset.show).toBe('false');
+    expect(screen.getByTestId('media').dataset.show).toBe('null');
   });
 
   it('shows media once every read has finished and found only spam', async () => {

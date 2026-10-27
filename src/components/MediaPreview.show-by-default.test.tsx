@@ -130,6 +130,27 @@ describe('InlineMediaPreview showByDefault', () => {
   });
 });
 
+// null: the reports that decide the default are not known yet.
+describe('MediaPreview while its default is not known yet', () => {
+  it('never creates a media element on the first render', () => {
+    expect(mediaElementsCreatedBy(<MediaPreview content={CONTENT} tags={[]} showByDefault={null} />)).toEqual([]);
+  });
+
+  it('forgets a Show once the default turns out sensitive', () => {
+    const { container, rerender } = render(<MediaPreview content={CONTENT} tags={[]} showByDefault={null} />);
+    fireEvent.click(screen.getByRole('button', { name: /show/i }));
+    expect(hasImg(container)).toBe(true);
+    rerender(<MediaPreview content={CONTENT} tags={[]} showByDefault={false} />);
+    expect(hasImg(container)).toBe(false);
+  });
+
+  it('leaves the media as it was when a known default goes back to not known', () => {
+    const { container, rerender } = render(<MediaPreview content={CONTENT} tags={[]} showByDefault={true} />);
+    rerender(<MediaPreview content={CONTENT} tags={[]} showByDefault={null} />);
+    expect(hasImg(container)).toBe(true);
+  });
+});
+
 describe('MediaPreview moving to another event', () => {
   it("never mounts the next event's media after the moderator showed the last one", () => {
     const { container, rerender } = render(<MediaPreview event={EVENT_A} showByDefault={false} />);
