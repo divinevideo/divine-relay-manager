@@ -243,12 +243,16 @@ describe('UserProfileCard relay-profile badge', () => {
   it('says the profile is on the relay when Funnelcake returned one', () => {
     render(<UserProfileCard pubkey={PUBKEY} stats={stats([])} profile={{ name: 'synthetic' }} isFunnelcakeUser={true} />);
     expect(screen.getByText('Profile on relay')).toBeInTheDocument();
+    // Neutral, so neither state reads as a trust signal (green for good, a colour for other).
+    expect(screen.getByText('Profile on relay').className).not.toMatch(/green|purple/);
     expect(screen.queryByText('Divine')).not.toBeInTheDocument();
   });
 
   it('says no relay profile was found when Funnelcake returned none', () => {
     render(<UserProfileCard pubkey={PUBKEY} stats={stats([])} profile={{ name: 'synthetic' }} isFunnelcakeUser={false} />);
     expect(screen.getByText('No relay profile found')).toBeInTheDocument();
+    // Neutral, so neither state reads as a trust signal (green for good, a colour for other).
+    expect(screen.getByText('No relay profile found').className).not.toMatch(/green|purple/);
     expect(screen.queryByText('Nostr')).not.toBeInTheDocument();
   });
 

@@ -2,6 +2,7 @@
 // ABOUTME: Self-declared and optional, so it is shown as what the report says, never as identity.
 
 import type { NostrEvent } from '@nostrify/nostrify';
+import { isolate } from '@/lib/bidi';
 
 const NO_APP_NAMED = 'No app named';
 
@@ -21,8 +22,10 @@ export function getReportClientName(event: NostrEvent): string | undefined {
   return name || undefined;
 }
 
-/** One line for one report, or for every report in a queue group. */
-export function describeReportClients(events: NostrEvent[]): string {
+export const NO_APP_NAMED_LABEL = NO_APP_NAMED;
+
+/** Each named app once, in the order first seen, and how many reports name none. */
+export function summarizeReportClients(events: NostrEvent[]): { names: string[]; unnamed: number } {
   const names: string[] = [];
   let unnamed = 0;
   for (const event of events) {
@@ -30,8 +33,26 @@ export function describeReportClients(events: NostrEvent[]): string {
     if (!name) unnamed++;
     else if (!names.includes(name)) names.push(name);
   }
+  return { names, unnamed };
+}
 
+/** The trailing count for reports that name no app, or '' when every report names one. */
+export function unnamedSuffix(unnamed: number): string {
+  return unnamed > 0 ? ` · ${unnamed} with no app named` : '';
+}
+
+/**
+ * One line for one report, or for every report in a queue group.
+ *
+ * `isolateNames` wraps each name in Unicode first-strong-isolate marks
+ * (U+2068 ... U+2069), after pairing the name's own isolate controls, so
+ * direction controls inside a self-declared name can't reorder the rest of
+ * the line. It is for plain-text uses such as a hover
+ * title; rendered text isolates with <bdi> instead.
+ */
+export function describeReportClients(events: NostrEvent[], { isolateNames = false } = {}): string {
+  const { names, unnamed } = summarizeReportClients(events);
   if (names.length === 0) return NO_APP_NAMED;
-  const named = `Filed via ${names.join(', ')}`;
-  return unnamed > 0 ? `${named} · ${unnamed} with no app named` : named;
+  const shown = isolateNames ? names.map(isolate) : names;
+  return `Filed via ${shown.join(', ')}${unnamedSuffix(unnamed)}`;
 }

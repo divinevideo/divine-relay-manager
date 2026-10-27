@@ -74,4 +74,11 @@ describe('describeReportClients', () => {
   it('says no app is named when none of the reports name one', () => {
     expect(describeReportClients([report([]), report([['client']])])).toBe('No app named');
   });
+
+  // For plain-text uses such as a hover title, where a <bdi> element can't go.
+  it('wraps each app name in a Unicode isolate when asked', () => {
+    const reports = [report([['client', 'Example App']]), report([['client', 'Other App']]), report([])];
+    expect(describeReportClients(reports, { isolateNames: true }))
+      .toBe('Filed via \u2068Example App\u2069, \u2068Other App\u2069 · 1 with no app named');
+  });
 });

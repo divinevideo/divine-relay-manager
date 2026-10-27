@@ -755,19 +755,16 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                 </Badge>
               )}
             </div>
-            <div className="flex flex-col items-end gap-0.5 min-w-0 text-right">
-              <span className="text-xs text-muted-foreground">
-                Reported: {new Date(report.created_at * 1000).toLocaleString(undefined, {
-                  year: 'numeric',
-                  month: 'short',
-                  day: 'numeric',
-                  hour: 'numeric',
-                  minute: '2-digit',
-                  timeZoneName: 'short'
-                })}
-              </span>
-              <ReportClientText reports={[report]} />
-            </div>
+            <span className="text-xs text-muted-foreground">
+              Reported: {new Date(report.created_at * 1000).toLocaleString(undefined, {
+                year: 'numeric',
+                month: 'short',
+                day: 'numeric',
+                hour: 'numeric',
+                minute: '2-digit',
+                timeZoneName: 'short'
+              })}
+            </span>
           </div>
 
           {/* Linked Zendesk ticket(s), when the report has a valid lookup target. */}
@@ -805,8 +802,10 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                       </div>
                       {/* Report details */}
                       <div className="flex items-center gap-2 mb-1 min-w-0">
-                        <Badge variant="destructive" className="text-xs">{catLabel}</Badge>
-                        <span className="text-xs text-muted-foreground">
+                        {/* The app name is reporter-set and can be long; it truncates
+                            while the badge and date keep their size. */}
+                        <Badge variant="destructive" className="text-xs shrink-0">{catLabel}</Badge>
+                        <span className="text-xs text-muted-foreground shrink-0">
                           {new Date(r.created_at * 1000).toLocaleDateString()}
                         </span>
                         <ReportClientText reports={[r]} />
@@ -824,7 +823,9 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                 )}
               </CardContent>
             </Card>
-          ) : report.content ? (
+          ) : (
+            // Shown even without a reason, so a report with no group list (no
+            // target, or its group filtered out) still says which app it names.
             <Card className="border-red-200 bg-red-50/50 dark:bg-red-950/20">
               <CardHeader className="py-3">
                 <CardTitle className="text-sm flex items-center gap-2 text-red-700 dark:text-red-400">
@@ -841,11 +842,16 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                       navigate(`/events?pubkey=${pubkey}`);
                     }}
                   />
+                  <ReportClientText reports={[report]} />
                 </div>
-                <p className="text-sm">{report.content}</p>
+                {report.content ? (
+                  <p className="text-sm">{report.content}</p>
+                ) : (
+                  <p className="text-sm text-muted-foreground italic">No reason provided</p>
+                )}
               </CardContent>
             </Card>
-          ) : null}
+          )}
 
           {/* Decision History - show if target already has decisions */}
           {decisionLog.hasDecisions && (

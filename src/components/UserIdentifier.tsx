@@ -16,6 +16,7 @@ import {
 import { useAuthor } from "@/hooks/useAuthor";
 import { cn } from "@/lib/utils";
 import { getProfileUrl } from "@/lib/constants";
+import { ClaimedNip05 } from "@/components/ClaimedNip05";
 
 interface UserIdentifierProps {
   pubkey: string;
@@ -149,9 +150,7 @@ export function UserIdentifier({
               {displayName && (
                 <p className="font-medium">{displayName}</p>
               )}
-              {nip05 && showNip05 && (
-                <p className="text-xs text-muted-foreground">{nip05}</p>
-              )}
+              {showNip05 && <ClaimedNip05 nip05={nip05} className="text-xs" wrap hoverNote={false} />}
               <p className="text-xs font-mono break-all">{npub}</p>
               {(linkToProfile || copyOnClick) && (
                 <p className="text-xs text-muted-foreground">
@@ -207,9 +206,7 @@ export function UserIdentifier({
           ) : (
             nameElement
           )}
-          {nip05 && showNip05 && (
-            <p className="text-xs text-muted-foreground truncate">{nip05}</p>
-          )}
+          {showNip05 && <ClaimedNip05 nip05={nip05} className="text-xs" />}
           <div className="flex items-center gap-1 min-w-0">
             <code className="text-xs font-mono text-muted-foreground truncate min-w-0">
               {displayNpub}
@@ -254,17 +251,13 @@ export function UserIdentifier({
               ) : (
                 <code className="text-xs font-mono">{displayNpub}</code>
               )}
-              {nip05 && showNip05 && !displayName && (
-                <span className="text-xs text-muted-foreground">({nip05})</span>
-              )}
+              {showNip05 && !displayName && <ClaimedNip05 nip05={nip05} className="text-xs" hoverNote={false} />}
             </span>
           </TooltipTrigger>
           <TooltipContent side="top" className="max-w-xs">
             <div className="space-y-1">
               {displayName && <p className="font-medium">{displayName}</p>}
-              {nip05 && showNip05 && (
-                <p className="text-xs text-muted-foreground">{nip05}</p>
-              )}
+              {showNip05 && <ClaimedNip05 nip05={nip05} className="text-xs" wrap hoverNote={false} />}
               <p className="text-xs font-mono break-all">{npub}</p>
             </div>
           </TooltipContent>

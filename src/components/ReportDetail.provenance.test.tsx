@@ -1,5 +1,5 @@
 // ABOUTME: Pins where report detail names the app a report says it was filed from:
-// ABOUTME: the header for the selected report, and each entry under "Why This Was Reported" (#132).
+// ABOUTME: each entry under "Why This Was Reported", and not the header (#132).
 
 import { render, screen } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -7,6 +7,7 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import { describe, expect, it, vi } from 'vitest';
 import { ReportDetail } from './ReportDetail';
 import type { NostrEvent } from '@nostrify/nostrify';
+import { appLine } from '@/test/appLine';
 
 const TARGET_EVENT = 'c'.repeat(64);
 const REPORTED_PUBKEY = 'd'.repeat(64);
@@ -122,11 +123,13 @@ function renderDetail(allReportsForTarget: NostrEvent[]) {
 }
 
 describe('ReportDetail reporting app', () => {
-  it("names the selected report's app in the header beside the report time", () => {
+  // The header shows only the selected (latest) report, so an app line there read
+  // as if it covered the whole group. Each entry names its own app instead.
+  it('leaves the app out of the header and names it once, on its entry', () => {
     renderDetail([REPORT, OTHER_REPORT]);
     const header = screen.getByText(/^Reported:/).parentElement!;
-    expect(header).toHaveTextContent('Filed via Header App');
-    expect(header).not.toHaveTextContent('Row App');
+    expect(header).not.toHaveTextContent('Filed via');
+    expect(screen.getAllByText(appLine('Filed via Header App'))).toHaveLength(1);
   });
 
   it('names each report\'s app on its entry under "Why This Was Reported"', () => {
@@ -134,6 +137,31 @@ describe('ReportDetail reporting app', () => {
     const reasons = screen.getByText(/^Why This Was Reported/).closest('.border-red-200')!;
     expect(reasons).toHaveTextContent('Filed via Header App');
     expect(reasons).toHaveTextContent('Filed via Row App');
+  });
+
+  // A report with no target, or one whose group a filter has hidden, reaches the
+  // pane without a group list. Its app must still show, with or without a reason.
+  it('names the app on the single-report card when there is no group list', () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <TooltipProvider>
+          <ReportDetail report={{ ...REPORT, content: '' }} allReportsForTarget={undefined} />
+        </TooltipProvider>
+      </QueryClientProvider>,
+    );
+    expect(screen.getByText(appLine('Filed via Header App'))).toBeInTheDocument();
+    expect(screen.getByText('No reason provided')).toBeInTheDocument();
+  });
+
+  // Any reporter can set a long app name; it truncates, and the category badge
+  // and date beside it keep their size instead of wrapping.
+  it('keeps the category badge and date from shrinking beside a long app name', () => {
+    renderDetail([REPORT, OTHER_REPORT]);
+    const line = screen.getByText(appLine('Filed via Row App')).parentElement!;
+    const [badge, date] = Array.from(line.children);
+    expect(badge.className).toContain('shrink-0');
+    expect(date.className).toContain('shrink-0');
   });
 
   it('says no app is named for a report without a client tag', () => {

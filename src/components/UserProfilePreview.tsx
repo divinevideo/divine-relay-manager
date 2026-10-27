@@ -12,6 +12,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { User, Bot, Calendar, MessageSquare, AlertTriangle, Globe, ExternalLink, Video } from "lucide-react";
 import { nip19 } from "nostr-tools";
 import { RELAY_PROFILE_BADGE, getProfileUrl, getPublicEventUrl } from "@/lib/constants";
+import { ClaimedNip05 } from "@/components/ClaimedNip05";
 
 interface UserProfilePreviewProps {
   pubkey: string;
@@ -84,11 +85,11 @@ export function UserProfilePreview({ pubkey, className }: UserProfilePreviewProp
               </a>
               {isFunnelcakeUser === true ? (
                 <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80" title={RELAY_PROFILE_BADGE.present.title}>
-                  <Badge variant="outline" className="text-xs text-green-600 border-green-300 bg-green-50">{RELAY_PROFILE_BADGE.present.label}</Badge>
+                  <Badge variant="outline" className="text-xs text-muted-foreground">{RELAY_PROFILE_BADGE.present.label}</Badge>
                 </a>
               ) : isFunnelcakeUser === false && (
                 <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80" title={RELAY_PROFILE_BADGE.absent.title}>
-                  <Badge variant="outline" className="text-xs text-purple-600 border-purple-300 bg-purple-50 gap-1">
+                  <Badge variant="outline" className="text-xs text-muted-foreground gap-1">
                     <Globe className="h-3 w-3" />{RELAY_PROFILE_BADGE.absent.label}
                   </Badge>
                 </a>
@@ -100,9 +101,7 @@ export function UserProfilePreview({ pubkey, className }: UserProfilePreviewProp
                 </Badge>
               )}
             </div>
-            {metadata?.nip05 && (
-              <p className="text-sm text-muted-foreground truncate">{metadata.nip05}</p>
-            )}
+            <ClaimedNip05 nip05={metadata?.nip05} className="text-sm" />
             <p className="text-xs text-muted-foreground font-mono mt-1 truncate">
               {npub.slice(0, 20)}...
             </p>

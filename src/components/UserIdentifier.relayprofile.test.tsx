@@ -27,7 +27,7 @@ const LAYOUTS: [string, () => ReactElement][] = [
 ];
 
 function globe() {
-  return screen.queryByRole('img', { name: RELAY_PROFILE_BADGE.absent.title });
+  return screen.queryByRole('img', { name: RELAY_PROFILE_BADGE.absent.label });
 }
 
 beforeEach(() => {

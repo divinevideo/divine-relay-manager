@@ -261,7 +261,7 @@ export function ReporterInline({ pubkey, onViewProfile }: ReporterInlineProps) {
   // NPool.query answers a failed or timed-out read with partial results, which
   // would print as a smaller count than the reporter really has.
   const reportCount = useQuery({
-    // Env key (apiUrl): singleton QueryClient + per-env NPool — without it a
+    // Env key (apiUrl): singleton QueryClient + per-env NPool. Without it a
     // count read from one environment's relay is shown in another
     queryKey: ['reporter-count', config.apiUrl, pubkey],
     queryFn: async ({ signal }) => {
@@ -320,20 +320,22 @@ export function ReporterInline({ pubkey, onViewProfile }: ReporterInlineProps) {
       {!reportCount.isPending && (
         <span className="text-xs text-muted-foreground flex items-center gap-1" title="Reports by this account stored on this relay">
           <Flag className="h-3 w-3" />
-          {reportCount.isError
-            ? 'report count unavailable'
-            : reportsFiledLabel(reportCount.data, REPORTER_COUNT_LIMIT)}
+          {/* A count read once stays true as of that read, so a later failed
+              refresh keeps it; "unavailable" is only for a count never read. */}
+          {reportCount.data !== undefined
+            ? reportsFiledLabel(reportCount.data, REPORTER_COUNT_LIMIT)
+            : 'report count unavailable'}
         </span>
       )}
       {isFunnelcakeUser === true ? (
         <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80" title={RELAY_PROFILE_BADGE.present.title}>
-          <Badge variant="outline" className="text-xs text-green-600 border-green-300 bg-green-50 gap-1">
+          <Badge variant="outline" className="text-xs text-muted-foreground gap-1">
             {RELAY_PROFILE_BADGE.present.label}
           </Badge>
         </a>
       ) : isFunnelcakeUser === false && (
         <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80" title={RELAY_PROFILE_BADGE.absent.title}>
-          <Badge variant="outline" className="text-xs text-purple-600 border-purple-300 bg-purple-50 gap-1">
+          <Badge variant="outline" className="text-xs text-muted-foreground gap-1">
             <Globe className="h-3 w-3" />
             {RELAY_PROFILE_BADGE.absent.label}
           </Badge>

@@ -6,6 +6,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import TestApp from '@/test/TestApp';
 import { Reports } from './Reports';
+import { appLine } from '@/test/appLine';
 
 vi.mock('@/components/ReportDetail', () => ({ ReportDetail: () => null }));
 
@@ -62,7 +63,7 @@ function renderQueue() {
 describe('Reports queue reporting-app line', () => {
   it('lists each named app once on a group card and counts the reports that name none', async () => {
     renderQueue();
-    expect(await screen.findByText('Filed via App A, App B · 1 with no app named')).toBeInTheDocument();
+    expect(await screen.findByText(appLine('Filed via App A, App B · 1 with no app named'))).toBeInTheDocument();
   });
 
   it("names each report's own app on its individual card", async () => {
@@ -71,8 +72,8 @@ describe('Reports queue reporting-app line', () => {
     await screen.findByText(/4 reports$/);
     await user.click(screen.getByRole('tab', { name: /^All/ }));
 
-    expect(await screen.findAllByText('Filed via App A')).toHaveLength(2);
-    expect(screen.getByText('Filed via App B')).toBeInTheDocument();
+    expect(await screen.findAllByText(appLine('Filed via App A'))).toHaveLength(2);
+    expect(screen.getByText(appLine('Filed via App B'))).toBeInTheDocument();
     expect(screen.getByText('No app named')).toBeInTheDocument();
   });
 });

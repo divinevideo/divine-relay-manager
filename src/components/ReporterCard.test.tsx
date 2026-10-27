@@ -2,7 +2,7 @@
 // ABOUTME: cards show category names, the same labels the reports list uses.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { RELAY_PROFILE_BADGE } from '@/lib/constants';
@@ -66,12 +66,16 @@ describe('ReporterInline relay-profile badge', () => {
     authorState.data = { metadata: { name: 'synthetic-reporter' }, isFunnelcakeUser: true };
     renderInline();
     expect(screen.getByText('Profile on relay')).toBeInTheDocument();
+    // Neutral, so neither state reads as a trust signal (green for good, a colour for other).
+    expect(screen.getByText('Profile on relay').className).not.toMatch(/green|purple/);
     expect(screen.queryByText('Divine')).not.toBeInTheDocument();
   });
 
   it('says no relay profile was found, not that the reporter is a Nostr user', () => {
     renderInline();
     expect(screen.getByText('No relay profile found')).toBeInTheDocument();
+    // Neutral, so neither state reads as a trust signal (green for good, a colour for other).
+    expect(screen.getByText('No relay profile found').className).not.toMatch(/green|purple/);
     expect(screen.queryByText('Nostr')).not.toBeInTheDocument();
   });
 
@@ -123,6 +127,34 @@ describe('ReporterInline report count', () => {
   });
 });
 
+describe('ReporterInline report count after a failed refresh', () => {
+  // A count that was read successfully stays true as of that read; one failed
+  // background refresh should not replace it with "unavailable".
+  it('keeps showing the last good count when a later refresh fails', async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    relayHas(4);
+    renderInline(client);
+    expect(await screen.findByText('4 reports filed')).toBeInTheDocument();
+
+    relay.query.mockResolvedValue([]);
+    relay.req.mockImplementation(async function* () {
+      yield ['CLOSED', 'sub', 'error: could not complete query'];
+    });
+    await act(async () => {
+      await client.refetchQueries({ queryKey: ['reporter-count'] });
+    });
+    // TanStack notifies observers on a later tick; let that render land before
+    // asserting what is (and is not) on screen.
+    await act(async () => {
+      await new Promise(resolve => setTimeout(resolve, 20));
+    });
+
+    expect(client.getQueryState(['reporter-count', appState.apiUrl, REPORTER])?.status).toBe('error');
+    expect(screen.getByText('4 reports filed')).toBeInTheDocument();
+    expect(screen.queryByText('report count unavailable')).not.toBeInTheDocument();
+  });
+});
+
 describe('ReporterInline report count cache', () => {
   // One QueryClient serves every environment, and each environment has its own
   // relay, so a cached count must not follow the moderator across a switch.
@@ -162,7 +194,7 @@ describe('ReporterInline nip05', () => {
 });
 
 describe('ReporterCard relay-profile globe', () => {
-  const globe = () => screen.queryByRole('img', { name: RELAY_PROFILE_BADGE.absent.title });
+  const globe = () => screen.queryByRole('img', { name: RELAY_PROFILE_BADGE.absent.label });
 
   describe.each([['full', false], ['compact', true]] as const)('%s layout', (_name, compact) => {
     it('shows no globe when the profile lookup produced no answer', () => {

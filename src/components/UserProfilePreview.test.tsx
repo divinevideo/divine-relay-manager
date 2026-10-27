@@ -37,6 +37,8 @@ describe('UserProfilePreview relay-profile badge', () => {
     authorState.result = { data: { metadata: { name: 'synthetic' }, isFunnelcakeUser: true }, isLoading: false };
     renderPreview();
     expect(screen.getByText('Profile on relay')).toBeInTheDocument();
+    // Neutral, so neither state reads as a trust signal (green for good, a colour for other).
+    expect(screen.getByText('Profile on relay').className).not.toMatch(/green|purple/);
     expect(screen.queryByText('Divine')).not.toBeInTheDocument();
   });
 
@@ -44,6 +46,8 @@ describe('UserProfilePreview relay-profile badge', () => {
     authorState.result = { data: { metadata: { name: 'synthetic' }, isFunnelcakeUser: false }, isLoading: false };
     renderPreview();
     expect(screen.getByText('No relay profile found')).toBeInTheDocument();
+    // Neutral, so neither state reads as a trust signal (green for good, a colour for other).
+    expect(screen.getByText('No relay profile found').className).not.toMatch(/green|purple/);
     expect(screen.queryByText('Nostr')).not.toBeInTheDocument();
   });
 
@@ -51,5 +55,13 @@ describe('UserProfilePreview relay-profile badge', () => {
     renderPreview();
     expect(screen.queryByText('Profile on relay')).not.toBeInTheDocument();
     expect(screen.queryByText('No relay profile found')).not.toBeInTheDocument();
+  });
+});
+
+describe('UserProfilePreview claimed nip05', () => {
+  it('marks it unverified', () => {
+    authorState.result = { data: { metadata: { name: 'synthetic', nip05: 'synthetic@example.test' }, isFunnelcakeUser: false }, isLoading: false };
+    renderPreview();
+    expect(screen.getByText('synthetic@example.test').parentElement).toHaveTextContent('(unverified)');
   });
 });

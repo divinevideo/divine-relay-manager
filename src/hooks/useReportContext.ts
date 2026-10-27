@@ -60,6 +60,9 @@ export function useReportContext(report: NostrEvent | null) {
   const userStats = useUserStats(targetPubkey || undefined);
 
   // Get reporter's profile
+  // Nothing reads `reporter` today (ReporterCard looks the reporter up itself),
+  // but it still gates isLoading, so the pane waits for the reporter's profile
+  // as it always has. Dropping it would change that loading behaviour.
   const reporter = useAuthor(reporterPubkey);
 
   const isLoading = thread.isLoading || reportedUser.isLoading ||

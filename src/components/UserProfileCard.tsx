@@ -175,11 +175,11 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
               </a>
               {isFunnelcakeUser === true ? (
                 <a href={profileUrl} target="_blank" rel="noopener noreferrer" title={RELAY_PROFILE_BADGE.present.title}>
-                  <Badge variant="outline" className="text-xs text-green-600 border-green-300 bg-green-50 shrink-0">{RELAY_PROFILE_BADGE.present.label}</Badge>
+                  <Badge variant="outline" className="text-xs text-muted-foreground shrink-0">{RELAY_PROFILE_BADGE.present.label}</Badge>
                 </a>
               ) : isFunnelcakeUser === false && (
                 <a href={profileUrl} target="_blank" rel="noopener noreferrer" title={RELAY_PROFILE_BADGE.absent.title}>
-                  <Badge variant="outline" className="text-xs text-purple-600 border-purple-300 bg-purple-50 gap-1 shrink-0">
+                  <Badge variant="outline" className="text-xs text-muted-foreground gap-1 shrink-0">
                     <Globe className="h-3 w-3" />{RELAY_PROFILE_BADGE.absent.label}
                   </Badge>
                 </a>

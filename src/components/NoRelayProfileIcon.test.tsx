@@ -7,9 +7,16 @@ import { RELAY_PROFILE_BADGE } from '@/lib/constants';
 import { NoRelayProfileIcon } from './NoRelayProfileIcon';
 
 describe('NoRelayProfileIcon', () => {
-  it('carries the absent-profile wording as its accessible name and hover title', () => {
+  it('is announced by the short badge label, with the full explanation on hover', () => {
     render(<NoRelayProfileIcon />);
-    const icon = screen.getByRole('img', { name: RELAY_PROFILE_BADGE.absent.title });
+    const icon = screen.getByRole('img', { name: RELAY_PROFILE_BADGE.absent.label });
     expect(icon.querySelector('title')).toHaveTextContent(RELAY_PROFILE_BADGE.absent.title);
+  });
+
+  it('is neutral grey, like the badges, so it reads as information, not a judgment', () => {
+    render(<NoRelayProfileIcon />);
+    const icon = screen.getByRole('img', { name: RELAY_PROFILE_BADGE.absent.label });
+    expect(icon.getAttribute('class')).toContain('text-muted-foreground');
+    expect(icon.getAttribute('class')).not.toMatch(/purple|green/);
   });
 });
