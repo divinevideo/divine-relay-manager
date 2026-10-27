@@ -968,9 +968,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // from resolved history.
   const feedConsolidated = useMemo(() => (reports ? consolidateReports(reports) : []), [reports]);
   // Targets the needs-attention feed itself holds, apart from deep-linked
-  // reports merged into `reports`: the feed carries every report on them.
+  // reports merged into `reports`, and whose reports the feed read in full: it
+  // carries every report on them only when it did not stop early. A feed that
+  // did (the red "stopped reading" banner) is missing reports older than its
+  // cut-off for every target in it, so none of them counts as fully read.
   const needsAttentionTargetKeys = useMemo(
-    () => new Set(consolidateReports(queueFeed?.events ?? []).map(c => reportTargetKey(c.target))),
+    () => (queueFeed?.truncated
+      ? new Set<string>()
+      : new Set(consolidateReports(queueFeed?.events ?? []).map(c => reportTargetKey(c.target)))),
     [queueFeed],
   );
   const feedTargetKeys = useMemo(
@@ -1510,7 +1515,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                 relayUrl,
                 target: latestTarget,
                 truncated,
-                exact: latestTarget.type === target.type && latestTarget.value === target.value,
+                // Compared in lowercase only here: a deep link may be written in
+                // uppercase hex, and the worker's filter lowercases it too. String():
+                // a malformed report's tag can have no value.
+                exact: latestTarget.type === target.type
+                  && String(latestTarget.value).toLowerCase() === String(target.value).toLowerCase(),
               }
             : null);
           setDeepLinkStatus('found');

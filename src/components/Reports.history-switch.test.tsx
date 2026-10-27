@@ -74,19 +74,21 @@ interface Stub {
   targetedTruncated?: boolean;
   // The feed read, when it should not answer with `feed`.
   feedReply?: () => Response | Promise<Response>;
+  // Whether the feed stopped before reading every report, as the worker says.
+  feedTruncated?: boolean;
 }
 
-function stubWorker({ feed = [SPAM_REPORT], history = [CSAM_REPORT], labels, targeted = {}, targetedTruncated = false, feedReply }: Stub) {
+function stubWorker({ feed = [SPAM_REPORT], history = [CSAM_REPORT], labels, targeted = {}, targetedTruncated = false, feedReply, feedTruncated = false }: Stub) {
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input instanceof Request ? input.url : input);
     if (url.includes('/api/reports/resolved')) {
       return jsonResponse(resolvedPage(history, { nextCursor: null, done: true }));
     }
     if (url.includes('/api/reports?needs_attention=1')) {
-      return feedReply ? feedReply() : jsonResponse({ success: true, events: feed, truncated: false });
+      return feedReply ? feedReply() : jsonResponse({ success: true, events: feed, truncated: feedTruncated, oldest_covered: feedTruncated ? 1751000000 : null });
     }
     if (url.includes('/api/reports?')) {
-      const hit = Object.keys(targeted).find(hex => url.includes(hex));
+      const hit = Object.keys(targeted).find(hex => url.toLowerCase().includes(hex));
       return jsonResponse({ success: true, events: hit ? targeted[hit] : [], truncated: targetedTruncated });
     }
     if (url.includes('/api/resolution-label-targets')) {
@@ -242,6 +244,37 @@ describe('what the pane knows of the selected target', () => {
 
     await screen.findByTestId('detail');
     await waitFor(() => expect(incomplete()).toBe('true'));
+  });
+
+  it('calls a feed target partial when the feed stopped early: older reports on it may be missing', async () => {
+    stubWorker({ feedTruncated: true });
+    const user = userEvent.setup();
+    renderAt('/reports');
+    await user.click(await screen.findByText(NOTE_SPAM));
+
+    await screen.findByTestId('detail');
+    expect(incomplete()).toBe('true');
+  });
+
+  it('keeps a feed target complete when the feed read to its end (control)', async () => {
+    stubWorker({ feedTruncated: false });
+    const user = userEvent.setup();
+    renderAt('/reports');
+    await user.click(await screen.findByText(NOTE_SPAM));
+
+    await screen.findByTestId('detail');
+    expect(incomplete()).toBe('false');
+  });
+
+  it('keeps a complete targeted read complete for a deep link written in uppercase hex', async () => {
+    const MIXED_EVENT = 'abcdef'.repeat(10) + 'abcd';
+    const MIXED_REPORT = report('e'.repeat(64), 1751000070, [['e', MIXED_EVENT, 'spam'], ['p', '9'.repeat(64), 'spam']]);
+    stubWorker({ feed: [], history: [], targeted: { [MIXED_EVENT]: [MIXED_REPORT] } });
+    renderAt(`/reports?event=${MIXED_EVENT.toUpperCase()}`);
+
+    await screen.findByTestId('detail');
+    await waitFor(() => expect(window.location.pathname).toBe(`/reports/${MIXED_REPORT.id}`));
+    expect(incomplete()).toBe('false');
   });
 
   it('keeps a feed target complete in the history view too', async () => {
