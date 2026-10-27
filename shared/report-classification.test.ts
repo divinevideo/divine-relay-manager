@@ -61,12 +61,20 @@ describe('classifyReport', () => {
     'is_child_porn',
     'x_child_sexual_abuse',
     'suspected_child_porn_ring',
+    'suspected_csam',
+    'csam_report',
+    'is_csam_content',
+    'csam-report',
+    'type=csam',
   ])('routes free text %j', content => {
     expect(classifyReport({ tags: [['e', E, 'illegal']], content }).csamSignal).toBe(true);
   });
 
   it.each([
     'csamuel',
+    'xcsam',
+    '1csam',
+    'csam2',
     'children playing',
     'child safety',
     'grandchildporn',
