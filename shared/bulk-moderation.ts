@@ -27,6 +27,34 @@ export interface BulkModerateResult {
   mediaProcessed: number;
   mediaSkipped: number;
   failures: string[];
+  // Files left for a person to look at (see BulkNote). They do not make the
+  // run a failure. Every one, never capped.
+  notes: BulkNote[];
+}
+
+// A file a bulk action left for a person to look at (#299). Not a failure: the
+// action did what it should, and the file is named so a moderator can act on
+// it. Kept apart from `failures`, so it never reads as "finished with issues",
+// never fails age review's bulk leg, and never crowds a real failure out of the
+// stored list. Hashes and pubkeys are full lowercase hex.
+//   still-hidden: an owned video still hidden when Un-age-restrict All ended:
+//     one it did not choose (it chooses from funnelcake's list only, so
+//     another decision may have hidden it, #295), or one it could not change
+//     (also listed as a failure). Check why, then restore it by hand.
+//   not-owned: another account owns this file, so the action left it unchanged.
+export type BulkNote =
+  | { kind: 'still-hidden'; sha256: string }
+  | { kind: 'not-owned'; sha256: string; owner: string };
+
+// The most notes one invocation writes (see storeBulkNotes in
+// worker/src/bulk-notes.ts for the D1 limits behind it).
+export const MAX_NOTES_PER_WRITE = 5_000;
+
+// One page of a queued job's notes, oldest first. `next` is the cursor for the
+// following page, or null after the last one.
+export interface BulkNotesPage {
+  notes: BulkNote[];
+  next: string | null;
 }
 
 // Async job model: /api/bulk-moderate enqueues a job and returns a jobId; a queue
@@ -48,8 +76,8 @@ export type BulkJobPhase = 'events' | 'media';
 //     delete-all only, 'media' (moderate each video blob). The other actions
 //     are media-only.
 //   - cursor: opaque continuation for the current phase -- funnelcake v2
-//     next_cursor for media, or the relay `until` timestamp (stringified) for
-//     events. Absent = start of the phase.
+//     next_cursor for media's funnelcake walk, or the relay `until` timestamp
+//     (stringified) for events. Absent = start of the phase.
 //   - mediaPage: 0-based page index for the media phase, incremented each chunk.
 //     Bounds the media phase on PAGES FETCHED (not items moderated), so a cursor
 //     that advances forever while moderation fails still terminates. Absent = 0.
@@ -101,6 +129,22 @@ interface BulkJobMessageFields {
   // key and no report, which is what delete-all has always written.
   moderatorPubkey?: string;
   reportId?: string;
+  // Media phase: which list this chunk walks (#299). Blossom's per-uploader
+  // list first ('blossom', by hash, after `mediaAfter`), then funnelcake's
+  // video list ('funnelcake', from `cursor`) for any file the uploader list
+  // missed. Absent means start the media walk from the beginning. That
+  // includes a media message from a worker that predates these fields: it
+  // carries only funnelcake's `cursor`, which is ignored. A worker that
+  // predates these fields ignores them and walks funnelcake's list.
+  // un-age-restrict-all walks only funnelcake's list, from `cursor`, whatever
+  // these say.
+  mediaWalk?: 'blossom' | 'funnelcake';
+  mediaAfter?: string;
+  // Set on the funnelcake walk once a blossom-walk read of the uploader list
+  // failed. The blossom walk then did not handle what the list shows, so the
+  // funnelcake walk must not exclude it. Absent means the blossom walk ran to
+  // its end. A worker that predates it never excludes anyway.
+  mediaFallback?: boolean;
 }
 
 export interface BulkJob {
@@ -114,6 +158,11 @@ export interface BulkJob {
   // Optional because a worker older than #291 does not send it.
   mediaSkipped?: number;
   failures: string[];
+  // How many notes the job stored (see BulkNote), counted by the status route;
+  // the notes themselves are read from /api/bulk-moderate/notes/:jobId. Sent
+  // only once the job is done or failed, and only by a worker that stores
+  // notes (#299).
+  noteCount?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -142,7 +191,9 @@ export const KIND_COUNTS_REQUEST_TIMEOUT_MS = 30_000;
 //   event:<event id>:<error>       one event that could not be deleted
 //   media:<sha256>:<error>         one file that could not be changed, or was
 //                                  left unchanged because its status could not
-//                                  be read or its two sources disagree (#291)
+//                                  be read or its two sources disagree (#291).
+//                                  Files left for a person are notes, not
+//                                  failures (see BulkNote)
 //   enumeration:<pubkey>:<warning> something about listing the account
 //   job:<reason>                   why the job stopped
 //   +<N> more                      N more failures past the stored cap
@@ -177,6 +228,17 @@ export function mediaFailure(sha256: string, error: string): string {
 
 export function enumerationWarning(pubkey: string, warning: string): string {
   return `enumeration:${pubkey}:${warning}`;
+}
+
+// A queued job's chunk keeps at most MAX_NOTES_PER_WRITE notes; this counts
+// the rest, which running the same action again lists.
+export function notesOverflowWarning(pubkey: string, count: number): string {
+  return enumerationWarning(pubkey, `${count} more note(s) than one run can store; act on these, then run it again to list the rest`);
+}
+
+// A queued job's chunk whose notes D1 would not store.
+export function notesNotStoredWarning(pubkey: string, count: number, error: string): string {
+  return enumerationWarning(pubkey, `could not store ${count} note(s) for a person: ${error}`);
 }
 
 export function jobFailure(reason: string): string {

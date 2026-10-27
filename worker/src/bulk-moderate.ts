@@ -1,6 +1,11 @@
 import { getAdminPubkey, banEvent, type Nip86Env } from './nip86';
 import { syncZendeskAfterAction, type ZendeskSyncEnv } from './zendesk-sync';
 import {
+  listAccountVideos, LOWER_HEX_64, readBlossomSecret, readBlossomStatus, SHA256_HEX,
+  STATUS_READ_TIMEOUT_MS, type AccountVideo, type BlossomBlob, type MediaLevel, type MediaStatus,
+} from './media-server';
+import { ensureBulkNotesTable, storeBulkNotes } from './bulk-notes';
+import {
   VALID_BULK_ACTIONS,
   type BulkAction,
   type AccountBulkAction,
@@ -10,6 +15,8 @@ import {
   type BulkJobPhase,
   type BulkEnqueueResponse,
   type BulkKindCounts,
+  type BulkNote,
+  MAX_NOTES_PER_WRITE,
   bulkJobIdOf,
   bulkJobIdField,
   isVersionedKind,
@@ -20,6 +27,8 @@ import {
   isListingGapWarning,
   jobFailure,
   mediaFailure,
+  notesNotStoredWarning,
+  notesOverflowWarning,
   parseOverflowMarker,
   sameSecondGapWarning,
   unpaginatedGapWarning,
@@ -139,23 +148,9 @@ export const LOOSENS_AGE_REVIEW_HOLD: Record<BulkAction, boolean> = {
 // video list does not exclude blocked files: a media block does not reach
 // funnelcake today (its blocked-media sync job is not scheduled). So each blob's
 // current status is read before it is changed, and the change is made only when
-// it is allowed from that status.
-//
-// Strength of a blob's current state, as either status source reports it.
-type MediaLevel = 'open' | 'gated' | 'hidden' | 'blocked' | 'deleted';
-
-// blossom's BlobStatus, from GET /admin/api/blob/{sha256} (divine-blossom
-// blossom-core/src/types.rs). This is what viewers are actually served, and the
-// only place a status set in blossom's own admin UI shows up: that UI never
-// tells moderation-service.
-const BLOSSOM_LEVEL = new Map<string, MediaLevel>([
-  ['active', 'open'],
-  ['pending', 'open'],
-  ['age_restricted', 'gated'],
-  ['restricted', 'hidden'],
-  ['banned', 'blocked'],
-  ['deleted', 'deleted'],
-]);
+// it is allowed from that status. Each status source's states map to a
+// MediaLevel; blossom's map (BLOSSOM_LEVEL) is with its reads in
+// media-server.ts.
 
 // moderation-service's recorded decision, from GET /check-result/{sha256}
 // ('unknown' when it has none). Read too because blossom caches status for 5
@@ -259,22 +254,6 @@ function decideMediaChange(mediaAction: MediaAction, blossom: MediaLevel, modera
   return 'disagree';
 }
 
-const STATUS_READ_TIMEOUT_MS = 10000;
-
-interface MediaStatus { raw: string; level: MediaLevel }
-
-async function readBlossomStatus(sha256: string, env: BulkModerateEnv, secret: string): Promise<MediaStatus> {
-  const response = await fetch(`https://${env.CDN_DOMAIN || 'media.divine.video'}/admin/api/blob/${sha256}`, {
-    headers: { Authorization: `Bearer ${secret}` },
-    signal: AbortSignal.timeout(STATUS_READ_TIMEOUT_MS),
-  });
-  if (!response.ok) throw new Error(`blossom returned ${response.status}`);
-  const { status } = await response.json() as { status?: unknown };
-  const level = typeof status === 'string' ? BLOSSOM_LEVEL.get(status) : undefined;
-  if (!level) throw new Error(`blossom returned unrecognised status ${JSON.stringify(status)}`);
-  return { raw: status as string, level };
-}
-
 async function readModerationStatus(sha256: string, env: BulkModerateEnv): Promise<MediaStatus> {
   // The service binding when bound, like callModerateMedia (its host is
   // ignored). Without one, reads go to MODERATION_SERVICE_URL like
@@ -300,22 +279,47 @@ async function readModerationStatus(sha256: string, env: BulkModerateEnv): Promi
   return { raw: status as string, level };
 }
 
-// True to change the blob, false to leave it alone (see decideMediaChange).
-// Throws, leaving the blob unchanged and reported, when either status cannot be
-// read (an unreadable status is never treated as open) or the two disagree.
+// What to do with one blob (see decideMediaChange).
+//   change: `resend` when the record already shows the action's result, so the
+//     change only repeats one already made (decideMediaChange's "record got
+//     ahead of blossom").
+//   leave: `atResult` when blossom already serves what the action would leave.
+//   not-owned: another account owns it.
+type MediaVerdict =
+  | { kind: 'change'; resend: boolean }
+  | { kind: 'leave'; atResult: boolean }
+  | { kind: 'not-owned'; owner: string };
+
+// Throws, leaving the blob unchanged and reported, when its owner or either
+// status cannot be read (an unreadable status is never treated as open) or the
+// two statuses disagree.
 async function mayChangeMedia(
-  sha256: string, mediaAction: MediaAction, env: BulkModerateEnv, blossomSecret: string | null,
-): Promise<boolean> {
-  let blossom: MediaStatus;
+  sha256: string, mediaAction: MediaAction, env: BulkModerateEnv, blossomSecret: string | Error, pubkey: string,
+): Promise<MediaVerdict> {
+  const unreadable = (error: unknown) => new Error(`could not read current status, left unchanged: ${formatError(error)}`);
+  let blossom: BlossomBlob;
+  try {
+    if (blossomSecret instanceof Error) throw blossomSecret;
+    blossom = await readBlossomStatus(sha256, env, blossomSecret);
+  } catch (error) {
+    throw unreadable(error);
+  }
+  // Only the account's own files (#299). Both lists can name a file someone
+  // else uploaded first: blossom's uploader list includes re-uploads of
+  // another account's bytes, and the account's event can point at another
+  // account's file. Blossom keeps one copy per hash, so changing it would
+  // change it for its owner too (a DELETE removes it for everyone). Decided
+  // before the recorded decision is read, so another account's moderation
+  // record can never fail this account's run (an unreadable media-server
+  // status still fails it, whoever owns the file). Both sides are lowercase
+  // hex: readBlossomStatus lowercases the owner, and runBulkModeration and
+  // processBulkJob refuse any other pubkey.
+  if (blossom.owner !== pubkey) return { kind: 'not-owned', owner: blossom.owner };
   let moderation: MediaStatus;
   try {
-    if (!blossomSecret) throw new Error('BLOSSOM_WEBHOOK_SECRET not configured');
-    [blossom, moderation] = await Promise.all([
-      readBlossomStatus(sha256, env, blossomSecret),
-      readModerationStatus(sha256, env),
-    ]);
+    moderation = await readModerationStatus(sha256, env);
   } catch (error) {
-    throw new Error(`could not read current status, left unchanged: ${formatError(error)}`);
+    throw unreadable(error);
   }
   const decision = decideMediaChange(mediaAction, blossom.level, moderation.level);
   if (decision === 'disagree') {
@@ -323,36 +327,174 @@ async function mayChangeMedia(
       `status sources disagree (blossom ${blossom.raw}, moderation-service ${moderation.raw}), left unchanged`,
     );
   }
-  return decision === 'change';
+  const result = RESULT_LEVEL[mediaAction];
+  return decision === 'change'
+    ? { kind: 'change', resend: moderation.level === result }
+    : { kind: 'leave', atResult: blossom.level === result };
 }
 
 // Per-item chunk helpers, shared by the synchronous runBulkModeration (age-review)
 // and the chunked queue consumer (processBulkJob).
 
+// Which pass over the files this is, for what it counts:
+//   walk: the first look at each file. Every file left alone is counted.
+//   after-blossom: the queued funnelcake walk after the blossom walk. A file
+//     already at the action's result is not counted again: the blossom walk
+//     changed it, or counted it. That includes a file it deleted, which has
+//     left the uploader list so the funnelcake walk cannot exclude it.
+//     Known limit: a file only funnelcake lists, and that was already at the
+//     result before the job, was never counted by the blossom walk, so it is
+//     not counted at all. The "left as they were" count can be lower than
+//     the worker's before #299, which counted it. Counts only; nothing is
+//     left unchanged.
+//     Two more count limits, both only after a media-server list read failed,
+//     which the job already reports as a failure line:
+//     - the first blossom chunk's read fails: the job goes straight to the
+//       funnelcake walk, without the exclusion, and that walk still counts as
+//       after-blossom, so a file already at the action's result before the
+//       job is counted by no pass;
+//     - a later read fails (a later blossom chunk's, or a funnelcake page's
+//       own exclusion read): the funnelcake walk revisits files the blossom
+//       walk already saw, so one it left alone that is not at the result
+//       (one already blocked, under Delete All) can be counted twice.
+//     Counts only here too: each revisited file is read again and left or
+//     changed as the blossom walk would have, and nothing is left unchanged.
+//   recheck: the end-of-walk check. It counts only files it changed for the
+//     first time, never a skip: anything else was counted on the walk, and
+//     blossom's cache can show a file this job already changed as unchanged.
+type MediaPass = 'walk' | 'after-blossom' | 'recheck';
+
+interface MediaOutcome {
+  processed: number;
+  skipped: number;
+  failures: string[];
+  notes: BulkNote[];
+}
+
 async function moderateMediaHashes(
-  env: BulkModerateEnv, hashes: string[], mediaAction: MediaAction, reason: string,
-): Promise<{ processed: number; skipped: number; failures: string[] }> {
+  env: BulkModerateEnv, pubkey: string, hashes: string[], mediaAction: MediaAction, reason: string,
+  pass: MediaPass = 'walk',
+): Promise<MediaOutcome> {
   let processed = 0;
   let skipped = 0;
   const failures: string[] = [];
-  const blossomSecret = typeof env.BLOSSOM_WEBHOOK_SECRET === 'string'
-    ? env.BLOSSOM_WEBHOOK_SECRET
-    : (await env.BLOSSOM_WEBHOOK_SECRET?.get()) ?? null;
+  const notes: BulkNote[] = [];
+  const blossomSecret = await readBlossomSecret(env);
   await runWithConcurrency(hashes, BULK_ACTION_CONCURRENCY, async (sha256) => {
     try {
-      // Left alone on purpose: not a failure, and not processed (processed
-      // means changed). Counted so the moderator sees it.
-      if (!(await mayChangeMedia(sha256, mediaAction, env, blossomSecret))) {
-        skipped++;
+      const verdict = await mayChangeMedia(sha256, mediaAction, env, blossomSecret, pubkey);
+      if (verdict.kind === 'not-owned') {
+        // A note, not a failure, and not counted: the count is shown as files
+        // left as they were because they were already blocked or deleted,
+        // which another account's file is not. The owner is the moderator's
+        // lead when an account posts files another key uploaded.
+        notes.push({ kind: 'not-owned', sha256, owner: verdict.owner });
+        return;
+      }
+      if (verdict.kind === 'leave') {
+        // Left alone on purpose: not a failure, and not processed (processed
+        // means changed). Counted so the moderator sees it.
+        if (pass === 'walk' || (pass === 'after-blossom' && !verdict.atResult)) skipped++;
         return;
       }
       await callModerateMedia(sha256, mediaAction, reason, env);
-      processed++;
+      if (pass !== 'recheck' || !verdict.resend) processed++;
     } catch (error) {
       failures.push(mediaFailure(sha256, formatError(error)));
     }
   });
-  return { processed, skipped, failures };
+  return { processed, skipped, failures, notes };
+}
+
+// The end-of-walk check (#299). Each walk reads the uploader list afresh and
+// only moves forward, so a file can be passed over: one uploaded behind the
+// walk's position, or one a read left out (blossom drops a row whose record
+// read errors and still answers 200). One more read, after every walk, finds
+// any owned video whose status the action may still change, and gives it one
+// more pass. One that is still unchanged after it has a failure line (a
+// change that fails, or statuses that disagree), so the job does not end
+// clean. The pass is one chunk at most; past that, the rest are counted in one
+// line, never changed unbounded in one invocation.
+async function recheckOwnedVideos(
+  env: BulkModerateEnv, pubkey: string, mediaAction: MediaAction, reason: string,
+): Promise<MediaOutcome> {
+  let files: AccountVideo[];
+  try {
+    files = await listAccountVideos(pubkey, env);
+  } catch (error) {
+    return {
+      processed: 0, skipped: 0, notes: [],
+      failures: [enumerationWarning(pubkey, `${formatError(error)}; could not check for files left unchanged`)],
+    };
+  }
+  // A row it cannot describe (no usable owner, or this account's with a status
+  // this worker does not know) goes through the pass too: for a file the walk
+  // passed over, this read is the only one that lists it. The per-file read
+  // fails on the same record and names the file, once (repeats of a line the
+  // walk wrote are dropped). Another account's row is not this account's.
+  const left = files
+    .filter((file) => file.owner === null
+      || (file.owner === pubkey && (file.level === null || MAY_CHANGE_FROM[mediaAction].includes(file.level))))
+    .map((file) => file.sha256);
+  const pass = left.slice(0, MEDIA_CHUNK_SIZE);
+  const media = await moderateMediaHashes(env, pubkey, pass, mediaAction, reason, 'recheck');
+  if (left.length > pass.length) {
+    media.failures.push(enumerationWarning(pubkey, `${left.length - pass.length} more owned video files still listed unchanged after the walk`));
+  }
+  return media;
+}
+
+// Un-age-restrict All's report (#299). It chooses files from funnelcake's list
+// only: SAFE cannot tell a file age review hid from one another decision hid
+// (#295), and the uploader list shows both, including the moderation
+// pipeline's own quarantines, which funnelcake hides. So the files it cannot
+// see are never changed. Each owned video the media server still serves
+// hidden is a note instead, for a person to look at and restore by hand.
+// Read-only. A list that cannot be read is a failure, not a note: then no one
+// can tell what is still hidden.
+//
+// Known limit: it reads blossom's status, which blossom caches per POP for up
+// to 5 minutes. Right after a change it can name a file a restore just made
+// active, or miss one the withhold just hid, so a clear can end with no note
+// while a file is still hidden. Recording what the withhold hid is #295.
+async function reportStillHidden(env: BulkModerateEnv, pubkey: string): Promise<{ notes: BulkNote[]; failures: string[] }> {
+  try {
+    const files = await listAccountVideos(pubkey, env);
+    const notes: BulkNote[] = files
+      .filter((file) => file.owner === pubkey && file.level === 'hidden')
+      .map((file) => ({ kind: 'still-hidden', sha256: file.sha256 }));
+    return { notes, failures: [] };
+  } catch (error) {
+    return { notes: [], failures: [enumerationWarning(pubkey, `${formatError(error)}; the files still hidden could not be listed`)] };
+  }
+}
+
+// The uploader list could not be read, so files were chosen from funnelcake's
+// list alone (#299): every file, or (a failed blossom-walk read) the rest of
+// the walk.
+// The count clause is a queued job's only: after its fallback the "left as
+// they were" count can be off (see MediaPass's after-blossom limits), and its
+// toast shows that count. The synchronous path walks every file once, so its
+// count is exact. The files themselves are not affected either way.
+function listFallbackWarning(
+  pubkey: string,
+  error: unknown,
+  { which = 'files', countMayBeOff }: { which?: 'files' | 'the rest'; countMayBeOff: boolean },
+): string {
+  const clause = countMayBeOff ? ', so the count of files left as they were may be off' : '';
+  return enumerationWarning(pubkey, `${formatError(error)}; ${which} were chosen from the relay's list only${clause}`);
+}
+
+// One entry per file and kind of note, in first-seen order. A job meets the
+// same file on more than one walk.
+function uniqueNotes(notes: BulkNote[]): BulkNote[] {
+  const seen = new Set<string>();
+  return notes.filter((note) => {
+    const key = `${note.kind}:${note.sha256}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 // The relay sent events outside the requested author or kind; none were acted on.
@@ -438,16 +580,32 @@ export async function runBulkModeration(
   action: AccountBulkAction,
   reason: string,
 ): Promise<BulkModerateResult> {
+  // A mixed-case or malformed pubkey would match no owner, so every file would
+  // be left alone and the run would report success.
+  if (!LOWER_HEX_64.test(pubkey)) throw new Error(`refusing ${JSON.stringify(pubkey)}: not a lowercase hex pubkey`);
   const moderatorPubkey = await getAdminPubkey(env);
-  const result: BulkModerateResult = { success: true, eventsProcessed: 0, mediaProcessed: 0, mediaSkipped: 0, failures: [] };
+  const result: BulkModerateResult = { success: true, eventsProcessed: 0, mediaProcessed: 0, mediaSkipped: 0, failures: [], notes: [] };
+  const mediaAction = BULK_MEDIA_ACTION[action];
+  // Files come from funnelcake's video list and, except for Un-age-restrict
+  // All (see reportStillHidden), blossom's uploader list (see
+  // listAccountVideos), all read before any event is banned. An uploader list
+  // that cannot be read leaves funnelcake's, and says so.
+  const listed = mediaAction === 'SAFE'
+    ? Promise.resolve(null)
+    : listAccountVideos(pubkey, env).then((files) => ({ files }), (error: unknown) => ({ error }));
 
+  let videoHashes: string[];
+  let list: Awaited<typeof listed>;
   if (action === 'delete-all') {
-    // Events come from the relay (WebSocket, paginated) for the event IDs;
-    // media hashes from the funnelcake REST API (dedup-correct, all videos).
-    const [{ events, complete, outOfScope }, mediaHashes] = await Promise.all([
+    // Events come from the relay (WebSocket, paginated) for the event IDs.
+    let relayEvents: Awaited<ReturnType<typeof queryRelayEvents>>;
+    [relayEvents, videoHashes, list] = await Promise.all([
       queryRelayEvents(pubkey, env),
       queryUserMediaHashes(pubkey, env),
+      listed,
     ]);
+    const { events, complete, outOfScope } = relayEvents;
+    if (list && 'error' in list) result.failures.push(listFallbackWarning(pubkey, list.error, { countMayBeOff: false }));
     if (outOfScope > 0) result.failures.push(outOfScopeWarning(pubkey, outOfScope));
     if (!complete) result.failures.push(unpaginatedGapWarning(pubkey, 'actioned a partial set'));
     const ev = await deleteEvents(env, events, reason, moderatorPubkey);
@@ -456,21 +614,41 @@ export async function runBulkModeration(
     if (ev.successfulEventIds.length > 0) {
       await syncZendeskAfterAction(env, 'delete_event', 'pubkey', pubkey, moderatorPubkey);
     }
-    const media = await moderateMediaHashes(env, mediaHashes, BULK_MEDIA_ACTION[action], reason);
-    result.mediaProcessed = media.processed;
-    result.mediaSkipped = media.skipped;
-    result.failures.push(...media.failures);
   } else {
     // age-restrict-all / age-gate-all / un-age-restrict-all are media-only;
     // see BULK_MEDIA_ACTION for what each sends.
-    const mediaHashes = await queryUserMediaHashes(pubkey, env);
-    result.eventsProcessed = mediaHashes.length; // one video == one event for video kinds
-    const media = await moderateMediaHashes(env, mediaHashes, BULK_MEDIA_ACTION[action], reason);
-    result.mediaProcessed = media.processed;
-    result.mediaSkipped = media.skipped;
-    result.failures.push(...media.failures);
+    [videoHashes, list] = await Promise.all([queryUserMediaHashes(pubkey, env), listed]);
+    if (list && 'error' in list) result.failures.push(listFallbackWarning(pubkey, list.error, { countMayBeOff: false }));
+    // one video == one event for video kinds, counted from funnelcake's list
+    // as before #299
+    result.eventsProcessed = videoHashes.length;
   }
 
+  const listedHashes = list && 'files' in list ? list.files.map((file) => file.sha256) : [];
+  const mediaHashes = [...new Set([...listedHashes, ...videoHashes])];
+  const media = await moderateMediaHashes(env, pubkey, mediaHashes, mediaAction, reason);
+  result.mediaProcessed = media.processed;
+  result.mediaSkipped = media.skipped;
+  result.failures.push(...media.failures);
+  result.notes.push(...media.notes);
+  if (mediaAction === 'SAFE') {
+    const report = await reportStillHidden(env, pubkey);
+    result.failures.push(...report.failures);
+    result.notes.push(...report.notes);
+  } else if (list && 'files' in list) {
+    // After a failed read the fallback line already stands, and this read
+    // would most likely fail the same way.
+    const check = await recheckOwnedVideos(env, pubkey, mediaAction, reason);
+    result.mediaProcessed += check.processed;
+    result.mediaSkipped += check.skipped;
+    result.failures.push(...check.failures);
+    result.notes.push(...check.notes);
+  }
+
+  // The check can meet a failure or a note the walk already recorded.
+  result.failures = [...new Set(result.failures)];
+  result.notes = uniqueNotes(result.notes);
+  // Notes are for a person and do not make the run a failure (see BulkNote).
   result.success = result.failures.length === 0;
   return result;
 }
@@ -511,6 +689,8 @@ export async function ensureBulkJobsTable(db: D1Database): Promise<void> {
   // NULL for every job that is not kind-scoped, including all existing rows.
   await db.prepare('ALTER TABLE bulk_jobs ADD COLUMN kind INTEGER')
     .run().catch(() => {});
+  // A job's notes for a person (#299), in their own table.
+  await ensureBulkNotesTable(db);
   bulkSchemaReady = true;
 }
 
@@ -689,7 +869,7 @@ const STALE_JOB_MS = 30 * 60 * 1000;
 // version it expects and atomically increments it before doing work, so only one
 // delivery can own a chunk. Terminal writes also require that claimed version.
 // Recovering an abandoned job's dropped continuation remains separate work.
-// TODO(#async-retry): continuation recovery.
+// TODO(#319): continuation recovery.
 const MAX_STORED_FAILURES = 50;
 
 // Merge new failures into the stored list, tracking the cumulative dropped count
@@ -767,6 +947,11 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
     if (msg.action !== row.action || msg.pubkey !== row.pubkey || msg.kind !== rowKind) {
       throw new Error('message does not match its job row (action, pubkey or kind); refusing to act on it');
     }
+    // The enqueue accepts only lowercase hex; a row that holds anything else
+    // would match no file's owner and report every file as left alone.
+    if (!LOWER_HEX_64.test(msg.pubkey)) {
+      throw new Error(`refusing ${JSON.stringify(msg.pubkey)}: not a lowercase hex pubkey`);
+    }
 
     // A loosening job must not run against an account an age review now holds:
     // stop it as `failed` (via the catch below) before this chunk sends anything.
@@ -796,6 +981,7 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
     let mediaDelta = 0;
     let skippedDelta = 0;
     const chunkFailures: string[] = [];
+    const chunkNotes: BulkNote[] = [];
     let next: BulkJobMessage | null = null;
     // Set when a delete-kind job's final sweep read from its ceiling, found
     // nothing and recorded nothing: that read disproves earlier gap warnings.
@@ -928,32 +1114,151 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
       // The media actions below would DELETE or un-restrict every video on the
       // account. A kind-scoped delete never gets here; fail if a message says so.
       if (msg.action === 'delete-kind') throw new Error('delete-kind has no media phase');
+
+      // Two walks (#299). First blossom's uploader list, by hash: it lists the
+      // account's files whatever the relay shows, so it still finds them after
+      // this job banned the events, or when the account is banned or
+      // suspended. Then funnelcake's video list, for files the uploader list
+      // missed. Then the end-of-walk check (recheckOwnedVideos). Only the
+      // account's own files are changed (mayChangeMedia). An uploader list
+      // that cannot be read sends the walk on to funnelcake's, and says so.
+      // The funnelcake walk skips what the uploader list shows, which the
+      // blossom walk handled, unless a blossom-walk read failed
+      // (`mediaFallback`): then the blossom walk did not handle it, so the
+      // funnelcake walk takes every file funnelcake lists.
+      //
+      // Un-age-restrict All walks funnelcake's list only, as before #299, and
+      // ends with reportStillHidden instead of the check.
+      //
+      // A message without mediaWalk starts the blossom walk from the beginning.
+      // That is the first media message, and also a media continuation from a
+      // worker that predates this walk, whose funnelcake `cursor` is ignored:
+      // the walk restarts, which is idempotent (files already changed read as
+      // done and are left alone). Un-age-restrict All keeps that cursor: the
+      // older worker walked the same list for it.
       const mediaPage = msg.mediaPage ?? 0;
-      const { hashes, nextCursor } = await queryUserVideosPage(msg.pubkey, env, msg.cursor);
-      const media = await moderateMediaHashes(env, hashes, BULK_MEDIA_ACTION[msg.action], reason);
+      const mediaAction = BULK_MEDIA_ACTION[msg.action];
+      const relayListOnly = mediaAction === 'SAFE';
+      const walk = relayListOnly || msg.mediaWalk === 'funnelcake' ? 'funnelcake' : 'blossom';
+      let candidates: string[];
+      let pass: MediaPass = 'walk';
+      let nextWalk: Pick<BulkJobMessage, 'mediaWalk' | 'mediaAfter' | 'cursor' | 'mediaFallback'> | null;
+      if (!relayListOnly && msg.mediaWalk === undefined && msg.cursor !== undefined) {
+        console.warn(`[bulk-job] ${msgJobId}: media continuation from an older worker; restarting the file walk from the start`);
+      }
+      if (walk === 'funnelcake') {
+        // Only `true` turns the exclusion off. A message without it comes from
+        // a blossom walk that ran to its end; a worker that predates the field
+        // sends no funnelcake-walk message at all (it has no mediaWalk), and
+        // walks funnelcake's list without any exclusion itself.
+        const fallback = msg.mediaFallback === true;
+        const [{ hashes, nextCursor }, listed] = await Promise.all([
+          queryUserVideosPage(msg.pubkey, env, msg.cursor),
+          relayListOnly || fallback
+            ? null
+            : listAccountVideos(msg.pubkey, env).then((files) => ({ files }), (error: unknown) => ({ error })),
+        ]);
+        candidates = [...new Set(hashes)];
+        if (listed && 'files' in listed) {
+          // The blossom walk already handled what the uploader list shows; doing
+          // them again here would count each as skipped a second time. Anything
+          // listed that it passed over, the end-of-walk check finds.
+          const onList = new Set(listed.files.map((file) => file.sha256));
+          candidates = candidates.filter((sha256) => !onList.has(sha256));
+        } else if (listed) {
+          chunkFailures.push(listFallbackWarning(msg.pubkey, listed.error, { countMayBeOff: true }));
+        }
+        if (!relayListOnly) pass = 'after-blossom';
+        // Parity with the synchronous path: for media-only actions one video ==
+        // one event, so the UI's "across N events" stays meaningful (delete-all
+        // counts events in its own phase, so leave eventsDelta 0 there).
+        if (msg.action !== 'delete-all') eventsDelta = hashes.length;
+        nextWalk = nextCursor
+          ? { mediaWalk: 'funnelcake', cursor: nextCursor, ...(fallback ? { mediaFallback: true } : {}) }
+          : null;
+      } else {
+        // Re-read every chunk rather than carried in messages: the list is
+        // not paged and can be larger than a queue message holds. Walking by
+        // hash, not position, is what keeps it exact while each DELETE takes
+        // a file off the list. A position this worker could not have written
+        // restarts the walk, as an unknown mediaWalk does: compared as a
+        // string, it could sort past every hash and skip the walk.
+        // TODO(divinevideo/divine-blossom#309): walk by hash with the list's own paging once it pages.
+        let after: string | undefined;
+        if (msg.mediaWalk === 'blossom' && msg.mediaAfter !== undefined) {
+          if (LOWER_HEX_64.test(msg.mediaAfter)) after = msg.mediaAfter;
+          else console.warn(`[bulk-job] ${msgJobId}: media position is not a hash; restarting the file walk from the start`);
+        }
+        try {
+          const remaining = (await listAccountVideos(msg.pubkey, env))
+            .map((file) => file.sha256)
+            .filter((sha256) => after === undefined || sha256 > after);
+          candidates = remaining.slice(0, MEDIA_CHUNK_SIZE);
+          nextWalk = remaining.length > MEDIA_CHUNK_SIZE
+            ? { mediaWalk: 'blossom', mediaAfter: candidates[candidates.length - 1] }
+            : { mediaWalk: 'funnelcake' };
+        } catch (error) {
+          chunkFailures.push(listFallbackWarning(msg.pubkey, error, { which: 'the rest', countMayBeOff: true }));
+          candidates = [];
+          nextWalk = { mediaWalk: 'funnelcake', mediaFallback: true };
+        }
+      }
+      const media = await moderateMediaHashes(env, msg.pubkey, candidates, mediaAction, reason, pass);
       mediaDelta = media.processed;
       skippedDelta = media.skipped;
       chunkFailures.push(...media.failures);
-      // Parity with the synchronous path: for media-only actions one video == one
-      // event, so the UI's "across N events" stays meaningful (delete-all counts
-      // events in its own phase, so leave eventsDelta 0 there).
-      if (msg.action !== 'delete-all') eventsDelta = hashes.length;
-      if (nextCursor) {
+      chunkNotes.push(...media.notes);
+      if (!nextWalk) {
+        // The last chunk of the walk. Its end runs in the same invocation, so
+        // no message shape is added for it.
+        if (relayListOnly) {
+          const report = await reportStillHidden(env, msg.pubkey);
+          chunkFailures.push(...report.failures);
+          chunkNotes.push(...report.notes);
+        } else {
+          const check = await recheckOwnedVideos(env, msg.pubkey, mediaAction, reason);
+          mediaDelta += check.processed;
+          skippedDelta += check.skipped;
+          chunkFailures.push(...check.failures);
+          chunkNotes.push(...check.notes);
+        }
+      }
+      if (nextWalk) {
         // Bound the media phase on PAGES FETCHED, not items moderated. mediaProcessed
         // only counts successes, so a cursor that advances forever while the
         // moderation service fails would keep it near zero and never trip a
         // success-based bound -- churning the queue forever (each chunk refreshes
         // updated_at, so the stale-heal can't reclaim it either). Counting pages
-        // catches advance-forever and A->B->A cycles regardless of success.
-        if (nextCursor === msg.cursor) {
-          throw new Error(`Video cursor did not advance for ${msg.pubkey} (stuck at ${nextCursor})`);
+        // catches advance-forever and A->B->A cycles regardless of success. The
+        // count runs across both walks and is never reset, so a job passed back
+        // and forth between this worker and an older one (which restarts its
+        // own walk) still ends.
+        if (nextWalk.cursor !== undefined && nextWalk.cursor === msg.cursor) {
+          throw new Error(`Video cursor did not advance for ${msg.pubkey} (stuck at ${nextWalk.cursor})`);
         }
         if (mediaPage + 1 >= VIDEO_MAX_PAGES) {
           throw new Error(`Video enumeration exceeded ${VIDEO_MAX_PAGES} pages for ${msg.pubkey}; cursor is not terminating`);
         }
-        next = continuation({ phase: 'media', cursor: nextCursor, mediaPage: mediaPage + 1 });
+        next = continuation({ phase: 'media', ...nextWalk, mediaPage: mediaPage + 1 });
       } else {
         next = null;
+      }
+    }
+
+    // Notes go to their own table before the row moves on, so a job never
+    // reads as finished with its notes still to be written. Storing them is a
+    // side effect: if it fails, the job says so and carries on.
+    if (chunkNotes.length > 0) {
+      const notes = uniqueNotes(chunkNotes);
+      const kept = notes.slice(0, MAX_NOTES_PER_WRITE);
+      if (notes.length > kept.length) {
+        chunkFailures.push(notesOverflowWarning(msg.pubkey, notes.length - kept.length));
+      }
+      try {
+        await storeBulkNotes(db, row.job_id, kept);
+      } catch (error) {
+        console.error('[bulk-job] could not store notes for', row.job_id, error);
+        chunkFailures.push(notesNotStoredWarning(msg.pubkey, kept.length, formatError(error)));
       }
     }
 
@@ -1019,7 +1324,7 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
 // IS later delivered its claim changes zero rows and no-ops -- so healing a
 // backlogged job is safe (worst case: the remaining pages are dropped and the
 // moderator re-runs; all actions are idempotent). Recovering the dropped
-// continuation automatically is separate work: TODO(#async-retry).
+// continuation automatically is separate work: TODO(#319).
 export async function handleBulkJobStatus(
   jobId: string,
   env: BulkModerateEnv,
@@ -1047,6 +1352,17 @@ export async function handleBulkJobStatus(
     job.updatedAt = new Date().toISOString();
     await env.DB.prepare(`UPDATE bulk_jobs SET status = ?, failures = ?, failures_dropped = ?, updated_at = ? WHERE job_id = ? AND status IN ('pending','running')`)
       .bind(job.status, JSON.stringify(merged.list), merged.dropped, job.updatedAt, jobId).run().catch(() => {});
+  }
+  // How many notes to read back, once the job has ended (the UI shows them
+  // then). Left out if the count fails: the UI then reads the notes route,
+  // which reports its own error.
+  if (job.status === 'done' || job.status === 'failed') {
+    try {
+      const counted = await env.DB.prepare('SELECT COUNT(*) AS n FROM bulk_job_notes WHERE job_id = ?').bind(jobId).first<{ n: number }>();
+      job.noteCount = Number(counted?.n ?? 0);
+    } catch (error) {
+      console.error('[bulk-job] could not count notes for', jobId, error);
+    }
   }
   return json(job, 200, corsHeaders);
 }
@@ -1389,8 +1705,7 @@ export async function queryRelayEventsPage(
   });
 }
 
-const SHA256_HEX = /^[a-f0-9]{64}$/i;
-const MEDIA_CHUNK_SIZE = 100; // funnelcake v2 max page
+const MEDIA_CHUNK_SIZE = 100; // funnelcake v2 max page; also the blossom walk's chunk
 const VIDEO_QUERY_TIMEOUT_MS = 10000; // per page
 export const VIDEO_MAX_PAGES = 100000; // anti-runaway guard for a non-terminating cursor (~10M videos)
 

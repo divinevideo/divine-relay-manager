@@ -16,6 +16,7 @@ import { KIND_COUNTS_REQUEST_TIMEOUT_MS, sameSecondGapWarning, type BulkJob, typ
 import { banEvent, getAdminPubkey } from './nip86';
 import { syncZendeskAfterAction } from './zendesk-sync';
 import { BAN_REFUSED, drainJob, relayFake, type RelayEvent } from './test-helpers/relay-fake';
+import { makeJobDb } from './test-helpers/bulk-job-db';
 
 vi.mock('./nip86', () => ({
   getAdminPubkey: vi.fn().mockResolvedValue('moderator-pubkey'),
@@ -47,6 +48,9 @@ beforeEach(() => {
 function mockUserVideos(videos: Array<{ sha256: string }>) {
   vi.spyOn(globalThis, 'fetch').mockImplementation((async (input: RequestInfo | URL) => {
     const url = new URL(String(input));
+    // blossom's per-uploader list (#299). Empty here, so these tests keep
+    // exercising funnelcake's list; the #299 tests below model both.
+    if (url.pathname.startsWith('/admin/api/user/')) return new Response('[]', { status: 200 });
     if (url.pathname.includes('/api/v2/users/') && url.pathname.includes('/videos')) {
       // funnelcake v2 envelope is { data: [...], pagination: { next_cursor } }
       // (PaginatedResponse<T> in funnelcake's handlers.rs). The cursor MUST live
@@ -63,86 +67,19 @@ function mockUserVideos(videos: Array<{ sha256: string }>) {
       const sha256 = url.pathname.slice('/admin/api/blob/'.length);
       const status = blossomStatus.get(sha256) ?? 'active';
       if (typeof status === 'number') return new Response('err', { status });
-      return new Response(JSON.stringify({ sha256, status }), { status: 200 });
+      // Owned by the account every test here acts on.
+      return new Response(JSON.stringify({ sha256, status, owner: 'a'.repeat(64) }), { status: 200 });
     }
     return new Response('not found', { status: 404 });
   }) as typeof fetch);
 }
 
-// Functional in-memory D1 mock for the bulk_jobs table: supports the INSERT,
-// positional-SET UPDATE, and SELECT-by-job_id statements the async path uses.
-// Honors a `status IN (...)` / `status = '...'` guard in the UPDATE WHERE clause
-// and reports meta.changes, so the consumer's sticky-status guards are exercised.
-// `ageReview` answers the consumer's open-case lookup on age_review_cases: an
-// open case exists only for `openCaseFor`, so a lookup bound to the wrong
-// pubkey finds nothing. The query itself is pinned against real SQLite in
-// test/age-review-lookup.d1.test.ts.
-function makeJobDb(ageReview: { openCaseFor?: string; lookupThrows?: boolean } = {}) {
-  const rows = new Map<string, Record<string, unknown>>();
-  // Statements passed to DB.batch (the per-chunk decision-log writes).
-  const batched: Array<{ sql: string; binds: unknown[] }> = [];
-  const db = {
-    prepare(sql: string) {
-      let binds: unknown[] = [];
-      const stmt = {
-        sql,
-        get binds() { return binds; },
-        bind(...args: unknown[]) { binds = args; return stmt; },
-        async run() {
-          if (/^\s*INSERT INTO bulk_jobs/i.test(sql)) {
-            const [job_id, pubkey, action, status, events_processed, media_processed, failures, failures_dropped, version, created_at, updated_at, kind] = binds;
-            rows.set(job_id as string, { job_id, pubkey, action, status, events_processed, media_processed, failures, failures_dropped, version, created_at, updated_at, kind: kind ?? null });
-            return { success: true, meta: { changes: 1 } };
-          }
-          if (/^\s*UPDATE bulk_jobs/i.test(sql)) {
-            const jobId = binds[binds.length - 1] as string;
-            const row = rows.get(jobId);
-            let changes = 0;
-            if (row) {
-              const where = sql.slice(sql.search(/WHERE/i));
-              const inMatch = where.match(/status IN \(([^)]+)\)/i);
-              const eqMatch = where.match(/status\s*=\s*'(\w+)'/i);
-              let statusOk = true;
-              if (inMatch) statusOk = inMatch[1].split(',').map((s) => s.trim().replace(/'/g, '')).includes(row.status as string);
-              else if (eqMatch) statusOk = row.status === eqMatch[1];
-              const versionOk = !/version\s*=\s*\?/i.test(where)
-                || Number(row.version ?? 0) === Number(binds[binds.length - 2]);
-              if (statusOk && versionOk) {
-                if (/version\s*=\s*version\s*\+\s*1/i.test(sql)) {
-                  row.status = binds[0];
-                  row.updated_at = binds[1];
-                  row.version = Number(row.version ?? 0) + 1;
-                } else {
-                  const cols = sql.match(/SET (.+) WHERE/i)![1].split(',').map((c) => c.trim().split('=')[0].trim());
-                  cols.forEach((c, i) => { row[c] = binds[i]; });
-                }
-                changes = 1;
-              }
-            }
-            return { success: true, meta: { changes } };
-          }
-          if (/^\s*DELETE FROM bulk_jobs/i.test(sql)) {
-            const existed = rows.delete(binds[0] as string);
-            return { success: true, meta: { changes: existed ? 1 : 0 } };
-          }
-          return { success: true, meta: { changes: 0 } }; // CREATE TABLE / ALTER TABLE
-        },
-        async first() {
-          if (/age_review_cases/i.test(sql)) {
-            if (ageReview.lookupThrows) throw new Error('D1 unavailable');
-            return binds[0] === ageReview.openCaseFor ? { id: 'case-open', pubkey: binds[0], state: 'open_reported' } : null;
-          }
-          return rows.get(binds[0] as string) ?? null;
-        },
-      };
-      return stmt;
-    },
-    batch: async (stmts: Array<{ sql: string; binds: unknown[] }>) => {
-      batched.push(...stmts.map((st) => ({ sql: st.sql, binds: st.binds })));
-      return [];
-    },
-  };
-  return { db: db as unknown as D1Database, rows, batched };
+// funnelcake's video list answers 500; blossom's uploader list (#299) is empty.
+function failVideoList() {
+  vi.spyOn(globalThis, 'fetch').mockImplementation((async (input: RequestInfo | URL) => {
+    if (new URL(String(input)).pathname.startsWith('/admin/api/user/')) return new Response('[]', { status: 200 });
+    return new Response('err', { status: 500 });
+  }) as typeof fetch);
 }
 
 function baseEnv(): BulkModerateEnv {
@@ -672,10 +609,15 @@ describe('bulk actions never weaken a stronger decision (#291)', () => {
   });
 
   it('skips every file and records failures when the blossom key is not configured', async () => {
+    // The file list cannot be read without it either (#299): the run says so
+    // and goes on with funnelcake's list, where each file fails its status
+    // read.
     mockEnv = { ...mockEnv, BLOSSOM_WEBHOOK_SECRET: undefined };
     const result = await runBulkModeration(mockEnv, 'a'.repeat(64), 'age-gate-all', 'r');
     expect(moderationActionFor(mockEnv, hashA)).toBeUndefined();
-    expect(result.failures).toHaveLength(3);
+    expect(result.failures).toHaveLength(4);
+    expect(result.failures[0]).toMatch(/^enumeration:.*BLOSSOM_WEBHOOK_SECRET not configured; files were chosen from the relay's list only$/);
+    expect(result.failures.slice(1).every((f) => /^media:.*could not read current status.*BLOSSOM_WEBHOOK_SECRET not configured/.test(f))).toBe(true);
   });
 
   it("reads blossom's admin status for the blob with the webhook key", async () => {
@@ -697,7 +639,7 @@ describe('bulk actions never weaken a stronger decision (#291)', () => {
     blossomStatus.set(hashB, 'banned');
     const jobId = 'job-gate-skip-1';
     jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'age-gate-all', status: 'running', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, created_at: 't', updated_at: 't' });
-    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'age-gate-all', phase: 'media' }, mockEnv);
+    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'age-gate-all', phase: 'media', mediaWalk: 'funnelcake' }, mockEnv);
     expect(moderationActionFor(mockEnv, hashA)).toBe('AGE_RESTRICTED');
     expect(moderationActionFor(mockEnv, hashB)).toBeUndefined();
     // media_processed counts files actually changed (hashA and hashC); the
@@ -717,7 +659,7 @@ describe('bulk actions never weaken a stronger decision (#291)', () => {
     blossomStatus.set(hashA, 'banned');
     const jobId = 'job-gate-skip-2';
     jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'age-gate-all', status: 'running', events_processed: 0, media_processed: 4, media_skipped: 2, failures: '[]', failures_dropped: 0, created_at: 't', updated_at: 't' });
-    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'age-gate-all', phase: 'media' }, mockEnv);
+    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'age-gate-all', phase: 'media', mediaWalk: 'funnelcake' }, mockEnv);
     expect(jobDb.rows.get(jobId)).toMatchObject({ media_processed: 6, media_skipped: 3 });
   });
 });
@@ -763,7 +705,7 @@ describe('async bulk job model', () => {
   it('queued age-gate-all media chunks send AGE_RESTRICTED (#290)', async () => {
     const jobId = 'job-gate-1';
     jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'age-gate-all', status: 'running', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, created_at: 't', updated_at: 't' });
-    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'age-gate-all', phase: 'media' }, mockEnv);
+    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'age-gate-all', phase: 'media', mediaWalk: 'funnelcake' }, mockEnv);
     expect(moderationActionFor(mockEnv, hashA)).toBe('AGE_RESTRICTED');
     expect(moderationActionFor(mockEnv, hashB)).toBe('AGE_RESTRICTED');
     expect(jobDb.rows.get(jobId)).toMatchObject({ status: 'done', media_processed: 2 });
@@ -776,7 +718,7 @@ describe('async bulk job model', () => {
     }
     const jobId = 'job-unrestrict-1';
     jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'un-age-restrict-all', status: 'running', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, created_at: 't', updated_at: 't' });
-    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'un-age-restrict-all', phase: 'media' }, mockEnv);
+    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'un-age-restrict-all', phase: 'media', mediaWalk: 'funnelcake' }, mockEnv);
     expect(moderationActionFor(mockEnv, hashA)).toBe('SAFE');
     expect(moderationActionFor(mockEnv, hashB)).toBe('SAFE');
   });
@@ -818,7 +760,7 @@ describe('async bulk job model', () => {
     mockEnv = { ...mockEnv, DB: jobDb.db };
     const jobId = 'job-gate-other-case';
     jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'age-gate-all', status: 'running', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, created_at: 't', updated_at: 't' });
-    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'age-gate-all', phase: 'media' }, mockEnv);
+    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'age-gate-all', phase: 'media', mediaWalk: 'funnelcake' }, mockEnv);
     expect(moderationActionFor(mockEnv, hashA)).toBe('AGE_RESTRICTED');
     expect(jobDb.rows.get(jobId)?.status).toBe('done');
   });
@@ -828,7 +770,7 @@ describe('async bulk job model', () => {
     mockEnv = { ...mockEnv, DB: jobDb.db };
     const jobId = 'job-withhold-open-case';
     jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', status: 'running', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, created_at: 't', updated_at: 't' });
-    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', phase: 'media' }, mockEnv);
+    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', phase: 'media', mediaWalk: 'funnelcake' }, mockEnv);
     expect(moderationActionFor(mockEnv, hashA)).toBe('QUARANTINE');
     expect(jobDb.rows.get(jobId)?.status).toBe('done');
   });
@@ -836,7 +778,7 @@ describe('async bulk job model', () => {
   it('queued age-restrict-all media chunks still send QUARANTINE (the withhold is not repointed at the 18+ gate) (#290)', async () => {
     const jobId = 'job-withhold-1';
     jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', status: 'running', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, created_at: 't', updated_at: 't' });
-    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', phase: 'media' }, mockEnv);
+    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', phase: 'media', mediaWalk: 'funnelcake' }, mockEnv);
     expect(moderationActionFor(mockEnv, hashA)).toBe('QUARANTINE');
     expect(moderationActionFor(mockEnv, hashB)).toBe('QUARANTINE');
   });
@@ -882,13 +824,14 @@ describe('async bulk job model', () => {
         const nextCursor = `c${Number(cursor.replace('c', '')) + 1}`; // always advances
         return new Response(JSON.stringify({ data: [{ sha256: hashA }], pagination: { next_cursor: nextCursor, has_more: true } }), { status: 200 });
       }
+      if (url.pathname.startsWith('/admin/api/user/')) return new Response('[]', { status: 200 });
       return new Response('not found', { status: 404 });
     }) as typeof fetch);
     const jobId = 'job-runaway-1';
     jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', status: 'running', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, created_at: 't', updated_at: 't' });
 
     // Start one page below the bound so a single chunk trips it.
-    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', phase: 'media', cursor: 'c0', mediaPage: VIDEO_MAX_PAGES - 1 }, mockEnv);
+    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', phase: 'media', mediaWalk: 'funnelcake', cursor: 'c0', mediaPage: VIDEO_MAX_PAGES - 1 }, mockEnv);
 
     const row = jobDb.rows.get(jobId)!;
     expect(row.status).toBe('failed');
@@ -929,14 +872,16 @@ describe('async bulk job model', () => {
     const jobId = 'job-repeat-1';
     jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', failures_dropped: 0, created_at: 't', updated_at: 't' });
 
-    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all' }, mockEnv);
+    // The funnelcake chunk, where the page lists the hash twice.
+    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', phase: 'media', mediaWalk: 'funnelcake' }, mockEnv);
 
     expect(JSON.parse(jobDb.rows.get(jobId)!.failures as string)).toEqual([`media:${hashA}:Moderation service returned 500`]);
   });
 
   it('media-only job chunks across multiple messages until done', async () => {
-    // 250 videos => pages of 100/100/50 across 3 messages. Proves chunking: the
-    // all-in-one consumer would finish in a single message.
+    // 250 videos => pages of 100/100/50 across 3 messages, after one chunk for
+    // blossom's (here empty) uploader list. Proves chunking: the all-in-one
+    // consumer would finish in a single message.
     const many = Array.from({ length: 250 }, (_, i) => ({ sha256: i.toString(16).padStart(64, '0') }));
     mockUserVideos(many);
     const jobId = 'job-chunk-1';
@@ -944,7 +889,7 @@ describe('async bulk job model', () => {
 
     const { chunks } = await drainJob(mockEnv, sent, { jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all' }, 10);
 
-    expect(chunks).toBe(3); // chunked across 3 messages
+    expect(chunks).toBe(4); // blossom chunk + 3 funnelcake chunks
     const row = jobDb.rows.get(jobId)!;
     expect(row.status).toBe('done');
     expect(row.media_processed).toBe(250);
@@ -964,7 +909,7 @@ describe('async bulk job model', () => {
 
     const { chunks } = await drainJob(mockEnv, sent, sent[0], 10);
 
-    expect(1 + chunks).toBe(3); // two bounded event batches -> media chunk
+    expect(1 + chunks).toBe(4); // two bounded event batches -> blossom chunk -> funnelcake chunk
     const row = jobDb.rows.get(jobId)!;
     expect(row.status).toBe('done');
     expect(row.events_processed).toBe(30);
@@ -980,7 +925,7 @@ describe('async bulk job model', () => {
 
     const { chunks } = await drainJob(mockEnv, sent, { jobId, pubkey: 'a'.repeat(64), action: 'delete-all', reason: 'spam wave' }, 10);
 
-    expect(chunks).toBe(3);
+    expect(chunks).toBe(4); // two event batches, then the blossom and funnelcake media chunks
     expect(vi.mocked(banEvent)).toHaveBeenCalledTimes(30);
     expect(vi.mocked(banEvent).mock.calls.every((c) => c[1] === 'spam wave')).toBe(true);
   });
@@ -1029,7 +974,8 @@ describe('async bulk job model', () => {
     const jobId = 'job-done-1';
     jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', created_at: 't', updated_at: 't' });
 
-    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all' }, mockEnv);
+    let msg: BulkJobMessage | undefined = { jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all' };
+    for (let i = 0; msg && i < 10; i++) { sent.length = 0; await processBulkJob(msg, mockEnv); msg = sent[0]; }
 
     const row = jobDb.rows.get(jobId)!;
     expect(row.status).toBe('done');
@@ -1054,7 +1000,7 @@ describe('async bulk job model', () => {
     const row = jobDb.rows.get(jobId)!;
     expect(row.status).toBe('done');
     expect(row.events_processed).toBe(200);                 // one chunk's worth; the rest unreachable
-    expect(chunks).toBe(12);                            // ten event batches + empty cursor check + media
+    expect(chunks).toBe(13);                            // ten event batches + empty cursor check + blossom + funnelcake
     expect(JSON.parse(row.failures as string).some((f: string) => /share one timestamp/.test(f))).toBe(true);
   });
 
@@ -1113,6 +1059,7 @@ describe('async bulk job model', () => {
       if (url.pathname.includes('/api/v2/users/') && url.pathname.includes('/videos')) {
         return new Response(JSON.stringify({ data: [{ sha256: hashA }], pagination: { next_cursor: 'STUCK', has_more: true } }), { status: 200 });
       }
+      if (url.pathname.startsWith('/admin/api/user/')) return new Response('[]', { status: 200 });
       return new Response('not found', { status: 404 });
     }) as typeof fetch);
     const jobId = 'job-stuck-1';
@@ -1141,7 +1088,7 @@ describe('async bulk job model', () => {
   it('age-restrict-all fails closed when the videos REST call errors (no false success)', async () => {
     // A failed enumeration must NOT report a successful withhold; queryUserMediaHashes
     // throws so the job fails rather than reporting success.
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('err', { status: 500 }));
+    failVideoList();
     await expect(runBulkModeration(mockEnv, 'a'.repeat(64), 'age-restrict-all', 'r')).rejects.toThrow(/Video query failed: 500/);
     expect(vi.mocked((mockEnv.MODERATION_API as unknown as { fetch: ReturnType<typeof vi.fn> }).fetch)).not.toHaveBeenCalled();
   });
@@ -1149,7 +1096,7 @@ describe('async bulk job model', () => {
   it('delete-all fails closed when the videos REST call errors (no events banned)', async () => {
     vi.mocked(banEvent).mockClear(); // call history accumulates across tests
     relayFake([{ id: 'e'.repeat(64), kind: 34235 }]);
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('err', { status: 500 }));
+    failVideoList();
     await expect(runBulkModeration(mockEnv, 'a'.repeat(64), 'delete-all', 'r')).rejects.toThrow(/Video query failed: 500/);
     expect(vi.mocked(banEvent)).not.toHaveBeenCalled();
   });
@@ -1157,9 +1104,10 @@ describe('async bulk job model', () => {
   it('processBulkJob records status=failed (not stranded) when the run throws', async () => {
     const jobId = 'job-fail-1';
     jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', status: 'pending', events_processed: 0, media_processed: 0, failures: '[]', created_at: 't', updated_at: 't' });
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('err', { status: 500 })); // enumeration throws
+    failVideoList(); // enumeration throws
 
-    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all' }, mockEnv);
+    let msg: BulkJobMessage | undefined = { jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all' };
+    for (let i = 0; msg && i < 10; i++) { sent.length = 0; await processBulkJob(msg, mockEnv); msg = sent[0]; }
 
     const row = jobDb.rows.get(jobId)!;
     expect(row.status).toBe('failed');
@@ -1172,9 +1120,9 @@ describe('async bulk job model', () => {
     const jobId = 'job-fail-full';
     const full = Array.from({ length: 50 }, (_, i) => `event:${i}:boom`);
     jobDb.rows.set(jobId, { job_id: jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', status: 'running', events_processed: 0, media_processed: 0, failures: JSON.stringify(full), failures_dropped: 3, version: 2, created_at: 't', updated_at: 't' });
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('err', { status: 500 }));
+    failVideoList();
 
-    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', phase: 'media', version: 2 }, mockEnv);
+    await processBulkJob({ jobId, pubkey: 'a'.repeat(64), action: 'age-restrict-all', phase: 'media', mediaWalk: 'funnelcake', version: 2 }, mockEnv);
 
     const job = await (await handleBulkJobStatus(jobId, mockEnv, {})).json() as BulkJob;
     expect(job.status).toBe('failed');

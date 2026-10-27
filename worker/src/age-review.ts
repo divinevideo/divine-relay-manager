@@ -2398,6 +2398,36 @@ export async function handleAgeReviewReplyWebhook(
 // Cron: deadline checker + Slack alerts
 // ---------------------------------------------------------------------------
 
+// The note the expiry cron's close writes. One constant, so the close and the
+// re-read after a close that threw (cronCloseOutcome) cannot drift apart.
+const AUTO_CLOSE_NOTE = 'Auto-closed: deadline expired with no response';
+
+// A close that threw may still have committed. Re-reads the case once:
+//   landed: the cron's own close is what landed, i.e. denied_closed at the
+//     version after the one it read, with the cron's note. A moderator's own
+//     deny also writes denied_closed at that version, so the note is what
+//     tells the two apart. Known limit: an overlapping tick's close of the
+//     same case writes the same note at the same version, so it matches too;
+//     its bans and delete are idempotent.
+//   restricted: the case still reads restricted, so the next tick retries it.
+//   changed: anything else (another close, or the row is gone).
+//   unreadable: the re-read itself failed.
+async function cronCloseOutcome(
+  db: D1Database, row: AgeReviewCase,
+): Promise<'landed' | 'restricted' | 'changed' | 'unreadable'> {
+  let now: { state: string; version: number; resolution_note: string | null } | null;
+  try {
+    now = await db.prepare('SELECT state, version, resolution_note FROM age_review_cases WHERE id = ?')
+      .bind(row.id).first<{ state: string; version: number; resolution_note: string | null }>();
+  } catch (error) {
+    console.error('[age-review] Could not re-read an expired case after its close threw:', error);
+    return 'unreadable';
+  }
+  if (now?.state === 'denied_closed' && now.version === row.version + 1 && now.resolution_note === AUTO_CLOSE_NOTE) return 'landed';
+  if (now && isAccountRestrictedAgeReviewState(now.state as AgeReviewState)) return 'restricted';
+  return 'changed';
+}
+
 export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> {
   if (!env.DB) return;
 
@@ -2447,38 +2477,56 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
       AND datetime(deadline_at) < datetime('now')
   `).bind(...ACCOUNT_RESTRICTED_AGE_REVIEW_STATES).all<AgeReviewCase>();
 
+  // Two passes: every expired case is closed and banned first, and only then
+  // auto-deleted (see the second pass for why).
+  const closedRows: AgeReviewCase[] = [];
   for (const row of expired.results) {
     // CAS on the version we read so the cron doesn't auto-close (and then
     // ban/delete) a case a moderator is concurrently acting on. If the row
     // changed since the SELECT above, skip it -- the moderator's action wins and
     // the next tick re-evaluates. This prevents the cron from clobbering a
     // just-cleared case or double-firing enforcement.
-    const closeResult = await env.DB.prepare(`
-      UPDATE age_review_cases
-      SET state = 'denied_closed', resolution_note = 'Auto-closed: deadline expired with no response',
-          closed_at = COALESCE(closed_at, datetime('now')), claim_link_url = NULL,
-          updated_at = datetime('now'), version = version + 1
-      WHERE id = ? AND version = ?
-    `).bind(row.id, row.version).run();
-    if (closeResult.meta?.changes !== 1) {
-      console.log('[age-review] Skipped expired case modified concurrently');
-      continue;
+    // A close that throws normally leaves the case restricted, so the next
+    // tick retries it. It must not end the tick: the cases closed before it in
+    // this pass are already denied_closed, so their auto-deletes run only in
+    // the second pass below, and no later tick picks them up again. A write
+    // can fail after it committed, so the case is re-read once and carried on
+    // as closed if the cron's close landed (cronCloseOutcome). Residual: if
+    // the re-read fails too and the close had committed, the case is closed
+    // but gets no bans or delete from this or any later tick; the log says so.
+    try {
+      const closeResult = await env.DB.prepare(`
+        UPDATE age_review_cases
+        SET state = 'denied_closed', resolution_note = ?3,
+            closed_at = COALESCE(closed_at, datetime('now')), claim_link_url = NULL,
+            updated_at = datetime('now'), version = version + 1
+        WHERE id = ?1 AND version = ?2
+      `).bind(row.id, row.version, AUTO_CLOSE_NOTE).run();
+      if (closeResult.meta?.changes !== 1) {
+        console.log('[age-review] Skipped expired case modified concurrently');
+        continue;
+      }
+    } catch (error) {
+      const outcome = await cronCloseOutcome(env.DB, row);
+      if (outcome === 'restricted') {
+        console.error('[age-review] Failed to auto-close expired case; the next tick retries it:', error);
+        continue;
+      }
+      if (outcome === 'changed') {
+        console.error('[age-review] Close threw and the case has since changed; skipped:', error);
+        continue;
+      }
+      if (outcome === 'unreadable') {
+        console.error('[age-review] Close threw and could not be re-read; if it committed, this case gets no bans or delete:', error);
+        continue;
+      }
+      console.log('[age-review] Close threw but had committed; continuing as closed');
     }
     console.log('[age-review] Auto-closed expired case');
     try {
-      await syncAgeReviewTicketResolution(row.id, 'denied_closed', 'Auto-closed: deadline expired with no response', env);
+      await syncAgeReviewTicketResolution(row.id, 'denied_closed', AUTO_CLOSE_NOTE, env);
     } catch (error) {
       console.error('[age-review] Failed to sync Zendesk for auto-closed case:', error);
-    }
-
-    try {
-      const config = await getAgeReviewConfig(env.DB!);
-      if (config.auto_delete_on_deny) {
-        await triggerBulkModerate(row.pubkey, 'delete-all', 'Age review expired -- auto-deleted', env);
-        console.log('[age-review] Auto-deleted content for expired case');
-      }
-    } catch (error) {
-      console.error('[age-review] Auto-delete failed for expired case:', error);
     }
 
     try {
@@ -2530,6 +2578,34 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
       }
     } catch (error) {
       console.error('[age-review] Relay banpubkey failed for expired case:', error);
+    }
+    closedRows.push(row);
+  }
+
+  // The auto-deletes run last, after every expired case's bans in this tick.
+  // Each walks its account's files on the media server (#299), so one can spend
+  // most of this invocation's subrequests, and no case's bans or minor-flag
+  // clear may depend on what a delete leaves. On an account the restrict step
+  // suspended, the order costs the delete nothing: the relay already hides a
+  // suspended account's events and funnelcake's video list, and the media
+  // server's per-uploader list does not depend on the relay. If that suspend
+  // had failed, the relay ban hides the account's events from the delete's
+  // listing as soon as banpubkey answers, whatever funnelcake's purge mode (its
+  // purge runs before that answer, or minutes later when deferred; see #318),
+  // so the delete bans none of them itself. No per-event decision rows are
+  // written, the Zendesk tickets linked to the events or the account are not
+  // resolved, and a report naming only an event no longer reads resolved. The
+  // moderator's inline deny already behaves this way.
+  // TODO(#319): run this delete as a queued bulk job and recover a lost run.
+  for (const row of closedRows) {
+    try {
+      const config = await getAgeReviewConfig(env.DB!);
+      if (config.auto_delete_on_deny) {
+        await triggerBulkModerate(row.pubkey, 'delete-all', 'Age review expired -- auto-deleted', env);
+        console.log('[age-review] Auto-deleted content for expired case');
+      }
+    } catch (error) {
+      console.error('[age-review] Auto-delete failed for expired case:', error);
     }
   }
 

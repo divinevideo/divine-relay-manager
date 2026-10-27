@@ -1866,6 +1866,230 @@ describe('checkAgeReviewDeadlines', () => {
     vi.unstubAllGlobals();
   });
 
+  // The auto-delete walks the account's files on the media server (#299), so it
+  // can spend most of the invocation's subrequests. Every expired case's bans
+  // and minor-flag clear run before any auto-delete in that tick, so none of
+  // them depends on what a delete leaves.
+  // `close` answers each case's close (the CAS binds the case id first); by
+  // default every close lands. `config` answers each read of the age-review
+  // config, in order; by default null, the default (auto-delete on). `reread`
+  // answers the re-read of a case after its close threw; by default no row.
+  function expiredCaseDb(
+    expiredCases: AgeReviewCase[],
+    {
+      close = async () => ({ meta: { changes: 1 } }),
+      config = async () => null,
+      reread = async () => null,
+    }: {
+      close?: (caseId: string) => Promise<unknown>;
+      config?: (read: number) => Promise<unknown>;
+      reread?: (caseId: string) => Promise<unknown>;
+    } = {},
+  ) {
+    let configReads = 0;
+    // getAgeReviewConfig reads with no bind.
+    return {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        first: vi.fn().mockImplementation(() => (sql.includes('auto_delete_on_deny') ? config(configReads++) : Promise.resolve(null))),
+        all: vi.fn().mockResolvedValue({ results: [] }),
+        bind: vi.fn().mockImplementation((...binds: unknown[]) => ({
+          all: vi.fn().mockResolvedValue({ results: sql.includes('+2 days') ? [] : expiredCases }),
+          first: vi.fn().mockImplementation(() => (sql.includes('SELECT state, version, resolution_note FROM age_review_cases')
+            ? reread(String(binds[0]))
+            : Promise.resolve(null))),
+          run: vi.fn().mockImplementation(() => (sql.includes("SET state = 'denied_closed'")
+            ? close(String(binds[0]))
+            : Promise.resolve({ meta: { changes: 1 } }))),
+        })),
+      })),
+      batch: vi.fn().mockResolvedValue([]),
+    };
+  }
+
+  const CRON_CLOSE_NOTE = 'Auto-closed: deadline expired with no response';
+
+  it("sends an expired case's Keycast ban, minor-flag clear and relay ban before its auto-delete", async () => {
+    const expiredCase = makeCase({ deadline_at: new Date(Date.now() - 1000).toISOString(), state: 'restricted_pending_user_response' });
+    vi.mocked(runBulkModeration).mockClear();
+    vi.mocked(banPubkey).mockClear();
+
+    await checkAgeReviewDeadlines(makeEnv(expiredCaseDb([expiredCase])));
+
+    const at = (fn: unknown) => vi.mocked(fn as () => unknown).mock.invocationCallOrder[0];
+    expect(vi.mocked(runBulkModeration).mock.calls[0]).toEqual([expect.anything(), expiredCase.pubkey, 'delete-all', expect.any(String)]);
+    expect(at(banUser)).toBeLessThan(at(clearVerifiedMinor));
+    expect(at(clearVerifiedMinor)).toBeLessThan(at(banPubkey));
+    expect(at(banPubkey)).toBeLessThan(at(runBulkModeration));
+  });
+
+  it("sends an expired case's Keycast ban, minor-flag clear and relay ban when its auto-delete throws", async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const expiredCase = makeCase({ deadline_at: new Date(Date.now() - 1000).toISOString(), state: 'restricted_pending_user_response' });
+    vi.mocked(runBulkModeration).mockClear().mockRejectedValueOnce(new Error('Too many subrequests.'));
+    vi.mocked(banPubkey).mockClear();
+
+    await checkAgeReviewDeadlines(makeEnv(expiredCaseDb([expiredCase])));
+
+    expect(runBulkModeration).toHaveBeenCalledOnce();
+    expect(banUser).toHaveBeenCalledWith(expiredCase.pubkey, 'age_review_expired', expect.anything());
+    expect(clearVerifiedMinor).toHaveBeenCalledWith(expiredCase.pubkey, undefined, 'age_review_expired', expect.anything());
+    expect(banPubkey).toHaveBeenCalledWith(expiredCase.pubkey, 'age_review_expired', expect.anything());
+    errors.mockRestore();
+  });
+
+  it("sends every expired case's bans before any auto-delete in the tick", async () => {
+    const expired = { deadline_at: new Date(Date.now() - 1000).toISOString(), state: 'restricted_pending_user_response' as const };
+    const first = makeCase({ ...expired, id: 'case-1', pubkey: 'a'.repeat(64) });
+    const second = makeCase({ ...expired, id: 'case-2', pubkey: 'c'.repeat(64) });
+    vi.mocked(runBulkModeration).mockClear();
+    vi.mocked(banPubkey).mockClear();
+
+    await checkAgeReviewDeadlines(makeEnv(expiredCaseDb([first, second])));
+
+    const order = (fn: unknown) => vi.mocked(fn as () => unknown).mock.invocationCallOrder;
+    expect(vi.mocked(runBulkModeration).mock.calls.map((call) => call[1])).toEqual([first.pubkey, second.pubkey]);
+    for (const fn of [banUser, clearVerifiedMinor, banPubkey]) expect(order(fn)).toHaveLength(2);
+    const lastBan = Math.max(...order(banUser), ...order(clearVerifiedMinor), ...order(banPubkey));
+    expect(lastBan).toBeLessThan(Math.min(...order(runBulkModeration)));
+  });
+
+  // A case a moderator changed since the SELECT loses the CAS: neither pass
+  // touches it, and the next tick re-evaluates it.
+  it('skips, in both passes, an expired case whose close lost the CAS', async () => {
+    const logs = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const expired = { deadline_at: new Date(Date.now() - 1000).toISOString(), state: 'restricted_pending_user_response' as const };
+    const first = makeCase({ ...expired, id: 'case-1', pubkey: 'a'.repeat(64) });
+    const second = makeCase({ ...expired, id: 'case-2', pubkey: 'c'.repeat(64) });
+    vi.mocked(runBulkModeration).mockClear();
+    vi.mocked(banPubkey).mockClear();
+
+    await checkAgeReviewDeadlines(makeEnv(expiredCaseDb([first, second], { close: async (caseId) => ({ meta: { changes: caseId === 'case-1' ? 0 : 1 } }) })));
+
+    expect(vi.mocked(runBulkModeration).mock.calls.map((call) => call[1])).toEqual([second.pubkey]);
+    expect(vi.mocked(banPubkey).mock.calls.map((call) => call[0])).toEqual([second.pubkey]);
+    logs.mockRestore();
+  });
+
+  // A close that throws (a D1 error) and did not commit leaves that case
+  // restricted for the next tick (the re-read says so), and must not cost the
+  // cases closed before it their auto-delete.
+  it('still auto-deletes the cases closed before a close that throws', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const expired = { deadline_at: new Date(Date.now() - 1000).toISOString(), state: 'restricted_pending_user_response' as const };
+    const first = makeCase({ ...expired, id: 'case-1', pubkey: 'a'.repeat(64) });
+    const second = makeCase({ ...expired, id: 'case-2', pubkey: 'c'.repeat(64) });
+    vi.mocked(runBulkModeration).mockClear();
+    vi.mocked(banPubkey).mockClear();
+    const db = expiredCaseDb([first, second], {
+      close: async (caseId) => {
+        if (caseId === 'case-2') throw new Error('D1_ERROR: Network connection lost.');
+        return { meta: { changes: 1 } };
+      },
+      // The close did not commit: the case still reads restricted.
+      reread: async () => ({ state: 'restricted_pending_user_response', version: 0, resolution_note: null }),
+    });
+
+    await checkAgeReviewDeadlines(makeEnv(db));
+
+    expect(vi.mocked(runBulkModeration).mock.calls.map((call) => call[1])).toEqual([first.pubkey]);
+    expect(vi.mocked(banPubkey).mock.calls.map((call) => call[0])).toEqual([first.pubkey]);
+    expect(errors).toHaveBeenCalledWith('[age-review] Failed to auto-close expired case; the next tick retries it:', expect.any(Error));
+    errors.mockRestore();
+  });
+
+  // A write can fail after it committed. The case is re-read once, and carried
+  // on as closed only if the cron's own close is what landed.
+  describe('a close that throws', () => {
+    const expired = { deadline_at: new Date(Date.now() - 1000).toISOString(), state: 'restricted_pending_user_response' as const };
+    const first = makeCase({ ...expired, id: 'case-1', pubkey: 'a'.repeat(64), version: 4 });
+    const second = makeCase({ ...expired, id: 'case-2', pubkey: 'c'.repeat(64) });
+    const throwsFor = (id: string) => async (caseId: string) => {
+      if (caseId === id) throw new Error('D1_ERROR: Network connection lost.');
+      return { meta: { changes: 1 } };
+    };
+    let errors: ReturnType<typeof vi.spyOn>;
+    let logs: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+      logs = vi.spyOn(console, 'log').mockImplementation(() => {});
+      vi.mocked(runBulkModeration).mockReset().mockResolvedValue({ success: true, eventsProcessed: 0, mediaProcessed: 0, mediaSkipped: 0, failures: [], notes: [] } as never);
+      vi.mocked(banPubkey).mockClear();
+    });
+    afterEach(() => { errors.mockRestore(); logs.mockRestore(); });
+
+    it('carries the case on as closed when the re-read finds the cron\'s close committed', async () => {
+      const db = expiredCaseDb([first], {
+        close: throwsFor('case-1'),
+        reread: async () => ({ state: 'denied_closed', version: 5, resolution_note: CRON_CLOSE_NOTE }),
+      });
+      await checkAgeReviewDeadlines(makeEnv(db));
+
+      expect(logs).toHaveBeenCalledWith('[age-review] Close threw but had committed; continuing as closed');
+      expect(banUser).toHaveBeenCalledWith(first.pubkey, 'age_review_expired', expect.anything());
+      expect(banPubkey).toHaveBeenCalledWith(first.pubkey, 'age_review_expired', expect.anything());
+      expect(vi.mocked(runBulkModeration).mock.calls.map((call) => call[1])).toEqual([first.pubkey]);
+    });
+
+    // Each row fails exactly one of the three checks. Only a case that still
+    // reads restricted is the next tick's to retry; one closed some other way
+    // has changed under the cron.
+    const RETRIES = '[age-review] Failed to auto-close expired case; the next tick retries it:';
+    const CHANGED = '[age-review] Close threw and the case has since changed; skipped:';
+    it.each([
+      ['still restricted', { state: 'restricted_pending_user_response', version: 5, resolution_note: CRON_CLOSE_NOTE }, RETRIES],
+      ['closed at another version', { state: 'denied_closed', version: 6, resolution_note: CRON_CLOSE_NOTE }, CHANGED],
+      ["closed by a moderator's own deny", { state: 'denied_closed', version: 5, resolution_note: 'Denied: no parental consent' }, CHANGED],
+      ['gone', null, CHANGED],
+    ])('skips the case when the re-read finds it %s', async (_label, now, logged) => {
+      const db = expiredCaseDb([first], { close: throwsFor('case-1'), reread: async () => now });
+      await checkAgeReviewDeadlines(makeEnv(db));
+
+      expect(errors).toHaveBeenCalledWith(logged, expect.any(Error));
+      expect(errors).not.toHaveBeenCalledWith(logged === RETRIES ? CHANGED : RETRIES, expect.anything());
+      expect(banPubkey).not.toHaveBeenCalled();
+      expect(runBulkModeration).not.toHaveBeenCalled();
+    });
+
+    it('skips the case when the re-read throws, and later cases still run', async () => {
+      const db = expiredCaseDb([first, second], {
+        close: throwsFor('case-1'),
+        reread: async () => { throw new Error('D1_ERROR: read failed'); },
+      });
+      await checkAgeReviewDeadlines(makeEnv(db));
+
+      // The read's own error is logged, not dropped.
+      expect(errors).toHaveBeenCalledWith(
+        '[age-review] Could not re-read an expired case after its close threw:',
+        expect.objectContaining({ message: 'D1_ERROR: read failed' }),
+      );
+      // Not "the next tick retries it": if the close committed, nothing will.
+      expect(errors).toHaveBeenCalledWith(
+        '[age-review] Close threw and could not be re-read; if it committed, this case gets no bans or delete:', expect.any(Error),
+      );
+      expect(errors).not.toHaveBeenCalledWith(RETRIES, expect.anything());
+      expect(vi.mocked(banPubkey).mock.calls.map((call) => call[0])).toEqual([second.pubkey]);
+      expect(vi.mocked(runBulkModeration).mock.calls.map((call) => call[1])).toEqual([second.pubkey]);
+    });
+  });
+
+  // The auto-delete follows the bans, so a ban step that throws must not stop it.
+  it.each([
+    ['relay ban', () => vi.mocked(banPubkey).mockRejectedValueOnce(new Error('relay unreachable'))],
+    ['minor-flag clear', () => vi.mocked(clearVerifiedMinor).mockRejectedValueOnce(new Error('keycast unreachable'))],
+  ])("still runs an expired case's auto-delete when its %s throws", async (_label, arrange) => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const expiredCase = makeCase({ deadline_at: new Date(Date.now() - 1000).toISOString(), state: 'restricted_pending_user_response' });
+    vi.mocked(runBulkModeration).mockClear();
+    vi.mocked(banPubkey).mockClear();
+    arrange();
+
+    await checkAgeReviewDeadlines(makeEnv(expiredCaseDb([expiredCase])));
+
+    expect(runBulkModeration).toHaveBeenCalledWith(expect.anything(), expiredCase.pubkey, 'delete-all', expect.any(String));
+    errors.mockRestore();
+  });
+
   it('does not let Keycast failure block auto-close', async () => {
     vi.mocked(banUser).mockResolvedValue({ success: false, error: 'Connection refused' });
 

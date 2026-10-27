@@ -403,6 +403,7 @@ describe('approving a 13-15 minor', () => {
     KEYCAST_SERVICE_TOKEN: 'test-token',
     NOSTR_NSEC: 'nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5',
     RELAY_URL: 'wss://relay.invalid',
+    BLOSSOM_WEBHOOK_SECRET: 'test-blossom',
   } as unknown as Parameters<typeof handleUpdateAgeReviewCase>[2]);
   let keycastPuts: string[];
 
@@ -418,6 +419,7 @@ describe('approving a 13-15 minor', () => {
     keycastPuts = [];
     vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
       if (String(input).includes('/verified-minor') && init?.method === 'PUT') keycastPuts.push(String(input));
+      if (String(input).includes('/admin/api/user/')) return Promise.resolve(new Response('[]', { status: 200 }));
       return Promise.resolve(new Response('{}', { status: 200 }));
     });
   });
