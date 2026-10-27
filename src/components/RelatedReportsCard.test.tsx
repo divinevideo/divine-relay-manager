@@ -186,6 +186,29 @@ describe('RelatedReportsCard', () => {
     expect(screen.queryByText(/Reports on their Events/)).not.toBeInTheDocument();
   });
 
+  // PR #323 hides the reported account's avatar and media on a report that
+  // signals CSAM. The card's rows are text only: a category badge, the first
+  // 40 characters of the reporter's own text, and a shortened note ID. This pins
+  // that, so a later row that adds a picture or a link has to meet #323's rule.
+  it('renders no image, media or link in its rows, even for CSAM-signal reports', async () => {
+    const csamUser: NostrEvent = {
+      ...userReport(1),
+      tags: [['p', USER, 'illegal'], ['l', 'NS-csam', 'social.nos.ontology']],
+      content: 'Reason: csam',
+    };
+    const csamEvent: NostrEvent = {
+      ...eventReport(2, '2'.repeat(64)),
+      tags: [['e', '2'.repeat(64), 'illegal'], ['p', USER], ['report', 'csam']],
+      content: 'this is csam',
+    };
+    fetchReportsByTarget.mockResolvedValue({ events: [csamUser, csamEvent], truncated: false });
+    const { container } = renderCard();
+
+    await screen.findByText(/Related Reports \(2 more on this account\)/);
+    expect(container.querySelectorAll('img, video, audio, picture, iframe, a, svg image').length).toBe(0);
+    expect(container.querySelector('[role="img"], [style*="background-image"]')).toBeNull();
+  });
+
   it('does not read when there is no pubkey', async () => {
     renderCard('');
 
