@@ -30,7 +30,8 @@ const PENDING_REPORT = report('a'.repeat(64), 1751000400, ['e', PENDING_EVENT, '
 // Auto-hidden too, with no report in the feed. A badge that counted it would
 // promise a row the view cannot show.
 const ORPHAN_PENDING_EVENT = '2'.repeat(64);
-// Two open targets, an account and a post, so a type filter visibly narrows the queue.
+// Two open targets, an account and a post, so a type filter visibly narrows the
+// queue.
 const OPEN_PUBKEY = '3'.repeat(64);
 const OPEN_ACCOUNT_REPORT = report('c'.repeat(64), 1751000300, ['p', OPEN_PUBKEY, 'spam']);
 const OPEN_EVENT = '4'.repeat(64);
@@ -179,7 +180,8 @@ describe('counts beside the queue come from the rows it renders', () => {
     expect(screen.getByText('All (2)')).toBeInTheDocument();
 
     await user.click(screen.getByRole('switch', { name: /hide resolved/i }));
-    // Open account, open post, resolved post. The auto-hidden post is not in this view.
+    // Open account, open post, resolved post. The auto-hidden post is not in
+    // this view.
     expect(await screen.findByText('All (3)')).toBeInTheDocument();
   });
 

@@ -863,12 +863,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // the decisions source alone builds, and unhandled CSAM-signal targets, which
   // labels and the ban lists only subtract from. So an unlanded or failed read
   // there keeps a target behind the switch, the safe direction (#323), and does
-  // not need to gate that view. Two other consumers -- the deep-link auto-deselect and the
-  // deep-link resolved branch -- key on Hide resolved alone, so they stay live
-  // in the pending-review view, where these three do not gate. That is
-  // deliberate: both fail in the show-more direction on a partially-loaded
-  // set, which is safe for a subtractive set, and self-correct once the source
-  // lands.
+  // not need to gate that view. Two other consumers -- the deep-link
+  // auto-deselect and the deep-link resolved branch -- key on Hide resolved
+  // alone, so they stay live in the pending-review view, where these three do
+  // not gate. That is deliberate: both fail in the show-more direction on a
+  // partially-loaded set, which is safe for a subtractive set, and self-correct
+  // once the source lands.
   const gatingSources = resolutionSources.filter(s => s.gatesAlways || !showPendingReview);
   // Has this source failed with nothing to fall back on, and stayed failed?
   //
@@ -2042,9 +2042,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           </div>
         </CardHeader>
         <CardContent className="p-0 flex-1 min-h-0">
-          {/* Radix wraps the viewport's content in a display:table div, which is never
-              narrower than its widest row (a nowrap 63-character ID). Block it, or below
-              about 1280 px the list's footer sentences are cut off at the card edge. */}
+          {/* Radix wraps the viewport's content in a display:table div, which is
+              never narrower than its widest row (a nowrap 63-character ID).
+              Block it, or below about 1280 px the list's footer sentences are
+              cut off at the card edge. */}
           <ScrollArea className="h-full [&>[data-radix-scroll-area-viewport]>div]:!block" viewportRef={listViewportRef}>
             <div className="space-y-2 p-4 pt-0">
               {viewMode === 'consolidated' ? (
@@ -2127,8 +2128,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           onOpenChange={(open) => !open && handleSelectReport(null)}
         >
           <SheetContent side="right" className="!w-full !max-w-[100vw] pt-10 px-0 pb-0 overflow-y-auto">
-            {/* The sheet covers the list column where the failure is drawn, so say it
-                here too: the moderator can act on this report but must know the queue is not loaded. */}
+            {/* The sheet covers the list column where the failure is drawn, so
+                say it here too: the moderator can act on this report but must
+                know the queue is not loaded. */}
             {queueFailedCold && <div className="px-4 pb-3">{queueLoadFailure}</div>}
             {reportDetailPane}
           </SheetContent>

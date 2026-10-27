@@ -936,8 +936,9 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                         <span>{new Date(context.thread.repostedEvent.created_at * 1000).toLocaleString()}</span>
                       </div>
                     </div>
-                    {/* Media in original post. Keyed by report, like the other viewers:
-                        a revealed one must not carry over to the next report. */}
+                    {/* Media in original post. Keyed by report, like the other
+                        viewers: a revealed one must not carry over to the next
+                        report. */}
                     <MediaPreview
                       key={report.id}
                       event={context.thread.repostedEvent}
@@ -1145,7 +1146,8 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
 
           <Separator />
 
-          {/* Related Reports: every report naming this account, read in full, not just the loaded queue */}
+          {/* Related Reports: every report naming this account, read in full,
+              not just the loaded queue */}
           <RelatedReportsCard pubkey={context.reportedUser.pubkey ?? ''} currentTarget={context.target} />
 
           {/* Section: Technical Details */}

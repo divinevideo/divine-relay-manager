@@ -14,7 +14,8 @@ import { Reports } from './Reports';
 
 vi.mock('@/hooks/useIsMobile', () => ({ useIsMobile: vi.fn(() => false) }));
 
-// Renders only which report the pane opened and how many of the target's reports it was given.
+// Renders only which report the pane opened and how many of the target's
+// reports it was given.
 vi.mock('@/components/ReportDetail', () => ({
   ReportDetail: ({ report, allReportsForTarget }: {
     report: { id: string } | null;

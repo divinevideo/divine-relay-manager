@@ -23,7 +23,8 @@ export function useRelatedReports(
   const key = pubkey.toLowerCase();
 
   const query = useQuery({
-    // Not "related-reports": EventDetail owns that namespace for its own capped read.
+    // Not "related-reports": EventDetail owns that namespace for its own capped
+    // read.
     // apiUrl is in the key: another environment's reports for the same pubkey
     // must never be served from this one's cache.
     queryKey: ['account-reports', config.apiUrl, key],

@@ -221,9 +221,10 @@ export function RelayManager() {
           </TabsContent>
 
           <TabsContent value="reports" className="flex-1 min-h-0 mt-4">
-            {/* Keyed by environment: the open report, and every action on it, belongs
-                to the relay and API it was read from, so a switch starts the screen
-                over instead of leaving a report open that would act on the new one. */}
+            {/* Keyed by environment: the open report, and every action on it,
+                belongs to the relay and API it was read from, so a switch starts
+                the screen over instead of leaving a report open that would act
+                on the new one. */}
             <Reports
               key={`${config.relayUrl}|${config.apiUrl}`}
               relayUrl={config.relayUrl}

@@ -182,7 +182,8 @@ describe('the history footer counts the rows on screen', () => {
     renderQueue();
     await openHistory(user);
 
-    // H1 and H2 from history, plus the banned post from the feed. Not the open post.
+    // H1 and H2 from history, plus the banned post from the feed. Not the open
+    // post.
     expect(await screen.findByText('Showing 3 resolved. More further back.')).toBeInTheDocument();
 
     // A filter narrows the count to the rows still shown, and the footer says
@@ -332,7 +333,8 @@ describe('the history view never counts on a resolution source it lacks', () => 
     expect(await screen.findByText(overrideWarning)).toBeInTheDocument();
 
     await openHistory(user);
-    // The banned post is listed, but unconfirmed as resolved: its ban was never read.
+    // The banned post is listed, but unconfirmed as resolved: its ban was never
+    // read.
     expect(await screen.findByText(note(BANNED_EVENT))).toBeInTheDocument();
     const footer = await screen.findByTestId('resolved-history-footer');
     await waitFor(() => expect(footer).not.toHaveTextContent(/Loading/));

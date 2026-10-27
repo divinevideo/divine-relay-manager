@@ -582,7 +582,8 @@ describe('cold error blocks the queue and offers an override (#221)', () => {
     expect(await screen.findByText(/some of these may already be handled/i)).toBeInTheDocument();
     await user.click(await screen.findByRole('switch', { name: /pending review/i }));
 
-    // Precondition: this is the pending-review view, and the target is listed in it.
+    // Precondition: this is the pending-review view, and the target is listed
+    // in it.
     expect(screen.getByRole('switch', { name: /hide resolved/i })).toBeDisabled();
     expect(screen.getByText(REPORTED_NPUB)).toBeInTheDocument();
     expect(screen.queryByText(/some of these may already be handled/i)).not.toBeInTheDocument();

@@ -327,7 +327,8 @@ describe('what the pane knows of the selected target', () => {
   });
 
   it('gives a valueless target no credit for a ?event=undefined link', async () => {
-    // getReportTarget is presence-based: a bare ["e"] tag is an event target with no value.
+    // getReportTarget is presence-based: a bare ["e"] tag is an event target
+    // with no value.
     const valueless = report('e'.repeat(64), 1751000071, [['e'], ['p', '9'.repeat(64), 'spam']]);
     stubWorker({ feed: [], history: [], targeted: { undefined: [valueless] } });
     renderAt('/reports?event=undefined');
@@ -443,7 +444,8 @@ describe('the open pane keeps its reports while the list is filtered', () => {
     await screen.findByTestId('detail');
     expect(screen.getByTestId('detail').getAttribute('data-target-reports')).toBe('2');
 
-    // The Users filter lists only account targets, so the open event row leaves the list.
+    // The Users filter lists only account targets, so the open event row
+    // leaves the list.
     await user.click(screen.getByRole('button', { name: /^users$/i }));
     await waitFor(() => expect(screen.queryByText(NOTE_SPAM)).not.toBeInTheDocument());
 
