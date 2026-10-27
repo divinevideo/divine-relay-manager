@@ -109,7 +109,7 @@ describe('RelatedReportsCard', () => {
     expect(screen.getByText(/Reports on their Events \(4\+\)/)).toBeInTheDocument();
     // No leading "+" next to a trailing one: "2+ more", not "+2+ more".
     expect(screen.getByText('2+ more user reports')).toBeInTheDocument();
-    expect(screen.getByText('1+ more event reports')).toBeInTheDocument();
+    expect(screen.getByText('1+ more event report')).toBeInTheDocument();
   });
 
   it('shows an exact "+N more" for the rest of a complete read', async () => {
@@ -124,7 +124,25 @@ describe('RelatedReportsCard', () => {
     renderCard();
 
     expect(await screen.findByText('+2 more user reports')).toBeInTheDocument();
-    expect(screen.getByText('+1 more event reports')).toBeInTheDocument();
+    expect(screen.getByText('+1 more event report')).toBeInTheDocument();
+  });
+
+  it.each([
+    [false, '+1 more user report', '+1 more event report'],
+    [true, '1+ more user report', '1+ more event report'],
+  ])('says "report", not "reports", for one more (stopped early: %s)', async (truncated, userLine, eventLine) => {
+    fetchReportsByTarget.mockResolvedValue({
+      events: [
+        userReport(1), userReport(2), userReport(3), userReport(4),
+        eventReport(5, '2'.repeat(64)), eventReport(6, '3'.repeat(64)),
+        eventReport(7, '4'.repeat(64)), eventReport(8, '5'.repeat(64)),
+      ],
+      truncated,
+    });
+    renderCard();
+
+    expect(await screen.findByText(userLine)).toBeInTheDocument();
+    expect(screen.getByText(eventLine)).toBeInTheDocument();
   });
 
   it('says so, not "0+", when a read that stopped early found nothing else', async () => {

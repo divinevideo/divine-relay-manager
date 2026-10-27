@@ -19,6 +19,14 @@ interface RelatedReportsCardProps {
 const CARD_CLASS = "border-orange-200 bg-orange-50/50 dark:bg-orange-950/20";
 const TITLE_CLASS = "text-sm flex items-center gap-2 text-orange-700 dark:text-orange-400";
 
+// "+3 more user reports", or "3+ more user reports" on a read that stopped early:
+// a plus on both sides ("+3+") would read as a typo, and the trailing one is the
+// floor mark every other count here uses.
+function overflowLine(rest: number, truncated: boolean, noun: 'user' | 'event'): string {
+  const count = truncated ? historyCount(rest, true) : `+${rest}`;
+  return `${count} more ${noun} ${rest === 1 ? 'report' : 'reports'}`;
+}
+
 export function RelatedReportsCard({ pubkey, currentTarget }: RelatedReportsCardProps) {
   const related = useRelatedReports(pubkey, currentTarget);
 
@@ -105,7 +113,7 @@ export function RelatedReportsCard({ pubkey, currentTarget }: RelatedReportsCard
                 })}
                 {userReports.length > 3 && (
                   <p className="text-xs text-muted-foreground pl-1">
-                    {truncated ? historyCount(userReports.length - 3, true) : `+${userReports.length - 3}`} more user reports
+                    {overflowLine(userReports.length - 3, truncated, 'user')}
                   </p>
                 )}
               </div>
@@ -139,7 +147,7 @@ export function RelatedReportsCard({ pubkey, currentTarget }: RelatedReportsCard
                 })}
                 {eventReports.length > 3 && (
                   <p className="text-xs text-muted-foreground pl-1">
-                    {truncated ? historyCount(eventReports.length - 3, true) : `+${eventReports.length - 3}`} more event reports
+                    {overflowLine(eventReports.length - 3, truncated, 'event')}
                   </p>
                 )}
               </div>

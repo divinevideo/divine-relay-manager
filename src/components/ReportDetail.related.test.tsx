@@ -7,8 +7,6 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ReportDetail } from './ReportDetail';
 import type { NostrEvent } from '@nostrify/nostrify';
-import type { ModerationStatus } from '@/hooks/useModerationStatus';
-import { moderationStatusMock } from '@/test/moderationStatusMock';
 
 const REPORTED_PUBKEY = 'd'.repeat(64);
 const MOD_PUBKEY = 'e'.repeat(64);
@@ -35,8 +33,6 @@ const REPORT: NostrEvent = {
   sig: 'b'.repeat(128),
 };
 
-// Set in beforeEach.
-const status = vi.hoisted(() => ({ value: {} as ModerationStatus }));
 const fetchReportsByTarget = vi.hoisted(() => vi.fn());
 
 vi.mock('react-router-dom', async (orig) => ({
@@ -74,9 +70,11 @@ vi.mock('@/hooks/useDecisionLog', () => ({
     refetch: vi.fn(),
   }),
 }));
-vi.mock('@/hooks/useModerationStatus', () => ({
-  useModerationStatus: () => status.value,
-}));
+vi.mock('@/hooks/useModerationStatus', async () => {
+  const { moderationStatusMock } = await import('@/test/moderationStatusMock');
+  const status = moderationStatusMock({ isUserBanned: false, isEventGone: false });
+  return { useModerationStatus: () => status };
+});
 vi.mock('@/hooks/useBannedEvent', () => ({ useBannedEvent: () => ({ data: null, isLoading: false }) }));
 vi.mock('@/hooks/useUserSummary', () => ({ useUserSummary: () => ({ data: null, isLoading: false }) }));
 vi.mock('@/hooks/useMediaStatus', () => ({ useMediaStatus: () => ({}) }));
@@ -124,7 +122,6 @@ function renderDetail() {
 describe('ReportDetail Related Reports wiring', () => {
   beforeEach(() => {
     fetchReportsByTarget.mockReset();
-    status.value = moderationStatusMock({ isUserBanned: false, isEventGone: false });
   });
 
   it("reads the reported account's reports and leaves the open report's target out", async () => {
