@@ -127,3 +127,24 @@ describe('UserProfileCard across reports on the same account', () => {
     expect(screen.getByTestId('avatar-img')).toHaveAttribute('src', PICTURE);
   });
 });
+
+describe('UserProfileCard across reports on different accounts', () => {
+  const OTHER_PUBKEY = 'b'.repeat(64);
+  const sensitiveCard = (pubkey: string) => (
+    <MemoryRouter>
+      <UserProfileCard pubkey={pubkey} profile={{ picture: PICTURE }} stats={STATS} hideMediaByDefault />
+    </MemoryRouter>
+  );
+
+  it("does not show an account's avatar again without a click after the pane visits another account", () => {
+    const { rerender } = render(sensitiveCard(PUBKEY));
+    fireEvent.click(screen.getByRole('button', { name: 'Show profile picture' }));
+    expect(screen.getByTestId('avatar-img')).toBeInTheDocument();
+
+    rerender(sensitiveCard(OTHER_PUBKEY));
+    expect(screen.queryByTestId('avatar-img')).not.toBeInTheDocument();
+    rerender(sensitiveCard(PUBKEY));
+
+    expect(screen.queryByTestId('avatar-img')).not.toBeInTheDocument();
+  });
+});
