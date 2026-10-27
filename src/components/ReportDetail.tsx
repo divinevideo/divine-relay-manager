@@ -936,8 +936,10 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                         <span>{new Date(context.thread.repostedEvent.created_at * 1000).toLocaleString()}</span>
                       </div>
                     </div>
-                    {/* Media in original post */}
+                    {/* Media in original post. Keyed by report, like the other viewers:
+                        a revealed one must not carry over to the next report. */}
                     <MediaPreview
+                      key={report.id}
                       event={context.thread.repostedEvent}
                       showByDefault={hasHighPriorityReports === false}
                       maxItems={6}
@@ -953,8 +955,13 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
           )}
 
           {/* Media Preview - show the actual content being reported */}
+          {/* Keyed by report: the thread of the next report is often cached, so
+              this stays mounted, and a viewer the moderator revealed would stay
+              revealed (and render before its hide effect runs) on a CSAM-signal
+              report. A fresh mount starts from showByDefault. */}
           {displayEvent && (
             <MediaPreview
+              key={report.id}
               event={displayEvent}
               showByDefault={hasHighPriorityReports === false}
               maxItems={6}
@@ -1040,6 +1047,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
           <>
           <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Reported User</h4>
           <UserProfileCard
+            key={report.id}
             profile={context.reportedUser.profile}
             pubkey={context.reportedUser.pubkey}
             stats={context.userStats}
