@@ -168,6 +168,57 @@ describe('human decision persistence', () => {
       expect(sqlLog.some(({ sql }) => sql.includes('INSERT INTO moderation_decisions'))).toBe(false);
     });
 
+    // 'auto' is the worker's own marker: a decision posted with it would read
+    // as one no person made.
+    it.each(['auto', '', 'e'.repeat(63), 'g'.repeat(64)])(
+      'rejects %j as the moderatorPubkey and records nothing',
+      async (moderatorPubkey) => {
+        const { db, sqlLog } = createMockDB();
+        const env = createEnv(db);
+
+        const response = await worker.fetch(new Request('http://localhost/api/decisions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+          body: JSON.stringify({ targetType: 'pubkey', targetId: 'b'.repeat(64), action: 'reviewed', moderatorPubkey }),
+        }), env as never, mockCtx);
+
+        expect(response.status).toBe(400);
+        expect(sqlLog.some(({ sql }) => sql.includes('INSERT INTO moderation_decisions'))).toBe(false);
+      },
+    );
+
+    it("records a moderator's hex pubkey with the decision", async () => {
+      const { db, sqlLog } = createMockDB();
+      const env = createEnv(db);
+      const moderatorPubkey = 'e'.repeat(64);
+
+      const response = await worker.fetch(new Request('http://localhost/api/decisions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        body: JSON.stringify({ targetType: 'pubkey', targetId: 'b'.repeat(64), action: 'reviewed', moderatorPubkey }),
+      }), env as never, mockCtx);
+
+      expect(response.status).toBe(200);
+      const insert = sqlLog.find(({ sql }) => sql.includes('INSERT INTO moderation_decisions'));
+      expect(insert?.bindings).toEqual(['pubkey', 'b'.repeat(64), 'reviewed', null, moderatorPubkey, null]);
+    });
+
+    // The repo's scripts post decisions without one.
+    it('records a decision sent with no moderatorPubkey as NULL', async () => {
+      const { db, sqlLog } = createMockDB();
+      const env = createEnv(db);
+
+      const response = await worker.fetch(new Request('http://localhost/api/decisions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        body: JSON.stringify({ targetType: 'event', targetId: 'c'.repeat(64), action: 'dismiss', reason: 'Test: dismiss' }),
+      }), env as never, mockCtx);
+
+      expect(response.status).toBe(200);
+      const insert = sqlLog.find(({ sql }) => sql.includes('INSERT INTO moderation_decisions'));
+      expect(insert?.bindings).toEqual(['event', 'c'.repeat(64), 'dismiss', 'Test: dismiss', null, null]);
+    });
+
     it('should mark human reviewed for all moderator action types', async () => {
       const actions = [
         'reviewed',

@@ -1857,6 +1857,12 @@ async function handleLogDecision(
     if (!body.targetType || !body.targetId || !body.action) {
       return jsonResponse({ success: false, error: 'Missing required fields' }, 400, corsHeaders);
     }
+    // Absent is allowed (recorded as NULL); anything else must be a pubkey.
+    // Above all not the worker's own 'auto', which would make a person's
+    // decision read as one no person made.
+    if (body.moderatorPubkey !== undefined && !/^[a-f0-9]{64}$/i.test(body.moderatorPubkey)) {
+      return jsonResponse({ success: false, error: 'Invalid moderatorPubkey' }, 400, corsHeaders);
+    }
     if (body.targetType === 'event' && COORDINATED_AUTO_HIDE_ACTIONS.has(body.action)) {
       return jsonResponse({ success: false, error: 'Event auto-hide state must use its coordinated endpoint' }, 400, corsHeaders);
     }

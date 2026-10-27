@@ -42,7 +42,10 @@ const ROW_CHUNK_SIZE = 1000;
 // carries `automated: true` so the sensitive-reports switch, which waits for a
 // person, can look past it. One human row anywhere in the walk clears the flag,
 // whichever chunk it falls in. isAutomatedDecision picks out the worker's own
-// rows; every human path whose rows this read sees writes a hex pubkey or NULL.
+// rows. A person's decision that this read sees has a hex pubkey or NULL as its
+// moderator: POST /api/decisions rejects any other value, and bulk moderation
+// always writes a hex pubkey. The worker puts its marker on a person's decision
+// only in an auto-hide row, which this read skips.
 export async function getResolvedTargets(
   db: D1Database,
   opts?: { chunkSize?: number }
