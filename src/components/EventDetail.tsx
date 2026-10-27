@@ -66,7 +66,7 @@ import {
 } from "lucide-react";
 import type { NostrEvent } from "@nostrify/nostrify";
 import { nip19 } from "nostr-tools";
-import { HIGH_PRIORITY_CATEGORIES, getReportCategory } from "@/lib/constants";
+import { HIGH_PRIORITY_CATEGORIES, getReportCategory, hasCsamSignal } from "@/lib/constants";
 
 interface EventDetailProps {
   event: NostrEvent;
@@ -691,7 +691,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
     return relatedReports.some(r => {
       const cat = getReportCategory(r);
       return HIGH_PRIORITY_CATEGORIES.includes(cat);
-    });
+    }) || hasCsamSignal(relatedReports);
   }, [relatedReports]);
 
   // Extract sha256 hashes for classifier components

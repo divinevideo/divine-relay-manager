@@ -1,5 +1,6 @@
 import { getEnvironmentByApiUrl } from "@/lib/environments";
 import { VIDEO_KINDS } from "@/lib/kindNames";
+import { classifyReport } from "../../shared/report-classification";
 export {
   AUTO_HIDE_ACTION,
   AUTO_HIDE_ACTIONS,
@@ -64,12 +65,10 @@ export const CATEGORY_LABELS: Record<string, string> = {
 export const RESOLUTION_STATUSES = ['reviewed', 'dismissed', 'no-action', 'false-positive'] as const;
 export type ResolutionStatus = typeof RESOLUTION_STATUSES[number];
 
-// Categories where media should be hidden by default for moderator safety
-export const HIGH_PRIORITY_CATEGORIES = [
-  'sexual_minors', 'csam', 'NS-csam',
-  'nonconsensual_sexual_content', 'terrorism_extremism', 'credible_threats',
-  'NS-underageUser', 'NS-childSafety',
-];
+// Categories where media should be hidden by default for moderator safety.
+// Defined in shared/ so the classifier uses the same list; re-exported so
+// existing imports keep working.
+export { HIGH_PRIORITY_CATEGORIES } from "../../shared/report-classification";
 
 // The exact report category that opens an age-review case (ReportWatcher gates
 // on this same literal). Distinct from HIGH_PRIORITY_CATEGORIES: CSAM /
@@ -93,13 +92,16 @@ export function getCategoryLabel(category: string): string {
   return CATEGORY_LABELS[category] || category;
 }
 
-// Extract category from a report event's tags
-export function getReportCategory(event: { tags: string[][] }): string {
-  const reportTag = event.tags.find(t => t[0] === 'report');
-  if (reportTag && reportTag[1]) return reportTag[1];
-  const lTag = event.tags.find(t => t[0] === 'l');
-  if (lTag && lTag[1]) return lTag[1];
-  return 'other';
+// Extract category from a report event (see shared/report-classification.ts)
+export function getReportCategory(event: { tags: string[][]; content?: string }): string {
+  return classifyReport(event).category;
+}
+
+// True when any report in the set signals CSAM, including old builds that
+// filed it as NIP-56 'illegal' and said so only in the content. Display and
+// prioritisation only: nothing is written or automated from this.
+export function hasCsamSignal(reports: readonly { tags: string[][]; content?: string }[]): boolean {
+  return reports.some(r => classifyReport(r).csamSignal);
 }
 
 // Divine profile URL base

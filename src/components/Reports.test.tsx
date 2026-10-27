@@ -7,12 +7,14 @@ import type { MockInstance } from 'vitest';
 import TestApp from '@/test/TestApp';
 import { Reports } from './Reports';
 
-// Stand-in for a detail pane crashed by hostile event data — always throws,
-// counting attempts so tests can observe boundary resets re-running it.
-const detailRender = vi.hoisted(() => ({ attempts: 0 }));
+// Stand-in for a detail pane crashed by hostile event data. It throws while
+// detailRender.crash is true (the default), counting attempts so tests can
+// observe boundary resets re-running it. Tests about the list turn it off.
+const detailRender = vi.hoisted(() => ({ attempts: 0, crash: true }));
 vi.mock('@/components/ReportDetail', () => ({
   ReportDetail: () => {
     detailRender.attempts++;
+    if (!detailRender.crash) return null;
     throw new Error('hostile report data');
   },
 }));
@@ -289,5 +291,146 @@ describe('Reports resolution filtering', () => {
     // The retry lands and the resolved target is hidden again.
     expect(await screen.findByText(pendingCount(0))).toBeInTheDocument();
     expect(labelCalls).toBeGreaterThan(1);
+  });
+});
+
+// An old build reports CSAM as NIP-56 'illegal' and names the reason only in
+// the content. The queue must still treat it as high priority, without ever
+// labelling the row as CSAM (the tags do not say so). Unhandled, it sits
+// behind the pending-review switch, so each test turns the switch on first.
+describe('Reports CSAM signal priority', () => {
+  // These tests are about the list, so the detail pane stays quiet.
+  // jsdom lacks scrollIntoView, which the Radix Select opens with.
+  const originalScrollIntoView = Element.prototype.scrollIntoView;
+  beforeEach(() => {
+    detailRender.crash = false;
+    Element.prototype.scrollIntoView = vi.fn();
+  });
+  afterEach(() => {
+    detailRender.crash = true;
+    if (originalScrollIntoView) Element.prototype.scrollIntoView = originalScrollIntoView;
+    else delete (Element.prototype as Partial<Element>).scrollIntoView;
+  });
+
+  const OLD_BUILD_REPORT = {
+    id: '1'.repeat(64),
+    pubkey: 'b'.repeat(64),
+    created_at: 1751000200,
+    kind: 1984,
+    tags: [['e', 'c'.repeat(64), 'illegal'], ['p', 'd'.repeat(64), 'illegal']],
+    content: 'CONTENT REPORT - NIP-56\nReason: csam\nDetails: none\n',
+    sig: 'e'.repeat(128),
+  };
+
+  function stubOldBuild() {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/reports')) return jsonResponse({ success: true, events: [OLD_BUILD_REPORT] });
+      if (url.includes('/api/resolution-label-targets')) return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
+      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, resolved: [], states: [] });
+      if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
+      return jsonResponse({ success: true });
+    }));
+  }
+
+  async function turnPendingReviewOn() {
+    fireEvent.click(await screen.findByRole('switch', { name: /pending review/i }));
+  }
+
+  function expectPriorityNotCsam() {
+    // 'Illegal' also appears in the category filter chips, so allow several.
+    expect(screen.getAllByText('Illegal').length).toBeGreaterThan(0);
+    expect(screen.queryByText(/csam/i)).not.toBeInTheDocument();
+  }
+
+  it('marks an old-build CSAM report as Priority in the list', async () => {
+    stubOldBuild();
+    render(
+      <TestApp>
+        <Reports relayUrl="wss://relay.example" />
+      </TestApp>
+    );
+
+    await turnPendingReviewOn();
+    expect(await screen.findByText('Priority')).toBeInTheDocument();
+    expectPriorityNotCsam();
+  });
+
+  it('marks it Priority in the individual (All) view too', async () => {
+    stubOldBuild();
+    render(
+      <TestApp>
+        <Reports relayUrl="wss://relay.example" />
+      </TestApp>
+    );
+
+    await turnPendingReviewOn();
+    await screen.findByText('Priority');
+    fireEvent.mouseDown(await screen.findByRole('tab', { name: /^All/ }), { button: 0 });
+    fireEvent.click(screen.getByRole('tab', { name: /^All/, hidden: true }));
+    await waitFor(() => expect(screen.getByRole('tab', { name: /^All/, hidden: true })).toHaveAttribute('aria-selected', 'true'));
+    expect(screen.getAllByText('Priority')).toHaveLength(1);
+    expectPriorityNotCsam();
+  });
+
+  // The old-build report is 'violence' and the control 'spam', so an
+  // alphabetical tie-break alone would put the control first. Only the CSAM
+  // signal can move the old-build target to the top. The control is
+  // auto-hidden so that both targets share the switched view the sort runs in.
+  const CONTROL_REPORT = {
+    ...OLD_BUILD_REPORT,
+    id: '2'.repeat(64),
+    created_at: 1751000300,
+    tags: [['e', '9'.repeat(64), 'spam'], ['p', '8'.repeat(64), 'spam']],
+    content: 'comment spam',
+  };
+  const OLD_BUILD_VIOLENCE = {
+    ...OLD_BUILD_REPORT,
+    tags: [['e', 'c'.repeat(64), 'violence'], ['p', 'd'.repeat(64), 'violence']],
+  };
+
+  function stubTwo() {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/reports')) return jsonResponse({ success: true, events: [CONTROL_REPORT, OLD_BUILD_VIOLENCE] });
+      if (url.includes('/api/resolution-label-targets')) return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
+      if (url.includes('/api/resolution-state')) {
+        return jsonResponse({
+          success: true,
+          resolved: [],
+          states: [{ target_type: 'event', target_id: '9'.repeat(64), action: 'auto_hidden' }],
+        });
+      }
+      if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
+      return jsonResponse({ success: true });
+    }));
+  }
+
+  const rows = () => Array.from(document.querySelectorAll('div.rounded-lg.cursor-pointer'));
+
+  async function sortByCategory() {
+    await turnPendingReviewOn();
+    await screen.findByText('Priority');
+    fireEvent.click(screen.getAllByRole('combobox', { hidden: true })[0]);
+    fireEvent.click(await screen.findByRole('option', { name: 'By Category', hidden: true }));
+  }
+
+  it('sorts a csam-signal target ahead of a spam target when sorting by category (grouped)', async () => {
+    stubTwo();
+    render(<TestApp><Reports relayUrl="wss://relay.example" /></TestApp>);
+    await sortByCategory();
+    await waitFor(() => expect(rows()).toHaveLength(2));
+    expect(rows()[0].className).toContain('border-red-300');
+  });
+
+  it('does the same in the individual (All) view', async () => {
+    stubTwo();
+    render(<TestApp><Reports relayUrl="wss://relay.example" /></TestApp>);
+    await sortByCategory();
+    fireEvent.mouseDown(screen.getByRole('tab', { name: /^All/, hidden: true }), { button: 0 });
+    fireEvent.click(screen.getByRole('tab', { name: /^All/, hidden: true }));
+    await waitFor(() => expect(screen.getByRole('tab', { name: /^All/, hidden: true })).toHaveAttribute('aria-selected', 'true'));
+    expect(rows()).toHaveLength(2);
+    expect(rows()[0].className).toContain('border-red-300');
   });
 });

@@ -1,7 +1,7 @@
 // ABOUTME: Displays kind 1984 reports with split-pane layout and consolidation
 // ABOUTME: Groups multiple reports on same target, shows count and all reporters
 
-import { useState, useMemo, useEffect, useRef } from "react";
+import { useState, useMemo, useEffect, useRef, useCallback } from "react";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
@@ -49,8 +49,9 @@ import { DeepLinkFallback } from "@/components/DeepLinkFallback";
 import { classifyTargetedFetch, reportsMatchingTarget, type DeepLinkStatus } from "@/lib/deepLinkResolution";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { useBannedPubkeys, useBannedEvents } from "@/hooks/useRelayBanLists";
-import { AUTO_HIDE_ACTION, CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, RESOLUTION_READ_TIMEOUT_MS, getLatestAutoHideState, getReportCategory, getReportTargetIds } from "@/lib/constants";
+import { AUTO_HIDE_ACTION, CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, RESOLUTION_READ_TIMEOUT_MS, getLatestAutoHideState, getReportCategory, getReportTargetIds, hasCsamSignal } from "@/lib/constants";
 import { isConsolidatedReportResolved } from "@/lib/reportResolution";
+import { SWITCH_STATE_LABELS, buildSwitchMembership, humanHandledAutoHideTargets, type SwitchState } from "@/lib/sensitiveSwitch";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
 import type { NostrEvent } from "@nostrify/nostrify";
@@ -93,8 +94,8 @@ const MEDIUM_PRIORITY_CATEGORIES = ['doxxing_pii', 'malware_scam', 'illegal_good
 type ResolutionSourceKey = 'labels' | 'banned-pubkeys' | 'banned-events' | 'decisions';
 
 // Category priority for sorting
-function getCategoryPriority(categories: string[]): number {
-  if (categories.some(c => HIGH_PRIORITY_CATEGORIES.includes(c))) return 0;
+function getCategoryPriority(categories: string[], csamSignal = false): number {
+  if (csamSignal || categories.some(c => HIGH_PRIORITY_CATEGORIES.includes(c))) return 0;
   if (categories.some(c => MEDIUM_PRIORITY_CATEGORIES.includes(c))) return 1;
   return 2;
 }
@@ -243,20 +244,34 @@ function TargetId({ value, type }: { value: string; type: 'event' | 'pubkey' }) 
   );
 }
 
+// Says which side of the Pending review switch a row is on. Rendered only for
+// rows behind the switch, so the default view carries no extra label.
+function SwitchStateBadge({ state }: { state?: SwitchState }) {
+  if (!state) return null;
+  return (
+    <Badge variant="outline" className="text-xs">
+      {SWITCH_STATE_LABELS[state]}
+    </Badge>
+  );
+}
+
 function ConsolidatedReportItem({
   consolidated,
   isSelected,
   onClick,
+  switchState,
 }: {
   consolidated: ConsolidatedReport;
   isSelected: boolean;
   onClick: () => void;
+  switchState?: SwitchState;
 }) {
   const reportCount = consolidated.reports.length;
   const reporterCount = consolidated.reporters.length;
   const primaryCategory = consolidated.categories[0];
   const categoryLabel = CATEGORY_LABELS[primaryCategory] || primaryCategory;
-  const isHighPriority = consolidated.categories.some(c => HIGH_PRIORITY_CATEGORIES.includes(c));
+  const isHighPriority = consolidated.categories.some(c => HIGH_PRIORITY_CATEGORIES.includes(c))
+    || hasCsamSignal(consolidated.reports);
   const isMediumPriority = consolidated.categories.some(c => MEDIUM_PRIORITY_CATEGORIES.includes(c));
 
   return (
@@ -295,6 +310,7 @@ function ConsolidatedReportItem({
             <Badge variant="secondary" className="text-xs">
               {consolidated.target.type === 'event' ? 'Event' : 'User'}
             </Badge>
+            <SwitchStateBadge state={switchState} />
           </div>
           <div className="flex items-center gap-1 text-xs text-muted-foreground shrink-0">
             <Clock className="h-3 w-3" />
@@ -325,15 +341,17 @@ function IndividualReportItem({
   report,
   isSelected,
   onClick,
+  switchState,
 }: {
   report: NostrEvent;
   isSelected: boolean;
   onClick: () => void;
+  switchState?: SwitchState;
 }) {
   const category = getReportCategory(report);
   const target = getReportTarget(report);
   const categoryLabel = CATEGORY_LABELS[category] || category;
-  const isHighPriority = HIGH_PRIORITY_CATEGORIES.includes(category);
+  const isHighPriority = HIGH_PRIORITY_CATEGORIES.includes(category) || hasCsamSignal([report]);
   const isMediumPriority = MEDIUM_PRIORITY_CATEGORIES.includes(category);
 
   return (
@@ -369,6 +387,7 @@ function IndividualReportItem({
                 {target.type === 'event' ? 'Event' : 'User'}
               </Badge>
             )}
+            <SwitchStateBadge state={switchState} />
           </div>
           <div className="flex items-center gap-1 text-xs text-muted-foreground shrink-0">
             <Clock className="h-3 w-3" />
@@ -439,6 +458,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // clear, so leaving it has to hand both back -- otherwise a look at the
   // auto-hidden queue silently spends settings they chose.
   const prePendingReviewRef = useRef<{ hideResolved: boolean; filterCategory: string | null } | null>(null);
+  // True only while the pending-review switch is on because a deep link
+  // opened it, not the moderator. Only then may the switch close itself when
+  // the linked target leaves it; a switch the moderator turned on is theirs.
+  const switchOpenedByDeepLinkRef = useRef(false);
   const [retryNonce, setRetryNonce] = useState(0); // forces the deep-link effect to re-run on retry
   // Tracks mount state so an in-flight targeted lookup that resolves after the component
   // unmounts (e.g. the moderator switched tabs) can't fire a late navigate() and yank them back.
@@ -545,6 +568,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   });
   const resolvedDecisionTargets = decisionsResult?.resolved;
   const autoHideStates = decisionsResult?.states;
+  // The switch's auto-hidden members come only from this read, so membership
+  // is known once it has answered. A failed read counts as settled too, so a
+  // deep link's resolved-unhide is held, never stranded: on error it falls
+  // back to unhiding as it did before the hold.
+  const switchMembershipKnown = !decisionsPending;
 
   // The deep-link target, resolved here rather than beside the pane that renders
   // it: the per-target decisions read below is a hook, and the pane sits after
@@ -665,10 +693,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     [bannedPubkeys],
   );
 
-  // Build set of targets pending review (auto-hidden but not yet confirmed/restored)
-  // TODO(#284): adopt pendingReviewTargetKeys from shared/autohide.ts in the queue-screen change.
+  // Targets pending review (auto-hidden but not yet confirmed/restored), keyed
+  // to their latest auto-hide state so a row can say when the hide is not
+  // confirmed (auto_hide_unresolved / auto_hide_restore_failed).
+  // TODO(#284): share this with pendingReviewTargetKeys in shared/autohide.ts in the
+  // queue-screen change. That helper returns a Set, so it would first need to
+  // return the latest action per key, which the switch labels depend on.
   const pendingReviewTargets = useMemo(() => {
-    const pending = new Set<string>();
+    const pending = new Map<string, string>();
     if (!autoHideStates) return pending;
 
     // Group by target to check status. The worker sends only the auto-hide STATE
@@ -690,13 +722,17 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       if (latestAction === AUTO_HIDE_ACTION.hidden
         || latestAction === AUTO_HIDE_ACTION.unresolved
         || latestAction === AUTO_HIDE_ACTION.restoreFailed) {
-        pending.add(key);
+        pending.set(key, latestAction);
       }
     }
 
-
     return pending;
   }, [autoHideStates]);
+
+  const humanHandledTargets = useMemo(
+    () => humanHandledAutoHideTargets(autoHideStates ?? []),
+    [autoHideStates],
+  );
 
   // The four sources that build resolvedTargets, described once so the gate,
   // the banners, and the blocked pane read from one list and cannot drift
@@ -756,11 +792,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       gatesAlways: false,
     },
     {
-      // Decisions feeds pendingReviewTargets as well as resolvedTargets, and
-      // pendingReviewTargets is applied on every path (filtered TO it in the
-      // pending view, filtered OUT of it otherwise). So it gates regardless of
-      // the hide-resolved toggle, which is what the old decisionsLoading guard
-      // did for loading and failed to do for errors.
+      // Decisions feeds the switch membership (through pendingReviewTargets)
+      // as well as resolvedTargets, and the membership is applied on every
+      // path (filtered TO it in the pending view, filtered OUT of it
+      // otherwise). So it gates regardless of the hide-resolved toggle, which
+      // is what the old decisionsLoading guard did for loading and failed to
+      // do for errors.
       key: 'decisions',
       label: 'Moderation decisions',
       hasData: !!resolvedDecisionTargets,
@@ -861,6 +898,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // Still gated on resolvedFilterActive: a bounded LABELS read only matters
   // where resolvedTargets is actually being subtracted. It contributes nothing
   // to pendingReviewTargets, which is built entirely from the decisions source.
+  // It does feed the switch's not-hidden group, but only subtractively: a
+  // label missing from a bounded read keeps a CSAM target behind the switch
+  // rather than in the default view, which is the safe direction.
   const activeTruncationBounds = [
     resolvedFilterActive ? truncationBounds.labels : null,
   ].filter((v): v is number => typeof v === 'number');
@@ -878,16 +918,34 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     return Array.from(categories).sort();
   }, [reports]);
 
-  const consolidated = useMemo(() => {
+  const allConsolidated = useMemo(() => {
     if (!reports) return [];
-    let items = consolidateReports(reports);
+    return consolidateReports(reports);
+  }, [reports]);
 
-    // If showing pending review, only show items pending review (auto-hidden CSAM queue)
+  // Who sits behind the Pending review switch: every auto-hidden target, plus
+  // any loaded target with a CSAM signal that no person has handled yet. It
+  // does not read hideResolved; see buildSwitchMembership.
+  const switchMembership = useMemo(() => buildSwitchMembership({
+    consolidated: allConsolidated,
+    pendingReview: pendingReviewTargets,
+    humanHandled: humanHandledTargets,
+    resolvedTargets,
+    bannedPubkeys: bannedPubkeySet,
+  }), [allConsolidated, pendingReviewTargets, humanHandledTargets, resolvedTargets, bannedPubkeySet]);
+
+  const consolidated = useMemo(() => {
+    // A copy, so the in-place sort below can never reorder allConsolidated.
+    // Today both view branches filter into a new array first, so this is
+    // belt and braces against a later change that drops a filter.
+    let items = [...allConsolidated];
+
+    // If showing pending review, only show items behind the switch
     if (showPendingReview) {
-      items = items.filter(c => pendingReviewTargets.has(`${c.target.type}:${c.target.value}`));
+      items = items.filter(c => switchMembership.has(`${c.target.type}:${c.target.value}`));
     } else {
-      // Default view: EXCLUDE auto-hidden items (moderators don't see CSAM unless they opt in)
-      items = items.filter(c => !pendingReviewTargets.has(`${c.target.type}:${c.target.value}`));
+      // Default view: EXCLUDE items behind the switch (moderators don't see CSAM unless they opt in)
+      items = items.filter(c => !switchMembership.has(`${c.target.type}:${c.target.value}`));
       // Also filter out resolved if toggle is on
       if (hideResolved) {
         items = items.filter(c => !isConsolidatedReportResolved(c, resolvedTargets, bannedPubkeySet));
@@ -929,8 +987,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
         case 'category': {
           // Sort by priority (CSAM first), then alphabetically by category
-          const aPriority = getCategoryPriority(a.categories);
-          const bPriority = getCategoryPriority(b.categories);
+          const aPriority = getCategoryPriority(a.categories, hasCsamSignal(a.reports));
+          const bPriority = getCategoryPriority(b.categories, hasCsamSignal(b.reports));
           if (aPriority !== bPriority) return aPriority - bPriority;
           // Then by primary category name
           const aCategory = a.categories[0] || 'zzz';
@@ -946,12 +1004,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     });
 
     return items;
-  }, [reports, hideResolved, showPendingReview, resolvedTargets, bannedPubkeySet, pendingReviewTargets, filterCategory, filterTargetType, sortBy]);
-
-  const allConsolidated = useMemo(() => {
-    if (!reports) return [];
-    return consolidateReports(reports);
-  }, [reports]);
+  }, [allConsolidated, hideResolved, showPendingReview, resolvedTargets, bannedPubkeySet, switchMembership, filterCategory, filterTargetType, sortBy]);
 
   const authorByTarget = useMemo(() => new Map(
     allConsolidated.map(c => [`${c.target.type}:${c.target.value}`, c.authorPubkey]),
@@ -962,19 +1015,19 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     if (!reports) return [];
     let items = [...reports];
 
-    // If showing pending review, only show items pending review (auto-hidden CSAM queue)
+    // If showing pending review, only show items behind the switch
     if (showPendingReview) {
       items = items.filter(report => {
         const target = getReportTarget(report);
         if (!target) return false;
-        return pendingReviewTargets.has(`${target.type}:${target.value}`);
+        return switchMembership.has(`${target.type}:${target.value}`);
       });
     } else {
-      // Default view: EXCLUDE auto-hidden items (moderators don't see CSAM unless they opt in)
+      // Default view: EXCLUDE items behind the switch (moderators don't see CSAM unless they opt in)
       items = items.filter(report => {
         const target = getReportTarget(report);
         if (!target) return true; // Keep reports without targets
-        return !pendingReviewTargets.has(`${target.type}:${target.value}`);
+        return !switchMembership.has(`${target.type}:${target.value}`);
       });
       // Also filter resolved if toggle is on
       if (hideResolved) {
@@ -1013,8 +1066,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         case 'category': {
           const aCat = getReportCategory(a);
           const bCat = getReportCategory(b);
-          const aPriority = getCategoryPriority([aCat]);
-          const bPriority = getCategoryPriority([bCat]);
+          const aPriority = getCategoryPriority([aCat], hasCsamSignal([a]));
+          const bPriority = getCategoryPriority([bCat], hasCsamSignal([b]));
           if (aPriority !== bPriority) return aPriority - bPriority;
           return aCat.localeCompare(bCat);
         }
@@ -1025,14 +1078,19 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     });
 
     return items;
-  }, [reports, hideResolved, showPendingReview, resolvedTargets, bannedPubkeySet, authorByTarget, pendingReviewTargets, filterCategory, filterTargetType, sortBy]);
+  }, [reports, hideResolved, showPendingReview, resolvedTargets, bannedPubkeySet, authorByTarget, switchMembership, filterCategory, filterTargetType, sortBy]);
 
   const uniqueTargets = consolidated.length;
-  const pendingReviewCount = pendingReviewTargets.size;
+  const pendingReviewCount = switchMembership.size;
   const totalTargets = allConsolidated.length;
   const totalReports = reports?.length || 0;
   const filteredReportsCount = filteredReports.length;
-  const resolvedCount = totalTargets - uniqueTargets;
+  // Loaded targets behind the switch are pending review, not resolved, so the
+  // header's "N resolved" must not count them.
+  const switchMembersLoaded = allConsolidated.filter(
+    c => switchMembership.has(`${c.target.type}:${c.target.value}`),
+  ).length;
+  const resolvedCount = totalTargets - uniqueTargets - switchMembersLoaded;
 
   // Sync selected report with URL
   useEffect(() => {
@@ -1061,8 +1119,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // it again. Reloading appeared to fix it only because that drops
   // selectedReport. #274 made it far more frequent by widening resolvedTargets
   // from a week to all of history, which is when moderators started reporting it.
+  //
+  // Held until switch membership is known. Labels or bans can resolve the
+  // target first; unhiding then would turn Hide resolved off before the switch
+  // opens, and the switch would save "off" as the moderator's setting.
   useEffect(() => {
-    if (!hideResolved || !selectedReport || !deepLinkSelectedRef.current) return;
+    if (!hideResolved || !selectedReport || !deepLinkSelectedRef.current || !switchMembershipKnown) return;
     const target = getReportTarget(selectedReport);
     if (target && isConsolidatedReportResolved(
       { target, authorPubkey: authorByTarget.get(`${target.type}:${target.value}`) },
@@ -1071,7 +1133,72 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     )) {
       setHideResolved(false);
     }
-  }, [hideResolved, selectedReport, resolvedTargets, bannedPubkeySet, authorByTarget]);
+  }, [hideResolved, selectedReport, resolvedTargets, bannedPubkeySet, authorByTarget, switchMembershipKnown]);
+
+  // Memoized because the deep-link effect below depends on it; it reads
+  // hideResolved and filterCategory, so it changes only when those do.
+  const enterPendingReview = useCallback(() => {
+    setShowPendingReview(true);
+    prePendingReviewRef.current = { hideResolved, filterCategory };
+    setHideResolved(false);
+    setFilterCategory(null);
+  }, [hideResolved, filterCategory]);
+
+  // Memoized for the same reason: the auto-leave effect below depends on it.
+  const leavePendingReview = useCallback(({ keepDeepLinkCourtesy = false } = {}) => {
+    setShowPendingReview(false);
+    // Turning the switch off is a stated preference, so the deep-link arrival
+    // courtesy is spent, as the Hide resolved handler does. Without this the
+    // effect below sees the deep-linked report still open behind the switch
+    // and turns it straight back on, then again on every poll. The auto-leave
+    // is not the moderator's choice, so it keeps the courtesy.
+    if (!keepDeepLinkCourtesy) deepLinkSelectedRef.current = false;
+    const previous = prePendingReviewRef.current;
+    if (previous) {
+      setHideResolved(previous.hideResolved);
+      // Only hand the category back if the moderator did not
+      // choose one inside the view. The chips stay live in
+      // there, so an in-view pick is a deliberate choice, and
+      // overwriting it would be the same silent discard this
+      // is meant to stop.
+      if (filterCategory === null) {
+        setFilterCategory(previous.filterCategory);
+      }
+      prePendingReviewRef.current = null;
+    }
+  }, [filterCategory]);
+
+  // A link that lands on a report behind the pending-review switch opens the
+  // switch, or the report sits in the detail pane with no row in the list.
+  // Same scoping as the resolved-unhide effect above, and for the same reason:
+  // DEEP-LINK selections only. A report the moderator clicked is already in
+  // the view they chose, and switchMembership is rebuilt on every poll, so an
+  // unscoped effect would reopen the switch underneath them every 15s.
+  useEffect(() => {
+    if (showPendingReview || !selectedReport || !deepLinkSelectedRef.current) return;
+    const target = getReportTarget(selectedReport);
+    if (target && switchMembership.has(`${target.type}:${target.value}`)) {
+      enterPendingReview();
+      switchOpenedByDeepLinkRef.current = true;
+    }
+  }, [showPendingReview, selectedReport, switchMembership, enterPendingReview]);
+
+  // The other half: a switch a deep link opened closes again once the linked
+  // target leaves it. While resolution sources load, an unresolved-looking
+  // CSAM target counts as a member, so the effect above can open the switch
+  // for a target that turns out to be resolved. The switch view shows members
+  // only and Hide resolved is off inside it, so the resolved-unhide effect
+  // cannot help, and the open report would have no row. Leaving keeps the
+  // deep-link courtesy, so that effect then shows it in the default view.
+  // A switch the moderator turned on is never closed for them.
+  useEffect(() => {
+    if (!showPendingReview || !switchOpenedByDeepLinkRef.current || !selectedReport) return;
+    const target = getReportTarget(selectedReport);
+    if (target && !switchMembership.has(`${target.type}:${target.value}`)) {
+      switchOpenedByDeepLinkRef.current = false;
+      leavePendingReview({ keepDeepLinkCourtesy: true });
+    }
+  }, [showPendingReview, selectedReport, switchMembership, leavePendingReview]);
 
   // Handle deep linking via query params (?event=... or ?pubkey=... or &env=...)
   useEffect(() => {
@@ -1117,8 +1244,18 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     );
 
     if (inBulk) {
-      // If target is resolved and we're hiding resolved, temporarily show it
-      if (hideResolved && isConsolidatedReportResolved(inBulk, resolvedTargets, bannedPubkeySet)) {
+      // If target is resolved and we're hiding resolved, temporarily show it.
+      // Not for a switch member: the switch-opening effect turns Hide resolved
+      // off itself and saves the moderator's setting first. Turning it off here
+      // would make the switch save "off" and hand that back when it closes.
+      // Held until membership is known; the resolved-unhide effect above
+      // applies it once it is.
+      if (
+        hideResolved
+        && switchMembershipKnown
+        && !switchMembership.has(`${inBulk.target.type}:${inBulk.target.value}`)
+        && isConsolidatedReportResolved(inBulk, resolvedTargets, bannedPubkeySet)
+      ) {
         setHideResolved(false);
       }
       deepLinkSelectedRef.current = true;
@@ -1197,7 +1334,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         setDeepLinkStatus('unavailable');
       }
     })();
-  }, [allConsolidated, searchParams, hideResolved, resolvedTargets, bannedPubkeySet, navigate, isLoading, config.relayUrl, config.apiUrl, updateConfig, queryClient, fetchReportsByTarget, relayUrl, retryNonce]);
+  }, [allConsolidated, searchParams, hideResolved, resolvedTargets, bannedPubkeySet, switchMembership, switchMembershipKnown, navigate, isLoading, config.relayUrl, config.apiUrl, updateConfig, queryClient, fetchReportsByTarget, relayUrl, retryNonce]);
 
   // Update URL when report selection changes
   const handleSelectReport = (report: NostrEvent | null) => {
@@ -1208,6 +1345,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     // A manual pick supersedes any deep link, so the unhide effect must not
     // treat this selection as one.
     deepLinkSelectedRef.current = false;
+    // Nor may the switch close itself under a report the moderator picked.
+    switchOpenedByDeepLinkRef.current = false;
     setSelectedReport(report);
     setDeepLinkStatus('idle'); // clear any deep-link fallback once the user interacts
     // Invalidate any in-flight targeted lookup: a user selection/dismissal
@@ -1338,6 +1477,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const showDeepLinkResolving =
     !selectedReport && deepLinkStatus === 'resolving' && hasDeepLinkParams;
 
+  // The open report's side of the switch, so the pane carries the row's label.
+  const selectedSwitchKey = selectedTarget ? `${selectedTarget.type}:${selectedTarget.value}` : undefined;
 
   const reportDetailPane = showDeepLinkFallback ? (
     <DeepLinkFallback
@@ -1380,6 +1521,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         allReportsForTargetTruncated={targetedHistoryTruncated}
         allReports={reports || []}
         onDismiss={dismissDetail}
+        switchState={selectedSwitchKey ? switchMembership.get(selectedSwitchKey) : undefined}
       />
     </ErrorBoundary>
   );
@@ -1551,11 +1693,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
             )}
 
             {/* Pending review filter */}
-            {pendingReviewCount > 0 && (
+            {/* Stays rendered while on, even at zero: finishing the last item
+                would otherwise remove the only way back, since Hide resolved
+                is disabled while this is on. */}
+            {(pendingReviewCount > 0 || showPendingReview) && (
               <div className="flex items-center justify-between pt-2 border-t">
                 <Label htmlFor="pending-review" className="text-xs text-muted-foreground flex items-center gap-1.5">
                   <EyeOff className="h-3 w-3 text-orange-500" />
-                  Pending review (auto-hidden)
+                  Pending review (sensitive)
                   <Badge variant="secondary" className="ml-1 text-xs px-1.5 py-0">
                     {pendingReviewCount}
                   </Badge>
@@ -1564,26 +1709,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                   id="pending-review"
                   checked={showPendingReview}
                   onCheckedChange={(checked) => {
-                    setShowPendingReview(checked);
-                    if (checked) {
-                      prePendingReviewRef.current = { hideResolved, filterCategory };
-                      setHideResolved(false);
-                      setFilterCategory(null);
-                    } else {
-                      const previous = prePendingReviewRef.current;
-                      if (previous) {
-                        setHideResolved(previous.hideResolved);
-                        // Only hand the category back if the moderator did not
-                        // choose one inside the view. The chips stay live in
-                        // there, so an in-view pick is a deliberate choice, and
-                        // overwriting it would be the same silent discard this
-                        // is meant to stop.
-                        if (filterCategory === null) {
-                          setFilterCategory(previous.filterCategory);
-                        }
-                        prePendingReviewRef.current = null;
-                      }
-                    }
+                    // The moderator owns the switch from here on.
+                    switchOpenedByDeepLinkRef.current = false;
+                    if (checked) enterPendingReview();
+                    else leavePendingReview();
                   }}
                 />
               </div>
@@ -1635,14 +1764,18 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                     <p className="text-sm">No reports found</p>
                   </div>
                 ) : (
-                  consolidated.map((item) => (
-                    <ConsolidatedReportItem
-                      key={`${item.target.type}:${item.target.value}`}
-                      consolidated={item}
-                      isSelected={selectedReport?.id === item.latestReport.id}
-                      onClick={() => handleSelectReport(item.latestReport)}
-                    />
-                  ))
+                  consolidated.map((item) => {
+                    const key = `${item.target.type}:${item.target.value}`;
+                    return (
+                      <ConsolidatedReportItem
+                        key={key}
+                        consolidated={item}
+                        isSelected={selectedReport?.id === item.latestReport.id}
+                        onClick={() => handleSelectReport(item.latestReport)}
+                        switchState={switchMembership.get(key)}
+                      />
+                    );
+                  })
                 )
               ) : (
                 filteredReports.length === 0 ? (
@@ -1651,14 +1784,19 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                     <p className="text-sm">No reports found</p>
                   </div>
                 ) : (
-                  filteredReports.map((report) => (
-                    <IndividualReportItem
-                      key={report.id}
-                      report={report}
-                      isSelected={selectedReport?.id === report.id}
-                      onClick={() => handleSelectReport(report)}
-                    />
-                  ))
+                  filteredReports.map((report) => {
+                    const target = getReportTarget(report);
+                    const key = target ? `${target.type}:${target.value}` : undefined;
+                    return (
+                      <IndividualReportItem
+                        key={report.id}
+                        report={report}
+                        isSelected={selectedReport?.id === report.id}
+                        onClick={() => handleSelectReport(report)}
+                        switchState={key ? switchMembership.get(key) : undefined}
+                      />
+                    );
+                  })
                 )
               )}
             </div>
