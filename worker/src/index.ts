@@ -959,6 +959,13 @@ function jsonResponse(data: ApiResponse, status: number, headers: Record<string,
   });
 }
 
+// A moderator pubkey as the API accepts one: a string of 64 hex characters.
+// The typeof check comes first because RegExp.test coerces what it is given,
+// so a one-element array holding a valid pubkey would otherwise pass.
+function isHexPubkey(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value);
+}
+
 /** Forward an upstream JSON response with CORS headers. Separate from jsonResponse to avoid weakening its type guard. */
 function proxyJsonResponse(data: unknown, status: number, headers: Record<string, string>): Response {
   return new Response(JSON.stringify(data), {
@@ -1006,7 +1013,7 @@ async function handlePublish(
   if (!body.kind || body.content === undefined) {
     return jsonResponse({ success: false, error: 'Missing required fields: kind, content' }, 400, corsHeaders);
   }
-  if (body.moderatorPubkey !== undefined && !/^[a-f0-9]{64}$/i.test(body.moderatorPubkey)) {
+  if (body.moderatorPubkey !== undefined && !isHexPubkey(body.moderatorPubkey)) {
     return jsonResponse({ success: false, error: 'Invalid moderatorPubkey' }, 400, corsHeaders);
   }
   if (body.moderationReason !== undefined && typeof body.moderationReason !== 'string') {
@@ -1150,7 +1157,7 @@ async function handleModerate(
       if (body.reason !== undefined && typeof body.reason !== 'string') {
         return jsonResponse({ success: false, error: `Invalid reason for ${body.action}` }, 400, corsHeaders);
       }
-      if (body.moderatorPubkey !== undefined && !/^[a-f0-9]{64}$/i.test(body.moderatorPubkey)) {
+      if (body.moderatorPubkey !== undefined && !isHexPubkey(body.moderatorPubkey)) {
         return jsonResponse({ success: false, error: `Invalid moderatorPubkey for ${body.action}` }, 400, corsHeaders);
       }
 
@@ -1225,7 +1232,7 @@ async function handleModerate(
       if (body.reason !== undefined && typeof body.reason !== 'string') {
         return jsonResponse({ success: false, error: `Invalid reason for ${body.action}` }, 400, corsHeaders);
       }
-      if (body.moderatorPubkey !== undefined && !/^[a-f0-9]{64}$/i.test(body.moderatorPubkey)) {
+      if (body.moderatorPubkey !== undefined && !isHexPubkey(body.moderatorPubkey)) {
         return jsonResponse({ success: false, error: `Invalid moderatorPubkey for ${body.action}` }, 400, corsHeaders);
       }
 
@@ -1860,7 +1867,7 @@ async function handleLogDecision(
     // Absent is allowed (recorded as NULL); anything else must be a pubkey.
     // Above all not the worker's own 'auto', which would make a person's
     // decision read as one no person made.
-    if (body.moderatorPubkey !== undefined && !/^[a-f0-9]{64}$/i.test(body.moderatorPubkey)) {
+    if (body.moderatorPubkey !== undefined && !isHexPubkey(body.moderatorPubkey)) {
       return jsonResponse({ success: false, error: 'Invalid moderatorPubkey' }, 400, corsHeaders);
     }
     if (body.targetType === 'event' && COORDINATED_AUTO_HIDE_ACTIONS.has(body.action)) {
@@ -1917,7 +1924,7 @@ async function handleConfirmAutoHide(
   if (body.reason !== undefined && typeof body.reason !== 'string') {
     return jsonResponse({ success: false, error: 'Invalid reason' }, 400, corsHeaders);
   }
-  if (body.moderatorPubkey !== undefined && !/^[a-f0-9]{64}$/i.test(body.moderatorPubkey)) {
+  if (body.moderatorPubkey !== undefined && !isHexPubkey(body.moderatorPubkey)) {
     return jsonResponse({ success: false, error: 'Invalid moderatorPubkey' }, 400, corsHeaders);
   }
   if (body.reportId !== undefined && !/^[a-f0-9]{64}$/i.test(body.reportId)) {

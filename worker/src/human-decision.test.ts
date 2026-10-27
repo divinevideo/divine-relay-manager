@@ -170,7 +170,7 @@ describe('human decision persistence', () => {
 
     // 'auto' is the worker's own marker: a decision posted with it would read
     // as one no person made.
-    it.each(['auto', '', 'e'.repeat(63), 'g'.repeat(64)])(
+    it.each(['auto', '', 'e'.repeat(63), 'g'.repeat(64), null])(
       'rejects %j as the moderatorPubkey and records nothing',
       async (moderatorPubkey) => {
         const { db, sqlLog } = createMockDB();
@@ -186,6 +186,24 @@ describe('human decision persistence', () => {
         expect(sqlLog.some(({ sql }) => sql.includes('INSERT INTO moderation_decisions'))).toBe(false);
       },
     );
+
+    // RegExp.test coerces what it is given, so a one-element array of a valid
+    // pubkey reads as that pubkey. Real D1 then rejects the bind with a 500.
+    it('rejects a moderatorPubkey sent as an array and records nothing', async () => {
+      const { db, sqlLog } = createMockDB();
+      const env = createEnv(db);
+
+      const response = await worker.fetch(new Request('http://localhost/api/decisions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        body: JSON.stringify({
+          targetType: 'pubkey', targetId: 'b'.repeat(64), action: 'reviewed', moderatorPubkey: ['e'.repeat(64)],
+        }),
+      }), env as never, mockCtx);
+
+      expect(response.status).toBe(400);
+      expect(sqlLog.some(({ sql }) => sql.includes('INSERT INTO moderation_decisions'))).toBe(false);
+    });
 
     it("records a moderator's hex pubkey with the decision", async () => {
       const { db, sqlLog } = createMockDB();
@@ -249,6 +267,23 @@ describe('human decision persistence', () => {
         const targetInserts = sqlLog.filter(s => s.sql.includes('moderation_targets'));
         expect(targetInserts.length).toBeGreaterThan(0);
       }
+    });
+  });
+
+  describe('POST /api/moderate (handleModerate) moderatorPubkey', () => {
+    it('rejects a moderatorPubkey sent as an array, before hiding anything', async () => {
+      const { db } = createMockDB();
+      const operations: unknown[] = [];
+      const env = createEnv(db, operations);
+
+      const response = await worker.fetch(new Request('http://localhost/api/moderate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        body: JSON.stringify({ action: 'delete_event', eventId: 'ab'.repeat(32), moderatorPubkey: ['e'.repeat(64)] }),
+      }), env as never, mockCtx);
+
+      expect(response.status).toBe(400);
+      expect(operations).toEqual([]);
     });
   });
 
