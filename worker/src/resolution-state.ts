@@ -2,6 +2,7 @@
 // ABOUTME: which targets the queue should treat as already handled.
 
 import { AUTO_HIDE_ACTIONS, AUTO_HIDE_STATE_ACTIONS } from '../../shared/autohide';
+import { isAutomatedDecision } from '../../shared/automated-decision';
 
 export interface ResolvedTargetRow {
   target_type: string;
@@ -23,13 +24,6 @@ export interface AutoHideStateRow {
 // query. Chunk boundaries are invisible in the result.
 const ROW_CHUNK_SIZE = 1000;
 
-// The moderator_pubkey the worker writes on decisions it makes itself
-// (ReportWatcher's logDecision). Every human path whose rows this read sees
-// writes a hex pubkey or NULL. ReportWatcher's recordAutoHideHumanDecision also
-// falls back to 'auto', but it writes only auto-hide actions, which this read
-// excludes.
-const AUTOMATED_MODERATOR = 'auto';
-
 // The queue subtracts these targets to hide handled work. /api/decisions caps at
 // the newest 1000 ROWS, so a target whose only decision falls outside that window
 // drops out of the subtraction and reappears as pending with nothing explaining
@@ -47,7 +41,8 @@ const AUTOMATED_MODERATOR = 'auto';
 // row -- is still returned, because Hide resolved counts it as handled. It
 // carries `automated: true` so the sensitive-reports switch, which waits for a
 // person, can look past it. One human row anywhere in the walk clears the flag,
-// whichever chunk it falls in.
+// whichever chunk it falls in. isAutomatedDecision picks out the worker's own
+// rows; every human path whose rows this read sees writes a hex pubkey or NULL.
 export async function getResolvedTargets(
   db: D1Database,
   opts?: { chunkSize?: number }
@@ -62,7 +57,7 @@ export async function getResolvedTargets(
   for (;;) {
     const result = await db
       .prepare(
-        `SELECT id, target_type, target_id, moderator_pubkey
+        `SELECT id, target_type, target_id, action, moderator_pubkey
            FROM moderation_decisions
           WHERE action NOT IN (${placeholders})
             AND id > ?
@@ -76,11 +71,12 @@ export async function getResolvedTargets(
       id: number;
       target_type: string;
       target_id: string;
+      action: string;
       moderator_pubkey: string | null;
     }>;
     for (const row of rows) {
       const key = `${row.target_type}:${row.target_id}`;
-      const human = row.moderator_pubkey !== AUTOMATED_MODERATOR;
+      const human = !isAutomatedDecision(row);
       const target = targets.get(key);
       if (!target) {
         targets.set(key, { target_type: row.target_type, target_id: row.target_id, human });

@@ -6,10 +6,18 @@
 // it. A stubbed DB cannot catch a bad GROUP BY or bind mismatch, so this runs
 // against real SQLite.
 import { Miniflare } from 'miniflare';
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { ensureSchema } from '../src/db';
 import { getResolvedTargets, getAutoHideStates } from '../src/resolution-state';
+import { ReportWatcher, type ReportEvent } from '../src/ReportWatcher';
 import worker from '../src/index';
+
+// ReportWatcher looks the reported account up on the relay before it opens an
+// age-review case. There is no relay here, so the lookup finds nothing.
+vi.mock('../src/relay-profile', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../src/relay-profile')>(),
+  fetchAccountIdentity: vi.fn(async () => ({ completed: false, profile: null })),
+}));
 
 let mf: Miniflare;
 let DB: D1Database;
@@ -347,5 +355,32 @@ describe('resolved targets only automation has touched, against real D1', () => 
       target_id: AUTO_ONLY,
       automated: true,
     });
+  });
+
+  // The fixtures above write 'auto' by hand. This one lets the worker write its
+  // own row, so the writer and this read cannot drift apart unnoticed.
+  it('flags the decision the worker writes when it opens an age-review case', async () => {
+    const state = {
+      storage: { get: async () => undefined, put: async () => {} },
+      blockConcurrencyWhile: async (callback: () => Promise<void>) => callback(),
+    } as unknown as DurableObjectState;
+    // Only DB is read on this path: the relay lookup is mocked above, and
+    // nothing here signs or calls keycast.
+    const watcher = new ReportWatcher(state, { DB: autoDB, NOSTR_NSEC: '', RELAY_URL: 'wss://relay.invalid' });
+    const reported = '5c'.repeat(32);
+    const event: ReportEvent = {
+      id: '6d'.repeat(32),
+      pubkey: '8f'.repeat(32),
+      kind: 1984,
+      content: '',
+      tags: [['p', reported]],
+      created_at: Math.floor(Date.now() / 1000),
+    };
+
+    await watcher['createAgeReviewCase'](event, reported);
+
+    expect(await resolvedFor(reported)).toStrictEqual([
+      { target_type: 'pubkey', target_id: reported, automated: true },
+    ]);
   });
 });

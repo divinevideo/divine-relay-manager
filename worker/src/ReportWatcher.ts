@@ -20,6 +20,7 @@ import {
   defaultResolutionForBand,
 } from '../../shared/age-review';
 import { getReportedList } from '../../shared/list-report';
+import { AUTOMATED_MODERATOR } from '../../shared/automated-decision';
 import { getUserStatus, type KeycastEnv } from './keycast-client';
 import { resolveByPubkey } from './protected-minors';
 import { fetchAccountIdentity } from './relay-profile';
@@ -1290,7 +1291,7 @@ export class ReportWatcher implements DurableObject {
         decision.targetId,
         decision.action,
         decision.reason,
-        decision.moderatorPubkey || 'auto',
+        decision.moderatorPubkey || AUTOMATED_MODERATOR,
         decision.reportId,
         decision.reporterPubkey
       ).run();
@@ -1332,7 +1333,7 @@ export class ReportWatcher implements DurableObject {
           operation.eventId,
           action,
           operation.reason || operation.humanAction || 'human review',
-          operation.moderatorPubkey || 'auto',
+          operation.moderatorPubkey || AUTOMATED_MODERATOR,
           operation.reportId || '',
           operation.reporterPubkey || '',
         ),
