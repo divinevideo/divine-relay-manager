@@ -28,6 +28,7 @@ import {
   publishLabelAndBan,
   markAsReviewed,
   moderateMedia,
+  getBulkJobNotes,
   verifyAgeRestricted,
   verifyPubkeyBanned,
   verifyPubkeyUnbanned,
@@ -1200,7 +1201,32 @@ describe('adminApi', () => {
     });
   });
 
+  describe('getBulkJobNotes', () => {
+    it("asks for one page of a job's notes, with the job id as one path segment and the cursor when given", async () => {
+      mockFetch.mockResolvedValue({ ok: true, json: async () => ({ notes: [], next: null }) });
+
+      await getBulkJobNotes(API_URL, 'age-review:case-1:3:cleared');
+      await getBulkJobNotes(API_URL, 'age-review:case-1:3:cleared', '500');
+
+      expect(mockFetch.mock.calls[0][0]).toBe(`${API_URL}/api/bulk-moderate/notes/age-review%3Acase-1%3A3%3Acleared`);
+      expect(mockFetch.mock.calls[1][0]).toBe(`${API_URL}/api/bulk-moderate/notes/age-review%3Acase-1%3A3%3Acleared?after=500`);
+      expect(mockFetch.mock.calls[0][1]).toMatchObject({ method: 'GET' });
+    });
+  });
+
   describe('moderateMedia', () => {
+    it('carries the open case a refusal names', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 409,
+        statusText: 'Conflict',
+        json: async () => ({ success: false, error: 'held', code: 'age_review_active', caseId: 'case-open', state: 'open_reported' }),
+      });
+
+      const error = await moderateMedia(API_URL, 'hash123', 'SAFE', 'r', 'QUARANTINE', 'a'.repeat(64)).catch((e: unknown) => e);
+      expect(error).toMatchObject({ code: 'age_review_active', caseId: 'case-open' });
+    });
+
     it('should POST to /api/moderate-media with sha256, action, reason', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,

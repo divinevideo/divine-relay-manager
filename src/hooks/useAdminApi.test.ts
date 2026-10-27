@@ -21,6 +21,7 @@ const fetchResolutionLabelTargets = vi.hoisted(() => vi.fn());
 const listSuspendedPubkeys = vi.hoisted(() => vi.fn());
 const bulkModerate = vi.hoisted(() => vi.fn());
 const getBulkKindCounts = vi.hoisted(() => vi.fn());
+const getBulkJobNotes = vi.hoisted(() => vi.fn());
 const moderateMedia = vi.hoisted(() => vi.fn());
 vi.mock('@/lib/adminApi', async (orig) => ({
   ...(await orig<typeof import('@/lib/adminApi')>()),
@@ -30,6 +31,7 @@ vi.mock('@/lib/adminApi', async (orig) => ({
   listSuspendedPubkeys,
   bulkModerate,
   getBulkKindCounts,
+  getBulkJobNotes,
   moderateMedia,
 }));
 
@@ -43,6 +45,15 @@ describe('useAdminApi', () => {
 
     // The account, too: dropped, the worker's account check never runs.
     expect(moderateMedia).toHaveBeenCalledWith(API_URL, 'f'.repeat(64), 'SAFE', 'r', 'QUARANTINE', 'a'.repeat(64));
+  });
+
+  // A dropped page cursor reads the first page of a job's notes forever.
+  it('forwards the notes page cursor to adminApi', () => {
+    const { result } = renderHook(() => useAdminApi());
+
+    result.current.getBulkJobNotes('job-1', '42');
+
+    expect(getBulkJobNotes).toHaveBeenCalledWith(API_URL, 'job-1', '42');
   });
 
   it('forwards the reopen target type through to adminApi', () => {

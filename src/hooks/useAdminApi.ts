@@ -157,6 +157,7 @@ export function useAdminApi() {
     bulkModerate: (pubkey: string, action: adminApi.BulkAction, reason?: string, options?: adminApi.BulkModerateOptions) =>
       adminApi.bulkModerate(apiUrl, pubkey, action, reason, options),
     getBulkJobStatus: (jobId: string) => adminApi.getBulkJobStatus(apiUrl, jobId),
+    getBulkJobNotes: (jobId: string, after?: string) => adminApi.getBulkJobNotes(apiUrl, jobId, after),
     getBulkKindCounts: (pubkey: string) => adminApi.getBulkKindCounts(apiUrl, pubkey),
 
     // Delete operations

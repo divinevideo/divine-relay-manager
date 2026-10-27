@@ -11,6 +11,8 @@ import {
   type BulkJobStatus,
   type BulkEnqueueResponse,
   type BulkKindCounts,
+  type BulkNote,
+  type BulkNotesPage,
   KIND_COUNTS_REQUEST_TIMEOUT_MS,
 } from "../../shared/bulk-moderation";
 import { extractMediaHashes as extractSharedMediaHashes } from "../../shared/media-hashes";
@@ -104,6 +106,8 @@ export class ApiError extends Error {
     // 18+-gates the file (`mediaServer` on either 409, the media server's own
     // status name).
     public mediaServerState?: string,
+    // The open age-review case an `age_review_active` refusal names.
+    public caseId?: string,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -205,7 +209,7 @@ async function apiRequest<T>(
     // Read the JSON error body if there is one so callers can act on structured
     // fields (a 409 version_conflict carries `code` + `current_version`) instead
     // of an opaque "HTTP 409:" message. Non-JSON bodies fall back to status text.
-    let parsed: { error?: string; code?: string; current_version?: number; current?: unknown; mediaServer?: unknown } | undefined;
+    let parsed: { error?: string; code?: string; current_version?: number; current?: unknown; mediaServer?: unknown; caseId?: unknown } | undefined;
     try {
       parsed = await response.json() as typeof parsed;
     } catch {
@@ -219,6 +223,7 @@ async function apiRequest<T>(
       parsed?.current_version,
       typeof parsed?.current === 'string' ? parsed.current : undefined,
       typeof parsed?.mediaServer === 'string' ? parsed.mediaServer : undefined,
+      typeof parsed?.caseId === 'string' ? parsed.caseId : undefined,
     );
   }
 
@@ -1522,7 +1527,7 @@ export async function createMinorAccount(
 }
 
 // Bulk moderation
-export { VALID_BULK_ACTIONS, type BulkAction, type BulkModerateResult, type BulkJob, type BulkJobStatus, type BulkKindCounts };
+export { VALID_BULK_ACTIONS, type BulkAction, type BulkModerateResult, type BulkJob, type BulkJobStatus, type BulkKindCounts, type BulkNote, type BulkNotesPage };
 
 // Optional job scope: `kind` is required for delete-kind (the one event kind it
 // deletes) and rejected for every other action. The moderator and report
@@ -1552,6 +1557,15 @@ export async function bulkModerate(
 // Fetch a bulk job's current state. `status` is terminal at 'done' | 'failed'.
 export async function getBulkJobStatus(apiUrl: string, jobId: string): Promise<BulkJob> {
   return apiRequest<BulkJob>(apiUrl, `/api/bulk-moderate/status/${encodeURIComponent(jobId)}`, 'GET');
+}
+
+// One page of a finished job's notes for a person, or of an age-review
+// transition's notes and failure lines (#299), from `after` (a previous page's
+// `next`), or the first page. A worker that predates notes has
+// no such route and answers 404.
+export async function getBulkJobNotes(apiUrl: string, jobId: string, after?: string): Promise<BulkNotesPage> {
+  const query = after === undefined ? '' : `?after=${encodeURIComponent(after)}`;
+  return apiRequest<BulkNotesPage>(apiUrl, `/api/bulk-moderate/notes/${encodeURIComponent(jobId)}${query}`, 'GET');
 }
 
 // Per-kind event counts for an account, from a full relay listing. When

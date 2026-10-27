@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
@@ -8,8 +8,11 @@ import { useAgeReviewGuardRedirect } from '@/hooks/useAgeReviewGuardRedirect';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { UNDERAGE_REPORT_CATEGORY } from '@/lib/constants';
 import { banFailureToast, banSuccessNote, refreshAfterUnconfirmedBan } from '@/lib/banFeedback';
-import { useBulkModerateJob } from '@/hooks/useBulkModerateJob';
+import { isTerminal, useBulkModerateJob } from '@/hooks/useBulkModerateJob';
+import { useBulkJobNotes } from '@/hooks/useBulkJobNotes';
+import { countIssues } from '../../shared/bulk-moderation';
 import { ConfirmDialog } from './ConfirmDialog';
+import { BulkNotesPanel } from './BulkNotesPanel';
 import { useNavigate } from 'react-router-dom';
 import { UserX, UserCheck, ShieldAlert, Trash2, Pause, Play, ArrowRight } from 'lucide-react';
 
@@ -239,19 +242,29 @@ export function UserActions({
       const leftAlone = job.mediaSkipped
         ? `${job.mediaSkipped} file(s) left as they were (already ${job.action === 'delete-all' ? 'blocked or deleted' : 'restricted, blocked or deleted'}).`
         : undefined;
+      // The job's problems and files to check are listed in the panel below the
+      // buttons, which stays until dismissed (#299); the toast only points to
+      // it. countIssues: a "+N more" marker stands for N failures, not one.
+      const listed = [
+        job.failures.length ? `${countIssues(job.failures)} problem(s)` : null,
+        job.noteCount ? `${job.noteCount} file(s) to check` : null,
+      ].filter(Boolean);
+      const pointer = listed.length ? `${listed.join(' and ')} are listed below.` : undefined;
       if (partial) {
-        const counts = `${job.mediaProcessed} media across ${job.eventsProcessed} events`;
-        const detail = job.failures.length
-          ? `${counts}; ${job.failures.length} issue(s): ${job.failures.slice(0, 3).join('; ')}`
-          : `${counts}. The job did not complete cleanly.`;
+        const counts = `${job.mediaProcessed} media across ${job.eventsProcessed} events.`;
+        const detail = [counts, job.failures.length ? null : 'The job did not complete cleanly.', pointer, leftAlone]
+          .filter(Boolean).join(' ');
+        // A failed job did not finish: its panel says it stopped, and so does this.
+        const ending = job.status === 'failed' ? 'stopped before it finished' : 'finished with issues';
         toast({
-          title: `Bulk ${job.action === 'delete-all' ? 'delete' : 'age-restrict'} finished with issues`,
-          description: leftAlone ? `${detail} ${leftAlone}` : detail,
+          title: `Bulk ${job.action === 'delete-all' ? 'delete' : 'age-restrict'} ${ending}`,
+          description: detail,
           variant: 'destructive',
         });
       } else {
         const verb = job.action === 'delete-all' ? 'Deleted' : 'Age-restricted';
-        toast({ title: `${verb} ${job.mediaProcessed} media file(s) across ${job.eventsProcessed} events`, description: leftAlone });
+        const extra = [pointer, leftAlone].filter(Boolean).join(' ') || undefined;
+        toast({ title: `${verb} ${job.mediaProcessed} media file(s) across ${job.eventsProcessed} events`, description: extra });
       }
       // Non-critical audit log; never block the action. Attribute to the
       // moderator snapshotted at job START (not now), so a mid-job logout/switch
@@ -295,8 +308,18 @@ export function UserActions({
   const accountStatusUnconfirmed = isBanned === null || isSuspended === null;
   const showStatusNote = accountStatusUnconfirmed || statusStale || statusPending;
 
+  // The finished job's problems (its stored failures) and notes for a person
+  // (#299), until the moderator dismisses them. Only a job of the account
+  // shown: the hook detaches from a job when the account changes.
+  const notesJob = bulkJob.job && bulkJob.job.pubkey === pubkey && isTerminal(bulkJob.job.status) ? bulkJob.job : undefined;
+  const notes = useBulkJobNotes(notesJob);
+  const [dismissedNotesJob, setDismissedNotesJob] = useState<string | null>(null);
+  const actionsRef = useRef<HTMLDivElement>(null);
+  const showNotes = notesJob !== undefined && notesJob.jobId !== dismissedNotesJob
+    && (notesJob.failures.length > 0 || notes.isLoading || notes.isError || (notes.data?.length ?? 0) > 0);
+
   return (
-    <div className="flex flex-wrap gap-2">
+    <div ref={actionsRef} role="group" aria-label="Account actions" tabIndex={-1} className="flex flex-wrap gap-2 outline-none">
       {bulkJob.trackingLost && (
         <div className="basis-full flex flex-wrap items-center gap-2 rounded-md border p-2 text-xs">
           <span className="font-medium">{LOST_TRACK_TITLE}</span>
@@ -407,6 +430,25 @@ export function UserActions({
             isPending={bulkJob.runningAction === 'delete-all'}
           />
         </>
+      )}
+
+      {showNotes && (
+        <div className="basis-full">
+          <BulkNotesPanel
+            pubkey={pubkey}
+            origin={{ kind: 'job', status: notesJob.status === 'failed' ? 'failed' : 'done' }}
+            failures={notesJob.failures}
+            notes={notes.data ?? []}
+            notesLoading={notes.isLoading}
+            notesError={notes.isError ? (notes.error as Error).message : null}
+            onRetry={() => { void notes.refetch(); }}
+            onDismiss={() => {
+              setDismissedNotesJob(notesJob.jobId);
+              // Back to the actions the panel sat under, not the page body.
+              actionsRef.current?.focus();
+            }}
+          />
+        </div>
       )}
     </div>
   );

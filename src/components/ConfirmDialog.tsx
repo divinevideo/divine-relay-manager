@@ -15,6 +15,8 @@ interface ConfirmDialogProps {
   trigger: ReactNode;
   title: string;
   summary: string;
+  // Extra classes for the summary, e.g. to let a long ID wrap.
+  summaryClassName?: string;
   onConfirm: () => void | Promise<void>;
   confirmLabel?: string;
   pendingLabel?: string;
@@ -32,6 +34,7 @@ export function ConfirmDialog({
   trigger,
   title,
   summary,
+  summaryClassName,
   onConfirm,
   confirmLabel = 'Confirm',
   pendingLabel = 'Processing...',
@@ -46,7 +49,7 @@ export function ConfirmDialog({
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle>{title}</AlertDialogTitle>
-          <AlertDialogDescription>{summary}</AlertDialogDescription>
+          <AlertDialogDescription className={summaryClassName}>{summary}</AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel>Cancel</AlertDialogCancel>

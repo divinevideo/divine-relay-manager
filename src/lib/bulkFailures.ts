@@ -1,6 +1,36 @@
 // ABOUTME: One bulk-job failure line in plain words, for every screen that lists
-// ABOUTME: them (Bulk Delete by Kind). IDs stay whole.
+// ABOUTME: them (the results panel, Bulk Delete by Kind). IDs stay whole.
 import { parseFailure, parseNotSavedMarker } from '../../shared/bulk-moderation';
+
+// What the media server shows for a file, by its own status name (blossom's
+// BlobStatus), as words that follow "the media server".
+const MEDIA_SERVER_SHOWS: Record<string, string> = {
+  active: 'shows it as public',
+  pending: 'shows it as public',
+  age_restricted: 'shows it behind the 18+ gate',
+  restricted: 'shows it as hidden',
+  banned: 'shows it as blocked',
+  deleted: 'shows it as deleted',
+};
+
+// What the moderation record says, by moderation-service's status name, as
+// words that follow "the moderation record".
+const RECORD_SAYS: Record<string, string> = {
+  unknown: 'has no decision',
+  safe: 'says public',
+  review: 'says waiting for review',
+  age_restricted: 'says 18+',
+  quarantine: 'says hidden',
+  permanent_ban: 'says blocked',
+  delete: 'says deleted',
+};
+
+// "the media server shows this file as …", for a status name; one not known
+// here is named as written.
+export function mediaServerShows(status: string, subject = 'it'): string {
+  const words = MEDIA_SERVER_SHOWS[status.toLowerCase()] ?? `shows it as ${status}`;
+  return words.replace(' it ', ` ${subject} `);
+}
 
 // The listing error the worker wraps every uploader-list failure in
 // (listAccountVideos in worker/src/media-server.ts); the lines below already
@@ -27,6 +57,20 @@ const LISTING_LINES: Array<[RegExp, (m: RegExpExecArray) => string]> = [
   [/^relay could not be fully paginated; (.*)$/s, (m) => `the relay's list of events could not be read in full; ${m[1]}`],
 ];
 
+// The per-file causes the worker builds when it leaves a file alone (see
+// mayChangeMedia in worker/src/bulk-moderate.ts), in words. Any other cause
+// is a change that failed, shown as written.
+function describeMediaFailure(sha256: string, error: string): string {
+  const disagree = /^status sources disagree \(blossom (\S+), moderation-service (\S+)\), left unchanged$/.exec(error);
+  if (disagree) {
+    const says = RECORD_SAYS[disagree[2].toLowerCase()] ?? `says ${disagree[2]}`;
+    return `file ${sha256} was left unchanged: the media server ${mediaServerShows(disagree[1])} but the moderation record ${says}`;
+  }
+  const unreadable = /^could not read current status, left unchanged: (.*)$/s.exec(error);
+  if (unreadable) return `file ${sha256} was left unchanged: its current status could not be read (${unreadable[1]})`;
+  return `file ${sha256} could not be changed: ${error}`;
+}
+
 // A fragment, not a sentence: a caller embeds it ("Reason: ...") or capitalises
 // it for a list.
 export function describeBulkFailure(failure: string): string {
@@ -42,7 +86,7 @@ export function describeBulkFailure(failure: string): string {
     case 'event':
       return `event ${parsed.id} failed: ${parsed.error}`;
     case 'media':
-      return `file ${parsed.sha256} could not be changed: ${parsed.error}`;
+      return describeMediaFailure(parsed.sha256, parsed.error);
     case 'enumeration': {
       // The account is already the screen's subject, so its pubkey is dropped.
       for (const [pattern, words] of LISTING_LINES) {
