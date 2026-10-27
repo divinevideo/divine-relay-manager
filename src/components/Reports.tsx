@@ -1798,9 +1798,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
             </div>
             {/* Sorted history covers only the pages loaded so far. */}
             {showSortScopeNote && (
-              <span id="sort-scope-note" className="text-[10px] italic opacity-70">
+              <p id="sort-scope-note" className="text-[10px] italic leading-tight opacity-70">
                 Sorted among the {resolvedRowsShown} resolved loaded so far. Load more can add rows anywhere in this order.
-              </span>
+              </p>
             )}
 
             {/* Target type filter */}
@@ -1936,7 +1936,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           </div>
         </CardHeader>
         <CardContent className="p-0 flex-1 min-h-0">
-          <ScrollArea className="h-full" viewportRef={listViewportRef}>
+          {/* Radix wraps the viewport's content in a display:table div, which is never
+              narrower than its widest row (a nowrap 63-character ID). Block it, or below
+              about 1280 px the list's footer sentences are cut off at the card edge. */}
+          <ScrollArea className="h-full [&>[data-radix-scroll-area-viewport]>div]:!block" viewportRef={listViewportRef}>
             <div className="space-y-2 p-4 pt-0">
               {viewMode === 'consolidated' ? (
                 !consolidated || consolidated.length === 0 ? (
