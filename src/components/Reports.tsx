@@ -1712,11 +1712,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     && !needsAttentionTargetKeys.has(reportTargetKey(selectedTarget))
     && !targetedReadComplete;
   // The "N+" floor mark: a targeted read that stopped early, or a feed target
-  // when the feed did, unless a targeted read of that target read it in full (an
-  // uppercase link misses the listed row so the read runs, or the queue was
-  // down when the link landed and recovered after). A history-only selection stays plain "N": its reports
-  // were never read for this target, which is partial but not a read that
-  // stopped early.
+  // when the feed did, unless a targeted read of that target read it in full
+  // (an uppercase link misses the listed row, so the read runs; or the queue
+  // was down when the link landed and recovered after). A history-only
+  // selection stays plain "N": its reports were never read for this target,
+  // which is partial but not a read that stopped early.
   const selectedTargetCountTruncated = targetedHistoryTruncated
     || (!!queueFeed?.truncated && !!selectedTarget
       && queueFeedTargetKeys.has(reportTargetKey(selectedTarget))
