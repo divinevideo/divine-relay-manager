@@ -8,11 +8,26 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { UserProfileCard } from './UserProfileCard';
 import { ThreadContext } from './ThreadContext';
+import { ThreadModal } from './ThreadModal';
 import { UserIdentifier } from './UserIdentifier';
 import type { UserStats } from '@/hooks/useUserStats';
 
 vi.mock('@/hooks/useAdminApi', () => ({
   useApiUrl: () => 'https://api.example.invalid',
+}));
+
+// The full-thread view reads its thread from the relay: one post, no replies.
+const threadRoot = vi.hoisted((): NostrEvent => ({
+  id: '3'.repeat(64), pubkey: 'c'.repeat(64), kind: 1, tags: [], content: 'root post',
+  created_at: 1_750_000_000, sig: 'f'.repeat(128),
+}));
+vi.mock('@nostrify/react', () => ({
+  useNostr: () => ({
+    nostr: { query: async (filters: { ids?: string[] }[]) => (filters[0].ids ? [threadRoot] : []) },
+  }),
+}));
+vi.mock('@/hooks/useAppContext', () => ({
+  useAppContext: () => ({ config: { apiUrl: 'https://api.example.invalid' } }),
 }));
 
 vi.mock('@/hooks/useEventTitles', () => ({
@@ -112,6 +127,25 @@ describe('ThreadContext avatar after its image loaded', () => {
     const { rerender } = render(thread(false));
     expect(screen.getByRole('img')).toBeInTheDocument();
     rerender(thread(true));
+    expect(screen.queryByRole('img')).not.toBeInTheDocument();
+    expect(screen.getByText('SO')).toBeInTheDocument();
+  });
+});
+
+// The report pane keeps its full-thread view when the moderator moves to a
+// sensitive report, so the same avatar goes from loaded to hidden.
+describe('ThreadModal avatar after its image loaded', () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const modal = (hide: boolean) => (
+    <QueryClientProvider client={client}>
+      <ThreadModal eventId={threadRoot.id} open onOpenChange={() => {}} hideAvatars={hide} />
+    </QueryClientProvider>
+  );
+
+  it('shows the initials when a loaded avatar becomes hidden', async () => {
+    const { rerender } = render(modal(false));
+    expect(await screen.findByRole('img')).toBeInTheDocument();
+    rerender(modal(true));
     expect(screen.queryByRole('img')).not.toBeInTheDocument();
     expect(screen.getByText('SO')).toBeInTheDocument();
   });

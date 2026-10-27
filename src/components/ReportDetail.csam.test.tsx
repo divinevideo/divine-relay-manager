@@ -119,7 +119,11 @@ vi.mock('@/components/MediaPreview', () => ({
     <div data-testid="media" data-show={String(showByDefault)} />
   ),
 }));
-vi.mock('@/components/ThreadModal', () => ({ ThreadModal: () => null }));
+vi.mock('@/components/ThreadModal', () => ({
+  ThreadModal: ({ hideAvatars }: { hideAvatars?: boolean }) => (
+    <div data-testid="thread-modal" data-hide-avatars={String(hideAvatars)} />
+  ),
+}));
 vi.mock('@/components/EventActions', () => ({ EventActions: () => null }));
 vi.mock('@/components/UserActions', () => ({
   UserActions: ({ reportCategory }: { reportCategory?: string }) => (
@@ -268,6 +272,21 @@ describe('ReportDetail on a sensitive report, elsewhere in the pane', () => {
   it('loads thread participant avatars on a bare illegal report (control)', () => {
     renderDetail(PLAIN_ILLEGAL);
     expect(screen.getByTestId('thread').dataset.hideAvatars).toBe('false');
+  });
+
+  it('withholds avatars in the full-thread view on a CSAM report', () => {
+    renderDetail(OLD_BUILD);
+    expect(screen.getByTestId('thread-modal').dataset.hideAvatars).toBe('true');
+  });
+
+  it('loads avatars in the full-thread view on a spam report once its reports have loaded (control)', () => {
+    renderDetail(SPAM);
+    expect(screen.getByTestId('thread-modal').dataset.hideAvatars).toBe('false');
+  });
+
+  it('withholds avatars in the full-thread view while the report set is still loading', () => {
+    renderDetail(SPAM, null);
+    expect(screen.getByTestId('thread-modal').dataset.hideAvatars).toBe('true');
   });
 
   it("withholds a repost's original author avatar on a CSAM report", () => {

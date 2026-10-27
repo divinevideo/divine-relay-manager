@@ -591,6 +591,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
           eventId={context.target.value}
           open={showThreadModal}
           onOpenChange={setShowThreadModal}
+          hideAvatars={hasHighPriorityReports !== false}
         />
       )}
 
