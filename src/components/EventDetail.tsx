@@ -40,6 +40,7 @@ import { extractMediaHashes } from "@/lib/adminApi";
 import { banFailureToast, banSuccessNote, refreshAfterUnconfirmedBan } from "@/lib/banFeedback";
 import { historyCount, historyStat } from "@/lib/historyCount";
 import { MediaPreview } from "@/components/MediaPreview";
+import { useMediaVisibility } from "@/hooks/useMediaVisibility";
 import {
   User,
   Hash,
@@ -63,6 +64,8 @@ import {
   XCircle,
   Ban,
   RefreshCw,
+  Eye,
+  EyeOff,
 } from "lucide-react";
 import type { NostrEvent, NostrFilter } from "@nostrify/nostrify";
 import { nip19 } from "nostr-tools";
@@ -113,7 +116,15 @@ function formatEventId(id: string): string {
   }
 }
 
-function ProfileMetadataCard({ content }: { content: string }) {
+// The picture and banner follow the event's media rule (useMediaVisibility):
+// showImagesByDefault is null while the event's reports are not known, and
+// false when one is sensitive.
+function ProfileMetadataCard({ content, eventId, showImagesByDefault }: {
+  content: string;
+  eventId: string;
+  showImagesByDefault: boolean | null;
+}) {
+  const [showImages, toggleImages] = useMediaVisibility(showImagesByDefault, eventId);
   let metadata: Record<string, unknown>;
   try {
     metadata = JSON.parse(content);
@@ -152,11 +163,23 @@ function ProfileMetadataCard({ content }: { content: string }) {
         <CardTitle className="text-sm flex items-center gap-2">
           <User className="h-4 w-4" />
           Profile Metadata
+          {(picture || banner) && (
+            <Button
+              variant="ghost"
+              size="sm"
+              aria-label={showImages ? "Hide profile images" : "Show profile images"}
+              title={showImages ? "Hide profile images" : "Show profile images"}
+              onClick={toggleImages}
+              className="ml-auto h-6 px-1.5"
+            >
+              {showImages ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+            </Button>
+          )}
         </CardTitle>
       </CardHeader>
       <CardContent className="py-2 px-3 space-y-3">
         {/* Banner */}
-        {banner && (
+        {banner && showImages && (
           <div className="relative -mx-3 -mt-3 h-24 overflow-hidden rounded-t">
             <img src={banner} alt="" className="w-full h-full object-cover" />
           </div>
@@ -164,13 +187,17 @@ function ProfileMetadataCard({ content }: { content: string }) {
 
         {/* Avatar + Name */}
         <div className="flex items-center gap-3">
-          {picture && (
+          {picture && (showImages ? (
             <img
               src={picture}
               alt={displayName || name || ''}
               className="h-12 w-12 rounded-full object-cover"
             />
-          )}
+          ) : (
+            <div className="h-12 w-12 rounded-full bg-gray-300 dark:bg-gray-600 flex items-center justify-center shrink-0">
+              <User className="h-6 w-6 text-gray-500" />
+            </div>
+          ))}
           <div className="min-w-0">
             {displayName && (
               <p className="font-semibold truncate">{displayName}</p>
@@ -735,6 +762,10 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
     if (sensitive) return true;
     return complete && isFetchedAfterMount ? false : undefined;
   }, [relatedReportsRead, isFetchedAfterMount]);
+  // The default for the event's media and a profile's images: null while the
+  // reports are not known, so a sensitive verdict still re-hides media
+  // revealed meanwhile.
+  const mediaShownByDefault = hasHighPriorityReports === undefined ? null : !hasHighPriorityReports;
 
   // Extract sha256 hashes for classifier components
   const mediaHashes = extractMediaHashes(event.content || '', event.tags);
@@ -991,7 +1022,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
         {/* Content */}
         {event.content && (
           event.kind === 0 ? (
-            <ProfileMetadataCard content={event.content} />
+            <ProfileMetadataCard content={event.content} eventId={event.id} showImagesByDefault={mediaShownByDefault} />
           ) : (
             <Card>
               <CardHeader className="py-2 px-3">
@@ -1010,11 +1041,10 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
         )}
 
         {/* Media Preview - collapsed by default until the event's reports are
-            known to hold nothing high-priority. null while they are not known,
-            so a sensitive verdict still re-hides media revealed meanwhile. */}
+            known to hold nothing high-priority */}
         <MediaPreview
           event={event}
-          showByDefault={hasHighPriorityReports === undefined ? null : !hasHighPriorityReports}
+          showByDefault={mediaShownByDefault}
           maxItems={4}
         />
 

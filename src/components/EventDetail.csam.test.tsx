@@ -1,7 +1,7 @@
-// ABOUTME: Pins that EventDetail hides media by default when a related report is an old-build
-// ABOUTME: CSAM report, and keeps it hidden until a complete read of its reports finds none.
+// ABOUTME: Pins that EventDetail hides media and profile images by default when a related report
+// ABOUTME: is sensitive, and keeps them hidden until a complete read of its reports finds none.
 
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NostrEvent } from '@nostrify/nostrify';
@@ -386,5 +386,87 @@ describe('EventDetail media on a later visit', () => {
 
       await waitFor(() => expect(media()).toBe('true'));
     });
+  });
+});
+
+// A profile (kind 0) event's picture and banner follow the same rule as the
+// event's media.
+describe('EventDetail profile images', () => {
+  const PICTURE = 'https://example.invalid/picture.png';
+  const BANNER = 'https://example.invalid/banner.png';
+  const PROFILE_EVENT: NostrEvent = {
+    ...EVENT,
+    kind: 0,
+    content: JSON.stringify({ name: 'someone', picture: PICTURE, banner: BANNER }),
+  };
+  const imageSrcs = (c: HTMLElement) => [...c.querySelectorAll('img')].map(i => i.getAttribute('src')).sort();
+
+  // A created <img> is already a request in a real browser, even if a later
+  // commit removes it, so this counts creations, not what the DOM ends with.
+  function imagesCreatedDuring(action: () => void): number {
+    const spy = vi.spyOn(document, 'createElement');
+    action();
+    const count = spy.mock.calls.filter(c => String(c[0]).toLowerCase() === 'img').length;
+    spy.mockRestore();
+    return count;
+  }
+  function renderProfile() {
+    return render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <EventDetail event={PROFILE_EVENT} />
+      </QueryClientProvider>,
+    );
+  }
+
+  it('creates no image for them while the reports read is still out', () => {
+    relay.answer = () => new Promise(() => {});
+    expect(imagesCreatedDuring(() => { renderProfile(); })).toBe(0);
+  });
+
+  it('shows them once the reports are known and none is sensitive', async () => {
+    reports.value = [SPAM];
+    const { container } = renderProfile();
+    await waitFor(() => expect(imageSrcs(container)).toEqual([BANNER, PICTURE]));
+  });
+
+  it('keeps them hidden on a sensitive report until asked for', async () => {
+    reports.value = [OLD_BUILD];
+    const { container } = renderProfile();
+    await screen.findByText('1 Related Report');
+    expect(imageSrcs(container)).toEqual([]);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show profile images' }));
+
+    expect(imageSrcs(container)).toEqual([BANNER, PICTURE]);
+  });
+
+  it('hides them again when the reports turn out sensitive after a Show while they loaded', async () => {
+    const answers: ((events: unknown[]) => void)[] = [];
+    relay.answer = () => new Promise<unknown[]>((resolve) => { answers.push(resolve); });
+    const { container } = renderProfile();
+    fireEvent.click(screen.getByRole('button', { name: 'Show profile images' }));
+    expect(imageSrcs(container)).toEqual([BANNER, PICTURE]);
+
+    await act(async () => { answers.forEach(answer => answer([OLD_BUILD])); });
+    await screen.findByText('1 Related Report');
+
+    expect(imageSrcs(container)).toEqual([]);
+  });
+
+  // The events page keeps this pane mounted when another event is picked.
+  it("does not carry a Show into the next profile event's images", async () => {
+    reports.value = [OLD_BUILD];
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const ui = (event: NostrEvent) => (
+      <QueryClientProvider client={queryClient}><EventDetail event={event} /></QueryClientProvider>
+    );
+    const { container, rerender } = render(ui(PROFILE_EVENT));
+    await screen.findByText('1 Related Report');
+    fireEvent.click(screen.getByRole('button', { name: 'Show profile images' }));
+    expect(imageSrcs(container)).toEqual([BANNER, PICTURE]);
+
+    rerender(ui({ ...PROFILE_EVENT, id: 'b'.repeat(64) }));
+
+    expect(imageSrcs(container)).toEqual([]);
   });
 });
