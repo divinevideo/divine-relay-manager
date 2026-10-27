@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { classifyReport, ageReviewCategory } from './report-classification';
+import { classifyReport, ageReviewCategory, reportCategory } from './report-classification';
 
 const P = 'b'.repeat(64);
 const E = 'c'.repeat(64);
@@ -183,6 +183,31 @@ describe('classifyReport', () => {
 
   it('reads profanity as a NIP-56 type', () => {
     expect(classifyReport({ tags: [['e', E, 'profanity'], ['p', P, 'profanity']] }).category).toBe('profanity');
+  });
+});
+
+describe('reportCategory', () => {
+  // The content carries a CSAM signal, which must not change the category.
+  it.each([
+    { name: 'a relay hint on e', tags: [['e', E, 'wss://relay.example.com'], ['p', P]], category: 'other' },
+    { name: 'a relay hint on p', tags: [['p', P, 'ws://relay.example.com']], category: 'other' },
+    { name: 'an upper-case relay hint', tags: [['e', E, 'WSS://relay.example.com'], ['p', P, 'spam']], category: 'spam' },
+    { name: 'a profanity type', tags: [['e', E, 'profanity'], ['p', P, 'profanity']], category: 'profanity' },
+    {
+      name: 'an empty first report tag',
+      tags: [
+        ['report', ''],
+        ['report', 'spam'],
+        ['L', 'social.nos.ontology'],
+        ['l', 'NS-childSafety', 'social.nos.ontology'],
+        ['p', P],
+      ],
+      category: 'NS-childSafety',
+    },
+  ])('matches classifyReport for $name', ({ tags, category }) => {
+    const event = { tags, content: 'CONTENT REPORT - NIP-56\nReason: csam\n' };
+    expect(reportCategory(event)).toBe(category);
+    expect(classifyReport(event).category).toBe(category);
   });
 });
 

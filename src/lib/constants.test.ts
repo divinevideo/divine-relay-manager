@@ -67,6 +67,20 @@ describe('getReportCategory', () => {
     expect(getReportCategory({ tags: [['p', 'd'.repeat(64), 'spam']] })).toBe('spam');
     expect(getReportCategory({ tags: [['e', 'c'.repeat(64), 'illegal'], ['p', 'd'.repeat(64), 'spam']] })).toBe('illegal');
   });
+
+  // Sort comparators call it on every comparison, so it skips the content.
+  it('classifies from the tags without reading the content', () => {
+    let contentReads = 0;
+    const event = {
+      tags: [['e', 'c'.repeat(64), 'illegal'], ['p', 'd'.repeat(64), 'illegal']],
+      get content() {
+        contentReads++;
+        return 'CONTENT REPORT - NIP-56\nReason: csam\n';
+      },
+    };
+    expect(getReportCategory(event)).toBe('illegal');
+    expect(contentReads).toBe(0);
+  });
 });
 
 describe('hasCsamSignal', () => {

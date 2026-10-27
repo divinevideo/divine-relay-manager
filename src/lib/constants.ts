@@ -1,6 +1,6 @@
 import { getEnvironmentByApiUrl } from "@/lib/environments";
 import { VIDEO_KINDS } from "@/lib/kindNames";
-import { classifyReport } from "../../shared/report-classification";
+import { classifyReport, reportCategory } from "../../shared/report-classification";
 export {
   AUTO_HIDE_ACTION,
   AUTO_HIDE_ACTIONS,
@@ -98,9 +98,10 @@ export function getCategoryLabel(category: string): string {
     : category;
 }
 
-// Extract category from a report event (see shared/report-classification.ts)
-export function getReportCategory(event: { tags: string[][]; content?: string }): string {
-  return classifyReport(event).category;
+// Extract category from a report event's tags (see shared/report-classification.ts).
+// Tags alone: sort comparators call this on every comparison.
+export function getReportCategory(event: { tags: string[][] }): string {
+  return reportCategory(event);
 }
 
 // True when any report in the set signals CSAM, including old builds that
