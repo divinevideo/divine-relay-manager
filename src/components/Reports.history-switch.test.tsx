@@ -1,0 +1,196 @@
+// ABOUTME: PR #323's pending-review switch beside resolved history and a failed queue.
+// ABOUTME: Membership comes from the feed, so loaded history cannot make the switch toggle.
+
+import { act, render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
+import { QueryClient } from '@tanstack/react-query';
+import { useLocation } from 'react-router-dom';
+import { nip19 } from 'nostr-tools';
+import TestApp from '@/test/TestApp';
+import { resolvedPage } from '@/test/resolvedHistory';
+import { Reports } from './Reports';
+
+const RELAY_URL = 'wss://relay.example';
+
+// Counts the groupings the screen builds. A render loop shows up here as a
+// failure, not a hung test run.
+const grouped = vi.hoisted(() => ({ calls: 0 }));
+vi.mock('@/lib/consolidateReports', async (orig) => {
+  const actual = await orig<typeof import('@/lib/consolidateReports')>();
+  return {
+    ...actual,
+    consolidateReports: (...args: Parameters<typeof actual.consolidateReports>) => {
+      grouped.calls += 1;
+      if (grouped.calls > 400) throw new Error('render loop: consolidateReports called over 400 times');
+      return actual.consolidateReports(...args);
+    },
+  };
+});
+
+vi.mock('@/components/ReportDetail', () => ({
+  ReportDetail: ({ switchState }: { switchState?: string }) => (
+    <div data-testid="detail" data-switch-state={switchState ?? ''} />
+  ),
+}));
+
+const CSAM_PROFILE = '4'.repeat(64);
+const SPAM_EVENT = '3'.repeat(64);
+
+function report(id: string, createdAt: number, tags: string[][], content = '') {
+  return { id, pubkey: '5'.repeat(64), created_at: createdAt, kind: 1984, tags, content, sig: 'f'.repeat(128) };
+}
+
+// A profile report that signals CSAM, which the worker counts resolved (it is on
+// a resolved-history page), and a plain open report in the feed.
+const CSAM_REPORT = report('d'.repeat(64), 1751000000, [
+  ['p', CSAM_PROFILE, 'illegal'],
+  ['l', 'NS-csam', 'social.nos.ontology'],
+]);
+const SPAM_REPORT = report('c'.repeat(64), 1751000050, [
+  ['e', SPAM_EVENT, 'spam'],
+  ['p', '9'.repeat(64), 'spam'],
+]);
+
+const NPUB_CSAM = nip19.npubEncode(CSAM_PROFILE);
+const NOTE_SPAM = nip19.noteEncode(SPAM_EVENT);
+
+function jsonResponse(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+}
+
+interface Stub {
+  feed?: unknown[];
+  history?: unknown[];
+  // The label read, when it should not answer with no labels.
+  labels?: () => Response | Promise<Response>;
+  // Answers for a deep link's targeted lookup, keyed by the target's hex.
+  targeted?: Record<string, unknown[]>;
+  // The feed read, when it should not answer with `feed`.
+  feedReply?: () => Response | Promise<Response>;
+}
+
+function stubWorker({ feed = [SPAM_REPORT], history = [CSAM_REPORT], labels, targeted = {}, feedReply }: Stub) {
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input instanceof Request ? input.url : input);
+    if (url.includes('/api/reports/resolved')) {
+      return jsonResponse(resolvedPage(history, { nextCursor: null, done: true }));
+    }
+    if (url.includes('/api/reports?needs_attention=1')) {
+      return feedReply ? feedReply() : jsonResponse({ success: true, events: feed, truncated: false });
+    }
+    if (url.includes('/api/reports?')) {
+      const hit = Object.keys(targeted).find(hex => url.includes(hex));
+      return jsonResponse({ success: true, events: hit ? targeted[hit] : [], truncated: false });
+    }
+    if (url.includes('/api/resolution-label-targets')) {
+      return labels ? labels() : jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
+    }
+    if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, resolved: [], states: [] });
+    if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
+    return jsonResponse({ success: true });
+  }));
+}
+
+const failLabels = () => jsonResponse({ success: false, error: 'unavailable' }, 502);
+
+function RoutedReports() {
+  const { pathname } = useLocation();
+  const reportId = pathname.match(/^\/reports\/([0-9a-f]{64})$/)?.[1];
+  return <Reports relayUrl={RELAY_URL} selectedReportId={reportId} />;
+}
+
+function renderAt(path: string) {
+  window.history.pushState({}, '', path);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, retryDelay: 0 } } });
+  render(<TestApp queryClient={queryClient}><RoutedReports /></TestApp>);
+  return queryClient;
+}
+
+const pendingSwitch = () => screen.queryByRole('switch', { name: /pending review/i });
+const hideResolvedSwitch = () => screen.getByRole('switch', { name: /hide resolved/i });
+const flush = () => act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+let consoleError: MockInstance;
+beforeEach(() => {
+  grouped.calls = 0;
+  consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+});
+afterEach(() => {
+  vi.unstubAllGlobals();
+  consoleError.mockRestore();
+  window.history.pushState({}, '', '/');
+});
+
+// The labels read failed and the moderator went on without it, so the browser
+// cannot see that the worker already resolved the CSAM report in history.
+describe('a resolved CSAM report that only history holds, with labels overridden', () => {
+  async function overrideLabels() {
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: /show the queue anyway/i }));
+  }
+
+  it('opens from /reports/<id> without the switch toggling', async () => {
+    stubWorker({ labels: failLabels });
+    renderAt(`/reports/${CSAM_REPORT.id}`);
+    await overrideLabels();
+
+    await waitFor(() => expect(screen.getByTestId('detail')).toBeInTheDocument());
+    await flush();
+    // Settled in the history view, the row listed, no switch behind it.
+    expect(grouped.calls).toBeLessThan(100);
+    expect(pendingSwitch()).toBeNull();
+    expect(hideResolvedSwitch()).not.toBeChecked();
+    expect(await screen.findByText(NPUB_CSAM)).toBeInTheDocument();
+  });
+
+  // Pins what membership is built from: not history, whose targets the worker
+  // already resolved.
+  it('lists the history row instead of hiding it as a switch member', async () => {
+    stubWorker({ labels: failLabels });
+    renderAt('/reports');
+    await overrideLabels();
+    await screen.findByText(NOTE_SPAM);
+    const user = userEvent.setup();
+    await user.click(hideResolvedSwitch());
+
+    expect(await screen.findByText(NPUB_CSAM)).toBeInTheDocument();
+    // The badge counts the feed's targets behind the switch: none.
+    expect(pendingSwitch()).toBeNull();
+  });
+});
+
+// #323's rule: while a resolution read is unread, a CSAM-signal target stays
+// behind the switch rather than in the default view. The loading skeleton holds
+// the list while labels load, so the case that still reaches the screen is a
+// read that failed and was overridden.
+describe('a CSAM-signal target while the labels read is overridden', () => {
+  it('stays behind the switch, in the default view and in history', async () => {
+    stubWorker({ feed: [CSAM_REPORT, SPAM_REPORT], history: [], labels: failLabels });
+    renderAt('/reports');
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: /show the queue anyway/i }));
+    await screen.findByText(NOTE_SPAM);
+
+    expect(screen.queryByText(NPUB_CSAM)).not.toBeInTheDocument();
+    expect(document.querySelector('label[for="pending-review"]')?.textContent).toBe('Pending review (sensitive)1');
+
+    await user.click(hideResolvedSwitch());
+    await flush();
+    expect(screen.queryByText(NPUB_CSAM)).not.toBeInTheDocument();
+  });
+});
+
+describe('the switch label beside a failed queue', () => {
+  it('gives a deep-linked CSAM report its "not hidden" state', async () => {
+    stubWorker({
+      feedReply: () => jsonResponse({ success: false, error: 'Relay query timed out' }, 502),
+      targeted: { [CSAM_PROFILE]: [CSAM_REPORT] },
+    });
+    renderAt(`/reports?pubkey=${CSAM_PROFILE}`);
+
+    const detail = await screen.findByTestId('detail');
+    await waitFor(() => expect(detail).toHaveAttribute('data-switch-state', 'not-hidden'));
+    expect(screen.getByText(/Failed to load reports/)).toBeInTheDocument();
+  });
+});

@@ -845,8 +845,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // view subtracts them from the list; the history view counts resolved rows
   // with them in its footer, so a failed or unlanded read there would state a
   // count, even "No resolved reports.", with nothing to back it. The
-  // pending-review view lists pendingReviewTargets, which the decisions source
-  // alone builds. Two other consumers -- the deep-link auto-deselect and the
+  // pending-review view lists the switch's members: auto-hidden targets, which
+  // the decisions source alone builds, and unhandled CSAM-signal targets, which
+  // labels and the ban lists only subtract from. So an unlanded or failed read
+  // there keeps a target behind the switch, the safe direction (#323), and does
+  // not need to gate that view. Two other consumers -- the deep-link auto-deselect and the
   // deep-link resolved branch -- key on Hide resolved alone, so they stay live
   // in the pending-review view, where these three do not gate. That is
   // deliberate: both fail in the show-more direction on a partially-loaded
@@ -960,16 +963,28 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     [feedConsolidated],
   );
 
+  // The reports the switch classifies: the needs-attention feed plus deep-linked
+  // reports (`reports`), never loaded history. A history page holds targets the
+  // worker already resolved, which a person has handled by definition. Built
+  // over them, a resolved CSAM-signal target the browser cannot yet see as
+  // resolved (a label read still loading or overridden) would become a member
+  // and leave the list as soon as the switch opened, and the deep-link effects
+  // would then open and close the switch without end. With the queue failed
+  // cold there is no feed, so the deep link's own reports stand in and the pane
+  // still gets its label.
+  const deepLinkedConsolidated = useMemo(() => consolidateReports(deepLinkedReports), [deepLinkedReports]);
+  const switchCandidates = reports ? feedConsolidated : deepLinkedConsolidated;
+
   // Who sits behind the Pending review switch: every auto-hidden target, plus
   // any loaded target with a CSAM signal that no person has handled yet. It
   // does not read hideResolved; see buildSwitchMembership.
   const switchMembership = useMemo(() => buildSwitchMembership({
-    consolidated: allConsolidated,
+    consolidated: switchCandidates,
     pendingReview: pendingReviewTargets,
     humanHandled: humanHandledTargets,
     handledTargets,
     bannedPubkeys: bannedPubkeySet,
-  }), [allConsolidated, pendingReviewTargets, humanHandledTargets, handledTargets, bannedPubkeySet]);
+  }), [switchCandidates, pendingReviewTargets, humanHandledTargets, handledTargets, bannedPubkeySet]);
 
   const consolidated = useMemo(() => {
     // A copy, so the in-place sort below can never reorder allConsolidated.
@@ -1265,7 +1280,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   }, [hideResolved, selectedReport, resolvedTargets, bannedPubkeySet, authorByTarget, switchMembershipKnown]);
 
   // Memoized because the deep-link effect below depends on it; it reads
-  // hideResolved and filterCategory, so it changes only when those do.
+  // hideResolved, filterCategory and filterTargetType, so it changes only when
+  // those do.
   const enterPendingReview = useCallback(() => {
     setShowPendingReview(true);
     // A failed or offline read counts as settled, so a link's courtesy can
@@ -1321,7 +1337,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   useEffect(() => {
     if (showPendingReview || !selectedReport || !deepLinkSelectedRef.current) return;
     const target = getReportTarget(selectedReport);
-    if (target && switchMembership.has(`${target.type}:${target.value}`)) {
+    if (target && switchMembership.has(reportTargetKey(target))) {
       enterPendingReview();
       switchOpenedByDeepLinkRef.current = true;
     }
@@ -1338,7 +1354,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   useEffect(() => {
     if (!showPendingReview || !switchOpenedByDeepLinkRef.current || !selectedReport) return;
     const target = getReportTarget(selectedReport);
-    if (target && !switchMembership.has(`${target.type}:${target.value}`)) {
+    if (target && !switchMembership.has(reportTargetKey(target))) {
       switchOpenedByDeepLinkRef.current = false;
       leavePendingReview({ keepDeepLinkCourtesy: true });
     }
@@ -1402,7 +1418,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       if (
         hideResolved
         && switchMembershipKnown
-        && !switchMembership.has(`${inBulk.target.type}:${inBulk.target.value}`)
+        && !switchMembership.has(reportTargetKey(inBulk.target))
         && isConsolidatedReportResolved(inBulk, resolvedTargets, bannedPubkeySet)
       ) {
         hideResolvedBeforeCourtesyRef.current = hideResolved;
@@ -1989,7 +2005,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                 ) : (
                   filteredReports.map((report) => {
                     const target = getReportTarget(report);
-                    const key = target ? `${target.type}:${target.value}` : undefined;
+                    const key = target ? reportTargetKey(target) : undefined;
                     return (
                       <IndividualReportItem
                         key={report.id}
