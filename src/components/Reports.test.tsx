@@ -2,6 +2,7 @@
 // ABOUTME: ReportDetail degrades to the inline fallback while the list survives
 
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { QueryClient } from '@tanstack/react-query';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MockInstance } from 'vitest';
 import TestApp from '@/test/TestApp';
@@ -484,5 +485,80 @@ describe('Reports category labels', () => {
     expect(listFallback()).not.toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /^All/ })).toHaveAttribute('aria-selected', 'true');
     expect(within(rows()[0]).getByText('__proto__')).toBeInTheDocument();
+  });
+});
+
+describe('Reports category sort', () => {
+  // jsdom lacks scrollIntoView, which the Radix Select opens with.
+  const originalScrollIntoView = Element.prototype.scrollIntoView;
+  beforeEach(() => {
+    detailRender.crash = false;
+    Element.prototype.scrollIntoView = vi.fn();
+  });
+  afterEach(() => {
+    detailRender.crash = true;
+    if (originalScrollIntoView) Element.prototype.scrollIntoView = originalScrollIntoView;
+    else delete (Element.prototype as Partial<Element>).scrollIntoView;
+  });
+
+  const rows = () => Array.from(document.querySelectorAll<HTMLElement>('div.rounded-lg.cursor-pointer'));
+
+  async function chooseSort(name: string) {
+    fireEvent.click(screen.getAllByRole('combobox', { hidden: true })[0]);
+    fireEvent.click(await screen.findByRole('option', { name, hidden: true }));
+  }
+
+  // A comparator that classifies reads every report's content on each of its
+  // O(n log n) comparisons, about 32 reads per report at this size.
+  it('reads report content a bounded number of times per category sort', async () => {
+    const N = 48;
+    // Cycled, so adjacent reports differ and the sort makes many comparisons.
+    const types = ['spam', 'nudity', 'illegal', 'impersonation'];
+    let contentReads = 0;
+    const reports = Array.from({ length: N }, (_, i) => {
+      const n = (i + 1).toString(16).padStart(4, '0');
+      return {
+        id: `${n}ffff`.repeat(8),
+        pubkey: 'b'.repeat(64),
+        created_at: 1751000000 + i,
+        kind: 1984,
+        tags: [['e', n.repeat(16), types[i % types.length]], ['p', 'd'.repeat(64)]],
+        get content() {
+          contentReads++;
+          return 'comment';
+        },
+        sig: 'e'.repeat(128),
+      };
+    });
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, retryDelay: 0, staleTime: Infinity } },
+    });
+    queryClient.setQueryData(['reports', 'wss://relay.example'], reports);
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/reports')) return new Promise<Response>(() => {});
+      if (url.includes('/api/resolution-label-targets')) return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
+      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, resolved: [], states: [] });
+      if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
+      return jsonResponse({ success: true });
+    }));
+
+    render(<TestApp queryClient={queryClient}><Reports relayUrl="wss://relay.example" /></TestApp>);
+    await waitFor(() => expect(rows()).toHaveLength(N));
+
+    // The rows read each report's content as they render, whatever the sort,
+    // so a newest-first sort is the baseline.
+    contentReads = 0;
+    await chooseSort('Newest First');
+    const newestReads = contentReads;
+    contentReads = 0;
+    await chooseSort('By Category');
+    const categoryReads = contentReads;
+
+    expect(categoryReads - newestReads).toBeLessThanOrEqual(8 * N);
+    // Same order as before: none of these types is high or medium priority,
+    // so they sort alphabetically.
+    expect(within(rows()[0]).getByText('Illegal')).toBeInTheDocument();
+    expect(within(rows()[N - 1]).getByText('Spam')).toBeInTheDocument();
   });
 });

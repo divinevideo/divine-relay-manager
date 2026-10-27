@@ -68,7 +68,8 @@ describe('getReportCategory', () => {
     expect(getReportCategory({ tags: [['e', 'c'.repeat(64), 'illegal'], ['p', 'd'.repeat(64), 'spam']] })).toBe('illegal');
   });
 
-  // Sort comparators call it on every comparison, so it skips the content.
+  // The queue's filters and sorts call it for every report, so it skips the
+  // content.
   it('classifies from the tags without reading the content', () => {
     let contentReads = 0;
     const event = {

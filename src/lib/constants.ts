@@ -99,7 +99,7 @@ export function getCategoryLabel(category: string): string {
 }
 
 // Extract category from a report event's tags (see shared/report-classification.ts).
-// Tags alone: sort comparators call this on every comparison.
+// Tags alone: the queue's filters and sorts call this for every report.
 export function getReportCategory(event: { tags: string[][] }): string {
   return reportCategory(event);
 }

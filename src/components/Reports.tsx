@@ -962,6 +962,15 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       items = items.filter(c => c.target.type === filterTargetType);
     }
 
+    // Classify each target once, not on every comparison: the CSAM signal
+    // reads each report's content.
+    const categoryPriority = new Map<ConsolidatedReport, number>();
+    if (sortBy === 'category') {
+      for (const c of items) {
+        categoryPriority.set(c, getCategoryPriority(c.categories, hasCsamSignal(c.reports)));
+      }
+    }
+
     // Apply sorting
     items.sort((a, b) => {
       switch (sortBy) {
@@ -987,8 +996,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
         case 'category': {
           // Sort by priority (CSAM first), then alphabetically by category
-          const aPriority = getCategoryPriority(a.categories, hasCsamSignal(a.reports));
-          const bPriority = getCategoryPriority(b.categories, hasCsamSignal(b.reports));
+          const aPriority = categoryPriority.get(a)!;
+          const bPriority = categoryPriority.get(b)!;
           if (aPriority !== bPriority) return aPriority - bPriority;
           // Then by primary category name
           const aCategory = a.categories[0] || 'zzz';
@@ -1056,6 +1065,16 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       });
     }
 
+    // Classify each report once, not on every comparison: the CSAM signal
+    // reads its content.
+    const categoryKeys = new Map<NostrEvent, { category: string; priority: number }>();
+    if (sortBy === 'category') {
+      for (const report of items) {
+        const category = getReportCategory(report);
+        categoryKeys.set(report, { category, priority: getCategoryPriority([category], hasCsamSignal([report])) });
+      }
+    }
+
     // Apply sorting
     items.sort((a, b) => {
       switch (sortBy) {
@@ -1064,12 +1083,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         case 'oldest':
           return a.created_at - b.created_at;
         case 'category': {
-          const aCat = getReportCategory(a);
-          const bCat = getReportCategory(b);
-          const aPriority = getCategoryPriority([aCat], hasCsamSignal([a]));
-          const bPriority = getCategoryPriority([bCat], hasCsamSignal([b]));
-          if (aPriority !== bPriority) return aPriority - bPriority;
-          return aCat.localeCompare(bCat);
+          const aKey = categoryKeys.get(a)!;
+          const bKey = categoryKeys.get(b)!;
+          if (aKey.priority !== bKey.priority) return aKey.priority - bKey.priority;
+          return aKey.category.localeCompare(bKey.category);
         }
         default:
           // For 'reports' and 'reporters', just use date for individual view

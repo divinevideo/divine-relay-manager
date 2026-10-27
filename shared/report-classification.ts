@@ -83,7 +83,7 @@ function categoryOf(tags: string[][]): string {
 }
 
 // The category from the tags alone, without classifyReport's content scan, for
-// callers such as sort comparators that ask on every comparison.
+// callers that need only the category.
 export function reportCategory(event: { tags?: unknown }): string {
   return categoryOf(tagList(event));
 }
@@ -97,7 +97,7 @@ export function classifyReport(event: { tags?: unknown; content?: unknown }): Re
     || CSAM_REASON_LINE.test(content)
     || CSAM_FREE_TEXT.test(content);
 
-  return { category: reportCategory(event), csamSignal };
+  return { category: categoryOf(tags), csamSignal };
 }
 
 // Must match the worker's category extraction in ReportWatcher.handleReportEvent
