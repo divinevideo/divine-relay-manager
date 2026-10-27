@@ -569,10 +569,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const resolvedDecisionTargets = decisionsResult?.resolved;
   const autoHideStates = decisionsResult?.states;
   // The switch's auto-hidden members come only from this read, so membership
-  // is known once it has answered. A failed read counts as settled too, and so
-  // does one paused because the browser is offline, which never settles on its
-  // own. So a deep link's resolved-unhide is held, never stranded: either way
-  // it falls back to unhiding as it did before the hold.
+  // is known once it has answered. A read that failed, or one paused because
+  // the browser is offline (which never settles on its own), leaves membership
+  // unknown, but this still treats it as settled. So a deep link's
+  // resolved-unhide is held, never stranded: on those reads it falls back to
+  // unhiding as it did before the hold.
   const switchMembershipKnown = !decisionsPending || decisionsFetchStatus === 'paused';
 
   // The deep-link target, resolved here rather than beside the pane that renders
@@ -695,8 +696,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   );
 
   // Targets pending review (auto-hidden but not yet confirmed/restored), keyed
-  // to their latest auto-hide state so a row can say when the hide is not
-  // confirmed (auto_hide_unresolved / auto_hide_restore_failed).
+  // to their latest auto-hide state so a row can say when a hide needs a check
+  // (auto_hide_unresolved / auto_hide_restore_failed).
   // TODO(#284): share this with pendingReviewTargetKeys in shared/autohide.ts in the
   // queue-screen change. That helper returns a Set, so it would first need to
   // return the latest action per key, which the switch labels depend on.

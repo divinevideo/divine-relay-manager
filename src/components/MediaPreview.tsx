@@ -145,9 +145,11 @@ interface MediaVisibility {
 
 // Whether the media is showing. The default can arrive after mount (report
 // classification loads async), so it is followed as it changes:
-// - to false (sensitive): hide, and forget a choice to show. A Show on one
-//   report must not carry into a sensitive one when the pane is reused. A
-//   choice to hide is kept.
+// - to false: hide, and forget a choice to show, so a Show from a report whose
+//   media showed by default does not carry into a sensitive one when the pane
+//   is reused. A choice to hide is kept. Callers pass false for a sensitive
+//   report and also for one whose reports are not known yet. A default that
+//   stays false is no change, so a Show made under it is kept.
 // - to true: show, unless the moderator has chosen.
 // A new resetKey (MediaPreview's event) starts again from its default.
 //
