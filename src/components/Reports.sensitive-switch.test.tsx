@@ -64,6 +64,7 @@ function stubFetch({
   states = [],
   resolved = [],
   bannedPubkeys = [],
+  bannedEvents = [],
   labels = () => Promise.resolve([] as LabelTarget[]),
   targeted = {},
   statesGate,
@@ -76,6 +77,8 @@ function stubFetch({
   resolved?: Resolved[];
   // What the relay's listbannedpubkeys answers.
   bannedPubkeys?: string[];
+  // The event ids the relay's listbannedevents answers.
+  bannedEvents?: string[];
   labels?: () => Promise<LabelTarget[]>;
   // The bulk /api/reports read waits for this before answering.
   reportsGate?: Promise<void>;
@@ -114,7 +117,11 @@ function stubFetch({
     }
     if (url.includes('/api/relay-rpc')) {
       const { method } = JSON.parse(typeof init?.body === 'string' ? init.body : '{}') as { method?: string };
-      return jsonResponse({ success: true, result: method === 'listbannedpubkeys' ? bannedPubkeys : [] });
+      if (method === 'listbannedpubkeys') return jsonResponse({ success: true, result: bannedPubkeys });
+      if (method === 'listbannedevents') {
+        return jsonResponse({ success: true, result: bannedEvents.map((id) => ({ id })) });
+      }
+      return jsonResponse({ success: true, result: [] });
     }
     return jsonResponse({ success: true });
   }));
@@ -135,6 +142,17 @@ function rowFor(bech32: string) {
 async function turnSwitchOn(user: ReturnType<typeof userEvent.setup>) {
   await user.click(await screen.findByRole('switch', { name: /pending review/i }));
   await flush();
+}
+// The target is out of the switch and hidden only by Hide resolved: it comes
+// back into the default view once that is turned off.
+async function expectHandled(user: ReturnType<typeof userEvent.setup>, bech32: string) {
+  await screen.findByText(NOTE_SPAM);
+  expect(screen.queryByRole('switch', { name: /pending review/i })).not.toBeInTheDocument();
+  expect(screen.getByRole('switch', { name: /hide resolved/i })).toBeChecked();
+  expect(screen.queryByText(bech32)).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole('switch', { name: /hide resolved/i }));
+  expect(screen.getByText(bech32)).toBeInTheDocument();
 }
 
 let consoleError: MockInstance;
@@ -274,6 +292,21 @@ describe('Reports sensitive pending-review switch', () => {
     expect(screen.queryByRole('switch', { name: /pending review/i })).not.toBeInTheDocument();
   });
 
+  it('treats a CSAM post as handled once the post is banned', async () => {
+    const CSAM_POST = 'ab'.repeat(32);
+    const CSAM_POST_REPORT = report('ef'.repeat(32), 1751000040, [
+      ['e', CSAM_POST, 'illegal'],
+      ['p', 'cd'.repeat(32), 'illegal'],
+      ['L', 'social.nos.ontology'],
+      ['l', 'NS-csam', 'social.nos.ontology'],
+    ]);
+    stubFetch({ events: [CSAM_POST_REPORT, SPAM_REPORT], bannedEvents: [CSAM_POST] });
+    const user = userEvent.setup();
+    render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
+
+    await expectHandled(user, nip19.noteEncode(CSAM_POST));
+  });
+
   describe('when only the worker has decided on a target', () => {
     // ReportWatcher opens an age-review case on a reported account by itself,
     // and /api/resolution-state marks a target whose only decisions are the
@@ -283,18 +316,6 @@ describe('Reports sensitive pending-review switch', () => {
     const SPAM_PROFILE = '7'.repeat(64);
     const SPAM_PROFILE_REPORT = report('0'.repeat(64), 1751000030, [['p', SPAM_PROFILE, 'spam']]);
     const NPUB_SPAM_PROFILE = nip19.npubEncode(SPAM_PROFILE);
-
-    // The target is out of the switch and hidden only by Hide resolved: it
-    // comes back into the default view once that is turned off.
-    async function expectHandled(user: ReturnType<typeof userEvent.setup>, npub: string) {
-      await screen.findByText(NOTE_SPAM);
-      expect(screen.queryByRole('switch', { name: /pending review/i })).not.toBeInTheDocument();
-      expect(screen.getByRole('switch', { name: /hide resolved/i })).toBeChecked();
-      expect(screen.queryByText(npub)).not.toBeInTheDocument();
-
-      await user.click(screen.getByRole('switch', { name: /hide resolved/i }));
-      expect(screen.getByText(npub)).toBeInTheDocument();
-    }
 
     it('keeps a profile CSAM report behind the switch', async () => {
       stubFetch({ events: [CSAM_REPORT, SPAM_REPORT], resolved: [AUTOMATED] });
