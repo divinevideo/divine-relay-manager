@@ -205,6 +205,37 @@ describe('EventDetail media before its reports are known', () => {
   });
 });
 
+// A read that returns as many reports as it asked for may have left older ones
+// on the relay, so it cannot rule out a sensitive one.
+describe('EventDetail media when a read returns its full limit', () => {
+  const accountReport = (n: number, tags: string[][]): NostrEvent => ({
+    id: n.toString(16).padStart(64, '0'), pubkey: 'a'.repeat(64), created_at: 1751000000 + n,
+    kind: 1984, tags, content: '', sig: 'b'.repeat(128),
+  });
+  const OLDER_CSAM = accountReport(1, [
+    ['p', REPORTED_PUBKEY, 'illegal'], ['L', 'social.nos.ontology'], ['l', 'NS-csam', 'social.nos.ontology'],
+  ]);
+  const NEWER_SPAM = Array.from({ length: 50 }, (_, i) => accountReport(200 + i, [['p', REPORTED_PUBKEY, 'spam']]));
+  const RELAY_REPORTS = [OLDER_CSAM, ...NEWER_SPAM, SPAM];
+
+  it('keeps media hidden when the account read stops at its limit before an older CSAM report', async () => {
+    // A relay answers each read with its newest matches, up to the limit.
+    relay.answer = async (filters) => {
+      const filter = filters[0];
+      const [tag, values] = filter['#e'] ? ['e', filter['#e']] : ['p', filter['#p']];
+      return RELAY_REPORTS
+        .filter(r => r.tags.some(t => t[0] === tag && (values as string[]).includes(t[1])))
+        .sort((a, b) => b.created_at - a.created_at)
+        .slice(0, filter.limit as number);
+    };
+    renderDetail();
+
+    // The event read found SPAM; the account read returned its 50 newest.
+    await screen.findByText('51 Related Reports');
+    expect(screen.getByTestId('media').dataset.show).toBe('null');
+  });
+});
+
 // A read cached from an earlier visit can predate a report filed since, so
 // only a read made since the event was opened may show its media.
 describe('EventDetail media on a later visit', () => {

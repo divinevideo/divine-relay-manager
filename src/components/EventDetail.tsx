@@ -399,14 +399,15 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
   // Get reports against this event or user. A read that runs out of time does
   // not fail: NPool.query resolves with whatever had arrived by then. So each
   // read keeps its own timeout signal, and `complete` says whether every read
-  // finished before it fired.
+  // finished before it fired and returned fewer reports than its limit. One
+  // that returned its full limit may have left older reports on the relay.
   const { data: relatedReportsRead, isFetchedAfterMount } = useQuery({
     queryKey: ['related-reports', event.id, event.pubkey],
     queryFn: async ({ signal }) => {
       const read = async (filter: NostrFilter) => {
         const timeout = AbortSignal.timeout(3000);
         const events = await nostr.query([filter], { signal: AbortSignal.any([signal, timeout]) });
-        return { events, complete: !timeout.aborted };
+        return { events, complete: !timeout.aborted && events.length < (filter.limit ?? Infinity) };
       };
       const reads: Promise<{ events: NostrEvent[]; complete: boolean }>[] = [];
 
