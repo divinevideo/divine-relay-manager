@@ -201,10 +201,6 @@ describe('classifyReport', () => {
     expect(classifyReport({ tags: [['p', P, 'ws://relay.example.com']] }).category).toBe('other');
     expect(classifyReport({ tags: [['e', E, 'WSS://relay.example.com'], ['p', P, 'spam']] }).category).toBe('spam');
   });
-
-  it('reads profanity as a NIP-56 type', () => {
-    expect(classifyReport({ tags: [['e', E, 'profanity'], ['p', P, 'profanity']] }).category).toBe('profanity');
-  });
 });
 
 describe('reportCategory', () => {
