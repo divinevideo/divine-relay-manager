@@ -54,6 +54,7 @@ import { useResolvedHistory } from "@/hooks/useResolvedHistory";
 import { useBannedPubkeys, useBannedEvents } from "@/hooks/useRelayBanLists";
 import { HIGH_PRIORITY_CATEGORIES, RESOLUTION_READ_TIMEOUT_MS, getCategoryLabel, getReportCategory, hasCsamSignal } from "@/lib/constants";
 import { consolidateReports, type ConsolidatedReport } from "@/lib/consolidateReports";
+import { historyCount } from "@/lib/historyCount";
 import { isConsolidatedReportResolved } from "@/lib/reportResolution";
 import { SWITCH_STATE_LABELS, buildSwitchMembership, humanHandledAutoHideTargets, type SwitchState } from "@/lib/sensitiveSwitch";
 import { mergeReportFeeds } from "@/lib/reportFeeds";
@@ -184,11 +185,15 @@ function ConsolidatedReportItem({
   isSelected,
   onClick,
   switchState,
+  countTruncated = false,
 }: {
   consolidated: ConsolidatedReport;
   isSelected: boolean;
   onClick: () => void;
   switchState?: SwitchState;
+  // The reports of this target may be more than the count: the read that
+  // loaded them stopped early. Shown as "N+", as in the open pane.
+  countTruncated?: boolean;
 }) {
   const reportCount = consolidated.reports.length;
   const reporterCount = consolidated.reporters.length;
@@ -247,7 +252,7 @@ function ConsolidatedReportItem({
         <div className="flex items-center gap-3 text-xs">
           <span className={`flex items-center gap-1 font-medium ${reportCount > 5 ? 'text-red-600' : reportCount > 2 ? 'text-orange-600' : 'text-muted-foreground'}`}>
             <Flag className="h-3 w-3" />
-            {reportCount} report{reportCount !== 1 ? 's' : ''}
+            {countTruncated ? `${historyCount(reportCount, true)} reports` : `${reportCount} report${reportCount !== 1 ? 's' : ''}`}
           </span>
           <span className="flex items-center gap-1 text-muted-foreground">
             <Users className="h-3 w-3" />
@@ -1490,7 +1495,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         // p-tags a ?pubkey= target (but resolves to an event) a false 'gone'. An empty
         // result here is a relay-confirmed absence; an empty *timeout* never reaches this
         // branch (the worker 502s it → the catch below → 'unavailable').
-        const matching = reportsMatchingTarget(events, target, (e: NostrEvent) => getReportTarget(e));
+        // The worker's filter lowercases the target, so the reports it returns
+        // are matched against the lowercase form: an uppercase link then opens
+        // the same report its lowercase twin does.
+        const matching = reportsMatchingTarget(
+          events,
+          { type: target.type, value: target.value.toLowerCase() },
+          (e: NostrEvent) => getReportTarget(e),
+        );
         if (truncated && events.length === 0) {
           setDeepLinkStatus('unavailable');
           return;
@@ -1683,9 +1695,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     );
   }
 
-  // With the queue failed cold there is no list to draw the target's reports
-  // from; the deep link's own lookup holds them.
-  const paneConsolidated = listReports ? consolidated : deepLinkedConsolidated;
+  // From every grouped report, not the filtered list: a filter that drops the
+  // open row must not empty the pane's report set. With the queue failed cold
+  // there is no list to draw the target's reports from; the deep link's own
+  // lookup holds them.
+  const paneConsolidated = listReports ? allConsolidated : deepLinkedConsolidated;
 
   // Built once and rendered in both the desktop pane and the mobile sheet so
   // the two views cannot drift. Reports render attacker-authored event data:
@@ -2051,6 +2065,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                         isSelected={selectedReport?.id === item.latestReport.id}
                         onClick={() => handleSelectReport(item.latestReport)}
                         switchState={switchMembership.get(key)}
+                        countTruncated={key === selectedSwitchKey
+                          ? selectedTargetCountTruncated
+                          : !!queueFeed?.truncated && queueFeedTargetKeys.has(key)}
                       />
                     );
                   })

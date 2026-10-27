@@ -29,13 +29,17 @@ vi.mock('@/lib/consolidateReports', async (orig) => {
 });
 
 vi.mock('@/components/ReportDetail', () => ({
-  ReportDetail: ({ switchState, targetReportsMayBePartial, allReportsForTargetTruncated }: {
+  ReportDetail: ({ report, switchState, targetReportsMayBePartial, allReportsForTargetTruncated, allReportsForTarget }: {
+    report?: { id: string } | null;
     switchState?: string;
     targetReportsMayBePartial?: boolean;
     allReportsForTargetTruncated?: boolean;
+    allReportsForTarget?: unknown[];
   }) => (
     <div
       data-testid="detail"
+      data-report-id={report?.id ?? ''}
+      data-target-reports={String(allReportsForTarget?.length ?? 'none')}
       data-switch-state={switchState ?? ''}
       data-reports-partial={String(targetReportsMayBePartial === true)}
       data-reports-truncated={String(allReportsForTargetTruncated === true)}
@@ -293,6 +297,10 @@ describe('what the pane knows of the selected target', () => {
     await screen.findByTestId('detail');
     await waitFor(() => expect(window.location.pathname).toBe(`/reports/${MIXED_REPORT.id}`));
     expect(screen.getByTestId('detail').getAttribute('data-reports-truncated')).toBe('false');
+    // The open row says the same as the pane: a count read in full is plain.
+    const row = document.querySelector(`[data-row-key="event:${MIXED_EVENT}"]`) as HTMLElement;
+    expect(row).toHaveTextContent('1 report');
+    expect(row).not.toHaveTextContent('1+');
   });
 
   // The queue failed cold, the deep link's read ran in full, and then the queue
@@ -421,5 +429,72 @@ describe('what the pane knows of the selected target', () => {
 
     await screen.findByTestId('detail');
     expect(incomplete()).toBe('false');
+  });
+});
+
+describe('the open pane keeps its reports while the list is filtered', () => {
+  const SECOND_SPAM = report('b'.repeat(64), 1751000049, [['e', SPAM_EVENT, 'spam'], ['p', '9'.repeat(64), 'spam']]);
+
+  it('still holds both reports of the open target after a filter drops its row', async () => {
+    stubWorker({ feed: [SPAM_REPORT, SECOND_SPAM, CSAM_REPORT], history: [] });
+    const user = userEvent.setup();
+    renderAt('/reports');
+    await user.click(await screen.findByText(NOTE_SPAM));
+    await screen.findByTestId('detail');
+    expect(screen.getByTestId('detail').getAttribute('data-target-reports')).toBe('2');
+
+    // The Users filter lists only account targets, so the open event row leaves the list.
+    await user.click(screen.getByRole('button', { name: /^users$/i }));
+    await waitFor(() => expect(screen.queryByText(NOTE_SPAM)).not.toBeInTheDocument());
+
+    expect(screen.getByTestId('detail').getAttribute('data-target-reports')).toBe('2');
+  });
+});
+
+describe('a ?pubkey= link written in uppercase', () => {
+  it("opens the account's profile report, as the lowercase link does", async () => {
+    const account = 'ab'.repeat(32);
+    const profile = report('c'.repeat(64), 1751000040, [['p', account, 'spam']]);
+    const post = report('d'.repeat(64), 1751000090, [['e', '8'.repeat(64), 'spam'], ['p', account]]);
+    stubWorker({ feed: [], history: [], targeted: { [account]: [profile, post] } });
+    renderAt(`/reports?pubkey=${account.toUpperCase()}`);
+
+    await screen.findByTestId('detail');
+    await waitFor(() => expect(window.location.pathname).toBe(`/reports/${profile.id}`));
+  });
+});
+
+describe("a feed target's row count when the feed stopped early", () => {
+  it('shows the floor form, as the open pane does', async () => {
+    stubWorker({ feedTruncated: true });
+    const user = userEvent.setup();
+    renderAt('/reports');
+    const row = (await screen.findByText(NOTE_SPAM)).closest('div.rounded-lg') as HTMLElement;
+    expect(row).toHaveTextContent('1+ reports');
+    await user.click(row);
+    await screen.findByTestId('detail');
+    expect(screen.getByTestId('detail').getAttribute('data-reports-truncated')).toBe('true');
+    // Still the floor form on the open row.
+    expect(row).toHaveTextContent('1+ reports');
+  });
+
+  it('keeps the plain count on a history row, which the feed does not hold', async () => {
+    stubWorker({ feedTruncated: true });
+    const user = userEvent.setup();
+    renderAt('/reports');
+    await screen.findByText(NOTE_SPAM);
+    await user.click(hideResolvedSwitch());
+    const historyRow = (await screen.findByText(NPUB_CSAM)).closest('div.rounded-lg') as HTMLElement;
+
+    expect(historyRow).toHaveTextContent('1 report');
+    expect(historyRow).not.toHaveTextContent('1+');
+  });
+
+  it('shows the plain count when the feed read to its end', async () => {
+    stubWorker({ feedTruncated: false });
+    renderAt('/reports');
+    const row = (await screen.findByText(NOTE_SPAM)).closest('div.rounded-lg') as HTMLElement;
+    expect(row).toHaveTextContent('1 report');
+    expect(row).not.toHaveTextContent('1+');
   });
 });
