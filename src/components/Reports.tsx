@@ -972,11 +972,13 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // carries every report on them only when it did not stop early. A feed that
   // did (the red "stopped reading" banner) is missing reports older than its
   // cut-off for every target in it, so none of them counts as fully read.
-  const needsAttentionTargetKeys = useMemo(
-    () => (queueFeed?.truncated
-      ? new Set<string>()
-      : new Set(consolidateReports(queueFeed?.events ?? []).map(c => reportTargetKey(c.target)))),
+  const queueFeedTargetKeys = useMemo(
+    () => new Set(consolidateReports(queueFeed?.events ?? []).map(c => reportTargetKey(c.target))),
     [queueFeed],
+  );
+  const needsAttentionTargetKeys = useMemo(
+    () => (queueFeed?.truncated ? new Set<string>() : queueFeedTargetKeys),
+    [queueFeed, queueFeedTargetKeys],
   );
   const feedTargetKeys = useMemo(
     () => new Set(feedConsolidated.map(c => reportTargetKey(c.target))),
@@ -1515,11 +1517,13 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                 relayUrl,
                 target: latestTarget,
                 truncated,
-                // Compared in lowercase only here: a deep link may be written in
-                // uppercase hex, and the worker's filter lowercases it too. String():
-                // a malformed report's tag can have no value.
+                // The read fetched the link's lowercase form (the worker's filter
+                // lowercases it), so only a report whose own tag is that lowercase
+                // value was read for this target: an uppercase tag was not fetched
+                // by a lowercase link. A malformed report's tag can have no value,
+                // and an absent value never equals a string.
                 exact: latestTarget.type === target.type
-                  && String(latestTarget.value).toLowerCase() === String(target.value).toLowerCase(),
+                  && latestTarget.value === target.value.toLowerCase(),
               }
             : null);
           setDeepLinkStatus('found');
@@ -1700,12 +1704,20 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // in the history view, pages), or a targeted read of that same target did not
   // stop early. Anything else may be missing a CSAM-signal report: a target
   // opened from history pages not yet loaded, a read cut short by the worker's
-  // page bound, or a post opened by a ?pubkey= link, whose read was the
+  // page bound, a feed that itself stopped early (it gives no credit to any
+  // target in it), or a post opened by a ?pubkey= link, whose read was the
   // account's and misses a report that lacks the author's p tag. Those start
   // hidden until clicked.
   const selectedTargetReportsPartial = !!selectedTarget
     && !needsAttentionTargetKeys.has(reportTargetKey(selectedTarget))
     && !targetedReadComplete;
+  // The "N+" floor mark: a targeted read that stopped early, or a feed target
+  // when the feed did. A history-only selection stays plain "N": its reports
+  // were never read for this target, which is partial but not a read that
+  // stopped early.
+  const selectedTargetCountTruncated = targetedHistoryTruncated
+    || (!!queueFeed?.truncated && !!selectedTarget
+      && queueFeedTargetKeys.has(reportTargetKey(selectedTarget)));
 
   const reportDetailPane = showDeepLinkFallback ? (
     <DeepLinkFallback
@@ -1745,7 +1757,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
               )?.reports
             : undefined
         }
-        allReportsForTargetTruncated={targetedHistoryTruncated}
+        allReportsForTargetTruncated={selectedTargetCountTruncated}
         targetReportsMayBePartial={selectedTargetReportsPartial}
         onDismiss={dismissDetail}
         switchState={selectedSwitchKey ? switchMembership.get(selectedSwitchKey) : undefined}

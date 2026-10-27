@@ -29,11 +29,16 @@ vi.mock('@/lib/consolidateReports', async (orig) => {
 });
 
 vi.mock('@/components/ReportDetail', () => ({
-  ReportDetail: ({ switchState, targetReportsMayBePartial }: { switchState?: string; targetReportsMayBePartial?: boolean }) => (
+  ReportDetail: ({ switchState, targetReportsMayBePartial, allReportsForTargetTruncated }: {
+    switchState?: string;
+    targetReportsMayBePartial?: boolean;
+    allReportsForTargetTruncated?: boolean;
+  }) => (
     <div
       data-testid="detail"
       data-switch-state={switchState ?? ''}
       data-reports-partial={String(targetReportsMayBePartial === true)}
+      data-reports-truncated={String(allReportsForTargetTruncated === true)}
     />
   ),
 }));
@@ -275,6 +280,60 @@ describe('what the pane knows of the selected target', () => {
     await screen.findByTestId('detail');
     await waitFor(() => expect(window.location.pathname).toBe(`/reports/${MIXED_REPORT.id}`));
     expect(incomplete()).toBe('false');
+  });
+
+  it('gives a valueless target no credit for a ?event=undefined link', async () => {
+    // getReportTarget is presence-based: a bare ["e"] tag is an event target with no value.
+    const valueless = report('e'.repeat(64), 1751000071, [['e'], ['p', '9'.repeat(64), 'spam']]);
+    stubWorker({ feed: [], history: [], targeted: { undefined: [valueless] } });
+    renderAt('/reports?event=undefined');
+
+    await screen.findByTestId('detail');
+    await waitFor(() => expect(window.location.pathname).toBe(`/reports/${valueless.id}`));
+    expect(incomplete()).toBe('true');
+  });
+
+  it('gives an uppercase-tag target no credit for a lowercase link that never fetched it', async () => {
+    const UPPER = 'ABCDEF'.repeat(10) + 'ABCD';
+    const upper = report('e'.repeat(64), 1751000072, [['e', UPPER, 'spam'], ['p', '9'.repeat(64), 'spam']]);
+    stubWorker({ feed: [], history: [], targeted: { [UPPER.toLowerCase()]: [upper] } });
+    renderAt(`/reports?event=${UPPER.toLowerCase()}`);
+
+    await screen.findByTestId('detail');
+    await waitFor(() => expect(window.location.pathname).toBe(`/reports/${upper.id}`));
+    expect(incomplete()).toBe('true');
+  });
+
+  it('shows the floor form for a feed target when the feed stopped early', async () => {
+    stubWorker({ feedTruncated: true });
+    const user = userEvent.setup();
+    renderAt('/reports');
+    await user.click(await screen.findByText(NOTE_SPAM));
+
+    await screen.findByTestId('detail');
+    expect(screen.getByTestId('detail').getAttribute('data-reports-truncated')).toBe('true');
+  });
+
+  it('shows the plain count for a feed target when the feed read to its end', async () => {
+    stubWorker({ feedTruncated: false });
+    const user = userEvent.setup();
+    renderAt('/reports');
+    await user.click(await screen.findByText(NOTE_SPAM));
+
+    await screen.findByTestId('detail');
+    expect(screen.getByTestId('detail').getAttribute('data-reports-truncated')).toBe('false');
+  });
+
+  it('keeps the plain count for a history-only selection when the feed stopped early', async () => {
+    stubWorker({ feedTruncated: true });
+    const user = userEvent.setup();
+    renderAt('/reports');
+    await screen.findByText(NOTE_SPAM);
+    await user.click(hideResolvedSwitch());
+    await user.click(await screen.findByText(NPUB_CSAM));
+
+    await screen.findByTestId('detail');
+    expect(screen.getByTestId('detail').getAttribute('data-reports-truncated')).toBe('false');
   });
 
   it('keeps a feed target complete in the history view too', async () => {
