@@ -574,4 +574,45 @@ describe("EventDetail author's picture", () => {
     // Only the author's card has a show or hide control for its picture.
     expect(screen.getAllByRole('button', { name: /^(Show|Hide) profile picture$/ })).toHaveLength(1);
   });
+
+  // The events page keeps this pane mounted when another event is picked. The
+  // card's <img> would be reused with a new src, so these check the DOM.
+  describe('when the next event has another author', () => {
+    const OTHER_AUTHOR = '6'.repeat(64);
+    const OTHER_PICTURE = 'https://example.invalid/other-author.png';
+    const OTHER_AUTHORS_EVENT: NostrEvent = { ...EVENT, id: 'b'.repeat(64), pubkey: OTHER_AUTHOR };
+    const ui = (queryClient: QueryClient, event: NostrEvent) => (
+      <QueryClientProvider client={queryClient}><EventDetail event={event} /></QueryClientProvider>
+    );
+
+    beforeEach(() => {
+      authors.pictures[OTHER_AUTHOR] = OTHER_PICTURE;
+    });
+
+    it("does not show that author's picture while the next event's reports load", async () => {
+      reports.value = [SPAM];
+      const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      const { container, rerender } = render(ui(queryClient, EVENT));
+      await waitFor(() => expect(imageSrcs(container)).toEqual([AUTHOR_PICTURE]));
+
+      relay.answer = () => new Promise(() => {});
+      rerender(ui(queryClient, OTHER_AUTHORS_EVENT));
+
+      expect(container.querySelector('img')).toBeNull();
+    });
+
+    it("does not carry a Show from a sensitive event to that author's picture", async () => {
+      reports.value = [OLD_BUILD];
+      const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      const { container, rerender } = render(ui(queryClient, EVENT));
+      await screen.findByText('1 Related Report');
+      fireEvent.click(screen.getByRole('button', { name: 'Show profile picture' }));
+      expect(imageSrcs(container)).toEqual([AUTHOR_PICTURE]);
+
+      relay.answer = () => new Promise(() => {});
+      rerender(ui(queryClient, OTHER_AUTHORS_EVENT));
+
+      expect(container.querySelector('img')).toBeNull();
+    });
+  });
 });
