@@ -603,30 +603,53 @@ describe('Reports sensitive pending-review switch', () => {
       expect(hideResolvedSwitch()).toBeChecked();
     });
 
+    // A switch the moderator opens by hand saves Hide resolved as it is on
+    // screen, so closing it keeps the linked report's row in view.
+    it('keeps Hide resolved off when the moderator opens and closes the switch over a linked resolved report', async () => {
+      stubFetch({
+        events: [CSAM_REPORT, SPAM_REPORT],
+        labels: () => Promise.resolve([{ type: 'event', value: SPAM_EVENT }]),
+      });
+      const user = userEvent.setup();
+      renderAt(`/reports?event=${SPAM_EVENT}`);
+      await waitFor(() => expect(window.location.pathname).toBe(`/reports/${SPAM_REPORT.id}`));
+      await waitFor(() => expect(hideResolvedSwitch()).not.toBeChecked());
+      expect(screen.getByText(NOTE_SPAM)).toBeInTheDocument();
+
+      await user.click(pendingSwitch());
+      await flush();
+      expect(pendingSwitch()).toBeChecked();
+      await user.click(pendingSwitch());
+      await flush();
+
+      expect(hideResolvedSwitch()).not.toBeChecked();
+      expect(screen.getByText(NOTE_SPAM)).toBeInTheDocument();
+    });
+
+    // A later link opens the switch with no courtesy of its own, so it saves
+    // what the moderator last chose, not what the first link remembered.
     it('hands back the Hide resolved setting the moderator chose after the link, not the one before it', async () => {
-      let statesFailing = true;
       stubFetch({
         events: [CSAM_REPORT, SPAM_REPORT, HIDDEN_REPORT],
         states: HIDDEN_STATES,
-        labels: () => Promise.resolve([{ type: 'event', value: HIDDEN_EVENT }]),
-        statesFail: () => statesFailing,
+        labels: () => Promise.resolve([{ type: 'event', value: SPAM_EVENT }]),
       });
       const user = userEvent.setup();
-      const queryClient = renderAt(`/reports?event=${HIDDEN_EVENT}`);
-      await waitFor(() => expect(window.location.pathname).toBe(`/reports/${HIDDEN_REPORT.id}`));
-      await user.click(await screen.findByRole('button', { name: /show the queue anyway/i }));
-      await flush();
-      expect(hideResolvedSwitch()).not.toBeChecked();
+      renderAt(`/reports?event=${SPAM_EVENT}`);
+      await waitFor(() => expect(window.location.pathname).toBe(`/reports/${SPAM_REPORT.id}`));
+      await waitFor(() => expect(hideResolvedSwitch()).not.toBeChecked());
 
       // The moderator sets it themselves: on, then off again.
       await user.click(hideResolvedSwitch());
       await user.click(hideResolvedSwitch());
       expect(hideResolvedSwitch()).not.toBeChecked();
 
-      statesFailing = false;
-      await act(async () => { await queryClient.invalidateQueries({ queryKey: ['resolution-state'] }); });
-      await user.click(await screen.findByRole('switch', { name: /pending review/i }));
-      await flush();
+      // A second link, to an auto-hidden report, opens the switch.
+      await act(async () => {
+        window.history.pushState({}, '', `/reports?event=${HIDDEN_EVENT}`);
+        window.dispatchEvent(new PopStateEvent('popstate'));
+      });
+      await waitFor(() => expect(pendingSwitch()).toBeChecked());
       await user.click(pendingSwitch());
       await flush();
 

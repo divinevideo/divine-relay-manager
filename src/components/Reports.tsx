@@ -460,9 +460,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const prePendingReviewRef = useRef<{ hideResolved: boolean; filterCategory: string | null } | null>(null);
   // Hide resolved as the moderator had it before a deep link's courtesy last
   // turned it off to show a resolved linked report. Null until a courtesy
-  // does, and again once the moderator sets Hide resolved themselves. If the
-  // switch opens later, for a target only a later read showed to be
-  // auto-hidden, it saves this rather than the courtesy's "off".
+  // does, and again once the moderator sets Hide resolved or the switch
+  // themselves. If the link opens the switch later, for a target only a later
+  // read showed to be auto-hidden, it saves this rather than the courtesy's
+  // "off".
   const hideResolvedBeforeCourtesyRef = useRef<boolean | null>(null);
   // True only while the pending-review switch is on because a deep link
   // opened it, not the moderator. Only then may the switch close itself when
@@ -1727,6 +1728,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                   onCheckedChange={(checked) => {
                     // The moderator owns the switch from here on.
                     switchOpenedByDeepLinkRef.current = false;
+                    // Opened by hand, the switch saves Hide resolved as it is
+                    // on screen: a value a link's courtesy remembered is only
+                    // for a switch that link opens.
+                    hideResolvedBeforeCourtesyRef.current = null;
                     if (checked) enterPendingReview();
                     else leavePendingReview();
                   }}
