@@ -80,6 +80,10 @@ interface ReportDetailProps {
   report: NostrEvent | null;
   allReportsForTarget?: NostrEvent[];
   allReportsForTargetTruncated?: boolean;
+  // The target came only from resolved-history pages loaded so far, so a report
+  // on it that signals CSAM may sit on a page that is not loaded. Media and
+  // avatars then start hidden whatever the loaded reports say, until clicked.
+  reportsIncomplete?: boolean;
   onDismiss?: () => void;
   // Which side of the queue's Pending review switch this report's target is
   // on. Undefined outside it. Only 'not-hidden' gets a badge here: the pane's
@@ -87,7 +91,7 @@ interface ReportDetailProps {
   switchState?: SwitchState;
 }
 
-export function ReportDetail({ report, allReportsForTarget, allReportsForTargetTruncated = false, onDismiss, switchState }: ReportDetailProps) {
+export function ReportDetail({ report, allReportsForTarget, allReportsForTargetTruncated = false, reportsIncomplete = false, onDismiss, switchState }: ReportDetailProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const {
@@ -362,14 +366,16 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // Check media status from moderation service
   const mediaStatus = useMediaStatus(mediaHashes);
 
-  // undefined while loading, then true/false once reports are available
+  // undefined while loading, then true/false once reports are available. Also
+  // undefined when the reports may not be all of them: undefined and true both
+  // start media and avatars hidden until clicked, and only false shows them.
   const hasHighPriorityReports = useMemo(() => {
-    if (!allReportsForTarget) return undefined;
+    if (!allReportsForTarget || reportsIncomplete) return undefined;
     return allReportsForTarget.some(r => {
       const cat = getReportCategory(r);
       return HIGH_PRIORITY_CATEGORIES.includes(cat);
     }) || hasCsamSignal(allReportsForTarget);
-  }, [allReportsForTarget]);
+  }, [allReportsForTarget, reportsIncomplete]);
 
   // Confirm auto-hidden content (approve the auto-hide decision)
   const confirmAutoHideMutation = useMutation({

@@ -29,8 +29,12 @@ vi.mock('@/lib/consolidateReports', async (orig) => {
 });
 
 vi.mock('@/components/ReportDetail', () => ({
-  ReportDetail: ({ switchState }: { switchState?: string }) => (
-    <div data-testid="detail" data-switch-state={switchState ?? ''} />
+  ReportDetail: ({ switchState, reportsIncomplete }: { switchState?: string; reportsIncomplete?: boolean }) => (
+    <div
+      data-testid="detail"
+      data-switch-state={switchState ?? ''}
+      data-reports-incomplete={String(reportsIncomplete === true)}
+    />
   ),
 }));
 
@@ -192,5 +196,67 @@ describe('the switch label beside a failed queue', () => {
     const detail = await screen.findByTestId('detail');
     await waitFor(() => expect(detail).toHaveAttribute('data-switch-state', 'not-hidden'));
     expect(screen.getByText(/Failed to load reports/)).toBeInTheDocument();
+    // The deep link's own read is the complete one: not a history-only selection.
+    expect(detail).toHaveAttribute('data-reports-incomplete', 'false');
+  });
+});
+
+describe('what the pane knows of the selected target', () => {
+  const incomplete = () => screen.getByTestId('detail').getAttribute('data-reports-incomplete');
+
+  it('calls a history-only selection incomplete: its other reports may be on pages not loaded', async () => {
+    stubWorker({});
+    renderAt(`/reports/${CSAM_REPORT.id}`);
+
+    await screen.findByTestId('detail');
+    await waitFor(() => expect(incomplete()).toBe('true'));
+  });
+
+  it('calls a history row clicked in the history view incomplete', async () => {
+    stubWorker({});
+    const user = userEvent.setup();
+    renderAt('/reports');
+    await screen.findByText(NOTE_SPAM);
+    await user.click(hideResolvedSwitch());
+    await user.click(await screen.findByText(NPUB_CSAM));
+
+    await waitFor(() => expect(incomplete()).toBe('true'));
+  });
+
+  it('calls a ?event= link that lands while history is open incomplete', async () => {
+    const HISTORY_EVENT = '6'.repeat(64);
+    const HISTORY_EVENT_REPORT = report('e'.repeat(64), 1751000010, [['e', HISTORY_EVENT, 'spam'], ['p', '9'.repeat(64), 'spam']]);
+    stubWorker({ history: [HISTORY_EVENT_REPORT] });
+    const user = userEvent.setup();
+    renderAt('/reports');
+    await screen.findByText(NOTE_SPAM);
+    await user.click(hideResolvedSwitch());
+    await screen.findByText(nip19.noteEncode(HISTORY_EVENT));
+
+    await act(async () => {
+      window.history.pushState({}, '', `/reports?event=${HISTORY_EVENT}`);
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    });
+
+    await screen.findByTestId('detail');
+    await waitFor(() => expect(incomplete()).toBe('true'));
+  });
+
+  it('keeps a feed target complete', async () => {
+    stubWorker({});
+    const user = userEvent.setup();
+    renderAt('/reports');
+    await user.click(await screen.findByText(NOTE_SPAM));
+
+    await screen.findByTestId('detail');
+    expect(incomplete()).toBe('false');
+  });
+
+  it('keeps a target from the complete targeted read complete', async () => {
+    stubWorker({ feed: [], history: [], targeted: { [SPAM_EVENT]: [SPAM_REPORT] } });
+    renderAt(`/reports?event=${SPAM_EVENT}`);
+
+    await screen.findByTestId('detail');
+    expect(incomplete()).toBe('false');
   });
 });

@@ -1662,6 +1662,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // The open report's side of the switch, so the pane carries the row's label.
   const selectedSwitchKey = selectedTarget ? reportTargetKey(selectedTarget) : undefined;
 
+  // The selected target came only from resolved-history pages: neither the
+  // needs-attention feed nor a complete targeted read holds it. Its reports on
+  // pages not loaded yet are unknown, so the pane hides sensitive media until
+  // clicked. With the queue failed cold there is no feed, and the deep link's
+  // own read is the complete one.
+  const selectedTargetHistoryOnly = !!reports && !!selectedTarget
+    && !feedTargetKeys.has(reportTargetKey(selectedTarget));
+
   const reportDetailPane = showDeepLinkFallback ? (
     <DeepLinkFallback
       status={deepLinkStatus === 'gone' ? 'gone' : 'unavailable'}
@@ -1701,6 +1709,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
             : undefined
         }
         allReportsForTargetTruncated={targetedHistoryTruncated}
+        reportsIncomplete={selectedTargetHistoryOnly}
         onDismiss={dismissDetail}
         switchState={selectedSwitchKey ? switchMembership.get(selectedSwitchKey) : undefined}
       />

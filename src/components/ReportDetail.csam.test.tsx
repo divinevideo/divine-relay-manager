@@ -219,6 +219,33 @@ describe('ReportDetail for an old-build CSAM report', () => {
   });
 });
 
+describe('ReportDetail when not all of the target reports may be loaded', () => {
+  // A target opened from resolved history pages holds only the reports on the
+  // pages loaded so far; a CSAM-signal one may sit on a page that is not.
+  function renderIncomplete(incomplete: boolean) {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    return render(
+      <QueryClientProvider client={qc}>
+        <TooltipProvider>
+          <ReportDetail report={PLAIN_ILLEGAL} allReportsForTarget={[PLAIN_ILLEGAL]} reportsIncomplete={incomplete} />
+        </TooltipProvider>
+      </QueryClientProvider>,
+    );
+  }
+
+  it('hides the reported account images and media by default', () => {
+    renderIncomplete(true);
+    expect(screen.getByTestId('profile-card').dataset.hide).toBe('true');
+    expect(screen.getAllByTestId('media').every(m => m.dataset.show === 'false')).toBe(true);
+  });
+
+  it('shows them for the same reports once they are known to be complete (control)', () => {
+    renderIncomplete(false);
+    expect(screen.getByTestId('profile-card').dataset.hide).toBe('false');
+    expect(screen.getAllByTestId('media').every(m => m.dataset.show === 'true')).toBe(true);
+  });
+});
+
 describe('ReportDetail switch label', () => {
   function renderWithSwitch(props: Partial<Parameters<typeof ReportDetail>[0]>) {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
