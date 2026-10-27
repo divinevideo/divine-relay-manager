@@ -282,6 +282,42 @@ describe('what the pane knows of the selected target', () => {
     expect(incomplete()).toBe('false');
   });
 
+  // A feed target can still get a complete targeted read: an uppercase ?event= link
+  // misses the listed row (the lookup is case-sensitive), so the read runs.
+  it('shows the plain count for a feed target read in full by an uppercase link, though the feed stopped early', async () => {
+    const MIXED_EVENT = 'abcdef'.repeat(10) + 'abcd';
+    const MIXED_REPORT = report('e'.repeat(64), 1751000073, [['e', MIXED_EVENT, 'spam'], ['p', '9'.repeat(64), 'spam']]);
+    stubWorker({ feed: [MIXED_REPORT], feedTruncated: true, history: [], targeted: { [MIXED_EVENT]: [MIXED_REPORT] } });
+    renderAt(`/reports?event=${MIXED_EVENT.toUpperCase()}`);
+
+    await screen.findByTestId('detail');
+    await waitFor(() => expect(window.location.pathname).toBe(`/reports/${MIXED_REPORT.id}`));
+    expect(screen.getByTestId('detail').getAttribute('data-reports-truncated')).toBe('false');
+  });
+
+  // The queue failed cold, the deep link's read ran in full, and then the queue
+  // recovered, truncated, with that target in it.
+  it('shows the plain count for a target read in full while the queue was down, once the queue recovers truncated', async () => {
+    let queueUp = false;
+    const target = '5'.repeat(64);
+    const TARGET_REPORT = report('f'.repeat(64), 1751000074, [['e', target, 'spam'], ['p', '9'.repeat(64), 'spam']]);
+    stubWorker({
+      feedReply: () => (queueUp
+        ? jsonResponse({ success: true, events: [TARGET_REPORT], truncated: true, oldest_covered: 1751000000 })
+        : jsonResponse({ success: false, error: 'Relay query timed out' }, 502)),
+      targeted: { [target]: [TARGET_REPORT] },
+    });
+    const queryClient = renderAt(`/reports?event=${target}`);
+
+    await screen.findByTestId('detail');
+    await waitFor(() => expect(window.location.pathname).toBe(`/reports/${TARGET_REPORT.id}`));
+    queueUp = true;
+    await act(async () => { await queryClient.refetchQueries({ queryKey: ['reports'] }); });
+    await screen.findByText(/stopped reading reports early/i);
+
+    expect(screen.getByTestId('detail').getAttribute('data-reports-truncated')).toBe('false');
+  });
+
   it('gives a valueless target no credit for a ?event=undefined link', async () => {
     // getReportTarget is presence-based: a bare ["e"] tag is an event target with no value.
     const valueless = report('e'.repeat(64), 1751000071, [['e'], ['p', '9'.repeat(64), 'spam']]);

@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { CopyableId } from "@/components/CopyableId";
 import { useRelatedReports } from "@/hooks/useRelatedReports";
 import { historyCount } from "@/lib/historyCount";
+import { overflowLine } from "@/lib/overflowLine";
 import { getCategoryLabel, getReportCategory } from "@/lib/constants";
 import { Link2, User, FileText, Loader2 } from "lucide-react";
 import { getReportTarget, type ReportTarget } from "../../shared/report-target";
@@ -18,15 +19,6 @@ interface RelatedReportsCardProps {
 
 const CARD_CLASS = "border-orange-200 bg-orange-50/50 dark:bg-orange-950/20";
 const TITLE_CLASS = "text-sm flex items-center gap-2 text-orange-700 dark:text-orange-400";
-
-// "+3 more user reports", or "3+ more user reports" on a read that stopped early:
-// a plus on both sides ("+3+") would read as a typo, and the trailing one is the
-// floor mark every other count here uses. Singular only for an exact count of
-// one: "1+" means at least one, so a read that stopped early stays plural.
-function overflowLine(rest: number, truncated: boolean, noun: 'user' | 'event'): string {
-  const count = truncated ? historyCount(rest, true) : `+${rest}`;
-  return `${count} more ${noun} ${rest === 1 && !truncated ? 'report' : 'reports'}`;
-}
 
 export function RelatedReportsCard({ pubkey, currentTarget }: RelatedReportsCardProps) {
   const related = useRelatedReports(pubkey, currentTarget);

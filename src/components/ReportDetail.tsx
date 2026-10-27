@@ -40,6 +40,7 @@ import { useAdminApi } from "@/hooks/useAdminApi";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { useAppContext } from "@/hooks/useAppContext";
 import { historyCount } from "@/lib/historyCount";
+import { overflowLine } from "@/lib/overflowLine";
 import { invalidateResolutionState } from "@/lib/queueInvalidation";
 import { extractMediaHashes, type ResolutionStatus } from "@/lib/adminApi";
 import { useMediaStatus } from "@/hooks/useMediaStatus";
@@ -788,7 +789,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                   );
                 })}
                 {allReportsForTarget.length > 5 && (
-                  <p className="text-xs text-muted-foreground">+{allReportsForTarget.length - 5} more reports</p>
+                  <p className="text-xs text-muted-foreground">{overflowLine(allReportsForTarget.length - 5, allReportsForTargetTruncated)}</p>
                 )}
               </CardContent>
             </Card>

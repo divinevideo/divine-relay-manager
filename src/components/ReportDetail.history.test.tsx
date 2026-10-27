@@ -140,6 +140,29 @@ describe('ReportDetail report-count header', () => {
   });
 });
 
+describe('ReportDetail overflow line under the report list', () => {
+  const reports = (n: number): NostrEvent[] =>
+    Array.from({ length: n }, (_, i) => ({ ...REPORT, id: (i + 1).toString(16).padStart(64, '0') }));
+
+  it('says "report" for exactly one more, on a read that finished', () => {
+    renderDetail({ allReportsForTarget: reports(6), allReportsForTargetTruncated: false });
+
+    expect(screen.getByText('+1 more report')).toBeInTheDocument();
+  });
+
+  it('says "reports" for several more, on a read that finished', () => {
+    renderDetail({ allReportsForTarget: reports(7), allReportsForTargetTruncated: false });
+
+    expect(screen.getByText('+2 more reports')).toBeInTheDocument();
+  });
+
+  it('puts the floor mark on the count, and stays plural, on a read that stopped early', () => {
+    renderDetail({ allReportsForTarget: reports(6), allReportsForTargetTruncated: true });
+
+    expect(screen.getByText('1+ more reports')).toBeInTheDocument();
+  });
+});
+
 describe('ReportDetail AI summary with an unreadable account history', () => {
   // A summary built from a history the read could not finish would describe
   // an account with fewer reports than it has. Say so instead.
