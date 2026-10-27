@@ -29,7 +29,7 @@ export function RelatedReportsCard({ pubkey, currentTarget }: RelatedReportsCard
       <Card className={CARD_CLASS}>
         <CardHeader className="py-3">
           <CardTitle className={TITLE_CLASS}>
-            <Link2 className="h-4 w-4" />
+            <Link2 className="h-4 w-4 shrink-0" />
             Related Reports: checking…
           </CardTitle>
         </CardHeader>
@@ -43,7 +43,7 @@ export function RelatedReportsCard({ pubkey, currentTarget }: RelatedReportsCard
       <Card className={CARD_CLASS}>
         <CardHeader className="py-3">
           <CardTitle className={TITLE_CLASS}>
-            <Link2 className="h-4 w-4" />
+            <Link2 className="h-4 w-4 shrink-0" />
             Related reports could not be loaded
             <Button variant="outline" size="sm" className="ml-auto h-7" onClick={related.retry} disabled={related.retrying}>
               {related.retrying && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
@@ -65,7 +65,7 @@ export function RelatedReportsCard({ pubkey, currentTarget }: RelatedReportsCard
       <Card className={CARD_CLASS}>
         <CardHeader className="py-3">
           <CardTitle className={TITLE_CLASS}>
-            <Link2 className="h-4 w-4" />
+            <Link2 className="h-4 w-4 shrink-0" />
             Related Reports: none found in the part of this account's history that could be read.
           </CardTitle>
         </CardHeader>
@@ -77,7 +77,7 @@ export function RelatedReportsCard({ pubkey, currentTarget }: RelatedReportsCard
     <Card className={CARD_CLASS}>
       <CardHeader className="py-3">
         <CardTitle className={TITLE_CLASS}>
-          <Link2 className="h-4 w-4" />
+          <Link2 className="h-4 w-4 shrink-0" />
           Related Reports ({historyCount(total, truncated)} more on this account)
         </CardTitle>
       </CardHeader>
@@ -105,7 +105,7 @@ export function RelatedReportsCard({ pubkey, currentTarget }: RelatedReportsCard
                 })}
                 {userReports.length > 3 && (
                   <p className="text-xs text-muted-foreground pl-1">
-                    +{historyCount(userReports.length - 3, truncated)} more user reports
+                    {truncated ? historyCount(userReports.length - 3, true) : `+${userReports.length - 3}`} more user reports
                   </p>
                 )}
               </div>
@@ -139,7 +139,7 @@ export function RelatedReportsCard({ pubkey, currentTarget }: RelatedReportsCard
                 })}
                 {eventReports.length > 3 && (
                   <p className="text-xs text-muted-foreground pl-1">
-                    +{historyCount(eventReports.length - 3, truncated)} more event reports
+                    {truncated ? historyCount(eventReports.length - 3, true) : `+${eventReports.length - 3}`} more event reports
                   </p>
                 )}
               </div>

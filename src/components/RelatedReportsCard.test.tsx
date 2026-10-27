@@ -107,8 +107,24 @@ describe('RelatedReportsCard', () => {
     expect(await screen.findByText(/Related Reports \(9\+ more on this account\)/)).toBeInTheDocument();
     expect(screen.getByText(/Reports on this User \(5\+\)/)).toBeInTheDocument();
     expect(screen.getByText(/Reports on their Events \(4\+\)/)).toBeInTheDocument();
-    expect(screen.getByText(/\+2\+ more user reports/)).toBeInTheDocument();
-    expect(screen.getByText(/\+1\+ more event reports/)).toBeInTheDocument();
+    // No leading "+" next to a trailing one: "2+ more", not "+2+ more".
+    expect(screen.getByText('2+ more user reports')).toBeInTheDocument();
+    expect(screen.getByText('1+ more event reports')).toBeInTheDocument();
+  });
+
+  it('shows an exact "+N more" for the rest of a complete read', async () => {
+    fetchReportsByTarget.mockResolvedValue({
+      events: [
+        userReport(1), userReport(2), userReport(3), userReport(4), userReport(5),
+        eventReport(6, '2'.repeat(64)), eventReport(7, '3'.repeat(64)),
+        eventReport(8, '4'.repeat(64)), eventReport(9, '5'.repeat(64)),
+      ],
+      truncated: false,
+    });
+    renderCard();
+
+    expect(await screen.findByText('+2 more user reports')).toBeInTheDocument();
+    expect(screen.getByText('+1 more event reports')).toBeInTheDocument();
   });
 
   it('says so, not "0+", when a read that stopped early found nothing else', async () => {
@@ -159,7 +175,7 @@ describe('RelatedReportsCard', () => {
     expect(screen.queryByText(/Related Reports/)).not.toBeInTheDocument();
   });
 
-  it('retries a failed read once and drops an account\'s read five minutes after it is last used', async () => {
+  it('asks for one retry and a five-minute cache lifetime', async () => {
     fetchReportsByTarget.mockResolvedValue({ events: [userReport(1)], truncated: false });
     const { client } = renderCard();
     await screen.findByText(/Related Reports/);
