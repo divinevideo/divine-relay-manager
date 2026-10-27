@@ -12,6 +12,7 @@ import { SettingsDashboard } from "@/components/SettingsDashboard";
 import { AgeReview } from "@/components/AgeReview";
 import { SexualQuarantine } from "@/components/SexualQuarantine";
 import { EnvironmentSelector } from "@/components/EnvironmentSelector";
+import { getEnvironmentById } from "@/lib/environments";
 import { Card } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Server, FileText, Users, Settings, Flag, Tag, Bug, GripVertical, Clock } from "lucide-react";
@@ -83,6 +84,33 @@ export function RelayManager() {
   const { config } = useAppContext();
 
   const currentTab = getTabFromPath(location.pathname);
+
+  // The Reports screen starts over, URL included, whenever the environment
+  // actually changes, wherever the change is observed: the selector, another
+  // browser tab's storage event, or a link that names its environment. A report
+  // or link in the URL belongs to the environment it was read from; left there,
+  // the screen the change remounts would look it up in the new one, reopening it
+  // or opening history to search for it. This is decided here, during render,
+  // because an effect runs after the remounted screen's own mount effects, which
+  // would already have acted on the old URL: while the URL still carries the
+  // old report, Reports is not rendered at all for that pass.
+  const environmentKey = `${config.relayUrl}|${config.apiUrl}`;
+  const [settledEnvironmentKey, setSettledEnvironmentKey] = useState(environmentKey);
+  const environmentChanged = settledEnvironmentKey !== environmentKey;
+  const urlCarriesReport = location.pathname.startsWith('/reports')
+    && (location.pathname !== '/reports' || location.search !== '');
+  // An &env= link names the environment it is for. When that is the one just
+  // switched to, the switch was made to open this very link, so it is kept.
+  const linkEnvironment = getEnvironmentById(new URLSearchParams(location.search).get('env') ?? '');
+  const linkIsForThisEnvironment = !!linkEnvironment
+    && linkEnvironment.relayUrl === config.relayUrl && linkEnvironment.apiUrl === config.apiUrl;
+  const holdReports = environmentChanged && urlCarriesReport && !linkIsForThisEnvironment;
+  useEffect(() => {
+    if (!environmentChanged) return;
+    // Replace, so Back does not return to the old environment's report.
+    if (holdReports) navigate('/reports', { replace: true });
+    setSettledEnvironmentKey(environmentKey);
+  }, [environmentChanged, holdReports, environmentKey, navigate]);
 
   // Tab order state with localStorage persistence
   const [tabOrder, setTabOrder] = useState<TabId[]>(loadTabOrder);
@@ -225,11 +253,13 @@ export function RelayManager() {
                 belongs to the relay and API it was read from, so a switch starts
                 the screen over instead of leaving a report open that would act
                 on the new one. */}
-            <Reports
-              key={`${config.relayUrl}|${config.apiUrl}`}
-              relayUrl={config.relayUrl}
-              selectedReportId={params.reportId}
-            />
+            {!holdReports && (
+              <Reports
+                key={environmentKey}
+                relayUrl={config.relayUrl}
+                selectedReportId={params.reportId}
+              />
+            )}
           </TabsContent>
 
           <TabsContent value="age-review" className="flex-1 min-h-0 mt-4">

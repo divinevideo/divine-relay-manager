@@ -16,7 +16,6 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { useState } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { useAppContext } from "@/hooks/useAppContext";
 import { environments, getCurrentEnvironment, type Environment } from "@/lib/environments";
@@ -29,23 +28,11 @@ interface EnvironmentSelectorProps {
 export function EnvironmentSelector({ className }: EnvironmentSelectorProps) {
   const { config, updateConfig } = useAppContext();
   const queryClient = useQueryClient();
-  const location = useLocation();
-  const navigate = useNavigate();
   const [open, setOpen] = useState(false);
 
   const currentEnvironment = getCurrentEnvironment(config.relayUrl, config.apiUrl);
 
   const switchEnvironment = (env: Environment) => {
-    // A report open in the Reports tab (/reports/<id>, or a ?event= / ?pubkey=
-    // link) belongs to the environment it was read from. Left in the URL, the
-    // screen the switch remounts would look it up in the new one: reopening it
-    // there, or opening history to search for it. Drop it in the same update as
-    // the config, so the new environment's first render already starts at the
-    // queue. Replace, so Back does not return to the old environment's report.
-    // Other tabs keep their routes.
-    if (location.pathname.startsWith('/reports') && (location.pathname !== '/reports' || location.search)) {
-      navigate('/reports', { replace: true });
-    }
     updateConfig(c => ({
       ...c,
       relayUrl: env.relayUrl,
