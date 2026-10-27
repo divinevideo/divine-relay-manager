@@ -487,7 +487,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     }
   }
   const history = useResolvedHistory(relayUrl, historyView);
-  const loadMoreErrorCountRef = useRef<number | null>(null);
+  const loadMoreErrorRef = useRef<unknown>(null);
   const historyPages = history.data?.pages;
   // What the list is built from: the feed plus deep-linked reports, plus
   // loaded history in the history view. They can hold the same report, and
@@ -1171,10 +1171,16 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         return !!target && isListedTargetResolved(target, authorByTarget.get(reportTargetKey(target)));
       }).length;
 
-  // errorUpdateCount of the error a failed Load more left (see refreshFailed).
-  // Written during render: it only remembers a value already in the query, and
-  // rendering twice records the same one.
-  if (history.isFetchNextPageError) loadMoreErrorCountRef.current = history.errorUpdateCount;
+  // The error a failed Load more left (see refreshFailed), by identity. Not
+  // errorUpdateCount: that counts per query and starts again from zero when
+  // the query is replaced (an environment switch, or re-selecting an
+  // environment, which clears the cache), so a new query's first error would
+  // match an old count. Each failed fetch, in any query, throws a new error
+  // object, so only the very error Load more left can match. Written during
+  // render: it only remembers a value already in the query, and rendering
+  // twice records the same one.
+  if (history.isFetchNextPageError) loadMoreErrorRef.current = history.error;
+  const isLoadMoreLeftover = loadMoreErrorRef.current !== null && loadMoreErrorRef.current === history.error;
 
   const lastHistoryPage = historyPages && historyPages.length > 0 ? historyPages[historyPages.length - 1] : undefined;
   const footerState = historyFooterState({
@@ -1184,8 +1190,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     // error a failed Load more left once a later plain re-read starts, because
     // query-core keeps the error and drops the fetch direction. The re-read has
     // not failed, so that same error is not a refresh failure: a re-read that
-    // fails itself raises errorUpdateCount and is.
-    refreshFailed: history.isRefetchError && history.errorUpdateCount !== loadMoreErrorCountRef.current,
+    // fails itself leaves a new error and is.
+    refreshFailed: history.isRefetchError && !isLoadMoreLeftover,
     lastPage: lastHistoryPage,
     loadingMore: history.isFetchingNextPage,
     busy: history.isFetching && !history.isFetchingNextPage,
@@ -1418,11 +1424,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     // The target isn't in what is listed: not in the needs-attention feed (so
     // most likely resolved or gone, unless that read failed or stopped early),
     // nor, in the history view, in any history page loaded so far (outside it
-    // the list is the feed alone). Do one targeted relay fetch per
-    // target to tell those apart from "still loading". Key the attempt on the
-    // full target identity (relay + type + value) so a same-value target across
-    // type, or a relay/environment switch, re-resolves instead of reusing the
-    // prior attempt or its stale result.
+    // the list is the feed plus deep-linked reports). Do one targeted relay
+    // fetch per target to tell those apart from "still loading". Key the
+    // attempt on the full target identity (relay + type + value) so a
+    // same-value target across type, or a relay/environment switch,
+    // re-resolves instead of reusing the prior attempt or its stale result.
     const targetKey = `${relayUrl}|${target.type}|${target.value}`;
     if (attemptedTargetRef.current === targetKey) return;
     attemptedTargetRef.current = targetKey;

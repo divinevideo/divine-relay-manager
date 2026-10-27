@@ -600,6 +600,42 @@ describe('the history footer never mistakes a stop for an end', () => {
       expect(await screen.findByText(/couldn't refresh resolved history/i)).toBeInTheDocument();
     });
 
+    // The query that holds the Load more error can be replaced: an environment
+    // switch gives a new key, and re-selecting an environment clears the cache.
+    // A new query counts its errors from zero again, so the first error there
+    // must not be taken for the old Load more error. It is a real refresh
+    // failure, and hiding it would leave a stale "More further back" or "End of
+    // resolved history" on screen (#221).
+    describe.each([
+      ['switching to another relay', async (_qc: QueryClient) => 'wss://relay-two.example'],
+      ['re-selecting the same environment', async (qc: QueryClient) => { qc.clear(); return RELAY_URL; }],
+    ])('after %s', (_name, switchEnvironment) => {
+      it('says a failed re-read failed to refresh', async () => {
+        let reRead: Reply = () => jsonResponse(resolvedPage([H1, H2], { nextCursor: PAGE_ONE_CURSOR, done: false }));
+        stubWorker({ pages: { first: () => reRead(), [PAGE_ONE_CURSOR]: fail } });
+        const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, retryDelay: 0 } } });
+        const ui = (relayUrl: string) => (
+          <TestApp queryClient={queryClient}><Reports relayUrl={relayUrl} /></TestApp>
+        );
+        const user = userEvent.setup();
+        const view = render(ui(RELAY_URL));
+        await openHistory(user);
+        await user.click(await screen.findByRole('button', { name: /load more/i }));
+        expect(await screen.findByText(/couldn't load the next page/i)).toBeInTheDocument();
+
+        let relayUrl = RELAY_URL;
+        await act(async () => { relayUrl = await switchEnvironment(queryClient); });
+        view.rerender(ui(relayUrl));
+        expect(await screen.findByText('Showing 3 resolved. More further back.')).toBeInTheDocument();
+
+        reRead = fail;
+        await act(async () => { await queryClient.invalidateQueries({ queryKey: ['reports-resolved'] }); });
+
+        expect(await screen.findByText(/couldn't refresh resolved history/i)).toBeInTheDocument();
+        expect(screen.getByTestId('resolved-history-footer')).not.toHaveTextContent('More further back');
+      });
+    });
+
     it('still says a failed Load more failed, after an earlier re-read succeeded', async () => {
       const { queryClient, user } = await failLoadMore(
         () => jsonResponse(resolvedPage([H1, H2], { nextCursor: PAGE_ONE_CURSOR, done: false })),
