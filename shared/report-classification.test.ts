@@ -57,17 +57,38 @@ describe('classifyReport', () => {
     'child\nsexual abuse material',
     'Child_Sexual_Abuse',
     'child-sexual-abuse',
+    'child_sexual_abuse_material',
+    'is_child_porn',
+    'x_child_sexual_abuse',
+    'suspected_child_porn_ring',
   ])('routes free text %j', content => {
     expect(classifyReport({ tags: [['e', E, 'illegal']], content }).csamSignal).toBe(true);
   });
 
-  it.each(['csamuel', 'children playing', 'child safety', 'grandchildporn'])('does not route free text %j', content => {
+  it.each([
+    'csamuel',
+    'children playing',
+    'child safety',
+    'grandchildporn',
+    'child sexual abuser',
+    'child sexual abuse2',
+    'wildchild sexual',
+  ])('does not route free text %j', content => {
     expect(classifyReport({ tags: [['e', E, 'illegal']], content }).csamSignal).toBe(false);
   });
 
-  it('classifies content of widely spaced "child" words in linear time', () => {
+  // The pattern consumes the character before "child" rather than looking
+  // behind, so pin each kind of prefix.
+  it('routes a phrase at the start, after punctuation, and after an underscore', () => {
+    const routes = (content: string) => classifyReport({ tags: [['e', E, 'illegal']], content }).csamSignal;
+    expect(routes('child porn ring')).toBe(true);
+    expect(routes('see (child porn)')).toBe(true);
+    expect(routes('tag_child porn')).toBe(true);
+  });
+
+  it('classifies a long run of whitespace after "child" in linear time', () => {
     const start = performance.now();
-    classifyReport({ tags: [['e', E, 'illegal']], content: ('child' + ' '.repeat(2000)).repeat(32) });
+    classifyReport({ tags: [['e', E, 'illegal']], content: 'child' + ' '.repeat(40_000) });
     expect(performance.now() - start).toBeLessThan(200);
   });
 

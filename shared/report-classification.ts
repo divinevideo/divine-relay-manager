@@ -24,12 +24,18 @@ const NOS_NAMESPACE = 'social.nos.ontology';
 // backtrack quadratically on content made of many blank lines. CRLF still
 // matches: with /m, $ also stops before \r, which JS counts as a line end.
 const CSAM_REASON_LINE = /^[ \t]*Reason:[ \t]*(csam|sexual_minors)[ \t]*$/im;
-// Free text from other apps. \b keeps "csamuel" out; "child porn" also matches
-// "child pornography" because only its left edge is anchored. Separators may be
-// spaces of any kind, hyphens, underscores or line breaks, or none after
-// "child" ("childporn"). \s is safe here, unlike in the Reason line above,
-// because each match that can use it starts at a literal "child".
-const CSAM_FREE_TEXT = /\b(csam|child[\s_-]*sexual[\s_-]+abuse)\b|\bchild[\s_-]*porn/i;
+// Free text from other apps. A match is either "csam" with no ASCII letter,
+// digit or underscore on either side, or "child" with no ASCII letter or digit
+// before it, then any run of whitespace, hyphens or underscores (or none), then
+// "porn" or "sexual abuse". "porn" is anchored on the left only, so "child
+// pornography" matches. "sexual" and "abuse" need at least one separator
+// between them, and "abuse" no ASCII letter or digit after it. So
+// "is_child_porn" and "child_sexual_abuse_material" match, and
+// "grandchildporn" and "child sexual abuser" do not. The (?:^|[^a-z0-9])
+// prefix stands in for a lookbehind: Safari before 16.4 cannot parse one, and
+// this module loads with the app. \s is safe here, unlike in the Reason line
+// above, because each run of it follows a literal "child" or "sexual".
+const CSAM_FREE_TEXT = /\bcsam\b|(?:^|[^a-z0-9])child[\s_-]*(?:sexual[\s_-]+abuse(?![a-z0-9])|porn)/i;
 
 function tagList(event: { tags?: unknown }): string[][] {
   return Array.isArray(event.tags)
