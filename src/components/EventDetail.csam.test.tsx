@@ -297,6 +297,26 @@ describe('EventDetail when a later read of its reports times out', () => {
 
     expect(media()).toBe('null');
   });
+
+  // A failed read leaves the cached read from before the event was opened in
+  // hand, so it cannot make that read count as one made since.
+  it('does not take a clean verdict from before the event was opened after a failed read', async () => {
+    vi.useFakeTimers();
+    const queryClient = appQueryClient();
+    reports.value = [SPAM];
+    const firstVisit = renderDetail(queryClient);
+    await flushTimers();
+    firstVisit.unmount();
+
+    // This visit's first read fails; the next one times out with nothing.
+    relay.answer = () => Promise.reject(new Error('relay unavailable'));
+    renderDetail(queryClient);
+    await flushTimers();
+    relay.answer = (_filters, { signal }) => answerOnAbort(signal);
+    await refetchUntilTimeout(queryClient);
+
+    expect(media()).toBe('null');
+  });
 });
 
 // A read that returns as many reports as it asked for may have left older ones
@@ -370,6 +390,20 @@ describe('EventDetail media on a later visit', () => {
     renderDetail(queryClient);
 
     expect(media()).toBe('false');
+  });
+
+  it("stays hidden when this visit's read fails, though the last visit found nothing sensitive", async () => {
+    const queryClient = appQueryClient();
+    await visitOnce(queryClient, [SPAM]);
+
+    relay.answer = () => Promise.reject(new Error('relay unavailable'));
+    renderDetail(queryClient);
+    await waitFor(() =>
+      expect(queryClient.getQueryState(['related-reports', EVENT.id, EVENT.pubkey])?.status).toBe('error'));
+    // Let the failed read reach the page.
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+
+    expect(media()).toBe('null');
   });
 
   // The events page keeps this pane mounted when the moderator picks another

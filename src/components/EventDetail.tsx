@@ -458,8 +458,9 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
   // exactly wrong. Unban stays on isUserBanned, so the undo remains reachable.
   const userBannedConfirmed = moderationStatus.isUserBanned === true && !moderationStatus.isUserBannedStale;
 
-  // Whether the related-reports read in hand was made since this event was
-  // opened, for the query function below, which runs outside render.
+  // readSinceOpened (below) for the query function, which runs outside render:
+  // a read since this event was opened has answered, and the latest read did
+  // not fail, so the read in hand was made since the event was opened.
   const readSinceOpenedRef = useRef(false);
 
   // Get reports against this event or user. A read that runs out of time does
@@ -467,7 +468,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
   // read keeps its own timeout signal, and `complete` says whether every read
   // finished before it fired and returned fewer reports than its limit. One
   // that returned its full limit may have left older reports on the relay.
-  const { data: relatedReportsRead, isFetchedAfterMount } = useQuery({
+  const { data: relatedReportsRead, isFetchedAfterMount, isError } = useQuery({
     queryKey: ['related-reports', event.id, event.pubkey],
     queryFn: async ({ signal, queryKey }) => {
       const read = async (filter: NostrFilter) => {
@@ -508,9 +509,13 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
     // event re-reads only stale data.
     staleTime: 0,
   });
+  // A read since this event was opened has answered, and the latest read did
+  // not fail. A failed read counts as fetched since then too, but it leaves
+  // the read from before in hand.
+  const readSinceOpened = isFetchedAfterMount && !isError;
   useEffect(() => {
-    readSinceOpenedRef.current = isFetchedAfterMount;
-  }, [isFetchedAfterMount]);
+    readSinceOpenedRef.current = readSinceOpened;
+  }, [readSinceOpened]);
   // Partial when a read timed out. Still listed below, but it cannot rule out
   // a sensitive report.
   const relatedReports = relatedReportsRead?.reports;
@@ -769,17 +774,18 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
   // Whether any related report has a high-priority category (CSAM, etc.), so
   // media starts hidden to protect moderators. True as soon as a loaded report
   // is one, cached or not. False only once a read made since this event was
-  // opened has finished and found none: a cached read can predate a report
-  // filed since. Undefined while that is unknown: no such read has finished,
-  // or it failed or timed out with nothing sensitive in what arrived.
+  // opened has finished complete and found none, and the latest read did not
+  // fail: a cached read can predate a report filed since. Undefined while that
+  // is unknown: no such read has finished, the latest read failed, or one
+  // timed out with nothing sensitive in what arrived.
   const hasHighPriorityReports = useMemo(() => {
     if (!relatedReportsRead) return undefined;
     const { reports, complete } = relatedReportsRead;
     const sensitive = reports.some(r => HIGH_PRIORITY_CATEGORIES.includes(getReportCategory(r)))
       || hasCsamSignal(reports);
     if (sensitive) return true;
-    return complete && isFetchedAfterMount ? false : undefined;
-  }, [relatedReportsRead, isFetchedAfterMount]);
+    return complete && readSinceOpened ? false : undefined;
+  }, [relatedReportsRead, readSinceOpened]);
   // The default for the event's media and a profile's images: null while the
   // reports are not known, so a sensitive verdict still re-hides media
   // revealed meanwhile.
