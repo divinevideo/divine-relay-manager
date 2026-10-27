@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { CATEGORY_LABELS, getReportCategory, hasCsamSignal, getReportTargetIds, isHex64 } from './constants';
+import { CATEGORY_LABELS, getCategoryLabel, getReportCategory, hasCsamSignal, getReportTargetIds, isHex64 } from './constants';
 
 describe('CATEGORY_LABELS', () => {
   it('maps the divine-mobile NIP-32 labels to existing display labels', () => {
@@ -19,6 +19,22 @@ describe('CATEGORY_LABELS', () => {
     expect(CATEGORY_LABELS['NS-sexual-content']).toBe('Sexual Content');
     expect(CATEGORY_LABELS['NS-false-information']).toBe('Misinformation');
     expect(CATEGORY_LABELS['NS-ai-generated']).toBe('AI Generated');
+  });
+});
+
+// Labels come from the map's own keys only, so inherited object keys render
+// as plain text.
+describe('getCategoryLabel', () => {
+  it.each(['__proto__', 'constructor', 'toString', 'hasOwnProperty', 'valueOf'])('returns %s unchanged', v => {
+    expect(getCategoryLabel(v)).toBe(v);
+  });
+
+  it('returns the display label for a known category', () => {
+    expect(getCategoryLabel('csam')).toBe('CSAM');
+  });
+
+  it('returns an unknown category unchanged', () => {
+    expect(getCategoryLabel('made_up')).toBe('made_up');
   });
 });
 

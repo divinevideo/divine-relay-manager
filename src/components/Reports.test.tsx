@@ -1,7 +1,7 @@
 // ABOUTME: Integration test for #158's acceptance wiring in Reports: a crashing
 // ABOUTME: ReportDetail degrades to the inline fallback while the list survives
 
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MockInstance } from 'vitest';
 import TestApp from '@/test/TestApp';
@@ -432,5 +432,57 @@ describe('Reports CSAM signal priority', () => {
     await waitFor(() => expect(screen.getByRole('tab', { name: /^All/, hidden: true })).toHaveAttribute('aria-selected', 'true'));
     expect(rows()).toHaveLength(2);
     expect(rows()[0].className).toContain('border-red-300');
+  });
+});
+
+// Category labels come from the label map's own keys only, so a report type
+// that names an inherited object key renders as plain text in every list view.
+describe('Reports category labels', () => {
+  // These tests are about the list, so the detail pane stays quiet.
+  beforeEach(() => {
+    detailRender.crash = false;
+  });
+  afterEach(() => {
+    detailRender.crash = true;
+  });
+
+  const INHERITED_KEY_REPORT = {
+    ...REPORT,
+    id: '3'.repeat(64),
+    tags: [['p', 'd'.repeat(64), '__proto__']],
+    content: '',
+  };
+
+  const listFallback = () => screen.queryByText(/the reports list failed to render/i);
+  const rows = () => Array.from(document.querySelectorAll<HTMLElement>('div.rounded-lg.cursor-pointer'));
+  const categoryChips = () => within(screen.getByText('Category').parentElement as HTMLElement);
+
+  it('renders an inherited object key as plain category text', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/reports')) return jsonResponse({ success: true, events: [INHERITED_KEY_REPORT] });
+      if (url.includes('/api/resolution-label-targets')) return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
+      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, resolved: [], states: [] });
+      if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
+      return jsonResponse({ success: true });
+    }));
+
+    render(<TestApp><Reports relayUrl="wss://relay.example" /></TestApp>);
+
+    // Settles either way: the row renders, or the list falls back.
+    await waitFor(() => expect(screen.queryByText(/1 report$/) ?? listFallback()).not.toBeNull());
+    expect(listFallback()).not.toBeInTheDocument();
+
+    // Grouped row badge, then the filter chip and the chip it becomes once picked.
+    expect(within(rows()[0]).getByText('__proto__')).toBeInTheDocument();
+    fireEvent.click(categoryChips().getByText('__proto__'));
+    expect(listFallback()).not.toBeInTheDocument();
+    expect(categoryChips().getByText('__proto__')).toBeInTheDocument();
+
+    // Individual row badge. Radix tabs switch on mouse down.
+    fireEvent.mouseDown(screen.getByRole('tab', { name: /^All/ }), { button: 0 });
+    expect(listFallback()).not.toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /^All/ })).toHaveAttribute('aria-selected', 'true');
+    expect(within(rows()[0]).getByText('__proto__')).toBeInTheDocument();
   });
 });

@@ -49,7 +49,7 @@ import { DeepLinkFallback } from "@/components/DeepLinkFallback";
 import { classifyTargetedFetch, reportsMatchingTarget, type DeepLinkStatus } from "@/lib/deepLinkResolution";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { useBannedPubkeys, useBannedEvents } from "@/hooks/useRelayBanLists";
-import { AUTO_HIDE_ACTION, CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, RESOLUTION_READ_TIMEOUT_MS, getLatestAutoHideState, getReportCategory, getReportTargetIds, hasCsamSignal } from "@/lib/constants";
+import { AUTO_HIDE_ACTION, HIGH_PRIORITY_CATEGORIES, RESOLUTION_READ_TIMEOUT_MS, getCategoryLabel, getLatestAutoHideState, getReportCategory, getReportTargetIds, hasCsamSignal } from "@/lib/constants";
 import { isConsolidatedReportResolved } from "@/lib/reportResolution";
 import { SWITCH_STATE_LABELS, buildSwitchMembership, humanHandledAutoHideTargets, type SwitchState } from "@/lib/sensitiveSwitch";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -269,7 +269,7 @@ function ConsolidatedReportItem({
   const reportCount = consolidated.reports.length;
   const reporterCount = consolidated.reporters.length;
   const primaryCategory = consolidated.categories[0];
-  const categoryLabel = CATEGORY_LABELS[primaryCategory] || primaryCategory;
+  const categoryLabel = getCategoryLabel(primaryCategory);
   const isHighPriority = consolidated.categories.some(c => HIGH_PRIORITY_CATEGORIES.includes(c))
     || hasCsamSignal(consolidated.reports);
   const isMediumPriority = consolidated.categories.some(c => MEDIUM_PRIORITY_CATEGORIES.includes(c));
@@ -350,7 +350,7 @@ function IndividualReportItem({
 }) {
   const category = getReportCategory(report);
   const target = getReportTarget(report);
-  const categoryLabel = CATEGORY_LABELS[category] || category;
+  const categoryLabel = getCategoryLabel(category);
   const isHighPriority = HIGH_PRIORITY_CATEGORIES.includes(category) || hasCsamSignal([report]);
   const isMediumPriority = MEDIUM_PRIORITY_CATEGORIES.includes(category);
 
@@ -1671,7 +1671,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                       className="text-xs cursor-pointer pr-1"
                       onClick={() => setFilterCategory(null)}
                     >
-                      {CATEGORY_LABELS[filterCategory] || filterCategory}
+                      {getCategoryLabel(filterCategory)}
                       <X className="h-3 w-3 ml-1" />
                     </Badge>
                   )}
@@ -1685,7 +1685,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                       {HIGH_PRIORITY_CATEGORIES.includes(cat) && (
                         <AlertTriangle className="h-3 w-3 mr-1" />
                       )}
-                      {CATEGORY_LABELS[cat] || cat}
+                      {getCategoryLabel(cat)}
                     </Badge>
                   ))}
                 </div>

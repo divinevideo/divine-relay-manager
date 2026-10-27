@@ -87,9 +87,13 @@ export const UNDERAGE_REPORT_CATEGORY = 'NS-underageUser';
 // Divine puts media on Blossom as URLs — querying it only pulled base64 noise.
 export const RECENT_CONTENT_KINDS = [1, 6, 16, ...VIDEO_KINDS, 20, 1063, 1111, 30023] as const;
 
-// Helper to get label with fallback
+// Helper to get label with fallback. Only the map's own keys count, so an
+// inherited object key comes back unchanged, as plain text. (Object.hasOwn is
+// not in the ES2020 lib this app compiles against.)
 export function getCategoryLabel(category: string): string {
-  return CATEGORY_LABELS[category] || category;
+  return Object.prototype.hasOwnProperty.call(CATEGORY_LABELS, category)
+    ? CATEGORY_LABELS[category]
+    : category;
 }
 
 // Extract category from a report event (see shared/report-classification.ts)
