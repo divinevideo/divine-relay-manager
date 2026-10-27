@@ -244,7 +244,7 @@ function ProfileMetadataCard({ content, eventId, showImagesByDefault }: {
 // showPictureByDefault gates the picture by the event's media rule
 // (useMediaVisibility): null while the event's reports are not known, false
 // when one is sensitive. Left out, the picture always shows, as it does for
-// the accounts an event names.
+// accounts an event names other than its author.
 function AuthorCard({ pubkey, showPictureByDefault }: { pubkey: string; showPictureByDefault?: boolean | null }) {
   const author = useAuthor(pubkey);
   const gated = showPictureByDefault !== undefined;
@@ -1149,8 +1149,15 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
                   Referenced Users ({linkedPubkeys.length})
                 </h4>
                 <div className="space-y-2">
+                  {/* The author named here (a self-reply, say) is the account
+                      the author card above gates, so it is gated here too.
+                      Other named accounts are not. */}
                   {linkedPubkeys.slice(0, 5).map((pk) => (
-                    <AuthorCard key={pk} pubkey={pk} />
+                    <AuthorCard
+                      key={pk}
+                      pubkey={pk}
+                      showPictureByDefault={pk === event.pubkey ? mediaShownByDefault : undefined}
+                    />
                   ))}
                   {linkedPubkeys.length > 5 && (
                     <p className="text-xs text-muted-foreground">+{linkedPubkeys.length - 5} more</p>

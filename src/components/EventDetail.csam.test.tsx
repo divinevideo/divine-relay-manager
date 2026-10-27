@@ -575,6 +575,28 @@ describe("EventDetail author's picture", () => {
     expect(screen.getAllByRole('button', { name: /^(Show|Hide) profile picture$/ })).toHaveLength(1);
   });
 
+  // An event can name its own author, a self-reply say, and that account's
+  // card under Referenced Users shows the same picture.
+  describe('when the event names its own author', () => {
+    const SELF_NAMING_EVENT: NostrEvent = { ...EVENT, tags: [['p', REPORTED_PUBKEY]] };
+    const renderSelfNaming = () => render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <EventDetail event={SELF_NAMING_EVENT} />
+      </QueryClientProvider>,
+    );
+
+    it('creates no image for that picture in either card while the reports read is still out', () => {
+      relay.answer = () => new Promise(() => {});
+      expect(imagesCreatedDuring(() => { renderSelfNaming(); })).toBe(0);
+    });
+
+    it('shows it in both cards once the reports are known and none is sensitive', async () => {
+      reports.value = [SPAM];
+      const { container } = renderSelfNaming();
+      await waitFor(() => expect(imageSrcs(container)).toEqual([AUTHOR_PICTURE, AUTHOR_PICTURE]));
+    });
+  });
+
   // The events page keeps this pane mounted when another event is picked. The
   // card's <img> would be reused with a new src, so these check the DOM.
   describe('when the next event has another author', () => {
