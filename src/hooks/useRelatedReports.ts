@@ -7,10 +7,11 @@ import { useAdminApi } from "@/hooks/useAdminApi";
 import { useAppContext } from "@/hooks/useAppContext";
 import type { ReportTarget } from "../../shared/report-target";
 import { splitRelatedReports, type RelatedReports } from "@/lib/relatedReports";
+import { reportTargetKey } from "../../shared/report-target";
 
 export type RelatedReportsState =
   | { status: 'loading' }
-  | { status: 'error'; retry: () => void }
+  | { status: 'error'; retry: () => void; retrying: boolean }
   | ({ status: 'ready'; truncated: boolean } & RelatedReports);
 
 export function useRelatedReports(
@@ -30,17 +31,27 @@ export function useRelatedReports(
     queryFn: () => fetchReportsByTarget({ pubkey: key }),
     enabled: !!key,
     staleTime: 60_000,
+    // One retry, as the queue's other relay-backed reads: the default of three
+    // keeps the card on "checking" for seconds before a failure shows.
+    retry: 1,
+    // The app default is Infinity, and each entry can be a read of tens of
+    // thousands of reports. Keep an account's read for a few minutes, not for
+    // every account the moderator ever opened.
+    gcTime: 5 * 60_000,
   });
 
   const events = query.data?.events;
+  // Keyed by the target's string: context.target is rebuilt on every render, so
+  // depending on the object would re-split the whole read each time.
+  const targetKey = currentTarget ? reportTargetKey(currentTarget) : '';
   const split = useMemo(
-    () => (events ? splitRelatedReports(events, key, currentTarget) : null),
-    [events, key, currentTarget],
+    () => (events ? splitRelatedReports(events, key, targetKey) : null),
+    [events, key, targetKey],
   );
 
   // An error is checked before data: a failed refetch keeps the last good data
   // on the query, but a read that is failing now must not read as a total.
-  if (query.isError) return { status: 'error', retry: () => void query.refetch() };
+  if (query.isError) return { status: 'error', retry: () => void query.refetch(), retrying: query.isFetching };
   if (!split) return { status: 'loading' };
   return { status: 'ready', truncated: query.data?.truncated === true, ...split };
 }

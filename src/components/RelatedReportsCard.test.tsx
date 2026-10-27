@@ -1,7 +1,7 @@
 // ABOUTME: Pins that the Related Reports card counts the account's complete report read,
 // ABOUTME: and never shows a failed, pending or stopped-early read as a total.
 
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -70,7 +70,7 @@ describe('RelatedReportsCard', () => {
     });
     renderCard();
 
-    expect(await screen.findByText(/Related Reports \(3 on same user\)/)).toBeInTheDocument();
+    expect(await screen.findByText(/Related Reports \(3 more on this account\)/)).toBeInTheDocument();
     expect(screen.getByText(/Reports on this User \(2\)/)).toBeInTheDocument();
     expect(screen.getByText(/Reports on their Events \(1\)/)).toBeInTheDocument();
   });
@@ -90,37 +90,125 @@ describe('RelatedReportsCard', () => {
     });
     renderCard();
 
-    expect(await screen.findByText(/Related Reports \(1 on same user\)/)).toBeInTheDocument();
+    expect(await screen.findByText(/Related Reports \(1 more on this account\)/)).toBeInTheDocument();
   });
 
-  it('shows a floor when the read stopped early', async () => {
+  it('shows a floor, on every count, when the read stopped early', async () => {
     fetchReportsByTarget.mockResolvedValue({
-      events: [userReport(1), userReport(2)],
+      events: [
+        userReport(1), userReport(2), userReport(3), userReport(4), userReport(5),
+        eventReport(6, '2'.repeat(64)), eventReport(7, '3'.repeat(64)),
+        eventReport(8, '4'.repeat(64)), eventReport(9, '5'.repeat(64)),
+      ],
       truncated: true,
     });
     renderCard();
 
-    expect(await screen.findByText(/Related Reports \(2\+ on same user\)/)).toBeInTheDocument();
-    expect(screen.getByText(/Reports on this User \(2\+\)/)).toBeInTheDocument();
+    expect(await screen.findByText(/Related Reports \(9\+ more on this account\)/)).toBeInTheDocument();
+    expect(screen.getByText(/Reports on this User \(5\+\)/)).toBeInTheDocument();
+    expect(screen.getByText(/Reports on their Events \(4\+\)/)).toBeInTheDocument();
+    expect(screen.getByText(/\+2\+ more user reports/)).toBeInTheDocument();
+    expect(screen.getByText(/\+1\+ more event reports/)).toBeInTheDocument();
   });
 
-  it('keeps the card, as a floor, when a read that stopped early found nothing related', async () => {
+  it('says so, not "0+", when a read that stopped early found nothing else', async () => {
     fetchReportsByTarget.mockResolvedValue({ events: [eventReport(1, CURRENT_EVENT)], truncated: true });
     renderCard();
 
-    expect(await screen.findByText(/Related Reports \(0\+ on same user\)/)).toBeInTheDocument();
+    expect(await screen.findByText(
+      /none found in the part of this account's history that could be read/i,
+    )).toBeInTheDocument();
+    expect(screen.queryByText(/0\+/)).not.toBeInTheDocument();
+  });
+
+  it('does not crash on a report with a valueless p tag, and does not count it', async () => {
+    // getReportTarget keeps a malformed report visible (a bare ["p"] gives a
+    // pubkey target with no value), and the read still returns it because its
+    // second p tag names the account.
+    const malformed: NostrEvent = { ...userReport(1), tags: [['p'], ['p', USER]] };
+    fetchReportsByTarget.mockResolvedValue({ events: [malformed, userReport(2)], truncated: false });
+    renderCard();
+
+    expect(await screen.findByText(/Related Reports \(1 more on this account\)/)).toBeInTheDocument();
+  });
+
+  it('does not count a report whose first p tag is another account', async () => {
+    // The target is the first p tag; the read returns the report only because
+    // a later p tag names this account.
+    const other: NostrEvent = { ...userReport(1), tags: [['p', 'f'.repeat(64)], ['p', USER]] };
+    fetchReportsByTarget.mockResolvedValue({ events: [other, userReport(2)], truncated: false });
+    renderCard();
+
+    expect(await screen.findByText(/Reports on this User \(1\)/)).toBeInTheDocument();
+  });
+
+  it('does not count an event report that does not name the account', async () => {
+    const unrelated: NostrEvent = { ...eventReport(1, '2'.repeat(64)), tags: [['e', '2'.repeat(64)], ['p', 'f'.repeat(64)]] };
+    fetchReportsByTarget.mockResolvedValue({ events: [unrelated, userReport(2)], truncated: false });
+    renderCard();
+
+    expect(await screen.findByText(/Related Reports \(1 more on this account\)/)).toBeInTheDocument();
+    expect(screen.queryByText(/Reports on their Events/)).not.toBeInTheDocument();
+  });
+
+  it('does not read when there is no pubkey', async () => {
+    renderCard('');
+
+    await act(async () => {});
+    expect(fetchReportsByTarget).not.toHaveBeenCalled();
+    expect(screen.queryByText(/Related Reports/)).not.toBeInTheDocument();
+  });
+
+  it('retries a failed read once and drops an account\'s read five minutes after it is last used', async () => {
+    fetchReportsByTarget.mockResolvedValue({ events: [userReport(1)], truncated: false });
+    const { client } = renderCard();
+    await screen.findByText(/Related Reports/);
+
+    const query = client.getQueryCache().find({ queryKey: ['account-reports', 'https://api-a.example', USER] });
+    expect(query?.options.retry).toBe(1);
+    expect(query?.options.gcTime).toBe(5 * 60_000);
+  });
+
+  it('shows the failure, not the earlier count, when a refetch fails with data on hand', async () => {
+    fetchReportsByTarget.mockResolvedValueOnce({ events: [userReport(1)], truncated: false });
+    const { client } = renderCard();
+    expect(await screen.findByText(/Related Reports \(1 more on this account\)/)).toBeInTheDocument();
+
+    fetchReportsByTarget.mockRejectedValue(new Error('boom'));
+    void client.refetchQueries({ queryKey: ['account-reports'] });
+
+    expect(await screen.findByText(/related reports could not be loaded/i, {}, { timeout: 4000 })).toBeInTheDocument();
+    expect(screen.queryByText(/more on this account/)).not.toBeInTheDocument();
+  });
+
+  it('disables Try again while the retry is in flight', async () => {
+    fetchReportsByTarget.mockResolvedValueOnce({ events: [userReport(1)], truncated: false });
+    const { client } = renderCard();
+    await screen.findByText(/Related Reports \(1 more on this account\)/);
+
+    fetchReportsByTarget.mockRejectedValue(new Error('boom'));
+    void client.refetchQueries({ queryKey: ['account-reports'] });
+    const button = await screen.findByRole('button', { name: /try again/i }, { timeout: 4000 });
+    expect(button).toBeEnabled();
+
+    fetchReportsByTarget.mockReturnValue(new Promise(() => {}));
+    await userEvent.click(button);
+
+    await waitFor(() => expect(screen.getByRole('button', { name: /try again/i })).toBeDisabled());
   });
 
   it('says the read failed, offers Try again, and does not read as zero', async () => {
     fetchReportsByTarget.mockRejectedValueOnce(new Error('boom'));
+    fetchReportsByTarget.mockRejectedValueOnce(new Error('boom'));
     fetchReportsByTarget.mockResolvedValueOnce({ events: [userReport(1)], truncated: false });
     renderCard();
 
-    expect(await screen.findByText(/related reports could not be loaded/i)).toBeInTheDocument();
-    expect(screen.queryByText(/on same user/)).not.toBeInTheDocument();
+    // One retry (1 s backoff) before the failure shows.
+    expect(await screen.findByText(/related reports could not be loaded/i, {}, { timeout: 4000 })).toBeInTheDocument();
+    expect(screen.queryByText(/more on this account/)).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByRole('button', { name: /try again/i }));
-    expect(await screen.findByText(/Related Reports \(1 on same user\)/)).toBeInTheDocument();
+    expect(await screen.findByText(/Related Reports \(1 more on this account\)/)).toBeInTheDocument();
   });
 
   it('shows no number while the read is pending', async () => {
@@ -128,7 +216,7 @@ describe('RelatedReportsCard', () => {
     renderCard();
 
     expect(await screen.findByText(/checking/i)).toBeInTheDocument();
-    expect(screen.queryByText(/\d+ on same user/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\d+ more on this account/)).not.toBeInTheDocument();
   });
 
   it('hides the card after a complete read finds nothing related', async () => {
@@ -146,12 +234,12 @@ describe('RelatedReportsCard', () => {
       truncated: false,
     }));
     const { rerenderCard } = renderCard();
-    expect(await screen.findByText(/Related Reports \(2 on same user\)/)).toBeInTheDocument();
+    expect(await screen.findByText(/Related Reports \(2 more on this account\)/)).toBeInTheDocument();
 
     config.apiUrl = 'https://api-b.example';
     rerenderCard();
 
-    expect(await screen.findByText(/Related Reports \(1 on same user\)/)).toBeInTheDocument();
+    expect(await screen.findByText(/Related Reports \(1 more on this account\)/)).toBeInTheDocument();
     expect(fetchReportsByTarget).toHaveBeenCalledWith('https://api-b.example', { pubkey: USER });
   });
 });

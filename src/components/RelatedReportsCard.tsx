@@ -8,7 +8,7 @@ import { CopyableId } from "@/components/CopyableId";
 import { useRelatedReports } from "@/hooks/useRelatedReports";
 import { historyCount } from "@/lib/historyCount";
 import { getCategoryLabel, getReportCategory } from "@/lib/constants";
-import { Link2, User, FileText } from "lucide-react";
+import { Link2, User, FileText, Loader2 } from "lucide-react";
 import { getReportTarget, type ReportTarget } from "../../shared/report-target";
 
 interface RelatedReportsCardProps {
@@ -30,7 +30,7 @@ export function RelatedReportsCard({ pubkey, currentTarget }: RelatedReportsCard
         <CardHeader className="py-3">
           <CardTitle className={TITLE_CLASS}>
             <Link2 className="h-4 w-4" />
-            Related Reports: checking...
+            Related Reports: checking…
           </CardTitle>
         </CardHeader>
       </Card>
@@ -45,7 +45,8 @@ export function RelatedReportsCard({ pubkey, currentTarget }: RelatedReportsCard
           <CardTitle className={TITLE_CLASS}>
             <Link2 className="h-4 w-4" />
             Related reports could not be loaded
-            <Button variant="outline" size="sm" className="ml-auto h-7" onClick={related.retry}>
+            <Button variant="outline" size="sm" className="ml-auto h-7" onClick={related.retry} disabled={related.retrying}>
+              {related.retrying && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
               Try again
             </Button>
           </CardTitle>
@@ -57,15 +58,27 @@ export function RelatedReportsCard({ pubkey, currentTarget }: RelatedReportsCard
   const { userReports, eventReports, truncated } = related;
   const total = userReports.length + eventReports.length;
   // Hidden only after a complete read finds nothing. A read that stopped early
-  // is not proof of nothing, so it keeps the card, as a floor.
+  // is not proof of nothing, so the card stays and says what was and was not read.
   if (total === 0 && !truncated) return null;
+  if (total === 0) {
+    return (
+      <Card className={CARD_CLASS}>
+        <CardHeader className="py-3">
+          <CardTitle className={TITLE_CLASS}>
+            <Link2 className="h-4 w-4" />
+            Related Reports: none found in the part of this account's history that could be read.
+          </CardTitle>
+        </CardHeader>
+      </Card>
+    );
+  }
 
   return (
     <Card className={CARD_CLASS}>
       <CardHeader className="py-3">
         <CardTitle className={TITLE_CLASS}>
           <Link2 className="h-4 w-4" />
-          Related Reports ({historyCount(total, truncated)} on same user)
+          Related Reports ({historyCount(total, truncated)} more on this account)
         </CardTitle>
       </CardHeader>
       <CardContent className="py-0 pb-3">
@@ -92,7 +105,7 @@ export function RelatedReportsCard({ pubkey, currentTarget }: RelatedReportsCard
                 })}
                 {userReports.length > 3 && (
                   <p className="text-xs text-muted-foreground pl-1">
-                    +{userReports.length - 3} more user reports
+                    +{historyCount(userReports.length - 3, truncated)} more user reports
                   </p>
                 )}
               </div>
@@ -126,7 +139,7 @@ export function RelatedReportsCard({ pubkey, currentTarget }: RelatedReportsCard
                 })}
                 {eventReports.length > 3 && (
                   <p className="text-xs text-muted-foreground pl-1">
-                    +{eventReports.length - 3} more event reports
+                    +{historyCount(eventReports.length - 3, truncated)} more event reports
                   </p>
                 )}
               </div>
