@@ -241,8 +241,14 @@ function ProfileMetadataCard({ content, eventId, showImagesByDefault }: {
   );
 }
 
-function AuthorCard({ pubkey }: { pubkey: string }) {
+// showPictureByDefault gates the picture by the event's media rule
+// (useMediaVisibility): null while the event's reports are not known, false
+// when one is sensitive. Left out, the picture always shows, as it does for
+// the accounts an event names.
+function AuthorCard({ pubkey, showPictureByDefault }: { pubkey: string; showPictureByDefault?: boolean | null }) {
   const author = useAuthor(pubkey);
+  const gated = showPictureByDefault !== undefined;
+  const [showPicture, togglePicture] = useMediaVisibility(gated ? showPictureByDefault : true, pubkey);
   const metadata = author.data?.metadata;
   const displayName = metadata?.name || formatPubkey(pubkey);
 
@@ -260,7 +266,7 @@ function AuthorCard({ pubkey }: { pubkey: string }) {
 
   return (
     <div className="flex items-center gap-3 p-3 bg-muted/50 rounded-lg">
-      {metadata?.picture ? (
+      {metadata?.picture && showPicture ? (
         <img
           src={metadata.picture}
           alt={displayName}
@@ -283,6 +289,18 @@ function AuthorCard({ pubkey }: { pubkey: string }) {
           </p>
         )}
       </div>
+      {gated && metadata?.picture && (
+        <Button
+          variant="ghost"
+          size="sm"
+          aria-label={showPicture ? "Hide profile picture" : "Show profile picture"}
+          title={showPicture ? "Hide profile picture" : "Show profile picture"}
+          onClick={togglePicture}
+          className="h-6 px-1.5 shrink-0"
+        >
+          {showPicture ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+        </Button>
+      )}
       <Button
         variant="ghost"
         size="sm"
@@ -998,7 +1016,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
             </CardTitle>
           </CardHeader>
           <CardContent className="py-2 px-3 space-y-3">
-            <AuthorCard pubkey={event.pubkey} />
+            <AuthorCard pubkey={event.pubkey} showPictureByDefault={mediaShownByDefault} />
             {/* User Stats */}
             {userStats.data && (
               <div className="flex gap-4 text-xs text-muted-foreground pt-2 border-t">

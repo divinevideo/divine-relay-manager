@@ -42,7 +42,14 @@ vi.mock('@/hooks/useNostr', () => ({
     },
   }),
 }));
-vi.mock('@/hooks/useAuthor', () => ({ useAuthor: () => ({ data: undefined, isLoading: false }) }));
+// Profile pictures useAuthor answers with, by pubkey. None unless a test sets one.
+const authors = vi.hoisted(() => ({ pictures: {} as Record<string, string> }));
+vi.mock('@/hooks/useAuthor', () => ({
+  useAuthor: (pubkey: string) => ({
+    data: authors.pictures[pubkey] ? { metadata: { name: 'someone', picture: authors.pictures[pubkey] } } : undefined,
+    isLoading: false,
+  }),
+}));
 vi.mock('@/hooks/useUserStats', () => ({ useUserStats: () => ({ data: undefined, isLoading: false }) }));
 vi.mock('@/hooks/useAgeReviewGuardRedirect', () => ({
   useAgeReviewGuardRedirect: () => ({ redirectIfGuarded: () => false }),
@@ -124,9 +131,22 @@ function appQueryClient() {
   return new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 60_000, gcTime: Infinity } } });
 }
 
+const imageSrcs = (c: HTMLElement) => [...c.querySelectorAll('img')].map(i => i.getAttribute('src')).sort();
+
+// A created <img> is already a request in a real browser, even if a later
+// commit removes it, so this counts creations, not what the DOM ends with.
+function imagesCreatedDuring(action: () => void): number {
+  const spy = vi.spyOn(document, 'createElement');
+  action();
+  const count = spy.mock.calls.filter(c => String(c[0]).toLowerCase() === 'img').length;
+  spy.mockRestore();
+  return count;
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   relay.answer = null;
+  authors.pictures = {};
   modStatus.isUserBanned = false;
   modStatus.isUserBannedStale = false;
   modStatus.isEventGone = false;
@@ -399,17 +419,6 @@ describe('EventDetail profile images', () => {
     kind: 0,
     content: JSON.stringify({ name: 'someone', picture: PICTURE, banner: BANNER }),
   };
-  const imageSrcs = (c: HTMLElement) => [...c.querySelectorAll('img')].map(i => i.getAttribute('src')).sort();
-
-  // A created <img> is already a request in a real browser, even if a later
-  // commit removes it, so this counts creations, not what the DOM ends with.
-  function imagesCreatedDuring(action: () => void): number {
-    const spy = vi.spyOn(document, 'createElement');
-    action();
-    const count = spy.mock.calls.filter(c => String(c[0]).toLowerCase() === 'img').length;
-    spy.mockRestore();
-    return count;
-  }
   function renderProfile() {
     return render(
       <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
@@ -468,5 +477,67 @@ describe('EventDetail profile images', () => {
     rerender(ui({ ...PROFILE_EVENT, id: 'b'.repeat(64) }));
 
     expect(imageSrcs(container)).toEqual([]);
+  });
+});
+
+// The author card shows the author's current picture, which follows the same
+// rule as the event's media.
+describe("EventDetail author's picture", () => {
+  const AUTHOR_PICTURE = 'https://example.invalid/author.png';
+
+  beforeEach(() => {
+    authors.pictures = { [REPORTED_PUBKEY]: AUTHOR_PICTURE };
+  });
+
+  it('creates no image for it while the reports read is still out', () => {
+    relay.answer = () => new Promise(() => {});
+    expect(imagesCreatedDuring(() => { renderDetail(); })).toBe(0);
+  });
+
+  it('shows it once the reports are known and none is sensitive', async () => {
+    reports.value = [SPAM];
+    const { container } = renderDetail();
+    await waitFor(() => expect(imageSrcs(container)).toEqual([AUTHOR_PICTURE]));
+  });
+
+  it('keeps it hidden on a sensitive report until asked for', async () => {
+    reports.value = [OLD_BUILD];
+    const { container } = renderDetail();
+    await screen.findByText('1 Related Report');
+    expect(imageSrcs(container)).toEqual([]);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show profile picture' }));
+
+    expect(imageSrcs(container)).toEqual([AUTHOR_PICTURE]);
+  });
+
+  it('hides it again when the reports turn out sensitive after a Show while they loaded', async () => {
+    const answers: ((events: unknown[]) => void)[] = [];
+    relay.answer = () => new Promise<unknown[]>((resolve) => { answers.push(resolve); });
+    const { container } = renderDetail();
+    fireEvent.click(screen.getByRole('button', { name: 'Show profile picture' }));
+    expect(imageSrcs(container)).toEqual([AUTHOR_PICTURE]);
+
+    await act(async () => { answers.forEach(answer => answer([OLD_BUILD])); });
+    await screen.findByText('1 Related Report');
+
+    expect(imageSrcs(container)).toEqual([]);
+  });
+
+  // The verdict is about this event and its author, not accounts it names.
+  it("leaves a referenced account's picture as it was", () => {
+    const REFERENCED = '7'.repeat(64);
+    const REFERENCED_PICTURE = 'https://example.invalid/referenced.png';
+    authors.pictures[REFERENCED] = REFERENCED_PICTURE;
+    relay.answer = () => new Promise(() => {});
+    const { container } = render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <EventDetail event={{ ...EVENT, tags: [['p', REFERENCED]] }} />
+      </QueryClientProvider>,
+    );
+
+    expect(imageSrcs(container)).toEqual([REFERENCED_PICTURE]);
+    // Only the author's card has a show or hide control for its picture.
+    expect(screen.getAllByRole('button', { name: /^(Show|Hide) profile picture$/ })).toHaveLength(1);
   });
 });
