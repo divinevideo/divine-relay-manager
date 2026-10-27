@@ -1008,7 +1008,13 @@ describe('relay-rpc account-state side effects', () => {
       },
     ), env, testCtx);
 
-    for (const body of [{ reportId: 'forged' }, { reporterPubkey: 'forged' }]) {
+    // An array holding a valid id would pass a bare RegExp.test, which coerces it.
+    for (const body of [
+      { reportId: 'forged' },
+      { reporterPubkey: 'forged' },
+      { reportId: ['b'.repeat(64)] },
+      { reporterPubkey: ['c'.repeat(64)] },
+    ]) {
       expect((await request(body)).status).toBe(400);
     }
     const response = await request({

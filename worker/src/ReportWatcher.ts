@@ -21,6 +21,7 @@ import {
 } from '../../shared/age-review';
 import { getReportedList } from '../../shared/list-report';
 import { AUTOMATED_MODERATOR } from '../../shared/automated-decision';
+import { isLowerHex64 } from './hex';
 import { getUserStatus, type KeycastEnv } from './keycast-client';
 import { resolveByPubkey } from './protected-minors';
 import { fetchAccountIdentity } from './relay-profile';
@@ -378,13 +379,13 @@ export class ReportWatcher implements DurableObject {
     }
 
     if (
-      !/^[0-9a-f]{64}$/.test(operation.eventId)
+      !isLowerHex64(operation.eventId)
       || !['hide', 'allow', 'review', 'confirm'].includes(operation.relayAction)
       || (operation.reason !== undefined && typeof operation.reason !== 'string')
       || (operation.humanAction !== undefined && typeof operation.humanAction !== 'string')
-      || (operation.moderatorPubkey !== undefined && !/^[0-9a-f]{64}$/.test(operation.moderatorPubkey))
-      || (operation.reportId !== undefined && !/^[0-9a-f]{64}$/.test(operation.reportId))
-      || (operation.reporterPubkey !== undefined && !/^[0-9a-f]{64}$/.test(operation.reporterPubkey))
+      || (operation.moderatorPubkey !== undefined && !isLowerHex64(operation.moderatorPubkey))
+      || (operation.reportId !== undefined && !isLowerHex64(operation.reportId))
+      || (operation.reporterPubkey !== undefined && !isLowerHex64(operation.reporterPubkey))
       || (operation.relayAction === 'review' && !operation.humanAction)
     ) {
       return Response.json({ success: false, error: 'Invalid event visibility operation' }, { status: 400 });
