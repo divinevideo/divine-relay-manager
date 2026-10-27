@@ -132,6 +132,45 @@ function extractMediaItems(content: string, tags: string[][]): MediaItem[] {
   return Array.from(items.values());
 }
 
+type MediaChoice = 'show' | 'hide' | null;
+
+interface MediaVisibility {
+  show: boolean;
+  // The moderator's last Show or Hide, if any.
+  choice: MediaChoice;
+  // The props `show` was last worked out from.
+  showByDefault: boolean;
+  resetKey?: string;
+}
+
+// Whether the media is showing. The default can arrive after mount (report
+// classification loads async), so it is followed as it changes:
+// - to false (sensitive): hide, and forget a choice to show. A Show on one
+//   report must not carry into a sensitive one when the pane is reused. A
+//   choice to hide is kept.
+// - to true: show, unless the moderator has chosen.
+// A new resetKey (MediaPreview's event) starts again from its default.
+//
+// Worked out during render, not in an effect: an effect would first commit
+// the old state with the new props, and a browser starts loading any media
+// that commit mounts.
+function useMediaVisibility(showByDefault: boolean, resetKey?: string): [boolean, () => void] {
+  const [state, setState] = useState<MediaVisibility>({ show: showByDefault, choice: null, showByDefault, resetKey });
+
+  let next = state;
+  if (resetKey !== state.resetKey) {
+    next = { show: showByDefault, choice: null, showByDefault, resetKey };
+  } else if (showByDefault !== state.showByDefault) {
+    next = showByDefault
+      ? { ...state, showByDefault, show: state.choice === null ? true : state.show }
+      : { ...state, showByDefault, show: false, choice: state.choice === 'show' ? null : state.choice };
+  }
+  if (next !== state) setState(next);
+
+  const toggle = () => setState(s => ({ ...s, show: !s.show, choice: s.show ? 'hide' : 'show' }));
+  return [next.show, toggle];
+}
+
 function getHlsUrl(sha256?: string): string | null {
   if (!sha256) return null;
   const cdnDomain = import.meta.env.VITE_CDN_DOMAIN || 'media.divine.video';
@@ -204,24 +243,14 @@ export function MediaPreview({
   showByDefault = false,
   maxItems = 4,
 }: MediaPreviewProps) {
-  const [showMedia, setShowMedia] = useState(showByDefault);
-  const userToggledRef = useRef(false);
+  // The pane that renders this is reused across reports, so a new event
+  // starts from its own default, not the last event's Show or Hide.
+  const [showMedia, toggleShowMedia] = useMediaVisibility(showByDefault, event?.id);
   const [failedUrls, setFailedUrls] = useState<Map<string, 'unavailable' | 'error'>>(new Map());
   const [proxyUrls, setProxyUrls] = useState<Map<string, string>>(new Map());
   const proxyUrlsRef = useRef(proxyUrls);
   proxyUrlsRef.current = proxyUrls;
   const apiUrl = useApiUrl();
-
-  const eventId = event?.id;
-  useEffect(() => {
-    userToggledRef.current = false;
-  }, [eventId]);
-
-  useEffect(() => {
-    if (!userToggledRef.current) {
-      setShowMedia(showByDefault);
-    }
-  }, [showByDefault]);
 
   useEffect(() => {
     return () => {
@@ -295,7 +324,7 @@ export function MediaPreview({
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => { userToggledRef.current = true; setShowMedia(!showMedia); }}
+            onClick={toggleShowMedia}
             className="h-7 px-2"
           >
             {showMedia ? (
@@ -402,21 +431,12 @@ export function InlineMediaPreview({
   className?: string;
   showByDefault?: boolean;
 }) {
-  const [showMedia, setShowMedia] = useState(showByDefault);
-  const userToggledRef = useRef(false);
+  const [showMedia, toggleShowMedia] = useMediaVisibility(showByDefault);
   const [failedUrls, setFailedUrls] = useState<Map<string, 'unavailable' | 'error'>>(new Map());
   const [proxyUrls, setProxyUrls] = useState<Map<string, string>>(new Map());
   const proxyUrlsRef = useRef(proxyUrls);
   proxyUrlsRef.current = proxyUrls;
   const apiUrl = useApiUrl();
-
-  // The default can arrive after mount (report classification loads async).
-  // Follow it until the moderator makes their own choice.
-  useEffect(() => {
-    if (!userToggledRef.current) {
-      setShowMedia(showByDefault);
-    }
-  }, [showByDefault]);
 
   useEffect(() => {
     return () => {
@@ -465,7 +485,7 @@ export function InlineMediaPreview({
         <Button
           variant="ghost"
           size="sm"
-          onClick={() => { userToggledRef.current = true; setShowMedia(!showMedia); }}
+          onClick={toggleShowMedia}
           className="h-6 px-2 text-xs"
         >
           {showMedia ? <EyeOff className="h-3 w-3 mr-1" /> : <Eye className="h-3 w-3 mr-1" />}

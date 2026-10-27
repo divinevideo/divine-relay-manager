@@ -147,8 +147,9 @@ export function AgeReviewContent({
       </div>
     ) : (
       // Keyed so the click-to-reveal state cannot carry over when the pane is
-      // reused for another case (MediaPreview keeps `showMedia` across an event
-      // swap, and revealing media is a deliberate gate here).
+      // reused for another case. MediaPreview also starts a new event from its
+      // default, but revealing media is a deliberate gate here, so the card
+      // does not rely on that.
       <ContentCard key={shown.event.id} event={shown.event} />
     )
   ) : reportedEventLoading ? (
