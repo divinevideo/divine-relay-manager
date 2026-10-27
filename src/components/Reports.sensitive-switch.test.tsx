@@ -52,6 +52,7 @@ const NOTE_SPAM = nip19.noteEncode(SPAM_EVENT);
 const NOTE_HIDDEN = nip19.noteEncode(HIDDEN_EVENT);
 
 type State = { target_type: string; target_id: string; action: string };
+type Resolved = { target_type: string; target_id: string; automated?: boolean };
 type LabelTarget = { type: string; value: string };
 
 function jsonResponse(body: unknown) {
@@ -61,6 +62,8 @@ function jsonResponse(body: unknown) {
 function stubFetch({
   events,
   states = [],
+  resolved = [],
+  bannedPubkeys = [],
   labels = () => Promise.resolve([] as LabelTarget[]),
   targeted = {},
   statesGate,
@@ -69,6 +72,10 @@ function stubFetch({
 }: {
   events: unknown[];
   states?: State[];
+  // The decision targets /api/resolution-state counts as resolved.
+  resolved?: Resolved[];
+  // What the relay's listbannedpubkeys answers.
+  bannedPubkeys?: string[];
   labels?: () => Promise<LabelTarget[]>;
   // The bulk /api/reports read waits for this before answering.
   reportsGate?: Promise<void>;
@@ -82,7 +89,7 @@ function stubFetch({
   targeted?: Record<string, unknown[]>;
 }) {
   const calls = { labels: 0, resolutionState: 0 };
-  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input instanceof Request ? input.url : input);
     if (url.includes('/api/reports?')) {
       const hit = Object.keys(targeted).find((hex) => url.includes(hex));
@@ -103,9 +110,12 @@ function stubFetch({
       if (typeof statesFail === 'function' ? statesFail() : statesFail) {
         return jsonResponse({ success: false, error: 'unavailable' });
       }
-      return jsonResponse({ success: true, resolved: [], states });
+      return jsonResponse({ success: true, resolved, states });
     }
-    if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
+    if (url.includes('/api/relay-rpc')) {
+      const { method } = JSON.parse(typeof init?.body === 'string' ? init.body : '{}') as { method?: string };
+      return jsonResponse({ success: true, result: method === 'listbannedpubkeys' ? bannedPubkeys : [] });
+    }
     return jsonResponse({ success: true });
   }));
   return calls;
@@ -262,6 +272,84 @@ describe('Reports sensitive pending-review switch', () => {
     await screen.findByText(NOTE_SPAM);
     expect(screen.getByText(NPUB_CSAM)).toBeInTheDocument();
     expect(screen.queryByRole('switch', { name: /pending review/i })).not.toBeInTheDocument();
+  });
+
+  describe('when only the worker has decided on a target', () => {
+    // ReportWatcher opens an age-review case on a reported account by itself,
+    // and /api/resolution-state marks a target whose only decisions are the
+    // worker's own as automated. Hide resolved still counts it as handled; the
+    // switch must not, because no person has looked at it.
+    const AUTOMATED: Resolved = { target_type: 'pubkey', target_id: CSAM_PROFILE, automated: true };
+    const SPAM_PROFILE = '7'.repeat(64);
+    const SPAM_PROFILE_REPORT = report('0'.repeat(64), 1751000030, [['p', SPAM_PROFILE, 'spam']]);
+    const NPUB_SPAM_PROFILE = nip19.npubEncode(SPAM_PROFILE);
+
+    // The target is out of the switch and hidden only by Hide resolved: it
+    // comes back into the default view once that is turned off.
+    async function expectHandled(user: ReturnType<typeof userEvent.setup>, npub: string) {
+      await screen.findByText(NOTE_SPAM);
+      expect(screen.queryByRole('switch', { name: /pending review/i })).not.toBeInTheDocument();
+      expect(screen.getByRole('switch', { name: /hide resolved/i })).toBeChecked();
+      expect(screen.queryByText(npub)).not.toBeInTheDocument();
+
+      await user.click(screen.getByRole('switch', { name: /hide resolved/i }));
+      expect(screen.getByText(npub)).toBeInTheDocument();
+    }
+
+    it('keeps a profile CSAM report behind the switch', async () => {
+      stubFetch({ events: [CSAM_REPORT, SPAM_REPORT], resolved: [AUTOMATED] });
+      const user = userEvent.setup();
+      render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
+
+      await screen.findByText(NOTE_SPAM);
+      expect(screen.queryByText(NPUB_CSAM)).not.toBeInTheDocument();
+      expect(switchLabelText()).toBe('Pending review (sensitive)1');
+
+      await turnSwitchOn(user);
+      expect(within(rowFor(NPUB_CSAM)).getByText('Not hidden, needs review')).toBeInTheDocument();
+    });
+
+    it('treats the target as handled once a person has decided on it', async () => {
+      stubFetch({
+        events: [CSAM_REPORT, SPAM_REPORT],
+        resolved: [{ target_type: 'pubkey', target_id: CSAM_PROFILE }],
+      });
+      const user = userEvent.setup();
+      render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
+
+      await expectHandled(user, NPUB_CSAM);
+    });
+
+    it('treats the target as handled when a resolution label covers it', async () => {
+      stubFetch({
+        events: [CSAM_REPORT, SPAM_REPORT],
+        resolved: [AUTOMATED],
+        labels: () => Promise.resolve([{ type: 'pubkey', value: CSAM_PROFILE }]),
+      });
+      const user = userEvent.setup();
+      render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
+
+      await expectHandled(user, NPUB_CSAM);
+    });
+
+    it('treats the target as handled when the account is banned', async () => {
+      stubFetch({ events: [CSAM_REPORT, SPAM_REPORT], resolved: [AUTOMATED], bannedPubkeys: [CSAM_PROFILE] });
+      const user = userEvent.setup();
+      render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
+
+      await expectHandled(user, NPUB_CSAM);
+    });
+
+    it('still hides a non-CSAM report on such a target as resolved', async () => {
+      stubFetch({
+        events: [SPAM_PROFILE_REPORT, SPAM_REPORT],
+        resolved: [{ target_type: 'pubkey', target_id: SPAM_PROFILE, automated: true }],
+      });
+      const user = userEvent.setup();
+      render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
+
+      await expectHandled(user, NPUB_SPAM_PROFILE);
+    });
   });
 
   describe('while resolution labels load', () => {

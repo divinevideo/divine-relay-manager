@@ -43,8 +43,8 @@ interface SwitchCandidate {
 
 // Membership is computed from resolution state BEFORE the view's own Hide
 // resolved setting applies: turning the switch on turns Hide resolved off, so
-// a resolved target has to be out of here already or it would sit behind the
-// switch for good. While a resolution source is still loading, resolvedTargets
+// a handled target has to be out of here already or it would sit behind the
+// switch for good. While a resolution source is still loading, handledTargets
 // is partial and a CSAM target stays in. That is the safe direction: it is
 // kept out of the default view, not shown there.
 export function buildSwitchMembership(args: {
@@ -52,7 +52,10 @@ export function buildSwitchMembership(args: {
   // Auto-hidden targets pending review, keyed to their latest auto-hide state.
   pendingReview: ReadonlyMap<string, string>;
   humanHandled: ReadonlySet<string>;
-  resolvedTargets: Set<string>;
+  // The queue's resolved set without the decisions only the worker wrote
+  // (resolution-state's `automated`). Those still count for Hide resolved, but
+  // no person has looked at the target, so they do not take it out of here.
+  handledTargets: Set<string>;
   bannedPubkeys: Set<string>;
 }): Map<string, SwitchState> {
   const membership = new Map<string, SwitchState>();
@@ -72,7 +75,7 @@ export function buildSwitchMembership(args: {
     if (membership.has(key)) continue;
     if (!hasCsamSignal(c.reports)) continue;
     if (args.humanHandled.has(key)) continue;
-    if (isConsolidatedReportResolved(c, args.resolvedTargets, args.bannedPubkeys)) continue;
+    if (isConsolidatedReportResolved(c, args.handledTargets, args.bannedPubkeys)) continue;
     membership.set(key, 'not-hidden');
   }
   return membership;
