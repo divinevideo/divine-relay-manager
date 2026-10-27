@@ -80,10 +80,13 @@ interface ReportDetailProps {
   report: NostrEvent | null;
   allReportsForTarget?: NostrEvent[];
   allReportsForTargetTruncated?: boolean;
-  // The target came only from resolved-history pages loaded so far, so a report
-  // on it that signals CSAM may sit on a page that is not loaded. Media and
-  // avatars then start hidden whatever the loaded reports say, until clicked.
-  reportsIncomplete?: boolean;
+  // allReportsForTarget may not be all of this target's reports, so a report on
+  // it that signals CSAM may be missing. Media and avatars then start hidden
+  // whatever the loaded reports say, until clicked. Not the same as
+  // allReportsForTargetTruncated, which only drives the "N+" floor mark: a read
+  // that stopped early is partial, but a partial set is also one that was never
+  // read for this target (a history page, or a fallback pool).
+  targetReportsMayBePartial?: boolean;
   onDismiss?: () => void;
   // Which side of the queue's Pending review switch this report's target is
   // on. Undefined outside it. Only 'not-hidden' gets a badge here: the pane's
@@ -91,7 +94,7 @@ interface ReportDetailProps {
   switchState?: SwitchState;
 }
 
-export function ReportDetail({ report, allReportsForTarget, allReportsForTargetTruncated = false, reportsIncomplete = false, onDismiss, switchState }: ReportDetailProps) {
+export function ReportDetail({ report, allReportsForTarget, allReportsForTargetTruncated = false, targetReportsMayBePartial = false, onDismiss, switchState }: ReportDetailProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const {
@@ -370,12 +373,12 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // undefined when the reports may not be all of them: undefined and true both
   // start media and avatars hidden until clicked, and only false shows them.
   const hasHighPriorityReports = useMemo(() => {
-    if (!allReportsForTarget || reportsIncomplete) return undefined;
+    if (!allReportsForTarget || targetReportsMayBePartial) return undefined;
     return allReportsForTarget.some(r => {
       const cat = getReportCategory(r);
       return HIGH_PRIORITY_CATEGORIES.includes(cat);
     }) || hasCsamSignal(allReportsForTarget);
-  }, [allReportsForTarget, reportsIncomplete]);
+  }, [allReportsForTarget, targetReportsMayBePartial]);
 
   // Confirm auto-hidden content (approve the auto-hide decision)
   const confirmAutoHideMutation = useMutation({

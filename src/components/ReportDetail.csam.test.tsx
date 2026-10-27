@@ -227,7 +227,7 @@ describe('ReportDetail when not all of the target reports may be loaded', () => 
     return render(
       <QueryClientProvider client={qc}>
         <TooltipProvider>
-          <ReportDetail report={PLAIN_ILLEGAL} allReportsForTarget={[PLAIN_ILLEGAL]} reportsIncomplete={incomplete} />
+          <ReportDetail report={PLAIN_ILLEGAL} allReportsForTarget={[PLAIN_ILLEGAL]} targetReportsMayBePartial={incomplete} />
         </TooltipProvider>
       </QueryClientProvider>,
     );

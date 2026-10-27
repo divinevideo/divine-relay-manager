@@ -29,11 +29,11 @@ vi.mock('@/lib/consolidateReports', async (orig) => {
 });
 
 vi.mock('@/components/ReportDetail', () => ({
-  ReportDetail: ({ switchState, reportsIncomplete }: { switchState?: string; reportsIncomplete?: boolean }) => (
+  ReportDetail: ({ switchState, targetReportsMayBePartial }: { switchState?: string; targetReportsMayBePartial?: boolean }) => (
     <div
       data-testid="detail"
       data-switch-state={switchState ?? ''}
-      data-reports-incomplete={String(reportsIncomplete === true)}
+      data-reports-partial={String(targetReportsMayBePartial === true)}
     />
   ),
 }));
@@ -197,12 +197,12 @@ describe('the switch label beside a failed queue', () => {
     await waitFor(() => expect(detail).toHaveAttribute('data-switch-state', 'not-hidden'));
     expect(screen.getByText(/Failed to load reports/)).toBeInTheDocument();
     // The deep link's own read is the complete one: not a history-only selection.
-    expect(detail).toHaveAttribute('data-reports-incomplete', 'false');
+    expect(detail).toHaveAttribute('data-reports-partial', 'false');
   });
 });
 
 describe('what the pane knows of the selected target', () => {
-  const incomplete = () => screen.getByTestId('detail').getAttribute('data-reports-incomplete');
+  const incomplete = () => screen.getByTestId('detail').getAttribute('data-reports-partial');
 
   it('calls a history-only selection incomplete: its other reports may be on pages not loaded', async () => {
     stubWorker({});

@@ -1667,7 +1667,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // pages not loaded yet are unknown, so the pane hides sensitive media until
   // clicked. With the queue failed cold there is no feed, and the deep link's
   // own read is the complete one.
-  const selectedTargetHistoryOnly = !!reports && !!selectedTarget
+  const selectedTargetReportsPartial = !!reports && !!selectedTarget
     && !feedTargetKeys.has(reportTargetKey(selectedTarget));
 
   const reportDetailPane = showDeepLinkFallback ? (
@@ -1709,7 +1709,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
             : undefined
         }
         allReportsForTargetTruncated={targetedHistoryTruncated}
-        reportsIncomplete={selectedTargetHistoryOnly}
+        targetReportsMayBePartial={selectedTargetReportsPartial}
         onDismiss={dismissDetail}
         switchState={selectedSwitchKey ? switchMembership.get(selectedSwitchKey) : undefined}
       />
