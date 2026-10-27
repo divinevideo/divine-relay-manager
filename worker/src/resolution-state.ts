@@ -6,6 +6,9 @@ import { AUTO_HIDE_ACTIONS, AUTO_HIDE_STATE_ACTIONS } from '../../shared/autohid
 export interface ResolvedTargetRow {
   target_type: string;
   target_id: string;
+  // Present only when the worker itself wrote every decision that resolves
+  // this target, so none of them came from a person. Absent otherwise.
+  automated?: true;
 }
 
 export interface AutoHideStateRow {
@@ -20,6 +23,13 @@ export interface AutoHideStateRow {
 // query. Chunk boundaries are invisible in the result.
 const ROW_CHUNK_SIZE = 1000;
 
+// The moderator_pubkey the worker writes on decisions it makes itself
+// (ReportWatcher's logDecision). Every human path whose rows this read sees
+// writes a hex pubkey or NULL. ReportWatcher's recordAutoHideHumanDecision also
+// falls back to 'auto', but it writes only auto-hide actions, which this read
+// excludes.
+const AUTOMATED_MODERATOR = 'auto';
+
 // The queue subtracts these targets to hide handled work. /api/decisions caps at
 // the newest 1000 ROWS, so a target whose only decision falls outside that window
 // drops out of the subtraction and reappears as pending with nothing explaining
@@ -32,6 +42,12 @@ const ROW_CHUNK_SIZE = 1000;
 // Auto-hide actions are excluded because they are not resolutions -- auto-hidden
 // content is waiting FOR review, and counting it as handled would hide the
 // pending-review queue from the moderators who have to work it.
+//
+// A target the worker alone resolved -- today with an age_review_case_created
+// row -- is still returned, because Hide resolved counts it as handled. It
+// carries `automated: true` so the sensitive-reports switch, which waits for a
+// person, can look past it. One human row anywhere in the walk clears the flag,
+// whichever chunk it falls in.
 export async function getResolvedTargets(
   db: D1Database,
   opts?: { chunkSize?: number }
@@ -39,14 +55,14 @@ export async function getResolvedTargets(
   const chunkSize = opts?.chunkSize ?? ROW_CHUNK_SIZE;
   const placeholders = AUTO_HIDE_ACTIONS.map(() => '?').join(', ');
 
-  const seen = new Set<string>();
-  const targets: ResolvedTargetRow[] = [];
+  // Map insertion order is first-seen order, which the result keeps.
+  const targets = new Map<string, { target_type: string; target_id: string; human: boolean }>();
   let afterId = 0;
 
   for (;;) {
     const result = await db
       .prepare(
-        `SELECT id, target_type, target_id
+        `SELECT id, target_type, target_id, moderator_pubkey
            FROM moderation_decisions
           WHERE action NOT IN (${placeholders})
             AND id > ?
@@ -56,19 +72,30 @@ export async function getResolvedTargets(
       .bind(...AUTO_HIDE_ACTIONS, afterId, chunkSize)
       .all();
 
-    const rows = (result.results || []) as unknown as Array<ResolvedTargetRow & { id: number }>;
+    const rows = (result.results || []) as unknown as Array<{
+      id: number;
+      target_type: string;
+      target_id: string;
+      moderator_pubkey: string | null;
+    }>;
     for (const row of rows) {
       const key = `${row.target_type}:${row.target_id}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      targets.push({ target_type: row.target_type, target_id: row.target_id });
+      const human = row.moderator_pubkey !== AUTOMATED_MODERATOR;
+      const target = targets.get(key);
+      if (!target) {
+        targets.set(key, { target_type: row.target_type, target_id: row.target_id, human });
+      } else if (human) {
+        target.human = true;
+      }
     }
 
     if (rows.length < chunkSize) break;
     afterId = rows[rows.length - 1].id;
   }
 
-  return targets;
+  return Array.from(targets.values(), ({ target_type, target_id, human }) =>
+    human ? { target_type, target_id } : { target_type, target_id, automated: true }
+  );
 }
 
 // Feeds the pending-review queue. Only the STATE actions are read, because
