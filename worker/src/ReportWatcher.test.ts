@@ -192,7 +192,8 @@ describe('ReportWatcher', () => {
   describe('event visibility coordination', () => {
     // A bare RegExp.test coerces its argument, so an array holding a valid id
     // would pass it and reach the relay and the decision log. Ids must also be
-    // lowercase: the worker lowercases them before handing them over.
+    // lowercase. Every route hands ids over in lowercase, except a resolution
+    // label's `e` tag on /api/publish (see hex.ts).
     it.each([
       ['eventId as an array', { eventId: ['ab'.repeat(32)] }],
       ['moderatorPubkey as an array', { moderatorPubkey: ['cd'.repeat(32)] }],
