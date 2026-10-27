@@ -282,6 +282,17 @@ negotiation, so order matters and the gap should be minimized:
   too), with that transition's failure lines beside them. Keeping age review's
   results never fails or alters the transition. A case's kept results are
   deleted with the case by retention's case-delete stage, under the same hold.
+- **Restore's account check (#299).** A note's Restore sends the account's pubkey
+  to `/api/moderate-media` with its SAFE and `from: 'QUARANTINE'`. When a pubkey is
+  sent, the worker refuses while that account has an open age review, or unless
+  the media server records it as the file's owner (both fail closed). It also
+  refuses a file the media server shows as blocked, deleted or behind the 18+
+  gate, which SAFE would make public, and names that status on the row. It marks
+  the file's notes restored when the restore lands, or when the record is already
+  public and the media server serves the file too; a public record over a file the
+  media server still hides is refused and named on the row. Callers that send no
+  pubkey (COOP, the per-post buttons) are unchanged. An older worker ignores the
+  pubkey, so the `from` check is the only one it applies.
 - **Known limits (#299), not fixed by it:**
   - Some files the media server holds are outside the videos-only filter and are
     not changed. Tracked privately.
@@ -295,7 +306,11 @@ negotiation, so order matters and the gap should be minimized:
   - Blossom caches a file's status for up to 5 minutes per location. Right after a
     change, Un-age-restrict All can name a file as still hidden that a restore just
     made active, or end with no note while a file the withhold just hid is still
-    hidden.
+    hidden. For the same reason, a Restore of a file just made public elsewhere can
+    be refused as "the media server shows this file as hidden" for a few minutes;
+    a later Restore marks it. And for up to 5 minutes after a block, delete or
+    18+ gate set in the media server's own admin, a Restore can still read the
+    old status and go through.
   - Counts only, nothing left unchanged: a file that only funnelcake's video list
     shows, and that was already at the action's result before the job, is not
     counted as left as it was. The count can be lower than the previous worker's.
@@ -372,7 +387,8 @@ any build in that range pairs the same way; if the version before this one is
 another build, ask #299's author before rolling back past it. Apart from the
 jobs above, each worker reads the other's queue messages (the older one ignores
 the new fields), and nothing else needs stopping or cleaning up. The
-`bulk_job_notes` table stays and the older worker never reads it.
+`bulk_job_notes` table stays and the older worker never reads it. Restore's
+account check is gone with it: only `from` is checked.
 
 Rolling back past #290 (to any build that has the job model but not
 `age-gate-all`): do not revert the worker first. Follow the steps below in order,

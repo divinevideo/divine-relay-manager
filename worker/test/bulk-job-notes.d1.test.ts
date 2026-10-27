@@ -6,7 +6,7 @@
 import { Miniflare } from 'miniflare';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { ensureBulkJobsTable, handleBulkJobStatus } from '../src/bulk-moderate';
-import { handleBulkJobNotes, handleCaseBulkNotesJob, storeBulkNotes } from '../src/bulk-notes';
+import { handleBulkJobNotes, handleCaseBulkNotesJob, markStillHiddenRestored, storeBulkNotes } from '../src/bulk-notes';
 import { ageReviewNotesJobId, type BulkJob, type BulkNote, type BulkNotesPage } from '../../shared/bulk-moderation';
 
 let mf: Miniflare;
@@ -230,3 +230,23 @@ describe('failures kept beside notes', () => {
 
 // A guarded restore marks the file's still-hidden notes restored (#299), so a
 // reload shows it.
+describe('restored notes', () => {
+  it("marks every job's still-hidden note for that file, once, and nothing else", async () => {
+    const x = hash(900);
+    await storeBulkNotes(DB, 'job-r1', [{ kind: 'still-hidden', sha256: x }, { kind: 'still-hidden', sha256: hash(901) }]);
+    await storeBulkNotes(DB, 'job-r2', [{ kind: 'still-hidden', sha256: x }, { kind: 'not-owned', sha256: x, owner: OWNER }]);
+
+    expect(await markStillHiddenRestored(DB, x, '2026-10-14T10:00:00.000Z')).toBe(2);
+    expect(await markStillHiddenRestored(DB, x, '2026-10-14T11:00:00.000Z')).toBe(0);
+
+    const r1 = await readAll('job-r1', 10);
+    expect(r1).toEqual([
+      { kind: 'still-hidden', sha256: x, restoredAt: '2026-10-14T10:00:00.000Z' },
+      { kind: 'still-hidden', sha256: hash(901) },
+    ]);
+    expect(await readAll('job-r2', 10)).toEqual([
+      { kind: 'still-hidden', sha256: x, restoredAt: '2026-10-14T10:00:00.000Z' },
+      { kind: 'not-owned', sha256: x, owner: OWNER },
+    ]);
+  });
+});

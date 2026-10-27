@@ -54,6 +54,19 @@ const NOTES_PER_STATEMENT = Math.floor(100 / NOTE_BINDS);
 const NOTES_PAGE_DEFAULT = 500;
 const NOTES_PAGE_MAX = 1_000;
 
+// Marks every still-hidden note for a file restored, in whatever job it was
+// written, once a guarded Restore made the file public (handleModerateMedia),
+// so a reload shows it restored. The first mark stands. Returns how many rows
+// it marked. Throws when D1 refuses the write; the caller treats that as
+// non-critical.
+export async function markStillHiddenRestored(db: D1Database, sha256: string, at: string): Promise<number> {
+  await ensureBulkNotesTable(db);
+  const result = await db.prepare(
+    "UPDATE bulk_job_notes SET restored_at = ? WHERE kind = 'still-hidden' AND sha256 = ? AND restored_at IS NULL"
+  ).bind(at, sha256).run();
+  return result.meta?.changes ?? 0;
+}
+
 // Stores notes for a job, and failure lines (age review only) ahead of them.
 // The table's unique key keeps each (kind, file) and each line once, however
 // often they are sent. Returns how many rows were new. Throws when D1 refuses
@@ -130,16 +143,16 @@ export async function handleBulkJobNotes(
   await ensureBulkNotesTable(env.DB);
   // One more row than the page, to know whether another page follows.
   const { results } = await env.DB.prepare(
-    'SELECT rowid AS id, kind, sha256, owner, detail FROM bulk_job_notes WHERE job_id = ? AND rowid > ? ORDER BY rowid LIMIT ?'
+    'SELECT rowid AS id, kind, sha256, owner, detail, restored_at FROM bulk_job_notes WHERE job_id = ? AND rowid > ? ORDER BY rowid LIMIT ?'
   ).bind(jobId, after === null ? 0 : Number(after), pageSize + 1).all<{
-    id: number; kind: string; sha256: string; owner: string | null; detail?: string | null;
+    id: number; kind: string; sha256: string; owner: string | null; detail?: string | null; restored_at?: string | null;
   }>();
   const rows = results ?? [];
   const page = rows.slice(0, pageSize);
   const notes: BulkNote[] = [];
   const failures: string[] = [];
   for (const row of page) {
-    if (row.kind === 'still-hidden') notes.push({ kind: 'still-hidden', sha256: row.sha256 });
+    if (row.kind === 'still-hidden') notes.push({ kind: 'still-hidden', sha256: row.sha256, ...(row.restored_at ? { restoredAt: row.restored_at } : {}) });
     else if (row.kind === 'not-owned' && row.owner) notes.push({ kind: 'not-owned', sha256: row.sha256, owner: row.owner });
     else if (row.kind === 'failure' && row.detail) failures.push(row.detail);
   }

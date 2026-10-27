@@ -200,7 +200,8 @@ export async function handleGetAgeReviewCase(
 
 /**
  * Refuse-and-route guard shared by the interactive enforcement endpoints
- * (relay-rpc suspend/unsuspend/unban, bulk-moderate enqueue): if the pubkey has
+ * (relay-rpc suspend/unsuspend/unban, bulk-moderate enqueue, and
+ * moderate-media when the request names the account): if the pubkey has
  * an open (non-terminal) age-review case, returns a structured 409
  * (`age_review_active` + caseId/state) that the frontend turns into a redirect
  * to the case; returns null when nothing blocks the action.
@@ -222,13 +223,18 @@ export async function handleGetAgeReviewCase(
  *
  * Under `failClosed` there are two ways the check "cannot happen", and both
  * refuse identically: no DB binding, and a thrown lookup. A non-canonical pubkey
- * is NOT one of them: no case can be keyed to a value the lookup could never
- * match, so there is nothing to refuse on its behalf.
+ * in the request is NOT one of them: it lifts nothing on the account a case is
+ * about (see the guard body), so there is nothing to refuse on its behalf.
+ * `failClosed` also makes the lookup match a case stored under an uppercase
+ * pubkey (anyCase, see getActiveAgeReviewCase): missing one there would lift
+ * its hold, while for an enforcing caller matching it would keep no hold and
+ * only refuse enforcement.
  *
- * `failClosed` is opt-in PER CALL SITE, not a property of the guard. Two call
- * sites pass it today: relay-rpc's reversals, and bulk-moderate's loosening
- * actions (age-gate-all, un-age-restrict-all). The rest of bulk deliberately
- * fails open; see LOOSENS_AGE_REVIEW_HOLD in bulk-moderate.ts.
+ * `failClosed` is opt-in PER CALL SITE, not a property of the guard. Three call
+ * sites pass it today: relay-rpc's reversals, bulk-moderate's loosening
+ * actions (age-gate-all, un-age-restrict-all), and moderate-media's account
+ * check (a note's Restore). The rest of bulk deliberately fails open; see
+ * LOOSENS_AGE_REVIEW_HOLD in bulk-moderate.ts.
  */
 export async function ageReviewActiveGuard(
   pubkey: string,
@@ -246,13 +252,16 @@ export async function ageReviewActiveGuard(
     code: 'age_review_check_failed',
   }, 503, corsHeaders);
 
-  // A non-canonical pubkey proceeds in both modes, and that is not the same
-  // omission the earlier version made. It skipped on the stated grounds that the
-  // caller validates, which no caller did. The reason now is that there is nothing
-  // here to protect: a case is keyed to a real lowercase pubkey, so a value that
-  // cannot match one cannot be hiding an open case either. Refusing would only
-  // block the reverse direction, which deliberately carries such values so a row
-  // banned with one stays removable (see handleRelayRpc).
+  // A non-canonical pubkey in the request proceeds in both modes, and that is not
+  // the same omission the earlier version made. It skipped on the stated grounds
+  // that the caller validates, which no caller did. The reason now is the legacy
+  // relay rows: the reverse direction deliberately carries such values so a row
+  // banned with one stays removable (see handleRelayRpc), and refusing here would
+  // block exactly that. Such a value reaches only the relay rows written with it:
+  // the relay matches bytes exactly and Keycast refuses anything but lowercase
+  // hex, so it lifts nothing on the account a case is about. What a case stores
+  // is another matter: a case can hold an uppercase `p` tag until #313, which is
+  // why a fail-closed lookup below matches in any case.
   //
   // The enforce direction does not reach this: handleRelayRpc answers those with a
   // 400 first, since a ban on a value the relay cannot match enforces on nobody.
@@ -273,7 +282,9 @@ export async function ageReviewActiveGuard(
 
   let activeCase: AgeReviewCase | null = null;
   try {
-    activeCase = await getActiveAgeReviewCase(pubkey, env);
+    // A fail-closed caller lifts a hold, so it also finds a case stored under
+    // an uppercase `p` tag; the rest match exactly (see getActiveAgeReviewCase).
+    activeCase = await getActiveAgeReviewCase(pubkey, env, { anyCase: opts.failClosed === true });
   } catch (err) {
     if (opts.failClosed) {
       console.error('[ageReviewActiveGuard] lookup failed; refusing (fail-closed):', err);
@@ -303,15 +314,16 @@ export async function handleGetActiveAgeReviewCase(
   env: AgeReviewEnv,
   corsHeaders: Record<string, string>,
 ): Promise<Response> {
-  // Pubkeys are canonical lowercase hex and the stored column is case-sensitive,
-  // so validate case-sensitively (a mixed-case value would pass a case-
-  // insensitive check but miss the lowercased row). Validate before the DB
-  // check so a malformed pubkey is a 400, not a 500.
+  // Callers send canonical lowercase hex, so validate case-sensitively; the
+  // lookup itself also finds a case stored under an uppercase or mixed-case
+  // `p` tag (anyCase, see getActiveAgeReviewCase), so the hand-off and the
+  // results panel's pause name it. Validate before the DB check so a
+  // malformed pubkey is a 400, not a 500.
   if (!/^[0-9a-f]{64}$/.test(pubkey)) {
     return json({ success: false, error: 'Invalid pubkey' }, 400, corsHeaders);
   }
   if (!env.DB) return json({ success: false, error: 'Database not configured' }, 500, corsHeaders);
-  const row = await getActiveAgeReviewCase(pubkey, env);
+  const row = await getActiveAgeReviewCase(pubkey, env, { anyCase: true });
   return json({ success: true, case: row }, 200, corsHeaders);
 }
 

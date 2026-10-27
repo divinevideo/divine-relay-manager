@@ -1231,6 +1231,57 @@ describe('adminApi', () => {
       await expect(moderateMedia(API_URL, 'badhash', 'SAFE')).rejects.toThrow('Invalid hash');
     });
 
+    // The worker refuses the write when the file's recorded state is not the
+    // one the caller expected (`from`).
+    it('sends the expected current state when given one', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true }) });
+
+      await moderateMedia(API_URL, 'hash123', 'SAFE', 'Restriction removed by moderator', 'QUARANTINE');
+
+      const callBody = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(callBody).toEqual({ sha256: 'hash123', action: 'SAFE', reason: 'Restriction removed by moderator', from: 'QUARANTINE' });
+    });
+
+    it("sends the account the file belongs to when given one, for the worker's account check", async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true }) });
+
+      await moderateMedia(API_URL, 'hash123', 'SAFE', 'r', 'QUARANTINE', 'a'.repeat(64));
+
+      const callBody = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(callBody).toEqual({ sha256: 'hash123', action: 'SAFE', reason: 'r', from: 'QUARANTINE', pubkey: 'a'.repeat(64) });
+    });
+
+    it("carries a refusal's code and the state actually found", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 409,
+        statusText: 'Conflict',
+        json: async () => ({
+          success: false, error: 'Refusing SAFE: expected current state QUARANTINE, found PERMANENT_BAN',
+          code: 'state_mismatch', from: 'QUARANTINE', current: 'PERMANENT_BAN',
+        }),
+      });
+
+      const error = await moderateMedia(API_URL, 'hash123', 'SAFE', 'r', 'QUARANTINE').catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ApiError);
+      expect(error).toMatchObject({ statusCode: 409, code: 'state_mismatch', currentState: 'PERMANENT_BAN' });
+      expect((error as ApiError).mediaServerState).toBeUndefined();
+    });
+
+    it('carries what the media server shows when it disagrees with a public record', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 409,
+        statusText: 'Conflict',
+        json: async () => ({
+          success: false, error: 'Refusing SAFE', code: 'state_mismatch', from: 'QUARANTINE', current: 'SAFE', mediaServer: 'restricted',
+        }),
+      });
+
+      const error = await moderateMedia(API_URL, 'hash123', 'SAFE', 'r', 'QUARANTINE', 'a'.repeat(64)).catch((e: unknown) => e);
+      expect(error).toMatchObject({ code: 'state_mismatch', currentState: 'SAFE', mediaServerState: 'restricted' });
+    });
+
     it('should handle all moderation actions', async () => {
       mockFetch.mockResolvedValue({
         ok: true,

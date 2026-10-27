@@ -959,7 +959,9 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
     if (LOOSENS_AGE_REVIEW_HOLD[msg.action]) {
       let open: boolean;
       try {
-        open = (await getActiveAgeReviewCase(msg.pubkey, env)) !== null;
+        // anyCase: missing a case stored under an uppercase `p` tag would let
+        // this job lift the hold (see getActiveAgeReviewCase).
+        open = (await getActiveAgeReviewCase(msg.pubkey, env, { anyCase: true })) !== null;
       } catch (error) {
         throw new Error(`stopped: could not check age-review status for ${msg.pubkey} (${formatError(error)}); no further videos were changed`);
       }

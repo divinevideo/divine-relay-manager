@@ -105,6 +105,18 @@ interface Props {
   caseData: AgeReviewCase;
 }
 
+// The active-case lookup's cache keys for a case's pubkey: its own first,
+// then any derived one, the lowercase key the hand-off, the Ban warning and
+// the results panel ask with. A case can store an uppercase pubkey (#313), and
+// the route answers the lowercase key with that case or another open one. So
+// after a transition the own key is written (null once the case closes) and
+// every derived key is dropped, never written. For a case stored in lowercase
+// there is no derived key: the own key is the lowercase key, and a close
+// writes null there.
+function activeCaseKeys(pubkey: string | undefined): Array<[string, string | undefined]> {
+  return [...new Set([pubkey, pubkey?.toLowerCase()])].map((key) => ['age-review-active-case', key]);
+}
+
 // The worker records an approval only for a lowercase 64-char hex pubkey (HEX_64 in
 // worker/src/keycast-client.ts). A case stores the report's p tag verbatim, so a
 // mixed-case tag is possible and could never be approved.
@@ -174,13 +186,15 @@ export function AgeReviewDetail({ caseData: c }: Props) {
         // ?pubkey= hand-off within its cache lifetime re-seeds the per-case
         // entry with the pre-action ACTIVE row, resurrecting the exact hole
         // above. Terminal states have no active case; write that truth.
-        queryClient.setQueryData(
-          ['age-review-active-case', updated.pubkey],
-          { success: true, case: TERMINAL_STATES.includes(updated.state) ? null : updated },
-        );
+        const [ownKey, ...derivedKeys] = activeCaseKeys(updated.pubkey);
+        queryClient.setQueryData(ownKey, { success: true, case: TERMINAL_STATES.includes(updated.state) ? null : updated });
+        // A derived lowercase key can also answer another open case of the
+        // account (#313), so nothing is written there, open or closed: the
+        // entry is dropped, and the next read asks the worker.
+        for (const key of derivedKeys) queryClient.removeQueries({ queryKey: key });
       } else {
         queryClient.invalidateQueries({ queryKey: ['age-review-case', ctx.caseId] });
-        queryClient.removeQueries({ queryKey: ['age-review-active-case', ctx.casePubkey] });
+        for (const key of activeCaseKeys(ctx.casePubkey)) queryClient.removeQueries({ queryKey: key });
       }
       // Invalidate AFTER the cache writes: setQueryData clears isInvalidated
       // and fresh-stamps the entry, so writing after invalidating would
@@ -295,7 +309,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
         queryClient.invalidateQueries({ queryKey: ['age-review-case', ctx?.caseId] });
         // Remove (not invalidate) the lookup entry: the hand-off effect seeds
         // synchronously from cached data before any refetch could land
-        queryClient.removeQueries({ queryKey: ['age-review-active-case', ctx?.casePubkey] });
+        for (const key of activeCaseKeys(ctx?.casePubkey)) queryClient.removeQueries({ queryKey: key });
         toast({
           title: 'Case changed since you opened it',
           description: 'Another moderator or an automated deadline action modified this case. Reloaded the latest state; review it and re-apply if still needed.',

@@ -51,6 +51,17 @@ export async function readBlossomSecret(env: MediaServerEnv): Promise<string | E
 export interface MediaStatus { raw: string; level: MediaLevel }
 export interface BlossomBlob extends MediaStatus { owner: string }
 
+// What the media server records for a file: its owner (lowercase hex) and its
+// status, as served to viewers. For /api/moderate-media's account check, which
+// needs the owner, and for its already-public refusal, which needs the status.
+// Throws when it cannot be read: no key, a failed request, or no usable owner
+// or status.
+export async function readMediaRecord(sha256: string, env: MediaServerEnv): Promise<BlossomBlob> {
+  const secret = await readBlossomSecret(env);
+  if (secret instanceof Error) throw secret;
+  return readBlossomStatus(sha256, env, secret);
+}
+
 export async function readBlossomStatus(sha256: string, env: MediaServerEnv, secret: string): Promise<BlossomBlob> {
   const response = await fetch(`https://${env.CDN_DOMAIN || 'media.divine.video'}/admin/api/blob/${sha256}`, {
     headers: { Authorization: `Bearer ${secret}` },

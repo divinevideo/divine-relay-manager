@@ -287,6 +287,66 @@ describe('AgeReviewDetail', () => {
     expect(screen.queryByText(/Failed to update/)).not.toBeInTheDocument();
   });
 
+  // A case can be stored under an uppercase pubkey (#313), and the hand-off,
+  // the Ban warning and the results panel ask for it in lowercase. That
+  // lowercase key can also answer another open case of the account, so after a
+  // transition the case's own key is written and the lowercase entry is
+  // dropped on every branch: the next read asks the worker. (For a case
+  // stored in lowercase the own key is the lowercase key, so a close writes
+  // null there.)
+  describe('a case stored under an uppercase pubkey', () => {
+    const UPPER = 'AB'.repeat(32);
+    const LOWER = UPPER.toLowerCase();
+
+    it('writes an open result under the own key and drops the lowercase entry', async () => {
+      const before = makeCase({ pubkey: UPPER, suspected_age_band: 'age_13_15' });
+      const after = makeCase({ pubkey: UPPER, suspected_age_band: 'age_13_15', state: 'restricted_pending_parental_consent', version: 1 });
+      updateAgeReviewCase.mockResolvedValueOnce({ success: true, case: after, enforcementComplete: true });
+      const { queryClient } = renderDetail(before);
+      queryClient.setQueryData(['age-review-active-case', LOWER], { success: true, case: before });
+      fireEvent.click(screen.getByRole('button', { name: 'Restrict Account' }));
+      await waitFor(() => expect(queryClient.getQueryData(['age-review-active-case', UPPER])).toEqual({ success: true, case: after }));
+      expect(queryClient.getQueryData(['age-review-active-case', LOWER])).toBeUndefined();
+    });
+
+    it('drops the lowercase active-case entry when a transition closes the case', async () => {
+      const before = makeCase({ pubkey: UPPER });
+      const after = makeCase({ pubkey: UPPER, state: 'denied_closed', version: 1 });
+      updateAgeReviewCase.mockResolvedValueOnce({ success: true, case: after, enforcementComplete: true });
+      const { queryClient } = renderDetail(before);
+      queryClient.setQueryData(['age-review-active-case', LOWER], { success: true, case: before });
+      fireEvent.click(screen.getByRole('button', { name: /Deny.*Close/ }));
+      await waitFor(() => expect(queryClient.getQueryData(['age-review-active-case', UPPER])).toEqual({ success: true, case: null }));
+      expect(queryClient.getQueryData(['age-review-active-case', LOWER])).toBeUndefined();
+    });
+
+    it('drops both active-case entries when a response carries no case', async () => {
+      const before = makeCase({ pubkey: UPPER, suspected_age_band: 'age_13_15' });
+      updateAgeReviewCase.mockResolvedValueOnce({ success: true, enforcementComplete: true });
+      const { queryClient } = renderDetail(before);
+      queryClient.setQueryData(['age-review-active-case', LOWER], { success: true, case: before });
+      queryClient.setQueryData(['age-review-active-case', UPPER], { success: true, case: before });
+      fireEvent.click(screen.getByRole('button', { name: 'Restrict Account' }));
+      await waitFor(() => expect(updateAgeReviewCase).toHaveBeenCalled());
+      await waitFor(() => expect(queryClient.getQueryData(['age-review-active-case', UPPER])).toBeUndefined());
+      expect(queryClient.getQueryData(['age-review-active-case', LOWER])).toBeUndefined();
+    });
+
+    it('drops the lowercase active-case entry on a version_conflict too', async () => {
+      const before = makeCase({ pubkey: UPPER, suspected_age_band: 'age_13_15' });
+      updateAgeReviewCase.mockRejectedValueOnce(
+        new ApiError('Case was modified by another request', 409, 'Conflict', 'version_conflict', 5),
+      );
+      const { queryClient } = renderDetail(before);
+      queryClient.setQueryData(['age-review-active-case', LOWER], { success: true, case: before });
+      queryClient.setQueryData(['age-review-active-case', UPPER], { success: true, case: before });
+      fireEvent.click(screen.getByRole('button', { name: 'Restrict Account' }));
+      await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Case changed since you opened it' })));
+      expect(queryClient.getQueryData(['age-review-active-case', LOWER])).toBeUndefined();
+      expect(queryClient.getQueryData(['age-review-active-case', UPPER])).toBeUndefined();
+    });
+  });
+
   it('shows Deny & Close without confirmation when auto-delete is off', () => {
     renderDetail(makeCase());
     expect(screen.getByRole('button', { name: /Deny.*Close/ })).toBeInTheDocument();

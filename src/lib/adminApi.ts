@@ -95,6 +95,15 @@ export class ApiError extends Error {
     // version returned alongside a 409 conflict.
     public code?: string,
     public currentVersion?: number,
+    // The state the server found, when it refused a change made from another
+    // (/api/moderate-media's `from` check: `current` on a 409).
+    public currentState?: string,
+    // What the media server shows for the file, when /api/moderate-media found
+    // a public (SAFE) record over a file the media server still does not serve,
+    // or refused a Restore because the media server blocks, deletes or
+    // 18+-gates the file (`mediaServer` on either 409, the media server's own
+    // status name).
+    public mediaServerState?: string,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -196,7 +205,7 @@ async function apiRequest<T>(
     // Read the JSON error body if there is one so callers can act on structured
     // fields (a 409 version_conflict carries `code` + `current_version`) instead
     // of an opaque "HTTP 409:" message. Non-JSON bodies fall back to status text.
-    let parsed: { error?: string; code?: string; current_version?: number } | undefined;
+    let parsed: { error?: string; code?: string; current_version?: number; current?: unknown; mediaServer?: unknown } | undefined;
     try {
       parsed = await response.json() as typeof parsed;
     } catch {
@@ -208,6 +217,8 @@ async function apiRequest<T>(
       response.statusText,
       parsed?.code,
       parsed?.current_version,
+      typeof parsed?.current === 'string' ? parsed.current : undefined,
+      typeof parsed?.mediaServer === 'string' ? parsed.mediaServer : undefined,
     );
   }
 
@@ -717,16 +728,27 @@ export function isBlockedMediaAction(action: MediaStatusAction | null | undefine
   return action === 'PERMANENT_BAN' || action === 'QUARANTINE';
 }
 
+// `from`, when given, is the state the caller expects the file to be in. The
+// worker then writes only if the moderation record still shows it, and
+// refuses otherwise (409 state_mismatch, or 503 state_unreadable).
+// `pubkey`, when given, is the account the file belongs to. The worker then
+// also refuses while that account has an open age review, or unless the media
+// server records it as the file's owner (409 age_review_active or
+// owner_mismatch; 503 when either cannot be checked).
 export async function moderateMedia(
   apiUrl: string,
   sha256: string,
   action: ModerationAction,
-  reason?: string
+  reason?: string,
+  from?: ModerationAction,
+  pubkey?: string,
 ): Promise<ApiResponse> {
   const data = await apiRequest<ApiResponse>(apiUrl, '/api/moderate-media', 'POST', {
     sha256,
     action,
     reason,
+    ...(from === undefined ? {} : { from }),
+    ...(pubkey === undefined ? {} : { pubkey }),
   });
   if (!data.success) {
     throw new ApiError(data.error || 'Failed to moderate media');

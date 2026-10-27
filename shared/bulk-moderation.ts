@@ -42,8 +42,10 @@ export interface BulkModerateResult {
 //     another decision may have hidden it, #295), or one it could not change
 //     (also listed as a failure). Check why, then restore it by hand.
 //   not-owned: another account owns this file, so the action left it unchanged.
+//   A still-hidden note carries `restoredAt` once a guarded Restore made that
+//   file public (see markStillHiddenRestored in worker/src/bulk-notes.ts).
 export type BulkNote =
-  | { kind: 'still-hidden'; sha256: string }
+  | { kind: 'still-hidden'; sha256: string; restoredAt?: string }
   | { kind: 'not-owned'; sha256: string; owner: string };
 
 // The most notes one invocation writes (see storeBulkNotes in

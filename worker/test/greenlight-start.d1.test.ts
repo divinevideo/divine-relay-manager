@@ -118,6 +118,17 @@ describe('starting the existing Greenlight consent process', () => {
     expect(body.restriction.status).toBe('restricted_minor_review');
     expect(body.minorReviewCase.id).toBe('restricted');
   });
+  // The open-review lookup matches this case's pubkey exactly, as on main: a
+  // report case stored in uppercase is not this account's open case here
+  // (intake normalisation is #313).
+  it('starts as before beside a report case stored under the uppercase pubkey', async () => {
+    await DB.prepare("INSERT INTO age_review_cases (id, pubkey, state, suspected_age_band, allowed_resolution, created_via) VALUES ('report-upper', ?, 'open_reported', 'age_13_15', 'parent_video_or_email', 'report')")
+      .bind(owner.toUpperCase()).run();
+    const response = await start();
+    expect(response.status).toBe(201);
+    const body = await response.json() as StartResponse;
+    expect(body.minorReviewCase.id).not.toBe('report-upper');
+  });
   it('does not overwrite an under-13 or 16+ review case with a 13–15 application', async () => {
     for (const band of ['under_13', 'age_16_plus_claimed']) {
       await DB.prepare('DELETE FROM age_review_cases').run();
