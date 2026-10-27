@@ -64,7 +64,7 @@ import {
   Ban,
   RefreshCw,
 } from "lucide-react";
-import type { NostrEvent } from "@nostrify/nostrify";
+import type { NostrEvent, NostrFilter } from "@nostrify/nostrify";
 import { nip19 } from "nostr-tools";
 import { HIGH_PRIORITY_CATEGORIES, getReportCategory, hasCsamSignal } from "@/lib/constants";
 
@@ -396,42 +396,44 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
   // exactly wrong. Unban stays on isUserBanned, so the undo remains reachable.
   const userBannedConfirmed = moderationStatus.isUserBanned === true && !moderationStatus.isUserBannedStale;
 
-  // Get reports against this event or user
-  const { data: relatedReports } = useQuery({
+  // Get reports against this event or user. A read that runs out of time does
+  // not fail: NPool.query resolves with whatever had arrived by then. So each
+  // read keeps its own timeout signal, and `complete` says whether every read
+  // finished before it fired.
+  const { data: relatedReportsRead } = useQuery({
     queryKey: ['related-reports', event.id, event.pubkey],
     queryFn: async ({ signal }) => {
-      const queries: Promise<import('@nostrify/nostrify').NostrEvent[]>[] = [];
+      const read = async (filter: NostrFilter) => {
+        const timeout = AbortSignal.timeout(3000);
+        const events = await nostr.query([filter], { signal: AbortSignal.any([signal, timeout]) });
+        return { events, complete: !timeout.aborted };
+      };
+      const reads: Promise<{ events: NostrEvent[]; complete: boolean }>[] = [];
 
       // Reports on this specific event
       if (event.id) {
-        queries.push(
-          nostr.query(
-            [{ kinds: [1984], '#e': [event.id], limit: 50 }],
-            { signal: AbortSignal.any([signal, AbortSignal.timeout(3000)]) }
-          )
-        );
+        reads.push(read({ kinds: [1984], '#e': [event.id], limit: 50 }));
       }
 
       // Reports on this user
-      queries.push(
-        nostr.query(
-          [{ kinds: [1984], '#p': [event.pubkey], limit: 50 }],
-          { signal: AbortSignal.any([signal, AbortSignal.timeout(3000)]) }
-        )
-      );
+      reads.push(read({ kinds: [1984], '#p': [event.pubkey], limit: 50 }));
 
-      const results = await Promise.all(queries);
-      const allReports = results.flat();
+      const results = await Promise.all(reads);
+      const allReports = results.flatMap(r => r.events);
 
       // Dedupe by event ID
       const seen = new Set<string>();
-      return allReports.filter(r => {
+      const reports = allReports.filter(r => {
         if (!r.id || seen.has(r.id)) return false;
         seen.add(r.id);
         return true;
       }).sort((a, b) => b.created_at - a.created_at);
+      return { reports, complete: results.every(r => r.complete) };
     },
   });
+  // Partial when a read timed out. Still listed below, but it cannot rule out
+  // a sensitive report.
+  const relatedReports = relatedReportsRead?.reports;
 
   const banMutation = useMutation({
     mutationFn: async ({ pubkey, reason }: { pubkey: string; reason: string }) => {
@@ -684,15 +686,19 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
   const urls = extractUrls(event.content || '');
   const otherUrls = urls.filter(u => !isMediaUrl(u));
 
-  // Check if any related report has a high-priority category (CSAM, etc.)
-  // Used to collapse media preview by default to protect moderators
+  // Whether any related report has a high-priority category (CSAM, etc.), so
+  // media starts hidden to protect moderators. True as soon as a loaded report
+  // is one, false only once every read finished and none is. Undefined while
+  // that is unknown: the read is pending, failed, or timed out with nothing
+  // sensitive in what arrived.
   const hasHighPriorityReports = useMemo(() => {
-    if (!relatedReports?.length) return false;
-    return relatedReports.some(r => {
-      const cat = getReportCategory(r);
-      return HIGH_PRIORITY_CATEGORIES.includes(cat);
-    }) || hasCsamSignal(relatedReports);
-  }, [relatedReports]);
+    if (!relatedReportsRead) return undefined;
+    const { reports, complete } = relatedReportsRead;
+    const sensitive = reports.some(r => HIGH_PRIORITY_CATEGORIES.includes(getReportCategory(r)))
+      || hasCsamSignal(reports);
+    if (sensitive) return true;
+    return complete ? false : undefined;
+  }, [relatedReportsRead]);
 
   // Extract sha256 hashes for classifier components
   const mediaHashes = extractMediaHashes(event.content || '', event.tags);
@@ -967,10 +973,11 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
           )
         )}
 
-        {/* Media Preview - collapsed by default if event has high-priority reports */}
+        {/* Media Preview - collapsed by default until the event's reports are
+            known to hold nothing high-priority */}
         <MediaPreview
           event={event}
-          showByDefault={!hasHighPriorityReports}
+          showByDefault={hasHighPriorityReports === false}
           maxItems={4}
         />
 
