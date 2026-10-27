@@ -106,8 +106,10 @@ function PostCard({
         <CardContent className="p-3 overflow-hidden">
           <div className="flex items-start gap-3">
             <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80 shrink-0">
-              <Avatar className="h-8 w-8">
-                {/* Radix starts loading src as soon as AvatarImage mounts */}
+              {/* Radix starts loading src as soon as AvatarImage mounts. It also
+                  remembers a loaded image after AvatarImage unmounts and keeps the
+                  initials hidden, so a fresh root per state brings them back. */}
+              <Avatar key={hideAvatar ? 'hidden' : 'image'} className="h-8 w-8">
                 {!hideAvatar && <AvatarImage src={avatar} />}
                 <AvatarFallback>{displayName.slice(0, 2).toUpperCase()}</AvatarFallback>
               </Avatar>

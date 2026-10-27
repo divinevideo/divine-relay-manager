@@ -90,12 +90,15 @@ export function UserIdentifier({
   const displayNpub = npub;
 
   const profileUrl = getProfileUrl(npub, isFunnelcakeUser);
+  // Radix remembers that an image loaded and hides the initials even after
+  // AvatarImage unmounts, so a fresh root per state brings them back.
+  const avatarKey = hideAvatarImage ? "hidden" : "image";
 
   if (variant === "compact") {
     const content = (
       <>
         {showAvatar && (
-          <Avatar className={avatarSizeClasses[avatarSize]}>
+          <Avatar key={avatarKey} className={avatarSizeClasses[avatarSize]}>
             {!hideAvatarImage && <AvatarImage src={picture} alt={displayName || npub} />}
             <AvatarFallback className={avatarTextSizes[avatarSize]}>
               {initials}
@@ -162,7 +165,7 @@ export function UserIdentifier({
 
   if (variant === "block") {
     const avatarElement = showAvatar && (
-      <Avatar className={avatarSizeClasses[avatarSize]}>
+      <Avatar key={avatarKey} className={avatarSizeClasses[avatarSize]}>
         {!hideAvatarImage && <AvatarImage src={picture} alt={displayName || npub} />}
         <AvatarFallback className={avatarTextSizes[avatarSize]}>
           {initials}
@@ -233,7 +236,7 @@ export function UserIdentifier({
   const inlineContent = (
     <>
       {showAvatar && (
-        <Avatar className={avatarSizeClasses[avatarSize]}>
+        <Avatar key={avatarKey} className={avatarSizeClasses[avatarSize]}>
           {!hideAvatarImage && <AvatarImage src={picture} alt={displayName || npub} />}
           <AvatarFallback className={avatarTextSizes[avatarSize]}>
             {initials}

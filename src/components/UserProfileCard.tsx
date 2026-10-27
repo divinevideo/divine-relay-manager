@@ -134,7 +134,9 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
       <CardHeader className="pb-3">
         <div className="flex items-center gap-3 min-w-0 overflow-hidden">
           <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80 shrink-0">
-            <Avatar className="h-12 w-12">
+            {/* Radix remembers that an image loaded and hides the initials even after
+                AvatarImage unmounts, so a fresh root per state brings them back. */}
+            <Avatar key={showAvatar ? "image" : "hidden"} className="h-12 w-12">
               {showAvatar && <AvatarImage src={profile?.picture} />}
               <AvatarFallback>{displayName.slice(0, 2).toUpperCase()}</AvatarFallback>
             </Avatar>
