@@ -59,6 +59,14 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
   const [copied, setCopied] = useState(false);
   // Keyed by pubkey so revealing one account's avatar never carries to the next
   const [avatarRevealedFor, setAvatarRevealedFor] = useState<string | null>(null);
+  // As with the post media below, a move to a sensitive report forgets a
+  // reveal: the pane is reused across reports on the same account. Done during
+  // render, so the avatar is never mounted for the sensitive report.
+  const [hiddenByDefaultBefore, setHiddenByDefaultBefore] = useState(hideMediaByDefault);
+  if (hideMediaByDefault !== hiddenByDefaultBefore) {
+    setHiddenByDefaultBefore(hideMediaByDefault);
+    if (hideMediaByDefault) setAvatarRevealedFor(null);
+  }
   const showAvatar = !hideMediaByDefault || avatarRevealedFor === (pubkey ?? "");
   const apiUrl = useApiUrl();
 

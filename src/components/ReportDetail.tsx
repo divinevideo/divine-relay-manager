@@ -709,9 +709,10 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                       <ShieldX className="h-3 w-3" />
                       {/* isAutoHidden covers the states that need a check too:
                           the worker writes those only after the relay ban
-                          landed, so the content is hidden either way. */}
+                          landed, so the content is hidden either way. Worded
+                          as the queue row and header badge word a plain one. */}
                       {decisionLog.isDeleted ? 'Removed by Moderation'
-                        : decisionLog.isAutoHidden ? 'Auto-Hidden'
+                        : decisionLog.isAutoHidden ? SWITCH_STATE_LABELS['auto-hidden']
                         : isUserBanned ? (moderationStatus.isUserBannedStale ? 'Banned (last known)' : 'User Banned')
                         : moderationStatus.isEventBanned ? 'Event Banned'
                         : 'Not Found on Relay'}

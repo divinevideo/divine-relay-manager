@@ -359,25 +359,27 @@ describe('ReportDetail on a sensitive report, elsewhere in the pane', () => {
   });
 
   // All three states leave the event banned on the relay, which shows a second
-  // header badge.
+  // header badge, worded like the first. A plain auto-hide's first badge says
+  // "Hidden automatically" too, so that one shows the words twice.
   it.each([
-    ['a plain auto-hide', null],
-    ['an unresolved hide', 'unresolved'],
-    ['a hide whose restore failed', 'restoreFailed'],
-  ] as const)('calls %s Auto-Hidden when the event is gone, not Not Found on Relay', (_label, flag) => {
+    ['a plain auto-hide', null, 2],
+    ['an unresolved hide', 'unresolved', 1],
+    ['a hide whose restore failed', 'restoreFailed', 1],
+  ] as const)('calls %s Hidden automatically when the event is gone, not Not Found on Relay', (_label, flag, count) => {
     if (flag) decisionRows[flag] = true;
     status.value = moderationStatusMock({ isUserBanned: false, isEventGone: true });
     renderPending(undefined);
-    expect(screen.getByText('Auto-Hidden')).toBeInTheDocument();
+    expect(screen.getAllByText('Hidden automatically')).toHaveLength(count);
+    expect(screen.queryByText('Auto-Hidden')).not.toBeInTheDocument();
     expect(screen.queryByText('Not Found on Relay')).not.toBeInTheDocument();
   });
 
-  it('calls an unresolved hide Auto-Hidden for a banned user too, as it does a plain one', () => {
+  it('calls an unresolved hide Hidden automatically for a banned user too, as it does a plain one', () => {
     decisionRows.unresolved = true;
     status.value = moderationStatusMock({ isUserBanned: true, isEventGone: true });
     renderPending(undefined);
     expect(screen.getByText('Hidden, needs a check')).toBeInTheDocument();
-    expect(screen.getByText('Auto-Hidden')).toBeInTheDocument();
+    expect(screen.getByText('Hidden automatically')).toBeInTheDocument();
     // The account's own badge still names the ban.
     expect(screen.getByText('User Banned')).toBeInTheDocument();
   });
