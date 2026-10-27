@@ -49,6 +49,28 @@ describe('classifyReport', () => {
     expect(classifyReport({ tags: [['e', E, 'illegal']], content: 'csamuel' }).csamSignal).toBe(false);
   });
 
+  it.each([
+    'child-porn',
+    'childporn',
+    'child  porn',
+    'child porn',
+    'child\nsexual abuse material',
+    'Child_Sexual_Abuse',
+    'child-sexual-abuse',
+  ])('routes free text %j', content => {
+    expect(classifyReport({ tags: [['e', E, 'illegal']], content }).csamSignal).toBe(true);
+  });
+
+  it.each(['csamuel', 'children playing', 'child safety', 'grandchildporn'])('does not route free text %j', content => {
+    expect(classifyReport({ tags: [['e', E, 'illegal']], content }).csamSignal).toBe(false);
+  });
+
+  it('classifies content of widely spaced "child" words in linear time', () => {
+    const start = performance.now();
+    classifyReport({ tags: [['e', E, 'illegal']], content: ('child' + ' '.repeat(2000)).repeat(32) });
+    expect(performance.now() - start).toBeLessThan(200);
+  });
+
   it('routes a CSAM label in another namespace', () => {
     expect(classifyReport({ tags: [['p', P], ['l', 'csam', 'MOD']] }).csamSignal).toBe(true);
   });

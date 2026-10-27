@@ -25,8 +25,11 @@ const NOS_NAMESPACE = 'social.nos.ontology';
 // matches: with /m, $ also stops before \r, which JS counts as a line end.
 const CSAM_REASON_LINE = /^[ \t]*Reason:[ \t]*(csam|sexual_minors)[ \t]*$/im;
 // Free text from other apps. \b keeps "csamuel" out; "child porn" also matches
-// "child pornography" because only its left edge is anchored.
-const CSAM_FREE_TEXT = /\b(csam|child sexual abuse)\b|\bchild porn/i;
+// "child pornography" because only its left edge is anchored. Separators may be
+// spaces of any kind, hyphens, underscores or line breaks, or none after
+// "child" ("childporn"). \s is safe here, unlike in the Reason line above,
+// because each match that can use it starts at a literal "child".
+const CSAM_FREE_TEXT = /\b(csam|child[\s_-]*sexual[\s_-]+abuse)\b|\bchild[\s_-]*porn/i;
 
 function tagList(event: { tags?: unknown }): string[][] {
   return Array.isArray(event.tags)
