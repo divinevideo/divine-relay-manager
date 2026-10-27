@@ -65,14 +65,18 @@ function stubFetch({
   targeted = {},
   statesGate,
   statesFail = false,
+  reportsGate,
 }: {
   events: unknown[];
   states?: State[];
   labels?: () => Promise<LabelTarget[]>;
+  // The bulk /api/reports read waits for this before answering.
+  reportsGate?: Promise<void>;
   // /api/resolution-state waits for this before answering.
   statesGate?: Promise<void>;
-  // /api/resolution-state answers success: false, so the read fails.
-  statesFail?: boolean;
+  // /api/resolution-state answers success: false, so the read fails. A
+  // function is asked on each read, so a test can let a later one succeed.
+  statesFail?: boolean | (() => boolean);
   // A deep link's targeted lookup (/api/reports?event= or ?pubkey=), keyed by
   // the target's hex. A target with no entry gets an empty result.
   targeted?: Record<string, unknown[]>;
@@ -84,7 +88,10 @@ function stubFetch({
       const hit = Object.keys(targeted).find((hex) => url.includes(hex));
       return jsonResponse({ success: true, events: hit ? targeted[hit] : [] });
     }
-    if (url.includes('/api/reports')) return jsonResponse({ success: true, events });
+    if (url.includes('/api/reports')) {
+      if (reportsGate) await reportsGate;
+      return jsonResponse({ success: true, events });
+    }
     if (url.includes('/api/resolution-label-targets')) {
       calls.labels += 1;
       const targets = await labels();
@@ -93,7 +100,9 @@ function stubFetch({
     if (url.includes('/api/resolution-state')) {
       calls.resolutionState += 1;
       if (statesGate) await statesGate;
-      if (statesFail) return jsonResponse({ success: false, error: 'unavailable' });
+      if (typeof statesFail === 'function' ? statesFail() : statesFail) {
+        return jsonResponse({ success: false, error: 'unavailable' });
+      }
       return jsonResponse({ success: true, resolved: [], states });
     }
     if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
@@ -536,6 +545,94 @@ describe('Reports sensitive pending-review switch', () => {
       expect(screen.getByText(NOTE_SPAM)).toBeInTheDocument();
     });
 
+    // The courtesy above turned Hide resolved off for the linked report. When
+    // the read recovers and the target turns out to be auto-hidden, the switch
+    // opens, and closing it must hand back the moderator's own setting.
+    it("hands Hide resolved back when a failed read recovers and the link's switch opens", async () => {
+      let statesFailing = true;
+      stubFetch({
+        events: [CSAM_REPORT, SPAM_REPORT, HIDDEN_REPORT],
+        states: HIDDEN_STATES,
+        labels: () => Promise.resolve([{ type: 'event', value: HIDDEN_EVENT }]),
+        statesFail: () => statesFailing,
+      });
+      const user = userEvent.setup();
+      const queryClient = renderAt(`/reports?event=${HIDDEN_EVENT}`);
+      await waitFor(() => expect(window.location.pathname).toBe(`/reports/${HIDDEN_REPORT.id}`));
+      await user.click(await screen.findByRole('button', { name: /show the queue anyway/i }));
+      await flush();
+      expect(hideResolvedSwitch()).not.toBeChecked();
+
+      statesFailing = false;
+      await act(async () => { await queryClient.invalidateQueries({ queryKey: ['resolution-state'] }); });
+      await waitFor(() => expect(pendingSwitch()).toBeChecked());
+      await user.click(pendingSwitch());
+      await flush();
+
+      expect(hideResolvedSwitch()).toBeChecked();
+    });
+
+    // Here the read has already failed when the link's report loads, so the
+    // link handler itself turns Hide resolved off, not the effect above.
+    it('hands Hide resolved back when the read had failed before the link landed', async () => {
+      let statesFailing = true;
+      let releaseReports: () => void = () => {};
+      const reportsGate = new Promise<void>((resolve) => { releaseReports = resolve; });
+      stubFetch({
+        events: [CSAM_REPORT, SPAM_REPORT, HIDDEN_REPORT],
+        states: HIDDEN_STATES,
+        labels: () => Promise.resolve([{ type: 'event', value: HIDDEN_EVENT }]),
+        statesFail: () => statesFailing,
+        reportsGate,
+      });
+      const user = userEvent.setup();
+      const queryClient = renderAt(`/reports?event=${HIDDEN_EVENT}`);
+      await waitFor(() => expect(queryClient.getQueryState(['resolution-state'])?.status).toBe('error'));
+      await act(async () => { releaseReports(); });
+      await waitFor(() => expect(window.location.pathname).toBe(`/reports/${HIDDEN_REPORT.id}`));
+      await user.click(await screen.findByRole('button', { name: /show the queue anyway/i }));
+      await flush();
+      expect(hideResolvedSwitch()).not.toBeChecked();
+
+      statesFailing = false;
+      await act(async () => { await queryClient.invalidateQueries({ queryKey: ['resolution-state'] }); });
+      await waitFor(() => expect(pendingSwitch()).toBeChecked());
+      await user.click(pendingSwitch());
+      await flush();
+
+      expect(hideResolvedSwitch()).toBeChecked();
+    });
+
+    it('hands back the Hide resolved setting the moderator chose after the link, not the one before it', async () => {
+      let statesFailing = true;
+      stubFetch({
+        events: [CSAM_REPORT, SPAM_REPORT, HIDDEN_REPORT],
+        states: HIDDEN_STATES,
+        labels: () => Promise.resolve([{ type: 'event', value: HIDDEN_EVENT }]),
+        statesFail: () => statesFailing,
+      });
+      const user = userEvent.setup();
+      const queryClient = renderAt(`/reports?event=${HIDDEN_EVENT}`);
+      await waitFor(() => expect(window.location.pathname).toBe(`/reports/${HIDDEN_REPORT.id}`));
+      await user.click(await screen.findByRole('button', { name: /show the queue anyway/i }));
+      await flush();
+      expect(hideResolvedSwitch()).not.toBeChecked();
+
+      // The moderator sets it themselves: on, then off again.
+      await user.click(hideResolvedSwitch());
+      await user.click(hideResolvedSwitch());
+      expect(hideResolvedSwitch()).not.toBeChecked();
+
+      statesFailing = false;
+      await act(async () => { await queryClient.invalidateQueries({ queryKey: ['resolution-state'] }); });
+      await user.click(await screen.findByRole('switch', { name: /pending review/i }));
+      await flush();
+      await user.click(pendingSwitch());
+      await flush();
+
+      expect(hideResolvedSwitch()).not.toBeChecked();
+    });
+
     describe('while the browser is offline', () => {
       let offlineClient: QueryClient | undefined;
       afterEach(() => {
@@ -572,6 +669,39 @@ describe('Reports sensitive pending-review switch', () => {
 
         expect(hideResolvedSwitch()).not.toBeChecked();
         expect(screen.getByText(NOTE_SPAM)).toBeInTheDocument();
+      });
+
+      it("hands Hide resolved back when the connection returns and the link's switch opens", async () => {
+        let releaseStates: () => void = () => {};
+        const statesGate = new Promise<void>((resolve) => { releaseStates = resolve; });
+        stubFetch({
+          events: [CSAM_REPORT, SPAM_REPORT, HIDDEN_REPORT],
+          states: HIDDEN_STATES,
+          labels: () => Promise.resolve([{ type: 'event', value: HIDDEN_EVENT }]),
+          statesGate,
+        });
+        const user = userEvent.setup();
+        const queryClient = renderAt(`/reports?event=${HIDDEN_EVENT}`);
+        offlineClient = queryClient;
+        await waitFor(() => expect(window.location.pathname).toBe(`/reports/${HIDDEN_REPORT.id}`));
+
+        onlineManager.setOnline(false);
+        await act(async () => {
+          void queryClient.resetQueries({ queryKey: ['resolution-state'] });
+        });
+        expect(queryClient.getQueryState(['resolution-state'])?.fetchStatus).toBe('paused');
+        await user.click(await screen.findByRole('button', { name: /show the queue anyway/i }));
+        await flush();
+        // The courtesy turned Hide resolved off to show the resolved report.
+        expect(hideResolvedSwitch()).not.toBeChecked();
+
+        onlineManager.setOnline(true);
+        await act(async () => { releaseStates(); });
+        await waitFor(() => expect(pendingSwitch()).toBeChecked());
+        await user.click(pendingSwitch());
+        await flush();
+
+        expect(hideResolvedSwitch()).toBeChecked();
       });
     });
 

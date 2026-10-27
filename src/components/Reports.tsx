@@ -458,6 +458,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // clear, so leaving it has to hand both back -- otherwise a look at the
   // auto-hidden queue silently spends settings they chose.
   const prePendingReviewRef = useRef<{ hideResolved: boolean; filterCategory: string | null } | null>(null);
+  // Hide resolved as the moderator had it before a deep link's courtesy last
+  // turned it off to show a resolved linked report. Null until a courtesy
+  // does, and again once the moderator sets Hide resolved themselves. If the
+  // switch opens later, for a target only a later read showed to be
+  // auto-hidden, it saves this rather than the courtesy's "off".
+  const hideResolvedBeforeCourtesyRef = useRef<boolean | null>(null);
   // True only while the pending-review switch is on because a deep link
   // opened it, not the moderator. Only then may the switch close itself when
   // the linked target leaves it; a switch the moderator turned on is theirs.
@@ -1133,6 +1139,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       resolvedTargets,
       bannedPubkeySet,
     )) {
+      hideResolvedBeforeCourtesyRef.current = hideResolved;
       setHideResolved(false);
     }
   }, [hideResolved, selectedReport, resolvedTargets, bannedPubkeySet, authorByTarget, switchMembershipKnown]);
@@ -1141,7 +1148,13 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // hideResolved and filterCategory, so it changes only when those do.
   const enterPendingReview = useCallback(() => {
     setShowPendingReview(true);
-    prePendingReviewRef.current = { hideResolved, filterCategory };
+    // A failed or offline read counts as settled, so a link's courtesy can
+    // turn Hide resolved off before a later read opens the switch. Saving that
+    // "off" would hand it back when the switch closes.
+    prePendingReviewRef.current = {
+      hideResolved: hideResolvedBeforeCourtesyRef.current ?? hideResolved,
+      filterCategory,
+    };
     setHideResolved(false);
     setFilterCategory(null);
   }, [hideResolved, filterCategory]);
@@ -1258,6 +1271,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         && !switchMembership.has(`${inBulk.target.type}:${inBulk.target.value}`)
         && isConsolidatedReportResolved(inBulk, resolvedTargets, bannedPubkeySet)
       ) {
+        hideResolvedBeforeCourtesyRef.current = hideResolved;
         setHideResolved(false);
       }
       deepLinkSelectedRef.current = true;
@@ -1746,6 +1760,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                   // arrival courtesy is spent. Without this, re-enabling the
                   // toggle re-arms the effect that just cleared it.
                   deepLinkSelectedRef.current = false;
+                  hideResolvedBeforeCourtesyRef.current = null;
                   setHideResolved(checked);
                   // When hiding resolved, turn off pending review filter
                   if (checked) setShowPendingReview(false);
