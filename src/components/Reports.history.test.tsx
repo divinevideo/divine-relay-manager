@@ -600,6 +600,52 @@ describe('the history footer never mistakes a stop for an end', () => {
       expect(await screen.findByText(/couldn't refresh resolved history/i)).toBeInTheDocument();
     });
 
+    it('does not call a running re-read a failed refresh after Reports remounts', async () => {
+      // Leaving the Reports tab unmounts it, and a plain re-read drops query-core's
+      // fetch direction, so the component cannot be what remembers the error.
+      let reRead: Reply = () => jsonResponse(resolvedPage([H1, H2], { nextCursor: PAGE_ONE_CURSOR, done: false }));
+      stubWorker({ pages: { first: () => reRead(), [PAGE_ONE_CURSOR]: fail } });
+      const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, retryDelay: 0 } } });
+      const ui = (children: React.ReactNode) => <TestApp queryClient={queryClient}>{children}</TestApp>;
+      const user = userEvent.setup();
+      const view = render(ui(<Reports relayUrl={RELAY_URL} />));
+      await openHistory(user);
+      await user.click(await screen.findByRole('button', { name: /load more/i }));
+      expect(await screen.findByText(/couldn't load the next page/i)).toBeInTheDocument();
+
+      reRead = hang;
+      await act(async () => { queryClient.invalidateQueries({ queryKey: ['reports-resolved'] }); });
+      await waitFor(() => expect(screen.getByRole('button', { name: /load more/i })).toBeDisabled());
+
+      view.rerender(ui(<div />));
+      view.rerender(ui(<Reports relayUrl={RELAY_URL} />));
+      await openHistory(user);
+
+      const footer = await screen.findByTestId('resolved-history-footer');
+      expect(footer).not.toHaveTextContent(/couldn't refresh/i);
+      expect(footer).toHaveTextContent('Showing 3 resolved. More further back.');
+    });
+
+    it('says a re-read failed even when it fails with the very error Load more left', async () => {
+      // A fetch layer that shares one rejection between callers. Only the
+      // timestamp tells the two failures apart.
+      const shared = new TypeError('network down');
+      let reRead: Reply = () => jsonResponse(resolvedPage([H1, H2], { nextCursor: PAGE_ONE_CURSOR, done: false }));
+      const throwShared: Reply = () => { throw shared; };
+      stubWorker({ pages: { first: () => reRead(), [PAGE_ONE_CURSOR]: throwShared } });
+      const user = userEvent.setup();
+      const queryClient = renderQueue();
+      await openHistory(user);
+      await user.click(await screen.findByRole('button', { name: /load more/i }));
+      expect(await screen.findByText(/couldn't load the next page/i)).toBeInTheDocument();
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      reRead = throwShared;
+      await act(async () => { await queryClient.invalidateQueries({ queryKey: ['reports-resolved'] }); });
+
+      expect(await screen.findByText(/couldn't refresh resolved history/i)).toBeInTheDocument();
+    });
+
     // The query that holds the Load more error can be replaced: an environment
     // switch gives a new key, and re-selecting an environment clears the cache.
     // A new query counts its errors from zero again, so the first error there

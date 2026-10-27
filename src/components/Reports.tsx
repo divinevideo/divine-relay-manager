@@ -49,6 +49,7 @@ import { DeepLinkFallback } from "@/components/DeepLinkFallback";
 import { ReportClientText } from "@/components/ReportClientText";
 import { classifyTargetedFetch, reportsMatchingTarget, type DeepLinkStatus } from "@/lib/deepLinkResolution";
 import { useAdminApi } from "@/hooks/useAdminApi";
+import { isLoadMoreFailure, rememberLoadMoreFailure } from "@/lib/loadMoreFailure";
 import { useResolvedHistory } from "@/hooks/useResolvedHistory";
 import { useBannedPubkeys, useBannedEvents } from "@/hooks/useRelayBanLists";
 import { HIGH_PRIORITY_CATEGORIES, RESOLUTION_READ_TIMEOUT_MS, getCategoryLabel, getReportCategory, hasCsamSignal } from "@/lib/constants";
@@ -487,7 +488,6 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     }
   }
   const history = useResolvedHistory(relayUrl, historyView);
-  const loadMoreErrorRef = useRef<unknown>(null);
   const historyPages = history.data?.pages;
   // What the list is built from: the feed plus deep-linked reports, plus
   // loaded history in the history view. They can hold the same report, and
@@ -1171,16 +1171,13 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         return !!target && isListedTargetResolved(target, authorByTarget.get(reportTargetKey(target)));
       }).length;
 
-  // The error a failed Load more left (see refreshFailed), by identity. Not
-  // errorUpdateCount: that counts per query and starts again from zero when
-  // the query is replaced (an environment switch, or re-selecting an
-  // environment, which clears the cache), so a new query's first error would
-  // match an old count. Each failed fetch, in any query, throws a new error
-  // object, so only the very error Load more left can match. Written during
-  // render: it only remembers a value already in the query, and rendering
-  // twice records the same one.
-  if (history.isFetchNextPageError) loadMoreErrorRef.current = history.error;
-  const isLoadMoreLeftover = loadMoreErrorRef.current !== null && loadMoreErrorRef.current === history.error;
+  // The failure a failed Load more left (see refreshFailed), remembered against
+  // the cached query's own error: src/lib/loadMoreFailure.ts says why it is not
+  // component state, and why it is the error and its timestamp together.
+  // Written during render: it only records values already in the query, and
+  // rendering twice records the same ones.
+  if (history.isFetchNextPageError) rememberLoadMoreFailure(history.error, history.errorUpdatedAt);
+  const isLoadMoreLeftover = isLoadMoreFailure(history.error, history.errorUpdatedAt);
 
   const lastHistoryPage = historyPages && historyPages.length > 0 ? historyPages[historyPages.length - 1] : undefined;
   const footerState = historyFooterState({
