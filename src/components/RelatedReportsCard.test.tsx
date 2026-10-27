@@ -70,7 +70,7 @@ describe('RelatedReportsCard', () => {
     });
     renderCard();
 
-    expect(await screen.findByText(/Related Reports \(3 more on this account\)/)).toBeInTheDocument();
+    expect(await screen.findByText(/Related Reports \(3 more on this account and its posts\)/)).toBeInTheDocument();
     expect(screen.getByText(/Reports on this User \(2\)/)).toBeInTheDocument();
     expect(screen.getByText(/Reports on their Events \(1\)/)).toBeInTheDocument();
   });
@@ -90,7 +90,7 @@ describe('RelatedReportsCard', () => {
     });
     renderCard();
 
-    expect(await screen.findByText(/Related Reports \(1 more on this account\)/)).toBeInTheDocument();
+    expect(await screen.findByText(/Related Reports \(1 more on this account and its posts\)/)).toBeInTheDocument();
   });
 
   it('shows a floor, on every count, when the read stopped early', async () => {
@@ -104,7 +104,7 @@ describe('RelatedReportsCard', () => {
     });
     renderCard();
 
-    expect(await screen.findByText(/Related Reports \(9\+ more on this account\)/)).toBeInTheDocument();
+    expect(await screen.findByText(/Related Reports \(9\+ more on this account and its posts\)/)).toBeInTheDocument();
     expect(screen.getByText(/Reports on this User \(5\+\)/)).toBeInTheDocument();
     expect(screen.getByText(/Reports on their Events \(4\+\)/)).toBeInTheDocument();
     // No leading "+" next to a trailing one: "2+ more", not "+2+ more".
@@ -151,7 +151,7 @@ describe('RelatedReportsCard', () => {
     renderCard();
 
     expect(await screen.findByText(
-      /none found in the part of this account's history that could be read/i,
+      /none found in the part of the history of this account and its posts that could be read/i,
     )).toBeInTheDocument();
     expect(screen.queryByText(/0\+/)).not.toBeInTheDocument();
   });
@@ -164,7 +164,7 @@ describe('RelatedReportsCard', () => {
     fetchReportsByTarget.mockResolvedValue({ events: [malformed, userReport(2)], truncated: false });
     renderCard();
 
-    expect(await screen.findByText(/Related Reports \(1 more on this account\)/)).toBeInTheDocument();
+    expect(await screen.findByText(/Related Reports \(1 more on this account and its posts\)/)).toBeInTheDocument();
   });
 
   it('does not count a report whose first p tag is another account', async () => {
@@ -182,7 +182,7 @@ describe('RelatedReportsCard', () => {
     fetchReportsByTarget.mockResolvedValue({ events: [unrelated, userReport(2)], truncated: false });
     renderCard();
 
-    expect(await screen.findByText(/Related Reports \(1 more on this account\)/)).toBeInTheDocument();
+    expect(await screen.findByText(/Related Reports \(1 more on this account and its posts\)/)).toBeInTheDocument();
     expect(screen.queryByText(/Reports on their Events/)).not.toBeInTheDocument();
   });
 
@@ -204,7 +204,7 @@ describe('RelatedReportsCard', () => {
     fetchReportsByTarget.mockResolvedValue({ events: [csamUser, csamEvent], truncated: false });
     const { container } = renderCard();
 
-    await screen.findByText(/Related Reports \(2 more on this account\)/);
+    await screen.findByText(/Related Reports \(2 more on this account and its posts\)/);
     expect(container.querySelectorAll('img, video, audio, picture, iframe, a, svg image').length).toBe(0);
     expect(container.querySelector('[role="img"], [style*="background-image"]')).toBeNull();
   });
@@ -230,19 +230,19 @@ describe('RelatedReportsCard', () => {
   it('shows the failure, not the earlier count, when a refetch fails with data on hand', async () => {
     fetchReportsByTarget.mockResolvedValueOnce({ events: [userReport(1)], truncated: false });
     const { client } = renderCard();
-    expect(await screen.findByText(/Related Reports \(1 more on this account\)/)).toBeInTheDocument();
+    expect(await screen.findByText(/Related Reports \(1 more on this account and its posts\)/)).toBeInTheDocument();
 
     fetchReportsByTarget.mockRejectedValue(new Error('boom'));
     void client.refetchQueries({ queryKey: ['account-reports'] });
 
     expect(await screen.findByText(/related reports could not be loaded/i, {}, { timeout: 4000 })).toBeInTheDocument();
-    expect(screen.queryByText(/more on this account/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/more on this account and its posts/)).not.toBeInTheDocument();
   });
 
   it('disables Try again while the retry is in flight', async () => {
     fetchReportsByTarget.mockResolvedValueOnce({ events: [userReport(1)], truncated: false });
     const { client } = renderCard();
-    await screen.findByText(/Related Reports \(1 more on this account\)/);
+    await screen.findByText(/Related Reports \(1 more on this account and its posts\)/);
 
     fetchReportsByTarget.mockRejectedValue(new Error('boom'));
     void client.refetchQueries({ queryKey: ['account-reports'] });
@@ -263,10 +263,10 @@ describe('RelatedReportsCard', () => {
 
     // One retry (1 s backoff) before the failure shows.
     expect(await screen.findByText(/related reports could not be loaded/i, {}, { timeout: 4000 })).toBeInTheDocument();
-    expect(screen.queryByText(/more on this account/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/more on this account and its posts/)).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByRole('button', { name: /try again/i }));
-    expect(await screen.findByText(/Related Reports \(1 more on this account\)/)).toBeInTheDocument();
+    expect(await screen.findByText(/Related Reports \(1 more on this account and its posts\)/)).toBeInTheDocument();
   });
 
   it('shows no number while the read is pending', async () => {
@@ -274,7 +274,7 @@ describe('RelatedReportsCard', () => {
     renderCard();
 
     expect(await screen.findByText(/checking/i)).toBeInTheDocument();
-    expect(screen.queryByText(/\d+ more on this account/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\d+ more on this account and its posts/)).not.toBeInTheDocument();
   });
 
   it('hides the card after a complete read finds nothing related', async () => {
@@ -292,12 +292,12 @@ describe('RelatedReportsCard', () => {
       truncated: false,
     }));
     const { rerenderCard } = renderCard();
-    expect(await screen.findByText(/Related Reports \(2 more on this account\)/)).toBeInTheDocument();
+    expect(await screen.findByText(/Related Reports \(2 more on this account and its posts\)/)).toBeInTheDocument();
 
     config.apiUrl = 'https://api-b.example';
     rerenderCard();
 
-    expect(await screen.findByText(/Related Reports \(1 more on this account\)/)).toBeInTheDocument();
+    expect(await screen.findByText(/Related Reports \(1 more on this account and its posts\)/)).toBeInTheDocument();
     expect(fetchReportsByTarget).toHaveBeenCalledWith('https://api-b.example', { pubkey: USER });
   });
 });

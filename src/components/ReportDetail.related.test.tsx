@@ -134,7 +134,7 @@ describe('ReportDetail Related Reports wiring', () => {
 
     renderDetail();
 
-    expect(await screen.findByText(/Related Reports \(1 more on this account\)/)).toBeInTheDocument();
+    expect(await screen.findByText(/Related Reports \(1 more on this account and its posts\)/)).toBeInTheDocument();
     expect(fetchReportsByTarget).toHaveBeenCalledWith({ pubkey: REPORTED_PUBKEY });
   });
 });

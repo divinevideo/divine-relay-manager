@@ -75,7 +75,7 @@ export function RelatedReportsCard({ pubkey, currentTarget }: RelatedReportsCard
         <CardHeader className="py-3">
           <CardTitle className={TITLE_CLASS}>
             <Link2 className="h-4 w-4 shrink-0" />
-            Related Reports: none found in the part of this account's history that could be read.
+            Related Reports: none found in the part of the history of this account and its posts that could be read.
           </CardTitle>
         </CardHeader>
       </Card>
@@ -87,7 +87,7 @@ export function RelatedReportsCard({ pubkey, currentTarget }: RelatedReportsCard
       <CardHeader className="py-3">
         <CardTitle className={TITLE_CLASS}>
           <Link2 className="h-4 w-4 shrink-0" />
-          Related Reports ({historyCount(total, truncated)} more on this account)
+          Related Reports ({historyCount(total, truncated)} more on this account and its posts)
         </CardTitle>
       </CardHeader>
       <CardContent className="py-0 pb-3">
