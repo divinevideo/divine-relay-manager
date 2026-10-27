@@ -12,7 +12,7 @@ import { FileText, Copy, Check, Flag, Globe } from "lucide-react";
 import { useState } from "react";
 import { nip19 } from "nostr-tools";
 import type { NostrEvent } from "@nostrify/nostrify";
-import { getProfileUrl, getReportCategory } from "@/lib/constants";
+import { getCategoryLabel, getProfileUrl, getReportCategory } from "@/lib/constants";
 
 interface ReporterCardProps {
   pubkey: string;
@@ -90,7 +90,7 @@ export function ReporterCard({
           <p className="text-xs text-muted-foreground font-mono truncate">{npubDisplay}</p>
         </div>
         {category && (
-          <Badge variant="outline" className="text-xs shrink-0">{category}</Badge>
+          <Badge variant="outline" className="text-xs shrink-0">{getCategoryLabel(category)}</Badge>
         )}
         {reportEvent && (
           <span className="text-xs text-muted-foreground shrink-0">
@@ -118,7 +118,7 @@ export function ReporterCard({
               {!isFunnelcakeUser && <Globe className="h-3 w-3 text-purple-500 shrink-0" />}
             </a>
             {category && (
-              <Badge variant="outline" className="text-xs shrink-0">{category}</Badge>
+              <Badge variant="outline" className="text-xs shrink-0">{getCategoryLabel(category)}</Badge>
             )}
           </div>
 
