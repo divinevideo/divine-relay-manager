@@ -991,7 +991,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const switchCandidates = reports ? feedConsolidated : deepLinkedConsolidated;
 
   // Who sits behind the Pending review switch: every auto-hidden target, plus
-  // any loaded target with a CSAM signal that no person has handled yet. It
+  // any target in the feed or the deep-linked reports with a CSAM signal that
+  // no person has handled yet. Not loaded history; see switchCandidates. It
   // does not read hideResolved; see buildSwitchMembership.
   const switchMembership = useMemo(() => buildSwitchMembership({
     consolidated: switchCandidates,
@@ -1671,7 +1672,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
   // With the queue failed cold there is no list to draw the target's reports
   // from; the deep link's own lookup holds them.
-  const paneConsolidated = listReports ? consolidated : consolidateReports(deepLinkedReports);
+  const paneConsolidated = listReports ? consolidated : deepLinkedConsolidated;
 
   // Built once and rendered in both the desktop pane and the mobile sheet so
   // the two views cannot drift. Reports render attacker-authored event data:
