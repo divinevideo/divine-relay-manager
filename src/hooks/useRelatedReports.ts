@@ -5,9 +5,8 @@ import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { useAppContext } from "@/hooks/useAppContext";
-import type { ReportTarget } from "../../shared/report-target";
 import { splitRelatedReports, type RelatedReports } from "@/lib/relatedReports";
-import { reportTargetKey } from "../../shared/report-target";
+import { reportTargetKey, type ReportTarget } from "../../shared/report-target";
 
 export type RelatedReportsState =
   | { status: 'loading' }
@@ -31,8 +30,9 @@ export function useRelatedReports(
     queryFn: () => fetchReportsByTarget({ pubkey: key }),
     enabled: !!key,
     staleTime: 60_000,
-    // One retry, as the queue's other relay-backed reads: the default of three
-    // keeps the card on "checking" for seconds before a failure shows.
+    // One retry, as the queue's other relay-backed reads. The default of three
+    // would keep the card on "checking" through four attempts, and a read that
+    // times out takes the full request timeout each time.
     retry: 1,
     // The app default is Infinity, and each entry can be a read of tens of
     // thousands of reports. Keep an account's read for a few minutes, not for

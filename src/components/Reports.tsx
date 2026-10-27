@@ -1405,13 +1405,13 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       return;
     }
 
-    // The list is loaded and the target isn't in it: the needs-attention feed
-    // holds every report that still needs a moderator, so the target is most
-    // likely resolved, or gone. Do one targeted relay fetch per target to tell
-    // those apart from "still loading". Key the
-    // attempt on the full target identity (relay + type + value) so a same-value
-    // target across type, or a relay/environment switch, re-resolves instead of
-    // reusing the prior attempt or its stale result.
+    // The target isn't in what is listed: not in the needs-attention feed (so
+    // most likely resolved or gone, unless that read failed or stopped early),
+    // nor in any history page loaded so far. Do one targeted relay fetch per
+    // target to tell those apart from "still loading". Key the attempt on the
+    // full target identity (relay + type + value) so a same-value target across
+    // type, or a relay/environment switch, re-resolves instead of reusing the
+    // prior attempt or its stale result.
     const targetKey = `${relayUrl}|${target.type}|${target.value}`;
     if (attemptedTargetRef.current === targetKey) return;
     attemptedTargetRef.current = targetKey;

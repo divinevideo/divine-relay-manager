@@ -12,27 +12,37 @@ import { moderationStatusMock } from '@/test/moderationStatusMock';
 
 const REPORTED_PUBKEY = 'd'.repeat(64);
 const MOD_PUBKEY = 'e'.repeat(64);
-const LIST_EVENT_ID = 'c'.repeat(64);
-const LIST_EVENT = vi.hoisted(() => ({
-  value: {
-    id: 'c'.repeat(64),
-    pubkey: 'd'.repeat(64),
-    created_at: 1751000000,
-    kind: 30005,
-    tags: [['d', 'faves'], ['title', 'Best skate clips'], ['description', 'Only the good ones']],
-    content: '',
-    sig: 'b'.repeat(128),
-  } as NostrEvent,
-}));
+const EVENT_ID = 'c'.repeat(64);
+const OTHER_EVENT_ID = '8'.repeat(64);
 
-// Set in beforeEach; tests change single fields.
+const THREAD_EVENT: NostrEvent = {
+  id: EVENT_ID,
+  pubkey: REPORTED_PUBKEY,
+  created_at: 1751000000,
+  kind: 1,
+  tags: [],
+  content: 'a post',
+  sig: 'b'.repeat(128),
+};
+
+const REPORT: NostrEvent = {
+  id: 'f'.repeat(64),
+  pubkey: 'a'.repeat(64),
+  created_at: 1751000000,
+  kind: 1984,
+  tags: [['e', EVENT_ID], ['p', REPORTED_PUBKEY]],
+  content: 'spam',
+  sig: 'b'.repeat(128),
+};
+
+// Set in beforeEach.
 const status = vi.hoisted(() => ({ value: {} as ModerationStatus }));
+const fetchReportsByTarget = vi.hoisted(() => vi.fn());
 
 vi.mock('react-router-dom', async (orig) => ({
   ...(await orig<typeof import('react-router-dom')>()),
   useNavigate: () => vi.fn(),
 }));
-const fetchReportsByTarget = vi.hoisted(() => vi.fn());
 vi.mock('@/hooks/useAdminApi', () => ({
   useAdminApi: () => ({
     deleteEvent: vi.fn(),
@@ -50,24 +60,17 @@ vi.mock('@/hooks/useCurrentUser', () => ({
 vi.mock('@/hooks/useAppContext', () => ({
   useAppContext: () => ({ config: { relayUrl: 'wss://relay.example', apiUrl: 'https://api.example' } }),
 }));
-// The decision log the reported list's id returns. Empty by default.
-const decisionRows = vi.hoisted(() => ({
-  value: [] as { id: number; action: string; reason: string | null; created_at: string }[],
-  handling: false,
-}));
 vi.mock('@/hooks/useDecisionLog', () => ({
   useDecisionLog: () => ({
-    hasDecisions: decisionRows.value.length > 0,
-    hasHandlingDecisions: decisionRows.handling,
-    latestHandlingDecision: decisionRows.handling
-      ? decisionRows.value.find(row => !row.action.startsWith('auto_hide_'))
-      : undefined,
+    hasDecisions: false,
+    hasHandlingDecisions: false,
+    latestHandlingDecision: undefined,
     isPendingReview: false,
     isDeleted: false,
     isAutoHidden: false,
     isAutoHideRestored: false,
-    decisions: decisionRows.value,
-    latestDecision: decisionRows.value[0] ?? null,
+    decisions: [],
+    latestDecision: null,
     refetch: vi.fn(),
   }),
 }));
@@ -77,14 +80,10 @@ vi.mock('@/hooks/useModerationStatus', () => ({
 vi.mock('@/hooks/useBannedEvent', () => ({ useBannedEvent: () => ({ data: null, isLoading: false }) }));
 vi.mock('@/hooks/useUserSummary', () => ({ useUserSummary: () => ({ data: null, isLoading: false }) }));
 vi.mock('@/hooks/useMediaStatus', () => ({ useMediaStatus: () => ({}) }));
-
-const reportTarget = vi.hoisted(() => ({
-  value: { type: 'event', value: 'c'.repeat(64) } as { type: string; value: string },
-}));
 vi.mock('@/hooks/useReportContext', () => ({
   useReportContext: () => ({
-    target: reportTarget.value,
-    thread: { event: LIST_EVENT.value, ancestors: [], replies: [] },
+    target: { type: 'event', value: EVENT_ID },
+    thread: { event: THREAD_EVENT, ancestors: [], replies: [] },
     threadLoading: false,
     reportedUser: { profile: undefined, pubkey: REPORTED_PUBKEY, isFunnelcakeUser: false },
     userStats: undefined,
@@ -109,16 +108,6 @@ vi.mock('@/components/BulkDeleteByKind', () => ({ BulkDeleteByKind: () => null }
 vi.mock('@/components/ReporterCard', () => ({ ReporterInline: () => null }));
 vi.mock('@/components/UserIdentifier', () => ({ UserIdentifier: () => null }));
 
-const REPORT: NostrEvent = {
-  id: 'f'.repeat(64),
-  pubkey: 'a'.repeat(64),
-  created_at: 1751000000,
-  kind: 1984,
-  tags: [['e', LIST_EVENT_ID], ['p', REPORTED_PUBKEY], ['a', `30005:${REPORTED_PUBKEY}:faves`]],
-  content: 'harassment',
-  sig: 'b'.repeat(128),
-};
-
 function renderDetail() {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -136,15 +125,13 @@ describe('ReportDetail Related Reports wiring', () => {
   beforeEach(() => {
     fetchReportsByTarget.mockReset();
     status.value = moderationStatusMock({ isUserBanned: false, isEventGone: false });
-    decisionRows.value = [];
-    decisionRows.handling = false;
   });
 
   it("reads the reported account's reports and leaves the open report's target out", async () => {
     const other: NostrEvent = {
       ...REPORT,
       id: '9'.repeat(64),
-      tags: [['e', '8'.repeat(64)], ['p', REPORTED_PUBKEY]],
+      tags: [['e', OTHER_EVENT_ID], ['p', REPORTED_PUBKEY]],
     };
     fetchReportsByTarget.mockResolvedValue({ events: [REPORT, other], truncated: false });
 

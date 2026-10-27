@@ -519,7 +519,8 @@ function sanitizeRelayEvents(events: unknown): NostrEvent[] {
 }
 
 // Fetch every report scoped to a single target (reported event id or pubkey)
-// via the worker's /api/reports filter, resolved or not, paged to the end.
+// via the worker's /api/reports filter, resolved or not, paged to the end or to
+// the worker's page bound (`truncated`).
 // Two callers: the queue's deep link, when its target isn't in the
 // needs-attention feed (a resolved report, or one that is gone), so the screen
 // can tell those apart from "still loading"; and the report pane's Related
