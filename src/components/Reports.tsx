@@ -1701,14 +1701,6 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // lookup holds them.
   const paneConsolidated = listReports ? allConsolidated : deepLinkedConsolidated;
 
-  // Built once and rendered in both the desktop pane and the mobile sheet so
-  // the two views cannot drift. Reports render attacker-authored event data:
-  // a crashing report degrades to the inline fallback (with the target's
-  // identifiers and retry/dismiss) while the reports list stays usable (#158).
-  // deepLinkTarget is lowercased where it is built, matching the worker's
-  // reports filter (reportsMode lowercases too), so the per-target
-  // decisions read keys off the same normalized hex an uppercase-hex deep link
-  // would otherwise miss.
   // The open report's side of the switch, so the pane carries the row's label.
   const selectedSwitchKey = selectedTarget ? reportTargetKey(selectedTarget) : undefined;
 
@@ -1736,6 +1728,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       && queueFeedTargetKeys.has(reportTargetKey(selectedTarget))
       && !targetedReadComplete);
 
+  // Built once and rendered in both the desktop pane and the mobile sheet so
+  // the two views cannot drift. Reports render attacker-authored event data:
+  // a crashing report degrades to the inline fallback (with the target's
+  // identifiers and retry/dismiss) while the reports list stays usable (#158).
+  // deepLinkTarget is lowercased where it is built, matching the worker's
+  // reports filter (reportsMode lowercases too), so the per-target
+  // decisions read keys off the same normalized hex an uppercase-hex deep link
+  // would otherwise miss.
   const reportDetailPane = showDeepLinkFallback ? (
     <DeepLinkFallback
       status={deepLinkStatus === 'gone' ? 'gone' : 'unavailable'}
