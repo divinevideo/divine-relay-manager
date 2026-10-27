@@ -400,7 +400,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
   // not fail: NPool.query resolves with whatever had arrived by then. So each
   // read keeps its own timeout signal, and `complete` says whether every read
   // finished before it fired.
-  const { data: relatedReportsRead } = useQuery({
+  const { data: relatedReportsRead, isFetchedAfterMount } = useQuery({
     queryKey: ['related-reports', event.id, event.pubkey],
     queryFn: async ({ signal }) => {
       const read = async (filter: NostrFilter) => {
@@ -430,6 +430,12 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
       }).sort((a, b) => b.created_at - a.created_at);
       return { reports, complete: results.every(r => r.complete) };
     },
+    // Read again whenever an event is opened, even with a recent read cached:
+    // only a read made since then may show its media (hasHighPriorityReports).
+    // staleTime rather than refetchOnMount: 'always', because the events page
+    // keeps this pane mounted when another event is picked, and a change of
+    // event re-reads only stale data.
+    staleTime: 0,
   });
   // Partial when a read timed out. Still listed below, but it cannot rule out
   // a sensitive report.
@@ -688,17 +694,18 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
 
   // Whether any related report has a high-priority category (CSAM, etc.), so
   // media starts hidden to protect moderators. True as soon as a loaded report
-  // is one, false only once every read finished and none is. Undefined while
-  // that is unknown: the read is pending, failed, or timed out with nothing
-  // sensitive in what arrived.
+  // is one, cached or not. False only once a read made since this event was
+  // opened has finished and found none: a cached read can predate a report
+  // filed since. Undefined while that is unknown: no such read has finished,
+  // or it failed or timed out with nothing sensitive in what arrived.
   const hasHighPriorityReports = useMemo(() => {
     if (!relatedReportsRead) return undefined;
     const { reports, complete } = relatedReportsRead;
     const sensitive = reports.some(r => HIGH_PRIORITY_CATEGORIES.includes(getReportCategory(r)))
       || hasCsamSignal(reports);
     if (sensitive) return true;
-    return complete ? false : undefined;
-  }, [relatedReportsRead]);
+    return complete && isFetchedAfterMount ? false : undefined;
+  }, [relatedReportsRead, isFetchedAfterMount]);
 
   // Extract sha256 hashes for classifier components
   const mediaHashes = extractMediaHashes(event.content || '', event.tags);

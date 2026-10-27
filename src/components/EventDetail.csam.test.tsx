@@ -107,16 +107,21 @@ function answerOnAbort(signal: AbortSignal, events: unknown[] = []): Promise<unk
   });
 }
 
-function renderDetail() {
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-  });
+function renderDetail(queryClient = new QueryClient({
+  defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+})) {
   const view = render(
     <QueryClientProvider client={queryClient}>
       <EventDetail event={EVENT} />
     </QueryClientProvider>,
   );
   return { ...view, queryClient };
+}
+
+// The app's own query defaults (App.tsx): a cached read stays fresh for a
+// minute and is never garbage-collected.
+function appQueryClient() {
+  return new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 60_000, gcTime: Infinity } } });
 }
 
 beforeEach(() => {
@@ -197,5 +202,84 @@ describe('EventDetail media before its reports are known', () => {
     renderDetail();
     await screen.findByText('1 Related Report');
     expect(screen.getByTestId('media').dataset.show).toBe('true');
+  });
+});
+
+// A read cached from an earlier visit can predate a report filed since, so
+// only a read made since the event was opened may show its media.
+describe('EventDetail media on a later visit', () => {
+  const media = () => screen.getByTestId('media').dataset.show;
+  const OTHER_EVENT: NostrEvent = { ...EVENT, id: 'b'.repeat(64) };
+
+  async function visitOnce(queryClient: QueryClient, reportsFound: NostrEvent[]) {
+    reports.value = reportsFound;
+    const first = renderDetail(queryClient);
+    await screen.findByText('1 Related Report');
+    first.unmount();
+  }
+
+  it('starts hidden, though the last visit found nothing sensitive, until this visit has read', async () => {
+    const queryClient = appQueryClient();
+    await visitOnce(queryClient, [SPAM]);
+
+    relay.answer = () => new Promise(() => {});
+    renderDetail(queryClient);
+
+    expect(media()).toBe('null');
+  });
+
+  it("shows media once this visit's own read finds nothing sensitive", async () => {
+    const queryClient = appQueryClient();
+    await visitOnce(queryClient, [SPAM]);
+
+    renderDetail(queryClient);
+
+    await waitFor(() => expect(media()).toBe('true'));
+  });
+
+  it('hides media at once when the last visit found a sensitive report', async () => {
+    const queryClient = appQueryClient();
+    await visitOnce(queryClient, [OLD_BUILD]);
+
+    relay.answer = () => new Promise(() => {});
+    renderDetail(queryClient);
+
+    expect(media()).toBe('false');
+  });
+
+  // The events page keeps this pane mounted when the moderator picks another
+  // event, so coming back to an event is a change of event, not a new mount.
+  describe('when the pane moves back to an event', () => {
+    const ui = (queryClient: QueryClient, event: NostrEvent) => (
+      <QueryClientProvider client={queryClient}><EventDetail event={event} /></QueryClientProvider>
+    );
+
+    async function visitAndMoveOn(queryClient: QueryClient) {
+      reports.value = [SPAM];
+      const view = render(ui(queryClient, EVENT));
+      await waitFor(() => expect(media()).toBe('true'));
+      view.rerender(ui(queryClient, OTHER_EVENT));
+      await waitFor(() => expect(media()).toBe('true'));
+      return view;
+    }
+
+    it('starts hidden until the read for this return has answered', async () => {
+      const queryClient = appQueryClient();
+      const { rerender } = await visitAndMoveOn(queryClient);
+
+      relay.answer = () => new Promise(() => {});
+      rerender(ui(queryClient, EVENT));
+
+      expect(media()).toBe('null');
+    });
+
+    it('shows media once the read for this return finds nothing sensitive', async () => {
+      const queryClient = appQueryClient();
+      const { rerender } = await visitAndMoveOn(queryClient);
+
+      rerender(ui(queryClient, EVENT));
+
+      await waitFor(() => expect(media()).toBe('true'));
+    });
   });
 });
