@@ -151,7 +151,7 @@ describe('RelatedReportsCard', () => {
     renderCard();
 
     expect(await screen.findByText(
-      /none found in the part of the history of this account and its posts that could be read/i,
+      /none found for this account or its posts, but not all of their history could be read/i,
     )).toBeInTheDocument();
     expect(screen.queryByText(/0\+/)).not.toBeInTheDocument();
   });
