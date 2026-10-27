@@ -199,6 +199,11 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
 
   // Auto-hide specific status
   const isPendingReview = decisionLog.isPendingReview;
+  // isAutoHidden also covers a hide or restore the worker could not confirm.
+  // Those keep the "Hide not confirmed" badge, so the event-gone badge must not
+  // also call them hidden; it falls through to what the relay itself says.
+  const isAutoHideLanded = decisionLog.isAutoHidden && !decisionLog.isAutoHideRestored
+    && !decisionLog.isAutoHideUnresolved && !decisionLog.isAutoHideRestoreFailed;
 
   // Find related reports: reports on this user AND reports on their events
   const relatedReports = useMemo(() => {
@@ -705,7 +710,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                     <Badge variant="destructive" className="flex items-center gap-1 cursor-help">
                       <ShieldX className="h-3 w-3" />
                       {decisionLog.isDeleted ? 'Removed by Moderation'
-                        : (decisionLog.isAutoHidden && !decisionLog.isAutoHideRestored) ? 'Auto-Hidden'
+                        : isAutoHideLanded ? 'Auto-Hidden'
                         : isUserBanned ? (moderationStatus.isUserBannedStale ? 'Banned (last known)' : 'User Banned')
                         : moderationStatus.isEventBanned ? 'Event Banned'
                         : 'Not Found on Relay'}
@@ -719,7 +724,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                           ` on ${new Date(decisionLog.decisions.find(d => d.action === 'delete_event' || d.action === 'delete')!.created_at).toLocaleDateString()}`
                         }
                       </p>
-                    ) : (decisionLog.isAutoHidden && !decisionLog.isAutoHideRestored) ? (
+                    ) : isAutoHideLanded ? (
                       <p className="text-xs">Auto-hidden by AI classification</p>
                     ) : isUserBanned ? (
                       <p className="text-xs">

@@ -129,6 +129,13 @@ describe('classifyReport', () => {
   it('skips a malformed NIP-56 type that is not a string', () => {
     const tags = [['e', P, 42], ['p', P, 'spam']] as unknown as string[][];
     expect(classifyReport({ tags }).category).toBe('spam');
+    const pTags = [['p', P, 42]] as unknown as string[][];
+    expect(classifyReport({ tags: pTags }).category).toBe('other');
+  });
+
+  it('skips an empty NIP-56 type', () => {
+    expect(classifyReport({ tags: [['e', P, ''], ['p', P, 'spam']] }).category).toBe('spam');
+    expect(classifyReport({ tags: [['p', P, '']] }).category).toBe('other');
   });
 });
 

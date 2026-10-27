@@ -338,4 +338,34 @@ describe('ReportDetail on a sensitive report, elsewhere in the pane', () => {
     expect(screen.getByText('Hide not confirmed')).toBeInTheDocument();
     expect(screen.queryByText('Auto-Hidden')).not.toBeInTheDocument();
   });
+
+  // A hide that landed, or a failed restore, leaves the event gone from the
+  // relay, which shows a second header badge.
+  it.each([
+    ['an unconfirmed hide', 'unresolved'],
+    ['a failed restore', 'restoreFailed'],
+  ] as const)('does not call %s Auto-Hidden when the event is gone', (_label, flag) => {
+    decisionRows[flag] = true;
+    status.value = moderationStatusMock({ isUserBanned: false, isEventGone: true });
+    renderPending(undefined);
+    expect(screen.getByText('Hide not confirmed')).toBeInTheDocument();
+    expect(screen.getByText('Not Found on Relay')).toBeInTheDocument();
+    expect(screen.queryByText('Auto-Hidden')).not.toBeInTheDocument();
+  });
+
+  it('names the ban, not Auto-Hidden, for a banned user whose hide is not confirmed', () => {
+    decisionRows.unresolved = true;
+    status.value = moderationStatusMock({ isUserBanned: true, isEventGone: true });
+    renderPending(undefined);
+    expect(screen.getByText('Hide not confirmed')).toBeInTheDocument();
+    expect(screen.getAllByText('User Banned').length).toBeGreaterThan(0);
+    expect(screen.queryByText('Auto-Hidden')).not.toBeInTheDocument();
+  });
+
+  it('still calls a landed hide Auto-Hidden when the event is gone (control)', () => {
+    status.value = moderationStatusMock({ isUserBanned: false, isEventGone: true });
+    renderPending(undefined);
+    expect(screen.getAllByText('Auto-Hidden')).toHaveLength(2);
+    expect(screen.queryByText('Not Found on Relay')).not.toBeInTheDocument();
+  });
 });

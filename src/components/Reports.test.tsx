@@ -308,7 +308,8 @@ describe('Reports CSAM signal priority', () => {
   });
   afterEach(() => {
     detailRender.crash = true;
-    Element.prototype.scrollIntoView = originalScrollIntoView;
+    if (originalScrollIntoView) Element.prototype.scrollIntoView = originalScrollIntoView;
+    else delete (Element.prototype as Partial<Element>).scrollIntoView;
   });
 
   const OLD_BUILD_REPORT = {
