@@ -70,11 +70,13 @@ interface Stub {
   labels?: () => Response | Promise<Response>;
   // Answers for a deep link's targeted lookup, keyed by the target's hex.
   targeted?: Record<string, unknown[]>;
+  // Whether those lookups stopped before reading the target's whole history.
+  targetedTruncated?: boolean;
   // The feed read, when it should not answer with `feed`.
   feedReply?: () => Response | Promise<Response>;
 }
 
-function stubWorker({ feed = [SPAM_REPORT], history = [CSAM_REPORT], labels, targeted = {}, feedReply }: Stub) {
+function stubWorker({ feed = [SPAM_REPORT], history = [CSAM_REPORT], labels, targeted = {}, targetedTruncated = false, feedReply }: Stub) {
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input instanceof Request ? input.url : input);
     if (url.includes('/api/reports/resolved')) {
@@ -85,7 +87,7 @@ function stubWorker({ feed = [SPAM_REPORT], history = [CSAM_REPORT], labels, tar
     }
     if (url.includes('/api/reports?')) {
       const hit = Object.keys(targeted).find(hex => url.includes(hex));
-      return jsonResponse({ success: true, events: hit ? targeted[hit] : [], truncated: false });
+      return jsonResponse({ success: true, events: hit ? targeted[hit] : [], truncated: targetedTruncated });
     }
     if (url.includes('/api/resolution-label-targets')) {
       return labels ? labels() : jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
@@ -240,6 +242,39 @@ describe('what the pane knows of the selected target', () => {
 
     await screen.findByTestId('detail');
     await waitFor(() => expect(incomplete()).toBe('true'));
+  });
+
+  it('keeps a feed target complete in the history view too', async () => {
+    stubWorker({});
+    const user = userEvent.setup();
+    renderAt('/reports');
+    await screen.findByText(NOTE_SPAM);
+    await user.click(hideResolvedSwitch());
+    await screen.findByText(NPUB_CSAM);
+    await user.click(screen.getByText(NOTE_SPAM));
+
+    await screen.findByTestId('detail');
+    expect(incomplete()).toBe('false');
+  });
+
+  it('calls a deep link whose targeted read stopped early partial', async () => {
+    stubWorker({ feed: [], history: [], targeted: { [SPAM_EVENT]: [SPAM_REPORT] }, targetedTruncated: true });
+    renderAt(`/reports?event=${SPAM_EVENT}`);
+
+    await screen.findByTestId('detail');
+    expect(incomplete()).toBe('true');
+  });
+
+  it('calls a post opened by a ?pubkey= link partial: the read was for the account, not the post', async () => {
+    // The account has reports only on its posts, so the link falls back to those.
+    // A report on the same post without the author's p tag is not in that read.
+    const account = '9'.repeat(64);
+    stubWorker({ feed: [], history: [], targeted: { [account]: [SPAM_REPORT] } });
+    renderAt(`/reports?pubkey=${account}`);
+
+    await screen.findByTestId('detail');
+    await waitFor(() => expect(window.location.pathname).toBe(`/reports/${SPAM_REPORT.id}`));
+    expect(incomplete()).toBe('true');
   });
 
   it('keeps a feed target complete', async () => {

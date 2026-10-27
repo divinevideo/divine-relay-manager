@@ -368,14 +368,23 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // keyed to the target (on its relay), not to the one report the lookup
   // selected: any report of that target reads it as true, and a report of any
   // other target, or the same target after a relay switch, reads it as false.
+  // `exact`: the read was for this very target. A ?pubkey= link whose account
+  // has no profile report falls back to the reports on the account's posts, and
+  // the post it opens was not itself read.
   const [targetedHistory, setTargetedHistory] =
-    useState<{ relayUrl: string; target: ReportTarget; truncated: boolean } | null>(null);
+    useState<{ relayUrl: string; target: ReportTarget; truncated: boolean; exact: boolean } | null>(null);
   const selectedTarget = selectedReport ? getReportTarget(selectedReport) : null;
-  const targetedHistoryTruncated =
-    targetedHistory !== null && targetedHistory.truncated && selectedTarget !== null
+  const targetedHistoryOfSelected =
+    targetedHistory !== null && selectedTarget !== null
     && targetedHistory.relayUrl === relayUrl
     && targetedHistory.target.type === selectedTarget.type
-    && targetedHistory.target.value === selectedTarget.value;
+    && targetedHistory.target.value === selectedTarget.value
+    ? targetedHistory : null;
+  const targetedHistoryTruncated = targetedHistoryOfSelected?.truncated === true;
+  // Every report of the selected target was read: a targeted read of that same
+  // target that did not stop early.
+  const targetedReadComplete = targetedHistoryOfSelected !== null
+    && targetedHistoryOfSelected.exact && !targetedHistoryOfSelected.truncated;
   const attemptedTargetRef = useRef<string | null>(null); // one targeted fetch per target
   // The relay and /reports/<id> the history view was last opened for, so it
   // opens once per id in each environment and does not reopen after the
@@ -958,6 +967,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // its badge counts from here; and a listed target this does not carry came
   // from resolved history.
   const feedConsolidated = useMemo(() => (reports ? consolidateReports(reports) : []), [reports]);
+  // Targets the needs-attention feed itself holds, apart from deep-linked
+  // reports merged into `reports`: the feed carries every report on them.
+  const needsAttentionTargetKeys = useMemo(
+    () => new Set(consolidateReports(queueFeed?.events ?? []).map(c => reportTargetKey(c.target))),
+    [queueFeed],
+  );
   const feedTargetKeys = useMemo(
     () => new Set(feedConsolidated.map(c => reportTargetKey(c.target))),
     [feedConsolidated],
@@ -1489,7 +1504,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           // pane counts; it can differ from the deep-link target when no
           // returned report resolves to it (the fallback pool above).
           const latestTarget = getReportTarget(latest);
-          setTargetedHistory(latestTarget ? { relayUrl, target: latestTarget, truncated } : null);
+          setTargetedHistory(latestTarget
+            ? {
+                relayUrl,
+                target: latestTarget,
+                truncated,
+                exact: latestTarget.type === target.type && latestTarget.value === target.value,
+              }
+            : null);
           setDeepLinkStatus('found');
           navigate(`/reports/${latest.id}`, { replace: true });
         } else {
@@ -1662,13 +1684,18 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // The open report's side of the switch, so the pane carries the row's label.
   const selectedSwitchKey = selectedTarget ? reportTargetKey(selectedTarget) : undefined;
 
-  // The selected target came only from resolved-history pages: neither the
-  // needs-attention feed nor a complete targeted read holds it. Its reports on
-  // pages not loaded yet are unknown, so the pane hides sensitive media until
-  // clicked. With the queue failed cold there is no feed, and the deep link's
-  // own read is the complete one.
-  const selectedTargetReportsPartial = !!reports && !!selectedTarget
-    && !feedTargetKeys.has(reportTargetKey(selectedTarget));
+  // The pane may start a target's media visible only when the reports in hand
+  // are all of that target's: the target is in the needs-attention feed itself
+  // (not merely in the merged list, which also holds deep-linked reports and,
+  // in the history view, pages), or a targeted read of that same target did not
+  // stop early. Anything else may be missing a CSAM-signal report: a target
+  // opened from history pages not yet loaded, a read cut short by the worker's
+  // page bound, or a post opened by a ?pubkey= link, whose read was the
+  // account's and misses a report that lacks the author's p tag. Those start
+  // hidden until clicked.
+  const selectedTargetReportsPartial = !!selectedTarget
+    && !needsAttentionTargetKeys.has(reportTargetKey(selectedTarget))
+    && !targetedReadComplete;
 
   const reportDetailPane = showDeepLinkFallback ? (
     <DeepLinkFallback
