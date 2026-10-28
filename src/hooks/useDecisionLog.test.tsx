@@ -92,6 +92,21 @@ describe('useDecisionLog handling decisions', () => {
     expect(result.current.hasHandlingDecisions).toBe(false);
   });
 
+  // The worker logs a failed auto-hide when the relay refuses the hide, so the
+  // content is still up and the report is still waiting for a moderator.
+  it('does not count a failed auto-hide as handling the report', async () => {
+    getDecisions.mockResolvedValue([
+      { action: 'auto_hide_failed', moderator_pubkey: 'auto' },
+    ]);
+
+    const { result } = renderHook(() => useDecisionLog('event-id'), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    expect(result.current.hasDecisions).toBe(true);
+    expect(result.current.hasHandlingDecisions).toBe(false);
+    expect(result.current.latestHandlingDecision).toBeUndefined();
+  });
+
   it('counts a moderator decision beside a skipped auto-hide', async () => {
     getDecisions.mockResolvedValue([
       { action: 'reviewed' },

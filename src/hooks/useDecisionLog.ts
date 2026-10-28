@@ -23,14 +23,15 @@ export function useDecisionLog(targetId: string | null | undefined) {
   const hasDecisions = (data?.length ?? 0) > 0;
 
   // The newest decision that handled the report. An auto-hide that was skipped
-  // (a list report, an untrusted client) or is still pending leaves the report
-  // waiting for a moderator, so it records history without handling anything,
-  // and must not stand in for the moderator's action when it lands later.
-  // Neither does a decision the worker made by itself, such as opening an
-  // age-review case: no person has looked at the report, which is also why the
-  // sensitive switch keeps it.
+  // (a list report, an untrusted client), failed at the relay, or is still
+  // pending leaves the report waiting for a moderator, so it records history
+  // without handling anything, and must not stand in for the moderator's
+  // action when it lands later. Neither does a decision the worker made by
+  // itself, such as opening an age-review case: no person has looked at the
+  // report, which is also why the sensitive switch keeps it.
   const latestHandlingDecision = data?.find(
     d => d.action !== AUTO_HIDE_ACTION.skipped
+      && d.action !== AUTO_HIDE_ACTION.failed
       && d.action !== AUTO_HIDE_ACTION.pending
       && !isAutomatedDecision(d),
   );
