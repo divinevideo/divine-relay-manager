@@ -210,7 +210,11 @@ export function RelayManager() {
             <EventsList relayUrl={config.relayUrl} />
           </TabsContent>
 
-          <TabsContent value="users" className="flex-1 min-h-0 mt-4">
+          {/* Users, Labels and Debug render natural-height content (no h-full
+              scroll pane of their own, unlike Events, Reports, Age Review or
+              Settings), so their bounded panels must scroll or long content runs
+              past the shell's overflow-hidden. */}
+          <TabsContent value="users" className="flex-1 min-h-0 overflow-y-auto mt-4">
             <UserManagement selectedPubkey={params.pubkey} />
           </TabsContent>
 
@@ -222,7 +226,7 @@ export function RelayManager() {
             <AgeReview />
           </TabsContent>
 
-          <TabsContent value="labels" className="flex-1 min-h-0 mt-4">
+          <TabsContent value="labels" className="flex-1 min-h-0 overflow-y-auto mt-4">
             <Labels relayUrl={config.relayUrl} />
           </TabsContent>
 
@@ -230,7 +234,7 @@ export function RelayManager() {
             <SettingsDashboard />
           </TabsContent>
 
-          <TabsContent value="debug" className="flex-1 min-h-0 mt-4">
+          <TabsContent value="debug" className="flex-1 min-h-0 overflow-y-auto mt-4">
             <Card>
               <DebugPanel />
             </Card>
