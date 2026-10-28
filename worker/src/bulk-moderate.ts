@@ -28,8 +28,13 @@ import {
   isListingGapWarning,
   jobFailure,
   mediaFailure,
+  listFallbackWarning,
   notesNotStoredWarning,
   notesOverflowWarning,
+  outOfScopeWarning,
+  recheckUnreadableWarning,
+  stillHiddenUnreadableWarning,
+  stillUnchangedWarning,
   parseOverflowMarker,
   sameSecondGapWarning,
   unpaginatedGapWarning,
@@ -425,7 +430,7 @@ async function recheckOwnedVideos(
   } catch (error) {
     return {
       processed: 0, skipped: 0, notes: [],
-      failures: [enumerationWarning(pubkey, `${formatError(error)}; could not check for files left unchanged`)],
+      failures: [recheckUnreadableWarning(pubkey, formatError(error))],
     };
   }
   // A row it cannot describe (no usable owner, or this account's with a status
@@ -440,7 +445,7 @@ async function recheckOwnedVideos(
   const pass = left.slice(0, MEDIA_CHUNK_SIZE);
   const media = await moderateMediaHashes(env, pubkey, pass, mediaAction, reason, 'recheck');
   if (left.length > pass.length) {
-    media.failures.push(enumerationWarning(pubkey, `${left.length - pass.length} more owned video files still listed unchanged after the walk`));
+    media.failures.push(stillUnchangedWarning(pubkey, left.length - pass.length));
   }
   return media;
 }
@@ -466,24 +471,8 @@ async function reportStillHidden(env: BulkModerateEnv, pubkey: string): Promise<
       .map((file) => ({ kind: 'still-hidden', sha256: file.sha256 }));
     return { notes, failures: [] };
   } catch (error) {
-    return { notes: [], failures: [enumerationWarning(pubkey, `${formatError(error)}; the files still hidden could not be listed`)] };
+    return { notes: [], failures: [stillHiddenUnreadableWarning(pubkey, formatError(error))] };
   }
-}
-
-// The uploader list could not be read, so files were chosen from funnelcake's
-// list alone (#299): every file, or (a failed blossom-walk read) the rest of
-// the walk.
-// The count clause is a queued job's only: after its fallback the "left as
-// they were" count can be off (see MediaPass's after-blossom limits), and its
-// toast shows that count. The synchronous path walks every file once, so its
-// count is exact. The files themselves are not affected either way.
-function listFallbackWarning(
-  pubkey: string,
-  error: unknown,
-  { which = 'files', countMayBeOff }: { which?: 'files' | 'the rest'; countMayBeOff: boolean },
-): string {
-  const clause = countMayBeOff ? ', so the count of files left as they were may be off' : '';
-  return enumerationWarning(pubkey, `${formatError(error)}; ${which} were chosen from the relay's list only${clause}`);
 }
 
 // One entry per file and kind of note, in first-seen order. A job meets the
@@ -496,11 +485,6 @@ function uniqueNotes(notes: BulkNote[]): BulkNote[] {
     seen.add(key);
     return true;
   });
-}
-
-// The relay sent events outside the requested author or kind; none were acted on.
-function outOfScopeWarning(pubkey: string, count: number): string {
-  return enumerationWarning(pubkey, `relay returned ${count} event(s) outside the requested author or kind; ignored them`);
 }
 
 // Who the per-event decision rows name. A job that carries neither falls back
@@ -606,7 +590,7 @@ export async function runBulkModeration(
       listed,
     ]);
     const { events, complete, outOfScope } = relayEvents;
-    if (list && 'error' in list) result.failures.push(listFallbackWarning(pubkey, list.error, { countMayBeOff: false }));
+    if (list && 'error' in list) result.failures.push(listFallbackWarning(pubkey, formatError(list.error), { countMayBeOff: false }));
     if (outOfScope > 0) result.failures.push(outOfScopeWarning(pubkey, outOfScope));
     if (!complete) result.failures.push(unpaginatedGapWarning(pubkey, 'actioned a partial set'));
     const ev = await deleteEvents(env, events, reason, moderatorPubkey);
@@ -619,7 +603,7 @@ export async function runBulkModeration(
     // age-restrict-all / age-gate-all / un-age-restrict-all are media-only;
     // see BULK_MEDIA_ACTION for what each sends.
     [videoHashes, list] = await Promise.all([queryUserMediaHashes(pubkey, env), listed]);
-    if (list && 'error' in list) result.failures.push(listFallbackWarning(pubkey, list.error, { countMayBeOff: false }));
+    if (list && 'error' in list) result.failures.push(listFallbackWarning(pubkey, formatError(list.error), { countMayBeOff: false }));
     // one video == one event for video kinds, counted from funnelcake's list
     // as before #299
     result.eventsProcessed = videoHashes.length;
@@ -1169,7 +1153,7 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
           const onList = new Set(listed.files.map((file) => file.sha256));
           candidates = candidates.filter((sha256) => !onList.has(sha256));
         } else if (listed) {
-          chunkFailures.push(listFallbackWarning(msg.pubkey, listed.error, { countMayBeOff: true }));
+          chunkFailures.push(listFallbackWarning(msg.pubkey, formatError(listed.error), { countMayBeOff: true }));
         }
         if (!relayListOnly) pass = 'after-blossom';
         // Parity with the synchronous path: for media-only actions one video ==
@@ -1201,7 +1185,7 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
             ? { mediaWalk: 'blossom', mediaAfter: candidates[candidates.length - 1] }
             : { mediaWalk: 'funnelcake' };
         } catch (error) {
-          chunkFailures.push(listFallbackWarning(msg.pubkey, error, { which: 'the rest', countMayBeOff: true }));
+          chunkFailures.push(listFallbackWarning(msg.pubkey, formatError(error), { which: 'the rest', countMayBeOff: true }));
           candidates = [];
           nextWalk = { mediaWalk: 'funnelcake', mediaFallback: true };
         }

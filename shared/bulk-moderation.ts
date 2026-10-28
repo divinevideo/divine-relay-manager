@@ -309,6 +309,44 @@ export function bulkLegStoppedWarning(pubkey: string, error: string): string {
   return enumerationWarning(pubkey, `the content step stopped before it finished: ${error}`);
 }
 
+// The media server's list of the account's files (#299) could not be read, so
+// files were chosen from funnelcake's list alone: every file, or (a failed
+// blossom-walk read) the rest of the walk. `error` names why.
+// The count clause is a queued job's only: after its fallback the "left as
+// they were" count can be off (see MediaPass in worker/src/bulk-moderate.ts),
+// and its toast shows that count. The synchronous path walks every file once,
+// so its count is exact. The files themselves are not affected either way.
+export function listFallbackWarning(
+  pubkey: string,
+  error: string,
+  { which = 'files', countMayBeOff }: { which?: 'files' | 'the rest'; countMayBeOff: boolean },
+): string {
+  const clause = countMayBeOff ? ', so the count of files left as they were may be off' : '';
+  return enumerationWarning(pubkey, `${error}; ${which} were chosen from the relay's list only${clause}`);
+}
+
+// The end-of-walk check (#299) could not read the media server's list.
+export function recheckUnreadableWarning(pubkey: string, error: string): string {
+  return enumerationWarning(pubkey, `${error}; could not check for files left unchanged`);
+}
+
+// The end-of-walk check (#299) found more owned videos the action may still
+// change than its one chunk takes.
+export function stillUnchangedWarning(pubkey: string, count: number): string {
+  return enumerationWarning(pubkey, `${count} more owned video files still listed unchanged after the walk`);
+}
+
+// Un-age-restrict All's report of files still hidden (#299) could not read
+// the media server's list.
+export function stillHiddenUnreadableWarning(pubkey: string, error: string): string {
+  return enumerationWarning(pubkey, `${error}; the files still hidden could not be listed`);
+}
+
+// The relay sent events outside the requested author or kind; none were acted on.
+export function outOfScopeWarning(pubkey: string, count: number): string {
+  return enumerationWarning(pubkey, `relay returned ${count} event(s) outside the requested author or kind; ignored them`);
+}
+
 // The expiry cron keeps this line for a case it closed, before its bans, and
 // clears it once the case's auto-delete has run and its own lines are kept.
 // One still there means the delete did not run, or its outcome could not be

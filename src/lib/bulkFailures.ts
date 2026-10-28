@@ -37,9 +37,13 @@ export function mediaServerShows(status: string, subject = 'it'): string {
 // say that, so only the cause after it is shown.
 const listCause = (error: string) => error.replace(/^could not list this account's files: /, '');
 
-// The worker's listing lines (enumerationWarning in worker/src/bulk-moderate.ts
-// and age-review.ts), each matched to words a moderator reads without knowing
-// how the job lists files. A line not listed here is shown as written.
+// The worker's listing lines, built by the enumerationWarning builders in
+// shared/bulk-moderation.ts (listFallbackWarning, recheckUnreadableWarning,
+// stillUnchangedWarning, stillHiddenUnreadableWarning, notesOverflowWarning,
+// notesNotStoredWarning, outOfScopeWarning, unpaginatedGapWarning), each
+// matched to words a moderator reads without knowing how the job lists files.
+// The tests build their inputs with those builders, so a reworded line fails
+// them. A line not listed here is shown as written.
 const LISTING_LINES: Array<[RegExp, (m: RegExpExecArray) => string]> = [
   // A queued job's line adds that its count may be off; an age-review step's
   // (the synchronous path, whose count is exact) does not.
