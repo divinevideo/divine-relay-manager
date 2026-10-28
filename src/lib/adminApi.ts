@@ -11,6 +11,8 @@ import {
   type BulkJobStatus,
   type BulkEnqueueResponse,
   type BulkKindCounts,
+  type BulkNote,
+  type BulkNotesPage,
   KIND_COUNTS_REQUEST_TIMEOUT_MS,
 } from "../../shared/bulk-moderation";
 import { extractMediaHashes as extractSharedMediaHashes } from "../../shared/media-hashes";
@@ -95,6 +97,17 @@ export class ApiError extends Error {
     // version returned alongside a 409 conflict.
     public code?: string,
     public currentVersion?: number,
+    // The state the server found, when it refused a change made from another
+    // (/api/moderate-media's `from` check: `current` on a 409).
+    public currentState?: string,
+    // What the media server shows for the file, when /api/moderate-media found
+    // a public (SAFE) record over a file the media server still does not serve,
+    // or refused a Restore because the media server blocks, deletes or
+    // 18+-gates the file (`mediaServer` on either 409, the media server's own
+    // status name).
+    public mediaServerState?: string,
+    // The open age-review case an `age_review_active` refusal names.
+    public caseId?: string,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -196,7 +209,7 @@ async function apiRequest<T>(
     // Read the JSON error body if there is one so callers can act on structured
     // fields (a 409 version_conflict carries `code` + `current_version`) instead
     // of an opaque "HTTP 409:" message. Non-JSON bodies fall back to status text.
-    let parsed: { error?: string; code?: string; current_version?: number } | undefined;
+    let parsed: { error?: string; code?: string; current_version?: number; current?: unknown; mediaServer?: unknown; caseId?: unknown } | undefined;
     try {
       parsed = await response.json() as typeof parsed;
     } catch {
@@ -208,6 +221,9 @@ async function apiRequest<T>(
       response.statusText,
       parsed?.code,
       parsed?.current_version,
+      typeof parsed?.current === 'string' ? parsed.current : undefined,
+      typeof parsed?.mediaServer === 'string' ? parsed.mediaServer : undefined,
+      typeof parsed?.caseId === 'string' ? parsed.caseId : undefined,
     );
   }
 
@@ -717,16 +733,27 @@ export function isBlockedMediaAction(action: MediaStatusAction | null | undefine
   return action === 'PERMANENT_BAN' || action === 'QUARANTINE';
 }
 
+// `from`, when given, is the state the caller expects the file to be in. The
+// worker then writes only if the moderation record still shows it, and
+// refuses otherwise (409 state_mismatch, or 503 state_unreadable).
+// `pubkey`, when given, is the account the file belongs to. The worker then
+// also refuses while that account has an open age review, or unless the media
+// server records it as the file's owner (409 age_review_active or
+// owner_mismatch; 503 when either cannot be checked).
 export async function moderateMedia(
   apiUrl: string,
   sha256: string,
   action: ModerationAction,
-  reason?: string
+  reason?: string,
+  from?: ModerationAction,
+  pubkey?: string,
 ): Promise<ApiResponse> {
   const data = await apiRequest<ApiResponse>(apiUrl, '/api/moderate-media', 'POST', {
     sha256,
     action,
     reason,
+    ...(from === undefined ? {} : { from }),
+    ...(pubkey === undefined ? {} : { pubkey }),
   });
   if (!data.success) {
     throw new ApiError(data.error || 'Failed to moderate media');
@@ -1500,7 +1527,7 @@ export async function createMinorAccount(
 }
 
 // Bulk moderation
-export { VALID_BULK_ACTIONS, type BulkAction, type BulkModerateResult, type BulkJob, type BulkJobStatus, type BulkKindCounts };
+export { VALID_BULK_ACTIONS, type BulkAction, type BulkModerateResult, type BulkJob, type BulkJobStatus, type BulkKindCounts, type BulkNote, type BulkNotesPage };
 
 // Optional job scope: `kind` is required for delete-kind (the one event kind it
 // deletes) and rejected for every other action. The moderator and report
@@ -1530,6 +1557,23 @@ export async function bulkModerate(
 // Fetch a bulk job's current state. `status` is terminal at 'done' | 'failed'.
 export async function getBulkJobStatus(apiUrl: string, jobId: string): Promise<BulkJob> {
   return apiRequest<BulkJob>(apiUrl, `/api/bulk-moderate/status/${encodeURIComponent(jobId)}`, 'GET');
+}
+
+// The notes key of an age-review case's latest transition that kept bulk
+// results (#299), with its step (`state`) and when it was kept, or a null key.
+// Its notes are then read with getBulkJobNotes. A worker that predates kept
+// notes answers 404.
+export async function getAgeReviewBulkNotesJob(apiUrl: string, caseId: string): Promise<{ jobId: string | null; state?: string; keptAt?: string }> {
+  return apiRequest<{ jobId: string | null; state?: string; keptAt?: string }>(apiUrl, `/api/bulk-moderate/case-notes/${encodeURIComponent(caseId)}`, 'GET');
+}
+
+// One page of a finished job's notes for a person, or of an age-review
+// transition's notes and failure lines (#299), from `after` (a previous page's
+// `next`), or the first page. A worker that predates notes has
+// no such route and answers 404.
+export async function getBulkJobNotes(apiUrl: string, jobId: string, after?: string): Promise<BulkNotesPage> {
+  const query = after === undefined ? '' : `?after=${encodeURIComponent(after)}`;
+  return apiRequest<BulkNotesPage>(apiUrl, `/api/bulk-moderate/notes/${encodeURIComponent(jobId)}${query}`, 'GET');
 }
 
 // Per-kind event counts for an account, from a full relay listing. When

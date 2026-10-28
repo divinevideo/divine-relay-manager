@@ -589,7 +589,7 @@ describe('BulkDeleteByKind outcomes', () => {
 
     expect(lastToast()).toEqual({
       title: 'Bulk delete finished with issues',
-      description: `Deleted 1 of 3 Reaction events. ${RERUN} 2 failed or could not be listed: event ${EVENT_ID} failed: banevent failed; +1 more`,
+      description: `Deleted 1 of 3 Reaction events. ${RERUN} 2 failed or could not be listed: event ${EVENT_ID} failed: banevent failed; 1 more problem was not stored`,
       variant: 'destructive',
       className: '[overflow-wrap:anywhere]',
     });

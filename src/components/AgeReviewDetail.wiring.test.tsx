@@ -32,6 +32,8 @@ vi.mock('@/hooks/useAdminApi', () => ({
   useAdminApi: () => ({
     updateAgeReviewCase: vi.fn().mockResolvedValue({ success: true }),
     getAgeReviewConfig: vi.fn().mockResolvedValue({ auto_delete_on_deny: false }),
+    // No bulk notes kept for any case (#299).
+    getAgeReviewBulkNotesJob: vi.fn().mockResolvedValue({ jobId: null }),
     getAccountStatus: vi.fn().mockResolvedValue({ success: true, status: 'active' }),
   }),
 }));

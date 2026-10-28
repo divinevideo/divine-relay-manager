@@ -2,6 +2,8 @@
 // ABOUTME: Compacts retry records before deletion and never mutates active classifications.
 
 import { RETENTION_DAYS } from '../../shared/retention';
+import { ageReviewNotesJobRange } from '../../shared/bulk-moderation';
+import { ensureBulkNotesTable } from './bulk-notes';
 import { disposeDueConsentVideos } from './consent-video';
 import type { SecretStoreSecret } from './nip86';
 import { errorNameOnly } from './error-name';
@@ -308,10 +310,12 @@ export async function runRetentionDisposal(env: RetentionEnv): Promise<Retention
     }
   });
 
+  // A case's kept bulk results (bulk_job_notes rows keyed by the case, #299)
+  // name its step, file hashes and pubkeys, so they go with it: one batch, so
+  // neither outlives the other, and each delete re-checks that the case is
+  // still due, so a hold placed after the SELECT keeps both.
   await runStage('case-delete', async () => {
-    const cases = await db.prepare(`DELETE FROM age_review_cases
-      WHERE id IN (SELECT c.id FROM age_review_cases c
-        WHERE c.closed_at IS NOT NULL
+    const due = `c.closed_at IS NOT NULL
           AND datetime(c.closed_at) <= datetime('now', '-${RETENTION_DAYS.ageReviewDecision} days')
           AND NOT EXISTS (SELECT 1 FROM protected_minor_subjects s
             WHERE s.source_case_id = c.id AND s.classification_state = 'active')
@@ -330,9 +334,29 @@ export async function runRetentionDisposal(env: RetentionEnv): Promise<Retention
                 OR (datetime(d.updated_at) = datetime(c.updated_at) AND d.rowid < c.rowid))))
           AND NOT EXISTS (SELECT 1 FROM age_review_parent_consent_submissions cs
             WHERE cs.case_id = c.id AND cs.object_key IS NOT NULL AND cs.disposed_at IS NULL)
-          AND ${noHold('age_review_case', 'c.id', 'deletion')}
-        LIMIT ${BATCH_LIMIT})`).run();
-    result.casesDeleted = cases.meta.changes;
+          AND ${noHold('age_review_case', 'c.id', 'deletion')}`;
+    const { results } = await db.prepare(`SELECT c.id FROM age_review_cases c WHERE ${due} LIMIT ${BATCH_LIMIT}`)
+      .all<{ id: string }>();
+    const ids = results.map((row) => row.id);
+    if (ids.length === 0) return;
+    await ensureBulkNotesTable(db);
+    const notes = ids.flatMap((id) => {
+      // An id the notes key cannot hold never had results kept under it.
+      let range: { start: string; end: string };
+      try {
+        range = ageReviewNotesJobRange(id);
+      } catch {
+        return [];
+      }
+      return [db.prepare(`DELETE FROM bulk_job_notes WHERE job_id >= ? AND job_id < ?
+        AND EXISTS (SELECT 1 FROM age_review_cases c WHERE c.id = ? AND ${due})`).bind(range.start, range.end, id)];
+    });
+    // BATCH_LIMIT (100) ids stay within D1's 100 bound parameters.
+    const cases = db.prepare(`DELETE FROM age_review_cases
+      WHERE id IN (SELECT c.id FROM age_review_cases c WHERE c.id IN (${ids.map(() => '?').join(', ')}) AND ${due})`)
+      .bind(...ids);
+    const outcomes = await db.batch([...notes, cases]);
+    result.casesDeleted = outcomes[outcomes.length - 1].meta.changes;
   });
 
   return result;

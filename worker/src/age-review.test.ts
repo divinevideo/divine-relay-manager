@@ -27,6 +27,8 @@ import { deriveResponseClock, FUNNEL_ZENDESK_QUERIES, toUtcIso } from '../../sha
 import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, createMinorAccount } from './keycast-client';
 import { suspendPubkey, unsuspendPubkey, banPubkey } from './nip86';
 import { runBulkModeration } from './bulk-moderate';
+import { storeBulkNotes, ensureBulkNotesTable, deleteBulkFailure } from './bulk-notes';
+import { autoDeletePendingWarning, bulkLegStoppedWarning, listFallbackWarning } from '../../shared/bulk-moderation';
 import { echoedFragments, MALFORMED_WEBHOOK, rejectLikeWorkersRuntime } from './test-helpers/secret-echo';
 
 vi.mock('./keycast-client', () => ({
@@ -43,7 +45,15 @@ vi.mock('./keycast-client', () => ({
 vi.mock('./bulk-moderate', () => ({
   // age-review enforcement now calls runBulkModeration directly (synchronous,
   // returns a BulkModerateResult), not the async HTTP enqueue path.
-  runBulkModeration: vi.fn().mockResolvedValue({ success: true, eventsProcessed: 0, mediaProcessed: 0, failures: [] }),
+  runBulkModeration: vi.fn().mockResolvedValue({ success: true, eventsProcessed: 0, mediaProcessed: 0, mediaSkipped: 0, failures: [], notes: [] }),
+}));
+
+// Where the case screen's notes are kept (#299). The SQL is pinned against
+// real SQLite in test/bulk-job-notes.d1.test.ts.
+vi.mock('./bulk-notes', () => ({
+  ensureBulkNotesTable: vi.fn().mockResolvedValue(undefined),
+  storeBulkNotes: vi.fn().mockResolvedValue(0),
+  deleteBulkFailure: vi.fn().mockResolvedValue(1),
 }));
 
 // Relay-level NIP-86 enforcement. Stubbed to succeed by default; the
@@ -393,6 +403,196 @@ describe('handleUpdateAgeReviewCase', () => {
     expect(payload.ticket.assignee_email).toBeUndefined();
 
     vi.unstubAllGlobals();
+  });
+
+  // #299. A bulk run's notes (files a clear left hidden for a restore by hand,
+  // another account's file) are not failures: the leg reads ok and the
+  // response carries them for the case screen. A real failure (a file list
+  // that could not be read, a file the run could not change) fails that leg
+  // and nothing else: the case still moves, the other legs still run, and
+  // nothing runs the bulk action again.
+  async function transitionWithBulkResult(
+    transition: { from: AgeReviewCase['state']; body: Record<string, unknown> & { state: AgeReviewCase['state'] } },
+    result: Record<string, unknown>,
+    arrange: () => void = () => {},
+  ) {
+    vi.mocked(runBulkModeration).mockClear();
+    vi.mocked(unsuspendUser).mockClear();
+    vi.mocked(runBulkModeration).mockResolvedValueOnce(result as never);
+    vi.mocked(storeBulkNotes).mockClear();
+    vi.mocked(ensureBulkNotesTable).mockClear();
+    arrange();
+    // The transition writes version 5.
+    const reviewCase = makeCase({ state: transition.from, version: 4 });
+    const movedCase = { ...reviewCase, state: transition.body.state };
+    let selectCount = 0;
+    const reviewDb = {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        // The deny step reads auto_delete_on_deny unbound; it is on.
+        first: vi.fn().mockResolvedValue(sql.includes('auto_delete_on_deny') ? { value: 'true' } : null),
+        bind: vi.fn().mockReturnValue({
+          first: vi.fn().mockImplementation(async () => {
+            if (sql.includes('WHERE id = ?')) {
+              selectCount += 1;
+              return selectCount === 1 ? reviewCase : movedCase;
+            }
+            return null;
+          }),
+          run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+        }),
+      })),
+    };
+    const req = new Request('https://api.test/api/age-review/cases/case-1', {
+      method: 'PATCH',
+      body: JSON.stringify(transition.body),
+    });
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(reviewDb), corsHeaders);
+    const body = await res.json() as {
+      case: { state: string };
+      enforcement: { relay: string; bulk: string; bulkError?: string; bulkNotes?: unknown[]; keycast: string };
+    };
+    return { res, body, reviewDb };
+  }
+
+  const clearWithBulkResult = (result: Record<string, unknown>, arrange: () => void = () => {}) => transitionWithBulkResult(
+    { from: 'restricted_pending_user_response', body: { state: 'cleared', resolution: 'not_minor', resolution_note: 'Age verified' } },
+    result,
+    arrange,
+  );
+
+  // The restrict and deny steps keep and return their notes the same way the
+  // clear does: they are the steps a minor's files most depend on.
+  it.each([
+    { step: 'restrict', from: 'under_moderator_review' as const, state: 'restricted_pending_user_response' as const, action: 'age-restrict-all' },
+    { step: 'deny', from: 'restricted_pending_user_response' as const, state: 'denied_closed' as const, action: 'delete-all' },
+  ])("the $step step returns its bulk notes and keeps them under its own state", async ({ from, state, action }) => {
+    const notes = [{ kind: 'not-owned', sha256: 'f'.repeat(64), owner: 'b'.repeat(64) }];
+    const { body, reviewDb } = await transitionWithBulkResult(
+      { from, body: { state, resolution_note: 'n' } },
+      { success: true, eventsProcessed: 0, mediaProcessed: 0, mediaSkipped: 0, failures: [], notes },
+    );
+    expect(runBulkModeration).toHaveBeenCalledWith(expect.anything(), 'a'.repeat(64), action, expect.any(String));
+    expect(body.enforcement).toMatchObject({ bulk: 'ok', bulkNotes: notes });
+    expect(storeBulkNotes).toHaveBeenCalledWith(reviewDb, `age-review:case-1:5:${state}`, notes, []);
+  });
+
+  it("a bulk leg's notes for a person leave the leg ok and come back on the response", async () => {
+    const notes = [
+      { kind: 'still-hidden', sha256: 'e'.repeat(64) },
+      { kind: 'not-owned', sha256: 'f'.repeat(64), owner: 'b'.repeat(64) },
+    ];
+    const { res, body } = await clearWithBulkResult({
+      success: true, eventsProcessed: 0, mediaProcessed: 0, mediaSkipped: 0, failures: [], notes,
+    });
+    expect(res.status).toBe(200);
+    expect(body.case.state).toBe('cleared');
+    expect(body.enforcement).toMatchObject({ relay: 'ok', bulk: 'ok', keycast: 'ok', bulkNotes: notes });
+    expect(runBulkModeration).toHaveBeenCalledTimes(1);
+  });
+
+  it('a bulk leg with a real failure reads failed, keeps its notes, and neither holds the transition nor retries', async () => {
+    const line = listFallbackWarning('a'.repeat(64), "could not list this account's files: media server returned 500", { countMayBeOff: false });
+    const notes = [{ kind: 'still-hidden', sha256: 'e'.repeat(64) }];
+    const { res, body } = await clearWithBulkResult({
+      success: false, eventsProcessed: 0, mediaProcessed: 0, mediaSkipped: 0, failures: [line], notes,
+    });
+    expect(res.status).toBe(207);
+    expect(body.case.state).toBe('cleared');
+    expect(body.enforcement).toMatchObject({ relay: 'ok', bulk: 'failed', keycast: 'ok', bulkError: line, bulkNotes: notes });
+    expect(runBulkModeration).toHaveBeenCalledTimes(1);
+    expect(unsuspendUser).toHaveBeenCalledTimes(1);
+  });
+
+  it('sends no notes field, and keeps none, when the bulk run had none', async () => {
+    const { body } = await clearWithBulkResult({
+      success: true, eventsProcessed: 0, mediaProcessed: 0, mediaSkipped: 0, failures: [], notes: [],
+    });
+    expect(body.enforcement.bulk).toBe('ok');
+    expect('bulkNotes' in body.enforcement).toBe(false);
+    expect(storeBulkNotes).not.toHaveBeenCalled();
+  });
+
+  // Kept so the case screen can show them again after a reload.
+  it("keeps a transition's notes and failures under the case, the version it wrote, and its state", async () => {
+    const notes = [{ kind: 'still-hidden', sha256: 'e'.repeat(64) }];
+    const { reviewDb, body } = await clearWithBulkResult({
+      success: false, eventsProcessed: 0, mediaProcessed: 0, mediaSkipped: 0, failures: ['enumeration:x:y'], notes,
+    });
+    expect(ensureBulkNotesTable).toHaveBeenCalledWith(reviewDb);
+    expect(storeBulkNotes).toHaveBeenCalledWith(reviewDb, 'age-review:case-1:5:cleared', notes, ['enumeration:x:y']);
+    // Every failure line comes back too, not only the three in bulkError.
+    expect((body.enforcement as Record<string, unknown>).bulkFailures).toEqual(['enumeration:x:y']);
+  });
+
+  it('returns every failure line of a failed bulk leg', async () => {
+    const failures = Array.from({ length: 5 }, (_, i) => `media:${String(i).repeat(64).slice(0, 64)}:write failed`);
+    const { body } = await clearWithBulkResult({
+      success: false, eventsProcessed: 0, mediaProcessed: 0, mediaSkipped: 0, failures, notes: [],
+    });
+    expect((body.enforcement as Record<string, unknown>).bulkFailures).toEqual(failures);
+    expect(storeBulkNotes).toHaveBeenCalledWith(expect.anything(), 'age-review:case-1:5:cleared', [], failures);
+  });
+
+  // A run that throws has no failure lines of its own; the leg still records
+  // one, so the panel shows it and it is kept for the case screen.
+  it('records a failure line when the bulk run throws, and keeps it for the case screen', async () => {
+    const { body } = await clearWithBulkResult({}, () => {
+      vi.mocked(runBulkModeration).mockReset()
+        .mockResolvedValue({ success: true, eventsProcessed: 0, mediaProcessed: 0, mediaSkipped: 0, failures: [], notes: [] } as never)
+        .mockRejectedValueOnce(new Error('Funnelcake API error: 503'));
+    });
+    const line = `enumeration:${'a'.repeat(64)}:the content step stopped before it finished: Funnelcake API error: 503`;
+    const enforcement = body.enforcement as Record<string, unknown>;
+    expect(enforcement.bulk).toBe('failed');
+    expect(enforcement.bulkFailures).toEqual([line]);
+    expect(storeBulkNotes).toHaveBeenCalledWith(expect.anything(), 'age-review:case-1:5:cleared', [], [line]);
+  });
+
+  // The marker's count covers failures too: 5,003 failures and no notes keep
+  // 4,999 beside a marker for the 4 left out.
+  it('counts failures left out in the marker, not only notes', async () => {
+    const failures = Array.from({ length: 5_003 }, (_, i) => `media:${i.toString(16).padStart(64, '0')}:write failed`);
+    await clearWithBulkResult({ success: false, eventsProcessed: 0, mediaProcessed: 0, mediaSkipped: 0, failures, notes: [] });
+    const [, , keptNotes, keptFailures] = vi.mocked(storeBulkNotes).mock.calls[0] as [unknown, string, unknown[], string[]];
+    expect(keptNotes).toEqual([]);
+    expect(keptFailures).toHaveLength(5_000);
+    expect(keptFailures.slice(0, 4_999)).toEqual(failures.slice(0, 4_999));
+    expect(keptFailures[4_999]).toBe(`enumeration:${'a'.repeat(64)}:4 more file(s) or problem(s) from this step were not saved`);
+  });
+
+  it('keeps exactly one write of rows whole, with no marker', async () => {
+    const notes = Array.from({ length: 4_999 }, (_, i) => ({ kind: 'still-hidden', sha256: i.toString(16).padStart(64, '0') }));
+    await clearWithBulkResult({ success: false, eventsProcessed: 0, mediaProcessed: 0, mediaSkipped: 0, failures: ['enumeration:x:y'], notes });
+    const [, , keptNotes, keptFailures] = vi.mocked(storeBulkNotes).mock.calls[0] as [unknown, string, unknown[], string[]];
+    expect(keptNotes).toHaveLength(4_999);
+    expect(keptFailures).toEqual(['enumeration:x:y']);
+  });
+
+  it('keeps at most one write of rows, and says how many more were not saved', async () => {
+    const notes = Array.from({ length: 5_003 }, (_, i) => ({ kind: 'still-hidden', sha256: i.toString(16).padStart(64, '0') }));
+    await clearWithBulkResult({
+      success: false, eventsProcessed: 0, mediaProcessed: 0, mediaSkipped: 0, failures: ['enumeration:x:y'], notes,
+    });
+    const [, , keptNotes, keptFailures] = vi.mocked(storeBulkNotes).mock.calls[0] as [unknown, string, unknown[], string[]];
+    expect(keptFailures.length + keptNotes.length).toBe(5_000);
+    expect(keptFailures[0]).toBe('enumeration:x:y');
+    // 1 failure + 5,003 notes, 4,999 kept beside the marker.
+    expect(keptFailures[keptFailures.length - 1]).toBe(`enumeration:${'a'.repeat(64)}:5 more file(s) or problem(s) from this step were not saved`);
+    expect(keptNotes).toEqual(notes.slice(0, 4_998));
+  });
+
+  it('carries on with the transition unchanged when keeping its notes fails', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const notes = [{ kind: 'still-hidden', sha256: 'e'.repeat(64) }];
+    const { res, body } = await clearWithBulkResult({
+      success: true, eventsProcessed: 0, mediaProcessed: 0, mediaSkipped: 0, failures: [], notes,
+    }, () => vi.mocked(storeBulkNotes).mockRejectedValueOnce(new Error('D1 write failed')));
+    expect(storeBulkNotes).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(200);
+    expect(body.case.state).toBe('cleared');
+    expect(body.enforcement).toMatchObject({ relay: 'ok', bulk: 'ok', keycast: 'ok', bulkNotes: notes });
+    expect(errors).toHaveBeenCalledWith(expect.stringContaining('could not keep'), expect.any(Error));
+    errors.mockRestore();
   });
 
   it('creates an internal Zendesk ticket when transitioning into a restricted state', async () => {
@@ -1864,6 +2064,488 @@ describe('checkAgeReviewDeadlines', () => {
     expect(clearVerifiedMinor).toHaveBeenCalledWith(expiredCase.pubkey, undefined, 'age_review_expired', expect.objectContaining({ DB: expect.anything() }));
 
     vi.unstubAllGlobals();
+  });
+
+  it("keeps an expired case's auto-delete notes under the version the close wrote", async () => {
+    const expiredCase = makeCase({
+      deadline_at: new Date(Date.now() - 1000).toISOString(),
+      state: 'restricted_pending_user_response',
+      version: 6,
+    });
+    const notes = [{ kind: 'not-owned', sha256: 'f'.repeat(64), owner: 'b'.repeat(64) }];
+    vi.mocked(runBulkModeration).mockResolvedValueOnce({
+      success: true, eventsProcessed: 0, mediaProcessed: 0, mediaSkipped: 0, failures: [], notes,
+    } as never);
+    vi.mocked(storeBulkNotes).mockClear();
+    // getAgeReviewConfig reads with no bind (null: the default, auto-delete on).
+    const db = {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        first: vi.fn().mockResolvedValue(null),
+        all: vi.fn().mockResolvedValue({ results: [] }),
+        bind: vi.fn().mockReturnValue({
+          all: vi.fn().mockResolvedValue({ results: sql.includes('+2 days') ? [] : [expiredCase] }),
+          first: vi.fn().mockResolvedValue(null),
+          run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+        }),
+      })),
+    };
+
+    await checkAgeReviewDeadlines(makeEnv(db));
+
+    expect(storeBulkNotes).toHaveBeenCalledWith(db, `age-review:${expiredCase.id}:7:denied_closed`, notes, []);
+  });
+
+  it("keeps a failure line for an expired case whose auto-delete threw", async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const expiredCase = makeCase({
+      deadline_at: new Date(Date.now() - 1000).toISOString(),
+      state: 'restricted_pending_user_response',
+      version: 6,
+    });
+    vi.mocked(runBulkModeration).mockRejectedValueOnce(new Error('Relay query timed out before EOSE'));
+    vi.mocked(storeBulkNotes).mockClear();
+    const db = {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        first: vi.fn().mockResolvedValue(null),
+        all: vi.fn().mockResolvedValue({ results: [] }),
+        bind: vi.fn().mockReturnValue({
+          all: vi.fn().mockResolvedValue({ results: sql.includes('+2 days') ? [] : [expiredCase] }),
+          first: vi.fn().mockResolvedValue(null),
+          run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+        }),
+      })),
+    };
+
+    await checkAgeReviewDeadlines(makeEnv(db));
+
+    expect(storeBulkNotes).toHaveBeenCalledWith(db, `age-review:${expiredCase.id}:7:denied_closed`, [], [
+      `enumeration:${expiredCase.pubkey}:the content step stopped before it finished: Relay query timed out before EOSE`,
+    ]);
+    expect(banUser).toHaveBeenCalled();
+    errors.mockRestore();
+  });
+
+  it("keeps an expired case's notes from an auto-delete that failed too", async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const expiredCase = makeCase({
+      deadline_at: new Date(Date.now() - 1000).toISOString(),
+      state: 'restricted_pending_user_response',
+      version: 6,
+    });
+    const notes = [{ kind: 'not-owned', sha256: 'f'.repeat(64), owner: 'b'.repeat(64) }];
+    vi.mocked(runBulkModeration).mockResolvedValueOnce({
+      success: false, eventsProcessed: 0, mediaProcessed: 0, mediaSkipped: 0, failures: ['enumeration:x:y'], notes,
+    } as never);
+    vi.mocked(storeBulkNotes).mockClear();
+    // getAgeReviewConfig reads with no bind (null: the default, auto-delete on).
+    const db = {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        first: vi.fn().mockResolvedValue(null),
+        all: vi.fn().mockResolvedValue({ results: [] }),
+        bind: vi.fn().mockReturnValue({
+          all: vi.fn().mockResolvedValue({ results: sql.includes('+2 days') ? [] : [expiredCase] }),
+          first: vi.fn().mockResolvedValue(null),
+          run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+        }),
+      })),
+    };
+
+    await checkAgeReviewDeadlines(makeEnv(db));
+
+    // The failed run's failure lines are kept beside its notes.
+    expect(storeBulkNotes).toHaveBeenCalledWith(db, `age-review:${expiredCase.id}:7:denied_closed`, notes, ['enumeration:x:y']);
+    // The close still went ahead, and so did the Keycast ban.
+    expect(banUser).toHaveBeenCalled();
+    errors.mockRestore();
+  });
+
+  // The auto-delete walks the account's files on the media server (#299), so it
+  // can spend most of the invocation's subrequests. Every expired case's bans
+  // and minor-flag clear run before any auto-delete in that tick, so none of
+  // them depends on what a delete leaves.
+  // `close` answers each case's close (the CAS binds the case id first); by
+  // default every close lands. `config` answers each read of the age-review
+  // config, in order; by default null, the default (auto-delete on). `reread`
+  // answers the re-read of a case after its close threw; by default no row.
+  function expiredCaseDb(
+    expiredCases: AgeReviewCase[],
+    {
+      close = async () => ({ meta: { changes: 1 } }),
+      config = async () => null,
+      reread = async () => null,
+    }: {
+      close?: (caseId: string) => Promise<unknown>;
+      config?: (read: number) => Promise<unknown>;
+      reread?: (caseId: string) => Promise<unknown>;
+    } = {},
+  ) {
+    let configReads = 0;
+    // getAgeReviewConfig reads with no bind.
+    return {
+      prepare: vi.fn().mockImplementation((sql: string) => ({
+        first: vi.fn().mockImplementation(() => (sql.includes('auto_delete_on_deny') ? config(configReads++) : Promise.resolve(null))),
+        all: vi.fn().mockResolvedValue({ results: [] }),
+        bind: vi.fn().mockImplementation((...binds: unknown[]) => ({
+          all: vi.fn().mockResolvedValue({ results: sql.includes('+2 days') ? [] : expiredCases }),
+          first: vi.fn().mockImplementation(() => (sql.includes('SELECT state, version, resolution_note FROM age_review_cases')
+            ? reread(String(binds[0]))
+            : Promise.resolve(null))),
+          run: vi.fn().mockImplementation(() => (sql.includes("SET state = 'denied_closed'")
+            ? close(String(binds[0]))
+            : Promise.resolve({ meta: { changes: 1 } }))),
+        })),
+      })),
+      batch: vi.fn().mockResolvedValue([]),
+    };
+  }
+
+  // The jobs a pending auto-delete line was kept under, in order.
+  const pendingJobs = () => vi.mocked(storeBulkNotes).mock.calls
+    .filter((call) => (call[3] ?? []).some((line) => line === autoDeletePendingWarning(line.split(':')[1] ?? '')))
+    .map((call) => call[1]);
+  const CRON_CLOSE_NOTE = 'Auto-closed: deadline expired with no response';
+
+  it("sends an expired case's Keycast ban, minor-flag clear and relay ban before its auto-delete", async () => {
+    const expiredCase = makeCase({ deadline_at: new Date(Date.now() - 1000).toISOString(), state: 'restricted_pending_user_response' });
+    vi.mocked(runBulkModeration).mockClear();
+    vi.mocked(banPubkey).mockClear();
+
+    await checkAgeReviewDeadlines(makeEnv(expiredCaseDb([expiredCase])));
+
+    const at = (fn: unknown) => vi.mocked(fn as () => unknown).mock.invocationCallOrder[0];
+    expect(vi.mocked(runBulkModeration).mock.calls[0]).toEqual([expect.anything(), expiredCase.pubkey, 'delete-all', expect.any(String)]);
+    expect(at(banUser)).toBeLessThan(at(clearVerifiedMinor));
+    expect(at(clearVerifiedMinor)).toBeLessThan(at(banPubkey));
+    expect(at(banPubkey)).toBeLessThan(at(runBulkModeration));
+  });
+
+  it("sends an expired case's Keycast ban, minor-flag clear and relay ban when its auto-delete throws", async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const expiredCase = makeCase({ deadline_at: new Date(Date.now() - 1000).toISOString(), state: 'restricted_pending_user_response' });
+    vi.mocked(runBulkModeration).mockClear().mockRejectedValueOnce(new Error('Too many subrequests.'));
+    vi.mocked(banPubkey).mockClear();
+
+    await checkAgeReviewDeadlines(makeEnv(expiredCaseDb([expiredCase])));
+
+    expect(runBulkModeration).toHaveBeenCalledOnce();
+    expect(banUser).toHaveBeenCalledWith(expiredCase.pubkey, 'age_review_expired', expect.anything());
+    expect(clearVerifiedMinor).toHaveBeenCalledWith(expiredCase.pubkey, undefined, 'age_review_expired', expect.anything());
+    expect(banPubkey).toHaveBeenCalledWith(expiredCase.pubkey, 'age_review_expired', expect.anything());
+    errors.mockRestore();
+  });
+
+  it("sends every expired case's bans before any auto-delete in the tick", async () => {
+    const expired = { deadline_at: new Date(Date.now() - 1000).toISOString(), state: 'restricted_pending_user_response' as const };
+    const first = makeCase({ ...expired, id: 'case-1', pubkey: 'a'.repeat(64) });
+    const second = makeCase({ ...expired, id: 'case-2', pubkey: 'c'.repeat(64) });
+    vi.mocked(runBulkModeration).mockClear();
+    vi.mocked(banPubkey).mockClear();
+
+    await checkAgeReviewDeadlines(makeEnv(expiredCaseDb([first, second])));
+
+    const order = (fn: unknown) => vi.mocked(fn as () => unknown).mock.invocationCallOrder;
+    expect(vi.mocked(runBulkModeration).mock.calls.map((call) => call[1])).toEqual([first.pubkey, second.pubkey]);
+    for (const fn of [banUser, clearVerifiedMinor, banPubkey]) expect(order(fn)).toHaveLength(2);
+    const lastBan = Math.max(...order(banUser), ...order(clearVerifiedMinor), ...order(banPubkey));
+    expect(lastBan).toBeLessThan(Math.min(...order(runBulkModeration)));
+  });
+
+  // A case a moderator changed since the SELECT loses the CAS: neither pass
+  // touches it, and the next tick re-evaluates it.
+  it('skips, in both passes, an expired case whose close lost the CAS', async () => {
+    const logs = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const expired = { deadline_at: new Date(Date.now() - 1000).toISOString(), state: 'restricted_pending_user_response' as const };
+    const first = makeCase({ ...expired, id: 'case-1', pubkey: 'a'.repeat(64) });
+    const second = makeCase({ ...expired, id: 'case-2', pubkey: 'c'.repeat(64) });
+    vi.mocked(runBulkModeration).mockClear();
+    vi.mocked(banPubkey).mockClear();
+    vi.mocked(storeBulkNotes).mockClear();
+
+    await checkAgeReviewDeadlines(makeEnv(expiredCaseDb([first, second], { close: async (caseId) => ({ meta: { changes: caseId === 'case-1' ? 0 : 1 } }) })));
+
+    expect(vi.mocked(runBulkModeration).mock.calls.map((call) => call[1])).toEqual([second.pubkey]);
+    expect(vi.mocked(banPubkey).mock.calls.map((call) => call[0])).toEqual([second.pubkey]);
+    // The pending line follows a close that won its CAS, never one that lost.
+    expect(pendingJobs()).toEqual([`age-review:${second.id}:1:denied_closed`]);
+    logs.mockRestore();
+  });
+
+  // A close that throws (a D1 error) and did not commit leaves that case
+  // restricted for the next tick (the re-read says so), and must not cost the
+  // cases closed before it their auto-delete.
+  it('still auto-deletes, and keeps the notes of, the cases closed before a close that throws', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const expired = { deadline_at: new Date(Date.now() - 1000).toISOString(), state: 'restricted_pending_user_response' as const };
+    const first = makeCase({ ...expired, id: 'case-1', pubkey: 'a'.repeat(64) });
+    const second = makeCase({ ...expired, id: 'case-2', pubkey: 'c'.repeat(64) });
+    const notes = [{ kind: 'not-owned', sha256: 'f'.repeat(64), owner: 'b'.repeat(64) }];
+    vi.mocked(runBulkModeration).mockClear().mockResolvedValueOnce({
+      success: true, eventsProcessed: 0, mediaProcessed: 0, mediaSkipped: 0, failures: [], notes,
+    } as never);
+    vi.mocked(banPubkey).mockClear();
+    vi.mocked(storeBulkNotes).mockClear();
+    const db = expiredCaseDb([first, second], {
+      close: async (caseId) => {
+        if (caseId === 'case-2') throw new Error('D1_ERROR: Network connection lost.');
+        return { meta: { changes: 1 } };
+      },
+      // The close did not commit: the case still reads restricted.
+      reread: async () => ({ state: 'restricted_pending_user_response', version: 0, resolution_note: null }),
+    });
+
+    await checkAgeReviewDeadlines(makeEnv(db));
+
+    expect(vi.mocked(runBulkModeration).mock.calls.map((call) => call[1])).toEqual([first.pubkey]);
+    expect(storeBulkNotes).toHaveBeenCalledWith(db, `age-review:${first.id}:1:denied_closed`, notes, []);
+    expect(vi.mocked(banPubkey).mock.calls.map((call) => call[0])).toEqual([first.pubkey]);
+    expect(pendingJobs()).toEqual([`age-review:${first.id}:1:denied_closed`]);
+    expect(errors).toHaveBeenCalledWith('[age-review] Failed to auto-close expired case; the next tick retries it:', expect.any(Error));
+    errors.mockRestore();
+  });
+
+  // A write can fail after it committed. The case is re-read once, and carried
+  // on as closed only if the cron's own close is what landed.
+  describe('a close that throws', () => {
+    const expired = { deadline_at: new Date(Date.now() - 1000).toISOString(), state: 'restricted_pending_user_response' as const };
+    const first = makeCase({ ...expired, id: 'case-1', pubkey: 'a'.repeat(64), version: 4 });
+    const second = makeCase({ ...expired, id: 'case-2', pubkey: 'c'.repeat(64) });
+    const throwsFor = (id: string) => async (caseId: string) => {
+      if (caseId === id) throw new Error('D1_ERROR: Network connection lost.');
+      return { meta: { changes: 1 } };
+    };
+    let errors: ReturnType<typeof vi.spyOn>;
+    let logs: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+      logs = vi.spyOn(console, 'log').mockImplementation(() => {});
+      vi.mocked(runBulkModeration).mockReset().mockResolvedValue({ success: true, eventsProcessed: 0, mediaProcessed: 0, mediaSkipped: 0, failures: [], notes: [] } as never);
+      vi.mocked(banPubkey).mockClear();
+      vi.mocked(storeBulkNotes).mockReset().mockResolvedValue(0);
+    });
+    afterEach(() => { errors.mockRestore(); logs.mockRestore(); });
+
+    it('carries the case on as closed when the re-read finds the cron\'s close committed', async () => {
+      const db = expiredCaseDb([first], {
+        close: throwsFor('case-1'),
+        reread: async () => ({ state: 'denied_closed', version: 5, resolution_note: CRON_CLOSE_NOTE }),
+      });
+      await checkAgeReviewDeadlines(makeEnv(db));
+
+      expect(logs).toHaveBeenCalledWith('[age-review] Close threw but had committed; continuing as closed');
+      expect(pendingJobs()).toEqual([`age-review:${first.id}:5:denied_closed`]);
+      expect(banUser).toHaveBeenCalledWith(first.pubkey, 'age_review_expired', expect.anything());
+      expect(banPubkey).toHaveBeenCalledWith(first.pubkey, 'age_review_expired', expect.anything());
+      expect(vi.mocked(runBulkModeration).mock.calls.map((call) => call[1])).toEqual([first.pubkey]);
+    });
+
+    // Each row fails exactly one of the three checks. Only a case that still
+    // reads restricted is the next tick's to retry; one closed some other way
+    // has changed under the cron.
+    const RETRIES = '[age-review] Failed to auto-close expired case; the next tick retries it:';
+    const CHANGED = '[age-review] Close threw and the case has since changed; skipped:';
+    it.each([
+      ['still restricted', { state: 'restricted_pending_user_response', version: 5, resolution_note: CRON_CLOSE_NOTE }, RETRIES],
+      ['closed at another version', { state: 'denied_closed', version: 6, resolution_note: CRON_CLOSE_NOTE }, CHANGED],
+      ["closed by a moderator's own deny", { state: 'denied_closed', version: 5, resolution_note: 'Denied: no parental consent' }, CHANGED],
+      ['gone', null, CHANGED],
+    ])('skips the case when the re-read finds it %s', async (_label, now, logged) => {
+      const db = expiredCaseDb([first], { close: throwsFor('case-1'), reread: async () => now });
+      await checkAgeReviewDeadlines(makeEnv(db));
+
+      expect(errors).toHaveBeenCalledWith(logged, expect.any(Error));
+      expect(errors).not.toHaveBeenCalledWith(logged === RETRIES ? CHANGED : RETRIES, expect.anything());
+      expect(pendingJobs()).toEqual([]);
+      expect(banPubkey).not.toHaveBeenCalled();
+      expect(runBulkModeration).not.toHaveBeenCalled();
+    });
+
+    it('skips the case when the re-read throws, and later cases still run', async () => {
+      const db = expiredCaseDb([first, second], {
+        close: throwsFor('case-1'),
+        reread: async () => { throw new Error('D1_ERROR: read failed'); },
+      });
+      await checkAgeReviewDeadlines(makeEnv(db));
+
+      // The read's own error is logged, not dropped.
+      expect(errors).toHaveBeenCalledWith(
+        '[age-review] Could not re-read an expired case after its close threw:',
+        expect.objectContaining({ message: 'D1_ERROR: read failed' }),
+      );
+      // Not "the next tick retries it": if the close committed, nothing will.
+      expect(errors).toHaveBeenCalledWith(
+        '[age-review] Close threw and could not be re-read; if it committed, this case gets no bans or delete:', expect.any(Error),
+      );
+      expect(errors).not.toHaveBeenCalledWith(RETRIES, expect.anything());
+      expect(vi.mocked(banPubkey).mock.calls.map((call) => call[0])).toEqual([second.pubkey]);
+      expect(vi.mocked(runBulkModeration).mock.calls.map((call) => call[1])).toEqual([second.pubkey]);
+      expect(pendingJobs()).toEqual([`age-review:${second.id}:1:denied_closed`]);
+    });
+  });
+
+  it('reads no config when nothing has expired', async () => {
+    const config = vi.fn(async () => null);
+    await checkAgeReviewDeadlines(makeEnv(expiredCaseDb([], { config })));
+    expect(config).not.toHaveBeenCalled();
+  });
+
+  // A pending line, kept for each closed case before its bans and cleared once
+  // its auto-delete has run, so a case screen shows a delete the run never
+  // reached (it does not retry it).
+  describe('the pending auto-delete line', () => {
+    const expired = { deadline_at: new Date(Date.now() - 1000).toISOString(), state: 'restricted_pending_user_response' as const };
+    const first = makeCase({ ...expired, id: 'case-1', pubkey: 'a'.repeat(64) });
+    const second = makeCase({ ...expired, id: 'case-2', pubkey: 'c'.repeat(64) });
+    const jobOf = (c: AgeReviewCase) => `age-review:${c.id}:${c.version + 1}:denied_closed`;
+    const PENDING = new Set([autoDeletePendingWarning(first.pubkey), autoDeletePendingWarning(second.pubkey)]);
+    const pendingStores = () => vi.mocked(storeBulkNotes).mock.calls
+      .map((call, i) => ({ call, at: vi.mocked(storeBulkNotes).mock.invocationCallOrder[i] }))
+      .filter(({ call }) => (call[3] ?? []).some((line) => PENDING.has(line)));
+    let errors: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+      vi.mocked(runBulkModeration).mockReset().mockResolvedValue({ success: true, eventsProcessed: 0, mediaProcessed: 0, mediaSkipped: 0, failures: [], notes: [] } as never);
+      vi.mocked(banPubkey).mockClear();
+      vi.mocked(storeBulkNotes).mockReset().mockResolvedValue(0);
+      vi.mocked(deleteBulkFailure).mockReset().mockResolvedValue(1);
+    });
+    afterEach(() => { errors.mockRestore(); });
+
+    it('is kept for each closed case after its close, before its bans and before any auto-delete', async () => {
+      const db = expiredCaseDb([first, second]);
+      await checkAgeReviewDeadlines(makeEnv(db));
+
+      expect(storeBulkNotes).toHaveBeenCalledWith(db, jobOf(first), [], [autoDeletePendingWarning(first.pubkey)]);
+      expect(storeBulkNotes).toHaveBeenCalledWith(db, jobOf(second), [], [autoDeletePendingWarning(second.pubkey)]);
+      const stores = pendingStores().map(({ at }) => at);
+      const bans = vi.mocked(banUser).mock.invocationCallOrder;
+      expect(stores).toHaveLength(2);
+      expect(stores[0]).toBeLessThan(bans[0]);
+      expect(stores[1]).toBeLessThan(bans[1]);
+      expect(bans[0]).toBeLessThan(stores[1]);
+      expect(Math.max(...stores)).toBeLessThan(Math.min(...vi.mocked(runBulkModeration).mock.invocationCallOrder));
+    });
+
+    it('is cleared once the auto-delete has run', async () => {
+      const db = expiredCaseDb([first]);
+      await checkAgeReviewDeadlines(makeEnv(db));
+
+      expect(deleteBulkFailure).toHaveBeenCalledOnce();
+      expect(deleteBulkFailure).toHaveBeenCalledWith(db, jobOf(first), autoDeletePendingWarning(first.pubkey));
+      expect(vi.mocked(deleteBulkFailure).mock.invocationCallOrder[0])
+        .toBeGreaterThan(vi.mocked(runBulkModeration).mock.invocationCallOrder[0]);
+    });
+
+    it("is cleared after a failed auto-delete, whose own failure lines stay", async () => {
+      vi.mocked(runBulkModeration).mockRejectedValueOnce(new Error('Relay query timed out before EOSE'));
+      const db = expiredCaseDb([first]);
+      await checkAgeReviewDeadlines(makeEnv(db));
+
+      const stopped = bulkLegStoppedWarning(first.pubkey, 'Relay query timed out before EOSE');
+      expect(storeBulkNotes).toHaveBeenCalledWith(db, jobOf(first), [], [stopped]);
+      expect(deleteBulkFailure).toHaveBeenCalledOnce();
+      expect(deleteBulkFailure).toHaveBeenCalledWith(db, jobOf(first), autoDeletePendingWarning(first.pubkey));
+      const keptStopped = vi.mocked(storeBulkNotes).mock.calls.findIndex((call) => call[3]?.includes(stopped));
+      expect(vi.mocked(deleteBulkFailure).mock.invocationCallOrder[0])
+        .toBeGreaterThan(vi.mocked(storeBulkNotes).mock.invocationCallOrder[keptStopped]);
+    });
+
+    it("stays when the failed delete's own lines could not be kept", async () => {
+      vi.mocked(runBulkModeration).mockRejectedValueOnce(new Error('Relay query timed out before EOSE'));
+      // The pending line is kept; the delete's own lines are not.
+      vi.mocked(storeBulkNotes).mockResolvedValueOnce(1).mockRejectedValueOnce(new Error('D1_ERROR: write failed'));
+      const db = expiredCaseDb([first]);
+      await checkAgeReviewDeadlines(makeEnv(db));
+
+      expect(pendingJobs()).toEqual([jobOf(first)]);
+      expect(deleteBulkFailure).not.toHaveBeenCalled();
+    });
+
+    it('is cleared when auto-delete on deny is turned off before the second pass', async () => {
+      const db = expiredCaseDb([first], { config: async (read) => (read === 0 ? null : { value: 'false' }) });
+      await checkAgeReviewDeadlines(makeEnv(db));
+
+      expect(pendingJobs()).toEqual([jobOf(first)]);
+      expect(runBulkModeration).not.toHaveBeenCalled();
+      expect(deleteBulkFailure).toHaveBeenCalledOnce();
+      expect(deleteBulkFailure).toHaveBeenCalledWith(db, jobOf(first), autoDeletePendingWarning(first.pubkey));
+    });
+
+    it('stays for a case the second pass never reaches', async () => {
+      let finish!: () => void;
+      vi.mocked(runBulkModeration).mockImplementationOnce(() => new Promise((resolve) => {
+        finish = () => resolve({ success: true, eventsProcessed: 0, mediaProcessed: 0, mediaSkipped: 0, failures: [], notes: [] } as never);
+      }));
+      const db = expiredCaseDb([first, second]);
+      const run = checkAgeReviewDeadlines(makeEnv(db));
+      // The invocation stops in the first case's delete.
+      await vi.waitFor(() => expect(runBulkModeration).toHaveBeenCalledOnce());
+
+      expect(storeBulkNotes).toHaveBeenCalledWith(db, jobOf(second), [], [autoDeletePendingWarning(second.pubkey)]);
+      expect(deleteBulkFailure).not.toHaveBeenCalled();
+      finish();
+      await run;
+    });
+
+    it('is not kept when auto-delete on deny is off', async () => {
+      const db = expiredCaseDb([first], { config: async () => ({ value: 'false' }) });
+      await checkAgeReviewDeadlines(makeEnv(db));
+
+      expect(storeBulkNotes).not.toHaveBeenCalled();
+      expect(deleteBulkFailure).not.toHaveBeenCalled();
+      expect(runBulkModeration).not.toHaveBeenCalled();
+      expect(banPubkey).toHaveBeenCalledWith(first.pubkey, 'age_review_expired', expect.anything());
+    });
+
+    it('is not kept when the config cannot be read before the first pass, and the delete still runs', async () => {
+      const db = expiredCaseDb([first], {
+        config: async (read) => { if (read === 0) throw new Error('D1_ERROR: config read failed'); return null; },
+      });
+      await checkAgeReviewDeadlines(makeEnv(db));
+
+      expect(pendingStores()).toEqual([]);
+      expect(runBulkModeration).toHaveBeenCalledWith(expect.anything(), first.pubkey, 'delete-all', expect.any(String));
+    });
+
+    it('does not stop the bans or the delete when it cannot be kept', async () => {
+      vi.mocked(storeBulkNotes).mockRejectedValueOnce(new Error('D1_ERROR: write failed'));
+      const db = expiredCaseDb([first]);
+      await checkAgeReviewDeadlines(makeEnv(db));
+
+      expect(banUser).toHaveBeenCalledWith(first.pubkey, 'age_review_expired', expect.anything());
+      expect(banPubkey).toHaveBeenCalledWith(first.pubkey, 'age_review_expired', expect.anything());
+      expect(runBulkModeration).toHaveBeenCalledWith(expect.anything(), first.pubkey, 'delete-all', expect.any(String));
+    });
+
+    it('does not stop later cases when it cannot be cleared', async () => {
+      vi.mocked(deleteBulkFailure).mockRejectedValueOnce(new Error('D1_ERROR: delete failed'));
+      const db = expiredCaseDb([first, second]);
+      await checkAgeReviewDeadlines(makeEnv(db));
+
+      expect(vi.mocked(runBulkModeration).mock.calls.map((call) => call[1])).toEqual([first.pubkey, second.pubkey]);
+      expect(deleteBulkFailure).toHaveBeenCalledTimes(2);
+      // Logged as what it is: the deletes themselves succeeded.
+      expect(errors).toHaveBeenCalledWith('[age-review] could not clear the pending auto-delete line:', expect.any(Error));
+      expect(errors).not.toHaveBeenCalledWith('[age-review] Auto-delete failed for expired case:', expect.anything());
+    });
+  });
+
+  // The auto-delete follows the bans, so a ban step that throws must not stop it.
+  it.each([
+    ['relay ban', () => vi.mocked(banPubkey).mockRejectedValueOnce(new Error('relay unreachable'))],
+    ['minor-flag clear', () => vi.mocked(clearVerifiedMinor).mockRejectedValueOnce(new Error('keycast unreachable'))],
+  ])("still runs an expired case's auto-delete when its %s throws", async (_label, arrange) => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const expiredCase = makeCase({ deadline_at: new Date(Date.now() - 1000).toISOString(), state: 'restricted_pending_user_response' });
+    vi.mocked(runBulkModeration).mockClear();
+    vi.mocked(banPubkey).mockClear();
+    arrange();
+
+    await checkAgeReviewDeadlines(makeEnv(expiredCaseDb([expiredCase])));
+
+    expect(runBulkModeration).toHaveBeenCalledWith(expect.anything(), expiredCase.pubkey, 'delete-all', expect.any(String));
+    errors.mockRestore();
   });
 
   it('does not let Keycast failure block auto-close', async () => {

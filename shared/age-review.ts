@@ -1,3 +1,5 @@
+import type { BulkNote } from './bulk-moderation';
+
 export const AGE_BANDS = ['under_13', 'age_13_15', 'age_16_plus_claimed'] as const;
 export type AgeBand = typeof AGE_BANDS[number];
 
@@ -284,6 +286,14 @@ export interface AgeReviewEnforcement {
   relayError?: string;
   bulk: EnforcementLegStatus;
   bulkError?: string;
+  /** Files the bulk action left for a person (#299; see BulkNote): files a
+   * clear left hidden, and other accounts' files. Not a failure of the leg.
+   * Sent only when there are any, and only by a worker that has notes, so an
+   * older client ignores it and an older worker's payload simply lacks it. */
+  bulkNotes?: BulkNote[];
+  /** Every failure line of a failed bulk leg (#299), for the case screen's
+   * panel; bulkError carries only the first three. Sent only when there are any. */
+  bulkFailures?: string[];
   keycast: EnforcementLegStatus;
   keycastError?: string;
   /** Keycast verified_minor clear on revoke/deny (issue #147). Optional so

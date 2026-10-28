@@ -94,8 +94,8 @@ export function useAdminApi() {
     ) => adminApi.markAsReviewed(apiUrl, targetType, targetValue, status, comment, moderatorPubkey),
 
     // Media moderation
-    moderateMedia: (sha256: string, action: adminApi.ModerationAction, reason?: string) =>
-      adminApi.moderateMedia(apiUrl, sha256, action, reason),
+    moderateMedia: (sha256: string, action: adminApi.ModerationAction, reason?: string, from?: adminApi.ModerationAction, pubkey?: string) =>
+      adminApi.moderateMedia(apiUrl, sha256, action, reason, from, pubkey),
     checkMediaStatus: (sha256: string) =>
       adminApi.checkMediaStatus(apiUrl, sha256),
     unblockMedia: (sha256: string, reason?: string) =>
@@ -157,6 +157,8 @@ export function useAdminApi() {
     bulkModerate: (pubkey: string, action: adminApi.BulkAction, reason?: string, options?: adminApi.BulkModerateOptions) =>
       adminApi.bulkModerate(apiUrl, pubkey, action, reason, options),
     getBulkJobStatus: (jobId: string) => adminApi.getBulkJobStatus(apiUrl, jobId),
+    getBulkJobNotes: (jobId: string, after?: string) => adminApi.getBulkJobNotes(apiUrl, jobId, after),
+    getAgeReviewBulkNotesJob: (caseId: string) => adminApi.getAgeReviewBulkNotesJob(apiUrl, caseId),
     getBulkKindCounts: (pubkey: string) => adminApi.getBulkKindCounts(apiUrl, pubkey),
 
     // Delete operations

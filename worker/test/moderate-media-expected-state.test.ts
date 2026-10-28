@@ -139,6 +139,21 @@ describe('/api/moderate-media expected-state check', () => {
     expect(moderateCalls()).toHaveLength(0);
   });
 
+  // #299: a "still hidden" note's Restore expects QUARANTINE. If the file was
+  // blocked after the note was written, the restore must not unblock it.
+  it('refuses a restore from QUARANTINE once the file is blocked, and does not act', async () => {
+    const res = await worker.fetch(
+      post({ sha256: SHA, action: 'SAFE', from: 'QUARANTINE' }),
+      env(moderationApi('permanent_ban')),
+      {} as ExecutionContext,
+    );
+
+    expect(res.status).toBe(409);
+    const payload = (await res.json()) as { code?: string; current?: string };
+    expect(payload).toMatchObject({ code: 'state_mismatch', current: 'PERMANENT_BAN' });
+    expect(moderateCalls()).toHaveLength(0);
+  });
+
   it('proceeds when the current state is the one the caller expected', async () => {
     const res = await worker.fetch(
       post({ sha256: SHA, action: 'SAFE', from: 'AGE_RESTRICTED' }),
