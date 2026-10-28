@@ -72,6 +72,8 @@ describe('ReportClientText', () => {
     const count = screen.getByText('· 1 with no app named');
     expect(count.className).toContain('shrink-0');
     expect(count.closest('.truncate')).toBeNull();
+    // The names' span only truncates as an item of a flex line.
+    expect(count.parentElement).toHaveClass('flex');
   });
 
   it('carries no verification caveat when no app is named', () => {
