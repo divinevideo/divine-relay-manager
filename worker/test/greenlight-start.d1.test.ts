@@ -121,8 +121,12 @@ describe('starting the existing Greenlight consent process', () => {
   // A report case stored under the uppercase pubkey neither blocks the start
   // nor stands in for its case: the start's insert guard (NOT EXISTS) matches
   // the pubkey exactly, as on main (intake normalisation is #313). Its two
-  // getActiveAgeReviewCase lookups are not pinned here: with the exact case
-  // in place, an any-case lookup would return the same case.
+  // getActiveAgeReviewCase lookups are not pinned here. The first, before the
+  // insert, only decides whether to capture the account's identity: an
+  // any-case lookup would find the report case and skip the capture, but
+  // with no RELAY_URL there is nothing captured to miss, and this test does
+  // not check identity. The second, after the insert, would return the same
+  // case either way, because an any-case lookup puts the exact case first.
   it('starts as before beside a report case stored under the uppercase pubkey', async () => {
     await DB.prepare("INSERT INTO age_review_cases (id, pubkey, state, suspected_age_band, allowed_resolution, created_via) VALUES ('report-upper', ?, 'open_reported', 'age_13_15', 'parent_video_or_email', 'report')")
       .bind(owner.toUpperCase()).run();
