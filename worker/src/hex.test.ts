@@ -38,4 +38,14 @@ describe('isHex64 and isLowerHex64', () => {
     expect(isHex64(value)).toBe(hex);
     expect(isLowerHex64(value)).toBe(lowerHex);
   });
+
+  // Both return a plain boolean. A `value is string` guard would narrow a
+  // string that fails the check to `never`, so `npm run typecheck` fails on
+  // this test if either guard comes back.
+  it('leaves a rejected string typed as a string', () => {
+    const value: string = 'auto';
+    if (!isHex64(value) && !isLowerHex64(value)) {
+      expect(value.length).toBe(4);
+    }
+  });
 });

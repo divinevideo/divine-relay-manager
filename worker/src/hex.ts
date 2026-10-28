@@ -2,7 +2,7 @@
 // ABOUTME: A bare RegExp.test coerces its argument, so an array holding a valid id passes it.
 
 // A 64-character hex id in either case, as the API accepts one from a client.
-export function isHex64(value: unknown): value is string {
+export function isHex64(value: unknown): boolean {
   return typeof value === 'string' && /^[0-9a-f]{64}$/i.test(value);
 }
 
@@ -12,6 +12,6 @@ export function isHex64(value: unknown): value is string {
 // forwarding only lowercase ones, except /api/publish: a resolution label's
 // `e` tag goes over as sent, so an uppercase tag there gets a 400 from
 // ReportWatcher, as it did before this helper.
-export function isLowerHex64(value: unknown): value is string {
+export function isLowerHex64(value: unknown): boolean {
   return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
 }
