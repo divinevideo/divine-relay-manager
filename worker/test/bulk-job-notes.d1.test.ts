@@ -126,15 +126,17 @@ describe("an age-review case's notes", () => {
 
   it("finds the case's most recent transition with notes, and reads its notes back in full", async () => {
     await ensureBulkJobsTable(DB);
-    await storeBulkNotes(DB, ageReviewNotesJobId('case-1', 2, 'restricted_pending_user_response'), notesFor(3));
+    // Versions 9 and 10: as text, the key for 10 sorts before the key for 9,
+    // so only the order the transitions were kept in names 10 the latest.
+    await storeBulkNotes(DB, ageReviewNotesJobId('case-1', 9, 'restricted_pending_user_response'), notesFor(3));
     await storeBulkNotes(DB, ageReviewNotesJobId('case-10', 5, 'cleared'), notesFor(2, 100));
-    await storeBulkNotes(DB, ageReviewNotesJobId('case-1', 3, 'cleared'), notesFor(4, 200));
+    await storeBulkNotes(DB, ageReviewNotesJobId('case-1', 10, 'cleared'), notesFor(4, 200));
     await storeBulkNotes(DB, 'job-unrelated', notesFor(1, 300));
 
     const one = await latestFor('case-1');
     expect(one.status).toBe(200);
     const { jobId, state, keptAt } = await one.json() as { jobId: string | null; state?: string; keptAt?: string };
-    expect(jobId).toBe('age-review:case-1:3:cleared');
+    expect(jobId).toBe('age-review:case-1:10:cleared');
     // The step and its time, so the case screen need not parse the key.
     expect(state).toBe('cleared');
     expect(Number.isNaN(Date.parse(keptAt!))).toBe(false);
