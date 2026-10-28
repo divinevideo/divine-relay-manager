@@ -6,9 +6,11 @@
 import { Miniflare } from 'miniflare';
 import type { ModerationStatusResponse } from '../../shared/age-review';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
+import { disposeDueConsentVideos, trackConsentObject } from '../src/consent-video';
 import { ensureSchema } from '../src/db';
-import { handleUpdateAgeReviewCase, handleAgeReviewReplyWebhook, handleParentConsent, checkAgeReviewDeadlines, handleGetModerationStatus, handleStartGreenlight } from '../src/age-review';
+import { handleUpdateAgeReviewCase, handleAgeReviewReplyWebhook, checkAgeReviewDeadlines, handleGetModerationStatus, handleStartGreenlight } from '../src/age-review';
 import { createSubjectWithBinding, approvalRegistryStatements, resolveByPubkey, clearSubject, markProjectionComplete } from '../src/protected-minors';
+import { submitSignedConsent, consentPayloadHash } from '../src/test-helpers/signed-consent';
 
 let mf: Miniflare;
 let DB: D1Database;
@@ -33,6 +35,7 @@ afterAll(async () => { await mf?.dispose(); });
 async function reset() {
   await ensureSchema(DB);
   await DB.prepare('DELETE FROM age_review_parent_consent_submissions').run();
+  await DB.prepare('DELETE FROM age_review_consent_objects').run();
   await DB.prepare('DELETE FROM age_review_cases').run();
   await DB.prepare(
     "INSERT OR REPLACE INTO age_review_config (key, value) VALUES ('auto_delete_on_deny', 'false')",
@@ -112,12 +115,13 @@ describe('age-review handler on real D1', () => {
     const form = new FormData();
     form.set('email', 'parent@example.com');
     form.set('video', new File(['clip'], 'clip.mp4', { type: 'video/mp4' }));
-    const request = () => new Request('https://api.test/v1/minor-review-cases/consent-case/parent-consent', {
+    const original = new Request('https://api.test/v1/minor-review-cases/consent-case/parent-consent', {
       method: 'POST', body: form,
     });
+    const request = () => original.clone();
     try {
       const consentEnv = { ...env, ZENDESK_SUBDOMAIN: 'test', ZENDESK_EMAIL: 'agent@test.com', ZENDESK_API_TOKEN: 'token', CONSENT_VIDEO_BUCKET: bucket as unknown as R2Bucket };
-      expect((await handleParentConsent(request(), 'consent-case', owner, consentEnv, cors)).status).toBe(200);
+      expect((await submitSignedConsent(request(), 'consent-case', owner, consentEnv, cors)).status).toBe(200);
       const status = await (await handleGetModerationStatus(owner, consentEnv, cors)).json() as ModerationStatusResponse;
       expect(status.restriction.status).toBe(restriction);
       const caseRow = await DB.prepare('SELECT state, version, clock_paused, parent_contact_email FROM age_review_cases WHERE id = ?')
@@ -130,7 +134,7 @@ describe('age-review handler on real D1', () => {
       expect(objects.get(submission!.object_key)).toEqual(new TextEncoder().encode('clip'));
       expect(commentBody).toContain(`/api/age-review/consent-video/${submission!.receipt_id}`);
       expect(calls).toHaveLength(3);
-      expect((await handleParentConsent(request(), 'consent-case', owner, consentEnv, cors)).status).toBe(200);
+      expect((await submitSignedConsent(request(), 'consent-case', owner, consentEnv, cors)).status).toBe(200);
       expect(fetchSpy).toHaveBeenCalledTimes(3);
     } finally {
       fetchSpy.mockRestore();
@@ -149,7 +153,7 @@ describe('age-review handler on real D1', () => {
     form.set('video', new File(['clip'], 'clip.mp4', { type: 'video/mp4' }));
     const request = new Request('https://api.test/v1/minor-review-cases/consent-case-404/parent-consent', { method: 'POST', body: form });
     try {
-      const res = await handleParentConsent(request, 'consent-case-404', 'b'.repeat(64), { ...env }, cors);
+      const res = await submitSignedConsent(request, 'consent-case-404', 'b'.repeat(64), { ...env }, cors);
       expect(res.status).toBe(404);
       expect(fetchSpy).not.toHaveBeenCalled();
       const row = await DB.prepare('SELECT 1 FROM age_review_parent_consent_submissions WHERE case_id = ?').bind('consent-case-404').first();
@@ -253,6 +257,885 @@ describe('age-review handler on real D1', () => {
     // ...but the DB state transition still applied (best-effort, retryable).
     expect(body.case.state).toBe('restricted_pending_user_response');
     expect((await rowOf('c5')).state).toBe('restricted_pending_user_response');
+  });
+});
+
+describe('concurrent parent-consent submissions on real D1', () => {
+  beforeEach(reset);
+  afterEach(() => vi.restoreAllMocks());
+
+  const owner = 'c'.repeat(64);
+  const boundary = 'round-boundary';
+  const url = 'https://api.test/v1/minor-review-cases/round-case/parent-consent';
+
+  async function seedSentBackRound() {
+    await DB.prepare(`INSERT INTO age_review_cases
+      (id, pubkey, state, suspected_age_band, zendesk_ticket_id, deadline_at, clock_paused, version)
+      VALUES ('round-case', ?, 'restricted_pending_parental_consent', 'age_13_15', 42, ?, 0, 9)`)
+      .bind(owner, new Date(Date.now() + 9 * 864e5).toISOString()).run();
+    await DB.prepare(`INSERT INTO age_review_parent_consent_submissions
+      (case_id, status, ticket_id, lease_until, created_at, receipt_id, object_key, case_version)
+      VALUES ('round-case', 'commented', 42, 0, 1, 'old-receipt', 'old-key', 7)`).run();
+  }
+
+  function upload(clip: string) {
+    const raw = `--${boundary}\r\nContent-Disposition: form-data; name="email"\r\n\r\nparent@example.com\r\n--${boundary}\r\nContent-Disposition: form-data; name="video"; filename="clip.mp4"\r\nContent-Type: video/mp4\r\n\r\n${clip}\r\n--${boundary}--\r\n`;
+    return new Request(url, { method: 'POST', headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` }, body: raw });
+  }
+
+  // Each request gets its own bucket view over one shared object store, so a
+  // test can tell whose clip is whose and hold one request at a chosen step.
+  function bucketView(objects: Map<string, string>, keys: string[], beforeComplete: () => Promise<void> = async () => {}) {
+    return {
+      head: async (key: string) => (objects.has(key) ? { size: objects.get(key)!.length } : null),
+      createMultipartUpload: async (key: string) => {
+        keys.push(key);
+        const chunks: Uint8Array[] = [];
+        return {
+          uploadPart: async (n: number, v: Uint8Array) => { chunks.push(new Uint8Array(v)); return { partNumber: n, etag: `e${n}` }; },
+          complete: async () => {
+            await beforeComplete();
+            objects.set(key, new TextDecoder().decode(new Uint8Array(chunks.flatMap((c) => [...c]))));
+            return {};
+          },
+          abort: async () => {},
+        };
+      },
+      delete: async (key: string) => { objects.delete(key); },
+    } as unknown as R2Bucket;
+  }
+
+  function zendesk(onComment: (count: number) => Promise<void> = async () => {}) {
+    const comments: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const target = String(input);
+      if (target.endsWith('/tickets/42')) {
+        comments.push((JSON.parse(String(init?.body)) as { ticket: { comment: { body: string } } }).ticket.comment.body);
+        await onComment(comments.length);
+        return new Response('{}', { status: 200 });
+      }
+      if (target.includes('/tickets/42/comments?')) {
+        return new Response(JSON.stringify({ comments: comments.map((body) => ({ body })) }), { status: 200 });
+      }
+      throw new Error(`Unexpected request: ${target}`);
+    });
+    return comments;
+  }
+
+  const zendeskEnv = { ZENDESK_SUBDOMAIN: 'test', ZENDESK_EMAIL: 'agent@test.com', ZENDESK_API_TOKEN: 'token' };
+
+  async function submissionRow() {
+    return DB.prepare('SELECT status, receipt_id, object_key, case_version FROM age_review_parent_consent_submissions WHERE case_id = ?')
+      .bind('round-case').first<{ status: string; receipt_id: string; object_key: string; case_version: number }>();
+  }
+
+  it('a slower request for the same new round cannot replace the round another request recorded', async () => {
+    await seedSentBackRound();
+    const objects = new Map([['old-key', 'old']]);
+    const comments = zendesk();
+    const aKeys: string[] = [];
+    const bKeys: string[] = [];
+    let bReady!: () => void;
+    const bAtComplete = new Promise<void>((resolve) => { bReady = resolve; });
+    let releaseB!: () => void;
+    const bGate = new Promise<void>((resolve) => { releaseB = resolve; });
+    const bucketB = bucketView(objects, bKeys, async () => { bReady(); await bGate; });
+    const slower = submitSignedConsent(upload('clipB'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketB }, cors);
+    await bAtComplete;
+
+    const first = await submitSignedConsent(upload('clipA'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, aKeys) }, cors);
+    expect(first.status).toBe(200);
+    releaseB();
+    expect((await slower).status).toBe(409);
+
+    const row = await submissionRow();
+    expect(row).toMatchObject({ status: 'commented', object_key: aKeys[0], case_version: 9 });
+    expect([...objects.entries()]).toEqual([[aKeys[0], 'clipA']]);
+    expect(comments).toHaveLength(1);
+    expect(comments[0]).toContain(row!.receipt_id);
+    expect(await rowOf('round-case')).toMatchObject({ state: 'submitted_for_review', version: 10 });
+  });
+
+  it('a request that reads a round another request just reset waits for its lease', async () => {
+    await seedSentBackRound();
+    const objects = new Map([['old-key', 'old']]);
+    const comments = zendesk();
+    let aReset!: () => void;
+    const aAfterReset = new Promise<void>((resolve) => { aReset = resolve; });
+    let releaseA!: () => void;
+    const aGate = new Promise<void>((resolve) => { releaseA = resolve; });
+    // Hold the first request between its round reset and its row claim.
+    const heldDb = {
+      prepare: (sql: string) => {
+        const statement = DB.prepare(sql);
+        if (!sql.includes('INSERT OR IGNORE INTO age_review_parent_consent_submissions')) return statement;
+        return {
+          bind: (...args: unknown[]) => {
+            const bound = statement.bind(...args);
+            return { run: async () => { aReset(); await aGate; return bound.run(); } };
+          },
+        };
+      },
+    } as unknown as D1Database;
+    const aKeys: string[] = [];
+    const first = submitSignedConsent(upload('clipA'), 'round-case', owner, { ...env, DB: heldDb, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, aKeys) }, cors);
+    await aAfterReset;
+
+    const second = await submitSignedConsent(upload('clipB'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, []) }, cors);
+    expect(second.status).toBe(409);
+    releaseA();
+    expect((await first).status).toBe(200);
+
+    expect(await submissionRow()).toMatchObject({ status: 'commented', object_key: aKeys[0], case_version: 9 });
+    expect([...objects.entries()]).toEqual([[aKeys[0], 'clipA']]);
+    expect(comments).toHaveLength(1);
+  });
+
+  it.each(['stored', 'commented', 'submitted'].flatMap(stage => ['email', 'video', 'boundary'].map(change => [stage, change])))('refuses a different signed body on a %s retry (%s) without changing its email or clip', async (stage, change) => {
+    await seedOpenCase();
+    const objects = new Map<string, string>();
+    const comments = zendesk();
+    const bucket = bucketView(objects, []);
+    const consentEnv = { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucket };
+    expect((await submitSignedConsent(upload('first'), 'round-case', owner, consentEnv, cors)).status).toBe(200);
+    if (stage !== 'submitted') {
+      await DB.prepare("UPDATE age_review_cases SET state = 'restricted_pending_parental_consent', version = 2 WHERE id = 'round-case'").run();
+      await DB.prepare('UPDATE age_review_parent_consent_submissions SET status = ?, lease_until = 0 WHERE case_id = ?').bind(stage, 'round-case').run();
+    }
+    const before = await submissionRow();
+    const changed = upload(change === 'video' ? 'second' : 'first');
+    let raw = await changed.text();
+    if (change === 'email') raw = raw.replace('parent@example.com', 'different@example.com');
+    if (change === 'boundary') {
+      raw = raw.replaceAll(boundary, 'new-boundary');
+      changed.headers.set('Content-Type', 'multipart/form-data; boundary=new-boundary');
+    }
+    const response = await submitSignedConsent(new Request(url, { method: 'POST', headers: changed.headers, body: raw }), 'round-case', owner, consentEnv, cors);
+    expect(response.status).toBe(409);
+    expect(await submissionRow()).toEqual(before);
+    expect([...objects.values()]).toEqual(['first']);
+    expect(await DB.prepare("SELECT parent_contact_email FROM age_review_cases WHERE id = 'round-case'").first()).toEqual({ parent_contact_email: 'parent@example.com' });
+    expect(comments).toHaveLength(1);
+    expect((await submitSignedConsent(upload('first'), 'round-case', owner, consentEnv, cors)).status).toBe(200);
+    expect(comments).toHaveLength(1);
+  });
+
+  it.each(['email', 'video', 'boundary'])('replaces an unlinked stored upload when the %s changes', async (change) => {
+    await seedOpenCase();
+    const objects = new Map<string, string>();
+    const consentEnv = { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, []) };
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Zendesk unavailable'));
+    expect((await submitSignedConsent(upload('first'), 'round-case', owner, consentEnv, cors)).status).toBe(503);
+    const before = await submissionRow();
+    expect(before?.status).toBe('stored');
+    vi.restoreAllMocks();
+    const comments = zendesk();
+    const changed = upload(change === 'video' ? 'second' : 'first');
+    let raw = await changed.text();
+    if (change === 'email') raw = raw.replace('parent@example.com', 'corrected@example.com');
+    if (change === 'boundary') {
+      raw = raw.replaceAll(boundary, 'new-boundary');
+      changed.headers.set('Content-Type', 'multipart/form-data; boundary=new-boundary');
+    }
+    const retry = new Request(url, { method: 'POST', headers: changed.headers, body: raw });
+    expect((await submitSignedConsent(retry.clone(), 'round-case', owner, consentEnv, cors)).status).toBe(200);
+    const after = await submissionRow();
+    expect(after?.status).toBe('commented');
+    expect(after?.receipt_id).not.toBe(before?.receipt_id);
+    expect(after?.object_key).not.toBe(before?.object_key);
+    expect([...objects.values()]).toEqual([change === 'video' ? 'second' : 'first']);
+    expect(comments).toHaveLength(1);
+    expect(comments[0]).toContain(after!.receipt_id);
+    expect(await DB.prepare("SELECT parent_contact_email FROM age_review_cases WHERE id = 'round-case'").first())
+      .toEqual({ parent_contact_email: change === 'email' ? 'corrected@example.com' : 'parent@example.com' });
+    expect((await submitSignedConsent(retry.clone(), 'round-case', owner, consentEnv, cors)).status).toBe(200);
+    expect((await submitSignedConsent(upload('first'), 'round-case', owner, consentEnv, cors)).status).toBe(409);
+    expect(comments).toHaveLength(1);
+  });
+
+  it('allows only one of two concurrent replacements of an unlinked stored upload', async () => {
+    await seedOpenCase();
+    const objects = new Map<string, string>();
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Zendesk unavailable'));
+    expect((await submitSignedConsent(upload('first'), 'round-case', owner,
+      { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, []) }, cors)).status).toBe(503);
+    vi.restoreAllMocks();
+    const comments = zendesk();
+    let ready!: () => void;
+    let release!: () => void;
+    const readyPromise = new Promise<void>((resolve) => { ready = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const slower = submitSignedConsent(upload('slower'), 'round-case', owner,
+      { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, [], async () => { ready(); await gate; }) }, cors);
+    await readyPromise;
+    expect((await submitSignedConsent(upload('winner'), 'round-case', owner,
+      { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, []) }, cors)).status).toBe(200);
+    release();
+    expect((await slower).status).toBe(409);
+    expect([...objects.values()]).toEqual(['winner']);
+    expect(comments).toHaveLength(1);
+    expect(await submissionRow()).toMatchObject({ status: 'commented' });
+  });
+
+  it.each(['lookup failure', 'lookup error status', 'malformed lookup', 'unbounded lookup', 'older linked comment', 'unknown ticket creation'])('preserves a stored upload on replacement with %s', async (scenario) => {
+    await seedOpenCase();
+    const objects = new Map<string, string>();
+    const consentEnv = { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, []) };
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Zendesk unavailable'));
+    expect((await submitSignedConsent(upload('first'), 'round-case', owner, consentEnv, cors)).status).toBe(503);
+    const before = await submissionRow();
+    vi.restoreAllMocks();
+    if (scenario === 'unknown ticket creation') {
+      await DB.prepare("UPDATE age_review_cases SET zendesk_ticket_id = NULL WHERE id = 'round-case'").run();
+      await DB.prepare("UPDATE age_review_parent_consent_submissions SET ticket_attempt_at = ? WHERE case_id = 'round-case'")
+        .bind(Math.floor(Date.now() / 1000)).run();
+    }
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      if (scenario === 'lookup error status') return new Response('', { status: 500 });
+      if (scenario === 'malformed lookup') return new Response(JSON.stringify({}));
+      if (scenario === 'unbounded lookup') return new Response(JSON.stringify({ comments: [], next_page: 'more' }));
+      if (scenario !== 'older linked comment') throw new Error('Zendesk unavailable');
+      if (String(input).includes('&page=2')) return new Response(JSON.stringify({ comments: [{ body: before!.receipt_id }], next_page: null }));
+      return new Response(JSON.stringify({ comments: [], next_page: 'page-two' }));
+    });
+    const res = await submitSignedConsent(upload('second'), 'round-case', owner, consentEnv, cors);
+    expect(res.status).toBe(scenario === 'older linked comment' || scenario === 'unknown ticket creation' ? 409 : 503);
+    expect(await submissionRow()).toEqual(before);
+    expect([...objects.values()]).toEqual(['first']);
+    expect(await DB.prepare("SELECT lease_until FROM age_review_parent_consent_submissions WHERE case_id = 'round-case'").first())
+      .toEqual({ lease_until: 0 });
+    if (scenario === 'unknown ticket creation') expect(fetchSpy).not.toHaveBeenCalled();
+    if (scenario === 'older linked comment') expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['lease owner', 'email submission', 'ticket identity', 'ticket attempt', 'case version', 'case state'])('does not adopt a replacement after the %s changes during its lookup', async (scenario) => {
+    await seedOpenCase();
+    const objects = new Map<string, string>();
+    const consentEnv = { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, []) };
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Zendesk unavailable'));
+    expect((await submitSignedConsent(upload('first'), 'round-case', owner, consentEnv, cors)).status).toBe(503);
+    const before = await submissionRow();
+    vi.restoreAllMocks();
+    const nextLease = Math.floor(Date.now() / 1000) + 1200;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      if (scenario === 'lease owner') {
+        await DB.prepare("UPDATE age_review_parent_consent_submissions SET lease_until = ? WHERE case_id = 'round-case'").bind(nextLease).run();
+      } else if (scenario === 'ticket identity') {
+        await DB.prepare("UPDATE age_review_parent_consent_submissions SET ticket_id = 99 WHERE case_id = 'round-case'").run();
+      } else if (scenario === 'ticket attempt') {
+        await DB.prepare("UPDATE age_review_parent_consent_submissions SET ticket_attempt_at = 1 WHERE case_id = 'round-case'").run();
+      } else if (scenario === 'case version') {
+        await DB.prepare("UPDATE age_review_cases SET version = version + 1 WHERE id = 'round-case'").run();
+      } else if (scenario === 'case state') {
+        await DB.prepare("UPDATE age_review_cases SET state = 'submitted_for_review' WHERE id = 'round-case'").run();
+      } else {
+        await DB.prepare("UPDATE age_review_cases SET state = 'submitted_for_review', version = version + 1 WHERE id = 'round-case'").run();
+      }
+      return new Response(JSON.stringify({ comments: [] }));
+    });
+    expect((await submitSignedConsent(upload('second'), 'round-case', owner, consentEnv, cors)).status).toBe(409);
+    expect(await submissionRow()).toEqual(before);
+    expect([...objects.values()]).toEqual(['first']);
+    expect(await DB.prepare("SELECT lease_until FROM age_review_parent_consent_submissions WHERE case_id = 'round-case'").first())
+      .toEqual({ lease_until: scenario === 'lease owner' ? nextLease : 0 });
+  });
+
+  it('keeps a failed replacement cleanup tracked and renews the abandoned-upload clock', async () => {
+    await seedOpenCase();
+    const objects = new Map<string, string>();
+    const bucket = bucketView(objects, []);
+    const consentEnv = { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucket };
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Zendesk unavailable'));
+    expect((await submitSignedConsent(upload('first'), 'round-case', owner, consentEnv, cors)).status).toBe(503);
+    const before = await submissionRow();
+    await DB.prepare("UPDATE age_review_parent_consent_submissions SET created_at = 1 WHERE case_id = 'round-case'").run();
+    vi.restoreAllMocks();
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      if (init?.method === 'PUT') throw new Error('Zendesk unavailable');
+      return new Response(JSON.stringify({ comments: [] }));
+    });
+    const remove = bucket.delete.bind(bucket);
+    bucket.delete = vi.fn().mockRejectedValue(new Error('storage unavailable'));
+    expect((await submitSignedConsent(upload('second'), 'round-case', owner, consentEnv, cors)).status).toBe(503);
+    const after = await submissionRow();
+    expect(after?.object_key).not.toBe(before?.object_key);
+    expect(await DB.prepare('SELECT object_key FROM age_review_consent_objects WHERE object_key = ?').bind(before!.object_key).first())
+      .toEqual({ object_key: before!.object_key });
+    bucket.delete = remove;
+    await disposeDueConsentVideos(DB, bucket);
+    expect(objects.get(after!.object_key)).toBe('second');
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 2 * 864e5);
+    await disposeDueConsentVideos(DB, bucket);
+    expect(objects.has(before!.object_key)).toBe(false);
+  });
+
+  it('rejects an exact replay of the previous round after send-back', async () => {
+    await seedSentBackRound();
+    await DB.prepare("UPDATE age_review_parent_consent_submissions SET payload_hash = ? WHERE case_id = 'round-case'")
+      .bind(await consentPayloadHash(upload('old'))).run();
+    const objects = new Map([['old-key', 'old']]);
+    const comments = zendesk();
+    const consentEnv = { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, []) };
+    const replay = await submitSignedConsent(upload('old'), 'round-case', owner, consentEnv, cors);
+    expect(replay.status).toBe(409);
+    expect(await replay.json()).toMatchObject({ error: 'A new consent upload is required after send-back' });
+    expect(await rowOf('round-case')).toMatchObject({ state: 'restricted_pending_parental_consent', version: 9 });
+    expect([...objects.entries()]).toEqual([['old-key', 'old']]);
+    expect(comments).toHaveLength(0);
+    expect((await submitSignedConsent(upload('new'), 'round-case', owner, consentEnv, cors)).status).toBe(200);
+    expect([...objects.values()]).toEqual(['new']);
+    expect(comments).toHaveLength(1);
+  });
+
+  it('finishes linking an exact stored retry after an email reply submits the case', async () => {
+    await seedOpenCase();
+    const objects = new Map<string, string>();
+    const keys: string[] = [];
+    const consentEnv = { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, keys) };
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Zendesk unavailable'));
+    expect((await submitSignedConsent(upload('first'), 'round-case', owner, consentEnv, cors)).status).toBe(503);
+    expect(await submissionRow()).toMatchObject({ status: 'stored' });
+    await DB.prepare("UPDATE age_review_cases SET state = 'submitted_for_review', version = 3, clock_paused = 1, parent_contact_email = 'email-parent@example.com' WHERE id = 'round-case'").run();
+    vi.restoreAllMocks();
+    const comments = zendesk();
+    expect((await submitSignedConsent(upload('first'), 'round-case', owner, consentEnv, cors)).status).toBe(200);
+    expect(await submissionRow()).toMatchObject({ status: 'commented' });
+    expect(comments).toHaveLength(1);
+    expect(keys).toHaveLength(1);
+    expect(await DB.prepare("SELECT state, version, parent_contact_email FROM age_review_cases WHERE id = 'round-case'").first())
+      .toEqual({ state: 'submitted_for_review', version: 3, parent_contact_email: 'email-parent@example.com' });
+    expect((await submitSignedConsent(upload('first'), 'round-case', owner, consentEnv, cors)).status).toBe(200);
+    expect(comments).toHaveLength(1);
+    expect((await submitSignedConsent(upload('different'), 'round-case', owner, consentEnv, cors)).status).toBe(409);
+  });
+
+  it('opens a sent-back round with a new body while the previous round\'s link is on the ticket', async () => {
+    await seedSentBackRound();
+    await DB.prepare("UPDATE age_review_parent_consent_submissions SET payload_hash = ? WHERE case_id = 'round-case'")
+      .bind(await consentPayloadHash(upload('old'))).run();
+    const objects = new Map([['old-key', 'old']]);
+    const comments = zendesk();
+    // After a real send-back the earlier round's reviewer link is on the ticket.
+    comments.push('Parent consent video submitted for review. Review the private consent video: https://api.test/api/age-review/consent-video/old-receipt');
+    const consentEnv = { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, []) };
+    expect((await submitSignedConsent(upload('new'), 'round-case', owner, consentEnv, cors)).status).toBe(200);
+    expect([...objects.values()]).toEqual(['new']);
+    expect(comments).toHaveLength(2);
+    expect(await rowOf('round-case')).toMatchObject({ state: 'submitted_for_review' });
+  });
+
+  it('does not open a sent-back round once another request has submitted the case', async () => {
+    await seedSentBackRound();
+    await DB.prepare("UPDATE age_review_parent_consent_submissions SET payload_hash = ? WHERE case_id = 'round-case'")
+      .bind(await consentPayloadHash(upload('old'))).run();
+    const objects = new Map([['old-key', 'old']]);
+    const comments = zendesk();
+    let newAtComplete!: () => void;
+    const newReady = new Promise<void>((resolve) => { newAtComplete = resolve; });
+    let releaseNew!: () => void;
+    const newGate = new Promise<void>((resolve) => { releaseNew = resolve; });
+    const opening = submitSignedConsent(upload('new'), 'round-case', owner,
+      { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, [], async () => { newAtComplete(); await newGate; }) }, cors);
+    await newReady;
+    // An exact retry of the earlier round finishes its case advance meanwhile.
+    await DB.prepare("UPDATE age_review_cases SET state = 'submitted_for_review', version = version + 1, parent_contact_email = 'earlier@example.com' WHERE id = 'round-case'").run();
+    releaseNew();
+    expect((await opening).status).toBe(409);
+
+    expect(await submissionRow()).toMatchObject({ status: 'commented', receipt_id: 'old-receipt', object_key: 'old-key', case_version: 7 });
+    expect([...objects.entries()]).toEqual([['old-key', 'old']]);
+    expect(comments).toHaveLength(0);
+  });
+
+  it('opens a sent-back round when the old clip cannot be deleted, leaving it to retention', async () => {
+    await seedSentBackRound();
+    await DB.prepare("UPDATE age_review_parent_consent_submissions SET payload_hash = ? WHERE case_id = 'round-case'")
+      .bind(await consentPayloadHash(upload('old'))).run();
+    const objects = new Map([['old-key', 'old']]);
+    const comments = zendesk();
+    const keys: string[] = [];
+    const failingOldDelete = Object.assign(bucketView(objects, keys), {
+      delete: async (key: string) => {
+        if (key === 'old-key') throw new Error('r2 down');
+        objects.delete(key);
+      },
+    });
+    const res = await submitSignedConsent(upload('new'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: failingOldDelete }, cors);
+    expect(res.status).toBe(200);
+    expect(await submissionRow()).toMatchObject({ status: 'commented', object_key: keys[0], case_version: 9 });
+    expect(comments).toHaveLength(1);
+    expect(objects.get('old-key')).toBe('old');
+
+    // The old key is inventoried and no row names it, so the sweep deletes it.
+    await DB.prepare("UPDATE age_review_consent_objects SET created_at = 1 WHERE object_key = 'old-key'").run();
+    await disposeDueConsentVideos(DB, bucketView(objects, []));
+    expect([...objects.entries()]).toEqual([[keys[0], 'new']]);
+    expect(await DB.prepare("SELECT 1 FROM age_review_consent_objects WHERE object_key = 'old-key'").first()).toBeNull();
+  });
+
+  it('lets a new body take over an upload that stopped before it was stored', async () => {
+    await seedOpenCase();
+    // A request inserted its row and then died before marking the clip stored,
+    // so no reviewer link can exist for it.
+    await DB.prepare(`INSERT INTO age_review_parent_consent_submissions (case_id, status, lease_until, created_at, receipt_id, object_key, payload_hash)
+      VALUES ('round-case', 'processing', 1, 1, 'stalled-receipt', 'stalled-key', ?)`).bind(await consentPayloadHash(upload('first'))).run();
+    await trackConsentObject(DB, 'round-case', 'stalled-key');
+    const objects = new Map([['stalled-key', 'first']]);
+    const comments = zendesk();
+    const keys: string[] = [];
+    const res = await submitSignedConsent(upload('second'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, keys) }, cors);
+    expect(res.status).toBe(200);
+    expect(await submissionRow()).toMatchObject({ status: 'commented', object_key: keys[0] });
+    expect([...objects.entries()]).toEqual([[keys[0], 'second']]);
+    expect(await DB.prepare("SELECT 1 FROM age_review_consent_objects WHERE object_key = 'stalled-key'").first()).toBeNull();
+    expect(comments).toHaveLength(1);
+    expect(await rowOf('round-case')).toMatchObject({ state: 'submitted_for_review' });
+  });
+
+  it('does not take over a processing upload that became stored before the lease claim', async () => {
+    await seedOpenCase();
+    const now = Math.floor(Date.now() / 1000);
+    await DB.prepare(`INSERT INTO age_review_parent_consent_submissions
+      (case_id, status, lease_until, created_at, receipt_id, object_key, payload_hash)
+      VALUES ('round-case', 'processing', ?, ?, 'stalled-receipt', 'stalled-key', ?)`)
+      .bind(now - 1, now - 601, await consentPayloadHash(upload('first'))).run();
+    await trackConsentObject(DB, 'round-case', 'stalled-key');
+    const objects = new Map([['stalled-key', 'first']]);
+    const comments = zendesk();
+    const bucket = bucketView(objects, [], async () => {
+      // The expired holder finishes storing and posts its link after this
+      // request read 'processing', but before this request claims the lease.
+      await DB.prepare("UPDATE age_review_parent_consent_submissions SET status = 'stored' WHERE case_id = 'round-case'").run();
+      comments.push('Review: https://api.test/api/age-review/consent-video/stalled-receipt');
+    });
+    const res = await submitSignedConsent(upload('second'), 'round-case', owner,
+      { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucket }, cors);
+    expect(res.status).toBe(409);
+    expect(await submissionRow()).toMatchObject({ status: 'stored', receipt_id: 'stalled-receipt', object_key: 'stalled-key' });
+    expect([...objects.entries()]).toEqual([['stalled-key', 'first']]);
+    expect(comments).toHaveLength(1);
+    expect(await rowOf('round-case')).toMatchObject({ state: 'restricted_pending_parental_consent', version: 2 });
+  });
+
+  it('retention retries a failed delete of a losing upload without deleting the accepted clip', async () => {
+    await seedOpenCase();
+    const objects = new Map<string, string>();
+    const comments = zendesk();
+    let ready!: () => void;
+    const atComplete = new Promise<void>((resolve) => { ready = resolve; });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const losingKeys: string[] = [];
+    const losingBucket = bucketView(objects, losingKeys, async () => { ready(); await gate; });
+    losingBucket.delete = vi.fn().mockRejectedValue(new Error('temporary storage failure'));
+    const losing = submitSignedConsent(upload('loser'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: losingBucket }, cors);
+    await atComplete;
+    const winnerBucket = bucketView(objects, []);
+    expect((await submitSignedConsent(upload('winner'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: winnerBucket }, cors)).status).toBe(200);
+    release();
+    expect((await losing).status).toBe(409);
+    expect(objects.size).toBe(2);
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 2 * 864e5);
+    await disposeDueConsentVideos(DB, winnerBucket);
+    expect([...objects.values()]).toEqual(['winner']);
+    expect(comments).toHaveLength(1);
+  });
+
+  it.each(['stored', 'commented', 'submitted'])('refuses a legacy %s retry with no saved fingerprint', async (stage) => {
+    await seedOpenCase();
+    const objects = new Map<string, string>();
+    zendesk();
+    const consentEnv = { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, []) };
+    expect((await submitSignedConsent(upload('original'), 'round-case', owner, consentEnv, cors)).status).toBe(200);
+    await DB.prepare("UPDATE age_review_parent_consent_submissions SET payload_hash = NULL WHERE case_id = 'round-case'").run();
+    if (stage !== 'submitted') {
+      await DB.prepare("UPDATE age_review_cases SET state = 'restricted_pending_parental_consent', version = 2 WHERE id = 'round-case'").run();
+      await DB.prepare("UPDATE age_review_parent_consent_submissions SET status = ?, lease_until = 0 WHERE case_id = 'round-case'").bind(stage).run();
+    }
+    expect((await submitSignedConsent(upload('original'), 'round-case', owner, consentEnv, cors)).status).toBe(409);
+    expect([...objects.values()]).toEqual(['original']);
+  });
+
+  // Change one identity column on the commented row just before the case
+  // advances; the advance must submit the case only against a row that
+  // still holds this request's clip and fingerprint.
+  it.each([
+    ['object_key', 'other-key'],
+    ['payload_hash', 'f'.repeat(64)],
+    ['status', 'stored'],
+  ])('does not submit the case when the row\'s %s changes before the advance', async (column, value) => {
+    await seedOpenCase();
+    const objects = new Map<string, string>();
+    zendesk();
+    let swapped = false;
+    const racingDb = new Proxy(DB, {
+      get(target, prop) {
+        if (prop === 'prepare') {
+          return (sql: string) => {
+            const stmt = target.prepare(sql);
+            if (swapped || !sql.includes("state = 'submitted_for_review'") || !sql.includes('EXISTS')) return stmt;
+            return { bind: (...args: unknown[]) => ({ run: async () => {
+              swapped = true;
+              await target.prepare(`UPDATE age_review_parent_consent_submissions SET ${column} = ? WHERE case_id = 'round-case'`).bind(value).run();
+              return stmt.bind(...args).run();
+            } }) };
+          };
+        }
+        const member = Reflect.get(target, prop);
+        return typeof member === 'function' ? member.bind(target) : member;
+      },
+    });
+    const res = await submitSignedConsent(upload('clip'), 'round-case', owner, { ...env, DB: racingDb, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, []) }, cors);
+    expect(swapped).toBe(true);
+    expect(res.status).toBe(409);
+    expect(await rowOf('round-case')).toMatchObject({ state: 'restricted_pending_parental_consent', version: 2 });
+  });
+
+  it('leaves an unreferenced upload in storage for its first day', async () => {
+    await seedOpenCase();
+    const start = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(start);
+    await trackConsentObject(DB, 'round-case', 'fresh-key');
+    const objects = new Map([['fresh-key', 'fresh']]);
+    const bucket = bucketView(objects, []);
+    clock.mockReturnValue(start + 23 * 3600 * 1000);
+    await disposeDueConsentVideos(DB, bucket);
+    expect([...objects.keys()]).toEqual(['fresh-key']);
+    clock.mockReturnValue(start + 25 * 3600 * 1000);
+    await disposeDueConsentVideos(DB, bucket);
+    expect(objects.size).toBe(0);
+  });
+
+  it('cannot adopt a stalled upload after retention has claimed its unreferenced key', async () => {
+    await seedOpenCase();
+    const objects = new Map<string, string>();
+    const comments = zendesk();
+    const bucket = bucketView(objects, [], async () => {
+      const now = Date.now();
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(now + 2 * 864e5);
+      await disposeDueConsentVideos(DB, bucket);
+      clock.mockRestore();
+    });
+    expect((await submitSignedConsent(upload('stalled'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucket }, cors)).status).toBe(409);
+    expect(objects.size).toBe(0);
+    expect(comments).toHaveLength(0);
+    expect(await submissionRow()).toBeNull();
+  });
+
+  // A first claim checks the inventory when it inserts the row; a resumed
+  // claim checks it when it marks the clip stored.
+  it.each([
+    ['a first', false],
+    ['a resumed', true],
+  ])('cannot adopt %s stalled upload that retention has marked for deletion', async (_label, resumed) => {
+    await seedOpenCase();
+    if (resumed) {
+      await DB.prepare(`INSERT INTO age_review_parent_consent_submissions (case_id, status, lease_until, created_at, receipt_id, object_key)
+        VALUES ('round-case', 'processing', 1, 1, 'old-receipt', 'old-key')`).run();
+    }
+    const objects = new Map<string, string>();
+    const comments = zendesk();
+    const failingDelete = vi.fn().mockRejectedValue(new Error('temporary deletion failure'));
+    const bucket = bucketView(objects, [], async () => {
+      const now = Date.now();
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(now + 2 * 864e5);
+      await disposeDueConsentVideos(DB, { ...bucket, delete: failingDelete } as unknown as R2Bucket);
+      clock.mockRestore();
+    });
+    expect((await submitSignedConsent(upload('stalled'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucket }, cors)).status).toBe(409);
+    expect(failingDelete).toHaveBeenCalled();
+    expect(comments).toHaveLength(0);
+    if (resumed) expect(await submissionRow()).toMatchObject({ status: 'processing', object_key: 'old-key' });
+    else expect(await submissionRow()).toBeNull();
+  });
+
+  it('preserves a superseded clip when a case hold precedes healthy replacement cleanup', async () => {
+    await seedOpenCase();
+    const objects = new Map<string, string>();
+    const bucket = bucketView(objects, []);
+    const consentEnv = { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucket };
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Zendesk unavailable'));
+    expect((await submitSignedConsent(upload('first'), 'round-case', owner, consentEnv, cors)).status).toBe(503);
+    const before = await submissionRow();
+    vi.restoreAllMocks();
+    zendesk();
+    await DB.prepare(`INSERT INTO retention_legal_holds (id, record_type, record_key, disposal_stage, authorized_role, starts_at, review_at)
+      VALUES ('inline-hold', 'age_review_case', 'round-case', 'consent_video', 'privacy/legal', '2020-01-01', '2030-01-01')`).run();
+    try {
+      expect((await submitSignedConsent(upload('second'), 'round-case', owner, consentEnv, cors)).status).toBe(200);
+      expect([...objects.values()]).toEqual(['first', 'second']);
+      expect(await DB.prepare('SELECT object_key FROM age_review_consent_objects WHERE object_key = ?').bind(before!.object_key).first())
+        .toEqual({ object_key: before!.object_key });
+      await DB.prepare('UPDATE age_review_consent_objects SET created_at = 1 WHERE object_key = ?').bind(before!.object_key).run();
+      await disposeDueConsentVideos(DB, bucket);
+      expect([...objects.values()]).toEqual(['first', 'second']);
+    } finally {
+      await DB.prepare("DELETE FROM retention_legal_holds WHERE id = 'inline-hold'").run();
+    }
+    await disposeDueConsentVideos(DB, bucket);
+    expect([...objects.values()]).toEqual(['second']);
+    expect(await DB.prepare('SELECT 1 FROM age_review_consent_objects WHERE object_key = ?').bind(before!.object_key).first()).toBeNull();
+  });
+
+  it('preserves an abandoned clip under a global consent hold until release', async () => {
+    await seedOpenCase();
+    await DB.prepare("UPDATE age_review_cases SET state = 'denied_closed', closed_at = datetime('now') WHERE id = 'round-case'").run();
+    await DB.prepare(`INSERT INTO age_review_parent_consent_submissions
+      (case_id, status, lease_until, created_at, receipt_id, object_key)
+      VALUES ('round-case', 'processing', 0, 1, 'abandoned-receipt', 'abandoned-key')`).run();
+    const objects = new Map([['abandoned-key', 'clip']]);
+    const bucket = bucketView(objects, []);
+    await DB.prepare(`INSERT INTO retention_legal_holds (id, record_type, record_key, disposal_stage, authorized_role, starts_at, review_at)
+      VALUES ('abandoned-hold', 'age_review_case', NULL, 'all', 'privacy/legal', '2020-01-01', '2030-01-01')`).run();
+    try {
+      expect(await disposeDueConsentVideos(DB, bucket)).toBe(0);
+      expect(objects.has('abandoned-key')).toBe(true);
+      expect(await DB.prepare("SELECT status, disposed_at FROM age_review_parent_consent_submissions WHERE case_id = 'round-case'").first())
+        .toEqual({ status: 'processing', disposed_at: null });
+    } finally {
+      await DB.prepare("DELETE FROM retention_legal_holds WHERE id = 'abandoned-hold'").run();
+    }
+    expect(await disposeDueConsentVideos(DB, bucket)).toBe(1);
+    expect(objects.size).toBe(0);
+  });
+
+  async function holdConsentVideos() {
+    await DB.prepare(`INSERT INTO retention_legal_holds (id, record_type, record_key, disposal_stage, authorized_role, starts_at, review_at)
+      VALUES ('request-hold', 'age_review_case', 'round-case', 'consent_video', 'privacy/legal', '2020-01-01', '2030-01-01')`).run();
+  }
+
+  // A held clip stays inventoried and unreferenced, survives the sweep while
+  // the hold lasts, and goes on the first sweep after the hold is released.
+  async function expectKeptUntilHoldReleased(objects: Map<string, string>, key: string) {
+    expect(objects.has(key)).toBe(true);
+    expect(await DB.prepare('SELECT state FROM age_review_consent_objects WHERE object_key = ?').bind(key).first()).toEqual({ state: 'pending' });
+    expect(await DB.prepare('SELECT 1 FROM age_review_parent_consent_submissions WHERE object_key = ?').bind(key).first()).toBeNull();
+    const sweepBucket = bucketView(objects, []);
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 2 * 864e5);
+    await disposeDueConsentVideos(DB, sweepBucket);
+    expect(objects.has(key)).toBe(true);
+    await DB.prepare("DELETE FROM retention_legal_holds WHERE id = 'request-hold'").run();
+    await disposeDueConsentVideos(DB, sweepBucket);
+    expect(objects.has(key)).toBe(false);
+  }
+
+  it('keeps a sent-back round\'s clip under a legal hold until the hold is released', async () => {
+    await seedSentBackRound();
+    await DB.prepare("UPDATE age_review_parent_consent_submissions SET payload_hash = ? WHERE case_id = 'round-case'")
+      .bind(await consentPayloadHash(upload('old'))).run();
+    await holdConsentVideos();
+    const objects = new Map([['old-key', 'old']]);
+    zendesk();
+    const res = await submitSignedConsent(upload('new'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, []) }, cors);
+    expect(res.status).toBe(200);
+    await expectKeptUntilHoldReleased(objects, 'old-key');
+  });
+
+  it('keeps a losing request\'s own clip under a legal hold until the hold is released', async () => {
+    await seedOpenCase();
+    await holdConsentVideos();
+    const objects = new Map<string, string>();
+    zendesk();
+    const keys: string[] = [];
+    const claimFirst = async () => {
+      await DB.prepare(`INSERT INTO age_review_parent_consent_submissions (case_id, lease_until, created_at, receipt_id, object_key)
+        VALUES ('round-case', ?, 1, 'other-receipt', 'other-key')`).bind(Math.floor(Date.now() / 1000) + 600).run();
+    };
+    const res = await submitSignedConsent(upload('lost'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, keys, claimFirst) }, cors);
+    expect(res.status).toBe(409);
+    await expectKeptUntilHoldReleased(objects, keys[0]);
+  });
+
+  it('keeps a replaced clip when the legal-hold lookup fails', async () => {
+    await seedOpenCase();
+    await DB.prepare(`INSERT INTO age_review_parent_consent_submissions (case_id, status, lease_until, created_at, receipt_id, object_key, payload_hash)
+      VALUES ('round-case', 'stored', 1, 1, 'old-receipt', 'old-key', ?)`).bind(await consentPayloadHash(upload('old'))).run();
+    await trackConsentObject(DB, 'round-case', 'old-key');
+    const objects = new Map([['old-key', 'old']]);
+    zendesk();
+    // Only the hold lookup fails; an unknown hold state must not permit the delete.
+    const failingHoldLookup = {
+      prepare: (sql: string) => (sql.includes(' AS held')
+        ? { bind: () => ({ first: async () => { throw new Error('D1 unavailable'); } }) }
+        : DB.prepare(sql)),
+    } as unknown as D1Database;
+    const res = await submitSignedConsent(upload('new'), 'round-case', owner,
+      { ...env, DB: failingHoldLookup, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, []) }, cors);
+    expect(res.status).toBe(200);
+    expect(objects.get('old-key')).toBe('old');
+    expect(await DB.prepare("SELECT state FROM age_review_consent_objects WHERE object_key = 'old-key'").first()).toEqual({ state: 'pending' });
+  });
+
+  it('keeps failed replacement cleanup retryable and honors legal holds', async () => {
+    await seedOpenCase();
+    await DB.prepare(`INSERT INTO age_review_parent_consent_submissions (case_id, status, lease_until, created_at, receipt_id, object_key)
+      VALUES ('round-case', 'processing', 1, 1, 'old-receipt', 'old-key')`).run();
+    const objects = new Map([['old-key', 'old']]);
+    zendesk();
+    const bucket = bucketView(objects, []);
+    const remove = bucket.delete.bind(bucket);
+    bucket.delete = vi.fn().mockRejectedValue(new Error('temporary deletion failure'));
+    expect((await submitSignedConsent(upload('new'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucket }, cors)).status).toBe(200);
+    expect(objects.size).toBe(2);
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 2 * 864e5);
+    await disposeDueConsentVideos(DB, bucket);
+    expect(await DB.prepare("SELECT state FROM age_review_consent_objects WHERE object_key = 'old-key'").first()).toEqual({ state: 'deleting' });
+    await DB.prepare(`INSERT INTO retention_legal_holds (id, record_type, record_key, disposal_stage, authorized_role, starts_at, review_at)
+      VALUES ('cleanup-hold', 'age_review_case', 'round-case', 'consent_video', 'privacy/legal', '2020-01-01', '2030-01-01')`).run();
+    bucket.delete = vi.fn(remove);
+    await disposeDueConsentVideos(DB, bucket);
+    expect(bucket.delete).not.toHaveBeenCalled();
+    await DB.prepare("DELETE FROM retention_legal_holds WHERE id = 'cleanup-hold'").run();
+    await disposeDueConsentVideos(DB, bucket);
+    expect([...objects.values()]).toEqual(['new']);
+    expect(await DB.prepare("SELECT 1 FROM age_review_consent_objects WHERE object_key = 'old-key'").first()).toBeNull();
+  });
+
+  async function seedOpenCase() {
+    await DB.prepare(`INSERT INTO age_review_cases
+      (id, pubkey, state, suspected_age_band, zendesk_ticket_id, deadline_at, clock_paused, version)
+      VALUES ('round-case', ?, 'restricted_pending_parental_consent', 'age_13_15', 42, ?, 0, 2)`)
+      .bind(owner, new Date(Date.now() + 9 * 864e5).toISOString()).run();
+  }
+
+  it('deletes its own clip when another request claims the first submission', async () => {
+    await seedOpenCase();
+    const objects = new Map<string, string>();
+    const comments = zendesk();
+    const claimFirst = async () => {
+      await DB.prepare(`INSERT INTO age_review_parent_consent_submissions (case_id, lease_until, created_at, receipt_id, object_key)
+        VALUES ('round-case', ?, 1, 'other-receipt', 'other-key')`).bind(Math.floor(Date.now() / 1000) + 600).run();
+    };
+    const res = await submitSignedConsent(upload('clipB'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, [], claimFirst) }, cors);
+    expect(res.status).toBe(409);
+    expect(objects.size).toBe(0);
+    expect(await submissionRow()).toMatchObject({ receipt_id: 'other-receipt', object_key: 'other-key' });
+    expect(comments).toHaveLength(0);
+  });
+
+  // The held row is what a concurrent winner leaves between its claim and
+  // its mark ('processing', clip already at its key), or a stored row whose
+  // object is missing. Either way the loser must not write into that key.
+  it.each([
+    ['processing', [['held-key', 'clipA']]],
+    ['stored', []],
+  ] as const)('leaves a %s submission another request holds untouched and keeps none of its own upload', async (status, held) => {
+    await seedOpenCase();
+    await DB.prepare(`INSERT INTO age_review_parent_consent_submissions (case_id, status, lease_until, created_at, receipt_id, object_key, content_type, size_bytes)
+      VALUES ('round-case', ?, ?, 1, 'held-receipt', 'held-key', 'video/mp4', 5)`).bind(status, Math.floor(Date.now() / 1000) + 600).run();
+    await DB.prepare("UPDATE age_review_parent_consent_submissions SET payload_hash = ? WHERE case_id = 'round-case'").bind(await consentPayloadHash(upload('clipB'))).run();
+    const objects = new Map<string, string>(held.map(([k, v]) => [k, v]));
+    const comments = zendesk();
+    const keys: string[] = [];
+    const res = await submitSignedConsent(upload('clipB'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, keys) }, cors);
+    expect(res.status).toBe(409);
+    expect(keys).toHaveLength(1);
+    expect([...objects.entries()]).toEqual(held);
+    expect(await submissionRow()).toMatchObject({ status, receipt_id: 'held-receipt', object_key: 'held-key' });
+    expect(comments).toHaveLength(0);
+  });
+
+  it.each([
+    ['processing', [['crashed-key', 'clipA']]],
+    ['stored', []],
+  ] as const)('resumes a crashed %s submission with its own clip and deletes the crashed key', async (status, crashed) => {
+    await seedOpenCase();
+    await DB.prepare(`INSERT INTO age_review_parent_consent_submissions (case_id, status, lease_until, created_at, receipt_id, object_key, content_type, size_bytes)
+      VALUES ('round-case', ?, 1, 1, 'crashed-receipt', 'crashed-key', 'video/mp4', 5)`).bind(status).run();
+    await DB.prepare("UPDATE age_review_parent_consent_submissions SET payload_hash = ? WHERE case_id = 'round-case'").bind(await consentPayloadHash(upload('clipB'))).run();
+    const objects = new Map<string, string>(crashed.map(([k, v]) => [k, v]));
+    const comments = zendesk();
+    const keys: string[] = [];
+    const res = await submitSignedConsent(upload('clipB'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, keys) }, cors);
+    expect(res.status).toBe(200);
+    const row = await submissionRow();
+    expect(row).toMatchObject({ status: 'commented', receipt_id: 'crashed-receipt', object_key: keys[0] });
+    expect([...objects.entries()]).toEqual([[keys[0], 'clipB']]);
+    expect(comments).toHaveLength(1);
+    expect(comments[0]).toContain('crashed-receipt');
+    expect(await rowOf('round-case')).toMatchObject({ state: 'submitted_for_review' });
+  });
+
+  it('a resume that loses the row to a request that recorded its clip first keeps none of its own upload', async () => {
+    await seedOpenCase();
+    await DB.prepare(`INSERT INTO age_review_parent_consent_submissions (case_id, status, lease_until, created_at, receipt_id, object_key)
+      VALUES ('round-case', 'processing', 1, 1, 'crashed-receipt', 'crashed-key')`).run();
+    const objects = new Map([['crashed-key', 'clip0']]);
+    // Zendesk is down, so the other request records its clip, releases the
+    // lease and answers retry.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 500 }));
+    let bReady!: () => void;
+    const bAtComplete = new Promise<void>((resolve) => { bReady = resolve; });
+    let releaseB!: () => void;
+    const bGate = new Promise<void>((resolve) => { releaseB = resolve; });
+    const bKeys: string[] = [];
+    const slower = submitSignedConsent(upload('clipB'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, bKeys, async () => { bReady(); await bGate; }) }, cors);
+    await bAtComplete;
+
+    const cKeys: string[] = [];
+    const other = await submitSignedConsent(upload('clipC'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, cKeys) }, cors);
+    expect(other.status).toBe(503);
+    releaseB();
+    expect((await slower).status).toBe(409);
+
+    expect(await submissionRow()).toMatchObject({ status: 'stored', receipt_id: 'crashed-receipt', object_key: cKeys[0] });
+    expect([...objects.entries()]).toEqual([[cKeys[0], 'clipC']]);
+  });
+
+  it('a stalled request whose lease another request took over cannot repoint the submission or free the lease', async () => {
+    await seedOpenCase();
+    const objects = new Map<string, string>();
+    // Hold the second request at its first Zendesk call, after it has
+    // recorded its clip and while it still holds the lease.
+    let bAtZendesk!: () => void;
+    const bLinking = new Promise<void>((resolve) => { bAtZendesk = resolve; });
+    let releaseB!: () => void;
+    const bGate = new Promise<void>((resolve) => { releaseB = resolve; });
+    let gated = false;
+    const comments = zendesk();
+    const zendeskFetch = vi.mocked(globalThis.fetch).getMockImplementation()!;
+    vi.mocked(globalThis.fetch).mockImplementation(async (input, init) => {
+      if (!gated) { gated = true; bAtZendesk(); await bGate; }
+      return zendeskFetch(input, init);
+    });
+    let aAtMark!: () => void;
+    const aMarking = new Promise<void>((resolve) => { aAtMark = resolve; });
+    let releaseA!: () => void;
+    const aGate = new Promise<void>((resolve) => { releaseA = resolve; });
+    // Hold the first request after its claim, just before it marks its clip stored.
+    const heldDb = {
+      prepare: (sql: string) => {
+        const statement = DB.prepare(sql);
+        if (!sql.includes("SET status = 'stored'")) return statement;
+        return {
+          bind: (...args: unknown[]) => {
+            const bound = statement.bind(...args);
+            return { run: async () => { aAtMark(); await aGate; return bound.run(); } };
+          },
+        };
+      },
+    } as unknown as D1Database;
+    const aKeys: string[] = [];
+    const first = submitSignedConsent(upload('clipA'), 'round-case', owner, { ...env, DB: heldDb, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, aKeys) }, cors);
+    await aMarking;
+    // The first request's lease runs out while it is stalled.
+    await DB.prepare("UPDATE age_review_parent_consent_submissions SET lease_until = 1 WHERE case_id = 'round-case'").run();
+
+    const bKeys: string[] = [];
+    const second = submitSignedConsent(upload('clipA'), 'round-case', owner, { ...env, ...zendeskEnv, CONSENT_VIDEO_BUCKET: bucketView(objects, bKeys) }, cors);
+    await bLinking;
+    releaseA();
+    expect((await first).status).toBe(409);
+    const held = await DB.prepare("SELECT status, object_key, lease_until FROM age_review_parent_consent_submissions WHERE case_id = 'round-case'")
+      .first<{ status: string; object_key: string; lease_until: number }>();
+    expect(held).toMatchObject({ status: 'stored', object_key: bKeys[0] });
+    expect(held!.lease_until).toBeGreaterThan(Math.floor(Date.now() / 1000));
+    releaseB();
+    expect((await second).status).toBe(200);
+
+    expect(await submissionRow()).toMatchObject({ status: 'commented', object_key: bKeys[0] });
+    expect([...objects.entries()]).toEqual([[bKeys[0], 'clipA']]);
+    expect(comments).toHaveLength(1);
   });
 });
 

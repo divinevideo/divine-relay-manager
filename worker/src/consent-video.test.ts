@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
-  parseConsentMultipart,
+  parseConsentMultipart as parseAuthenticatedMultipart,
   R2MultipartVideoWriter,
   verifyConsentAccessJwt,
   handleConsentVideo,
@@ -8,6 +8,19 @@ import {
   ConsentUploadError,
   type ConsentVideoEnv,
 } from './consent-video';
+
+// Generate a digest only for parser fixtures that are not testing a supplied digest.
+async function parseConsentMultipart(
+  body: ReadableStream<Uint8Array>, contentType: string,
+  limits: { bodyLimit?: number; videoLimit?: number; payloadHash?: string },
+  sink: Parameters<typeof parseAuthenticatedMultipart>[3],
+) {
+  if (limits.payloadHash) return parseAuthenticatedMultipart(body, contentType, { ...limits, payloadHash: limits.payloadHash }, sink);
+  const [input, digestInput] = body.tee();
+  const digest = await crypto.subtle.digest('SHA-256', await new Response(digestInput).arrayBuffer());
+  const payloadHash = Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
+  return parseAuthenticatedMultipart(input, contentType, { ...limits, payloadHash }, sink);
+}
 
 const cors = { 'Access-Control-Allow-Origin': '*' };
 
@@ -41,6 +54,46 @@ function multipartBody(parts: Array<{ name: string; filename?: string; type?: st
 }
 
 describe('parseConsentMultipart', () => {
+  it('rejects a boundary containing a line break', async () => {
+    const data = multipartBody([{ name: 'video', filename: 'clip.mp4', type: 'video/mp4', value: 'clip' }], 'first\r\nsecond');
+    await expect(parseConsentMultipart(data.body, 'multipart/form-data; boundary="first\r\nsecond"',
+      {}, { onVideoChunk: () => {} })).rejects.toMatchObject({ status: 400 });
+  });
+
+  it.each(['first', 'second'])('rejects an ambiguous signed body selected with the %s boundary', async (selected) => {
+    const first = multipartBody([
+      { name: 'email', value: 'first@example.com' },
+      { name: 'video', filename: 'first.mp4', type: 'video/mp4', value: 'first clip' },
+    ], 'first-boundary');
+    const second = multipartBody([
+      { name: 'email', value: 'second@example.com' },
+      { name: 'video', filename: 'second.mp4', type: 'video/mp4', value: 'second clip' },
+    ], 'second-boundary');
+    const a = new Uint8Array(await new Response(first.body).arrayBuffer());
+    const b = new Uint8Array(await new Response(second.body).arrayBuffer());
+    // The helper signs these same bytes whichever unsigned boundary is selected.
+    await expect(parseConsentMultipart(streamOf([a, b], 1), selected === 'first' ? first.contentType : second.contentType,
+      {}, { onVideoChunk: () => {} })).rejects.toMatchObject({ status: 400 });
+  });
+
+  it('accepts only an optional complete CRLF after the closing boundary', async () => {
+    const data = multipartBody([{ name: 'video', filename: 'clip.mp4', type: 'video/mp4', value: 'clip' }]);
+    const raw = new Uint8Array(await new Response(data.body).arrayBuffer());
+    for (const body of [raw, raw.slice(0, -2)]) {
+      const parsed = await parseConsentMultipart(streamOf([body], 1), data.contentType, {}, { onVideoChunk: () => {} });
+      expect(parsed.videoSize).toBe(4);
+    }
+    await expect(parseConsentMultipart(streamOf([raw.slice(0, -1)], 1), data.contentType,
+      {}, { onVideoChunk: () => {} })).rejects.toMatchObject({ status: 400 });
+  });
+
+  it('fails closed without a canonical signed digest', async () => {
+    const sink = { onVideoChunk: vi.fn() };
+    await expect(parseAuthenticatedMultipart(streamOf([]), 'multipart/form-data; boundary=test',
+      { payloadHash: '' }, sink)).rejects.toMatchObject({ status: 401 });
+    expect(sink.onVideoChunk).not.toHaveBeenCalled();
+  });
+
   it('streams video bytes intact across tiny chunks and parses fields after the file', async () => {
     const video = new Uint8Array(Array.from({ length: 500 }, (_, i) => i % 251));
     const { body, contentType } = multipartBody([
@@ -52,12 +105,37 @@ describe('parseConsentMultipart', () => {
     const result = await parseConsentMultipart(body, contentType, {}, {
       onVideoStart: (t) => { started = t; },
       onVideoChunk: (c) => { got.push(...c); },
-      onVideoEnd: () => {},
     });
     expect(started).toBe('video/mp4');
     expect(result.email).toBe('parent@example.com');
     expect(result.videoSize).toBe(video.length);
     expect(new Uint8Array(got)).toEqual(video);
+  });
+
+  it('binds binary chunks and rejects data beyond the closing delimiter', async () => {
+    const data = multipartBody([
+      { name: 'email', value: 'parent@example.com' },
+      { name: 'video', filename: 'clip.mp4', type: 'video/mp4', value: new Uint8Array([0, 128, 255]) },
+    ]);
+    const raw = new Uint8Array(await new Response(data.body).arrayBuffer());
+    const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', raw)), b => b.toString(16).padStart(2, '0')).join('');
+    const result = await parseConsentMultipart(streamOf([raw], 1), data.contentType, { payloadHash: digest }, { onVideoChunk: () => {} });
+    expect(result.videoSize).toBe(3);
+    await expect(parseConsentMultipart(streamOf([raw, new TextEncoder().encode('extra')], 1), data.contentType,
+      { payloadHash: digest }, { onVideoChunk: () => {} })).rejects.toMatchObject({ status: 400 });
+    await expect(parseConsentMultipart(streamOf([raw], 1), data.contentType,
+      { bodyLimit: raw.length - 1, payloadHash: digest }, { onVideoChunk: () => {} })).rejects.toMatchObject({ status: 413 });
+  });
+
+  it('rejects a second video before replacing the active multipart writer', async () => {
+    const body = multipartBody([
+      { name: 'video', filename: 'first.mp4', type: 'video/mp4', value: 'first' },
+      { name: 'video', filename: 'second.mp4', type: 'video/mp4', value: 'second' },
+    ]);
+    const start = vi.fn();
+    await expect(parseConsentMultipart(body.body, body.contentType, {}, { onVideoStart: start, onVideoChunk: () => {} }))
+      .rejects.toMatchObject({ status: 400 });
+    expect(start).toHaveBeenCalledTimes(1);
   });
 
   it('rejects a non-video part with 415 and oversize video with 413', async () => {
@@ -124,8 +202,8 @@ describe('large clip streaming', () => {
     const result = await parseConsentMultipart(body, contentType, {}, {
       onVideoStart: (t) => writer.start(t),
       onVideoChunk: (c) => writer.write(c),
-      onVideoEnd: () => writer.finish(),
     });
+    await writer.finish();
     expect(result.videoSize).toBe(size);
     expect(partSizes).toEqual([5 * 1024 * 1024, size - 5 * 1024 * 1024]);
   });
@@ -168,7 +246,7 @@ describe('disposeDueConsentVideos', () => {
     const order: string[] = [];
     const rows = [{ case_id: 'c1', object_key: 'obj1' }];
     const db = { prepare: vi.fn((sql: string) => ({ bind: vi.fn(() => ({
-      all: vi.fn(async () => ({ results: sql.includes('closed_at') ? rows : [] })),
+      all: vi.fn(async () => ({ results: sql.includes('SELECT s.case_id') && sql.includes('closed_at') ? rows : [] })),
       run: vi.fn(async () => { order.push('db'); return { meta: { changes: 1 } }; }),
     })) })) };
     const bucket = { delete: vi.fn(async () => { order.push('r2'); }) };
@@ -176,6 +254,23 @@ describe('disposeDueConsentVideos', () => {
     expect(count).toBe(1);
     // First 'db' is the disposed-row cleanup; the object delete still
     // precedes the update that marks this row disposed.
-    expect(order).toEqual(['db', 'r2', 'db']);
+    expect(order).toEqual(['db', 'r2', 'db', 'db']);
+  });
+
+  it('still disposes due clips when the unreferenced-upload sweep fails', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const rows = [{ case_id: 'c1', object_key: 'obj1' }];
+    const db = { prepare: vi.fn((sql: string) => ({ bind: vi.fn(() => ({
+      all: vi.fn(async () => {
+        if (sql.includes("SET state = 'deleting'")) throw new Error('D1 unavailable');
+        return { results: sql.includes('SELECT s.case_id') && sql.includes('closed_at') ? rows : [] };
+      }),
+      run: vi.fn(async () => ({ meta: { changes: 1 } })),
+    })) })) };
+    const bucket = { delete: vi.fn(async () => {}) };
+    expect(await disposeDueConsentVideos(db as never, bucket as never)).toBe(1);
+    expect(bucket.delete).toHaveBeenCalledWith('obj1');
+    expect(logged).toHaveBeenCalled();
+    logged.mockRestore();
   });
 });

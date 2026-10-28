@@ -512,7 +512,7 @@ export default {
         const caseId = path.slice('/v1/minor-review-cases/'.length, -'/parent-consent'.length);
         if (!caseId || caseId.includes('/')) return jsonResponse({ success: false, error: 'Invalid caseId' }, 400, corsHeaders);
         if (env.DB) await ensureSchemaOnce(env.DB);
-        return handleParentConsent(request, caseId, authResult.pubkey, env, corsHeaders);
+        return handleParentConsent(request, caseId, authResult.pubkey, env, corsHeaders, authResult.payloadHash);
       }
 
       // Greenlight consent reviewer playback. NOT behind verifyAdminAccess:
@@ -2926,6 +2926,7 @@ async function verifyZendeskWebhook(
 interface Nip98Result {
   valid: boolean;
   pubkey?: string;
+  payloadHash?: string;
   error?: string;
 }
 
@@ -3006,7 +3007,12 @@ export async function verifyNip98Auth(
       return { valid: false, error: 'Method mismatch' };
     }
 
-    return { valid: true, pubkey: event.pubkey };
+    // Only expose an unambiguous, canonical digest from the verified event.
+    // Routes handling streamed bodies verify it while consuming their stream.
+    const payloadTags = event.tags.filter((t: string[]) => t[0] === 'payload');
+    const payloadHash = payloadTags.length === 1 && payloadTags[0].length === 2
+      && /^[0-9a-f]{64}$/.test(payloadTags[0][1]) ? payloadTags[0][1] : undefined;
+    return { valid: true, pubkey: event.pubkey, payloadHash };
   } catch (e) {
     console.error('[verifyNip98Auth] Error:', e);
     return { valid: false, error: 'Failed to parse auth event' };

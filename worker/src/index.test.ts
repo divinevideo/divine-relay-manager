@@ -15,6 +15,21 @@ const TEST_NSEC = 'nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlf
 
 const ctx = {} as ExecutionContext;
 
+describe('parent-consent payload auth wiring', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('passes only the signed body digest to the upload handler', async () => {
+    const handler = vi.spyOn(ageReview, 'handleParentConsent').mockResolvedValue(new Response('{}'));
+    const url = 'https://worker.test/v1/minor-review-cases/case-1/parent-consent';
+    const digest = 'a'.repeat(64);
+    const signed = finalizeEvent({ kind: 27235, content: '', created_at: Math.floor(Date.now() / 1000),
+      tags: [['u', url], ['method', 'POST'], ['payload', digest]],
+    }, generateSecretKey());
+    await worker.fetch(new Request(url, { method: 'POST', headers: { Authorization: 'Nostr ' + btoa(JSON.stringify(signed)) }, body: 'upload' }), env, ctx);
+    expect(handler).toHaveBeenCalledWith(expect.any(Request), 'case-1', signed.pubkey, env, expect.anything(), digest);
+  });
+});
+
 describe('account-status route', () => {
   afterEach(() => vi.restoreAllMocks());
 
