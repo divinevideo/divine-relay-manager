@@ -411,7 +411,9 @@ describe('bulk media actions find the account\'s files through the media server 
       world.addVideo(ACCOUNT, 'blocked-event', blocked, 2_500_000);
       const { row, messages } = await runQueued('age-gate-all');
       expect(statuses(own)).toEqual(['age_restricted', 'age_restricted']);
-      expect(row).toMatchObject({ status: 'done', media_processed: 2, media_skipped: 1, failures: '[]' });
+      // The exclusion leaves the funnelcake walk no file, but its events are
+      // still counted from funnelcake's page (one video == one event).
+      expect(row).toMatchObject({ status: 'done', events_processed: 3, media_processed: 2, media_skipped: 1, failures: '[]' });
       expect(messages.some((m) => 'mediaFallback' in m)).toBe(false);
     });
 
