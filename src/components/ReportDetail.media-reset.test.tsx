@@ -237,6 +237,32 @@ describe("the completeness rule under MediaPreview's null default", () => {
     expect(hasImg(AVATAR)).toBe(false);
   });
 
+  // A refresh can add a CSAM-signal report and mark the feed stopped early at
+  // once. A sensitive report in hand is known, whatever else may be missing.
+  it('hides media already showing when the reports turn partial with a CSAM signal in hand', () => {
+    const client = qc();
+    const a = NONSENSITIVE(E1);
+    const { rerender } = render(treeWith(client, a, [a], false));
+    expect(hasImg(IMG1)).toBe(true);
+    expect(hasImg(AVATAR)).toBe(true);
+    expect(hasImg(POST_IMG)).toBe(true);
+
+    rerender(treeWith(client, a, [a, CSAM(E1)], true));
+    expect(hasImg(IMG1)).toBe(false);
+    expect(hasImg(AVATAR)).toBe(false);
+    expect(hasImg(POST_IMG)).toBe(false);
+  });
+
+  it('keeps media showing when the reports turn partial with nothing sensitive in hand', () => {
+    const client = qc();
+    const a = NONSENSITIVE(E1);
+    const { rerender } = render(treeWith(client, a, [a], false));
+    rerender(treeWith(client, a, [a, NONSENSITIVE(E1)], true));
+    expect(hasImg(IMG1)).toBe(true);
+    expect(hasImg(AVATAR)).toBe(true);
+    expect(hasImg(POST_IMG)).toBe(true);
+  });
+
   it('keeps a way back to an avatar the moderator hid while partial, once the reports turn out not sensitive', () => {
     const client = qc();
     const a = A_PARTIAL_SPAM(E1);

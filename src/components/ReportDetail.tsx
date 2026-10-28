@@ -370,15 +370,21 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // Check media status from moderation service
   const mediaStatus = useMediaStatus(mediaHashes);
 
-  // undefined while loading, then true/false once reports are available. Also
-  // undefined when the reports may not be all of them: undefined and true both
-  // start media and avatars hidden until clicked, and only false shows them.
+  // undefined while loading, then true/false once reports are available. A
+  // sensitive report in hand is true even when the reports may not be all of
+  // them: what is missing can only add to it. Otherwise partial reports are
+  // undefined. undefined and true both start media and avatars hidden until
+  // clicked, and only false shows them.
   const hasHighPriorityReports = useMemo(() => {
-    if (!allReportsForTarget || targetReportsMayBePartial) return undefined;
-    return allReportsForTarget.some(r => {
+    if (!allReportsForTarget) return undefined;
+    const sensitive = allReportsForTarget.some(r => {
       const cat = getReportCategory(r);
       return HIGH_PRIORITY_CATEGORIES.includes(cat);
     }) || hasCsamSignal(allReportsForTarget);
+    if (sensitive) return true;
+    // On purpose, a target that turns partial with nothing sensitive in hand
+    // keeps what is showing: nothing known about it is sensitive.
+    return targetReportsMayBePartial ? undefined : false;
   }, [allReportsForTarget, targetReportsMayBePartial]);
   // The pane's media viewers take "not known yet" as null rather than false:
   // both start hidden, but only under null does a later false (the reports turn
