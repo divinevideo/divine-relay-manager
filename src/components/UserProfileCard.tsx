@@ -9,11 +9,12 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useApiUrl } from "@/hooks/useAdminApi";
-import { User, FileText, Flag, Tag, CheckCircle, ChevronDown, ChevronUp, Copy, Check, ArrowUpRight, Trash2, Globe, ExternalLink, Activity, Eye, EyeOff } from "lucide-react";
+import { User, FileText, Flag, Tag, ChevronDown, ChevronUp, Copy, Check, ArrowUpRight, Trash2, Globe, ExternalLink, Activity, Eye, EyeOff } from "lucide-react";
 import { InlineMediaPreview } from "@/components/MediaPreview";
 import type { NostrEvent, NostrMetadata } from "@nostrify/nostrify";
 import type { UserStats } from "@/hooks/useUserStats";
-import { getProfileUrl, getPublicEventUrl } from "@/lib/constants";
+import { RELAY_PROFILE_BADGE, getProfileUrl, getPublicEventUrl } from "@/lib/constants";
+import { ClaimedNip05 } from "@/components/ClaimedNip05";
 import { parseRepostForDisplay } from "@/lib/nip18";
 import { KindBadge } from "@/components/KindBadge";
 import { getCommentTarget, formatCommentActivity } from "@/lib/commentActivity";
@@ -50,12 +51,13 @@ interface UserProfileCardProps {
   onDeleteEvent?: (eventId: string) => void;
   /** Navigate to an in-app view of all events authored by this user (#156) */
   onViewActivity?: () => void;
+  /** Undefined until the profile lookup answers; no relay-profile badge until then. */
   isFunnelcakeUser?: boolean;
   /** Withhold the avatar and recent-post media until a moderator asks (sensitive reports) */
   hideMediaByDefault?: boolean;
 }
 
-export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEvent, onViewActivity, isFunnelcakeUser = false, hideMediaByDefault = false }: UserProfileCardProps) {
+export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEvent, onViewActivity, isFunnelcakeUser, hideMediaByDefault = false }: UserProfileCardProps) {
   const [copied, setCopied] = useState(false);
   // Keyed by pubkey so revealing one account's avatar never carries to the next
   const [avatarRevealedFor, setAvatarRevealedFor] = useState<string | null>(null);
@@ -127,7 +129,7 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
   const hasProfile = !!(profile?.display_name || profile?.name);
   const displayName = profile?.display_name || profile?.name || npub;
   const nip05 = profile?.nip05;
-  const profileUrl = getProfileUrl(npub, isFunnelcakeUser);
+  const profileUrl = getProfileUrl(npub, isFunnelcakeUser ?? false);
 
   // Extract unique labels from label events
   const labelCounts = new Map<string, number>();
@@ -171,24 +173,19 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
                   <ArrowUpRight className="h-3 w-3 text-muted-foreground shrink-0" />
                 </CardTitle>
               </a>
-              {isFunnelcakeUser ? (
-                <a href={profileUrl} target="_blank" rel="noopener noreferrer">
-                  <Badge variant="outline" className="text-xs text-green-600 border-green-300 bg-green-50 shrink-0">Divine</Badge>
+              {isFunnelcakeUser === true ? (
+                <a href={profileUrl} target="_blank" rel="noopener noreferrer" title={RELAY_PROFILE_BADGE.present.title}>
+                  <Badge variant="outline" className="text-xs text-muted-foreground shrink-0">{RELAY_PROFILE_BADGE.present.label}</Badge>
                 </a>
-              ) : (
-                <a href={profileUrl} target="_blank" rel="noopener noreferrer">
-                  <Badge variant="outline" className="text-xs text-purple-600 border-purple-300 bg-purple-50 gap-1 shrink-0">
-                    <Globe className="h-3 w-3" />Nostr
+              ) : isFunnelcakeUser === false && (
+                <a href={profileUrl} target="_blank" rel="noopener noreferrer" title={RELAY_PROFILE_BADGE.absent.title}>
+                  <Badge variant="outline" className="text-xs text-muted-foreground gap-1 shrink-0">
+                    <Globe className="h-3 w-3" />{RELAY_PROFILE_BADGE.absent.label}
                   </Badge>
                 </a>
               )}
             </div>
-            {nip05 && (
-              <div className="flex items-center gap-1 text-sm text-muted-foreground min-w-0">
-                <CheckCircle className="h-3 w-3 text-green-500 shrink-0" />
-                <span className="truncate min-w-0">{nip05}</span>
-              </div>
-            )}
+            <ClaimedNip05 nip05={nip05} className="text-sm" />
             <div className="flex items-center gap-1 min-w-0">
               <code className="text-xs text-muted-foreground font-mono block truncate min-w-0 flex-1">
                 {npub}
@@ -207,8 +204,11 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
                 )}
               </Button>
             </div>
-            {!hasProfile && (
-              <p className="text-xs text-muted-foreground italic">No profile published to this relay</p>
+            {/* Says only what the lookup returned, and nothing until it answers
+                (isFunnelcakeUser is undefined until then). Whether the relay
+                stores a profile is the badge's job. */}
+            {!hasProfile && (profile || isFunnelcakeUser === false) && (
+              <p className="text-xs text-muted-foreground italic">{profile ? 'No name in profile' : 'No profile found'}</p>
             )}
           </div>
         </div>

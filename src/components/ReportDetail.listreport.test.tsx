@@ -86,7 +86,6 @@ vi.mock('@/hooks/useReportContext', () => ({
     threadLoading: false,
     reportedUser: { profile: undefined, pubkey: REPORTED_PUBKEY, isFunnelcakeUser: false },
     userStats: undefined,
-    reporter: { profile: undefined, pubkey: 'a'.repeat(64), reportCount: 0, isFunnelcakeUser: false },
     isLoading: false,
     error: null,
     relayHint: undefined,

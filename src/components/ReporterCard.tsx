@@ -2,6 +2,7 @@
 // ABOUTME: Shows reporter identity and links to view their profile/posts
 
 import { useAuthor } from "@/hooks/useAuthor";
+import { useAppContext } from "@/hooks/useAppContext";
 import { useNostr } from "@nostrify/react";
 import { useQuery } from "@tanstack/react-query";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -9,10 +10,14 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { FileText, Copy, Check, Flag, Globe } from "lucide-react";
+import { NoRelayProfileIcon } from "@/components/NoRelayProfileIcon";
 import { useState } from "react";
 import { nip19 } from "nostr-tools";
 import type { NostrEvent } from "@nostrify/nostrify";
-import { getCategoryLabel, getProfileUrl, getReportCategory } from "@/lib/constants";
+import { RELAY_PROFILE_BADGE, getCategoryLabel, getProfileUrl, getReportCategory } from "@/lib/constants";
+import { reportsFiledLabel } from "@/lib/historyCount";
+import { queryStrict } from "@/lib/relayRead";
+import { ClaimedNip05 } from "@/components/ClaimedNip05";
 
 interface ReporterCardProps {
   pubkey: string;
@@ -43,10 +48,11 @@ export function ReporterCard({
     npub = pubkey;
   }
 
-  const isFunnelcakeUser = author.data?.isFunnelcakeUser ?? false;
+  // Undefined until the profile lookup answers; the globe waits for a definite "none".
+  const isFunnelcakeUser = author.data?.isFunnelcakeUser;
   const displayName = profile?.display_name || profile?.name || `${npub.slice(0, 12)}...`;
   const npubDisplay = `${npub.slice(0, 12)}...${npub.slice(-6)}`;
-  const profileUrl = getProfileUrl(npub, isFunnelcakeUser);
+  const profileUrl = getProfileUrl(npub, isFunnelcakeUser ?? false);
 
   const copyPubkey = async () => {
     try {
@@ -85,7 +91,7 @@ export function ReporterCard({
         <div className="flex-1 min-w-0">
           <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:opacity-80">
             <p className="text-sm font-medium truncate">{displayName}</p>
-            {!isFunnelcakeUser && <Globe className="h-3 w-3 text-purple-500 shrink-0" />}
+            {isFunnelcakeUser === false && <NoRelayProfileIcon />}
           </a>
           <p className="text-xs text-muted-foreground font-mono truncate">{npubDisplay}</p>
         </div>
@@ -115,7 +121,7 @@ export function ReporterCard({
           <div className="flex items-center gap-2">
             <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:opacity-80">
               <p className="font-medium truncate">{displayName}</p>
-              {!isFunnelcakeUser && <Globe className="h-3 w-3 text-purple-500 shrink-0" />}
+              {isFunnelcakeUser === false && <NoRelayProfileIcon />}
             </a>
             {category && (
               <Badge variant="outline" className="text-xs shrink-0">{getCategoryLabel(category)}</Badge>
@@ -236,14 +242,8 @@ export function ReporterList({
   );
 }
 
-// Trust level based on report count
-function getTrustLevel(reportCount: number): { level: string; color: string } {
-  if (reportCount >= 50) return { level: 'Trusted', color: 'text-green-600 border-green-300 bg-green-50' };
-  if (reportCount >= 20) return { level: 'Active', color: 'text-blue-600 border-blue-300 bg-blue-50' };
-  if (reportCount >= 10) return { level: 'Regular', color: 'text-yellow-600 border-yellow-300 bg-yellow-50' };
-  if (reportCount >= 3) return { level: 'New', color: 'text-orange-600 border-orange-300 bg-orange-50' };
-  return { level: 'First-time', color: 'text-gray-600 border-gray-300 bg-gray-50' };
-}
+// The filing-history read stops here, so a count that reaches it is a floor.
+const REPORTER_COUNT_LIMIT = 100;
 
 // Inline reporter info - shows who filed a report with their report count
 interface ReporterInlineProps {
@@ -253,19 +253,28 @@ interface ReporterInlineProps {
 
 export function ReporterInline({ pubkey, onViewProfile }: ReporterInlineProps) {
   const { nostr } = useNostr();
+  const { config } = useAppContext();
   const author = useAuthor(pubkey);
   const profile = author.data?.metadata;
 
-  // Count how many reports this user has filed
-  const { data: reportCount = 0 } = useQuery({
-    queryKey: ['reporter-count', pubkey],
+  // Count how many reports this user has filed. queryStrict, not nostr.query:
+  // NPool.query answers a failed or timed-out read with partial results, which
+  // would print as a smaller count than the reporter really has.
+  const reportCount = useQuery({
+    // Env key (apiUrl): singleton QueryClient + per-env NPool. Without it a
+    // count read from one environment's relay is shown in another
+    queryKey: ['reporter-count', config.apiUrl, pubkey],
     queryFn: async ({ signal }) => {
-      const reports = await nostr.query(
-        [{ kinds: [1984], authors: [pubkey], limit: 100 }],
-        { signal: AbortSignal.any([signal, AbortSignal.timeout(3000)]) }
+      const reports = await queryStrict(
+        nostr,
+        [{ kinds: [1984], authors: [pubkey], limit: REPORTER_COUNT_LIMIT }],
+        { signal, timeoutMs: 3000 },
       );
       return reports.length;
     },
+    // One retry, so a failed read settles to "unavailable" quickly instead of
+    // leaving the count blank through the default three.
+    retry: 1,
     staleTime: 5 * 60 * 1000,
   });
 
@@ -278,7 +287,6 @@ export function ReporterInline({ pubkey, onViewProfile }: ReporterInlineProps) {
   }
 
   const displayName = profile?.display_name || profile?.name || `${npub.slice(0, 12)}...`;
-  const trust = getTrustLevel(reportCount);
 
   if (author.isLoading) {
     return (
@@ -289,8 +297,9 @@ export function ReporterInline({ pubkey, onViewProfile }: ReporterInlineProps) {
     );
   }
 
-  const isFunnelcakeUser = author.data?.isFunnelcakeUser ?? false;
-  const profileUrl = getProfileUrl(npub, isFunnelcakeUser);
+  // Undefined when the lookup produced no answer: then no badge claims either way.
+  const isFunnelcakeUser = author.data?.isFunnelcakeUser;
+  const profileUrl = getProfileUrl(npub, isFunnelcakeUser ?? false);
 
   return (
     <div className="flex items-center gap-2 flex-wrap">
@@ -307,24 +316,28 @@ export function ReporterInline({ pubkey, onViewProfile }: ReporterInlineProps) {
         </Avatar>
         <span className="text-sm font-medium hover:underline">{displayName}</span>
       </a>
-      <span className="text-xs text-muted-foreground flex items-center gap-1">
-        <Flag className="h-3 w-3" />
-        {reportCount} report{reportCount !== 1 ? 's' : ''} filed
-      </span>
-      <Badge variant="outline" className={`text-xs ${trust.color}`}>
-        {trust.level}
-      </Badge>
-      {isFunnelcakeUser ? (
-        <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80">
-          <Badge variant="outline" className="text-xs text-green-600 border-green-300 bg-green-50 gap-1">
-            Divine
+      <ClaimedNip05 nip05={profile?.nip05} className="text-xs max-w-full" />
+      {!reportCount.isPending && (
+        <span className="text-xs text-muted-foreground flex items-center gap-1" title="Reports by this account stored on this relay">
+          <Flag className="h-3 w-3" />
+          {/* A count read once stays true as of that read, so a later failed
+              refresh keeps it; "unavailable" is only for a count never read. */}
+          {reportCount.data !== undefined
+            ? reportsFiledLabel(reportCount.data, REPORTER_COUNT_LIMIT)
+            : 'report count unavailable'}
+        </span>
+      )}
+      {isFunnelcakeUser === true ? (
+        <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80" title={RELAY_PROFILE_BADGE.present.title}>
+          <Badge variant="outline" className="text-xs text-muted-foreground gap-1">
+            {RELAY_PROFILE_BADGE.present.label}
           </Badge>
         </a>
-      ) : (
-        <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80">
-          <Badge variant="outline" className="text-xs text-purple-600 border-purple-300 bg-purple-50 gap-1">
+      ) : isFunnelcakeUser === false && (
+        <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80" title={RELAY_PROFILE_BADGE.absent.title}>
+          <Badge variant="outline" className="text-xs text-muted-foreground gap-1">
             <Globe className="h-3 w-3" />
-            Nostr
+            {RELAY_PROFILE_BADGE.absent.label}
           </Badge>
         </a>
       )}

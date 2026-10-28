@@ -224,3 +224,70 @@ describe('UserProfileCard comment context', () => {
     expect(titleCalls.targets.at(-1)).toEqual([]);
   });
 });
+
+describe('UserProfileCard nip05', () => {
+  // Nothing checks a profile's nip05 against the domain's nostr.json, and any
+  // account can claim any domain, so it must not carry a verified check (#132).
+  it('shows the claimed nip05 as unverified, with no check mark', () => {
+    render(<UserProfileCard pubkey={PUBKEY} stats={stats([])} profile={{ name: 'synthetic', nip05: 'synthetic@example.test' }} />);
+    expect(screen.getByText('synthetic@example.test').parentElement).toHaveTextContent('(unverified)');
+    // The whole profile header (name, badge, nip05, npub), so a check icon placed
+    // beside the nip05 rather than inside it is caught too.
+    const header = screen.getByText('synthetic').closest('.flex-1')!;
+    expect(header).toContainElement(screen.getByText('synthetic@example.test'));
+    expect(header.querySelector('[class*="circle-check"], [class*="check-circle"]')).toBeNull();
+  });
+});
+
+describe('UserProfileCard relay-profile badge', () => {
+  it('says the profile is on the relay when Funnelcake returned one', () => {
+    render(<UserProfileCard pubkey={PUBKEY} stats={stats([])} profile={{ name: 'synthetic' }} isFunnelcakeUser={true} />);
+    expect(screen.getByText('Profile on relay')).toBeInTheDocument();
+    // Neutral, so neither state reads as a trust signal (green for good, a colour for other).
+    expect(screen.getByText('Profile on relay').className).not.toMatch(/green|purple/);
+    expect(screen.queryByText('Divine')).not.toBeInTheDocument();
+  });
+
+  it('says no relay profile was found when Funnelcake returned none', () => {
+    render(<UserProfileCard pubkey={PUBKEY} stats={stats([])} profile={{ name: 'synthetic' }} isFunnelcakeUser={false} />);
+    expect(screen.getByText('No relay profile found')).toBeInTheDocument();
+    // Neutral, so neither state reads as a trust signal (green for good, a colour for other).
+    expect(screen.getByText('No relay profile found').className).not.toMatch(/green|purple/);
+    expect(screen.queryByText('Nostr')).not.toBeInTheDocument();
+  });
+
+  // Report detail renders this card before the reported user's profile lookup
+  // has answered; it must not claim either way until it does.
+  it('shows no badge while the profile lookup is unresolved', () => {
+    render(<UserProfileCard pubkey={PUBKEY} stats={stats([])} isFunnelcakeUser={undefined} />);
+    expect(screen.queryByText('Profile on relay')).not.toBeInTheDocument();
+    expect(screen.queryByText('No relay profile found')).not.toBeInTheDocument();
+  });
+});
+
+// The line knows only whether a profile came back and whether it has a name;
+// it can't say what the relay stores.
+describe('UserProfileCard missing-name line', () => {
+  it('says the profile has no name when one came back without a name', () => {
+    render(<UserProfileCard pubkey={PUBKEY} stats={stats([])} profile={{ nip05: 'synthetic@example.test' }} isFunnelcakeUser={true} />);
+    expect(screen.getByText('No name in profile')).toBeInTheDocument();
+    expect(screen.queryByText(/published to this relay/)).not.toBeInTheDocument();
+  });
+
+  it('says no profile was found when the lookup answered with none', () => {
+    render(<UserProfileCard pubkey={PUBKEY} stats={stats([])} isFunnelcakeUser={false} />);
+    expect(screen.getByText('No profile found')).toBeInTheDocument();
+  });
+
+  it('says nothing while the profile lookup has not answered', () => {
+    render(<UserProfileCard pubkey={PUBKEY} stats={stats([])} isFunnelcakeUser={undefined} />);
+    expect(screen.queryByText('No profile found')).not.toBeInTheDocument();
+    expect(screen.queryByText('No name in profile')).not.toBeInTheDocument();
+  });
+
+  it('says nothing when the profile has a name', () => {
+    render(<UserProfileCard pubkey={PUBKEY} stats={stats([])} profile={{ name: 'synthetic' }} />);
+    expect(screen.queryByText('No name in profile')).not.toBeInTheDocument();
+    expect(screen.queryByText('No profile found')).not.toBeInTheDocument();
+  });
+});
