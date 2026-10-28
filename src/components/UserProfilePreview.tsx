@@ -80,15 +80,16 @@ export function UserProfilePreview({ pubkey, className }: UserProfilePreviewProp
           </a>
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
-              <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:opacity-80">
+              <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 hover:opacity-80 min-w-0">
                 <h4 className="font-semibold truncate">{displayName}</h4>
               </a>
+              {/* A long name truncates; the badge keeps its one line. */}
               {isFunnelcakeUser === true ? (
-                <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80" title={RELAY_PROFILE_BADGE.present.title}>
+                <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80 shrink-0" title={RELAY_PROFILE_BADGE.present.title}>
                   <Badge variant="outline" className="text-xs text-muted-foreground">{RELAY_PROFILE_BADGE.present.label}</Badge>
                 </a>
               ) : isFunnelcakeUser === false && (
-                <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80" title={RELAY_PROFILE_BADGE.absent.title}>
+                <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80 shrink-0" title={RELAY_PROFILE_BADGE.absent.title}>
                   <Badge variant="outline" className="text-xs text-muted-foreground gap-1">
                     <Globe className="h-3 w-3" />{RELAY_PROFILE_BADGE.absent.label}
                   </Badge>

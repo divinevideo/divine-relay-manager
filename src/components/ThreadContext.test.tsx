@@ -19,6 +19,11 @@ vi.mock('@/hooks/useAuthor', () => ({
   useAuthor: () => authorState.result,
 }));
 
+// Every test starts from the same unanswered lookup, whichever test ran before it.
+beforeEach(() => {
+  authorState.result = { data: undefined, isLoading: false };
+});
+
 const REPORTED_USER = 'a'.repeat(64);
 const OTHER_USER = 'b'.repeat(64);
 const VIDEO_ID = 'c'.repeat(64);
@@ -148,10 +153,6 @@ describe('ThreadContext moderation status summary', () => {
 });
 
 describe('ThreadContext relay-profile globe (#132)', () => {
-  beforeEach(() => {
-    authorState.result = { data: undefined, isLoading: false };
-  });
-
   // The bare purple globe beside an author our relay returned no profile for
   // used to carry no explanation at all.
   it('labels the globe with what an absent relay profile means', () => {

@@ -1,9 +1,9 @@
 // ABOUTME: Keeps self-declared text (app names, nip05 claims) from reordering the words
 // ABOUTME: around it. Characters show as written, except paragraph breaks, shown as ¶.
 
-const ISOLATE_OPENERS = new Set(['⁦', '⁧', '⁨']); // LRI, RLI, FSI
-const FSI = '⁨';
-const PDI = '⁩';
+const ISOLATE_OPENERS = new Set(['\u2066', '\u2067', '\u2068']); // LRI, RLI, FSI
+const FSI = '\u2068';
+const PDI = '\u2069';
 
 /**
  * Text whose isolate controls are paired, so wrapping it in an isolate (a <bdi>

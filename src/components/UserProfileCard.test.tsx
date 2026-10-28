@@ -256,6 +256,17 @@ describe('UserProfileCard relay-profile badge', () => {
     expect(screen.queryByText('Nostr')).not.toBeInTheDocument();
   });
 
+  // The badge's link is the header row's flex item. A multi-word badge on a link
+  // that may shrink wraps into a tall pill beside a long name; held to its width,
+  // it keeps one line and the name truncates instead.
+  it.each([
+    [true, 'Profile on relay'],
+    [false, 'No relay profile found'],
+  ])('keeps the badge on one line beside a long name (isFunnelcakeUser %s)', (isFunnelcakeUser, label) => {
+    render(<UserProfileCard pubkey={PUBKEY} stats={stats([])} profile={{ name: 'Synthetic Creator With A Rather Long Display Name' }} isFunnelcakeUser={isFunnelcakeUser} />);
+    expect(screen.getByText(label).closest('a')!.className).toContain('shrink-0');
+  });
+
   // Report detail renders this card before the reported user's profile lookup
   // has answered; it must not claim either way until it does.
   it('shows no badge while the profile lookup is unresolved', () => {

@@ -261,9 +261,9 @@ export function ReporterInline({ pubkey, onViewProfile }: ReporterInlineProps) {
   // NPool.query answers a failed or timed-out read with partial results, which
   // would print as a smaller count than the reporter really has.
   const reportCount = useQuery({
-    // Env key (apiUrl): singleton QueryClient + per-env NPool. Without it a
-    // count read from one environment's relay is shown in another
-    queryKey: ['reporter-count', config.apiUrl, pubkey],
+    // Relay key: singleton QueryClient + one NPool per relayUrl. Without it a
+    // count read from one relay is shown for another
+    queryKey: ['reporter-count', config.relayUrl, pubkey],
     queryFn: async ({ signal }) => {
       const reports = await queryStrict(
         nostr,

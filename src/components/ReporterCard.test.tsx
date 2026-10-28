@@ -18,8 +18,8 @@ vi.mock('@/hooks/useAuthor', () => ({
   useAuthor: () => ({ data: authorState.data, isLoading: false }),
 }));
 
-const appState = vi.hoisted(() => ({ apiUrl: 'https://api.one.example.test' }));
-vi.mock('@/hooks/useAppContext', () => ({ useAppContext: () => ({ config: { apiUrl: appState.apiUrl } }) }));
+const appState = vi.hoisted(() => ({ relayUrl: 'wss://relay.one.example.test' }));
+vi.mock('@/hooks/useAppContext', () => ({ useAppContext: () => ({ config: { relayUrl: appState.relayUrl } }) }));
 
 const REPORTER = 'a'.repeat(64);
 
@@ -54,7 +54,7 @@ function renderInline(client = new QueryClient({ defaultOptions: { queries: { re
 }
 
 beforeEach(() => {
-  appState.apiUrl = 'https://api.one.example.test';
+  appState.relayUrl = 'wss://relay.one.example.test';
   relay.query.mockReset();
   relay.req.mockReset();
   relayHas(0);
@@ -154,23 +154,24 @@ describe('ReporterInline report count after a failed refresh', () => {
       await new Promise(resolve => setTimeout(resolve, 20));
     });
 
-    expect(client.getQueryState(['reporter-count', appState.apiUrl, REPORTER])?.status).toBe('error');
+    expect(client.getQueryState(['reporter-count', appState.relayUrl, REPORTER])?.status).toBe('error');
     expect(screen.getByText('4 reports filed')).toBeInTheDocument();
     expect(screen.queryByText('report count unavailable')).not.toBeInTheDocument();
   });
 });
 
 describe('ReporterInline report count cache', () => {
-  // One QueryClient serves every environment, and each environment has its own
-  // relay, so a cached count must not follow the moderator across a switch.
-  it('reads the count again after the environment changes', async () => {
+  // One QueryClient serves every relay, and the count is read from whichever
+  // relay is configured, so a cached count must not follow the moderator to
+  // another one. The relay can change without the API URL changing with it.
+  it('reads the count again after the relay changes', async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     relayHas(3);
     const first = renderInline(client);
     expect(await screen.findByText('3 reports filed')).toBeInTheDocument();
     first.unmount();
 
-    appState.apiUrl = 'https://api.two.example.test';
+    appState.relayUrl = 'wss://relay.two.example.test';
     relayHas(7);
     renderInline(client);
     expect(await screen.findByText('7 reports filed')).toBeInTheDocument();
