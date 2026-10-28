@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { BulkNotesPanel } from './BulkNotesPanel';
 import { ApiError, type BulkNote } from '@/lib/adminApi';
-import { mediaFailure, statusDisagreeCause } from '../../shared/bulk-moderation';
+import { listFallbackWarning, mediaFailure, notSavedWarning, statusDisagreeCause } from '../../shared/bulk-moderation';
 
 const api = vi.hoisted(() => ({
   moderateMedia: vi.fn(),
@@ -82,13 +82,13 @@ describe('BulkNotesPanel', () => {
   });
 
   it('counts the "not saved" marker as the rows it stands for, like "+N more"', () => {
-    renderPanel({ failures: ['enumeration:x:y', `enumeration:${ACCOUNT}:4321 more file(s) or problem(s) from this step were not saved`] });
+    renderPanel({ failures: ['enumeration:x:y', notSavedWarning(ACCOUNT, 4321)] });
     expect(screen.getByRole('heading', { name: /problems \(4322\)/i })).toBeInTheDocument();
     expect(screen.getByText('4321 more files or problems from this step were not saved.')).toBeInTheDocument();
   });
 
   it('says a problem in plain words, with the line as the worker wrote it to hand', () => {
-    const raw = `enumeration:${ACCOUNT}:HTTP 500; files were chosen from the relay's list only, so the count of files left as they were may be off`;
+    const raw = listFallbackWarning(ACCOUNT, "could not list this account's files: HTTP 500", { countMayBeOff: true });
     renderPanel({ failures: [raw] });
     const item = screen.getByText("The media server's list of this account's files could not be read (HTTP 500), so its files were chosen from the relay's list only, and the count of files left as they were may be off.").closest('li') as HTMLElement;
     fireEvent.click(within(item).getByText('As recorded'));
@@ -96,7 +96,7 @@ describe('BulkNotesPanel', () => {
   });
 
   it("words an age-review step's fallback line without a count it does not show", () => {
-    const raw = `enumeration:${ACCOUNT}:HTTP 500; files were chosen from the relay's list only`;
+    const raw = listFallbackWarning(ACCOUNT, "could not list this account's files: HTTP 500", { countMayBeOff: false });
     renderPanel({ failures: [raw] });
     expect(screen.getByText("The media server's list of this account's files could not be read (HTTP 500), so its files were chosen from the relay's list only.")).toBeInTheDocument();
     expect(screen.queryByText(/left as they were/)).toBeNull();

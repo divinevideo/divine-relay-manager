@@ -14,11 +14,13 @@ import {
   notSavedWarning,
   jobFailure,
   mediaFailure,
+  outOfScopeWarning,
   parseFailure,
   parseOverflowMarker,
   sameSecondGapWarning,
   statusDisagreeCause,
   statusUnreadableCause,
+  stillUnchangedWarning,
   unpaginatedGapWarning,
 } from './bulk-moderation';
 
@@ -78,7 +80,7 @@ describe('bulk failure strings', () => {
     expect(isListingGapWarning(sameSecondGapWarning(PUBKEY, 200))).toBe(true);
     expect(isListingGapWarning(unpaginatedGapWarning(PUBKEY, 'some events may be unprocessed'))).toBe(true);
     expect(isListingGapWarning(unpaginatedGapWarning(PUBKEY, 'actioned a partial set'))).toBe(true);
-    expect(isListingGapWarning(enumerationWarning(PUBKEY, 'relay returned 1 event(s) outside the requested author or kind; ignored them'))).toBe(false);
+    expect(isListingGapWarning(outOfScopeWarning(PUBKEY, 1))).toBe(false);
     expect(isListingGapWarning(eventFailure(EVENT_ID, 'relay could not be fully paginated'))).toBe(false);
   });
 });
@@ -99,7 +101,7 @@ describe('countIssues', () => {
   });
 
   it('counts an ordinary listing warning that merely mentions "more" as one', () => {
-    expect(countIssues([enumerationWarning('a'.repeat(64), '5 more owned video files still listed unchanged after the walk')])).toBe(1);
+    expect(countIssues([stillUnchangedWarning('a'.repeat(64), 5)])).toBe(1);
   });
 });
 

@@ -28,7 +28,7 @@ import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, createMinorAcc
 import { suspendPubkey, unsuspendPubkey, banPubkey } from './nip86';
 import { runBulkModeration } from './bulk-moderate';
 import { storeBulkNotes, ensureBulkNotesTable, deleteBulkFailure } from './bulk-notes';
-import { autoDeletePendingWarning, bulkLegStoppedWarning } from '../../shared/bulk-moderation';
+import { autoDeletePendingWarning, bulkLegStoppedWarning, listFallbackWarning } from '../../shared/bulk-moderation';
 import { echoedFragments, MALFORMED_WEBHOOK, rejectLikeWorkersRuntime } from './test-helpers/secret-echo';
 
 vi.mock('./keycast-client', () => ({
@@ -491,7 +491,7 @@ describe('handleUpdateAgeReviewCase', () => {
   });
 
   it('a bulk leg with a real failure reads failed, keeps its notes, and neither holds the transition nor retries', async () => {
-    const line = `enumeration:${'a'.repeat(64)}:could not list this account's files: media server returned 500; files were chosen from the relay's list only`;
+    const line = listFallbackWarning('a'.repeat(64), "could not list this account's files: media server returned 500", { countMayBeOff: false });
     const notes = [{ kind: 'still-hidden', sha256: 'e'.repeat(64) }];
     const { res, body } = await clearWithBulkResult({
       success: false, eventsProcessed: 0, mediaProcessed: 0, mediaSkipped: 0, failures: [line], notes,
