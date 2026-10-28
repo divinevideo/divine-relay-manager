@@ -1,17 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import { balanceIsolates, displaySafe, isolate } from './bidi';
 
-const FSI = '⁨';
-const PDI = '⁩';
-const RLI = '⁧';
-const RLO = '‮';
+const FSI = '\u2068';
+const PDI = '\u2069';
+const RLI = '\u2067';
+const RLO = '\u202E';
 
 // Every isolate the text opens is closed inside it, and it never closes one it
 // didn't open, so wrapping it in an isolate keeps everything after it in place.
 function isBalanced(text: string): boolean {
   let depth = 0;
   for (const ch of text) {
-    if (ch === '⁦' || ch === RLI || ch === FSI) depth++;
+    if (ch === '\u2066' || ch === RLI || ch === FSI) depth++;
     else if (ch === PDI && --depth < 0) return false;
   }
   return depth === 0;
