@@ -1124,7 +1124,7 @@ describe('AgeReviewDetail bulk notes', () => {
   });
 
   it("labels an earlier step's kept notes with that step, not the case's latest", async () => {
-    getAgeReviewBulkNotesJob.mockResolvedValue({ jobId: 'age-review:case-1:2:cleared', state: 'restricted_pending_user_response', keptAt: '2026-10-13T09:30:00.000Z' });
+    getAgeReviewBulkNotesJob.mockResolvedValue({ jobId: 'age-review:case-1:2:restricted_pending_user_response', state: 'restricted_pending_user_response', keptAt: '2026-10-13T09:30:00.000Z' });
     getBulkJobNotes.mockResolvedValue({ notes: [{ kind: 'not-owned', sha256: HIDDEN_A, owner: 'b'.repeat(64) }], next: null });
     renderDetail(makeCase({ state: 'cleared', version: 5 }));
     const panel = await screen.findByRole('region', { name: /results to look at/i });

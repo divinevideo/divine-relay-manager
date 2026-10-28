@@ -118,9 +118,11 @@ describe('starting the existing Greenlight consent process', () => {
     expect(body.restriction.status).toBe('restricted_minor_review');
     expect(body.minorReviewCase.id).toBe('restricted');
   });
-  // The open-review lookup matches this case's pubkey exactly, as on main: a
-  // report case stored in uppercase is not this account's open case here
-  // (intake normalisation is #313).
+  // A report case stored under the uppercase pubkey neither blocks the start
+  // nor stands in for its case: the start's insert guard (NOT EXISTS) matches
+  // the pubkey exactly, as on main (intake normalisation is #313). Its two
+  // getActiveAgeReviewCase lookups are not pinned here: with the exact case
+  // in place, an any-case lookup would return the same case.
   it('starts as before beside a report case stored under the uppercase pubkey', async () => {
     await DB.prepare("INSERT INTO age_review_cases (id, pubkey, state, suspected_age_band, allowed_resolution, created_via) VALUES ('report-upper', ?, 'open_reported', 'age_13_15', 'parent_video_or_email', 'report')")
       .bind(owner.toUpperCase()).run();

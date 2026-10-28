@@ -413,7 +413,9 @@ describe('BulkNotesPanel', () => {
     expect(api.getActiveAgeReviewCase).not.toHaveBeenCalled();
   });
 
-  it('stays until the moderator dismisses it', () => {
+  // Hiding it is the parent's job (UserActions, AgeReviewDetail); this checks
+  // the panel hands the dismissal over.
+  it('hands a dismissal to its parent', () => {
     const { onDismiss } = renderPanel();
     fireEvent.click(screen.getByRole('button', { name: /dismiss/i }));
     expect(onDismiss).toHaveBeenCalledTimes(1);
