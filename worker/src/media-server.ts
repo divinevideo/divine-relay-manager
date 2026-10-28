@@ -92,13 +92,14 @@ export interface AccountVideo {
 
 // Every video file blossom lists under the account as its uploader, sorted by
 // hash, each hash once and lowercase (#299). This is the list bulk media
-// actions rely on: funnelcake's video list hides a banned event at once and
-// every video of a banned or suspended account, so after Delete All bans the
-// events, or once the account is banned or suspended, it is empty. Blossom's
-// list does not depend on what the relay shows. It holds every status except
-// deleted (a soft delete takes the file off it), and it is keyed by who
-// uploaded, so it can include a file another account owns; mayChangeMedia only
-// changes the account's own.
+// actions rely on: funnelcake's video list shows only public videos (see
+// queryUserVideosPage in bulk-moderate.ts). Among others it hides a banned
+// event at once and every video of a banned or suspended account, so after
+// Delete All bans the events, or once the account is banned or suspended, it
+// is empty. Blossom's list does not depend on what the relay shows. It holds
+// every status except deleted (a soft delete takes the file off it), and it
+// is keyed by who uploaded, so it can include a file another account owns;
+// mayChangeMedia only changes the account's own.
 //
 // Videos only: a row whose `type` starts with "video/", in any case. The same
 // list holds avatars, banners, sounds and subtitles. Blossom's record always
