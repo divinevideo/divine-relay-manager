@@ -30,7 +30,7 @@ function build(overrides: Partial<Parameters<typeof buildSwitchMembership>[0]> =
     consolidated: [],
     pendingReview: new Map(),
     humanHandled: new Set(),
-    resolvedTargets: new Set(),
+    handledTargets: new Set(),
     bannedPubkeys: new Set(),
     ...overrides,
   });
@@ -50,7 +50,7 @@ describe('buildSwitchMembership', () => {
   it('leaves a resolved CSAM target out', () => {
     const m = build({
       consolidated: [profileTarget([CSAM_REPORT])],
-      resolvedTargets: new Set([`pubkey:${PROFILE}`]),
+      handledTargets: new Set([`pubkey:${PROFILE}`]),
     });
     expect(m.has(`pubkey:${PROFILE}`)).toBe(false);
   });

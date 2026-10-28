@@ -844,9 +844,9 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
 
           {/* Decision History - show if target already has decisions */}
           {decisionLog.hasDecisions && (
-            <Card className="border-green-200 bg-green-50/50 dark:bg-green-950/20">
+            <Card className={decisionLog.hasHandlingDecisions ? 'border-green-200 bg-green-50/50 dark:bg-green-950/20' : undefined}>
               <CardHeader className="py-3">
-                <CardTitle className="text-sm flex items-center gap-2 text-green-700 dark:text-green-400">
+                <CardTitle className={`text-sm flex items-center gap-2 ${decisionLog.hasHandlingDecisions ? 'text-green-700 dark:text-green-400' : 'text-muted-foreground'}`}>
                   <History className="h-4 w-4" />
                   {decisionLog.hasHandlingDecisions ? 'Already Handled' : 'Decision History'} ({decisionLog.decisions.length} action{decisionLog.decisions.length !== 1 ? 's' : ''})
                 </CardTitle>

@@ -640,7 +640,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   }, [dataUpdatedAt]);
 
   // Build set of resolved target keys (from labels, bans, deletions, and decisions)
-  const resolvedTargets = useMemo(() => {
+  //
+  // handledTargets is the same set without the decisions only the worker wrote
+  // (`automated`, today an age-review case it opened on a reported account).
+  // Only the sensitive switch reads it: Hide resolved still counts those
+  // targets as handled, but no person has looked at them.
+  const { resolvedTargets, handledTargets } = useMemo(() => {
     const resolved = new Set<string>();
 
     // Add from resolution labels. The worker now walks every page of labels and
@@ -666,6 +671,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       }
     }
 
+    const handled = new Set(resolved);
+
     // Add from moderation decisions (ban_user, delete_event, etc.). The worker
     // already excluded auto-hide actions and collapsed the table to distinct
     // targets, so what arrives here is the resolved set itself rather than a
@@ -673,12 +680,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     if (resolvedDecisionTargets) {
       for (const target of resolvedDecisionTargets) {
         if (target.target_type === 'pubkey' || target.target_type === 'event') {
-          resolved.add(`${target.target_type}:${target.target_id}`);
+          const key = `${target.target_type}:${target.target_id}`;
+          resolved.add(key);
+          if (!target.automated) handled.add(key);
         }
       }
     }
 
-    return resolved;
+    return { resolvedTargets: resolved, handledTargets: handled };
   }, [labelTargets, bannedPubkeys, bannedEvents, resolvedDecisionTargets]);
 
   // Set of relay-banned pubkeys, used to cross-resolve an event-scoped report
@@ -939,9 +948,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     consolidated: allConsolidated,
     pendingReview: pendingReviewTargets,
     humanHandled: humanHandledTargets,
-    resolvedTargets,
+    handledTargets,
     bannedPubkeys: bannedPubkeySet,
-  }), [allConsolidated, pendingReviewTargets, humanHandledTargets, resolvedTargets, bannedPubkeySet]);
+  }), [allConsolidated, pendingReviewTargets, humanHandledTargets, handledTargets, bannedPubkeySet]);
 
   const consolidated = useMemo(() => {
     // A copy, so the in-place sort below can never reorder allConsolidated.

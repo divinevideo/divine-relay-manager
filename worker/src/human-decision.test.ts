@@ -168,6 +168,75 @@ describe('human decision persistence', () => {
       expect(sqlLog.some(({ sql }) => sql.includes('INSERT INTO moderation_decisions'))).toBe(false);
     });
 
+    // 'auto' is the worker's own marker: a decision posted with it would read
+    // as one no person made.
+    it.each(['auto', '', 'e'.repeat(63), 'g'.repeat(64), null])(
+      'rejects %j as the moderatorPubkey and records nothing',
+      async (moderatorPubkey) => {
+        const { db, sqlLog } = createMockDB();
+        const env = createEnv(db);
+
+        const response = await worker.fetch(new Request('http://localhost/api/decisions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+          body: JSON.stringify({ targetType: 'pubkey', targetId: 'b'.repeat(64), action: 'reviewed', moderatorPubkey }),
+        }), env as never, mockCtx);
+
+        expect(response.status).toBe(400);
+        expect(sqlLog.some(({ sql }) => sql.includes('INSERT INTO moderation_decisions'))).toBe(false);
+      },
+    );
+
+    // RegExp.test coerces what it is given, so a one-element array of a valid
+    // pubkey reads as that pubkey. Real D1 then rejects the bind with a 500.
+    it('rejects a moderatorPubkey sent as an array and records nothing', async () => {
+      const { db, sqlLog } = createMockDB();
+      const env = createEnv(db);
+
+      const response = await worker.fetch(new Request('http://localhost/api/decisions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        body: JSON.stringify({
+          targetType: 'pubkey', targetId: 'b'.repeat(64), action: 'reviewed', moderatorPubkey: ['e'.repeat(64)],
+        }),
+      }), env as never, mockCtx);
+
+      expect(response.status).toBe(400);
+      expect(sqlLog.some(({ sql }) => sql.includes('INSERT INTO moderation_decisions'))).toBe(false);
+    });
+
+    it("records a moderator's hex pubkey with the decision", async () => {
+      const { db, sqlLog } = createMockDB();
+      const env = createEnv(db);
+      const moderatorPubkey = 'e'.repeat(64);
+
+      const response = await worker.fetch(new Request('http://localhost/api/decisions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        body: JSON.stringify({ targetType: 'pubkey', targetId: 'b'.repeat(64), action: 'reviewed', moderatorPubkey }),
+      }), env as never, mockCtx);
+
+      expect(response.status).toBe(200);
+      const insert = sqlLog.find(({ sql }) => sql.includes('INSERT INTO moderation_decisions'));
+      expect(insert?.bindings).toEqual(['pubkey', 'b'.repeat(64), 'reviewed', null, moderatorPubkey, null]);
+    });
+
+    // The repo's scripts post decisions without one.
+    it('records a decision sent with no moderatorPubkey as NULL', async () => {
+      const { db, sqlLog } = createMockDB();
+      const env = createEnv(db);
+
+      const response = await worker.fetch(new Request('http://localhost/api/decisions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        body: JSON.stringify({ targetType: 'event', targetId: 'c'.repeat(64), action: 'dismiss', reason: 'Test: dismiss' }),
+      }), env as never, mockCtx);
+
+      expect(response.status).toBe(200);
+      const insert = sqlLog.find(({ sql }) => sql.includes('INSERT INTO moderation_decisions'));
+      expect(insert?.bindings).toEqual(['event', 'c'.repeat(64), 'dismiss', 'Test: dismiss', null, null]);
+    });
+
     it('should mark human reviewed for all moderator action types', async () => {
       const actions = [
         'reviewed',
@@ -199,6 +268,27 @@ describe('human decision persistence', () => {
         expect(targetInserts.length).toBeGreaterThan(0);
       }
     });
+  });
+
+  describe('POST /api/moderate (handleModerate) moderatorPubkey', () => {
+    // delete_event has its own check; hide_event and allow_event share one.
+    it.each(['delete_event', 'hide_event', 'allow_event'])(
+      'rejects a moderatorPubkey sent as an array for %s, before changing anything',
+      async (action) => {
+        const { db } = createMockDB();
+        const operations: unknown[] = [];
+        const env = createEnv(db, operations);
+
+        const response = await worker.fetch(new Request('http://localhost/api/moderate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+          body: JSON.stringify({ action, eventId: 'ab'.repeat(32), moderatorPubkey: ['e'.repeat(64)] }),
+        }), env as never, mockCtx);
+
+        expect(response.status).toBe(400);
+        expect(operations).toEqual([]);
+      },
+    );
   });
 
   describe('DELETE /api/decisions/:targetId (handleDeleteDecisions)', () => {
@@ -237,6 +327,31 @@ describe('human decision persistence', () => {
   });
 
   describe('POST /api/publish (handlePublish, kind 1985 resolution labels)', () => {
+    it('rejects a moderatorPubkey sent as an array before marking anything', async () => {
+      const { db, sqlLog } = createMockDB();
+      const operations: unknown[] = [];
+      const env = createEnv(db, operations);
+
+      const response = await worker.fetch(new Request('http://localhost/api/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        body: JSON.stringify({
+          kind: 1985,
+          content: 'Reviewed',
+          tags: [
+            ['L', 'moderation/resolution'],
+            ['l', 'reviewed', 'moderation/resolution'],
+            ['e', 'ab'.repeat(32)],
+          ],
+          moderatorPubkey: ['e'.repeat(64)],
+        }),
+      }), env as never, mockCtx);
+
+      expect(response.status).toBe(400);
+      expect(operations).toEqual([]);
+      expect(sqlLog.some(s => s.sql.includes('moderation_targets'))).toBe(false);
+    });
+
     it('should call markHumanReviewed for resolution labels', async () => {
       const { db, sqlLog } = createMockDB();
       const env = createEnv(db);

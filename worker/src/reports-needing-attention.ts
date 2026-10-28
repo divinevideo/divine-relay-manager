@@ -15,11 +15,18 @@ export interface RelayReport {
   tags: string[][];
 }
 
-// The targets the worker can call resolved: any resolution label, and any human
-// decision on an event or pubkey. Auto-hide actions are already excluded by
-// getResolvedTargets -- auto-hidden content is waiting FOR review, not handled.
-// Other target types (media) never match a report, which is why the client's
-// resolvedTargets ignores them too.
+// The targets the worker can call resolved: any resolution label, and any
+// decision on an event or pubkey that getResolvedTargets returns. That is every
+// decision except an auto-hide action. Decisions the worker wrote itself (today
+// age_review_case_created) are included, and getResolvedTargets marks those
+// targets `automated`; counting them matches what the queue's Hide resolved
+// subtracts. Auto-hide actions are left out because auto-hidden content is
+// waiting FOR review, not handled. Other target types (media) never match a
+// report, which is why the client's resolvedTargets ignores them too.
+// TODO(#284): adopting this read for the sensitive switch must not treat
+// `automated` targets as handled. This returns a plain Set of keys, and
+// readResolutionKeys hands that Set on as `resolved`, so the flag has to be
+// passed through first.
 export function resolvedKeysFrom(
   decisions: readonly { target_type: string; target_id: string }[],
   labels: readonly { type: string; value: string }[],
@@ -98,8 +105,9 @@ export interface PagingOptions {
   maxPages?: number;
 }
 
-// Everything the worker knows about which targets are handled: human decisions
-// and auto-hide states from D1, resolution labels from the relay.
+// Everything the worker knows about which targets are handled: decisions,
+// the worker's own automated ones included, and auto-hide states from D1;
+// resolution labels from the relay.
 // getAutoHideStates returns newest first, which pendingReviewTargetKeys needs.
 export async function readResolutionKeys(
   db: D1Database,

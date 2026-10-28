@@ -49,6 +49,7 @@ import { coordinateEventVisibility, type EventVisibilityResult } from './event-v
 import { markHumanAction, markHumanReviewed } from './human-decision';
 import { AUTO_HIDE_STATE_ACTIONS } from '../../shared/autohide';
 import { getResolvedTargets, getAutoHideStates } from './resolution-state';
+import { isHex64 } from './hex';
 import { readResolutionLabelTargets } from './resolution-labels';
 import { runRetentionDisposal } from './retention';
 import { errorNameOnly } from './error-name';
@@ -1006,7 +1007,7 @@ async function handlePublish(
   if (!body.kind || body.content === undefined) {
     return jsonResponse({ success: false, error: 'Missing required fields: kind, content' }, 400, corsHeaders);
   }
-  if (body.moderatorPubkey !== undefined && !/^[a-f0-9]{64}$/i.test(body.moderatorPubkey)) {
+  if (body.moderatorPubkey !== undefined && !isHex64(body.moderatorPubkey)) {
     return jsonResponse({ success: false, error: 'Invalid moderatorPubkey' }, 400, corsHeaders);
   }
   if (body.moderationReason !== undefined && typeof body.moderationReason !== 'string') {
@@ -1150,7 +1151,7 @@ async function handleModerate(
       if (body.reason !== undefined && typeof body.reason !== 'string') {
         return jsonResponse({ success: false, error: `Invalid reason for ${body.action}` }, 400, corsHeaders);
       }
-      if (body.moderatorPubkey !== undefined && !/^[a-f0-9]{64}$/i.test(body.moderatorPubkey)) {
+      if (body.moderatorPubkey !== undefined && !isHex64(body.moderatorPubkey)) {
         return jsonResponse({ success: false, error: `Invalid moderatorPubkey for ${body.action}` }, 400, corsHeaders);
       }
 
@@ -1225,7 +1226,7 @@ async function handleModerate(
       if (body.reason !== undefined && typeof body.reason !== 'string') {
         return jsonResponse({ success: false, error: `Invalid reason for ${body.action}` }, 400, corsHeaders);
       }
-      if (body.moderatorPubkey !== undefined && !/^[a-f0-9]{64}$/i.test(body.moderatorPubkey)) {
+      if (body.moderatorPubkey !== undefined && !isHex64(body.moderatorPubkey)) {
         return jsonResponse({ success: false, error: `Invalid moderatorPubkey for ${body.action}` }, 400, corsHeaders);
       }
 
@@ -1857,6 +1858,12 @@ async function handleLogDecision(
     if (!body.targetType || !body.targetId || !body.action) {
       return jsonResponse({ success: false, error: 'Missing required fields' }, 400, corsHeaders);
     }
+    // Absent is allowed (recorded as NULL); anything else must be a pubkey.
+    // Above all not the worker's own 'auto', which would make a person's
+    // decision read as one no person made.
+    if (body.moderatorPubkey !== undefined && !isHex64(body.moderatorPubkey)) {
+      return jsonResponse({ success: false, error: 'Invalid moderatorPubkey' }, 400, corsHeaders);
+    }
     if (body.targetType === 'event' && COORDINATED_AUTO_HIDE_ACTIONS.has(body.action)) {
       return jsonResponse({ success: false, error: 'Event auto-hide state must use its coordinated endpoint' }, 400, corsHeaders);
     }
@@ -1911,13 +1918,13 @@ async function handleConfirmAutoHide(
   if (body.reason !== undefined && typeof body.reason !== 'string') {
     return jsonResponse({ success: false, error: 'Invalid reason' }, 400, corsHeaders);
   }
-  if (body.moderatorPubkey !== undefined && !/^[a-f0-9]{64}$/i.test(body.moderatorPubkey)) {
+  if (body.moderatorPubkey !== undefined && !isHex64(body.moderatorPubkey)) {
     return jsonResponse({ success: false, error: 'Invalid moderatorPubkey' }, 400, corsHeaders);
   }
-  if (body.reportId !== undefined && !/^[a-f0-9]{64}$/i.test(body.reportId)) {
+  if (body.reportId !== undefined && !isHex64(body.reportId)) {
     return jsonResponse({ success: false, error: 'Invalid reportId' }, 400, corsHeaders);
   }
-  if (body.reporterPubkey !== undefined && !/^[a-f0-9]{64}$/i.test(body.reporterPubkey)) {
+  if (body.reporterPubkey !== undefined && !isHex64(body.reporterPubkey)) {
     return jsonResponse({ success: false, error: 'Invalid reporterPubkey' }, 400, corsHeaders);
   }
   const result = await coordinateEventVisibility(env, {

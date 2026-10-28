@@ -416,11 +416,13 @@ Log a moderation decision (called automatically by action endpoints).
   "targetId": "abc123...",
   "action": "ban_user",
   "reason": "Spam account",
-  "moderatorPubkey": "mod-pubkey...",
+  "moderatorPubkey": "<64-character hex pubkey>",
   "reportId": "report-id...",
   "zendeskTicketId": 12345
 }
 ```
+
+`moderatorPubkey` is optional: send a 64-character hex string, or omit it and the decision is recorded with no moderator. Any other value gets a `400`, including the worker's own `auto` marker.
 
 ---
 
