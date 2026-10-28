@@ -859,6 +859,10 @@ export function isBlockedMediaAction(action: MediaStatusAction | null | undefine
   return action === 'PERMANENT_BAN' || action === 'QUARANTINE';
 }
 
+// The state a media write can expect: a stored action, or UNKNOWN for a file
+// with no moderation record (check-result's status 'unknown').
+export type ExpectedMediaState = ModerationAction | 'UNKNOWN';
+
 // `from`, when given, is the state the caller expects the file to be in. The
 // worker then writes only if the moderation record still shows it, and
 // refuses otherwise (409 state_mismatch, or 503 state_unreadable).
@@ -878,7 +882,7 @@ export async function moderateMedia(
   sha256: string,
   action: ModerationAction,
   reason?: string,
-  from?: ModerationAction,
+  from?: ExpectedMediaState,
   pubkey?: string,
 ): Promise<ApiResponse> {
   const data = await apiRequest<ApiResponse>(apiUrl, '/api/moderate-media', 'POST', {
@@ -1732,8 +1736,8 @@ export async function getBulkKindCounts(apiUrl: string, pubkey: string): Promise
 }
 
 // Delete media (convenience wrapper)
-export async function deleteMedia(apiUrl: string, sha256: string, reason?: string): Promise<ApiResponse> {
-  return moderateMedia(apiUrl, sha256, 'DELETE', reason || 'Deleted by moderator');
+export async function deleteMedia(apiUrl: string, sha256: string, reason?: string, from?: ExpectedMediaState): Promise<ApiResponse> {
+  return moderateMedia(apiUrl, sha256, 'DELETE', reason || 'Deleted by moderator', from);
 }
 
 // Age review config

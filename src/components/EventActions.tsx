@@ -6,6 +6,8 @@ import { getToasts, useToast } from '@/hooks/useToast';
 import type { toast as showToast } from '@/hooks/useToast';
 import { useAdminApi } from '@/hooks/useAdminApi';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
+import type { ExpectedMediaState, ModerationAction } from '@/lib/adminApi';
+import { describeStateRefusal, expectedStateOf } from '@/lib/mediaState';
 import { DeleteConfirmDialog } from './DeleteConfirmDialog';
 import { invalidateResolutionState } from '@/lib/queueInvalidation';
 import { ApiError } from '@/lib/adminApi';
@@ -138,6 +140,25 @@ export function EventActions({
   };
   const allFiles = [...mediaHashes, ...thumbnails];
   const statusOf = (hash: string) => mediaHashStatuses.find((s) => s.hash === hash);
+  // Every media write names the state this screen showed for the file (#336), so
+  // the worker refuses it if another moderator or the automated checks changed
+  // the file since. A refusal fails a video's action and is a warning for a
+  // thumbnail, as any failure is, in plain words, and the status is read again
+  // so the buttons match the file.
+  const writeMedia = async (hash: string, write: (from: ExpectedMediaState | undefined) => Promise<unknown>) => {
+    try {
+      await write(expectedStateOf(statusOf(hash)));
+    } catch (error) {
+      const refusal = describeStateRefusal(error);
+      if (refusal === undefined) throw error;
+      queryClient.invalidateQueries({ queryKey: ['media-status'] });
+      throw new Error(refusal);
+    }
+  };
+  const moderateFile = (hash: string, action: ModerationAction, reason: string) =>
+    writeMedia(hash, (from) => api.moderateMedia(hash, action, reason, from));
+  const deleteFile = (hash: string) =>
+    writeMedia(hash, (from) => api.deleteMedia(hash, 'Permanently deleted by moderator', from));
   // Any status but DELETE moves a deleted file out of Deleted on the media server
   // (divine-blossom handle_admin_moderate and handle_admin_moderate_action both),
   // so no status is ever sent to a deleted file: a deleted video gets no Block or
@@ -364,7 +385,7 @@ export function EventActions({
   const blockMediaMutation = useMutation({
     mutationFn: async () => {
       const moderator = getModeratorPubkey(); // capture before the authoritative request
-      const result = withUnreadSkipped(await actOnFiles(filesToBlock, (hash) => api.moderateMedia(hash, 'PERMANENT_BAN', 'Blocked by moderator')));
+      const result = withUnreadSkipped(await actOnFiles(filesToBlock, (hash) => moderateFile(hash, 'PERMANENT_BAN', 'Blocked by moderator')));
       const shown: ShownToast = { toast: doneToast(`Blocked ${result.changed} media file(s)`, (what) => `Video blocked; ${what} NOT blocked`, result) };
       logAudit(moderator, {
         targetType: 'event',
@@ -383,7 +404,7 @@ export function EventActions({
   const ageRestrictMutation = useMutation({
     mutationFn: async () => {
       const moderator = getModeratorPubkey(); // capture before the authoritative request
-      const result = withUnreadSkipped(await actOnFiles(filesToRestrict, (hash) => api.moderateMedia(hash, 'AGE_RESTRICTED', 'Age restricted by moderator')));
+      const result = withUnreadSkipped(await actOnFiles(filesToRestrict, (hash) => moderateFile(hash, 'AGE_RESTRICTED', 'Age restricted by moderator')));
       const shown: ShownToast = { toast: doneToast(`Age restricted ${result.changed} media file(s)`, (what) => `Video age restricted; ${what} NOT age restricted`, result) };
       logAudit(moderator, {
         targetType: 'event',
@@ -411,7 +432,7 @@ export function EventActions({
     let lifted = 0;
     try {
       for (const hash of hashes) {
-        await api.moderateMedia(hash, 'SAFE', apiReason);
+        await moderateFile(hash, 'SAFE', apiReason);
         lifted++;
       }
     } catch (error) {
@@ -504,7 +525,7 @@ export function EventActions({
   const deleteMediaMutation = useMutation({
     mutationFn: async () => {
       const moderator = getModeratorPubkey(); // capture before the authoritative request
-      const result = await actOnFiles(allFiles, (hash) => api.deleteMedia(hash, 'Permanently deleted by moderator'));
+      const result = await actOnFiles(allFiles, deleteFile);
       const shown: ShownToast = { toast: doneToast(`Deleted ${result.changed} media file(s)`, (what) => `Video deleted; ${what} NOT deleted`, result) };
       logAudit(moderator, {
         targetType: 'event',
@@ -532,7 +553,7 @@ export function EventActions({
         logAudit(moderator, { targetType: 'event', targetId: eventId, action: 'delete_event', reason: 'Permanently deleted (combined)' }, shown);
 
         const result = await actOnFiles(allFiles, async (hash) => {
-          await api.deleteMedia(hash, 'Permanently deleted by moderator');
+          await deleteFile(hash);
           completed.push(`media_${hash}`);
         });
         shown.toast = doneToast('Event and media permanently deleted', (what) => `Event and video deleted; ${what} NOT deleted`, result);
