@@ -50,7 +50,7 @@ import { EventActions } from "@/components/EventActions";
 import { UserActions } from "@/components/UserActions";
 import { LinkedTicketPanel } from "@/components/LinkedTicketPanel";
 import { linkedTicketTarget } from "@/lib/linkedTicketTarget";
-import { CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, getReportCategory, hasCsamSignal } from "@/lib/constants";
+import { HIGH_PRIORITY_CATEGORIES, getCategoryLabel, getReportCategory, hasCsamSignal } from "@/lib/constants";
 import { SWITCH_STATE_LABELS, type SwitchState } from "@/lib/sensitiveSwitch";
 import { ageReviewCategory, classifyReport } from "../../shared/report-classification";
 import { KIND_NAMES } from "@/lib/kindNames";
@@ -527,7 +527,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   }
 
   const category = getReportCategory(report);
-  const categoryLabel = CATEGORY_LABELS[category] || category;
+  const categoryLabel = getCategoryLabel(category);
   // Any report on the target, not just the selected one, so the header agrees
   // with the queue row when an older report carries the CSAM signal.
   const isHighPriorityCategory = HIGH_PRIORITY_CATEGORIES.includes(category)
@@ -783,7 +783,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
               <CardContent className="py-0 pb-3 space-y-3">
                 {allReportsForTarget.slice(0, 5).map((r) => {
                   const cat = getReportCategory(r);
-                  const catLabel = CATEGORY_LABELS[cat] || cat;
+                  const catLabel = getCategoryLabel(cat);
                   return (
                     <div key={r.id} className="p-3 bg-background rounded-lg border">
                       {/* Reporter info */}
@@ -1173,7 +1173,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                       <div className="space-y-1">
                         {relatedReports.userReports.slice(0, 3).map((r) => {
                           const cat = getReportCategory(r);
-                          const catLabel = CATEGORY_LABELS[cat] || cat;
+                          const catLabel = getCategoryLabel(cat);
                           return (
                             <div key={r.id} className="flex items-center gap-2 text-xs p-1.5 bg-background rounded">
                               <Badge variant="outline" className="text-xs">{catLabel}</Badge>
@@ -1201,7 +1201,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                       <div className="space-y-1">
                         {relatedReports.eventReports.slice(0, 3).map((r) => {
                           const cat = getReportCategory(r);
-                          const catLabel = CATEGORY_LABELS[cat] || cat;
+                          const catLabel = getCategoryLabel(cat);
                           const target = getReportTarget(r);
                           return (
                             <div key={r.id} className="flex items-center gap-2 text-xs p-1.5 bg-background rounded">

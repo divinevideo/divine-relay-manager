@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { classifyReport, ageReviewCategory } from './report-classification';
+import { classifyReport, ageReviewCategory, reportCategory } from './report-classification';
 
 const P = 'b'.repeat(64);
 const E = 'c'.repeat(64);
@@ -47,6 +47,59 @@ describe('classifyReport', () => {
 
   it('does not match csam inside another word', () => {
     expect(classifyReport({ tags: [['e', E, 'illegal']], content: 'csamuel' }).csamSignal).toBe(false);
+  });
+
+  it.each([
+    'child-porn',
+    'childporn',
+    'child  porn',
+    'child porn',
+    'child\nsexual abuse material',
+    'Child_Sexual_Abuse',
+    'child-sexual-abuse',
+    'child_sexual_abuse_material',
+    'is_child_porn',
+    'x_child_sexual_abuse',
+    'suspected_child_porn_ring',
+    'suspected_csam',
+    'csam_report',
+    'is_csam_content',
+    'csam-report',
+    'type=csam',
+  ])('routes free text %j', content => {
+    expect(classifyReport({ tags: [['e', E, 'illegal']], content }).csamSignal).toBe(true);
+  });
+
+  it.each([
+    'csamuel',
+    'xcsam',
+    '1csam',
+    'csam2',
+    'children playing',
+    'child safety',
+    'grandchildporn',
+    'child sexual abuser',
+    'child sexual abuse2',
+    'wildchild sexual abuse',
+    '1child porn',
+    'child sexualabuse',
+  ])('does not route free text %j', content => {
+    expect(classifyReport({ tags: [['e', E, 'illegal']], content }).csamSignal).toBe(false);
+  });
+
+  // The pattern consumes the character before "child" rather than looking
+  // behind, so pin each kind of prefix.
+  it('routes a phrase at the start, after punctuation, and after an underscore', () => {
+    const routes = (content: string) => classifyReport({ tags: [['e', E, 'illegal']], content }).csamSignal;
+    expect(routes('child porn ring')).toBe(true);
+    expect(routes('see (child porn)')).toBe(true);
+    expect(routes('tag_child porn')).toBe(true);
+  });
+
+  it('classifies a long run of whitespace after "child" in linear time', () => {
+    const start = performance.now();
+    classifyReport({ tags: [['e', E, 'illegal']], content: 'child' + ' '.repeat(40_000) });
+    expect(performance.now() - start).toBeLessThan(200);
   });
 
   it('routes a CSAM label in another namespace', () => {
@@ -122,6 +175,20 @@ describe('classifyReport', () => {
     expect(classifyReport({ tags: [['report', ''], ['l', '', 'social.nos.ontology'], ['p', P, 'spam']] }).category).toBe('spam');
   });
 
+  // Only the first report tag counts, as in age review: an empty one falls
+  // back to the labels, not to a later report tag.
+  it('lets an empty first report tag fall back to labels', () => {
+    const tags = [
+      ['report', ''],
+      ['report', 'spam'],
+      ['L', 'social.nos.ontology'],
+      ['l', 'NS-childSafety', 'social.nos.ontology'],
+      ['p', P],
+    ];
+    expect(classifyReport({ tags }).category).toBe('NS-childSafety');
+    expect(ageReviewCategory({ tags })).toBe('NS-childSafety');
+  });
+
   it('falls back to the NIP-56 type on a p tag', () => {
     expect(classifyReport({ tags: [['p', P, 'spam']] }).category).toBe('spam');
   });
@@ -136,6 +203,38 @@ describe('classifyReport', () => {
   it('skips an empty NIP-56 type', () => {
     expect(classifyReport({ tags: [['e', P, ''], ['p', P, 'spam']] }).category).toBe('spam');
     expect(classifyReport({ tags: [['p', P, '']] }).category).toBe('other');
+  });
+
+  // NIP-01 puts a relay hint third on an e or p tag, where NIP-56 puts the type.
+  it('skips a relay hint where the NIP-56 type goes', () => {
+    expect(classifyReport({ tags: [['e', E, 'wss://relay.example.com'], ['p', P]] }).category).toBe('other');
+    expect(classifyReport({ tags: [['p', P, 'ws://relay.example.com']] }).category).toBe('other');
+    expect(classifyReport({ tags: [['e', E, 'WSS://relay.example.com'], ['p', P, 'spam']] }).category).toBe('spam');
+  });
+});
+
+describe('reportCategory', () => {
+  // The content carries a CSAM signal, which must not change the category.
+  it.each([
+    { name: 'a relay hint on e', tags: [['e', E, 'wss://relay.example.com'], ['p', P]], category: 'other' },
+    { name: 'a relay hint on p', tags: [['p', P, 'ws://relay.example.com']], category: 'other' },
+    { name: 'an upper-case relay hint', tags: [['e', E, 'WSS://relay.example.com'], ['p', P, 'spam']], category: 'spam' },
+    { name: 'a profanity type', tags: [['e', E, 'profanity'], ['p', P, 'profanity']], category: 'profanity' },
+    {
+      name: 'an empty first report tag',
+      tags: [
+        ['report', ''],
+        ['report', 'spam'],
+        ['L', 'social.nos.ontology'],
+        ['l', 'NS-childSafety', 'social.nos.ontology'],
+        ['p', P],
+      ],
+      category: 'NS-childSafety',
+    },
+  ])('matches classifyReport for $name', ({ tags, category }) => {
+    const event = { tags, content: 'CONTENT REPORT - NIP-56\nReason: csam\n' };
+    expect(reportCategory(event)).toBe(category);
+    expect(classifyReport(event).category).toBe(category);
   });
 });
 

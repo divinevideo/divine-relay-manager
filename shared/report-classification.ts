@@ -24,9 +24,18 @@ const NOS_NAMESPACE = 'social.nos.ontology';
 // backtrack quadratically on content made of many blank lines. CRLF still
 // matches: with /m, $ also stops before \r, which JS counts as a line end.
 const CSAM_REASON_LINE = /^[ \t]*Reason:[ \t]*(csam|sexual_minors)[ \t]*$/im;
-// Free text from other apps. \b keeps "csamuel" out; "child porn" also matches
-// "child pornography" because only its left edge is anchored.
-const CSAM_FREE_TEXT = /\b(csam|child sexual abuse)\b|\bchild porn/i;
+// Free text from other apps. A match is either "csam" with no ASCII letter or
+// digit on either side, or "child" with no ASCII letter or digit before it,
+// then any run of whitespace, hyphens or underscores (or none), then "porn" or
+// "sexual abuse". "porn" is anchored on the left only, so "child pornography"
+// matches. "sexual" and "abuse" need at least one separator between them, and
+// "abuse" no ASCII letter or digit after it. So "is_csam_content",
+// "is_child_porn" and "child_sexual_abuse_material" match, and "csamuel",
+// "grandchildporn" and "child sexual abuser" do not. The (?:^|[^a-z0-9])
+// prefixes stand in for a lookbehind: Safari before 16.4 cannot parse one, and
+// this module loads with the app. \s is safe here, unlike in the Reason line
+// above, because each run of it follows a literal "child" or "sexual".
+const CSAM_FREE_TEXT = /(?:^|[^a-z0-9])csam(?![a-z0-9])|(?:^|[^a-z0-9])child[\s_-]*(?:sexual[\s_-]+abuse(?![a-z0-9])|porn)/i;
 
 function tagList(event: { tags?: unknown }): string[][] {
   return Array.isArray(event.tags)
@@ -38,14 +47,22 @@ function hasValue(t: string[]): boolean {
   return typeof t[1] === 'string' && t[1] !== '';
 }
 
+// NIP-01 lets an e or p tag carry a relay URL third, where NIP-56 puts the
+// report type. A relay URL there is a hint, not a type.
+const RELAY_HINT = /^wss?:\/\//i;
+
+function isReportType(value: unknown): value is string {
+  return typeof value === 'string' && value !== '' && !RELAY_HINT.test(value);
+}
+
 function isCsamValue(value: unknown): boolean {
   return typeof value === 'string'
     && CSAM_CATEGORIES.some(c => c.toLowerCase() === value.toLowerCase());
 }
 
 function categoryOf(tags: string[][]): string {
-  const report = tags.find(t => t[0] === 'report' && hasValue(t));
-  if (report) return report[1];
+  const report = tags.find(t => t[0] === 'report');
+  if (report && hasValue(report)) return report[1];
 
   // Prefer a high-priority Divine label, so a spam label listed first cannot
   // hide a CSAM label listed second.
@@ -58,11 +75,17 @@ function categoryOf(tags: string[][]): string {
 
   // NIP-56 puts the report type on the target tag.
   const eType = tags.find(t => t[0] === 'e')?.[2];
-  if (typeof eType === 'string' && eType !== '') return eType;
+  if (isReportType(eType)) return eType;
   const pType = tags.find(t => t[0] === 'p')?.[2];
-  if (typeof pType === 'string' && pType !== '') return pType;
+  if (isReportType(pType)) return pType;
 
   return 'other';
+}
+
+// The category from the tags alone, without classifyReport's content scan, for
+// callers that need only the category.
+export function reportCategory(event: { tags?: unknown }): string {
+  return categoryOf(tagList(event));
 }
 
 export function classifyReport(event: { tags?: unknown; content?: unknown }): ReportClassification {

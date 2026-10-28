@@ -1,7 +1,8 @@
 // ABOUTME: Integration test for #158's acceptance wiring in Reports: a crashing
 // ABOUTME: ReportDetail degrades to the inline fallback while the list survives
 
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { QueryClient } from '@tanstack/react-query';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MockInstance } from 'vitest';
 import TestApp from '@/test/TestApp';
@@ -432,5 +433,132 @@ describe('Reports CSAM signal priority', () => {
     await waitFor(() => expect(screen.getByRole('tab', { name: /^All/, hidden: true })).toHaveAttribute('aria-selected', 'true'));
     expect(rows()).toHaveLength(2);
     expect(rows()[0].className).toContain('border-red-300');
+  });
+});
+
+// Category labels come from the label map's own keys only, so a report type
+// that names an inherited object key renders as plain text in every list view.
+describe('Reports category labels', () => {
+  // These tests are about the list, so the detail pane stays quiet.
+  beforeEach(() => {
+    detailRender.crash = false;
+  });
+  afterEach(() => {
+    detailRender.crash = true;
+  });
+
+  const INHERITED_KEY_REPORT = {
+    ...REPORT,
+    id: '3'.repeat(64),
+    tags: [['p', 'd'.repeat(64), '__proto__']],
+    content: '',
+  };
+
+  const listFallback = () => screen.queryByText(/the reports list failed to render/i);
+  const rows = () => Array.from(document.querySelectorAll<HTMLElement>('div.rounded-lg.cursor-pointer'));
+  const categoryChips = () => within(screen.getByText('Category').parentElement as HTMLElement);
+
+  it('renders an inherited object key as plain category text', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/reports')) return jsonResponse({ success: true, events: [INHERITED_KEY_REPORT] });
+      if (url.includes('/api/resolution-label-targets')) return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
+      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, resolved: [], states: [] });
+      if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
+      return jsonResponse({ success: true });
+    }));
+
+    render(<TestApp><Reports relayUrl="wss://relay.example" /></TestApp>);
+
+    // Settles either way: the row renders, or the list falls back.
+    await waitFor(() => expect(screen.queryByText(/1 report$/) ?? listFallback()).not.toBeNull());
+    expect(listFallback()).not.toBeInTheDocument();
+
+    // Grouped row badge, then the filter chip and the chip it becomes once picked.
+    expect(within(rows()[0]).getByText('__proto__')).toBeInTheDocument();
+    fireEvent.click(categoryChips().getByText('__proto__'));
+    expect(listFallback()).not.toBeInTheDocument();
+    expect(categoryChips().getByText('__proto__')).toBeInTheDocument();
+
+    // Individual row badge. Radix tabs switch on mouse down.
+    fireEvent.mouseDown(screen.getByRole('tab', { name: /^All/ }), { button: 0 });
+    expect(listFallback()).not.toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /^All/ })).toHaveAttribute('aria-selected', 'true');
+    expect(within(rows()[0]).getByText('__proto__')).toBeInTheDocument();
+  });
+});
+
+describe('Reports category sort', () => {
+  // jsdom lacks scrollIntoView, which the Radix Select opens with.
+  const originalScrollIntoView = Element.prototype.scrollIntoView;
+  beforeEach(() => {
+    detailRender.crash = false;
+    Element.prototype.scrollIntoView = vi.fn();
+  });
+  afterEach(() => {
+    detailRender.crash = true;
+    if (originalScrollIntoView) Element.prototype.scrollIntoView = originalScrollIntoView;
+    else delete (Element.prototype as Partial<Element>).scrollIntoView;
+  });
+
+  const rows = () => Array.from(document.querySelectorAll<HTMLElement>('div.rounded-lg.cursor-pointer'));
+
+  async function chooseSort(name: string) {
+    fireEvent.click(screen.getAllByRole('combobox', { hidden: true })[0]);
+    fireEvent.click(await screen.findByRole('option', { name, hidden: true }));
+  }
+
+  // A comparator that classifies reads every report's content on each of its
+  // O(n log n) comparisons, about 32 reads per report at this size.
+  it('reads report content a bounded number of times per category sort', async () => {
+    const N = 48;
+    // Cycled, so adjacent reports differ and the sort makes many comparisons.
+    const types = ['spam', 'nudity', 'illegal', 'impersonation'];
+    let contentReads = 0;
+    const reports = Array.from({ length: N }, (_, i) => {
+      const n = (i + 1).toString(16).padStart(4, '0');
+      return {
+        id: `${n}ffff`.repeat(8),
+        pubkey: 'b'.repeat(64),
+        created_at: 1751000000 + i,
+        kind: 1984,
+        tags: [['e', n.repeat(16), types[i % types.length]], ['p', 'd'.repeat(64)]],
+        get content() {
+          contentReads++;
+          return 'comment';
+        },
+        sig: 'e'.repeat(128),
+      };
+    });
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, retryDelay: 0, staleTime: Infinity } },
+    });
+    queryClient.setQueryData(['reports', 'wss://relay.example'], reports);
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/reports')) return new Promise<Response>(() => {});
+      if (url.includes('/api/resolution-label-targets')) return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
+      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, resolved: [], states: [] });
+      if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
+      return jsonResponse({ success: true });
+    }));
+
+    render(<TestApp queryClient={queryClient}><Reports relayUrl="wss://relay.example" /></TestApp>);
+    await waitFor(() => expect(rows()).toHaveLength(N));
+
+    // The rows read each report's content as they render, whatever the sort,
+    // so a newest-first sort is the baseline.
+    contentReads = 0;
+    await chooseSort('Newest First');
+    const newestReads = contentReads;
+    contentReads = 0;
+    await chooseSort('By Category');
+    const categoryReads = contentReads;
+
+    expect(categoryReads - newestReads).toBeLessThanOrEqual(8 * N);
+    // Same order as before: none of these types is high or medium priority,
+    // so they sort alphabetically.
+    expect(within(rows()[0]).getByText('Illegal')).toBeInTheDocument();
+    expect(within(rows()[N - 1]).getByText('Spam')).toBeInTheDocument();
   });
 });

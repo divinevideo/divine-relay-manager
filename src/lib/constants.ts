@@ -1,6 +1,6 @@
 import { getEnvironmentByApiUrl } from "@/lib/environments";
 import { VIDEO_KINDS } from "@/lib/kindNames";
-import { classifyReport } from "../../shared/report-classification";
+import { classifyReport, reportCategory } from "../../shared/report-classification";
 export {
   AUTO_HIDE_ACTION,
   AUTO_HIDE_ACTIONS,
@@ -12,7 +12,8 @@ export {
 // ABOUTME: Shared constants for moderation categories and labels
 // ABOUTME: DTSP (Digital Trust & Safety Partnership) category mappings
 
-export const CATEGORY_LABELS: Record<string, string> = {
+// Typed as a literal so every label is checked to be a string.
+const LABELS: Record<string, string> = {
   'sexual_minors': 'CSAM',
   'csam': 'CSAM',
   'NS-csam': 'CSAM',
@@ -48,6 +49,8 @@ export const CATEGORY_LABELS: Record<string, string> = {
   'harassment': 'Harassment',
   'nudity': 'Nudity',
   'illegal': 'Illegal',
+  'malware': 'Malware',
+  'profanity': 'Profanity',
   'copyright': 'Copyright',
   'aiGenerated': 'AI Generated',
   'ai-generated': 'AI Generated',
@@ -61,6 +64,10 @@ export const CATEGORY_LABELS: Record<string, string> = {
   'NS-underageUser': 'Under 16',
   'NS-childSafety': 'Child Safety',
 };
+
+// A null prototype, so even a raw lookup by a report's category finds only
+// these labels, never an inherited object key.
+export const CATEGORY_LABELS = Object.setPrototypeOf(LABELS, null) as Record<string, string>;
 
 export const RESOLUTION_STATUSES = ['reviewed', 'dismissed', 'no-action', 'false-positive'] as const;
 export type ResolutionStatus = typeof RESOLUTION_STATUSES[number];
@@ -87,14 +94,19 @@ export const UNDERAGE_REPORT_CATEGORY = 'NS-underageUser';
 // Divine puts media on Blossom as URLs — querying it only pulled base64 noise.
 export const RECENT_CONTENT_KINDS = [1, 6, 16, ...VIDEO_KINDS, 20, 1063, 1111, 30023] as const;
 
-// Helper to get label with fallback
+// Helper to get label with fallback. Only the map's own keys count, so an
+// inherited object key comes back unchanged, as plain text. (Object.hasOwn is
+// not in the ES2020 lib this app compiles against.)
 export function getCategoryLabel(category: string): string {
-  return CATEGORY_LABELS[category] || category;
+  return Object.prototype.hasOwnProperty.call(CATEGORY_LABELS, category)
+    ? CATEGORY_LABELS[category]
+    : category;
 }
 
-// Extract category from a report event (see shared/report-classification.ts)
-export function getReportCategory(event: { tags: string[][]; content?: string }): string {
-  return classifyReport(event).category;
+// Extract category from a report event's tags (see shared/report-classification.ts).
+// Tags alone: the queue's filters and sorts call this for every report.
+export function getReportCategory(event: { tags: string[][] }): string {
+  return reportCategory(event);
 }
 
 // True when any report in the set signals CSAM, including old builds that

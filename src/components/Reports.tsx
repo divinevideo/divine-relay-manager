@@ -49,7 +49,7 @@ import { DeepLinkFallback } from "@/components/DeepLinkFallback";
 import { classifyTargetedFetch, reportsMatchingTarget, type DeepLinkStatus } from "@/lib/deepLinkResolution";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { useBannedPubkeys, useBannedEvents } from "@/hooks/useRelayBanLists";
-import { AUTO_HIDE_ACTION, CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, RESOLUTION_READ_TIMEOUT_MS, getLatestAutoHideState, getReportCategory, getReportTargetIds, hasCsamSignal } from "@/lib/constants";
+import { AUTO_HIDE_ACTION, HIGH_PRIORITY_CATEGORIES, RESOLUTION_READ_TIMEOUT_MS, getCategoryLabel, getLatestAutoHideState, getReportCategory, getReportTargetIds, hasCsamSignal } from "@/lib/constants";
 import { isConsolidatedReportResolved } from "@/lib/reportResolution";
 import { SWITCH_STATE_LABELS, buildSwitchMembership, humanHandledAutoHideTargets, type SwitchState } from "@/lib/sensitiveSwitch";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -269,7 +269,7 @@ function ConsolidatedReportItem({
   const reportCount = consolidated.reports.length;
   const reporterCount = consolidated.reporters.length;
   const primaryCategory = consolidated.categories[0];
-  const categoryLabel = CATEGORY_LABELS[primaryCategory] || primaryCategory;
+  const categoryLabel = getCategoryLabel(primaryCategory);
   const isHighPriority = consolidated.categories.some(c => HIGH_PRIORITY_CATEGORIES.includes(c))
     || hasCsamSignal(consolidated.reports);
   const isMediumPriority = consolidated.categories.some(c => MEDIUM_PRIORITY_CATEGORIES.includes(c));
@@ -350,7 +350,7 @@ function IndividualReportItem({
 }) {
   const category = getReportCategory(report);
   const target = getReportTarget(report);
-  const categoryLabel = CATEGORY_LABELS[category] || category;
+  const categoryLabel = getCategoryLabel(category);
   const isHighPriority = HIGH_PRIORITY_CATEGORIES.includes(category) || hasCsamSignal([report]);
   const isMediumPriority = MEDIUM_PRIORITY_CATEGORIES.includes(category);
 
@@ -962,6 +962,15 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       items = items.filter(c => c.target.type === filterTargetType);
     }
 
+    // Classify each target once, not on every comparison: the CSAM signal
+    // reads each report's content.
+    const categoryPriority = new Map<ConsolidatedReport, number>();
+    if (sortBy === 'category') {
+      for (const c of items) {
+        categoryPriority.set(c, getCategoryPriority(c.categories, hasCsamSignal(c.reports)));
+      }
+    }
+
     // Apply sorting
     items.sort((a, b) => {
       switch (sortBy) {
@@ -987,8 +996,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
         case 'category': {
           // Sort by priority (CSAM first), then alphabetically by category
-          const aPriority = getCategoryPriority(a.categories, hasCsamSignal(a.reports));
-          const bPriority = getCategoryPriority(b.categories, hasCsamSignal(b.reports));
+          const aPriority = categoryPriority.get(a)!;
+          const bPriority = categoryPriority.get(b)!;
           if (aPriority !== bPriority) return aPriority - bPriority;
           // Then by primary category name
           const aCategory = a.categories[0] || 'zzz';
@@ -1056,6 +1065,16 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       });
     }
 
+    // Classify each report once, not on every comparison: the CSAM signal
+    // reads its content.
+    const categoryKeys = new Map<NostrEvent, { category: string; priority: number }>();
+    if (sortBy === 'category') {
+      for (const report of items) {
+        const category = getReportCategory(report);
+        categoryKeys.set(report, { category, priority: getCategoryPriority([category], hasCsamSignal([report])) });
+      }
+    }
+
     // Apply sorting
     items.sort((a, b) => {
       switch (sortBy) {
@@ -1064,12 +1083,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         case 'oldest':
           return a.created_at - b.created_at;
         case 'category': {
-          const aCat = getReportCategory(a);
-          const bCat = getReportCategory(b);
-          const aPriority = getCategoryPriority([aCat], hasCsamSignal([a]));
-          const bPriority = getCategoryPriority([bCat], hasCsamSignal([b]));
-          if (aPriority !== bPriority) return aPriority - bPriority;
-          return aCat.localeCompare(bCat);
+          const aKey = categoryKeys.get(a)!;
+          const bKey = categoryKeys.get(b)!;
+          if (aKey.priority !== bKey.priority) return aKey.priority - bKey.priority;
+          return aKey.category.localeCompare(bKey.category);
         }
         default:
           // For 'reports' and 'reporters', just use date for individual view
@@ -1671,7 +1688,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                       className="text-xs cursor-pointer pr-1"
                       onClick={() => setFilterCategory(null)}
                     >
-                      {CATEGORY_LABELS[filterCategory] || filterCategory}
+                      {getCategoryLabel(filterCategory)}
                       <X className="h-3 w-3 ml-1" />
                     </Badge>
                   )}
@@ -1685,7 +1702,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                       {HIGH_PRIORITY_CATEGORIES.includes(cat) && (
                         <AlertTriangle className="h-3 w-3 mr-1" />
                       )}
-                      {CATEGORY_LABELS[cat] || cat}
+                      {getCategoryLabel(cat)}
                     </Badge>
                   ))}
                 </div>

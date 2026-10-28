@@ -318,17 +318,18 @@ function TagsTable({ tags }: { tags: string[][] }) {
   const [expanded, setExpanded] = useState(false);
   const _displayTags = expanded ? tags : tags.slice(0, 10);
 
-  // Group tags by type
-  const tagGroups: Record<string, string[][]> = {};
+  // Group tags by type. A Map, so a tag's name is only ever a key.
+  const tagGroups = new Map<string, string[][]>();
   for (const tag of tags) {
     const type = tag[0] || 'unknown';
-    if (!tagGroups[type]) tagGroups[type] = [];
-    tagGroups[type].push(tag);
+    const group = tagGroups.get(type);
+    if (group) group.push(tag);
+    else tagGroups.set(type, [tag]);
   }
 
   return (
     <div className="space-y-2">
-      {Object.entries(tagGroups).map(([type, groupTags]) => (
+      {[...tagGroups].map(([type, groupTags]) => (
         <div key={type} className="border rounded p-2">
           <div className="flex items-center gap-2 mb-1">
             <Badge variant="secondary" className="text-xs">{type}</Badge>
