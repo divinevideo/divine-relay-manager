@@ -1900,15 +1900,15 @@ describe('adminApi', () => {
         json: async () => ({ success: true, events: [], automated_targets: [key, 42, null, ['x']] }),
       });
 
-      expect([...(await fetchReportsNeedingAttention(API_URL)).automatedTargets]).toEqual([key]);
+      expect((await fetchReportsNeedingAttention(API_URL)).automatedTargets).toEqual([key]);
     });
 
     it('reads none from a worker that sends no automated_targets, or not a list', async () => {
       mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, events: [] }) });
-      expect((await fetchReportsNeedingAttention(API_URL)).automatedTargets.size).toBe(0);
+      expect((await fetchReportsNeedingAttention(API_URL)).automatedTargets).toEqual([]);
 
       mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, events: [], automated_targets: 'pubkey:x' }) });
-      expect((await fetchReportsNeedingAttention(API_URL)).automatedTargets.size).toBe(0);
+      expect((await fetchReportsNeedingAttention(API_URL)).automatedTargets).toEqual([]);
     });
 
     it('normalizes malformed tags and drops non-object events (raw payload is untrusted)', async () => {

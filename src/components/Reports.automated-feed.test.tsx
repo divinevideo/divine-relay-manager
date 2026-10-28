@@ -13,6 +13,20 @@ import { Reports } from './Reports';
 
 const RELAY_URL = 'wss://relay.example';
 
+// Counts the groupings the screen builds, so an unchanged poll can be seen to
+// rebuild nothing.
+const grouped = vi.hoisted(() => ({ calls: 0 }));
+vi.mock('@/lib/consolidateReports', async (orig) => {
+  const actual = await orig<typeof import('@/lib/consolidateReports')>();
+  return {
+    ...actual,
+    consolidateReports: (...args: Parameters<typeof actual.consolidateReports>) => {
+      grouped.calls += 1;
+      return actual.consolidateReports(...args);
+    },
+  };
+});
+
 vi.mock('@/components/ReportDetail', () => ({
   ReportDetail: ({ switchState }: { switchState?: string }) => (
     <div data-testid="detail" data-switch-state={switchState ?? ''} />
@@ -142,6 +156,27 @@ describe('a target only automation resolved, from the needs-attention feed', () 
     // Resolved history answered with nothing, so the row is the feed's.
     await waitFor(() => expect(calls.history).toBeGreaterThan(0));
     expect(await screen.findByText(NPUB_SPAM_PROFILE)).toBeInTheDocument();
+  });
+});
+
+describe('a feed poll that returns the same answer', () => {
+  // The feed's query data has to stay plain for TanStack Query to keep its
+  // reference when nothing changed. Anything else rebuilds the whole queue on
+  // every poll.
+  it('keeps the feed it had and groups nothing again', async () => {
+    stubWorker({ feed: [CSAM_REPORT, SPAM_REPORT], automatedTargets: [`pubkey:${CSAM_PROFILE}`] });
+    const queryClient = newClient();
+    render(<TestApp queryClient={queryClient}><Reports relayUrl={RELAY_URL} /></TestApp>);
+    await screen.findByText(NOTE_SPAM);
+    await flush();
+
+    const before = queryClient.getQueryData(['reports', RELAY_URL]);
+    grouped.calls = 0;
+    await act(async () => { await queryClient.refetchQueries({ queryKey: ['reports', RELAY_URL] }); });
+    await flush();
+
+    expect(queryClient.getQueryData(['reports', RELAY_URL])).toBe(before);
+    expect(grouped.calls).toBe(0);
   });
 });
 

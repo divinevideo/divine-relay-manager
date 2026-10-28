@@ -561,8 +561,10 @@ export interface ReportsNeedingAttention {
   truncated: boolean;
   // Epoch milliseconds, via parseOldestCovered.
   oldestCovered: number | null;
-  // Target keys ("pubkey:<hex>", "event:<hex>") from `automated_targets`.
-  automatedTargets: ReadonlySet<string>;
+  // Target keys ("pubkey:<hex>", "event:<hex>") from `automated_targets`. A
+  // plain array, not a Set: TanStack Query keeps the previous data only for
+  // plain values, so a Set here rebuilt the whole queue on every unchanged poll.
+  automatedTargets: readonly string[];
 }
 
 export async function fetchReportsNeedingAttention(apiUrl: string): Promise<ReportsNeedingAttention> {
@@ -584,11 +586,9 @@ export async function fetchReportsNeedingAttention(apiUrl: string): Promise<Repo
     truncated: data.truncated === true,
     oldestCovered: parseOldestCovered(data.oldest_covered),
     // Only strings: anything else in the list names no target.
-    automatedTargets: new Set(
-      Array.isArray(data.automated_targets)
-        ? data.automated_targets.filter((key): key is string => typeof key === 'string')
-        : [],
-    ),
+    automatedTargets: Array.isArray(data.automated_targets)
+      ? data.automated_targets.filter((key): key is string => typeof key === 'string')
+      : [],
   };
 }
 
