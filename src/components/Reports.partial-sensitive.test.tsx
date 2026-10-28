@@ -43,7 +43,6 @@ vi.mock('@/hooks/useReportContext', () => ({
       authoredContentIncomplete: false, labelsIncomplete: false, reportsIncomplete: false, reportsTruncated: false,
       labelsTruncated: false, relayIncomplete: false,
     },
-    reporter: { profile: undefined, pubkey: '5'.repeat(64), reportCount: 0, isFunnelcakeUser: false },
     isLoading: false,
     error: null,
     relayHint: undefined,
