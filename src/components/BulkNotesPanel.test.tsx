@@ -395,6 +395,9 @@ describe('BulkNotesPanel', () => {
       /This account has an open age review \(case case-open\)\. That case handles the account's files; Restore here works once it closes\./],
     ['cannot be checked for one', () => api.getActiveAgeReviewCase.mockRejectedValue(new Error('down')),
       /Could not check this account for an open age review, so Restore is unavailable\./],
+    // Before the check answers, a Restore could race a review it has not seen.
+    ['is still being checked for one', () => api.getActiveAgeReviewCase.mockReturnValue(new Promise(() => {})),
+      /^Checking this account for an open age review\.\.\.$/],
   ])('disables Restore, saying why, while the account %s', async (_label, arrange, reason) => {
     arrange();
     renderPanel();
