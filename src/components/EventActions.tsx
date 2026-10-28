@@ -133,20 +133,19 @@ export function EventActions({
   // Any status but DELETE moves a deleted file out of Deleted on the media server
   // (divine-blossom handle_admin_moderate and handle_admin_moderate_action both),
   // so no status is ever sent to a deleted file: a deleted video gets no Block or
-  // Age Restrict, and those skip a deleted thumbnail.
+  // Age Restrict, and those skip a deleted thumbnail, and one whose status could
+  // not be read and so might be deleted (or blocked, which Age Restrict would
+  // weaken). When the video's own status could not be read, Block and Age
+  // Restrict are both withheld (see UNREADABLE_REASON).
   const isDeleted = (hash: string) => statusOf(hash)?.action === 'DELETE';
   const videoDeleted = mediaHashes.some(isDeleted);
-  const filesToBlock = allFiles.filter((hash) => !(thumbnails.includes(hash) && isDeleted(hash)));
-  // Age Restrict also never touches a thumbnail that is blocked, or whose status
-  // could not be read and so might be: that would weaken it. When the video's own
-  // status could not be read, Block and Age Restrict are both withheld (see
-  // UNREADABLE_REASON). (The buttons only offer Age Restrict when the video is
-  // not known to be blocked.)
+  const filesToBlock = allFiles.filter((hash) =>
+    !(thumbnails.includes(hash) && (isDeleted(hash) || statusOf(hash)?.unreadable)));
+  // Age Restrict also never touches a thumbnail that is blocked: that would weaken
+  // it. (The buttons only offer Age Restrict when the video is not known to be
+  // blocked.)
   const videoUnreadable = mediaHashes.some((hash) => statusOf(hash)?.unreadable);
-  const filesToRestrict = filesToBlock.filter((hash) => {
-    const status = statusOf(hash);
-    return !(thumbnails.includes(hash) && (status?.isBlocked || status?.unreadable));
-  });
+  const filesToRestrict = filesToBlock.filter((hash) => !(thumbnails.includes(hash) && statusOf(hash)?.isBlocked));
   // Undo lifts the video files only. A thumbnail's stored action cannot say
   // whether it was gated with the video or on its own: Block overwrites an 18+
   // gate, and another moderator may have banned it for its own content. So a
@@ -171,13 +170,22 @@ export function EventActions({
   const sentence = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
   const leftGatedNote = (count: number, state: string) =>
     (count === 0 ? undefined : `${thumbnailWord(count)} left ${state}`);
-  // A thumbnail whose status could not be read is never age restricted and gets no
-  // undo button of its own, and the moderator is told so rather than left to
-  // assume it was changed.
+  // A thumbnail whose status could not be read is never blocked or age restricted
+  // and gets no undo button of its own, and the moderator is told so rather than
+  // left to assume it was changed.
   const unreadThumbnails = thumbnails.filter((hash) => statusOf(hash)?.unreadable).length;
   const unreadNote = unreadThumbnails === 0
     ? undefined
     : `${thumbnailWord(unreadThumbnails)} skipped: ${unreadThumbnails === 1 ? 'its' : 'their'} status could not be read`;
+  // A thumbnail Block or Age Restrict skipped might be open, so it is a warning.
+  const withUnreadSkipped = <T extends { thumbnailWarning?: string; thumbnailsLeftOpen?: number }>(acted: T): T =>
+    (unreadNote
+      ? {
+          ...acted,
+          thumbnailWarning: joinNotes(acted.thumbnailWarning, unreadNote),
+          thumbnailsLeftOpen: (acted.thumbnailsLeftOpen ?? 0) + unreadThumbnails,
+        }
+      : acted);
   // Built before the audit write settles, so a failed write can reach a warning.
   const doneToast = (
     title: string,
@@ -344,13 +352,13 @@ export function EventActions({
   const blockMediaMutation = useMutation({
     mutationFn: async () => {
       const moderator = getModeratorPubkey(); // capture before the authoritative request
-      const result = await actOnFiles(filesToBlock, (hash) => api.moderateMedia(hash, 'PERMANENT_BAN', 'Blocked by moderator'));
+      const result = withUnreadSkipped(await actOnFiles(filesToBlock, (hash) => api.moderateMedia(hash, 'PERMANENT_BAN', 'Blocked by moderator')));
       const shown: ShownToast = { toast: doneToast(`Blocked ${result.changed} media file(s)`, (what) => `Video blocked; ${what} NOT blocked`, result) };
       logAudit(moderator, {
         targetType: 'event',
         targetId: eventId,
         action: 'block_media',
-        reason: withNote(`Blocked ${result.changed} media file(s)`, result.thumbnailNote),
+        reason: withNote(`Blocked ${result.changed} media file(s)`, result.thumbnailNote, unreadNote),
       }, shown);
       return shown;
     },
@@ -363,15 +371,7 @@ export function EventActions({
   const ageRestrictMutation = useMutation({
     mutationFn: async () => {
       const moderator = getModeratorPubkey(); // capture before the authoritative request
-      const acted = await actOnFiles(filesToRestrict, (hash) => api.moderateMedia(hash, 'AGE_RESTRICTED', 'Age restricted by moderator'));
-      // Skipped because it might be blocked, so it might as well be open.
-      const result = unreadNote
-        ? {
-            ...acted,
-            thumbnailWarning: joinNotes(acted.thumbnailWarning, unreadNote),
-            thumbnailsLeftOpen: (acted.thumbnailsLeftOpen ?? 0) + unreadThumbnails,
-          }
-        : acted;
+      const result = withUnreadSkipped(await actOnFiles(filesToRestrict, (hash) => api.moderateMedia(hash, 'AGE_RESTRICTED', 'Age restricted by moderator')));
       const shown: ShownToast = { toast: doneToast(`Age restricted ${result.changed} media file(s)`, (what) => `Video age restricted; ${what} NOT age restricted`, result) };
       logAudit(moderator, {
         targetType: 'event',

@@ -1255,6 +1255,66 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
     expect(api.moderateMedia.mock.calls).toEqual([[VIDEO, 'PERMANENT_BAN', 'Blocked by moderator']]);
   });
 
+  it('skips a thumbnail whose status could not be read when blocking, and warns it may be open', async () => {
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' },
+          // Might be deleted, which a block would bring back.
+          { hash: THUMB, isBlocked: false, isRestricted: false, action: null, unreadable: true },
+        ]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Block Media (1)' }));
+
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({
+      title: 'Video blocked; thumbnail NOT blocked',
+      description: 'Thumbnail skipped: its status could not be read',
+      variant: 'destructive',
+      duration: 10000,
+    }));
+    expect(api.moderateMedia.mock.calls).toEqual([[VIDEO, 'PERMANENT_BAN', 'Blocked by moderator']]);
+    await waitFor(() => expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({
+      reason: 'Blocked 1 media file(s); thumbnail skipped: its status could not be read',
+    })));
+  });
+
+  it('skips a thumbnail whose status could not be read on Block again', async () => {
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB, OTHER_THUMB]}
+        hasBlockedMedia={true}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: true, isRestricted: false, action: 'PERMANENT_BAN' },
+          { hash: THUMB, isBlocked: false, isRestricted: false, action: null, unreadable: true },
+          { hash: OTHER_THUMB, isBlocked: false, isRestricted: false, action: null },
+        ]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Block again (2)' }));
+
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({
+      title: 'Video blocked; thumbnail NOT blocked',
+      description: 'Thumbnail skipped: its status could not be read',
+      variant: 'destructive',
+      duration: 10000,
+    }));
+    expect(api.moderateMedia.mock.calls.map((call) => call[0])).toEqual([VIDEO, OTHER_THUMB]);
+  });
+
+  it('offers no Block again when the only thumbnail could not be read', () => {
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]}
+        hasBlockedMedia={true}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: true, isRestricted: false, action: 'PERMANENT_BAN' },
+          { hash: THUMB, isBlocked: false, isRestricted: false, action: null, unreadable: true },
+        ]} />
+    );
+
+    expect(screen.getByRole('button', { name: 'Unblock Media' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Block again/ })).not.toBeInTheDocument();
+  });
+
   it('leaves a thumbnail whose status could not be read when the video is unblocked', async () => {
     renderWithProvider(
       <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]}
