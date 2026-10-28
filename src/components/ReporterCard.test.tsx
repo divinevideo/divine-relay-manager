@@ -112,6 +112,11 @@ describe('ReporterInline report count', () => {
     relayHas(100);
     renderInline();
     expect(await screen.findByText('100+ reports filed')).toBeInTheDocument();
+    // The floor only holds if the read asked for exactly that many.
+    expect(relay.req).toHaveBeenCalledWith(
+      [{ kinds: [1984], authors: [REPORTER], limit: 100 }],
+      expect.anything(),
+    );
   });
 
   it('does not print a failed read as zero reports', async () => {

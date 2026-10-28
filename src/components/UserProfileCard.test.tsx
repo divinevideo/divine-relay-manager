@@ -264,3 +264,30 @@ describe('UserProfileCard relay-profile badge', () => {
     expect(screen.queryByText('No relay profile found')).not.toBeInTheDocument();
   });
 });
+
+// The line knows only whether a profile came back and whether it has a name;
+// it can't say what the relay stores.
+describe('UserProfileCard missing-name line', () => {
+  it('says the profile has no name when one came back without a name', () => {
+    render(<UserProfileCard pubkey={PUBKEY} stats={stats([])} profile={{ nip05: 'synthetic@example.test' }} isFunnelcakeUser={true} />);
+    expect(screen.getByText('No name in profile')).toBeInTheDocument();
+    expect(screen.queryByText(/published to this relay/)).not.toBeInTheDocument();
+  });
+
+  it('says no profile was found when the lookup answered with none', () => {
+    render(<UserProfileCard pubkey={PUBKEY} stats={stats([])} isFunnelcakeUser={false} />);
+    expect(screen.getByText('No profile found')).toBeInTheDocument();
+  });
+
+  it('says nothing while the profile lookup has not answered', () => {
+    render(<UserProfileCard pubkey={PUBKEY} stats={stats([])} isFunnelcakeUser={undefined} />);
+    expect(screen.queryByText('No profile found')).not.toBeInTheDocument();
+    expect(screen.queryByText('No name in profile')).not.toBeInTheDocument();
+  });
+
+  it('says nothing when the profile has a name', () => {
+    render(<UserProfileCard pubkey={PUBKEY} stats={stats([])} profile={{ name: 'synthetic' }} />);
+    expect(screen.queryByText('No name in profile')).not.toBeInTheDocument();
+    expect(screen.queryByText('No profile found')).not.toBeInTheDocument();
+  });
+});

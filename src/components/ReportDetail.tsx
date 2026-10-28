@@ -1303,15 +1303,6 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
             </CardContent>
           </Card>
 
-          {/*
-            REMOVED: Redundant reporter section (Jan 2026)
-            - Was showing ReporterList (multiple) or ReporterInfo (single) here
-            - Now redundant because "Why This Was Reported" section above shows each
-              reporter via ReporterInline (claimed nip05, relay-scoped report count)
-            - ReporterInfo, with its report-count "trust level" badge, was deleted in
-              #132; restore reporter rows with ReporterInline, not a trust label
-          */}
-
           <Separator />
 
 

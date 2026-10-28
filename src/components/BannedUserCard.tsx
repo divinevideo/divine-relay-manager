@@ -5,7 +5,6 @@ import { useQuery } from "@tanstack/react-query";
 import { useNostr } from "@nostrify/react";
 import { nip19 } from "nostr-tools";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -18,6 +17,7 @@ import { useMemo, useState } from "react";
 import { getProfileUrl, RECENT_CONTENT_KINDS } from "@/lib/constants";
 import { parseRepostForDisplay } from "@/lib/nip18";
 import { KindBadge } from "@/components/KindBadge";
+import { ClaimedNip05 } from "@/components/ClaimedNip05";
 import { useAuthor } from "@/hooks/useAuthor";
 import { useAppContext } from "@/hooks/useAppContext";
 import { getCommentTarget, formatCommentActivity } from "@/lib/commentActivity";
@@ -132,15 +132,11 @@ export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButto
                 {profileLoading ? (
                   <Skeleton className="h-5 w-32" />
                 ) : (
-                  <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80">
+                  <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80 min-w-0">
                     <h3 className="font-semibold truncate">{displayName}</h3>
                   </a>
                 )}
-                {profile?.nip05 && (
-                  <Badge variant="secondary" className="text-xs">
-                    {profile.nip05}
-                  </Badge>
-                )}
+                <ClaimedNip05 nip05={profile?.nip05} className="text-xs" />
               </div>
 
               {/* npub with copy */}

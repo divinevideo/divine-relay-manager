@@ -4,7 +4,7 @@
 import { Fragment } from 'react';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { displaySafe } from '@/lib/bidi';
-import { NO_APP_NAMED_LABEL, describeReportClients, summarizeReportClients, unnamedSuffix } from '@/lib/reportClient';
+import { NO_APP_NAMED, describeReportClients, summarizeReportClients, unnamedSuffix } from '@/lib/reportClient';
 
 const SELF_DECLARED = 'The reporting app writes this name itself; it is not verified.';
 
@@ -12,7 +12,7 @@ const SELF_DECLARED = 'The reporting app writes this name itself; it is not veri
 export function ReportClientText({ reports }: { reports: NostrEvent[] }) {
   const { names, unnamed } = summarizeReportClients(reports);
   const anyNamed = names.length > 0;
-  const titleLabel = describeReportClients(reports, { isolateNames: true });
+  const titleLabel = describeReportClients(reports);
   return (
     <span
       className="block text-xs text-muted-foreground truncate min-w-0 max-w-full"
@@ -35,7 +35,7 @@ export function ReportClientText({ reports }: { reports: NostrEvent[] }) {
           {unnamedSuffix(unnamed)}
         </>
       ) : (
-        NO_APP_NAMED_LABEL
+        NO_APP_NAMED
       )}
     </span>
   );

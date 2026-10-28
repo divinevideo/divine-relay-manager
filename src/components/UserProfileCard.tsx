@@ -204,8 +204,11 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
                 )}
               </Button>
             </div>
-            {!hasProfile && (
-              <p className="text-xs text-muted-foreground italic">No profile published to this relay</p>
+            {/* Says only what the lookup returned, and nothing until it answers
+                (isFunnelcakeUser is undefined until then). Whether the relay
+                stores a profile is the badge's job. */}
+            {!hasProfile && (profile || isFunnelcakeUser === false) && (
+              <p className="text-xs text-muted-foreground italic">{profile ? 'No name in profile' : 'No profile found'}</p>
             )}
           </div>
         </div>

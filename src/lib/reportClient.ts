@@ -4,7 +4,7 @@
 import type { NostrEvent } from '@nostrify/nostrify';
 import { isolate } from '@/lib/bidi';
 
-const NO_APP_NAMED = 'No app named';
+export const NO_APP_NAMED = 'No app named';
 
 /**
  * The app name from the report's first `client` tag, trimmed, or undefined
@@ -21,8 +21,6 @@ export function getReportClientName(event: NostrEvent): string | undefined {
   const name = clientTag?.[1]?.trim();
   return name || undefined;
 }
-
-export const NO_APP_NAMED_LABEL = NO_APP_NAMED;
 
 /** Each named app once, in the order first seen, and how many reports name none. */
 export function summarizeReportClients(events: NostrEvent[]): { names: string[]; unnamed: number } {
@@ -42,17 +40,15 @@ export function unnamedSuffix(unnamed: number): string {
 }
 
 /**
- * One line for one report, or for every report in a queue group.
+ * One line of plain text for one report, or for every report in a queue group,
+ * for uses such as a hover title where a <bdi> element can't go.
  *
- * `isolateNames` wraps each name in Unicode first-strong-isolate marks
- * (U+2068 ... U+2069), after pairing the name's own isolate controls, so
- * direction controls inside a self-declared name can't reorder the rest of
- * the line. It is for plain-text uses such as a hover
- * title; rendered text isolates with <bdi> instead.
+ * Each name is wrapped in Unicode first-strong-isolate marks (U+2068 ... U+2069),
+ * after pairing the name's own isolate controls, so direction controls inside a
+ * self-declared name can't reorder the rest of the line.
  */
-export function describeReportClients(events: NostrEvent[], { isolateNames = false } = {}): string {
+export function describeReportClients(events: NostrEvent[]): string {
   const { names, unnamed } = summarizeReportClients(events);
   if (names.length === 0) return NO_APP_NAMED;
-  const shown = isolateNames ? names.map(isolate) : names;
-  return `Filed via ${shown.join(', ')}${unnamedSuffix(unnamed)}`;
+  return `Filed via ${names.map(isolate).join(', ')}${unnamedSuffix(unnamed)}`;
 }

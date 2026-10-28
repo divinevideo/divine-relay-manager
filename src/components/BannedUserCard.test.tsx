@@ -17,8 +17,11 @@ vi.mock('@nostrify/react', () => ({
 
 // Profile loading is useAuthor's concern (tested elsewhere); these tests
 // exercise the recent-content query and rendering.
+const authorState = vi.hoisted(() => ({
+  data: undefined as { metadata: Record<string, unknown> } | undefined,
+}));
 vi.mock('@/hooks/useAuthor', () => ({
-  useAuthor: () => ({ data: undefined, isLoading: false }),
+  useAuthor: () => ({ data: authorState.data, isLoading: false }),
 }));
 
 // The batched parent-title hook is mocked so comment-row links are deterministic;
@@ -80,6 +83,7 @@ function renderCard() {
 }
 
 beforeEach(() => {
+  authorState.data = undefined;
   relayQuery.fn.mockReset();
   titleCalls.targets.length = 0;
   setAuthored(AUTHORED);
@@ -239,5 +243,13 @@ describe('BannedUserCard', () => {
 
     // Newest 3 targets only — the 2 never-rendered comments are not resolved
     expect(titleCalls.targets.at(-1)).toEqual(['f'.repeat(64), 'e'.repeat(64), 'd'.repeat(64)]);
+  });
+});
+
+describe('BannedUserCard claimed nip05', () => {
+  it('marks it unverified', () => {
+    authorState.data = { metadata: { name: 'synthetic', nip05: 'synthetic@example.test' } };
+    renderCard();
+    expect(screen.getByText('synthetic@example.test').parentElement).toHaveTextContent('(unverified)');
   });
 });

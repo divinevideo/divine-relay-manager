@@ -59,10 +59,9 @@ export function useReportContext(report: NostrEvent | null) {
   const reportedUser = useAuthor(targetPubkey || undefined, apiUrl);
   const userStats = useUserStats(targetPubkey || undefined);
 
-  // Get reporter's profile
-  // Nothing reads `reporter` today (ReporterCard looks the reporter up itself),
-  // but it still gates isLoading, so the pane waits for the reporter's profile
-  // as it always has. Dropping it would change that loading behaviour.
+  // The reporter's profile isn't returned (ReporterCard looks the reporter up
+  // itself), but the lookup still gates isLoading, so the pane waits for it as
+  // it always has.
   const reporter = useAuthor(reporterPubkey);
 
   const isLoading = thread.isLoading || reportedUser.isLoading ||
@@ -83,11 +82,6 @@ export function useReportContext(report: NostrEvent | null) {
       isFunnelcakeUser: reportedUser.data?.isFunnelcakeUser,
     },
     userStats: userStats.data,
-    reporter: {
-      profile: reporter.data?.metadata,
-      pubkey: reporterPubkey,
-      isFunnelcakeUser: reporter.data?.isFunnelcakeUser,
-    },
     isLoading,
     error,
     /** Relay hint from the report's e-tag, if present */

@@ -13,13 +13,20 @@ vi.mock('@/hooks/useThread', () => ({ useThread: () => ({ data: undefined, isLoa
 vi.mock('@/hooks/useUserStats', () => ({ useUserStats: () => ({ data: undefined, isLoading: false, error: null }) }));
 
 const authorState = vi.hoisted(() => ({
+  /** A pubkey whose lookup is still in flight while every other one answers with `result`. */
+  loadingFor: undefined as string | undefined,
   result: { data: undefined, isLoading: true, error: null } as {
     data: { isFunnelcakeUser: boolean } | undefined;
     isLoading: boolean;
     error: null;
   },
 }));
-vi.mock('@/hooks/useAuthor', () => ({ useAuthor: () => authorState.result }));
+vi.mock('@/hooks/useAuthor', () => ({
+  useAuthor: (pubkey?: string) =>
+    pubkey !== undefined && pubkey === authorState.loadingFor
+      ? { data: undefined, isLoading: true, error: null }
+      : authorState.result,
+}));
 
 const report: NostrEvent = {
   id: '1'.repeat(64),
@@ -37,6 +44,7 @@ function wrapper({ children }: { children: ReactNode }) {
 }
 
 beforeEach(() => {
+  authorState.loadingFor = undefined;
   authorState.result = { data: undefined, isLoading: true, error: null };
 });
 
@@ -44,13 +52,21 @@ describe('useReportContext isFunnelcakeUser', () => {
   it('is unresolved while the profile lookup is in flight', () => {
     const { result } = renderHook(() => useReportContext(report), { wrapper });
     expect(result.current.reportedUser.isFunnelcakeUser).toBeUndefined();
-    expect(result.current.reporter.isFunnelcakeUser).toBeUndefined();
   });
 
   it('carries the lookup answer once it arrives', () => {
     authorState.result = { data: { isFunnelcakeUser: false }, isLoading: false, error: null };
     const { result } = renderHook(() => useReportContext(report), { wrapper });
     expect(result.current.reportedUser.isFunnelcakeUser).toBe(false);
-    expect(result.current.reporter.isFunnelcakeUser).toBe(false);
+  });
+});
+
+describe('useReportContext isLoading', () => {
+  // The reporter's profile isn't returned, but the pane still waits for it.
+  it('waits for the reporter lookup even when the reported user has loaded', () => {
+    authorState.loadingFor = report.pubkey;
+    authorState.result = { data: { isFunnelcakeUser: false }, isLoading: false, error: null };
+    const { result } = renderHook(() => useReportContext(report), { wrapper });
+    expect(result.current.isLoading).toBe(true);
   });
 });

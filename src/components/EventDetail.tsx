@@ -36,6 +36,7 @@ import { AIDetectionReport } from "@/components/AIDetectionReport";
 import { SceneClassification } from "@/components/SceneClassification";
 import { TranscriptAnalysis } from "@/components/TranscriptAnalysis";
 import { ReporterList } from "@/components/ReporterCard";
+import { ClaimedNip05 } from "@/components/ClaimedNip05";
 import { extractMediaHashes } from "@/lib/adminApi";
 import { banFailureToast, banSuccessNote, refreshAfterUnconfirmedBan } from "@/lib/banFeedback";
 import { historyCount, historyStat } from "@/lib/historyCount";
@@ -282,12 +283,7 @@ function AuthorCard({ pubkey, showPictureByDefault }: { pubkey: string; showPict
         <p className="text-xs text-muted-foreground font-mono truncate">
           {formatPubkey(pubkey)}
         </p>
-        {metadata?.nip05 && (
-          <p className="text-xs text-blue-600 truncate">
-            <AtSign className="h-3 w-3 inline mr-0.5" />
-            {metadata.nip05}
-          </p>
-        )}
+        <ClaimedNip05 nip05={metadata?.nip05} className="text-xs" />
       </div>
       {gated && metadata?.picture && (
         <Button
