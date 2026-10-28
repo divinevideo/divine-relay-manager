@@ -1288,8 +1288,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         // The feed has answered and does not hold it: most likely resolved.
         // Look in resolved history, as the old single read did for its newest
         // 200; this branch selects it once page 1 lands. An id older than
-        // page 1 stays unselected, as it did then.
+        // page 1 stays unselected, as it did then. A courtesy like the deep
+        // link's, so a switch the link opens later saves the setting from
+        // before it.
         urlHistoryTriedRef.current = `${relayUrl}|${selectedReportId}`;
+        hideResolvedBeforeCourtesyRef.current = hideResolved;
         setHideResolved(false);
       }
     }
