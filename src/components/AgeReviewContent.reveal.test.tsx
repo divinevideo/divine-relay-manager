@@ -4,11 +4,10 @@ import { AgeReviewContent } from "./AgeReviewContent";
 import type { AccountStatusResponse } from "@/lib/adminApi";
 import type { ReportedEventResult } from "@/hooks/useReportedEvent";
 
-// A stateful stand-in for MediaPreview. The real component holds `showMedia` in
-// state and its reset effect only clears `userToggledRef` on an event change, so
-// a revealed clip stays revealed when the same element is reused for another
-// event. This mock reproduces that retention so the guard (a key on the reported
-// card) is actually exercised rather than assumed.
+// A stateful stand-in for MediaPreview that keeps a reveal when the same element
+// is reused for another event. The real component starts each event from its
+// default, so this retention is what makes the guard (a key on the reported
+// card) the thing under test rather than something assumed.
 vi.mock("@/components/MediaPreview", async () => {
   const { useState } = await import("react");
   return {

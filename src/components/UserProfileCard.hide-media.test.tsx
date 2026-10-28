@@ -97,3 +97,54 @@ describe('UserProfileCard hideMediaByDefault', () => {
     expect(container.querySelector('video')).not.toBeNull();
   });
 });
+
+// The report pane is reused across reports, so the card is too.
+describe('UserProfileCard across reports on the same account', () => {
+  const card = (hide: boolean) => (
+    <MemoryRouter>
+      <UserProfileCard pubkey={PUBKEY} profile={{ picture: PICTURE }} stats={STATS} hideMediaByDefault={hide} />
+    </MemoryRouter>
+  );
+
+  it('hides a revealed avatar again when a later report is sensitive, as it does post media', () => {
+    const { container, rerender } = render(card(true));
+    fireEvent.click(screen.getByRole('button', { name: 'Show profile picture' }));
+    fireEvent.click(screen.getByRole('button', { name: /show 1 media/i }));
+
+    rerender(card(false));
+    rerender(card(true));
+
+    expect(screen.queryByTestId('avatar-img')).not.toBeInTheDocument();
+    expect(container.querySelector('video')).toBeNull();
+  });
+
+  it('keeps a revealed avatar while the next report is sensitive too', () => {
+    const { rerender } = render(card(true));
+    fireEvent.click(screen.getByRole('button', { name: 'Show profile picture' }));
+
+    rerender(card(true));
+
+    expect(screen.getByTestId('avatar-img')).toHaveAttribute('src', PICTURE);
+  });
+});
+
+describe('UserProfileCard across reports on different accounts', () => {
+  const OTHER_PUBKEY = 'b'.repeat(64);
+  const sensitiveCard = (pubkey: string) => (
+    <MemoryRouter>
+      <UserProfileCard pubkey={pubkey} profile={{ picture: PICTURE }} stats={STATS} hideMediaByDefault />
+    </MemoryRouter>
+  );
+
+  it("does not show an account's avatar again without a click after the pane visits another account", () => {
+    const { rerender } = render(sensitiveCard(PUBKEY));
+    fireEvent.click(screen.getByRole('button', { name: 'Show profile picture' }));
+    expect(screen.getByTestId('avatar-img')).toBeInTheDocument();
+
+    rerender(sensitiveCard(OTHER_PUBKEY));
+    expect(screen.queryByTestId('avatar-img')).not.toBeInTheDocument();
+    rerender(sensitiveCard(PUBKEY));
+
+    expect(screen.queryByTestId('avatar-img')).not.toBeInTheDocument();
+  });
+});

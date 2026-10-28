@@ -5,13 +5,17 @@ import { AUTO_HIDE_ACTION, type AutoHideStateRowLike } from '../../shared/autohi
 import { hasCsamSignal } from './constants';
 import { isConsolidatedReportResolved } from './reportResolution';
 
-// 'hide-unconfirmed' is an auto-hidden target whose latest state is
-// auto_hide_unresolved or auto_hide_restore_failed: the hide (or a restore)
-// may not have landed, so it must not be labelled as hidden.
-export type SwitchState = 'auto-hidden' | 'hide-unconfirmed' | 'not-hidden';
+// 'hidden-needs-check' is an auto-hidden target whose latest state is
+// auto_hide_unresolved or auto_hide_restore_failed. The worker writes both only
+// after the relay ban landed, so the content is hidden either way:
+// - unresolved: it could not read whether a moderator's restore raced the ban.
+// - restore failed: a moderator's restore raced the ban, and the worker's
+//   attempt to undo the ban failed.
+export type SwitchState = 'auto-hidden' | 'hidden-needs-check' | 'not-hidden';
 
-// Auto-hide states only a person writes: confirming the hide, restoring the
-// content, or reversing the hide. ANY such row counts, not just the newest,
+// The auto-hide states that record a person's choice. A person confirms the
+// hide or restores the content; the worker writes `auto_hide_reversed` when a
+// person's restore raced its hide. ANY such row counts, not just the newest,
 // because a person has looked at the target either way. Without this, a
 // restored post (the restore writes only `auto_hide_restored`, which the
 // resolved set does not include) would drop straight back behind the switch.
@@ -57,7 +61,7 @@ export function buildSwitchMembership(args: {
     membership.set(
       key,
       latestAction === AUTO_HIDE_ACTION.unresolved || latestAction === AUTO_HIDE_ACTION.restoreFailed
-        ? 'hide-unconfirmed'
+        ? 'hidden-needs-check'
         : 'auto-hidden',
     );
   }
@@ -76,6 +80,6 @@ export function buildSwitchMembership(args: {
 
 export const SWITCH_STATE_LABELS: Record<SwitchState, string> = {
   'auto-hidden': 'Hidden automatically',
-  'hide-unconfirmed': 'Hide not confirmed',
+  'hidden-needs-check': 'Hidden, needs a check',
   'not-hidden': 'Not hidden, needs review',
 };

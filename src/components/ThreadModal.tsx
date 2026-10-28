@@ -26,16 +26,20 @@ interface ThreadModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   highlightEventId?: string;
+  /** Withhold every participant's avatar image, keeping the initials (sensitive reports) */
+  hideAvatars?: boolean;
 }
 
 function ThreadPost({
   node,
   highlightId,
   apiUrl,
+  hideAvatar = false,
 }: {
   node: ThreadNode;
   highlightId?: string;
   apiUrl?: string;
+  hideAvatar?: boolean;
 }) {
   const author = useAuthor(node.event.pubkey, apiUrl);
   const npubFallback = (() => {
@@ -69,8 +73,11 @@ function ThreadPost({
       >
         <div className="flex items-start gap-2">
           <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80 shrink-0">
-            <Avatar className="h-6 w-6">
-              <AvatarImage src={avatar} />
+            {/* Radix starts loading src as soon as AvatarImage mounts. It also
+                remembers a loaded image after AvatarImage unmounts and keeps the
+                initials hidden, so a fresh root per state brings them back. */}
+            <Avatar key={hideAvatar ? 'hidden' : 'image'} className="h-6 w-6">
+              {!hideAvatar && <AvatarImage src={avatar} />}
               <AvatarFallback className="text-xs">
                 {displayName.slice(0, 2).toUpperCase()}
               </AvatarFallback>
@@ -96,13 +103,13 @@ function ThreadPost({
         </div>
       </div>
       {node.replies.map(reply => (
-        <ThreadPost key={reply.event.id} node={reply} highlightId={highlightId} apiUrl={apiUrl} />
+        <ThreadPost key={reply.event.id} node={reply} highlightId={highlightId} apiUrl={apiUrl} hideAvatar={hideAvatar} />
       ))}
     </div>
   );
 }
 
-export function ThreadModal({ eventId, open, onOpenChange, highlightEventId }: ThreadModalProps) {
+export function ThreadModal({ eventId, open, onOpenChange, highlightEventId, hideAvatars = false }: ThreadModalProps) {
   const { nostr } = useNostr();
   const { config } = useAppContext();
 
@@ -168,7 +175,7 @@ export function ThreadModal({ eventId, open, onOpenChange, highlightEventId }: T
               ))}
             </div>
           ) : thread ? (
-            <ThreadPost node={thread} highlightId={highlightEventId || eventId} apiUrl={config.apiUrl} />
+            <ThreadPost node={thread} highlightId={highlightEventId || eventId} apiUrl={config.apiUrl} hideAvatar={hideAvatars} />
           ) : (
             <div className="text-center py-8 text-muted-foreground">
               <p>Could not load thread</p>

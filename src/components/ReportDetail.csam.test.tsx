@@ -119,7 +119,11 @@ vi.mock('@/components/MediaPreview', () => ({
     <div data-testid="media" data-show={String(showByDefault)} />
   ),
 }));
-vi.mock('@/components/ThreadModal', () => ({ ThreadModal: () => null }));
+vi.mock('@/components/ThreadModal', () => ({
+  ThreadModal: ({ hideAvatars }: { hideAvatars?: boolean }) => (
+    <div data-testid="thread-modal" data-hide-avatars={String(hideAvatars)} />
+  ),
+}));
 vi.mock('@/components/EventActions', () => ({ EventActions: () => null }));
 vi.mock('@/components/UserActions', () => ({
   UserActions: ({ reportCategory }: { reportCategory?: string }) => (
@@ -237,15 +241,15 @@ describe('ReportDetail switch label', () => {
   // so a second badge would only duplicate or contradict them.
   it('adds no switch badge for an auto-hidden target', () => {
     const { unmount } = renderWithSwitch({ switchState: 'auto-hidden' });
-    expect(screen.queryByText(/Hidden automatically|Not hidden, needs review|Hide not confirmed/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Hidden automatically|Not hidden, needs review|Hidden, needs a check/)).not.toBeInTheDocument();
     unmount();
-    renderWithSwitch({ switchState: 'hide-unconfirmed' });
-    expect(screen.queryByText(/Hidden automatically|Not hidden, needs review|Hide not confirmed/)).not.toBeInTheDocument();
+    renderWithSwitch({ switchState: 'hidden-needs-check' });
+    expect(screen.queryByText(/Hidden automatically|Not hidden, needs review|Hidden, needs a check/)).not.toBeInTheDocument();
   });
 
   it('shows no switch label outside the switch', () => {
     renderWithSwitch({});
-    expect(screen.queryByText(/Hidden automatically|Not hidden, needs review|Hide not confirmed/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Hidden automatically|Not hidden, needs review|Hidden, needs a check/)).not.toBeInTheDocument();
   });
 });
 
@@ -268,6 +272,21 @@ describe('ReportDetail on a sensitive report, elsewhere in the pane', () => {
   it('loads thread participant avatars on a bare illegal report (control)', () => {
     renderDetail(PLAIN_ILLEGAL);
     expect(screen.getByTestId('thread').dataset.hideAvatars).toBe('false');
+  });
+
+  it('withholds avatars in the full-thread view on a CSAM report', () => {
+    renderDetail(OLD_BUILD);
+    expect(screen.getByTestId('thread-modal').dataset.hideAvatars).toBe('true');
+  });
+
+  it('loads avatars in the full-thread view on a spam report once its reports have loaded (control)', () => {
+    renderDetail(SPAM);
+    expect(screen.getByTestId('thread-modal').dataset.hideAvatars).toBe('false');
+  });
+
+  it('withholds avatars in the full-thread view while the report set is still loading', () => {
+    renderDetail(SPAM, null);
+    expect(screen.getByTestId('thread-modal').dataset.hideAvatars).toBe('true');
   });
 
   it("withholds a repost's original author avatar on a CSAM report", () => {
@@ -308,64 +327,60 @@ describe('ReportDetail on a sensitive report, elsewhere in the pane', () => {
 
   // The pane reads the hide's state from its own decision log, so the switch
   // state (from /api/resolution-state) is left undefined: it may still be
-  // loading, or have failed.
-  it('does not tell the moderator an unconfirmed hide landed', () => {
+  // loading, or have failed. The worker writes the two states that need a
+  // check only after the relay ban landed, so both say the content is hidden.
+  it('says an unresolved hide is hidden, and that the restore check failed', () => {
     decisionRows.unresolved = true;
     renderPending(undefined);
-    expect(screen.queryByText(/was automatically hidden/)).not.toBeInTheDocument();
+    expect(screen.getByText('Auto-Hidden — Restore Check Failed')).toBeInTheDocument();
+    expect(screen.getByText('This content was hidden automatically, but the worker could not check whether a moderator restored it at the same time. Review and confirm or restore.')).toBeInTheDocument();
     expect(screen.queryByText('Auto-Hidden — Pending Review')).not.toBeInTheDocument();
-    expect(screen.getByText('Automatic hide not confirmed')).toBeInTheDocument();
-    expect(screen.getByText('An automatic hide may not have landed. Review and confirm or restore.')).toBeInTheDocument();
-    // The header badge beside the banner agrees with it and with the row label.
-    expect(screen.getByText('Hide not confirmed')).toBeInTheDocument();
-    expect(screen.queryByText('Auto-Hidden')).not.toBeInTheDocument();
+    // The header badge beside the banner agrees with the queue row.
+    expect(screen.getByText('Hidden, needs a check')).toBeInTheDocument();
+    expect(screen.queryByText('Hidden automatically')).not.toBeInTheDocument();
   });
 
-  it('says the content was hidden when the hide is not in doubt (control)', () => {
-    renderPending(undefined);
-    expect(screen.getByText('Auto-Hidden — Pending Review')).toBeInTheDocument();
-    expect(screen.getByText(/was automatically hidden/)).toBeInTheDocument();
-    expect(screen.queryByText(/may not have landed|not confirmed/)).not.toBeInTheDocument();
-    expect(screen.getByText('Auto-Hidden')).toBeInTheDocument();
-  });
-
-  it('keeps the restore-failed wording for a failed restore, under the unconfirmed heading', () => {
+  it('says a failed restore left the content hidden, and to retry restoring it', () => {
     decisionRows.restoreFailed = true;
     renderPending(undefined);
-    expect(screen.getByText('Automatic hide not confirmed')).toBeInTheDocument();
+    expect(screen.getByText('Auto-Hidden — Restore Failed')).toBeInTheDocument();
+    expect(screen.getByText('A moderator restored this while it was being hidden automatically, and undoing the hide failed. Retry restoring this content.')).toBeInTheDocument();
     expect(screen.queryByText('Auto-Hidden — Pending Review')).not.toBeInTheDocument();
-    expect(screen.getByText('An automatic restore failed. Retry restoring this content.')).toBeInTheDocument();
-    expect(screen.getByText('Hide not confirmed')).toBeInTheDocument();
-    expect(screen.queryByText('Auto-Hidden')).not.toBeInTheDocument();
+    expect(screen.getByText('Hidden, needs a check')).toBeInTheDocument();
+    expect(screen.queryByText('Hidden automatically')).not.toBeInTheDocument();
   });
 
-  // A hide that landed, or a failed restore, leaves the event gone from the
-  // relay, which shows a second header badge.
+  it("labels a plain auto-hide as pending review, with the queue row's badge (control)", () => {
+    renderPending(undefined);
+    expect(screen.getByText('Auto-Hidden — Pending Review')).toBeInTheDocument();
+    expect(screen.getByText('This content was automatically hidden based on a report. Please review and confirm or restore.')).toBeInTheDocument();
+    expect(screen.getByText('Hidden automatically')).toBeInTheDocument();
+    expect(screen.queryByText(/needs a check|Restore Check Failed|Restore Failed/)).not.toBeInTheDocument();
+  });
+
+  // All three states leave the event banned on the relay, which shows a second
+  // header badge, worded like the first. A plain auto-hide's first badge says
+  // "Hidden automatically" too, so that one shows the words twice.
   it.each([
-    ['an unconfirmed hide', 'unresolved'],
-    ['a failed restore', 'restoreFailed'],
-  ] as const)('does not call %s Auto-Hidden when the event is gone', (_label, flag) => {
-    decisionRows[flag] = true;
+    ['a plain auto-hide', null, 2],
+    ['an unresolved hide', 'unresolved', 1],
+    ['a hide whose restore failed', 'restoreFailed', 1],
+  ] as const)('calls %s Hidden automatically when the event is gone, not Not Found on Relay', (_label, flag, count) => {
+    if (flag) decisionRows[flag] = true;
     status.value = moderationStatusMock({ isUserBanned: false, isEventGone: true });
     renderPending(undefined);
-    expect(screen.getByText('Hide not confirmed')).toBeInTheDocument();
-    expect(screen.getByText('Not Found on Relay')).toBeInTheDocument();
+    expect(screen.getAllByText('Hidden automatically')).toHaveLength(count);
     expect(screen.queryByText('Auto-Hidden')).not.toBeInTheDocument();
+    expect(screen.queryByText('Not Found on Relay')).not.toBeInTheDocument();
   });
 
-  it('names the ban, not Auto-Hidden, for a banned user whose hide is not confirmed', () => {
+  it('calls an unresolved hide Hidden automatically for a banned user too, as it does a plain one', () => {
     decisionRows.unresolved = true;
     status.value = moderationStatusMock({ isUserBanned: true, isEventGone: true });
     renderPending(undefined);
-    expect(screen.getByText('Hide not confirmed')).toBeInTheDocument();
-    expect(screen.getAllByText('User Banned').length).toBeGreaterThan(0);
-    expect(screen.queryByText('Auto-Hidden')).not.toBeInTheDocument();
-  });
-
-  it('still calls a landed hide Auto-Hidden when the event is gone (control)', () => {
-    status.value = moderationStatusMock({ isUserBanned: false, isEventGone: true });
-    renderPending(undefined);
-    expect(screen.getAllByText('Auto-Hidden')).toHaveLength(2);
-    expect(screen.queryByText('Not Found on Relay')).not.toBeInTheDocument();
+    expect(screen.getByText('Hidden, needs a check')).toBeInTheDocument();
+    expect(screen.getByText('Hidden automatically')).toBeInTheDocument();
+    // The account's own badge still names the ban.
+    expect(screen.getByText('User Banned')).toBeInTheDocument();
   });
 });

@@ -199,11 +199,6 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
 
   // Auto-hide specific status
   const isPendingReview = decisionLog.isPendingReview;
-  // isAutoHidden also covers a hide or restore the worker could not confirm.
-  // Those keep the "Hide not confirmed" badge, so the event-gone badge must not
-  // also call them hidden; it falls through to what the relay itself says.
-  const isAutoHideLanded = decisionLog.isAutoHidden && !decisionLog.isAutoHideRestored
-    && !decisionLog.isAutoHideUnresolved && !decisionLog.isAutoHideRestoreFailed;
 
   // Find related reports: reports on this user AND reports on their events
   const relatedReports = useMemo(() => {
@@ -591,6 +586,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
           eventId={context.target.value}
           open={showThreadModal}
           onOpenChange={setShowThreadModal}
+          hideAvatars={hasHighPriorityReports !== false}
         />
       )}
 
@@ -608,15 +604,17 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                       prop: that comes from /api/resolution-state, which may
                       still be loading or have failed. */}
                   <p className="font-medium text-orange-800 dark:text-orange-300">
-                    {decisionLog.isAutoHideUnresolved || decisionLog.isAutoHideRestoreFailed
-                      ? 'Automatic hide not confirmed'
-                      : 'Auto-Hidden — Pending Review'}
+                    {decisionLog.isAutoHideRestoreFailed
+                      ? 'Auto-Hidden — Restore Failed'
+                      : decisionLog.isAutoHideUnresolved
+                        ? 'Auto-Hidden — Restore Check Failed'
+                        : 'Auto-Hidden — Pending Review'}
                   </p>
                   <p className="text-sm text-orange-600 dark:text-orange-400">
                     {decisionLog.isAutoHideRestoreFailed
-                      ? 'An automatic restore failed. Retry restoring this content.'
+                      ? 'A moderator restored this while it was being hidden automatically, and undoing the hide failed. Retry restoring this content.'
                       : decisionLog.isAutoHideUnresolved
-                        ? 'An automatic hide may not have landed. Review and confirm or restore.'
+                        ? 'This content was hidden automatically, but the worker could not check whether a moderator restored it at the same time. Review and confirm or restore.'
                         : 'This content was automatically hidden based on a report. Please review and confirm or restore.'}
                   </p>
                 </div>
@@ -709,8 +707,12 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                   <TooltipTrigger asChild>
                     <Badge variant="destructive" className="flex items-center gap-1 cursor-help">
                       <ShieldX className="h-3 w-3" />
+                      {/* isAutoHidden covers the states that need a check too:
+                          the worker writes those only after the relay ban
+                          landed, so the content is hidden either way. Worded
+                          as the queue row and header badge word a plain one. */}
                       {decisionLog.isDeleted ? 'Removed by Moderation'
-                        : isAutoHideLanded ? 'Auto-Hidden'
+                        : decisionLog.isAutoHidden ? SWITCH_STATE_LABELS['auto-hidden']
                         : isUserBanned ? (moderationStatus.isUserBannedStale ? 'Banned (last known)' : 'User Banned')
                         : moderationStatus.isEventBanned ? 'Event Banned'
                         : 'Not Found on Relay'}
@@ -724,7 +726,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                           ` on ${new Date(decisionLog.decisions.find(d => d.action === 'delete_event' || d.action === 'delete')!.created_at).toLocaleDateString()}`
                         }
                       </p>
-                    ) : isAutoHideLanded ? (
+                    ) : decisionLog.isAutoHidden ? (
                       <p className="text-xs">Auto-hidden by AI classification</p>
                     ) : isUserBanned ? (
                       <p className="text-xs">
@@ -745,9 +747,10 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
               {isPendingReview && (
                 <Badge variant="outline" className="flex items-center gap-1 border-orange-500 text-orange-600">
                   <EyeOff className="h-3 w-3" />
+                  {/* The queue row's label, so the pane and the row agree. */}
                   {decisionLog.isAutoHideUnresolved || decisionLog.isAutoHideRestoreFailed
-                    ? SWITCH_STATE_LABELS['hide-unconfirmed']
-                    : 'Auto-Hidden'}
+                    ? SWITCH_STATE_LABELS['hidden-needs-check']
+                    : SWITCH_STATE_LABELS['auto-hidden']}
                 </Badge>
               )}
             </div>
