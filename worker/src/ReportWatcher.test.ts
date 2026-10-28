@@ -190,6 +190,54 @@ describe('ReportWatcher', () => {
   });
 
   describe('event visibility coordination', () => {
+    // A bare RegExp.test coerces its argument, so an array holding a valid id
+    // would pass it and reach the relay and the decision log. Ids must also be
+    // lowercase. Every route hands ids over in lowercase, except a resolution
+    // label's `e` tag on /api/publish (see hex.ts).
+    it.each([
+      ['eventId as an array', { eventId: ['ab'.repeat(32)] }],
+      ['moderatorPubkey as an array', { moderatorPubkey: ['cd'.repeat(32)] }],
+      ['reportId as an array', { reportId: ['cd'.repeat(32)] }],
+      ['reporterPubkey as an array', { reporterPubkey: ['cd'.repeat(32)] }],
+      ['an uppercase eventId', { eventId: 'AB'.repeat(32) }],
+      ['an uppercase moderatorPubkey', { moderatorPubkey: 'CD'.repeat(32) }],
+      ['an uppercase reportId', { reportId: 'CD'.repeat(32) }],
+      ['an uppercase reporterPubkey', { reporterPubkey: 'CD'.repeat(32) }],
+    ])(
+      'rejects %s before touching the relay or D1',
+      async (_case, overrides) => {
+        const statements: string[] = [];
+        const db = {
+          batch: vi.fn(async (batch: D1PreparedStatement[]) => Promise.all(batch.map(statement => statement.run()))),
+          prepare: vi.fn().mockImplementation((sql: string) => {
+            statements.push(sql);
+            return {
+              bind: vi.fn().mockReturnValue({
+                run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 1 } }),
+                first: vi.fn().mockResolvedValue(null),
+              }),
+              run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 0 } }),
+            };
+          }),
+        } as unknown as D1Database;
+        mockState = createMockState();
+        mockEnv = createMockEnv({ DB: db });
+        watcher = new ReportWatcher(mockState, mockEnv);
+        const relayFetch = vi.fn();
+        vi.stubGlobal('fetch', relayFetch);
+
+        const response = await watcher.fetch(new Request('https://do/event-visibility', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ eventId: 'ab'.repeat(32), relayAction: 'hide', ...overrides }),
+        }));
+
+        expect(response.status).toBe(400);
+        expect(statements).toEqual([]);
+        expect(relayFetch).not.toHaveBeenCalled();
+      },
+    );
+
     it('records a resolution review without mutating relay visibility or direction', async () => {
       const statements: string[] = [];
       const db = {

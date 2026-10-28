@@ -571,7 +571,9 @@ export async function fetchResolutionLabels(
 // every handled report (#221).
 
 export interface ResolutionStateResult {
-  resolved: Array<{ target_type: string; target_id: string }>;
+  // automated: the worker itself wrote every decision that resolves this
+  // target. Hide resolved still counts it; the sensitive switch does not.
+  resolved: Array<{ target_type: string; target_id: string; automated?: boolean }>;
   states: Array<{ target_type: string; target_id: string; action: string }>;
 }
 

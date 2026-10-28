@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Image, Video, Eye, EyeOff, AlertTriangle, ExternalLink, ImageOff } from "lucide-react";
 import type { NostrEvent } from "@nostrify/nostrify";
 import { useApiUrl } from "@/hooks/useAdminApi";
+import { useMediaVisibility } from "@/hooks/useMediaVisibility";
 import { getApiHeaders } from "@/lib/adminApi";
 
 interface MediaItem {
@@ -22,7 +23,12 @@ interface MediaPreviewProps {
   content?: string;
   tags?: string[][];
   className?: string;
-  showByDefault?: boolean;
+  /**
+   * Whether media shows before the moderator chooses. null while the reports
+   * that decide it are not known yet: media stays hidden, and a later false
+   * still counts as turning sensitive, so a Show made meanwhile is forgotten.
+   */
+  showByDefault?: boolean | null;
   maxItems?: number;
 }
 
@@ -204,24 +210,14 @@ export function MediaPreview({
   showByDefault = false,
   maxItems = 4,
 }: MediaPreviewProps) {
-  const [showMedia, setShowMedia] = useState(showByDefault);
-  const userToggledRef = useRef(false);
+  // The pane that renders this is reused across reports, so a new event
+  // starts from its own default, not the last event's Show or Hide.
+  const [showMedia, toggleShowMedia] = useMediaVisibility(showByDefault, event?.id);
   const [failedUrls, setFailedUrls] = useState<Map<string, 'unavailable' | 'error'>>(new Map());
   const [proxyUrls, setProxyUrls] = useState<Map<string, string>>(new Map());
   const proxyUrlsRef = useRef(proxyUrls);
   proxyUrlsRef.current = proxyUrls;
   const apiUrl = useApiUrl();
-
-  const eventId = event?.id;
-  useEffect(() => {
-    userToggledRef.current = false;
-  }, [eventId]);
-
-  useEffect(() => {
-    if (!userToggledRef.current) {
-      setShowMedia(showByDefault);
-    }
-  }, [showByDefault]);
 
   useEffect(() => {
     return () => {
@@ -295,7 +291,7 @@ export function MediaPreview({
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => { userToggledRef.current = true; setShowMedia(!showMedia); }}
+            onClick={toggleShowMedia}
             className="h-7 px-2"
           >
             {showMedia ? (
@@ -395,12 +391,14 @@ export function InlineMediaPreview({
   content,
   tags,
   className,
+  showByDefault = true,
 }: {
   content: string;
   tags: string[][];
   className?: string;
+  showByDefault?: boolean;
 }) {
-  const [showMedia, setShowMedia] = useState(true);
+  const [showMedia, toggleShowMedia] = useMediaVisibility(showByDefault);
   const [failedUrls, setFailedUrls] = useState<Map<string, 'unavailable' | 'error'>>(new Map());
   const [proxyUrls, setProxyUrls] = useState<Map<string, string>>(new Map());
   const proxyUrlsRef = useRef(proxyUrls);
@@ -454,7 +452,7 @@ export function InlineMediaPreview({
         <Button
           variant="ghost"
           size="sm"
-          onClick={() => setShowMedia(!showMedia)}
+          onClick={toggleShowMedia}
           className="h-6 px-2 text-xs"
         >
           {showMedia ? <EyeOff className="h-3 w-3 mr-1" /> : <Eye className="h-3 w-3 mr-1" />}

@@ -90,9 +90,10 @@ const label = (n: number, createdAt: number, target: string[]): RelayEvent => ({
   tags: [['L', 'moderation/resolution'], ['l', 'resolved', 'moderation/resolution'], target],
 });
 
-async function decide(targetType: string, targetId: string, action: string) {
-  await DB.prepare('INSERT INTO moderation_decisions (target_type, target_id, action, created_at) VALUES (?, ?, ?, ?)')
-    .bind(targetType, targetId, action, '2026-01-01 00:00:00').run();
+async function decide(targetType: string, targetId: string, action: string, moderatorPubkey: string | null = null) {
+  await DB.prepare(
+    'INSERT INTO moderation_decisions (target_type, target_id, action, moderator_pubkey, created_at) VALUES (?, ?, ?, ?, ?)',
+  ).bind(targetType, targetId, action, moderatorPubkey, '2026-01-01 00:00:00').run();
 }
 
 function env(withDb = true) {
@@ -145,6 +146,25 @@ describe('GET /api/reports needs-attention mode, against real D1', () => {
     expect(body.truncated).toBe(false);
     expect(body.resolution_truncated).toBe(false);
     expect(body.oldest_covered).toBe(95);
+  });
+
+  // Today's contract, matching the queue's Hide resolved: a decision the worker
+  // wrote itself resolves its target here too. The sensitive switch must not
+  // read it that way (TODO(#284) in reports-needing-attention.ts); passing the
+  // `automated` flag through for that will make this fail on purpose.
+  it('drops a target only the worker has decided on, as Hide resolved does', async () => {
+    stubRelay([
+      report(1, 100, [['p', P1]]),   // an account whose only decision is the worker's age-review case
+      report(2, 99, [['e', E(2)]]),  // unresolved
+    ]);
+    await decide('pubkey', P1, 'age_review_case_created', 'auto');
+
+    const body = await (await get('/api/reports?needs_attention=1')).json() as {
+      events: RelayEvent[]; counts: { targets: number; resolved: number };
+    };
+
+    expect(body.events.map(e => e.id)).toEqual([id(2)]);
+    expect(body.counts).toEqual({ targets: 1, resolved: 1 });
   });
 
   it('asks the relay for the page size its pager treats as full, and walks past a full page', async () => {

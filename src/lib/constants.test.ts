@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { CATEGORY_LABELS, getReportCategory, getReportTargetIds, isHex64 } from './constants';
+import { CATEGORY_LABELS, getCategoryLabel, getReportCategory, hasCsamSignal, getReportTargetIds, isHex64 } from './constants';
 
 describe('CATEGORY_LABELS', () => {
   it('maps the divine-mobile NIP-32 labels to existing display labels', () => {
@@ -19,6 +19,32 @@ describe('CATEGORY_LABELS', () => {
     expect(CATEGORY_LABELS['NS-sexual-content']).toBe('Sexual Content');
     expect(CATEGORY_LABELS['NS-false-information']).toBe('Misinformation');
     expect(CATEGORY_LABELS['NS-ai-generated']).toBe('AI Generated');
+  });
+
+  // Even a raw lookup by a report's category finds only the map's own labels.
+  it.each(['__proto__', 'constructor', 'toString', 'hasOwnProperty', 'valueOf'])('has no inherited %s entry', key => {
+    expect(CATEGORY_LABELS[key]).toBeUndefined();
+  });
+});
+
+// Labels come from the map's own keys only, so inherited object keys render
+// as plain text.
+describe('getCategoryLabel', () => {
+  it.each(['__proto__', 'constructor', 'toString', 'hasOwnProperty', 'valueOf'])('returns %s unchanged', v => {
+    expect(getCategoryLabel(v)).toBe(v);
+  });
+
+  it('returns the display label for a known category', () => {
+    expect(getCategoryLabel('csam')).toBe('CSAM');
+  });
+
+  it('returns an unknown category unchanged', () => {
+    expect(getCategoryLabel('made_up')).toBe('made_up');
+  });
+
+  it('names the NIP-56 malware and profanity types', () => {
+    expect(getCategoryLabel('malware')).toBe('Malware');
+    expect(getCategoryLabel('profanity')).toBe('Profanity');
   });
 });
 
@@ -40,6 +66,47 @@ describe('getReportCategory', () => {
         ['l', 'NS-spam', 'social.nos.ontology'],
       ],
     })).toBe('spam');
+  });
+
+  it('reads the NIP-56 report type from the e or p tag', () => {
+    expect(getReportCategory({ tags: [['p', 'd'.repeat(64), 'spam']] })).toBe('spam');
+    expect(getReportCategory({ tags: [['e', 'c'.repeat(64), 'illegal'], ['p', 'd'.repeat(64), 'spam']] })).toBe('illegal');
+  });
+
+  // The queue's filters and sorts call it for every report, so it skips the
+  // content.
+  it('classifies from the tags without reading the content', () => {
+    let contentReads = 0;
+    const event = {
+      tags: [['e', 'c'.repeat(64), 'illegal'], ['p', 'd'.repeat(64), 'illegal']],
+      get content() {
+        contentReads++;
+        return 'CONTENT REPORT - NIP-56\nReason: csam\n';
+      },
+    };
+    expect(getReportCategory(event)).toBe('illegal');
+    expect(contentReads).toBe(0);
+  });
+});
+
+describe('hasCsamSignal', () => {
+  const oldBuild = {
+    tags: [['e', 'c'.repeat(64), 'illegal'], ['p', 'd'.repeat(64), 'illegal']],
+    content: 'CONTENT REPORT - NIP-56\nReason: csam\n',
+  };
+  const plainIllegal = { tags: [['p', 'd'.repeat(64), 'illegal']], content: 'bad' };
+
+  it('is true for an old-build report whose Reason line says csam', () => {
+    expect(hasCsamSignal([oldBuild])).toBe(true);
+  });
+
+  it('is true when any one report in the set carries the signal', () => {
+    expect(hasCsamSignal([plainIllegal, oldBuild])).toBe(true);
+  });
+
+  it('is false for a bare illegal report and for an empty set', () => {
+    expect(hasCsamSignal([plainIllegal])).toBe(false);
+    expect(hasCsamSignal([])).toBe(false);
   });
 });
 

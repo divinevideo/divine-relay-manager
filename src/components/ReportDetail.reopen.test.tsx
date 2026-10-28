@@ -212,7 +212,7 @@ describe('ReportDetail reopen reporting', () => {
 
     expect(screen.getByRole('button', { name: 'Restore Content' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Confirm Hide' })).not.toBeInTheDocument();
-    expect(screen.getByText(/automatic restore failed/i)).toBeInTheDocument();
+    expect(screen.getByText('Auto-Hidden — Restore Failed')).toBeInTheDocument();
   });
 
   it('keeps the report open and raises a persistent warning when dismissal reconciliation fails', async () => {

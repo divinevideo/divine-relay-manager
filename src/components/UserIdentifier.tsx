@@ -19,6 +19,8 @@ import { getProfileUrl } from "@/lib/constants";
 interface UserIdentifierProps {
   pubkey: string;
   showAvatar?: boolean;
+  /** Keep the avatar slot (initials) but never mount the image (sensitive reports) */
+  hideAvatarImage?: boolean;
   avatarSize?: "sm" | "md" | "lg";
   showCopyButton?: boolean;
   copyOnClick?: boolean;
@@ -31,6 +33,7 @@ interface UserIdentifierProps {
 export function UserIdentifier({
   pubkey,
   showAvatar = false,
+  hideAvatarImage = false,
   avatarSize = "sm",
   showCopyButton = true,
   copyOnClick = false,
@@ -87,13 +90,16 @@ export function UserIdentifier({
   const displayNpub = npub;
 
   const profileUrl = getProfileUrl(npub, isFunnelcakeUser);
+  // Radix remembers that an image loaded and hides the initials even after
+  // AvatarImage unmounts, so a fresh root per state brings them back.
+  const avatarKey = hideAvatarImage ? "hidden" : "image";
 
   if (variant === "compact") {
     const content = (
       <>
         {showAvatar && (
-          <Avatar className={avatarSizeClasses[avatarSize]}>
-            <AvatarImage src={picture} alt={displayName || npub} />
+          <Avatar key={avatarKey} className={avatarSizeClasses[avatarSize]}>
+            {!hideAvatarImage && <AvatarImage src={picture} alt={displayName || npub} />}
             <AvatarFallback className={avatarTextSizes[avatarSize]}>
               {initials}
             </AvatarFallback>
@@ -159,8 +165,8 @@ export function UserIdentifier({
 
   if (variant === "block") {
     const avatarElement = showAvatar && (
-      <Avatar className={avatarSizeClasses[avatarSize]}>
-        <AvatarImage src={picture} alt={displayName || npub} />
+      <Avatar key={avatarKey} className={avatarSizeClasses[avatarSize]}>
+        {!hideAvatarImage && <AvatarImage src={picture} alt={displayName || npub} />}
         <AvatarFallback className={avatarTextSizes[avatarSize]}>
           {initials}
         </AvatarFallback>
@@ -230,8 +236,8 @@ export function UserIdentifier({
   const inlineContent = (
     <>
       {showAvatar && (
-        <Avatar className={avatarSizeClasses[avatarSize]}>
-          <AvatarImage src={picture} alt={displayName || npub} />
+        <Avatar key={avatarKey} className={avatarSizeClasses[avatarSize]}>
+          {!hideAvatarImage && <AvatarImage src={picture} alt={displayName || npub} />}
           <AvatarFallback className={avatarTextSizes[avatarSize]}>
             {initials}
           </AvatarFallback>

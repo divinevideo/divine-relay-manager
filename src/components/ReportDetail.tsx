@@ -50,7 +50,9 @@ import { EventActions } from "@/components/EventActions";
 import { UserActions } from "@/components/UserActions";
 import { LinkedTicketPanel } from "@/components/LinkedTicketPanel";
 import { linkedTicketTarget } from "@/lib/linkedTicketTarget";
-import { CATEGORY_LABELS, HIGH_PRIORITY_CATEGORIES, getReportCategory } from "@/lib/constants";
+import { HIGH_PRIORITY_CATEGORIES, getCategoryLabel, getReportCategory, hasCsamSignal } from "@/lib/constants";
+import { SWITCH_STATE_LABELS, type SwitchState } from "@/lib/sensitiveSwitch";
+import { ageReviewCategory, classifyReport } from "../../shared/report-classification";
 import { KIND_NAMES } from "@/lib/kindNames";
 import { Flag, CheckCircle, History, Ban, ShieldX, Link2, User, FileText, Repeat2, FileCode, RefreshCw, EyeOff, Eye } from "lucide-react";
 import { CopyableId, CopyableTags } from "@/components/CopyableId";
@@ -77,6 +79,10 @@ interface ReportDetailProps {
   allReportsForTargetTruncated?: boolean;
   allReports?: NostrEvent[];
   onDismiss?: () => void;
+  // Which side of the queue's Pending review switch this report's target is
+  // on. Undefined outside it. Only 'not-hidden' gets a badge here: the pane's
+  // own auto-hide banner and badge already describe the auto-hidden states.
+  switchState?: SwitchState;
 }
 
 // Helper to extract report target
@@ -94,7 +100,7 @@ function getReportTarget(event: NostrEvent): { type: 'event' | 'pubkey'; value: 
 }
 
 
-export function ReportDetail({ report, allReportsForTarget, allReportsForTargetTruncated = false, allReports = [], onDismiss }: ReportDetailProps) {
+export function ReportDetail({ report, allReportsForTarget, allReportsForTargetTruncated = false, allReports = [], onDismiss, switchState }: ReportDetailProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const {
@@ -432,7 +438,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
     return allReportsForTarget.some(r => {
       const cat = getReportCategory(r);
       return HIGH_PRIORITY_CATEGORIES.includes(cat);
-    });
+    }) || hasCsamSignal(allReportsForTarget);
   }, [allReportsForTarget]);
 
   // Confirm auto-hidden content (approve the auto-hide decision)
@@ -549,8 +555,12 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   }
 
   const category = getReportCategory(report);
-  const categoryLabel = CATEGORY_LABELS[category] || category;
-  const isHighPriorityCategory = HIGH_PRIORITY_CATEGORIES.includes(category);
+  const categoryLabel = getCategoryLabel(category);
+  // Any report on the target, not just the selected one, so the header agrees
+  // with the queue row when an older report carries the CSAM signal.
+  const isHighPriorityCategory = HIGH_PRIORITY_CATEGORIES.includes(category)
+    || classifyReport(report).csamSignal
+    || hasCsamSignal(allReportsForTarget ?? []);
 
   // Scroll the whole pane, not just an inner region. On a short viewport the
   // tall action footer used to starve the content area (it was a shrink-0 block
@@ -609,6 +619,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
           eventId={context.target.value}
           open={showThreadModal}
           onOpenChange={setShowThreadModal}
+          hideAvatars={hasHighPriorityReports !== false}
         />
       )}
 
@@ -622,13 +633,22 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
               <div className="flex items-center gap-3 mb-3">
                 <EyeOff className="h-6 w-6 text-orange-600" />
                 <div className="flex-1">
+                  {/* Read from this pane's own decision log, not the switchState
+                      prop: that comes from /api/resolution-state, which may
+                      still be loading or have failed. */}
                   <p className="font-medium text-orange-800 dark:text-orange-300">
-                    Auto-Hidden — Pending Review
+                    {decisionLog.isAutoHideRestoreFailed
+                      ? 'Auto-Hidden — Restore Failed'
+                      : decisionLog.isAutoHideUnresolved
+                        ? 'Auto-Hidden — Restore Check Failed'
+                        : 'Auto-Hidden — Pending Review'}
                   </p>
                   <p className="text-sm text-orange-600 dark:text-orange-400">
                     {decisionLog.isAutoHideRestoreFailed
-                      ? 'An automatic restore failed. Retry restoring this content.'
-                      : 'This content was automatically hidden based on a report. Please review and confirm or restore.'}
+                      ? 'A moderator restored this while it was being hidden automatically, and undoing the hide failed. Retry restoring this content.'
+                      : decisionLog.isAutoHideUnresolved
+                        ? 'This content was hidden automatically, but the worker could not check whether a moderator restored it at the same time. Review and confirm or restore.'
+                        : 'This content was automatically hidden based on a report. Please review and confirm or restore.'}
                   </p>
                 </div>
               </div>
@@ -693,6 +713,9 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 flex-wrap">
               <Badge variant={isHighPriorityCategory ? "destructive" : "outline"}>{categoryLabel}</Badge>
+              {switchState === 'not-hidden' && (
+                <Badge variant="outline">{SWITCH_STATE_LABELS['not-hidden']}</Badge>
+              )}
               <Badge variant="secondary">
                 {context.target?.type === 'event' ? 'Event' : 'User'}
               </Badge>
@@ -717,8 +740,12 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                   <TooltipTrigger asChild>
                     <Badge variant="destructive" className="flex items-center gap-1 cursor-help">
                       <ShieldX className="h-3 w-3" />
+                      {/* isAutoHidden covers the states that need a check too:
+                          the worker writes those only after the relay ban
+                          landed, so the content is hidden either way. Worded
+                          as the queue row and header badge word a plain one. */}
                       {decisionLog.isDeleted ? 'Removed by Moderation'
-                        : (decisionLog.isAutoHidden && !decisionLog.isAutoHideRestored) ? 'Auto-Hidden'
+                        : decisionLog.isAutoHidden ? SWITCH_STATE_LABELS['auto-hidden']
                         : isUserBanned ? (moderationStatus.isUserBannedStale ? 'Banned (last known)' : 'User Banned')
                         : moderationStatus.isEventBanned ? 'Event Banned'
                         : 'Not Found on Relay'}
@@ -732,7 +759,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                           ` on ${new Date(decisionLog.decisions.find(d => d.action === 'delete_event' || d.action === 'delete')!.created_at).toLocaleDateString()}`
                         }
                       </p>
-                    ) : (decisionLog.isAutoHidden && !decisionLog.isAutoHideRestored) ? (
+                    ) : decisionLog.isAutoHidden ? (
                       <p className="text-xs">Auto-hidden by AI classification</p>
                     ) : isUserBanned ? (
                       <p className="text-xs">
@@ -753,7 +780,10 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
               {isPendingReview && (
                 <Badge variant="outline" className="flex items-center gap-1 border-orange-500 text-orange-600">
                   <EyeOff className="h-3 w-3" />
-                  Auto-Hidden
+                  {/* The queue row's label, so the pane and the row agree. */}
+                  {decisionLog.isAutoHideUnresolved || decisionLog.isAutoHideRestoreFailed
+                    ? SWITCH_STATE_LABELS['hidden-needs-check']
+                    : SWITCH_STATE_LABELS['auto-hidden']}
                 </Badge>
               )}
             </div>
@@ -789,7 +819,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
               <CardContent className="py-0 pb-3 space-y-3">
                 {allReportsForTarget.slice(0, 5).map((r) => {
                   const cat = getReportCategory(r);
-                  const catLabel = CATEGORY_LABELS[cat] || cat;
+                  const catLabel = getCategoryLabel(cat);
                   return (
                     <div key={r.id} className="p-3 bg-background rounded-lg border">
                       {/* Reporter info */}
@@ -847,9 +877,9 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
 
           {/* Decision History - show if target already has decisions */}
           {decisionLog.hasDecisions && (
-            <Card className="border-green-200 bg-green-50/50 dark:bg-green-950/20">
+            <Card className={decisionLog.hasHandlingDecisions ? 'border-green-200 bg-green-50/50 dark:bg-green-950/20' : undefined}>
               <CardHeader className="py-3">
-                <CardTitle className="text-sm flex items-center gap-2 text-green-700 dark:text-green-400">
+                <CardTitle className={`text-sm flex items-center gap-2 ${decisionLog.hasHandlingDecisions ? 'text-green-700 dark:text-green-400' : 'text-muted-foreground'}`}>
                   <History className="h-4 w-4" />
                   {decisionLog.hasHandlingDecisions ? 'Already Handled' : 'Decision History'} ({decisionLog.decisions.length} action{decisionLog.decisions.length !== 1 ? 's' : ''})
                 </CardTitle>
@@ -913,6 +943,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                 checkedAt={moderationStatus.checkedAt}
                 onRecheck={moderationStatus.recheck}
                 isRechecking={moderationStatus.isChecking}
+                hideAvatars={hasHighPriorityReports !== false}
               />
             </>
           )}
@@ -940,6 +971,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                       <UserIdentifier
                         pubkey={context.thread.repostedEvent.pubkey}
                         showAvatar
+                        hideAvatarImage={hasHighPriorityReports !== false}
                         avatarSize="sm"
                         variant="inline"
                         linkToProfile
@@ -1065,6 +1097,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
             stats={context.userStats}
             isLoading={false}
             isFunnelcakeUser={context.reportedUser.isFunnelcakeUser}
+            hideMediaByDefault={hasHighPriorityReports !== false}
             onViewActivity={reportedPubkey ? () => {
               // Same drill-down the reporter rows get: Events tab filtered to this
               // user (#156). Encoded: the p tag comes from an attacker-authored
@@ -1176,7 +1209,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                       <div className="space-y-1">
                         {relatedReports.userReports.slice(0, 3).map((r) => {
                           const cat = getReportCategory(r);
-                          const catLabel = CATEGORY_LABELS[cat] || cat;
+                          const catLabel = getCategoryLabel(cat);
                           return (
                             <div key={r.id} className="flex items-center gap-2 text-xs p-1.5 bg-background rounded">
                               <Badge variant="outline" className="text-xs">{catLabel}</Badge>
@@ -1204,7 +1237,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                       <div className="space-y-1">
                         {relatedReports.eventReports.slice(0, 3).map((r) => {
                           const cat = getReportCategory(r);
-                          const catLabel = CATEGORY_LABELS[cat] || cat;
+                          const catLabel = getCategoryLabel(cat);
                           const target = getReportTarget(r);
                           return (
                             <div key={r.id} className="flex items-center gap-2 text-xs p-1.5 bg-background rounded">
@@ -1379,7 +1412,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
               <UserActions
                 pubkey={context.reportedUser.pubkey}
                 context="report"
-                reportCategory={category}
+                reportCategory={ageReviewCategory(report)}
                 // Pass null through. `?? undefined` handed UserActions an
                 // absent prop, which its default turned into a confirmed
                 // "not banned" / "not suspended".

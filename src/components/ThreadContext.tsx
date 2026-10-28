@@ -56,6 +56,8 @@ interface ThreadContextProps {
   onRecheck?: () => void;
   /** True when a re-check is in progress */
   isRechecking?: boolean;
+  /** Withhold every participant's avatar image, keeping the initials (sensitive reports) */
+  hideAvatars?: boolean;
 }
 
 function PostCard({
@@ -64,6 +66,7 @@ function PostCard({
   flagAuthor = false,
   depth = 0,
   apiUrl,
+  hideAvatar = false,
 }: {
   event: NostrEvent;
   isReported?: boolean;
@@ -71,6 +74,7 @@ function PostCard({
   flagAuthor?: boolean;
   depth?: number;
   apiUrl?: string;
+  hideAvatar?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
   const author = useAuthor(event.pubkey, apiUrl);
@@ -102,8 +106,11 @@ function PostCard({
         <CardContent className="p-3 overflow-hidden">
           <div className="flex items-start gap-3">
             <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80 shrink-0">
-              <Avatar className="h-8 w-8">
-                <AvatarImage src={avatar} />
+              {/* Radix starts loading src as soon as AvatarImage mounts. It also
+                  remembers a loaded image after AvatarImage unmounts and keeps the
+                  initials hidden, so a fresh root per state brings them back. */}
+              <Avatar key={hideAvatar ? 'hidden' : 'image'} className="h-8 w-8">
+                {!hideAvatar && <AvatarImage src={avatar} />}
                 <AvatarFallback>{displayName.slice(0, 2).toUpperCase()}</AvatarFallback>
               </Avatar>
             </a>
@@ -229,10 +236,12 @@ function CommentsSection({
   replies,
   reportedPubkey,
   apiUrl,
+  hideAvatars,
 }: {
   replies: NostrEvent[];
   reportedPubkey?: string | null;
   apiUrl?: string;
+  hideAvatars: boolean;
 }) {
   if (replies.length === 0) return null;
   const sorted = [...replies].sort((a, b) => b.created_at - a.created_at);
@@ -252,6 +261,7 @@ function CommentsSection({
           event={event}
           depth={1}
           apiUrl={apiUrl}
+          hideAvatar={hideAvatars}
           flagAuthor={!!reportedPubkey && event.pubkey === reportedPubkey}
         />
       ))}
@@ -279,6 +289,7 @@ export function ThreadContext({
   checkedAt,
   onRecheck,
   isRechecking,
+  hideAvatars = false,
 }: ThreadContextProps) {
   if (isLoading) {
     return (
@@ -439,7 +450,7 @@ export function ThreadContext({
       </div>
 
       {ancestors.map((event, index) => (
-        <PostCard key={event.id} event={event} depth={index} apiUrl={apiUrl} />
+        <PostCard key={event.id} event={event} depth={index} apiUrl={apiUrl} hideAvatar={hideAvatars} />
       ))}
 
       <PostCard
@@ -447,9 +458,10 @@ export function ThreadContext({
         isReported
         depth={ancestors.length}
         apiUrl={apiUrl}
+        hideAvatar={hideAvatars}
       />
 
-      <CommentsSection replies={replies} reportedPubkey={reportedPubkey} apiUrl={apiUrl} />
+      <CommentsSection replies={replies} reportedPubkey={reportedPubkey} apiUrl={apiUrl} hideAvatars={hideAvatars} />
     </div>
   );
 }

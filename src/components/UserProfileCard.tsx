@@ -9,7 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useApiUrl } from "@/hooks/useAdminApi";
-import { User, FileText, Flag, Tag, CheckCircle, ChevronDown, ChevronUp, Copy, Check, ArrowUpRight, Trash2, Globe, ExternalLink, Activity } from "lucide-react";
+import { User, FileText, Flag, Tag, CheckCircle, ChevronDown, ChevronUp, Copy, Check, ArrowUpRight, Trash2, Globe, ExternalLink, Activity, Eye, EyeOff } from "lucide-react";
 import { InlineMediaPreview } from "@/components/MediaPreview";
 import type { NostrEvent, NostrMetadata } from "@nostrify/nostrify";
 import type { UserStats } from "@/hooks/useUserStats";
@@ -51,10 +51,25 @@ interface UserProfileCardProps {
   /** Navigate to an in-app view of all events authored by this user (#156) */
   onViewActivity?: () => void;
   isFunnelcakeUser?: boolean;
+  /** Withhold the avatar and recent-post media until a moderator asks (sensitive reports) */
+  hideMediaByDefault?: boolean;
 }
 
-export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEvent, onViewActivity, isFunnelcakeUser = false }: UserProfileCardProps) {
+export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEvent, onViewActivity, isFunnelcakeUser = false, hideMediaByDefault = false }: UserProfileCardProps) {
   const [copied, setCopied] = useState(false);
+  // Keyed by pubkey so revealing one account's avatar never carries to the next
+  const [avatarRevealedFor, setAvatarRevealedFor] = useState<string | null>(null);
+  // The pane is reused across reports, so, as with the post media below, a
+  // reveal is forgotten when the pane moves to another account, or when the
+  // default changes, if the avatar is then hidden by default: coming back asks
+  // again. Another report on the same account, with the default unchanged,
+  // keeps it. Done during render, so the avatar is never mounted meanwhile.
+  const [revealContext, setRevealContext] = useState({ hideMediaByDefault, pubkey });
+  if (hideMediaByDefault !== revealContext.hideMediaByDefault || pubkey !== revealContext.pubkey) {
+    setRevealContext({ hideMediaByDefault, pubkey });
+    if (hideMediaByDefault) setAvatarRevealedFor(null);
+  }
+  const showAvatar = !hideMediaByDefault || avatarRevealedFor === (pubkey ?? "");
   const apiUrl = useApiUrl();
 
   // Convert hex pubkey to npub
@@ -129,11 +144,25 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
       <CardHeader className="pb-3">
         <div className="flex items-center gap-3 min-w-0 overflow-hidden">
           <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80 shrink-0">
-            <Avatar className="h-12 w-12">
-              <AvatarImage src={profile?.picture} />
+            {/* Radix remembers that an image loaded and hides the initials even after
+                AvatarImage unmounts, so a fresh root per state brings them back. */}
+            <Avatar key={showAvatar ? "image" : "hidden"} className="h-12 w-12">
+              {showAvatar && <AvatarImage src={profile?.picture} />}
               <AvatarFallback>{displayName.slice(0, 2).toUpperCase()}</AvatarFallback>
             </Avatar>
           </a>
+          {hideMediaByDefault && (
+            <Button
+              variant="ghost"
+              size="sm"
+              aria-label={showAvatar ? "Hide profile picture" : "Show profile picture"}
+              title={showAvatar ? "Hide profile picture" : "Show profile picture"}
+              onClick={() => setAvatarRevealedFor(showAvatar ? null : (pubkey ?? ""))}
+              className="h-6 px-1.5 shrink-0"
+            >
+              {showAvatar ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+            </Button>
+          )}
           <div className="flex-1 min-w-0 overflow-hidden">
             <div className="flex items-center gap-2 min-w-0 overflow-hidden">
               <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="hover:opacity-80 min-w-0 overflow-hidden">
@@ -239,7 +268,7 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
 
         {/* Recent Posts */}
         {stats?.recentPosts && stats.recentPosts.length > 0 && (
-          <RecentPostsSection posts={stats.recentPosts} onDeleteEvent={onDeleteEvent} apiUrl={apiUrl} />
+          <RecentPostsSection posts={stats.recentPosts} onDeleteEvent={onDeleteEvent} apiUrl={apiUrl} hideMediaByDefault={hideMediaByDefault} />
         )}
       </CardContent>
     </Card>
@@ -251,10 +280,12 @@ function RecentPostsSection({
   posts,
   onDeleteEvent,
   apiUrl,
+  hideMediaByDefault,
 }: {
   posts: NostrEvent[];
   onDeleteEvent?: (eventId: string) => void;
   apiUrl: string;
+  hideMediaByDefault: boolean;
 }) {
   const [expanded, setExpanded] = useState(true);
   const [showAll, setShowAll] = useState(false);
@@ -330,6 +361,7 @@ function RecentPostsSection({
                 <InlineMediaPreview
                   content={displayContent}
                   tags={isRepost ? (inner?.tags ?? []) : post.tags}
+                  showByDefault={!hideMediaByDefault}
                 />
 
                 {/* Timestamp, kind, link, and delete */}

@@ -6,10 +6,18 @@
 // it. A stubbed DB cannot catch a bad GROUP BY or bind mismatch, so this runs
 // against real SQLite.
 import { Miniflare } from 'miniflare';
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { ensureSchema } from '../src/db';
 import { getResolvedTargets, getAutoHideStates } from '../src/resolution-state';
+import { ReportWatcher, type ReportEvent } from '../src/ReportWatcher';
 import worker from '../src/index';
+
+// ReportWatcher looks the reported account up on the relay before it opens an
+// age-review case. There is no relay here, so the lookup finds nothing.
+vi.mock('../src/relay-profile', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../src/relay-profile')>(),
+  fetchAccountIdentity: vi.fn(async () => ({ completed: false, profile: null })),
+}));
 
 let mf: Miniflare;
 let DB: D1Database;
@@ -66,26 +74,26 @@ afterAll(async () => {
   await mf?.dispose();
 });
 
-function env() {
+function env(db: D1Database = DB) {
   return {
     ALLOWED_ORIGINS: 'https://app.divine.video',
     RELAY_URL: 'wss://relay.divine.video',
     ADMIN_API_KEY: 'test-admin-key',
-    DB,
+    DB: db,
   } as never;
 }
 
-async function resolutionState() {
+async function resolutionState(db: D1Database = DB) {
   const res = await worker.fetch(
     new Request('https://api.example/api/resolution-state', {
       headers: { 'X-Admin-Key': 'test-admin-key' },
     }),
-    env(),
+    env(db),
     ctx
   );
   const body = (await res.json()) as {
     success: boolean;
-    resolved: Array<{ target_type: string; target_id: string }>;
+    resolved: Array<{ target_type: string; target_id: string; automated?: true }>;
     states: Array<{ target_type: string; target_id: string; action: string }>;
   };
   return { res, body };
@@ -252,5 +260,127 @@ describe('resolution-state chunking against real D1', () => {
     expect(
       chunked.filter((s) => s.target_id === NULL_DATED_TARGET).map((s) => s.action)
     ).toEqual(['auto_hidden']);
+  });
+});
+
+// ReportWatcher logs some decisions itself, with moderator_pubkey 'auto' --
+// today age_review_case_created on a reported account. Hide resolved still
+// counts those targets as handled, but the sensitive-reports switch must not
+// read them as a person's review, so the read marks them. Its own small
+// database, so the chunkSize: 1 reads stay fast.
+describe('resolved targets only automation has touched, against real D1', () => {
+  let autoMf: Miniflare;
+  let autoDB: D1Database;
+
+  const AUTO_ONLY = 'ab'.repeat(32);
+  const AUTO_THEN_HUMAN = 'cd'.repeat(32);
+  const HUMAN_THEN_AUTO = 'ef'.repeat(32);
+  const NULL_MODERATOR = 'a1'.repeat(32);
+  const MODERATOR = '7e'.repeat(32);
+
+  beforeAll(async () => {
+    autoMf = new Miniflare({
+      modules: true,
+      script: 'export default { fetch() { return new Response("ok"); } };',
+      compatibilityDate: '2024-12-01',
+      compatibilityFlags: ['nodejs_compat'],
+      d1Databases: ['DB'],
+    });
+    autoDB = (await autoMf.getD1Database('DB')) as unknown as D1Database;
+    await ensureSchema(autoDB);
+
+    const stmt = autoDB.prepare(
+      `INSERT INTO moderation_decisions (target_type, target_id, action, moderator_pubkey, created_at)
+       VALUES (?, ?, ?, ?, ?)`
+    );
+    // Interleaved, so each target's rows are apart in id order, as they are in
+    // production. With chunkSize: 1 every row is its own chunk.
+    await autoDB.batch([
+      stmt.bind('pubkey', AUTO_ONLY, 'age_review_case_created', 'auto', '2026-03-01 00:00:00'),
+      stmt.bind('pubkey', AUTO_THEN_HUMAN, 'age_review_case_created', 'auto', '2026-03-01 00:00:01'),
+      stmt.bind('pubkey', HUMAN_THEN_AUTO, 'reviewed', MODERATOR, '2026-03-01 00:00:02'),
+      // Human paths write NULL when the moderator's pubkey was not available.
+      stmt.bind('pubkey', NULL_MODERATOR, 'reviewed', null, '2026-03-01 00:00:03'),
+      stmt.bind('pubkey', AUTO_THEN_HUMAN, 'reviewed', MODERATOR, '2026-03-01 00:00:04'),
+      stmt.bind('pubkey', HUMAN_THEN_AUTO, 'age_review_case_created', 'auto', '2026-03-01 00:00:05'),
+    ]);
+  });
+
+  afterAll(async () => {
+    await autoMf?.dispose();
+  });
+
+  async function resolvedFor(targetId: string, opts?: { chunkSize?: number }) {
+    return (await getResolvedTargets(autoDB, opts)).filter((t) => t.target_id === targetId);
+  }
+
+  // toStrictEqual, not toEqual: toEqual also accepts `automated: undefined`,
+  // and a target a person touched must carry no flag at all.
+  it('flags a target whose only decision the worker wrote itself', async () => {
+    expect(await resolvedFor(AUTO_ONLY)).toStrictEqual([
+      { target_type: 'pubkey', target_id: AUTO_ONLY, automated: true },
+    ]);
+  });
+
+  it('does not flag a target a moderator also decided on', async () => {
+    expect(await resolvedFor(AUTO_THEN_HUMAN)).toStrictEqual([
+      { target_type: 'pubkey', target_id: AUTO_THEN_HUMAN },
+    ]);
+  });
+
+  it('does not flag a decision with no moderator recorded', async () => {
+    expect(await resolvedFor(NULL_MODERATOR)).toStrictEqual([
+      { target_type: 'pubkey', target_id: NULL_MODERATOR },
+    ]);
+  });
+
+  it('clears the flag when the human decision arrives in a later chunk', async () => {
+    expect(await resolvedFor(AUTO_THEN_HUMAN, { chunkSize: 1 })).toStrictEqual([
+      { target_type: 'pubkey', target_id: AUTO_THEN_HUMAN },
+    ]);
+  });
+
+  it('keeps the flag off when the automated decision arrives in a later chunk', async () => {
+    expect(await resolvedFor(HUMAN_THEN_AUTO, { chunkSize: 1 })).toStrictEqual([
+      { target_type: 'pubkey', target_id: HUMAN_THEN_AUTO },
+    ]);
+  });
+
+  it('sends the flag to the queue through /api/resolution-state', async () => {
+    const { res, body } = await resolutionState(autoDB);
+
+    expect(res.status).toBe(200);
+    expect(body.resolved).toContainEqual({
+      target_type: 'pubkey',
+      target_id: AUTO_ONLY,
+      automated: true,
+    });
+  });
+
+  // The fixtures above write 'auto' by hand. This one lets the worker write its
+  // own row, so the writer and this read cannot drift apart unnoticed.
+  it('flags the decision the worker writes when it opens an age-review case', async () => {
+    const state = {
+      storage: { get: async () => undefined, put: async () => {} },
+      blockConcurrencyWhile: async (callback: () => Promise<void>) => callback(),
+    } as unknown as DurableObjectState;
+    // Only DB is read on this path: the relay lookup is mocked above, and
+    // nothing here signs or calls keycast.
+    const watcher = new ReportWatcher(state, { DB: autoDB, NOSTR_NSEC: '', RELAY_URL: 'wss://relay.invalid' });
+    const reported = '5c'.repeat(32);
+    const event: ReportEvent = {
+      id: '6d'.repeat(32),
+      pubkey: '8f'.repeat(32),
+      kind: 1984,
+      content: '',
+      tags: [['p', reported]],
+      created_at: Math.floor(Date.now() / 1000),
+    };
+
+    await watcher['createAgeReviewCase'](event, reported);
+
+    expect(await resolvedFor(reported)).toStrictEqual([
+      { target_type: 'pubkey', target_id: reported, automated: true },
+    ]);
   });
 });

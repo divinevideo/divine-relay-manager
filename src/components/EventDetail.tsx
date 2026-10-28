@@ -1,7 +1,7 @@
 // ABOUTME: Comprehensive event detail view showing all event information
 // ABOUTME: Includes raw JSON, linked events, author profile, user stats, related reports, and moderation actions
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNostr } from "@/hooks/useNostr";
 import { useAuthor } from "@/hooks/useAuthor";
@@ -40,6 +40,7 @@ import { extractMediaHashes } from "@/lib/adminApi";
 import { banFailureToast, banSuccessNote, refreshAfterUnconfirmedBan } from "@/lib/banFeedback";
 import { historyCount, historyStat } from "@/lib/historyCount";
 import { MediaPreview } from "@/components/MediaPreview";
+import { useMediaVisibility } from "@/hooks/useMediaVisibility";
 import {
   User,
   Hash,
@@ -63,10 +64,12 @@ import {
   XCircle,
   Ban,
   RefreshCw,
+  Eye,
+  EyeOff,
 } from "lucide-react";
-import type { NostrEvent } from "@nostrify/nostrify";
+import type { NostrEvent, NostrFilter } from "@nostrify/nostrify";
 import { nip19 } from "nostr-tools";
-import { HIGH_PRIORITY_CATEGORIES, getReportCategory } from "@/lib/constants";
+import { HIGH_PRIORITY_CATEGORIES, getReportCategory, hasCsamSignal } from "@/lib/constants";
 
 interface EventDetailProps {
   event: NostrEvent;
@@ -113,7 +116,15 @@ function formatEventId(id: string): string {
   }
 }
 
-function ProfileMetadataCard({ content }: { content: string }) {
+// The picture and banner follow the event's media rule (useMediaVisibility):
+// showImagesByDefault is null while the event's reports are not known, and
+// false when one is sensitive.
+function ProfileMetadataCard({ content, eventId, showImagesByDefault }: {
+  content: string;
+  eventId: string;
+  showImagesByDefault: boolean | null;
+}) {
+  const [showImages, toggleImages] = useMediaVisibility(showImagesByDefault, eventId);
   let metadata: Record<string, unknown>;
   try {
     metadata = JSON.parse(content);
@@ -152,11 +163,23 @@ function ProfileMetadataCard({ content }: { content: string }) {
         <CardTitle className="text-sm flex items-center gap-2">
           <User className="h-4 w-4" />
           Profile Metadata
+          {(picture || banner) && (
+            <Button
+              variant="ghost"
+              size="sm"
+              aria-label={showImages ? "Hide profile images" : "Show profile images"}
+              title={showImages ? "Hide profile images" : "Show profile images"}
+              onClick={toggleImages}
+              className="ml-auto h-6 px-1.5"
+            >
+              {showImages ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+            </Button>
+          )}
         </CardTitle>
       </CardHeader>
       <CardContent className="py-2 px-3 space-y-3">
         {/* Banner */}
-        {banner && (
+        {banner && showImages && (
           <div className="relative -mx-3 -mt-3 h-24 overflow-hidden rounded-t">
             <img src={banner} alt="" className="w-full h-full object-cover" />
           </div>
@@ -164,13 +187,17 @@ function ProfileMetadataCard({ content }: { content: string }) {
 
         {/* Avatar + Name */}
         <div className="flex items-center gap-3">
-          {picture && (
+          {picture && (showImages ? (
             <img
               src={picture}
               alt={displayName || name || ''}
               className="h-12 w-12 rounded-full object-cover"
             />
-          )}
+          ) : (
+            <div className="h-12 w-12 rounded-full bg-gray-300 dark:bg-gray-600 flex items-center justify-center shrink-0">
+              <User className="h-6 w-6 text-gray-500" />
+            </div>
+          ))}
           <div className="min-w-0">
             {displayName && (
               <p className="font-semibold truncate">{displayName}</p>
@@ -214,8 +241,14 @@ function ProfileMetadataCard({ content }: { content: string }) {
   );
 }
 
-function AuthorCard({ pubkey }: { pubkey: string }) {
+// showPictureByDefault gates the picture by the event's media rule
+// (useMediaVisibility): null while the event's reports are not known, false
+// when one is sensitive. Left out, the picture always shows, as it does for
+// accounts an event names other than its author.
+function AuthorCard({ pubkey, showPictureByDefault }: { pubkey: string; showPictureByDefault?: boolean | null }) {
   const author = useAuthor(pubkey);
+  const gated = showPictureByDefault !== undefined;
+  const [showPicture, togglePicture] = useMediaVisibility(gated ? showPictureByDefault : true, pubkey);
   const metadata = author.data?.metadata;
   const displayName = metadata?.name || formatPubkey(pubkey);
 
@@ -233,7 +266,7 @@ function AuthorCard({ pubkey }: { pubkey: string }) {
 
   return (
     <div className="flex items-center gap-3 p-3 bg-muted/50 rounded-lg">
-      {metadata?.picture ? (
+      {metadata?.picture && showPicture ? (
         <img
           src={metadata.picture}
           alt={displayName}
@@ -256,6 +289,18 @@ function AuthorCard({ pubkey }: { pubkey: string }) {
           </p>
         )}
       </div>
+      {gated && metadata?.picture && (
+        <Button
+          variant="ghost"
+          size="sm"
+          aria-label={showPicture ? "Hide profile picture" : "Show profile picture"}
+          title={showPicture ? "Hide profile picture" : "Show profile picture"}
+          onClick={togglePicture}
+          className="h-6 px-1.5 shrink-0"
+        >
+          {showPicture ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+        </Button>
+      )}
       <Button
         variant="ghost"
         size="sm"
@@ -318,17 +363,18 @@ function TagsTable({ tags }: { tags: string[][] }) {
   const [expanded, setExpanded] = useState(false);
   const _displayTags = expanded ? tags : tags.slice(0, 10);
 
-  // Group tags by type
-  const tagGroups: Record<string, string[][]> = {};
+  // Group tags by type. A Map, so a tag's name is only ever a key.
+  const tagGroups = new Map<string, string[][]>();
   for (const tag of tags) {
     const type = tag[0] || 'unknown';
-    if (!tagGroups[type]) tagGroups[type] = [];
-    tagGroups[type].push(tag);
+    const group = tagGroups.get(type);
+    if (group) group.push(tag);
+    else tagGroups.set(type, [tag]);
   }
 
   return (
     <div className="space-y-2">
-      {Object.entries(tagGroups).map(([type, groupTags]) => (
+      {[...tagGroups].map(([type, groupTags]) => (
         <div key={type} className="border rounded p-2">
           <div className="flex items-center gap-2 mb-1">
             <Badge variant="secondary" className="text-xs">{type}</Badge>
@@ -365,6 +411,23 @@ function TagsTable({ tags }: { tags: string[][] }) {
   );
 }
 
+// Reports filed against an event or its author, and whether every read of
+// them finished (see the related-reports query in EventDetail).
+interface RelatedReportsRead {
+  reports: NostrEvent[];
+  complete: boolean;
+}
+
+// Each report once, newest first.
+function newestFirstUnique(reports: NostrEvent[]): NostrEvent[] {
+  const seen = new Set<string>();
+  return reports.filter(r => {
+    if (!r.id || seen.has(r.id)) return false;
+    seen.add(r.id);
+    return true;
+  }).sort((a, b) => b.created_at - a.created_at);
+}
+
 export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReports }: EventDetailProps) {
   const { nostr } = useNostr();
   const { toast } = useToast();
@@ -396,42 +459,67 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
   // exactly wrong. Unban stays on isUserBanned, so the undo remains reachable.
   const userBannedConfirmed = moderationStatus.isUserBanned === true && !moderationStatus.isUserBannedStale;
 
-  // Get reports against this event or user
-  const { data: relatedReports } = useQuery({
+  // readSinceOpened (below) for the query function, which runs outside render:
+  // a read since this event was opened has answered, and the latest read did
+  // not fail, so the read in hand was made since the event was opened.
+  const readSinceOpenedRef = useRef(false);
+
+  // Get reports against this event or user. A read that runs out of time does
+  // not fail: NPool.query resolves with whatever had arrived by then. So each
+  // read keeps its own timeout signal, and `complete` says whether every read
+  // finished before it fired and returned fewer reports than its limit. One
+  // that returned its full limit may have left older reports on the relay.
+  const { data: relatedReportsRead, isFetchedAfterMount, isError } = useQuery({
     queryKey: ['related-reports', event.id, event.pubkey],
-    queryFn: async ({ signal }) => {
-      const queries: Promise<import('@nostrify/nostrify').NostrEvent[]>[] = [];
+    queryFn: async ({ signal, queryKey }) => {
+      const read = async (filter: NostrFilter) => {
+        const timeout = AbortSignal.timeout(3000);
+        const events = await nostr.query([filter], { signal: AbortSignal.any([signal, timeout]) });
+        return { events, complete: !timeout.aborted && events.length < (filter.limit ?? Infinity) };
+      };
+      const reads: Promise<{ events: NostrEvent[]; complete: boolean }>[] = [];
 
       // Reports on this specific event
       if (event.id) {
-        queries.push(
-          nostr.query(
-            [{ kinds: [1984], '#e': [event.id], limit: 50 }],
-            { signal: AbortSignal.any([signal, AbortSignal.timeout(3000)]) }
-          )
-        );
+        reads.push(read({ kinds: [1984], '#e': [event.id], limit: 50 }));
       }
 
       // Reports on this user
-      queries.push(
-        nostr.query(
-          [{ kinds: [1984], '#p': [event.pubkey], limit: 50 }],
-          { signal: AbortSignal.any([signal, AbortSignal.timeout(3000)]) }
-        )
-      );
+      reads.push(read({ kinds: [1984], '#p': [event.pubkey], limit: 50 }));
 
-      const results = await Promise.all(queries);
-      const allReports = results.flat();
+      const results = await Promise.all(reads);
+      const reports = results.flatMap(r => r.events);
+      const complete = results.every(r => r.complete);
 
-      // Dedupe by event ID
-      const seen = new Set<string>();
-      return allReports.filter(r => {
-        if (!r.id || seen.has(r.id)) return false;
-        seen.add(r.id);
-        return true;
-      }).sort((a, b) => b.created_at - a.created_at);
+      // A later read that times out (a refetch on window focus, say) keeps
+      // what an earlier read since the event was opened found: its reports
+      // stay listed, and its verdict stands. One from before the event was
+      // opened is not kept, so it cannot lend this read its clean verdict.
+      const earlier = readSinceOpenedRef.current
+        ? queryClient.getQueryData<RelatedReportsRead>(queryKey)
+        : undefined;
+      if (!complete && earlier) {
+        return { reports: newestFirstUnique([...reports, ...earlier.reports]), complete: earlier.complete };
+      }
+      return { reports: newestFirstUnique(reports), complete };
     },
+    // Read again whenever an event is opened, even with a recent read cached:
+    // only a read made since then may show its media (hasHighPriorityReports).
+    // staleTime rather than refetchOnMount: 'always', because the events page
+    // keeps this pane mounted when another event is picked, and a change of
+    // event re-reads only stale data.
+    staleTime: 0,
   });
+  // A read since this event was opened has answered, and the latest read did
+  // not fail. A failed read counts as fetched since then too, but it leaves
+  // the read from before in hand.
+  const readSinceOpened = isFetchedAfterMount && !isError;
+  useEffect(() => {
+    readSinceOpenedRef.current = readSinceOpened;
+  }, [readSinceOpened]);
+  // Partial when a read timed out. Still listed below, but it cannot rule out
+  // a sensitive report.
+  const relatedReports = relatedReportsRead?.reports;
 
   const banMutation = useMutation({
     mutationFn: async ({ pubkey, reason }: { pubkey: string; reason: string }) => {
@@ -684,15 +772,25 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
   const urls = extractUrls(event.content || '');
   const otherUrls = urls.filter(u => !isMediaUrl(u));
 
-  // Check if any related report has a high-priority category (CSAM, etc.)
-  // Used to collapse media preview by default to protect moderators
+  // Whether any related report has a high-priority category (CSAM, etc.), so
+  // media starts hidden to protect moderators. True as soon as a loaded report
+  // is one, cached or not. False only once a read made since this event was
+  // opened has finished complete and found none, and the latest read did not
+  // fail: a cached read can predate a report filed since. Undefined while that
+  // is unknown: no such read has finished, the latest read failed, or one
+  // timed out with nothing sensitive in what arrived.
   const hasHighPriorityReports = useMemo(() => {
-    if (!relatedReports?.length) return false;
-    return relatedReports.some(r => {
-      const cat = getReportCategory(r);
-      return HIGH_PRIORITY_CATEGORIES.includes(cat);
-    });
-  }, [relatedReports]);
+    if (!relatedReportsRead) return undefined;
+    const { reports, complete } = relatedReportsRead;
+    const sensitive = reports.some(r => HIGH_PRIORITY_CATEGORIES.includes(getReportCategory(r)))
+      || hasCsamSignal(reports);
+    if (sensitive) return true;
+    return complete && readSinceOpened ? false : undefined;
+  }, [relatedReportsRead, readSinceOpened]);
+  // The default for the event's media and a profile's images: null while the
+  // reports are not known, so a sensitive verdict still re-hides media
+  // revealed meanwhile.
+  const mediaShownByDefault = hasHighPriorityReports === undefined ? null : !hasHighPriorityReports;
 
   // Extract sha256 hashes for classifier components
   const mediaHashes = extractMediaHashes(event.content || '', event.tags);
@@ -925,7 +1023,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
             </CardTitle>
           </CardHeader>
           <CardContent className="py-2 px-3 space-y-3">
-            <AuthorCard pubkey={event.pubkey} />
+            <AuthorCard pubkey={event.pubkey} showPictureByDefault={mediaShownByDefault} />
             {/* User Stats */}
             {userStats.data && (
               <div className="flex gap-4 text-xs text-muted-foreground pt-2 border-t">
@@ -949,7 +1047,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
         {/* Content */}
         {event.content && (
           event.kind === 0 ? (
-            <ProfileMetadataCard content={event.content} />
+            <ProfileMetadataCard content={event.content} eventId={event.id} showImagesByDefault={mediaShownByDefault} />
           ) : (
             <Card>
               <CardHeader className="py-2 px-3">
@@ -967,10 +1065,11 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
           )
         )}
 
-        {/* Media Preview - collapsed by default if event has high-priority reports */}
+        {/* Media Preview - collapsed by default until the event's reports are
+            known to hold nothing high-priority */}
         <MediaPreview
           event={event}
-          showByDefault={!hasHighPriorityReports}
+          showByDefault={mediaShownByDefault}
           maxItems={4}
         />
 
@@ -1051,8 +1150,15 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
                   Referenced Users ({linkedPubkeys.length})
                 </h4>
                 <div className="space-y-2">
+                  {/* The author named here (a self-reply, say) is the account
+                      the author card above gates, so it is gated here too.
+                      Other named accounts are not. */}
                   {linkedPubkeys.slice(0, 5).map((pk) => (
-                    <AuthorCard key={pk} pubkey={pk} />
+                    <AuthorCard
+                      key={pk}
+                      pubkey={pk}
+                      showPictureByDefault={pk === event.pubkey ? mediaShownByDefault : undefined}
+                    />
                   ))}
                   {linkedPubkeys.length > 5 && (
                     <p className="text-xs text-muted-foreground">+{linkedPubkeys.length - 5} more</p>
