@@ -9,6 +9,7 @@ import { nip19 } from 'nostr-tools';
 import type { NostrEvent, NostrFilter } from '@nostrify/nostrify';
 import { EventsList } from './EventsList';
 import { parseSearchInput } from '@/lib/searchInput';
+import { RELAY_PROFILE_BADGE } from '@/lib/constants';
 
 const PK = 'b'.repeat(64);
 
@@ -73,9 +74,12 @@ vi.mock('@/hooks/useDivineSession', () => ({
   useDivineSession: () => ({ isSignedIn: true }),
 }));
 
-// Profile loading is useAuthor's concern (tested elsewhere)
+// Profile loading is useAuthor's concern (tested elsewhere); tests set what it answered.
+const authorState = vi.hoisted(() => ({
+  result: { data: undefined, isLoading: false } as { data?: { isFunnelcakeUser?: boolean }; isLoading: boolean },
+}));
 vi.mock('@/hooks/useAuthor', () => ({
-  useAuthor: () => ({ data: undefined, isLoading: false }),
+  useAuthor: () => authorState.result,
 }));
 
 vi.mock('@/hooks/useToast', () => ({
@@ -140,6 +144,7 @@ function renderEvents(initialEntry: string) {
 }
 
 beforeEach(() => {
+  authorState.result = { data: undefined, isLoading: false };
   window.HTMLElement.prototype.scrollIntoView = vi.fn();
   relayQuery.fn.mockReset();
   rpc.fn.mockReset();
@@ -251,5 +256,24 @@ describe('EventsList recorded moderation', () => {
       'Allowed from event list',
     ));
     expect(eventModeration.hide).not.toHaveBeenCalled();
+  });
+});
+
+describe('EventsList no-relay-profile globe', () => {
+  const globe = () => screen.queryByRole('img', { name: RELAY_PROFILE_BADGE.absent.label });
+
+  it('shows no globe while the author lookup has not answered', async () => {
+    setRelay({ list: [event({ id: 'd'.repeat(64), content: 'listed event' })] });
+    renderEvents('/events');
+    await screen.findByText('listed event');
+    expect(globe()).not.toBeInTheDocument();
+  });
+
+  it('shows the globe once the lookup answers that the relay has no profile', async () => {
+    authorState.result = { data: { isFunnelcakeUser: false }, isLoading: false };
+    setRelay({ list: [event({ id: 'd'.repeat(64), content: 'listed event' })] });
+    renderEvents('/events');
+    await screen.findByText('listed event');
+    expect(globe()).toBeInTheDocument();
   });
 });

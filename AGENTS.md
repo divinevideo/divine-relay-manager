@@ -284,7 +284,6 @@ useReportContext(report)
   |-- useAuthor(targetPubkey)    -- kind 0 profile metadata
   |-- useUserStats(targetPubkey) -- recent posts, labels, reports
   |-- useAuthor(reporterPubkey)  -- reporter profile
-  |-- reporterStats query        -- reporter's filing history
 ```
 
 All relay queries are subject to network latency (500ms-2s per round-trip). Use `staleTime` on TanStack Query hooks to cache across report navigation.

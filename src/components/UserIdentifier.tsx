@@ -3,7 +3,8 @@
 
 import { useState } from "react";
 import { nip19 } from "nostr-tools";
-import { Copy, Check, Globe } from "lucide-react";
+import { Copy, Check } from "lucide-react";
+import { NoRelayProfileIcon } from "@/components/NoRelayProfileIcon";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import {
@@ -15,6 +16,7 @@ import {
 import { useAuthor } from "@/hooks/useAuthor";
 import { cn } from "@/lib/utils";
 import { getProfileUrl } from "@/lib/constants";
+import { ClaimedNip05 } from "@/components/ClaimedNip05";
 
 interface UserIdentifierProps {
   pubkey: string;
@@ -54,7 +56,8 @@ export function UserIdentifier({
   }
 
   const metadata = author.data?.metadata;
-  const isFunnelcakeUser = author.data?.isFunnelcakeUser ?? false;
+  // Undefined until the profile lookup answers; the globe waits for a definite "none".
+  const isFunnelcakeUser = author.data?.isFunnelcakeUser;
   const displayName = metadata?.display_name || metadata?.name;
   const nip05 = metadata?.nip05;
   const picture = metadata?.picture;
@@ -89,7 +92,7 @@ export function UserIdentifier({
   // Full npub -- CSS truncation handles overflow based on available space
   const displayNpub = npub;
 
-  const profileUrl = getProfileUrl(npub, isFunnelcakeUser);
+  const profileUrl = getProfileUrl(npub, isFunnelcakeUser ?? false);
   // Radix remembers that an image loaded and hides the initials even after
   // AvatarImage unmounts, so a fresh root per state brings them back.
   const avatarKey = hideAvatarImage ? "hidden" : "image";
@@ -126,7 +129,7 @@ export function UserIdentifier({
                 )}
               >
                 {content}
-                {!isFunnelcakeUser && <Globe className="h-3 w-3 text-purple-500 shrink-0" />}
+                {isFunnelcakeUser === false && <NoRelayProfileIcon />}
               </a>
             ) : (
               <span
@@ -147,9 +150,7 @@ export function UserIdentifier({
               {displayName && (
                 <p className="font-medium">{displayName}</p>
               )}
-              {nip05 && showNip05 && (
-                <p className="text-xs text-muted-foreground">{nip05}</p>
-              )}
+              {showNip05 && <ClaimedNip05 nip05={nip05} className="text-xs" wrap hoverNote={false} />}
               <p className="text-xs font-mono break-all">{npub}</p>
               {(linkToProfile || copyOnClick) && (
                 <p className="text-xs text-muted-foreground">
@@ -200,14 +201,12 @@ export function UserIdentifier({
               className="inline-flex items-center gap-1 hover:opacity-80"
             >
               {nameElement}
-              {!isFunnelcakeUser && <Globe className="h-3 w-3 text-purple-500 shrink-0" />}
+              {isFunnelcakeUser === false && <NoRelayProfileIcon />}
             </a>
           ) : (
             nameElement
           )}
-          {nip05 && showNip05 && (
-            <p className="text-xs text-muted-foreground truncate">{nip05}</p>
-          )}
+          {showNip05 && <ClaimedNip05 nip05={nip05} className="text-xs" />}
           <div className="flex items-center gap-1 min-w-0">
             <code className="text-xs font-mono text-muted-foreground truncate min-w-0">
               {displayNpub}
@@ -252,17 +251,13 @@ export function UserIdentifier({
               ) : (
                 <code className="text-xs font-mono">{displayNpub}</code>
               )}
-              {nip05 && showNip05 && !displayName && (
-                <span className="text-xs text-muted-foreground">({nip05})</span>
-              )}
+              {showNip05 && !displayName && <ClaimedNip05 nip05={nip05} className="text-xs" hoverNote={false} />}
             </span>
           </TooltipTrigger>
           <TooltipContent side="top" className="max-w-xs">
             <div className="space-y-1">
               {displayName && <p className="font-medium">{displayName}</p>}
-              {nip05 && showNip05 && (
-                <p className="text-xs text-muted-foreground">{nip05}</p>
-              )}
+              {showNip05 && <ClaimedNip05 nip05={nip05} className="text-xs" wrap hoverNote={false} />}
               <p className="text-xs font-mono break-all">{npub}</p>
             </div>
           </TooltipContent>
@@ -281,7 +276,7 @@ export function UserIdentifier({
           className="inline-flex items-center gap-1 hover:opacity-80"
         >
           {inlineContent}
-          {!isFunnelcakeUser && <Globe className="h-3 w-3 text-purple-500 shrink-0" />}
+          {isFunnelcakeUser === false && <NoRelayProfileIcon />}
         </a>
       ) : (
         inlineContent
@@ -320,7 +315,8 @@ export function UserDisplayName({
 }: UserDisplayNameProps) {
   const author = useAuthor(pubkey);
   const metadata = author.data?.metadata;
-  const isFunnelcakeUser = author.data?.isFunnelcakeUser ?? false;
+  // Undefined until the profile lookup answers; the globe waits for a definite "none".
+  const isFunnelcakeUser = author.data?.isFunnelcakeUser;
   const displayName = metadata?.display_name || metadata?.name;
 
   let npub = "";
@@ -341,13 +337,13 @@ export function UserDisplayName({
   if (linkToProfile) {
     return (
       <a
-        href={getProfileUrl(npub, isFunnelcakeUser)}
+        href={getProfileUrl(npub, isFunnelcakeUser ?? false)}
         target="_blank"
         rel="noopener noreferrer"
         className="inline-flex items-center gap-1 min-w-0 overflow-hidden hover:opacity-80"
       >
         {content}
-        {!isFunnelcakeUser && <Globe className="h-3 w-3 text-purple-500 shrink-0" />}
+        {isFunnelcakeUser === false && <NoRelayProfileIcon />}
       </a>
     );
   }

@@ -34,6 +34,8 @@ vi.mock('@/hooks/useAdminApi', () => ({
     updateAgeReviewCase,
     getAgeReviewConfig,
     getAccountStatus,
+    // No bulk notes kept for any case (#299).
+    getAgeReviewBulkNotesJob: async () => ({ jobId: null }),
   }),
 }));
 

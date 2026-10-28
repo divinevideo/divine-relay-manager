@@ -21,6 +21,9 @@ const fetchResolutionLabelTargets = vi.hoisted(() => vi.fn());
 const listSuspendedPubkeys = vi.hoisted(() => vi.fn());
 const bulkModerate = vi.hoisted(() => vi.fn());
 const getBulkKindCounts = vi.hoisted(() => vi.fn());
+const getBulkJobNotes = vi.hoisted(() => vi.fn());
+const moderateMedia = vi.hoisted(() => vi.fn());
+const getAgeReviewBulkNotesJob = vi.hoisted(() => vi.fn());
 vi.mock('@/lib/adminApi', async (orig) => ({
   ...(await orig<typeof import('@/lib/adminApi')>()),
   deleteDecisions,
@@ -29,9 +32,40 @@ vi.mock('@/lib/adminApi', async (orig) => ({
   listSuspendedPubkeys,
   bulkModerate,
   getBulkKindCounts,
+  getBulkJobNotes,
+  moderateMedia,
+  getAgeReviewBulkNotesJob,
 }));
 
 describe('useAdminApi', () => {
+  // A dropped `from` turns a guarded restore into an unguarded one: the
+  // worker only checks the file's current state when `from` arrives.
+  it('forwards the expected current state to moderateMedia', () => {
+    const { result } = renderHook(() => useAdminApi());
+
+    result.current.moderateMedia('f'.repeat(64), 'SAFE', 'r', 'QUARANTINE', 'a'.repeat(64));
+
+    // The account, too: dropped, the worker's account check never runs.
+    expect(moderateMedia).toHaveBeenCalledWith(API_URL, 'f'.repeat(64), 'SAFE', 'r', 'QUARANTINE', 'a'.repeat(64));
+  });
+
+  it("forwards the case id to the case's kept-notes read", () => {
+    const { result } = renderHook(() => useAdminApi());
+
+    result.current.getAgeReviewBulkNotesJob('case-1');
+
+    expect(getAgeReviewBulkNotesJob).toHaveBeenCalledWith(API_URL, 'case-1');
+  });
+
+  // A dropped page cursor reads the first page of a job's notes forever.
+  it('forwards the notes page cursor to adminApi', () => {
+    const { result } = renderHook(() => useAdminApi());
+
+    result.current.getBulkJobNotes('job-1', '42');
+
+    expect(getBulkJobNotes).toHaveBeenCalledWith(API_URL, 'job-1', '42');
+  });
+
   it('forwards the reopen target type through to adminApi', () => {
     const { result } = renderHook(() => useAdminApi());
 

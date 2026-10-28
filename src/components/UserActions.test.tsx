@@ -11,6 +11,8 @@ import { banFailureToast, banSuccessNote } from '@/lib/banFeedback';
 const api = vi.hoisted(() => ({
   bulkModerate: vi.fn(),
   getBulkJobStatus: vi.fn(),
+  getBulkJobNotes: vi.fn(),
+  moderateMedia: vi.fn(),
   banPubkey: vi.fn(),
   unbanPubkey: vi.fn(),
   suspendPubkey: vi.fn(),
@@ -47,6 +49,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   api.bulkModerate.mockResolvedValue({ success: true, jobId: 'job-1' });
   api.getBulkJobStatus.mockResolvedValue(doneJob('age-gate-all'));
+  api.getBulkJobNotes.mockResolvedValue({ notes: [], next: null });
+  api.moderateMedia.mockResolvedValue({ success: true });
   api.banPubkey.mockResolvedValue({ unconfirmed: null });
   api.unbanPubkey.mockResolvedValue({ success: true });
   api.suspendPubkey.mockResolvedValue({ success: true });
@@ -291,7 +295,34 @@ describe('UserActions', () => {
     );
   });
 
-  it('reports a partial/failed job with a destructive toast', async () => {
+  it('counts an overflow marker as the issues it stands for', async () => {
+    // The worker stores 50 failures and counts the rest in "+N more".
+    const failures = [...Array.from({ length: 50 }, (_, i) => `media:${i}:boom`), '+10 more'];
+    api.getBulkJobStatus.mockResolvedValue(doneJob('delete-all', { failures }));
+    renderWithProvider(<UserActions pubkey={PUBKEY} />);
+    fireEvent.click(screen.getByRole('button', { name: /Delete All Content/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /Confirm Delete/i }));
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({
+      title: expect.stringMatching(/finished with issues/i),
+      description: expect.stringContaining('60 problem(s)'),
+    })));
+  });
+
+  it('reports a job that finished with failures with a destructive toast', async () => {
+    api.getBulkJobStatus.mockResolvedValue(doneJob('age-gate-all', { failures: ['media:x:boom'] }));
+    renderWithProvider(<UserActions pubkey={PUBKEY} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
+
+    await waitFor(() =>
+      expect(toast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Bulk age-restrict finished with issues', variant: 'destructive' }),
+      ),
+    );
+  });
+
+  // A failed job did not finish, and its panel says "stopped": so does the toast.
+  it('says a failed job stopped before it finished, never that it finished', async () => {
     api.getBulkJobStatus.mockResolvedValue(doneJob('age-gate-all', { status: 'failed', failures: ['media:x:boom'] }));
     renderWithProvider(<UserActions pubkey={PUBKEY} />);
 
@@ -299,9 +330,10 @@ describe('UserActions', () => {
 
     await waitFor(() =>
       expect(toast).toHaveBeenCalledWith(
-        expect.objectContaining({ title: expect.stringMatching(/finished with issues/i), variant: 'destructive' }),
+        expect.objectContaining({ title: 'Bulk age-restrict stopped before it finished', variant: 'destructive' }),
       ),
     );
+    expect(vi.mocked(toast).mock.calls.some(([arg]) => /finished with issues/.test(String(arg.title)))).toBe(false);
   });
 
   it('shows an error toast when the enqueue request fails', async () => {
@@ -748,4 +780,97 @@ describe('UserActions', () => {
     });
   });
 
+});
+
+// #299: a finished job's problems and notes for a person (other accounts'
+// files) are listed in a panel that stays until dismissed, not in the toast.
+// The Users page starts only Age Restrict All and Delete All, so it never gets
+// still-hidden notes (only Un-age-restrict All makes them).
+describe('UserActions bulk job notes', () => {
+  const THEIRS = '3'.repeat(64);
+  const OTHER_THEIRS = '4'.repeat(64);
+  const OWNER = 'b2'.repeat(32);
+
+  async function finishAgeRestrictAll() {
+    renderWithProvider(<UserActions pubkey={PUBKEY} />);
+    fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
+    await waitFor(() => expect(toast).toHaveBeenCalled());
+  }
+
+  it("lists the job's stored failures in the panel, above its notes, and the toast only points to them", async () => {
+    const failures = [`media:${'9'.repeat(64)}:Moderation service returned 500`, 'enumeration:x:the list could not be read', '+3 more'];
+    api.getBulkJobStatus.mockResolvedValue(doneJob('delete-all', { failures, noteCount: 1 }));
+    api.getBulkJobNotes.mockResolvedValue({ notes: [{ kind: 'not-owned', sha256: THEIRS, owner: OWNER }], next: null });
+    renderWithProvider(<UserActions pubkey={PUBKEY} />);
+    fireEvent.click(screen.getByRole('button', { name: /Delete All Content/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /Confirm Delete/i }));
+    expect(await screen.findByRole('heading', { name: /problems \(5\)/i })).toBeInTheDocument();
+    expect(screen.getByText(`File ${'9'.repeat(64)} could not be changed: Moderation service returned 500.`)).toBeInTheDocument();
+    expect(await screen.findByText(THEIRS)).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: /results to look at/i })).toHaveTextContent('The job finished.');
+    const call = vi.mocked(toast).mock.calls.find(([arg]) => /finished with issues/.test(String(arg.title)));
+    expect(call?.[0].description).toBe('2 media across 3 events. 5 problem(s) and 1 file(s) to check are listed below.');
+  });
+
+  it('says a failed job stopped before it finished', async () => {
+    api.getBulkJobStatus.mockResolvedValue(doneJob('age-gate-all', { status: 'failed', failures: ['job:relay down'] }));
+    await finishAgeRestrictAll();
+    expect(await screen.findByRole('region', { name: /results to look at/i })).toHaveTextContent('The job stopped before it finished.');
+  });
+
+  it('moves focus to the account actions when the panel is dismissed', async () => {
+    api.getBulkJobStatus.mockResolvedValue(doneJob('age-gate-all', { failures: ['enumeration:x:y'] }));
+    await finishAgeRestrictAll();
+    fireEvent.click(await screen.findByRole('button', { name: /dismiss/i }));
+    expect(document.activeElement).toBe(screen.getByRole('group', { name: /account actions/i }));
+  });
+
+  it('reads every page of a finished job\'s notes and lists them until dismissed', async () => {
+    api.getBulkJobStatus.mockResolvedValue(doneJob('age-gate-all', { noteCount: 2 }));
+    api.getBulkJobNotes
+      .mockResolvedValueOnce({ notes: [{ kind: 'not-owned', sha256: THEIRS, owner: OWNER }], next: '1' })
+      .mockResolvedValueOnce({ notes: [{ kind: 'not-owned', sha256: OTHER_THEIRS, owner: OWNER }], next: null });
+    await finishAgeRestrictAll();
+    expect(await screen.findByText(THEIRS)).toBeInTheDocument();
+    expect(screen.getByText(OTHER_THEIRS)).toBeInTheDocument();
+    expect(api.getBulkJobNotes).toHaveBeenNthCalledWith(1, 'job-1', undefined);
+    expect(api.getBulkJobNotes).toHaveBeenNthCalledWith(2, 'job-1', '1');
+    // Notes are not issues: the job finished clean.
+    expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: expect.stringMatching(/Age-restricted 2 media file\(s\)/i) }));
+    fireEvent.click(screen.getByRole('button', { name: /dismiss/i }));
+    expect(screen.queryByText(THEIRS)).not.toBeInTheDocument();
+  });
+
+  it('does not read notes for a job that stored none', async () => {
+    api.getBulkJobStatus.mockResolvedValue(doneJob('age-gate-all', { noteCount: 0 }));
+    await finishAgeRestrictAll();
+    expect(api.getBulkJobNotes).not.toHaveBeenCalled();
+    expect(screen.queryByRole('region', { name: /to look at/i })).not.toBeInTheDocument();
+  });
+
+  it('shows no notes for a job a worker that predates notes ran (no count, no notes route)', async () => {
+    api.getBulkJobStatus.mockResolvedValue(doneJob('age-gate-all'));
+    api.getBulkJobNotes.mockRejectedValue(new ApiError('Not found', 404, 'Not Found'));
+    await finishAgeRestrictAll();
+    await waitFor(() => expect(api.getBulkJobNotes).toHaveBeenCalled());
+    expect(screen.queryByRole('region', { name: /to look at/i })).not.toBeInTheDocument();
+    expect(screen.queryByText(/could not be loaded/i)).not.toBeInTheDocument();
+  });
+
+  it('still lists the notes when the job\'s count could not be read', async () => {
+    api.getBulkJobStatus.mockResolvedValue(doneJob('age-gate-all'));
+    api.getBulkJobNotes.mockResolvedValue({ notes: [{ kind: 'not-owned', sha256: THEIRS, owner: OWNER }], next: null });
+    await finishAgeRestrictAll();
+    expect(await screen.findByText(THEIRS)).toBeInTheDocument();
+  });
+
+  it('says why the notes could not be loaded, and tries again on request', async () => {
+    api.getBulkJobStatus.mockResolvedValue(doneJob('age-gate-all', { noteCount: 1 }));
+    api.getBulkJobNotes.mockRejectedValueOnce(new ApiError('HTTP 500: Internal Server Error', 500, 'Internal Server Error'));
+    api.getBulkJobNotes.mockResolvedValueOnce({ notes: [{ kind: 'not-owned', sha256: THEIRS, owner: OWNER }], next: null });
+    await finishAgeRestrictAll();
+    expect(await screen.findByText(/HTTP 500/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /try again/i }));
+    expect(await screen.findByText(THEIRS)).toBeInTheDocument();
+  });
 });

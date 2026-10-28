@@ -224,6 +224,11 @@ negotiation, so order matters and the gap should be minimized:
 1. **Worker first.** `npx wrangler deploy --config wrangler.staging.toml` (verify), then prod.
    - Old frontend + new worker: the old UI expects a synchronous `BulkModerateResult`
      but gets `{jobId}` — bulk moderation misreports until the frontend catches up.
+   - **A plain `wrangler deploy`, never a gradual or percentage rollout** (#299).
+     A job's media messages from this worker and the one before it read
+     differently: each restarts the other's file walk. With one version serving
+     the queue that costs at most one restart per job, but with both serving it a
+     job can restart on every message until its page bound.
 2. **Frontend second**, back-to-back. `npx vite build && npx wrangler pages deploy dist ...`.
    - New frontend + old worker: the UI polls `/api/bulk-moderate/status/:jobId` against
      a worker with no status route (404) — bulk moderation breaks until the worker catches up.
@@ -246,8 +251,10 @@ negotiation, so order matters and the gap should be minimized:
   others become AgeRestricted (18+ gate), and the result message counts 1 file left
   as it was. Delete All sets Deleted; the age-review withhold (`age-restrict-all`)
   sets Restricted.
-- Bulk actions read each file's status from Blossom first, so the worker needs
-  `BLOSSOM_WEBHOOK_SECRET` (prod and staging bind it). Without it every file fails
+- Bulk actions read each file's status from Blossom first, and (#299) the
+  account's file list from Blossom's admin API, so the worker needs
+  `BLOSSOM_WEBHOOK_SECRET` (prod and staging bind it). Without it the job records
+  a failure saying it could not list the account's files, and every file fails
   with "could not read current status".
 - `bulk_jobs` table is created on demand in the prod D1 (`divine-moderation-decisions-prod`),
   and its `media_skipped` and `kind` columns are added on demand to an existing table.
@@ -256,6 +263,76 @@ negotiation, so order matters and the gap should be minimized:
   row reaches `done`. Delete by kind touches only the relay of the environment it
   runs in, never media, so unlike the Age Restrict All check, a staging run does
   not change production files.
+- **Files found through the media server (#299).** On a throwaway test account
+  (the caveat above applies: staging changes production media):
+  1. post a video from the account;
+  2. ban the account (Ban User), so the relay and funnelcake hide its videos;
+  3. run Delete All Content on it;
+  4. confirm the job row reaches `done` with `media_processed` of at least 1, and
+     that Blossom shows the video Deleted. Before #299 this job ended `done` with
+     no media processed, and the file stayed.
+
+  Optionally confirm the notes table exists:
+  `npx wrangler d1 execute divine-moderation-decisions-prod --remote --command "SELECT COUNT(*) FROM bulk_job_notes;"`.
+- **Results to look at (#299).** Files a bulk action left for a person (videos a
+  clear left hidden, other accounts' files) are notes, not failures. They are kept
+  in the `bulk_job_notes` table, created on demand in the same D1 as `bulk_jobs`:
+  a queued job's under its job id, and an age-review transition's under
+  `age-review:<case id>:<case version>:<state>` (the expiry cron's auto-delete
+  too), with that transition's failure lines beside them. The Users page lists a
+  job's problems (its stored failures) and notes under the bulk buttons; the
+  age-review case screen lists the problems and notes of its latest step that
+  kept any, labelled with that step, also after a reload. Keeping age review's
+  results never fails or alters the transition. A case's kept results are
+  deleted with the case by retention's case-delete stage, under the same hold.
+  Deploy the worker first: a frontend without the worker reads no notes (both
+  notes routes answer 404) and shows none.
+- **Restore's account check (#299).** A note's Restore sends the account's pubkey
+  to `/api/moderate-media` with its SAFE and `from: 'QUARANTINE'`. When a pubkey is
+  sent, the worker refuses while that account has an open age review, or unless
+  the media server records it as the file's owner (both fail closed). It also
+  refuses a file the media server shows as blocked, deleted or behind the 18+
+  gate, which SAFE would make public, and names that status on the row. It marks
+  the file's notes restored when the restore lands, or when the record is already
+  public and the media server serves the file too; a public record over a file the
+  media server still hides is refused and named on the row. Callers that send no
+  pubkey (COOP, the per-post buttons) are unchanged. An older worker ignores the
+  pubkey, so the `from` check is the only one it applies.
+- **Known limits (#299), not fixed by it:**
+  - Some files the media server holds are outside the videos-only filter and are
+    not changed. Tracked privately.
+  - The media server's list of an account's files is not paged
+    (divinevideo/divine-blossom#309). A large account is slow to list, and past
+    the worker's timeout the job falls back to funnelcake's list and records a
+    failure line saying so.
+  - The media server's list can leave files out without saying so
+    (divinevideo/divine-blossom#308). The end-of-walk check finds some of them on
+    a later read.
+  - Blossom caches a file's status for up to 5 minutes per location. Right after a
+    change, Un-age-restrict All can name a file as still hidden that a restore just
+    made active, or end with no note while a file the withhold just hid is still
+    hidden. For the same reason, a Restore of a file just made public elsewhere can
+    be refused as "the media server shows this file as hidden" for a few minutes;
+    a later Restore marks it. And for up to 5 minutes after a block, delete or
+    18+ gate set in the media server's own admin, a Restore can still read the
+    old status and go through.
+  - Counts only, nothing left unchanged: a file that only funnelcake's video list
+    shows, and that was already at the action's result before the job, is not
+    counted as left as it was. The count can be lower than the previous worker's.
+    When a media-server list read fails, the count can also be low or doubled,
+    and the job's warning says the count may be off.
+  - Counts only: a media-only job (Age Restrict All) that the previous worker
+    started and this one finishes, across a forward deploy, shows inflated counts.
+    This worker restarts the file walk, so it counts the first page's events again
+    and counts the files the previous worker already changed as left as they were.
+    The files themselves all end changed.
+  - The expiry cron closes and bans every expired case before any auto-delete. An
+    invocation that ends after a case is closed and before its auto-delete
+    finishes, for example at a CPU or time limit, leaves that case's files in
+    place. Its case screen keeps an 'Auto-delete was not confirmed' line,
+    unless that line itself could not be stored, or that tick could not read
+    the age-review config, and nothing retries the delete. #319 tracks
+    running the cron's delete as a queued job and recovering a lost one.
 
 ### Rollback
 
@@ -287,6 +364,38 @@ npx wrangler d1 execute divine-moderation-decisions-prod --remote --command \
 npx wrangler d1 execute divine-moderation-decisions-prod --remote --command \
   "UPDATE bulk_jobs SET status = 'failed', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE action = 'delete-kind' AND status IN ('pending', 'running');"
 ```
+
+Rolling back past #299 (finding files through the media server). First list the
+jobs a rollback can leave unfinished:
+
+```bash
+npx wrangler d1 execute divine-moderation-decisions-prod --remote --command \
+  "SELECT job_id, pubkey, action FROM bulk_jobs WHERE action IN ('delete-all', 'age-gate-all') AND status IN ('pending', 'running');"
+```
+
+For each listed job, either wait for it to finish, or note its account and re-run
+the action after the roll-forward. The older worker would finish such a job on
+funnelcake's video list, which hides what these jobs act on, and end it `done`
+with no failures while files remain:
+- a Delete All in its media phase deletes none of the files of the events it
+  already banned (the row does not record its phase, so treat every listed Delete
+  All as in it);
+- an Age Restrict All on a banned or suspended account leaves the rest of its
+  files ungated.
+
+Run the SELECT again immediately before the rollback: a job can start between
+the first check and the deploy. Then roll the worker back to the version deployed
+before this one, with a plain deploy as above. #299's cross-version tests were
+run against `028e0ac` (#294). main's changes after it, up to `6b53be1` (#330),
+touch neither `worker/src/bulk-moderate.ts` nor `shared/bulk-moderation.ts`, so
+any build in that range pairs the same way; if the version before this one is
+another build, ask #299's author before rolling back past it. Apart from the
+jobs above, each worker reads the other's queue messages (the older one ignores
+the new fields), and nothing else needs stopping or cleaning up. The
+`bulk_job_notes` table stays and the older worker never reads it; while it
+serves, a newer frontend shows no notes, and moderators see owner lines and
+still-hidden files nowhere (the older worker reported neither). Restore's
+account check is gone with it: only `from` is checked.
 
 Rolling back past #290 (to any build that has the job model but not
 `age-gate-all`): do not revert the worker first. Follow the steps below in order,

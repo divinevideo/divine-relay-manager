@@ -24,9 +24,10 @@ import {
   FUNNEL_ZENDESK_QUERIES,
 } from '../../shared/age-review';
 import { runBulkModeration, type BulkModerateEnv } from './bulk-moderate';
+import { deleteBulkFailure, ensureBulkNotesTable, storeBulkNotes } from './bulk-notes';
 import { getActiveAgeReviewCase } from './age-review-lookup';
 import { resolveZendeskCreds } from './zendesk-sync';
-import type { AccountBulkAction } from '../../shared/bulk-moderation';
+import { ageReviewNotesJobId, autoDeletePendingWarning, bulkLegStoppedWarning, MAX_NOTES_PER_WRITE, notSavedWarning, type AccountBulkAction, type BulkNote } from '../../shared/bulk-moderation';
 import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, setVerifiedMinor, createMinorAccount, HEX_64, type KeycastEnv, type KeycastReason, type KeycastResult } from './keycast-client';
 import { suspendPubkey, unsuspendPubkey, banPubkey, type BanPubkeyResult, type SecretStoreSecret } from './nip86';
 import { buildAgeReviewIdentityBlock, buildClaimedParentName, toNpub } from './report-note';
@@ -199,7 +200,8 @@ export async function handleGetAgeReviewCase(
 
 /**
  * Refuse-and-route guard shared by the interactive enforcement endpoints
- * (relay-rpc suspend/unsuspend/unban, bulk-moderate enqueue): if the pubkey has
+ * (relay-rpc suspend/unsuspend/unban, bulk-moderate enqueue, and
+ * moderate-media when the request names the account): if the pubkey has
  * an open (non-terminal) age-review case, returns a structured 409
  * (`age_review_active` + caseId/state) that the frontend turns into a redirect
  * to the case; returns null when nothing blocks the action.
@@ -221,13 +223,18 @@ export async function handleGetAgeReviewCase(
  *
  * Under `failClosed` there are two ways the check "cannot happen", and both
  * refuse identically: no DB binding, and a thrown lookup. A non-canonical pubkey
- * is NOT one of them: no case can be keyed to a value the lookup could never
- * match, so there is nothing to refuse on its behalf.
+ * in the request is NOT one of them: it lifts nothing on the account a case is
+ * about (see the guard body), so there is nothing to refuse on its behalf.
+ * `failClosed` also makes the lookup match a case stored under an uppercase
+ * pubkey (anyCase, see getActiveAgeReviewCase): missing one there would lift
+ * its hold, while for an enforcing caller matching it would keep no hold and
+ * only refuse enforcement.
  *
- * `failClosed` is opt-in PER CALL SITE, not a property of the guard. Two call
- * sites pass it today: relay-rpc's reversals, and bulk-moderate's loosening
- * actions (age-gate-all, un-age-restrict-all). The rest of bulk deliberately
- * fails open; see LOOSENS_AGE_REVIEW_HOLD in bulk-moderate.ts.
+ * `failClosed` is opt-in PER CALL SITE, not a property of the guard. Three call
+ * sites pass it today: relay-rpc's reversals, bulk-moderate's loosening
+ * actions (age-gate-all, un-age-restrict-all), and moderate-media's account
+ * check (a note's Restore). The rest of bulk deliberately fails open; see
+ * LOOSENS_AGE_REVIEW_HOLD in bulk-moderate.ts.
  */
 export async function ageReviewActiveGuard(
   pubkey: string,
@@ -245,13 +252,16 @@ export async function ageReviewActiveGuard(
     code: 'age_review_check_failed',
   }, 503, corsHeaders);
 
-  // A non-canonical pubkey proceeds in both modes, and that is not the same
-  // omission the earlier version made. It skipped on the stated grounds that the
-  // caller validates, which no caller did. The reason now is that there is nothing
-  // here to protect: a case is keyed to a real lowercase pubkey, so a value that
-  // cannot match one cannot be hiding an open case either. Refusing would only
-  // block the reverse direction, which deliberately carries such values so a row
-  // banned with one stays removable (see handleRelayRpc).
+  // A non-canonical pubkey in the request proceeds in both modes, and that is not
+  // the same omission the earlier version made. It skipped on the stated grounds
+  // that the caller validates, which no caller did. The reason now is the legacy
+  // relay rows: the reverse direction deliberately carries such values so a row
+  // banned with one stays removable (see handleRelayRpc), and refusing here would
+  // block exactly that. Such a value reaches only the relay rows written with it:
+  // the relay matches bytes exactly and Keycast refuses anything but lowercase
+  // hex, so it lifts nothing on the account a case is about. What a case stores
+  // is another matter: a case can hold an uppercase `p` tag until #313, which is
+  // why a fail-closed lookup below matches in any case.
   //
   // The enforce direction does not reach this: handleRelayRpc answers those with a
   // 400 first, since a ban on a value the relay cannot match enforces on nobody.
@@ -272,7 +282,9 @@ export async function ageReviewActiveGuard(
 
   let activeCase: AgeReviewCase | null = null;
   try {
-    activeCase = await getActiveAgeReviewCase(pubkey, env);
+    // A fail-closed caller lifts a hold, so it also finds a case stored under
+    // an uppercase `p` tag; the rest match exactly (see getActiveAgeReviewCase).
+    activeCase = await getActiveAgeReviewCase(pubkey, env, { anyCase: opts.failClosed === true });
   } catch (err) {
     if (opts.failClosed) {
       console.error('[ageReviewActiveGuard] lookup failed; refusing (fail-closed):', err);
@@ -302,15 +314,16 @@ export async function handleGetActiveAgeReviewCase(
   env: AgeReviewEnv,
   corsHeaders: Record<string, string>,
 ): Promise<Response> {
-  // Pubkeys are canonical lowercase hex and the stored column is case-sensitive,
-  // so validate case-sensitively (a mixed-case value would pass a case-
-  // insensitive check but miss the lowercased row). Validate before the DB
-  // check so a malformed pubkey is a 400, not a 500.
+  // Callers send canonical lowercase hex, so validate case-sensitively; the
+  // lookup itself also finds a case stored under an uppercase or mixed-case
+  // `p` tag (anyCase, see getActiveAgeReviewCase), so the hand-off and the
+  // results panel's pause name it. Validate before the DB check so a
+  // malformed pubkey is a 400, not a 500.
   if (!/^[0-9a-f]{64}$/.test(pubkey)) {
     return json({ success: false, error: 'Invalid pubkey' }, 400, corsHeaders);
   }
   if (!env.DB) return json({ success: false, error: 'Database not configured' }, 500, corsHeaders);
-  const row = await getActiveAgeReviewCase(pubkey, env);
+  const row = await getActiveAgeReviewCase(pubkey, env, { anyCase: true });
   return json({ success: true, case: row }, 200, corsHeaders);
 }
 
@@ -575,6 +588,8 @@ export async function handleUpdateAgeReviewCase(
   // stays non-critical and swallowed.)
   let bulk: EnforcementLegStatus = 'not_attempted';
   let bulkError: string | undefined;
+  let bulkNotes: BulkNote[] = [];
+  let bulkFailures: string[] = [];
   let bulkActionTriggered: string | undefined;
   let relay: EnforcementLegStatus = 'not_attempted';
   let relayError: string | undefined;
@@ -636,17 +651,17 @@ export async function handleUpdateAgeReviewCase(
     // only deletes when auto_delete_on_deny is set).
     try {
       if (enteredRestrictedState) {
-        await triggerBulkModerate(existing.pubkey, 'age-restrict-all', 'Age review restriction', env);
+        ({ notes: bulkNotes } = await triggerBulkModerate(existing.pubkey, 'age-restrict-all', 'Age review restriction', env));
         bulk = 'ok';
         bulkActionTriggered = 'age-restrict-all';
       } else if (clearedCase) {
-        await triggerBulkModerate(existing.pubkey, 'un-age-restrict-all', 'Age review cleared', env);
+        ({ notes: bulkNotes } = await triggerBulkModerate(existing.pubkey, 'un-age-restrict-all', 'Age review cleared', env));
         bulk = 'ok';
         bulkActionTriggered = 'un-age-restrict-all';
       } else if (deniedCase) {
         const config = await getAgeReviewConfig(env.DB!);
         if (config.auto_delete_on_deny) {
-          await triggerBulkModerate(existing.pubkey, 'delete-all', 'Age review denied', env);
+          ({ notes: bulkNotes } = await triggerBulkModerate(existing.pubkey, 'delete-all', 'Age review denied', env));
           bulk = 'ok';
           bulkActionTriggered = 'delete-all';
         }
@@ -654,8 +669,11 @@ export async function handleUpdateAgeReviewCase(
     } catch (error) {
       bulk = 'failed';
       bulkError = error instanceof Error ? error.message : String(error);
+      if (error instanceof BulkLegError) ({ notes: bulkNotes, failures: bulkFailures } = error);
       console.error('[age-review] Bulk action failed:', error);
     }
+    // existing.version + 1: the version this transition's compare-and-swap wrote.
+    await keepBulkNotes(env, caseId, existing.pubkey, existing.version + 1, requestedState, bulkNotes, bulkFailures);
 
     // Keycast account status.
     const keycastLeg = await runStatusLeg('Keycast', () =>
@@ -797,6 +815,11 @@ export async function handleUpdateAgeReviewCase(
     keycastMinorClear, keycastMinorClearError, subjectClear, subjectClearError,
     subjectActivate, subjectActivateError, keycastMinorSet, keycastMinorSetError,
     ...(keycastMinorSetUnclaimed ? { keycastMinorSetUnclaimed: true } : {}),
+    // Kept under the case by keepBulkNotes too; the response lets the case
+    // screen show them at once.
+    ...(bulkNotes.length > 0 ? { bulkNotes } : {}),
+    // Every failure line, for the case screen's panel (bulkError carries three).
+    ...(bulkFailures.length > 0 ? { bulkFailures } : {}),
   };
   const enforcementComplete = relay !== 'failed' && bulk !== 'failed' && keycast !== 'failed'
     && keycastMinorClear !== 'failed' && subjectClear !== 'failed'
@@ -2398,6 +2421,37 @@ export async function handleAgeReviewReplyWebhook(
 // Cron: deadline checker + Slack alerts
 // ---------------------------------------------------------------------------
 
+// The note the expiry cron's close writes. One constant, so the close and the
+// re-read after a close that threw (cronCloseOutcome) cannot drift apart.
+const AUTO_CLOSE_NOTE = 'Auto-closed: deadline expired with no response';
+
+// A close that threw may still have committed. Re-reads the case once:
+//   landed: the cron's own close is what landed, i.e. denied_closed at the
+//     version after the one it read, with the cron's note. A moderator's own
+//     deny also writes denied_closed at that version, under the same notes key
+//     (ageReviewNotesJobId(id, version + 1, 'denied_closed')), so the note is
+//     what tells the two apart. Known limit: an overlapping tick's close of the
+//     same case writes the same note at the same version, so it matches too;
+//     its bans and delete are idempotent.
+//   restricted: the case still reads restricted, so the next tick retries it.
+//   changed: anything else (another close, or the row is gone).
+//   unreadable: the re-read itself failed.
+async function cronCloseOutcome(
+  db: D1Database, row: AgeReviewCase,
+): Promise<'landed' | 'restricted' | 'changed' | 'unreadable'> {
+  let now: { state: string; version: number; resolution_note: string | null } | null;
+  try {
+    now = await db.prepare('SELECT state, version, resolution_note FROM age_review_cases WHERE id = ?')
+      .bind(row.id).first<{ state: string; version: number; resolution_note: string | null }>();
+  } catch (error) {
+    console.error('[age-review] Could not re-read an expired case after its close threw:', error);
+    return 'unreadable';
+  }
+  if (now?.state === 'denied_closed' && now.version === row.version + 1 && now.resolution_note === AUTO_CLOSE_NOTE) return 'landed';
+  if (now && isAccountRestrictedAgeReviewState(now.state as AgeReviewState)) return 'restricted';
+  return 'changed';
+}
+
 export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> {
   if (!env.DB) return;
 
@@ -2447,38 +2501,70 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
       AND datetime(deadline_at) < datetime('now')
   `).bind(...ACCOUNT_RESTRICTED_AGE_REVIEW_STATES).all<AgeReviewCase>();
 
+  // Two passes: every expired case is closed and banned first, and only then
+  // auto-deleted (see the second pass for why).
+  const closedRows: AgeReviewCase[] = [];
+  // Whether to keep a pending auto-delete line for each case closed below
+  // (keepAutoDeletePending). Read once for the tick; if it cannot be read, no
+  // line is kept, and the second pass reads the config again for each case.
+  let keepPending = false;
+  if (expired.results.length > 0) {
+    try {
+      keepPending = (await getAgeReviewConfig(env.DB)).auto_delete_on_deny;
+    } catch (error) {
+      console.error('[age-review] Could not read the age-review config; no pending auto-delete lines this tick:', error);
+    }
+  }
   for (const row of expired.results) {
     // CAS on the version we read so the cron doesn't auto-close (and then
     // ban/delete) a case a moderator is concurrently acting on. If the row
     // changed since the SELECT above, skip it -- the moderator's action wins and
     // the next tick re-evaluates. This prevents the cron from clobbering a
     // just-cleared case or double-firing enforcement.
-    const closeResult = await env.DB.prepare(`
-      UPDATE age_review_cases
-      SET state = 'denied_closed', resolution_note = 'Auto-closed: deadline expired with no response',
-          closed_at = COALESCE(closed_at, datetime('now')), claim_link_url = NULL,
-          updated_at = datetime('now'), version = version + 1
-      WHERE id = ? AND version = ?
-    `).bind(row.id, row.version).run();
-    if (closeResult.meta?.changes !== 1) {
-      console.log('[age-review] Skipped expired case modified concurrently');
-      continue;
-    }
-    console.log('[age-review] Auto-closed expired case');
+    // A close that throws normally leaves the case restricted, so the next
+    // tick retries it. It must not end the tick: the cases closed before it in
+    // this pass are already denied_closed, so their auto-deletes run only in
+    // the second pass below, and no later tick picks them up again. A write
+    // can fail after it committed, so the case is re-read once and carried on
+    // as closed if the cron's close landed (cronCloseOutcome). Residual: if
+    // the re-read fails too and the close had committed, the case is closed
+    // but gets no bans or delete from this or any later tick; the log says so.
     try {
-      await syncAgeReviewTicketResolution(row.id, 'denied_closed', 'Auto-closed: deadline expired with no response', env);
-    } catch (error) {
-      console.error('[age-review] Failed to sync Zendesk for auto-closed case:', error);
-    }
-
-    try {
-      const config = await getAgeReviewConfig(env.DB!);
-      if (config.auto_delete_on_deny) {
-        await triggerBulkModerate(row.pubkey, 'delete-all', 'Age review expired -- auto-deleted', env);
-        console.log('[age-review] Auto-deleted content for expired case');
+      const closeResult = await env.DB.prepare(`
+        UPDATE age_review_cases
+        SET state = 'denied_closed', resolution_note = ?3,
+            closed_at = COALESCE(closed_at, datetime('now')), claim_link_url = NULL,
+            updated_at = datetime('now'), version = version + 1
+        WHERE id = ?1 AND version = ?2
+      `).bind(row.id, row.version, AUTO_CLOSE_NOTE).run();
+      if (closeResult.meta?.changes !== 1) {
+        console.log('[age-review] Skipped expired case modified concurrently');
+        continue;
       }
     } catch (error) {
-      console.error('[age-review] Auto-delete failed for expired case:', error);
+      const outcome = await cronCloseOutcome(env.DB, row);
+      if (outcome === 'restricted') {
+        console.error('[age-review] Failed to auto-close expired case; the next tick retries it:', error);
+        continue;
+      }
+      if (outcome === 'changed') {
+        console.error('[age-review] Close threw and the case has since changed; skipped:', error);
+        continue;
+      }
+      if (outcome === 'unreadable') {
+        console.error('[age-review] Close threw and could not be re-read; if it committed, this case gets no bans or delete:', error);
+        continue;
+      }
+      console.log('[age-review] Close threw but had committed; continuing as closed');
+    }
+    console.log('[age-review] Auto-closed expired case');
+    // Before the bans: from here on the case is closed, and only the second
+    // pass deletes its files. row.version + 1 is the version the close wrote.
+    if (keepPending) await keepAutoDeletePending(env, row.id, row.pubkey, row.version + 1);
+    try {
+      await syncAgeReviewTicketResolution(row.id, 'denied_closed', AUTO_CLOSE_NOTE, env);
+    } catch (error) {
+      console.error('[age-review] Failed to sync Zendesk for auto-closed case:', error);
     }
 
     try {
@@ -2530,6 +2616,55 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
       }
     } catch (error) {
       console.error('[age-review] Relay banpubkey failed for expired case:', error);
+    }
+    closedRows.push(row);
+  }
+
+  // The auto-deletes run last, after every expired case's bans in this tick.
+  // Each walks its account's files on the media server (#299), so one can spend
+  // most of this invocation's subrequests, and no case's bans or minor-flag
+  // clear may depend on what a delete leaves. On an account the restrict step
+  // suspended, the order costs the delete nothing: the relay already hides a
+  // suspended account's events and funnelcake's video list, and the media
+  // server's per-uploader list does not depend on the relay. If that suspend
+  // had failed, the relay ban hides the account's events from the delete's
+  // listing as soon as banpubkey answers, whatever funnelcake's purge mode (its
+  // purge runs before that answer, or minutes later when deferred; see #318),
+  // so the delete bans none of them itself. No per-event decision rows are
+  // written, the Zendesk tickets linked to the events or the account are not
+  // resolved, and a report naming only an event no longer reads resolved. The
+  // moderator's inline deny already behaves this way.
+  // TODO(#319): run this delete as a queued bulk job and recover a lost run.
+  for (const row of closedRows) {
+    try {
+      const config = await getAgeReviewConfig(env.DB!);
+      if (config.auto_delete_on_deny) {
+        let notes: BulkNote[] = [];
+        let failures: string[] = [];
+        try {
+          ({ notes } = await triggerBulkModerate(row.pubkey, 'delete-all', 'Age review expired -- auto-deleted', env));
+          console.log(`[age-review] Auto-deleted content for expired case${notes.length > 0 ? `; ${notes.length} note(s) for a person` : ''}`);
+        } catch (error) {
+          if (error instanceof BulkLegError) ({ notes, failures } = error);
+          throw error;
+        } finally {
+          // Kept for the case screen, whether the run succeeded or not: no one
+          // is shown a cron run's result. row.version + 1 is the version the
+          // first pass's close wrote.
+          const kept = await keepBulkNotes(env, row.id, row.pubkey, row.version + 1, 'denied_closed', notes, failures);
+          // The delete has run and its own lines are kept, so the pending line
+          // goes; if they could not be kept, the pending line stays as the only
+          // record.
+          if (keepPending && kept) await clearAutoDeletePending(env, row.id, row.pubkey, row.version + 1);
+        }
+      } else if (keepPending) {
+        // Turned off since the first pass read it: no delete was meant to run,
+        // so the pending line goes. (A read that throws leaves it, and the
+        // line's own words still hold.)
+        await clearAutoDeletePending(env, row.id, row.pubkey, row.version + 1);
+      }
+    } catch (error) {
+      console.error('[age-review] Auto-delete failed for expired case:', error);
     }
   }
 
@@ -2710,17 +2845,101 @@ export async function sendDbUnavailableAlert(webhookUrl: string, environment: st
 // rather than the async HTTP enqueue path the moderator UI uses. This runs in a
 // webhook/cron context (no UI modal to hang), so synchronous is correct here.
 
+// Keeps a transition's bulk failures and notes (see BulkNote) for the case
+// screen, which reads them back after a reload (see ageReviewNotesJobId). Not
+// part of the transition: awaited, but a failure is logged and nothing else
+// changes. At most MAX_NOTES_PER_WRITE rows in one invocation, failures first;
+// past that the last row is a failure line saying how many more were not
+// saved, so the screen is never silently short. The response still carries
+// every one. Returns false only when the rows could not be stored (nothing to
+// store, or no DB, is true); callers other than the expiry cron ignore it.
+async function keepBulkNotes(
+  env: AgeReviewEnv, caseId: string, pubkey: string, version: number, state: string,
+  notes: BulkNote[], failures: string[],
+): Promise<boolean> {
+  if ((notes.length === 0 && failures.length === 0) || !env.DB) return true;
+  try {
+    let keptFailures = failures;
+    let keptNotes = notes;
+    const total = failures.length + notes.length;
+    if (total > MAX_NOTES_PER_WRITE) {
+      const room = MAX_NOTES_PER_WRITE - 1;
+      keptFailures = failures.slice(0, room);
+      keptNotes = notes.slice(0, room - keptFailures.length);
+      const dropped = total - keptFailures.length - keptNotes.length;
+      keptFailures = [...keptFailures, notSavedWarning(pubkey, dropped)];
+      console.error(`[age-review] kept ${MAX_NOTES_PER_WRITE - 1} of ${total} bulk rows for the case screen`);
+    }
+    await ensureBulkNotesTable(env.DB);
+    await storeBulkNotes(env.DB, ageReviewNotesJobId(caseId, version, state), keptNotes, keptFailures);
+    return true;
+  } catch (error) {
+    console.error('[age-review] could not keep the bulk notes for the case screen:', error);
+    return false;
+  }
+}
+
+// The expiry cron's pending line (see autoDeletePendingWarning): kept for a
+// case as soon as the cron closes it, under the key its auto-delete's notes
+// use, so its screen says so if the delete does not run or its outcome cannot
+// be recorded (the invocation ending first is the usual cause). It does not
+// retry anything. Like keepBulkNotes, a failure is logged and nothing
+// else changes.
+async function keepAutoDeletePending(env: AgeReviewEnv, caseId: string, pubkey: string, version: number): Promise<void> {
+  if (!env.DB) return;
+  try {
+    await ensureBulkNotesTable(env.DB);
+    await storeBulkNotes(env.DB, ageReviewNotesJobId(caseId, version, 'denied_closed'), [], [autoDeletePendingWarning(pubkey)]);
+  } catch (error) {
+    console.error('[age-review] could not keep the pending auto-delete line for the case screen:', error);
+  }
+}
+
+// Clears that line once the case's auto-delete has run, whatever its outcome,
+// and the delete's own lines are kept: a failed delete's failure lines then
+// stand as the problem. If they could not be kept, the caller leaves the line
+// as the only record. Also cleared when auto-delete was turned off before the
+// delete. Exactly that row goes. A failure is logged and nothing else changes.
+async function clearAutoDeletePending(env: AgeReviewEnv, caseId: string, pubkey: string, version: number): Promise<void> {
+  if (!env.DB) return;
+  try {
+    await deleteBulkFailure(env.DB, ageReviewNotesJobId(caseId, version, 'denied_closed'), autoDeletePendingWarning(pubkey));
+  } catch (error) {
+    console.error('[age-review] could not clear the pending auto-delete line:', error);
+  }
+}
+
+// A failed bulk run, carrying its failure lines (for a run that threw, one
+// naming the error) and the notes it still produced.
+class BulkLegError extends Error {
+  constructor(message: string, readonly notes: BulkNote[], readonly failures: string[]) {
+    super(message);
+  }
+}
+
+// Returns the run's notes for a person (see BulkNote). Throws a BulkLegError on
+// a failure, with its failure lines and notes, so the leg reads failed and the
+// case screen still shows both. A run that throws before it can report has no
+// failure lines of its own, so it gets one naming the error.
 async function triggerBulkModerate(
   pubkey: string,
   action: AccountBulkAction,
   reason: string,
   env: AgeReviewEnv,
-): Promise<void> {
-  const result = await runBulkModeration(env, pubkey, action, reason);
+): Promise<{ notes: BulkNote[] }> {
+  let result: Awaited<ReturnType<typeof runBulkModeration>>;
+  try {
+    result = await runBulkModeration(env, pubkey, action, reason);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new BulkLegError(message, [], [bulkLegStoppedWarning(pubkey, message)]);
+  }
+  const notes = result.notes;
   if (!result.success) {
     const summary = result.failures.slice(0, 3).join('; ');
-    throw new Error(summary || 'Bulk moderate failed');
+    throw new BulkLegError(summary || 'Bulk moderate failed', notes, result.failures);
   }
+  return { notes };
 }
 
 // ---------------------------------------------------------------------------

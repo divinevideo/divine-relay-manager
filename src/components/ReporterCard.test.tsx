@@ -1,15 +1,225 @@
-// ABOUTME: Reporter cards in an event's related reports show category names,
-// ABOUTME: the same labels the reports list uses, in both card layouts
+// ABOUTME: Tests that reporter labels say only what is known (#132) and that reporter
+// ABOUTME: cards show category names, the same labels the reports list uses.
 
-import { render, screen } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { act, render, screen } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { NostrEvent } from '@nostrify/nostrify';
-import { ReporterList } from './ReporterCard';
+import { RELAY_PROFILE_BADGE } from '@/lib/constants';
+import { ReporterCard, ReporterInline, ReporterList } from './ReporterCard';
 
-// The profile lookup is a network read the category badge does not use.
-vi.mock('@/hooks/useAuthor', () => ({
-  useAuthor: () => ({ data: undefined, isLoading: false }),
+const relay = vi.hoisted(() => ({ query: vi.fn(), req: vi.fn() }));
+vi.mock('@nostrify/react', () => ({ useNostr: () => ({ nostr: relay }) }));
+
+const authorState = vi.hoisted(() => ({
+  data: undefined as { metadata?: Record<string, string>; isFunnelcakeUser: boolean } | undefined,
 }));
+vi.mock('@/hooks/useAuthor', () => ({
+  useAuthor: () => ({ data: authorState.data, isLoading: false }),
+}));
+
+const appState = vi.hoisted(() => ({ apiUrl: 'https://api.one.example.test' }));
+vi.mock('@/hooks/useAppContext', () => ({ useAppContext: () => ({ config: { apiUrl: appState.apiUrl } }) }));
+
+const REPORTER = 'a'.repeat(64);
+
+function reportEvent(n: number): NostrEvent {
+  return {
+    id: n.toString(16).padStart(64, '0'),
+    pubkey: REPORTER,
+    kind: 1984,
+    content: '',
+    tags: [],
+    created_at: 1_750_000_000 + n,
+    sig: 'f'.repeat(128),
+  };
+}
+
+/** The reporter's filing history as the relay returns it: events, then EOSE. */
+function relayHas(count: number) {
+  const events = Array.from({ length: count }, (_, i) => reportEvent(i));
+  relay.query.mockResolvedValue(events);
+  relay.req.mockImplementation(async function* () {
+    for (const e of events) yield ['EVENT', 'sub', e];
+    yield ['EOSE', 'sub'];
+  });
+}
+
+function renderInline(client = new QueryClient({ defaultOptions: { queries: { retry: false } } })) {
+  return render(
+    <QueryClientProvider client={client}>
+      <ReporterInline pubkey={REPORTER} />
+    </QueryClientProvider>,
+  );
+}
+
+beforeEach(() => {
+  appState.apiUrl = 'https://api.one.example.test';
+  relay.query.mockReset();
+  relay.req.mockReset();
+  relayHas(0);
+  authorState.data = { metadata: { name: 'synthetic-reporter' }, isFunnelcakeUser: false };
+});
+
+describe('ReporterInline relay-profile badge', () => {
+  it('says the profile is on the relay, not that the reporter is a Divine user', () => {
+    authorState.data = { metadata: { name: 'synthetic-reporter' }, isFunnelcakeUser: true };
+    renderInline();
+    expect(screen.getByText('Profile on relay')).toBeInTheDocument();
+    // Neutral, so neither state reads as a trust signal (green for good, a colour for other).
+    expect(screen.getByText('Profile on relay').className).not.toMatch(/green|purple/);
+    expect(screen.queryByText('Divine')).not.toBeInTheDocument();
+  });
+
+  it('says no relay profile was found, not that the reporter is a Nostr user', () => {
+    renderInline();
+    expect(screen.getByText('No relay profile found')).toBeInTheDocument();
+    // Neutral, so neither state reads as a trust signal (green for good, a colour for other).
+    expect(screen.getByText('No relay profile found').className).not.toMatch(/green|purple/);
+    expect(screen.queryByText('Nostr')).not.toBeInTheDocument();
+  });
+
+  it('shows no badge when the profile lookup produced no answer', () => {
+    authorState.data = undefined;
+    renderInline();
+    expect(screen.queryByText('Profile on relay')).not.toBeInTheDocument();
+    expect(screen.queryByText('No relay profile found')).not.toBeInTheDocument();
+  });
+});
+
+describe('ReporterInline report count', () => {
+  // getTrustLevel used to badge 50+ filings as "Trusted": a count dressed as a
+  // judgment of the reporter. Only the count is known.
+  it('shows the count of reports filed without a trust label', async () => {
+    relayHas(60);
+    renderInline();
+    expect(await screen.findByText('60 reports filed')).toBeInTheDocument();
+    for (const label of ['Trusted', 'Active', 'Regular', 'New', 'First-time']) {
+      expect(screen.queryByText(label)).not.toBeInTheDocument();
+    }
+  });
+
+  // The count is kind 1984 events this relay holds, not every report the account
+  // has filed anywhere; the hover text says so.
+  it('says on hover that the count is only what this relay stores', async () => {
+    relayHas(4);
+    renderInline();
+    const count = await screen.findByText('4 reports filed');
+    expect(count).toHaveAttribute('title', 'Reports by this account stored on this relay');
+  });
+
+  it('marks a count that reached the read limit as a floor', async () => {
+    relayHas(100);
+    renderInline();
+    expect(await screen.findByText('100+ reports filed')).toBeInTheDocument();
+    // The floor only holds if the read asked for exactly that many.
+    expect(relay.req).toHaveBeenCalledWith(
+      [{ kinds: [1984], authors: [REPORTER], limit: 100 }],
+      expect.anything(),
+    );
+  });
+
+  it('does not print a failed read as zero reports', async () => {
+    relay.query.mockResolvedValue([]); // NPool.query's answer to a failed read
+    relay.req.mockImplementation(async function* () {
+      yield ['CLOSED', 'sub', 'error: could not complete query'];
+    });
+    renderInline();
+    // The count query retries once (about a second) before it gives up.
+    expect(await screen.findByText('report count unavailable', undefined, { timeout: 3000 })).toBeInTheDocument();
+    expect(relay.req).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText('0 reports filed')).not.toBeInTheDocument();
+  });
+});
+
+describe('ReporterInline report count after a failed refresh', () => {
+  // A count that was read successfully stays true as of that read; one failed
+  // background refresh should not replace it with "unavailable".
+  it('keeps showing the last good count when a later refresh fails', async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    relayHas(4);
+    renderInline(client);
+    expect(await screen.findByText('4 reports filed')).toBeInTheDocument();
+
+    relay.query.mockResolvedValue([]);
+    relay.req.mockImplementation(async function* () {
+      yield ['CLOSED', 'sub', 'error: could not complete query'];
+    });
+    await act(async () => {
+      await client.refetchQueries({ queryKey: ['reporter-count'] });
+    });
+    // TanStack notifies observers on a later tick; let that render land before
+    // asserting what is (and is not) on screen.
+    await act(async () => {
+      await new Promise(resolve => setTimeout(resolve, 20));
+    });
+
+    expect(client.getQueryState(['reporter-count', appState.apiUrl, REPORTER])?.status).toBe('error');
+    expect(screen.getByText('4 reports filed')).toBeInTheDocument();
+    expect(screen.queryByText('report count unavailable')).not.toBeInTheDocument();
+  });
+});
+
+describe('ReporterInline report count cache', () => {
+  // One QueryClient serves every environment, and each environment has its own
+  // relay, so a cached count must not follow the moderator across a switch.
+  it('reads the count again after the environment changes', async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    relayHas(3);
+    const first = renderInline(client);
+    expect(await screen.findByText('3 reports filed')).toBeInTheDocument();
+    first.unmount();
+
+    appState.apiUrl = 'https://api.two.example.test';
+    relayHas(7);
+    renderInline(client);
+    expect(await screen.findByText('7 reports filed')).toBeInTheDocument();
+  });
+});
+
+describe('ReporterInline nip05', () => {
+  it('shows the nip05 the profile claims, marked unverified', () => {
+    authorState.data = { metadata: { name: 'synthetic-reporter', nip05: 'synthetic@example.test' }, isFunnelcakeUser: true };
+    renderInline();
+    expect(screen.getByText('synthetic@example.test')).toBeInTheDocument();
+    expect(screen.getByText('(unverified)')).toBeInTheDocument();
+  });
+
+  it('shows nothing for a reporter with no nip05', () => {
+    renderInline();
+    expect(screen.queryByText('(unverified)')).not.toBeInTheDocument();
+  });
+
+  it('shows nothing for a reporter with no profile at all', () => {
+    authorState.data = { isFunnelcakeUser: false };
+    renderInline();
+    expect(screen.queryByText('(unverified)')).not.toBeInTheDocument();
+    expect(screen.getByText('No relay profile found')).toBeInTheDocument();
+  });
+});
+
+describe('ReporterCard relay-profile globe', () => {
+  const globe = () => screen.queryByRole('img', { name: RELAY_PROFILE_BADGE.absent.label });
+
+  describe.each([['full', false], ['compact', true]] as const)('%s layout', (_name, compact) => {
+    it('shows no globe when the profile lookup produced no answer', () => {
+      authorState.data = undefined;
+      render(<ReporterCard pubkey={REPORTER} compact={compact} />);
+      expect(globe()).not.toBeInTheDocument();
+    });
+
+    it('shows the globe once the lookup answers that the relay has no profile', () => {
+      render(<ReporterCard pubkey={REPORTER} compact={compact} />);
+      expect(globe()).toBeInTheDocument();
+    });
+
+    it('shows no globe when the relay has a profile', () => {
+      authorState.data = { metadata: { name: 'synthetic-reporter' }, isFunnelcakeUser: true };
+      render(<ReporterCard pubkey={REPORTER} compact={compact} />);
+      expect(globe()).not.toBeInTheDocument();
+    });
+  });
+});
 
 // The current Divine app's profile CSAM report shape.
 function profileReport(idChar: string, reporterChar: string): NostrEvent {

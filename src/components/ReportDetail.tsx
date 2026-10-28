@@ -32,6 +32,7 @@ import { ThreadContext } from "@/components/ThreadContext";
 import { UserProfileCard } from "@/components/UserProfileCard";
 import { UserIdentifier } from "@/components/UserIdentifier";
 import { ReporterInline } from "@/components/ReporterCard";
+import { ReportClientText } from "@/components/ReportClientText";
 import { AISummary } from "@/components/AISummary";
 
 import { ThreadModal } from "@/components/ThreadModal";
@@ -833,11 +834,14 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                         />
                       </div>
                       {/* Report details */}
-                      <div className="flex items-center gap-2 mb-1">
-                        <Badge variant="destructive" className="text-xs">{catLabel}</Badge>
-                        <span className="text-xs text-muted-foreground">
+                      <div className="flex items-center gap-2 mb-1 min-w-0">
+                        {/* The app name is reporter-set and can be long; it truncates
+                            while the badge and date keep their size. */}
+                        <Badge variant="destructive" className="text-xs shrink-0">{catLabel}</Badge>
+                        <span className="text-xs text-muted-foreground shrink-0">
                           {new Date(r.created_at * 1000).toLocaleDateString()}
                         </span>
+                        <ReportClientText reports={[r]} />
                       </div>
                       {r.content ? (
                         <p className="text-sm text-muted-foreground">{r.content}</p>
@@ -852,7 +856,9 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                 )}
               </CardContent>
             </Card>
-          ) : report.content ? (
+          ) : (
+            // Shown even without a reason, so a report with no group list (no
+            // target, or its group filtered out) still says which app it names.
             <Card className="border-red-200 bg-red-50/50 dark:bg-red-950/20">
               <CardHeader className="py-3">
                 <CardTitle className="text-sm flex items-center gap-2 text-red-700 dark:text-red-400">
@@ -869,11 +875,16 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                       navigate(`/events?pubkey=${pubkey}`);
                     }}
                   />
+                  <ReportClientText reports={[report]} />
                 </div>
-                <p className="text-sm">{report.content}</p>
+                {report.content ? (
+                  <p className="text-sm">{report.content}</p>
+                ) : (
+                  <p className="text-sm text-muted-foreground italic">No reason provided</p>
+                )}
               </CardContent>
             </Card>
-          ) : null}
+          )}
 
           {/* Decision History - show if target already has decisions */}
           {decisionLog.hasDecisions && (
@@ -1324,17 +1335,6 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
               )}
             </CardContent>
           </Card>
-
-          {/*
-            REMOVED: Redundant reporter section (Jan 2026)
-            - Was showing ReporterList (multiple) or ReporterInfo (single) here
-            - Now redundant because "Why This Was Reported" section above shows reporters
-              with trust level badges via ReporterInline component
-            - To restore: use <ReporterList reports={allReportsForTarget} maxVisible={5} />
-              for multiple reports, or <ReporterInfo profile={context.reporter.profile}
-              pubkey={context.reporter.pubkey} reportCount={context.reporter.reportCount} />
-              for single reporter
-          */}
 
           <Separator />
 

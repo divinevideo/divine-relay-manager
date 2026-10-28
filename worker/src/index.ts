@@ -41,6 +41,8 @@ import {
 } from './age-review';
 import { handleAccountStatus } from './account-status';
 import { handleBulkModerateEnqueue, handleBulkJobStatus, handleBulkKindCounts, processBulkJob, LOOSENS_AGE_REVIEW_HOLD } from './bulk-moderate';
+import { handleBulkJobNotes, handleCaseBulkNotesJob, markStillHiddenRestored } from './bulk-notes';
+import { readMediaRecord, type BlossomBlob } from './media-server';
 import type { BulkAction, BulkJobMessage } from '../../shared/bulk-moderation';
 import { ensureZendeskTable, addZendeskInternalNote, syncZendeskAfterAction, getLinkedTickets, closeTicketById } from './zendesk-sync';
 import { buildReportNote, parseKind0Profile, type ReportedProfile } from './report-note';
@@ -49,7 +51,7 @@ import { coordinateEventVisibility, type EventVisibilityResult } from './event-v
 import { markHumanAction, markHumanReviewed } from './human-decision';
 import { AUTO_HIDE_STATE_ACTIONS } from '../../shared/autohide';
 import { getResolvedTargets, getAutoHideStates } from './resolution-state';
-import { isHex64 } from './hex';
+import { isHex64, isLowerHex64 } from './hex';
 import { readResolutionLabelTargets } from './resolution-labels';
 import { runRetentionDisposal } from './retention';
 import { errorNameOnly } from './error-name';
@@ -404,6 +406,10 @@ interface ApiResponse {
   // seeing only "conflict" cannot tell this from any other refusal.
   from?: string;
   current?: string;
+  // /api/moderate-media, for a request that names the account: what the media
+  // server shows for the file (its own status name), when that is why the
+  // request was refused.
+  mediaServer?: string;
   // /api/tickets: Zendesk tickets linked to a report target.
   tickets?: Array<{ ticket_id: number; status: string; url: string }>;
 }
@@ -787,6 +793,20 @@ export default {
       const bulkStatusMatch = path.match(/^\/api\/bulk-moderate\/status\/([^/]+)$/);
       if (bulkStatusMatch && request.method === 'GET') {
         return handleBulkJobStatus(decodeURIComponent(bulkStatusMatch[1]), env, corsHeaders);
+      }
+
+      // A finished job's notes for a person (#299), a page at a time.
+      const bulkNotesMatch = path.match(/^\/api\/bulk-moderate\/notes\/([^/]+)$/);
+      if (bulkNotesMatch && request.method === 'GET') {
+        return handleBulkJobNotes(
+          decodeURIComponent(bulkNotesMatch[1]), url.searchParams.get('after'), url.searchParams.get('limit'), env, corsHeaders,
+        );
+      }
+
+      // The notes key of an age-review case's latest transition that kept any.
+      const caseNotesMatch = path.match(/^\/api\/bulk-moderate\/case-notes\/([^/]+)$/);
+      if (caseNotesMatch && request.method === 'GET') {
+        return handleCaseBulkNotesJob(decodeURIComponent(caseNotesMatch[1]), env, corsHeaders);
       }
 
       // Per-kind event counts for an account, from a paged listing (the by-kind
@@ -1516,9 +1536,12 @@ async function runRelayRpc(
   // one, and rows written with a non-canonical value are stored byte-exactly and are
   // removable only by sending that same value back. Refusing it here would make
   // cleanup stricter than the thing that created the mess, leaving those rows stuck in
-  // the ban list with no way out of the UI. Nothing is risked by allowing it: an
-  // age-review case is keyed to a real lowercase pubkey, so a non-canonical value has
-  // no case to skip past, which is why the guard also lets it through.
+  // the ban list with no way out of the UI. Nothing is risked by allowing it: a
+  // non-canonical request value reaches only the relay rows written with that same
+  // value (Keycast refuses it outright), so it lifts nothing on the account an
+  // age-review case holds, which is why the guard also lets it through. A stored
+  // case can still carry an uppercase pubkey until #313; for a lowercase reversal
+  // the guard's lookup finds it (see getActiveAgeReviewCase).
   if (
     (body.method === 'banpubkey' || body.method === 'suspendpubkey')
     && !/^[0-9a-f]{64}$/.test(target)
@@ -2286,6 +2309,20 @@ async function handleCheckResult(
   }
 }
 
+// Marks a file's still-hidden notes restored once a guarded Restore (one that
+// named the account and passed its checks) finds the file public, so a reload
+// of the panel that offered it shows it restored (#299). `sha256` is the
+// lowercase hash the notes store. Non-critical: the answer to the request is
+// the same whether or not this lands.
+async function markNotesRestored(env: Env, sha256: string): Promise<void> {
+  if (!env.DB) return;
+  try {
+    await markStillHiddenRestored(env.DB, sha256, new Date().toISOString());
+  } catch (err) {
+    console.error("[handleModerateMedia] could not mark the file's notes restored:", err);
+  }
+}
+
 async function handleModerateMedia(
   request: Request,
   env: Env,
@@ -2309,12 +2346,89 @@ async function handleModerateMedia(
     }
 
     // The hash used for the upstream write. Left exactly as sent unless the
-    // expected-state path canonicalises it below, so callers that send no
-    // `from` see no change in what reaches moderation-service.
+    // account check or the expected-state path below canonicalises it, so
+    // callers that send neither `pubkey` nor `from` see no change in what
+    // reaches moderation-service.
     let sha256 = body.sha256;
 
     if (!body.action) {
       return jsonResponse({ success: false, error: 'Missing action' }, 400, corsHeaders);
+    }
+
+    // The account check (#299), opt-in like `from` below: a caller that names
+    // the account the file belongs to gets these refusals before anything is
+    // written, and a caller that names none is unchanged. A bulk action's
+    // "still hidden" note sends it with its Restore, because `from` alone
+    // cannot tell a stale note's file from one a newer age review now holds:
+    // both read QUARANTINE.
+    //   - The pubkey must be the account's 64 lowercase hex.
+    //   - The account must have no open age review. Fail-closed: a lookup that
+    //     cannot run refuses (503), as the reversal guards do.
+    //   - The media server must record that account as the file's owner, so a
+    //     note built from a stale list row cannot restore another account's
+    //     file. Fail-closed too.
+    //   - A SAFE must find the file hidden or public on the media server, not
+    //     blocked, deleted or 18+-gated (checked just before the write, below).
+    // Once an account is named, the hash is lowercased for every step after:
+    // the owner read, the write and the mark (moderation-service keys its
+    // record case-sensitively; see the `from` block below).
+    // The checks run before the write, not with it: a case opened, and its
+    // withhold written, in the seconds between the two would be overwritten.
+    // The same check-then-act shape as ageReviewActiveGuard's other callers.
+    const subject = (body as { pubkey?: unknown }).pubkey;
+    // The media server's record of the file, read by the owner check and used
+    // again by the SAFE check before the write.
+    let blob: BlossomBlob | undefined;
+    if (subject !== undefined) {
+      if (typeof subject !== 'string' || !isLowerHex64(subject)) {
+        return jsonResponse(
+          { success: false, error: "`pubkey` must be the account's 64-character lowercase hex pubkey", code: 'invalid_pubkey' },
+          400,
+          corsHeaders
+        );
+      }
+      if (typeof body.sha256 !== 'string' || !isHex64(body.sha256)) {
+        return jsonResponse(
+          { success: false, error: '`sha256` must be a 64-character hex hash to name an account', code: 'invalid_sha256' },
+          400,
+          corsHeaders
+        );
+      }
+      sha256 = body.sha256.toLowerCase();
+      // The open-review check reads age_review_cases, so the schema must exist
+      // first (a fresh D1 has none). Bootstrapping is part of the check, as in
+      // runRelayRpc: a DDL failure reaches the guard's fail-closed refusal
+      // (503), and a caller that names no account never waits on it.
+      if (env.DB) {
+        try {
+          await ensureSchemaOnce(env.DB);
+        } catch (err) {
+          console.error('[handleModerateMedia] age-review schema bootstrap failed:', err);
+        }
+      }
+      const held = await ageReviewActiveGuard(
+        subject, env, corsHeaders,
+        'This account has an open age review; restore its files through that case.',
+        { failClosed: true },
+      );
+      if (held) return held;
+      try {
+        blob = await readMediaRecord(sha256, env);
+      } catch (err) {
+        console.error('[handleModerateMedia] owner read failed; refusing:', err);
+        return jsonResponse(
+          { success: false, error: 'Could not read who owns this file; refusing to act', code: 'owner_unreadable' },
+          503,
+          corsHeaders
+        );
+      }
+      if (blob.owner !== subject) {
+        return jsonResponse(
+          { success: false, error: 'Another account owns this file; refusing to act for this one', code: 'owner_mismatch' },
+          409,
+          corsHeaders
+        );
+      }
     }
 
     // Build auth headers: Bearer when SERVICE_API_TOKEN is configured, CF Access otherwise
@@ -2348,9 +2462,10 @@ async function handleModerateMedia(
     // AGE_RESTRICTED must never be used for a minor). Both are the same request.
     //
     // ageReviewActiveGuard refuses that class of reversal for unbanpubkey and
-    // unsuspendpubkey, but it is pubkey-keyed and this endpoint is hash-keyed, so
-    // it was never wired here. `from` closes the gap for callers that opt in,
-    // without a breaking change for the ones that do not.
+    // unsuspendpubkey. It is pubkey-keyed and this endpoint is hash-keyed, so it
+    // runs here only for callers that name the account (the account check
+    // above). `from` closes the gap for callers that opt in, without a breaking
+    // change for the ones that do not.
     //
     // The check and the write are two separate steps, not one. Reading the state
     // is a request to moderation-service and changing it is another, with no lock
@@ -2401,10 +2516,11 @@ async function handleModerateMedia(
       // (handlePublicCheckResult, src/index.mjs:1494), so nothing that survives
       // here is something the upstream would have rejected.
       //
-      // Deliberately scoped to the expected-state path. Callers that send no
-      // `from` pass sha256 in a POST body, which moderation-service validates
-      // itself, so widening this would change behaviour for existing callers to
-      // no benefit and is left out of this change.
+      // Scoped to the callers that opt in: this path and the account check
+      // above, which validates the same shape. Callers that send neither pass
+      // sha256 in a POST body, which moderation-service validates itself, so
+      // widening this would change behaviour for existing callers to no
+      // benefit and is left out of this change.
       if (typeof body.sha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(body.sha256)) {
         return jsonResponse(
           { success: false, error: '`sha256` must be a 64-character hex hash to use `from`', code: 'invalid_sha256' },
@@ -2421,10 +2537,11 @@ async function handleModerateMedia(
       // an uppercase hash a DIFFERENT key, so unnormalised this reads dd44... and
       // writes DD44... while reporting that it checked first.
       //
-      // Only the expected-state path is normalised, matching how the validation
-      // above is scoped. That an uppercase hash can open a second row at all is a
-      // pre-existing hazard of this endpoint, not something introduced here, and
-      // fixing it for every caller belongs in its own change.
+      // Only this path and the account check above normalise, matching how the
+      // validation is scoped (for a caller that sent both, this repeats it). That
+      // an uppercase hash can open a second row at all is a pre-existing hazard
+      // of this endpoint, not something introduced here, and fixing it for every
+      // caller belongs in its own change.
       sha256 = body.sha256.toLowerCase();
 
       // NOTE: the read goes to MODERATION_SERVICE_URL and the write below goes to
@@ -2484,6 +2601,17 @@ async function handleModerateMedia(
       }
 
       if (current !== expected) {
+        // A guarded restore that finds the record already public. The file is
+        // public only if the media server serves it too: a status set in its
+        // own admin UI, or a SAFE whose call to it failed, leaves the record
+        // SAFE over a file it still hides. Public on both: what the Restore
+        // offered has happened, so its notes read restored too. Otherwise the
+        // refusal says what the media server shows, and nothing is marked.
+        const recordSafe = blob !== undefined && body.action === 'SAFE' && current === 'SAFE';
+        const mediaServerDisagrees = recordSafe && blob!.level !== 'open';
+        if (recordSafe && !mediaServerDisagrees) {
+          await markNotesRestored(env, sha256);
+        }
         // Names both states: an operator seeing only "conflict" cannot tell this
         // from any other 409 and will retry it. Echoes the NORMALISED value, so
         // what is reported is what was actually compared.
@@ -2494,11 +2622,37 @@ async function handleModerateMedia(
             code: 'state_mismatch',
             from: expected,
             current,
+            // What the media server shows, when it disagrees with a SAFE record.
+            ...(mediaServerDisagrees ? { mediaServer: blob!.raw } : {}),
           },
           409,
           corsHeaders
         );
       }
+    }
+
+    // A Restore (SAFE for a named account) is for a file the media server
+    // hides, or already serves, where the SAFE only aligns the record. One it
+    // shows blocked, deleted or behind the 18+ gate was changed there after the
+    // note was kept, often in its own admin, which never tells
+    // moderation-service: the record can still read QUARANTINE and pass `from`.
+    // SAFE sets a file Active whatever it was, so it would make that file
+    // public. Refuse, mark nothing, and say what the media server shows.
+    // Known limit: the media server caches a file's status for up to 5
+    // minutes, so for that long after a block, delete or 18+ gate set in its
+    // own admin, this read can still show the old status and let a Restore
+    // through (see DEPLOYMENT.md, known limits).
+    if (blob !== undefined && body.action === 'SAFE' && blob.level !== 'hidden' && blob.level !== 'open') {
+      return jsonResponse(
+        {
+          success: false,
+          error: `Refusing SAFE: the media server shows this file as ${blob.raw}`,
+          code: 'media_server_state',
+          mediaServer: blob.raw,
+        },
+        409,
+        corsHeaders
+      );
     }
 
     const moderationRequest = new Request(`${getModerationAdminUrl(env)}/api/v1/moderate`, {
@@ -2527,6 +2681,11 @@ async function handleModerateMedia(
     }
 
     const result = await response.json() as { success: boolean; sha256: string; action: string };
+
+    // A guarded restore landed.
+    if (subject !== undefined && body.action === 'SAFE') {
+      await markNotesRestored(env, sha256);
+    }
 
     // Sync any linked Zendesk tickets
     // Note: media actions use sha256, but current ticket mapping is by event_id/pubkey

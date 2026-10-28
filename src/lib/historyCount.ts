@@ -16,3 +16,9 @@ export function historyStat(
   if (incomplete) return `${noun} unavailable`;
   return `${historyCount(count, truncated)} ${noun}`;
 }
+
+// For a read capped at `limit` events: reaching the cap means there may be
+// more, so the count is printed as a floor rather than an exact total.
+export function reportsFiledLabel(count: number, limit: number): string {
+  return `${historyCount(count, count >= limit)} report${count === 1 ? '' : 's'} filed`;
+}

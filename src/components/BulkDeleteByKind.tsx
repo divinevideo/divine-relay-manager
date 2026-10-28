@@ -9,7 +9,8 @@ import { useAgeReviewGuardRedirect } from "@/hooks/useAgeReviewGuardRedirect";
 import { useToast } from "@/hooks/useToast";
 import { getKindName } from "@/lib/kindNames";
 import { ApiError, type BulkJob } from "@/lib/adminApi";
-import { isVersionedKind, parseFailure, parseOverflowMarker } from "../../shared/bulk-moderation";
+import { countIssues, isVersionedKind, parseFailure } from "../../shared/bulk-moderation";
+import { describeBulkFailure } from "@/lib/bulkFailures";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
@@ -84,30 +85,6 @@ interface ExpectedCount {
   kind: number;
 }
 
-// Each stored failure is one problem, except the "+N more" overflow marker,
-// which stands for N of them.
-function countIssues(failures: string[]): number {
-  return failures.reduce((n, failure) => n + (parseOverflowMarker(failure) ?? 1), 0);
-}
-
-// The worker's failure strings in words a moderator can act on. Event ids stay
-// whole: a shortened id can't be looked up.
-function describeFailure(failure: string): string {
-  const parsed = parseFailure(failure);
-  switch (parsed.type) {
-    case "job":
-      // An abandoned job in words; any other reason the job stopped, as given.
-      return parsed.abandoned ? "the server stopped reporting progress" : parsed.reason;
-    case "enumeration":
-      // The account is already the dialog's subject, so drop its pubkey.
-      return parsed.warning;
-    case "event":
-      return `event ${parsed.id} failed: ${parsed.error}`;
-    default:
-      return failure;
-  }
-}
-
 // " of Y" (or " of at least Y") after a deleted count, or nothing where it would
 // read as nonsense: past the count ("20 of 1", a sweep also deletes older
 // versions and later posts), or against an incomplete zero ("of at least 0").
@@ -156,12 +133,12 @@ function describeOutcome(job: BulkJob, expected: ExpectedCount | undefined, cont
     return { clean, title, description: `Deleted ${deleted} ${kindName}events` };
   }
   const head = `Deleted ${deleted}${ofTotal(expected, deleted)} ${kindName}events. ${contentHidden ? HIDDEN_ACCOUNT : RERUN_SAFE}`;
-  const detail = job.failures.slice(0, 2).map(describeFailure).join("; ");
+  const detail = job.failures.slice(0, 2).map(describeBulkFailure).join("; ");
   if (job.status === "failed") {
     // Why it stopped is its `job:` entry, which follows any per-event failures
     // (the last stored slot in a full list).
     const stop = job.failures.find((failure) => parseFailure(failure).type === "job");
-    return { clean, title: "Bulk delete stopped early", description: `${head} Reason: ${stop ? describeFailure(stop) : detail}` };
+    return { clean, title: "Bulk delete stopped early", description: `${head} Reason: ${stop ? describeBulkFailure(stop) : detail}` };
   }
   return {
     clean,
