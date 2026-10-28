@@ -78,6 +78,9 @@ export function createBulkWorld(options: BulkWorldOptions = {}) {
   const uploaderLists = new Map<string, string[]>();
   const records = new Map<string, string>();
   const writes: Array<{ sha256: string; action: string }> = [];
+  // Every write sent to moderation-service, including one it answered 500 to
+  // (see writeFailures); `writes` holds only those it applied.
+  const writeAttempts: Array<{ sha256: string; action: string }> = [];
   const listReads: string[] = [];
   // Files whose per-file read comes back without an owner.
   const ownerless = new Set<string>();
@@ -188,6 +191,7 @@ export function createBulkWorld(options: BulkWorldOptions = {}) {
 
     statusOf(sha256: string): BlobStatus | undefined { return blobs.get(sha256)?.status; },
     writesFor(sha256: string): string[] { return writes.filter((w) => w.sha256 === sha256).map((w) => w.action); },
+    writeAttemptsFor(sha256: string): string[] { return writeAttempts.filter((w) => w.sha256 === sha256).map((w) => w.action); },
 
     // NIP-86 banevent, as funnelcake applies it: hidden from REQ and from the
     // public video list at once.
@@ -271,6 +275,7 @@ export function createBulkWorld(options: BulkWorldOptions = {}) {
         }
         if (url.pathname === '/api/v1/moderate' && init?.method === 'POST') {
           const { sha256, action } = JSON.parse(String(init.body)) as { sha256: string; action: string };
+          writeAttempts.push({ sha256, action });
           if (writeFailures.has(sha256)) return new Response('err', { status: 500 });
           world.moderate(sha256, action);
           return new Response(JSON.stringify({ success: true }), { status: 200 });
