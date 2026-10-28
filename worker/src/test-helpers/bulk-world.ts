@@ -78,8 +78,10 @@ export function createBulkWorld(options: BulkWorldOptions = {}) {
   const uploaderLists = new Map<string, string[]>();
   const records = new Map<string, string>();
   const writes: Array<{ sha256: string; action: string }> = [];
-  // Every write sent to moderation-service, including one it answered 500 to
-  // (see writeFailures); `writes` holds only those it applied.
+  // Every write sent through the moderation-service binding (moderationApi),
+  // including one it answered 500 to (see writeFailures). `writes` holds every
+  // decision applied: those the binding applied, and those a test applied
+  // directly with world.moderate(), which this does not record.
   const writeAttempts: Array<{ sha256: string; action: string }> = [];
   const listReads: string[] = [];
   // Files whose per-file read comes back without an owner.

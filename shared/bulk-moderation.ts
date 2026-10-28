@@ -231,12 +231,12 @@ export const KIND_COUNTS_REQUEST_TIMEOUT_MS = 30_000;
 // A job's `failures` are strings the worker writes and the screens read back.
 // The worker builds them only through the builders here, and the screens split
 // them into the kinds below only through parseFailure, so a reworded prefix
-// can't silently stop the other side from recognising a line. The words after the
-// prefix are another matter: to put some of them in plain words, the screens
-// match them again with regexes typed out in src/lib/bulkFailures.ts, not with
-// code here. Only that file's tests keep the two in step. They build their
-// inputs with these builders, so rewording one fails them until the matching
-// regex is changed too:
+// can't silently stop the other side from recognising a line. The words after
+// the prefix are another matter: to put some of them in plain words, the
+// screens match them again with regexes typed out in src/lib/bulkFailures.ts,
+// not with code here. Only tests keep the two in step: that file's own and the
+// results panel's build their inputs with these builders, so rewording one
+// fails them until the matching regex is changed too:
 //   event:<event id>:<error>       one event that could not be deleted
 //   media:<sha256>:<error>         one file that could not be changed, or was
 //                                  left unchanged because its status could not
