@@ -411,7 +411,11 @@ describe('handleUpdateAgeReviewCase', () => {
   // that could not be read, a file the run could not change) fails that leg
   // and nothing else: the case still moves, the other legs still run, and
   // nothing runs the bulk action again.
-  async function clearWithBulkResult(result: Record<string, unknown>, arrange: () => void = () => {}) {
+  async function transitionWithBulkResult(
+    transition: { from: AgeReviewCase['state']; body: Record<string, unknown> & { state: AgeReviewCase['state'] } },
+    result: Record<string, unknown>,
+    arrange: () => void = () => {},
+  ) {
     vi.mocked(runBulkModeration).mockClear();
     vi.mocked(unsuspendUser).mockClear();
     vi.mocked(runBulkModeration).mockResolvedValueOnce(result as never);
@@ -419,16 +423,18 @@ describe('handleUpdateAgeReviewCase', () => {
     vi.mocked(ensureBulkNotesTable).mockClear();
     arrange();
     // The transition writes version 5.
-    const reviewCase = makeCase({ state: 'restricted_pending_user_response', version: 4 });
-    const clearedCase = { ...reviewCase, state: 'cleared' as const };
+    const reviewCase = makeCase({ state: transition.from, version: 4 });
+    const movedCase = { ...reviewCase, state: transition.body.state };
     let selectCount = 0;
     const reviewDb = {
       prepare: vi.fn().mockImplementation((sql: string) => ({
+        // The deny step reads auto_delete_on_deny unbound; it is on.
+        first: vi.fn().mockResolvedValue(sql.includes('auto_delete_on_deny') ? { value: 'true' } : null),
         bind: vi.fn().mockReturnValue({
           first: vi.fn().mockImplementation(async () => {
             if (sql.includes('WHERE id = ?')) {
               selectCount += 1;
-              return selectCount === 1 ? reviewCase : clearedCase;
+              return selectCount === 1 ? reviewCase : movedCase;
             }
             return null;
           }),
@@ -438,7 +444,7 @@ describe('handleUpdateAgeReviewCase', () => {
     };
     const req = new Request('https://api.test/api/age-review/cases/case-1', {
       method: 'PATCH',
-      body: JSON.stringify({ state: 'cleared', resolution: 'not_minor', resolution_note: 'Age verified' }),
+      body: JSON.stringify(transition.body),
     });
     const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(reviewDb), corsHeaders);
     const body = await res.json() as {
@@ -447,6 +453,28 @@ describe('handleUpdateAgeReviewCase', () => {
     };
     return { res, body, reviewDb };
   }
+
+  const clearWithBulkResult = (result: Record<string, unknown>, arrange: () => void = () => {}) => transitionWithBulkResult(
+    { from: 'restricted_pending_user_response', body: { state: 'cleared', resolution: 'not_minor', resolution_note: 'Age verified' } },
+    result,
+    arrange,
+  );
+
+  // The restrict and deny steps keep and return their notes the same way the
+  // clear does: they are the steps a minor's files most depend on.
+  it.each([
+    { step: 'restrict', from: 'under_moderator_review' as const, state: 'restricted_pending_user_response' as const, action: 'age-restrict-all' },
+    { step: 'deny', from: 'restricted_pending_user_response' as const, state: 'denied_closed' as const, action: 'delete-all' },
+  ])("the $step step returns its bulk notes and keeps them under its own state", async ({ from, state, action }) => {
+    const notes = [{ kind: 'not-owned', sha256: 'f'.repeat(64), owner: 'b'.repeat(64) }];
+    const { body, reviewDb } = await transitionWithBulkResult(
+      { from, body: { state, resolution_note: 'n' } },
+      { success: true, eventsProcessed: 0, mediaProcessed: 0, mediaSkipped: 0, failures: [], notes },
+    );
+    expect(runBulkModeration).toHaveBeenCalledWith(expect.anything(), 'a'.repeat(64), action, expect.any(String));
+    expect(body.enforcement).toMatchObject({ bulk: 'ok', bulkNotes: notes });
+    expect(storeBulkNotes).toHaveBeenCalledWith(reviewDb, `age-review:case-1:5:${state}`, notes, []);
+  });
 
   it("a bulk leg's notes for a person leave the leg ok and come back on the response", async () => {
     const notes = [
