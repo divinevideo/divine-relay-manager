@@ -1,8 +1,8 @@
-import { useEffect, useRef } from 'react';
+import type { ReactNode } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
-import { useToast } from '@/hooks/useToast';
+import { getToasts, useToast } from '@/hooks/useToast';
 import type { toast as showToast } from '@/hooks/useToast';
 import { useAdminApi } from '@/hooks/useAdminApi';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
@@ -13,24 +13,37 @@ export interface MediaHashStatus {
   hash: string;
   isBlocked: boolean;
   isRestricted: boolean;
-  /** The stored action, so undo can tell a thumbnail gated with the video from one gated on its own. */
+  /** The stored action, such as DELETE or QUARANTINE, which some buttons must not act on. */
   action?: string | null;
   /** The status check did not answer for this file, so its state is unknown. */
   unreadable?: boolean;
 }
+
+const DELETED_REASON = 'This video was deleted from the media server. Blocking or age restricting it would restore it.';
+// An unknown video may be hidden by age review, which a block would outlast, or
+// deleted, which a block would bring back, or blocked, which Age Restrict would weaken.
+const UNREADABLE_REASON = "The video's status could not be read, so it may be hidden, deleted or blocked. Reload to try again.";
 
 // What a media action shows when it finishes.
 interface DoneToast {
   title: string;
   description?: string;
   variant?: 'destructive';
+  duration?: number;
 }
 
+// A red media warning is the only sign a file was left in a state the moderator
+// didn't choose (a thumbnail left open, an action stopped partway), so it stays
+// up longer than the default five seconds.
+const WARNING_DURATION_MS = 10000;
+
 // A media action's toast, and once shown, the handle that changes it in place.
-// Filled in after the audit writes have started, so they can reach it.
+// Filled in after the audit writes have started, so they can reach it. An audit
+// failure that lands before the toast shows is kept here and shown on it.
 interface ShownToast {
   toast?: DoneToast;
   handle?: ReturnType<typeof showToast>;
+  auditFailed?: boolean;
 }
 
 interface EventActionsProps {
@@ -60,12 +73,7 @@ export function EventActions({
   mediaStatusLoading = false,
   onActionComplete,
 }: EventActionsProps) {
-  const { toast, toasts } = useToast();
-  // The toasts on screen as of the last render, for an audit write that settles later.
-  const toastsOnScreen = useRef(toasts);
-  useEffect(() => {
-    toastsOnScreen.current = toasts;
-  });
+  const { toast } = useToast();
   const api = useAdminApi();
   const { getModeratorPubkey } = useCurrentUser();
   const queryClient = useQueryClient();
@@ -122,38 +130,50 @@ export function EventActions({
   };
   const allFiles = [...mediaHashes, ...thumbnails];
   const statusOf = (hash: string) => mediaHashStatuses.find((s) => s.hash === hash);
-  // Age Restrict never touches a thumbnail that is blocked or deleted, or whose
-  // status could not be read and so might be: that would weaken it. (The media
-  // server restores a deleted file to whatever status it is sent.) When the
-  // video's own status could not be read, Age Restrict is withheld. (The buttons
-  // only offer it when the video is not known to be blocked.)
+  // Any status but DELETE moves a deleted file out of Deleted on the media server
+  // (divine-blossom handle_admin_moderate and handle_admin_moderate_action both),
+  // so no status is ever sent to a deleted file: a deleted video gets no Block or
+  // Age Restrict, and those skip a deleted thumbnail.
+  const isDeleted = (hash: string) => statusOf(hash)?.action === 'DELETE';
+  const videoDeleted = mediaHashes.some(isDeleted);
+  const filesToBlock = allFiles.filter((hash) => !(thumbnails.includes(hash) && isDeleted(hash)));
+  // Age Restrict also never touches a thumbnail that is blocked, or whose status
+  // could not be read and so might be: that would weaken it. When the video's own
+  // status could not be read, Block and Age Restrict are both withheld (see
+  // UNREADABLE_REASON). (The buttons only offer Age Restrict when the video is
+  // not known to be blocked.)
   const videoUnreadable = mediaHashes.some((hash) => statusOf(hash)?.unreadable);
-  const filesToRestrict = allFiles.filter((hash) => {
+  const filesToRestrict = filesToBlock.filter((hash) => {
     const status = statusOf(hash);
-    return !(thumbnails.includes(hash) && (status?.isBlocked || status?.unreadable || status?.action === 'DELETE'));
+    return !(thumbnails.includes(hash) && (status?.isBlocked || status?.unreadable));
   });
-  // Undo reaches a thumbnail only when its stored action matches a gated video
-  // file's, so a different gate on the thumbnail, such as an automated quarantine
-  // under a moderator's block, stays.
-  const undoFiles = (gated: (status: MediaHashStatus) => boolean) => {
-    const gatedStatuses = mediaHashStatuses.filter(gated);
-    const videoActions = new Set(gatedStatuses.filter((s) => !thumbnails.includes(s.hash)).map((s) => s.action));
-    const files = gatedStatuses
-      .filter((s) => !thumbnails.includes(s.hash) || (s.action != null && videoActions.has(s.action)))
-      .map((s) => s.hash);
-    return { files, leftAlone: gatedStatuses.length - files.length };
-  };
-  const leftAloneNote = (count: number, state: string) => {
-    if (count === 0) return undefined;
-    return count === 1
-      ? `thumbnail left ${state}: it was ${state} separately`
-      : `${count} thumbnails left ${state}: they were ${state} separately`;
-  };
+  // Undo lifts the video files only. A thumbnail's stored action cannot say
+  // whether it was gated with the video or on its own: Block overwrites an 18+
+  // gate, and another moderator may have banned it for its own content. So a
+  // thumbnail keeps its gate until a person lifts it with its own button, offered
+  // only for the gates this screen sets, so a quarantine from the automated checks
+  // is never lifted in one click. None is offered while a video file is hidden,
+  // or its status could not be read and so it might be: age review hides the
+  // video alone, and a thumbnail opened then would show a suspected minor's
+  // image while the case is open.
+  const gatedVideos = (gated: (status: MediaHashStatus) => boolean) =>
+    mediaHashes.filter((hash) => { const status = statusOf(hash); return status ? gated(status) : false; });
+  const gatedThumbnailCount = (gated: (status: MediaHashStatus) => boolean) =>
+    thumbnails.filter((hash) => { const status = statusOf(hash); return status ? gated(status) : false; }).length;
+  const videoHidden = mediaHashes.some((hash) => statusOf(hash)?.action === 'QUARANTINE');
+  const liftableThumbnails = (action: string) =>
+    (videoHidden || videoUnreadable ? [] : thumbnails.filter((hash) => statusOf(hash)?.action === action));
+  const thumbnailsToUnblock = liftableThumbnails('PERMANENT_BAN');
+  const thumbnailsToUnrestrict = liftableThumbnails('AGE_RESTRICTED');
   const joinNotes = (...notes: (string | undefined)[]) => notes.filter(Boolean).join('; ') || undefined;
   const withNote = (reason: string, ...notes: (string | undefined)[]) => joinNotes(reason, ...notes) ?? reason;
   const thumbnailWord = (count: number) => (count === 1 ? 'thumbnail' : `${count} thumbnails`);
-  // A thumbnail whose status could not be read is never age restricted and never
-  // undone, and the moderator is told so rather than left to assume it was.
+  const sentence = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
+  const leftGatedNote = (count: number, state: string) =>
+    (count === 0 ? undefined : `${thumbnailWord(count)} left ${state}`);
+  // A thumbnail whose status could not be read is never age restricted and gets no
+  // undo button of its own, and the moderator is told so rather than left to
+  // assume it was changed.
   const unreadThumbnails = thumbnails.filter((hash) => statusOf(hash)?.unreadable).length;
   const unreadNote = unreadThumbnails === 0
     ? undefined
@@ -165,12 +185,12 @@ export function EventActions({
     result?: { thumbnailToastNote?: string; thumbnailWarning?: string; thumbnailsLeftOpen?: number },
   ): DoneToast => {
     const note = result?.thumbnailToastNote;
-    const sentence = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
     if (result?.thumbnailWarning) {
       return {
         title: warningTitle(thumbnailWord(result.thumbnailsLeftOpen ?? 1)),
         description: sentence(joinNotes(result.thumbnailWarning, note) ?? ''),
         variant: 'destructive',
+        duration: WARNING_DURATION_MS,
       };
     }
     return note ? { title, description: sentence(note) } : { title };
@@ -178,13 +198,20 @@ export function EventActions({
   // Videos restricted or blocked before thumbnails were included can have an open
   // thumbnail, and a failed thumbnail needs a retry. Once the video is gated only
   // the undo button shows, so these re-apply the action to the video and reach the
-  // thumbnail. For a video already in that state nothing changes; a quarantined
-  // video counts as blocked, so Block again makes it a permanent block, which is
-  // stronger. A blocked video is only ever offered Block again, and Age Restrict
-  // again only shows when it would reach a thumbnail.
-  const offerRestrictAgain = hasRestrictedMedia && !hasBlockedMedia && !videoUnreadable
+  // thumbnail, and show only when there is a thumbnail they may act on. (The status
+  // check can say a thumbnail is gated when the media server never got the change,
+  // so it cannot hide them.) Block again is never offered when a video file is an
+  // age-review hide, which the review lifts when the case clears and a ban would
+  // outlive, or is deleted or unreadable. A blocked video is never offered Age
+  // Restrict again.
+  const offerRestrictAgain = hasRestrictedMedia && !hasBlockedMedia && !videoUnreadable && !videoDeleted
     && filesToRestrict.some((hash) => thumbnails.includes(hash));
-  const offerBlockAgain = thumbnails.length > 0 && hasBlockedMedia;
+  const offerBlockAgain = hasBlockedMedia
+    && !mediaHashes.some((hash) => {
+      const status = statusOf(hash);
+      return !status || status.unreadable || status.action === 'QUARANTINE' || status.action === 'DELETE';
+    })
+    && filesToBlock.some((hash) => thumbnails.includes(hash));
 
   // Audit logging is a non-critical side effect. Fire-and-forget so a slow, hung,
   // or failing /api/decisions write can never make a relay/media action that already
@@ -200,7 +227,9 @@ export function EventActions({
   // own toast, so a failure toast of its own would replace a warning, the only
   // sign that a thumbnail was left open. While the warning is open, a failure is
   // added to it instead; once it is closed or replaced, the failure gets the
-  // usual toast, and an out-of-date warning never comes back.
+  // usual toast, and an out-of-date warning never comes back. A failure before
+  // the action's toast shows goes on that toast. The toasts are read from the
+  // store when the write settles, so this holds after the panel unmounts too.
   const logAudit = (
     moderator: Promise<string | undefined>,
     params: Parameters<typeof api.logDecision>[0],
@@ -214,21 +243,30 @@ export function EventActions({
         })
         .catch((e) => {
           console.warn('[EventActions] audit log failed', e);
+          if (shown && !shown.handle) {
+            shown.auditFailed = true;
+            return;
+          }
           const warning = shown?.toast?.variant === 'destructive' ? shown.toast : undefined;
           const handle = shown?.handle;
-          if (warning && handle && toastsOnScreen.current?.some((t) => t.id === handle.id && t.open)) {
-            handle.update({
-              ...warning,
-              id: handle.id,
-              description: joinNotes(warning.description, 'audit log not recorded'),
-            });
+          if (warning && handle && getToasts().some((t) => t.id === handle.id && t.open)) {
+            handle.update({ ...withAuditNote(warning), id: handle.id });
           } else {
             toast({ title: 'Action applied; audit log not recorded' });
           }
         }));
 
+  const withAuditNote = (done: DoneToast): DoneToast => ({
+    ...done,
+    description: done.description ? `${done.description}; audit log not recorded` : 'Audit log not recorded',
+  });
+
   const showDone = (shown: ShownToast) => {
-    if (shown.toast) shown.handle = toast(shown.toast);
+    if (shown.toast) {
+      shown.handle = toast(shown.auditFailed ? withAuditNote(shown.toast) : shown.toast);
+    } else if (shown.auditFailed) {
+      toast({ title: 'Action applied; audit log not recorded' });
+    }
     onActionComplete?.();
   };
 
@@ -306,7 +344,7 @@ export function EventActions({
   const blockMediaMutation = useMutation({
     mutationFn: async () => {
       const moderator = getModeratorPubkey(); // capture before the authoritative request
-      const result = await actOnFiles(allFiles, (hash) => api.moderateMedia(hash, 'PERMANENT_BAN', 'Blocked by moderator'));
+      const result = await actOnFiles(filesToBlock, (hash) => api.moderateMedia(hash, 'PERMANENT_BAN', 'Blocked by moderator'));
       const shown: ShownToast = { toast: doneToast(`Blocked ${result.changed} media file(s)`, (what) => `Video blocked; ${what} NOT blocked`, result) };
       logAudit(moderator, {
         targetType: 'event',
@@ -349,50 +387,106 @@ export function EventActions({
     },
   });
 
+  // Lifts files one after another. When one fails after others were lifted, the
+  // audit log records those, and the error says so and carries the toast holder,
+  // so the failure toast can take a failed audit write the way a warning does.
+  const liftEach = async (
+    hashes: string[],
+    apiReason: string,
+    moderator: Promise<string | undefined>,
+    audit: { action: string; reason: (count: number) => string },
+  ) => {
+    let lifted = 0;
+    try {
+      for (const hash of hashes) {
+        await api.moderateMedia(hash, 'SAFE', apiReason);
+        lifted++;
+      }
+    } catch (error) {
+      if (lifted === 0) throw error;
+      const message = `${lifted} of ${hashes.length} lifted, then: ${error instanceof Error ? error.message : 'unknown error'}`;
+      const partial: ShownToast = {};
+      logAudit(moderator, { targetType: 'event', targetId: eventId, action: audit.action, reason: `${audit.reason(lifted)}; ${message}` }, partial);
+      throw Object.assign(new Error(message), { partial });
+    }
+  };
+
+  // An undo's failure. After a partial lift something did change, so the screen
+  // checks the media status again, as the combined delete does on a partial.
+  const undoFailed = (title: string) => (error: Error & { partial?: ShownToast }) => {
+    const failure: DoneToast = { title, description: error.message, variant: 'destructive' };
+    if (error.partial) {
+      error.partial.toast = { ...failure, duration: WARNING_DURATION_MS };
+      showDone(error.partial);
+    } else {
+      toast(failure);
+    }
+  };
+
+  // Undo of the video files. Thumbnails keep their gate (see gatedVideos), and the
+  // toast says how many did.
+  const undoVideos = async (
+    gated: (status: MediaHashStatus) => boolean,
+    state: string,
+    title: string,
+    apiReason: string,
+    audit: { action: string; reason: (count: number) => string },
+  ): Promise<ShownToast> => {
+    const files = gatedVideos(gated);
+    if (files.length === 0) return { toast: { title } };
+    const moderator = getModeratorPubkey(); // capture before the authoritative request
+    await liftEach(files, apiReason, moderator, audit);
+    const left = leftGatedNote(gatedThumbnailCount(gated), state);
+    const note = joinNotes(left, unreadNote);
+    logAudit(moderator, {
+      targetType: 'event',
+      targetId: eventId,
+      action: audit.action,
+      reason: withNote(audit.reason(files.length), left, unreadNote),
+    });
+    return { toast: note ? { title, description: sentence(note) } : { title } };
+  };
+
+  // A person lifting a thumbnail's own gate. The thumbnail is the whole action
+  // here, so a failure fails it.
+  const undoThumbnails = async (
+    hashes: string[],
+    apiReason: string,
+    title: (what: string) => string,
+    audit: { action: string; reason: (count: number) => string },
+  ): Promise<ShownToast> => {
+    const moderator = getModeratorPubkey(); // capture before the authoritative request
+    await liftEach(hashes, apiReason, moderator, audit);
+    logAudit(moderator, { targetType: 'event', targetId: eventId, action: audit.action, reason: audit.reason(hashes.length) });
+    return { toast: { title: sentence(title(thumbnailWord(hashes.length))) } };
+  };
+
   const unblockMediaMutation = useMutation({
-    mutationFn: async () => {
-      const { files, leftAlone } = undoFiles((s) => s.isBlocked);
-      if (files.length === 0) return { toast: { title: 'Media unblocked' } };
-      const moderator = getModeratorPubkey(); // capture before the authoritative request
-      const result = await actOnFiles(files, (hash) => api.moderateMedia(hash, 'SAFE', 'Unblocked by moderator'));
-      const left = leftAloneNote(leftAlone, 'blocked');
-      const shown: ShownToast = { toast: doneToast('Media unblocked', (what) => `Video unblocked; ${what} still blocked`,
-        { ...result, thumbnailToastNote: joinNotes(result.thumbnailToastNote, left, unreadNote) }) };
-      logAudit(moderator, {
-        targetType: 'event',
-        targetId: eventId,
-        action: 'unblock_media',
-        reason: withNote(`Unblocked ${result.changed} media file(s)`, result.thumbnailNote, left, unreadNote),
-      }, shown);
-      return shown;
-    },
+    mutationFn: () => undoVideos((s) => s.isBlocked, 'blocked', 'Media unblocked', 'Unblocked by moderator',
+      { action: 'unblock_media', reason: (count) => `Unblocked ${count} media file(s)` }),
     onSuccess: showDone,
-    onError: (error: Error) => {
-      toast({ title: 'Failed to unblock media', description: error.message, variant: 'destructive' });
-    },
+    onError: undoFailed('Failed to unblock media'),
   });
 
   const removeRestrictionMutation = useMutation({
-    mutationFn: async () => {
-      const { files, leftAlone } = undoFiles((s) => s.isRestricted);
-      if (files.length === 0) return { toast: { title: 'Restriction removed' } };
-      const moderator = getModeratorPubkey(); // capture before the authoritative request
-      const result = await actOnFiles(files, (hash) => api.moderateMedia(hash, 'SAFE', 'Restriction removed by moderator'));
-      const left = leftAloneNote(leftAlone, 'restricted');
-      const shown: ShownToast = { toast: doneToast('Restriction removed', (what) => `Restriction removed from video; ${what} still restricted`,
-        { ...result, thumbnailToastNote: joinNotes(result.thumbnailToastNote, left, unreadNote) }) };
-      logAudit(moderator, {
-        targetType: 'event',
-        targetId: eventId,
-        action: 'remove_restriction',
-        reason: withNote(`Removed restriction from ${result.changed} media file(s)`, result.thumbnailNote, left, unreadNote),
-      }, shown);
-      return shown;
-    },
+    mutationFn: () => undoVideos((s) => s.isRestricted, 'restricted', 'Restriction removed', 'Restriction removed by moderator',
+      { action: 'remove_restriction', reason: (count) => `Removed restriction from ${count} media file(s)` }),
     onSuccess: showDone,
-    onError: (error: Error) => {
-      toast({ title: 'Failed to remove restriction', description: error.message, variant: 'destructive' });
-    },
+    onError: undoFailed('Failed to remove restriction'),
+  });
+
+  const unblockThumbnailMutation = useMutation({
+    mutationFn: () => undoThumbnails(thumbnailsToUnblock, 'Unblocked by moderator', (what) => `${what} unblocked`,
+      { action: 'unblock_media', reason: (count) => `Unblocked ${count} thumbnail(s)` }),
+    onSuccess: showDone,
+    onError: undoFailed('Failed to unblock thumbnail'),
+  });
+
+  const unrestrictThumbnailMutation = useMutation({
+    mutationFn: () => undoThumbnails(thumbnailsToUnrestrict, 'Restriction removed by moderator', (what) => `Restriction removed from ${what}`,
+      { action: 'remove_restriction', reason: (count) => `Removed restriction from ${count} thumbnail(s)` }),
+    onSuccess: showDone,
+    onError: undoFailed('Failed to remove thumbnail restriction'),
   });
 
   const deleteMediaMutation = useMutation({
@@ -437,21 +531,24 @@ export function EventActions({
         // not the audit log, which is now fire-and-forget. So "media deletion failed"
         // in onError is accurate.
         if (completed.length > 0) {
-          logAudit(moderator, { targetType: 'event', targetId: eventId, action: 'delete_event_and_media_partial', reason: `Partial delete (completed: ${completed.join(', ')}). Error: ${error instanceof Error ? error.message : 'unknown'}` });
+          logAudit(moderator, { targetType: 'event', targetId: eventId, action: 'delete_event_and_media_partial', reason: `Partial delete (completed: ${completed.join(', ')}). Error: ${error instanceof Error ? error.message : 'unknown'}` }, shown);
         }
-        throw Object.assign(error instanceof Error ? error : new Error('Unknown error'), { completed });
+        throw Object.assign(error instanceof Error ? error : new Error('Unknown error'), { completed, partial: shown });
       }
     },
     onSuccess: showDone,
-    onError: (error: Error & { completed?: string[] }) => {
+    onError: (error: Error & { completed?: string[]; partial?: ShownToast }) => {
       const completed = error.completed ?? [];
       if (completed.length > 0) {
-        toast({
+        // Through the shared holder, so an audit failure joins this warning.
+        const shown = error.partial ?? {};
+        shown.toast = {
           title: 'Partially completed',
-          description: `Event was deleted but media deletion failed: ${error.message}. Check audit log for details.`,
+          description: `Event was deleted but media deletion failed: ${error.message}`,
           variant: 'destructive',
-        });
-        onActionComplete?.();
+          duration: WARNING_DURATION_MS,
+        };
+        showDone(shown);
       } else {
         toast({ title: 'Failed to delete', description: error.message, variant: 'destructive' });
       }
@@ -461,10 +558,27 @@ export function EventActions({
   const anyPending = banEventMutation.isPending || restoreEventMutation.isPending ||
     deleteEventMutation.isPending || blockMediaMutation.isPending || ageRestrictMutation.isPending ||
     unblockMediaMutation.isPending || removeRestrictionMutation.isPending ||
+    unblockThumbnailMutation.isPending || unrestrictThumbnailMutation.isPending ||
     deleteMediaMutation.isPending || deleteEventAndMediaMutation.isPending;
   // Until the status check answers, a blocked file reads as open, and Age
   // Restrict would weaken it. So the media buttons wait for it.
   const mediaBusy = anyPending || mediaStatusLoading;
+
+  // A button the moderator can see but not use, with the reason on hover or focus.
+  const withheld = (icon: ReactNode, className: string | undefined, label: string, reason: string) => (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        {/* A disabled button gets no pointer events, so the tooltip hangs on a wrapper. */}
+        <span tabIndex={0} className="rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+          <Button variant="outline" className={className} disabled>
+            {icon}
+            {label}
+          </Button>
+        </span>
+      </TooltipTrigger>
+      <TooltipContent><p>{reason}</p></TooltipContent>
+    </Tooltip>
+  );
 
   return (
     <div className="flex flex-wrap gap-2">
@@ -533,7 +647,7 @@ export function EventActions({
               <TooltipTrigger asChild>
                 <Button variant="outline" onClick={() => blockMediaMutation.mutate()} disabled={mediaBusy}>
                   <Video className="h-4 w-4 mr-1" />
-                  {blockMediaMutation.isPending ? 'Blocking...' : `Block again (${fileCount})`}
+                  {blockMediaMutation.isPending ? 'Blocking...' : `Block again (${filesToBlock.length})`}
                 </Button>
               </TooltipTrigger>
               <TooltipContent><p>Block the video and its thumbnail again. Use when the thumbnail was missed or failed.</p></TooltipContent>
@@ -566,44 +680,65 @@ export function EventActions({
             </Tooltip>
           )}
 
-          {!hasBlockedMedia && !hasRestrictedMedia && (
+          {thumbnailsToUnblock.length > 0 && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="outline" className="border-green-500 text-green-600 hover:bg-green-50"
+                  onClick={() => unblockThumbnailMutation.mutate()} disabled={mediaBusy}>
+                  <Unlock className="h-4 w-4 mr-1" />
+                  {unblockThumbnailMutation.isPending ? 'Unblocking...' : `Unblock thumbnail (${thumbnailsToUnblock.length})`}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent><p>Unblock the thumbnail only, and serve it to everyone. First check it was not blocked for its own content.</p></TooltipContent>
+            </Tooltip>
+          )}
+
+          {thumbnailsToUnrestrict.length > 0 && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="outline" className="border-green-500 text-green-600 hover:bg-green-50"
+                  onClick={() => unrestrictThumbnailMutation.mutate()} disabled={mediaBusy}>
+                  <Unlock className="h-4 w-4 mr-1" />
+                  {unrestrictThumbnailMutation.isPending ? 'Removing...' : `Remove thumbnail restriction (${thumbnailsToUnrestrict.length})`}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent><p>Remove the thumbnail's age restriction only. First check it was not restricted for its own content.</p></TooltipContent>
+            </Tooltip>
+          )}
+
+          {!hasBlockedMedia && !hasRestrictedMedia && (videoDeleted ? (
+            <>
+              {withheld(<Video className="h-4 w-4 mr-1" />, undefined, 'Block Media (deleted)', DELETED_REASON)}
+              {withheld(<ShieldAlert className="h-4 w-4 mr-1" />, 'border-orange-500 text-orange-600', 'Age Restrict (deleted)', DELETED_REASON)}
+            </>
+          ) : videoUnreadable ? (
+            <>
+              {withheld(<Video className="h-4 w-4 mr-1" />, undefined, 'Block Media (status unknown)', UNREADABLE_REASON)}
+              {withheld(<ShieldAlert className="h-4 w-4 mr-1" />, 'border-orange-500 text-orange-600', 'Age Restrict (status unknown)', UNREADABLE_REASON)}
+            </>
+          ) : (
             <>
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button variant="outline" onClick={() => blockMediaMutation.mutate()} disabled={mediaBusy}>
                     <Video className="h-4 w-4 mr-1" />
-                    {blockMediaMutation.isPending ? 'Blocking...' : `Block Media (${fileCount})`}
+                    {blockMediaMutation.isPending ? 'Blocking...' : `Block Media (${filesToBlock.length})`}
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent><p>Block media by hash. Can be reversed.</p></TooltipContent>
               </Tooltip>
-              {videoUnreadable ? (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    {/* A disabled button gets no pointer events, so the tooltip hangs on a wrapper. */}
-                    <span tabIndex={0} className="rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-                      <Button variant="outline" className="border-orange-500 text-orange-600" disabled>
-                        <ShieldAlert className="h-4 w-4 mr-1" />
-                        Age Restrict (status unknown)
-                      </Button>
-                    </span>
-                  </TooltipTrigger>
-                  <TooltipContent><p>The video's status could not be read, so it may already be blocked. Reload to try again.</p></TooltipContent>
-                </Tooltip>
-              ) : (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button variant="outline" className="border-orange-500 text-orange-600 hover:bg-orange-50"
-                      onClick={() => ageRestrictMutation.mutate()} disabled={mediaBusy}>
-                      <ShieldAlert className="h-4 w-4 mr-1" />
-                      {ageRestrictMutation.isPending ? 'Restricting...' : `Age Restrict (${filesToRestrict.length})`}
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent><p>Age-restrict media. Owner can still view, gated for others. Can be reversed.</p></TooltipContent>
-                </Tooltip>
-              )}
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button variant="outline" className="border-orange-500 text-orange-600 hover:bg-orange-50"
+                    onClick={() => ageRestrictMutation.mutate()} disabled={mediaBusy}>
+                    <ShieldAlert className="h-4 w-4 mr-1" />
+                    {ageRestrictMutation.isPending ? 'Restricting...' : `Age Restrict (${filesToRestrict.length})`}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent><p>Age-restrict media. Owner can still view, gated for others. Can be reversed.</p></TooltipContent>
+              </Tooltip>
             </>
-          )}
+          ))}
 
           {/* Delete Media (irreversible) */}
           <DeleteConfirmDialog

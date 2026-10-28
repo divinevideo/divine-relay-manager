@@ -20,7 +20,10 @@ const toastsOnScreen = vi.hoisted(() => ({ value: [] as Array<{ id: string; open
 const MOD_PUBKEY = 'e'.repeat(64);
 
 vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => api }));
-vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast, toasts: toastsOnScreen.value }) }));
+vi.mock('@/hooks/useToast', () => ({
+  useToast: () => ({ toast, toasts: toastsOnScreen.value }),
+  getToasts: () => toastsOnScreen.value,
+}));
 // Logged-in moderator, so audit writes carry attribution (#178).
 vi.mock('@/hooks/useCurrentUser', () => ({
   useCurrentUser: () => ({ user: { pubkey: MOD_PUBKEY }, getModeratorPubkey: async () => MOD_PUBKEY }),
@@ -285,8 +288,7 @@ describe('EventActions: a video thumbnail never breaks the video action', () => 
     expect(toast).not.toHaveBeenCalledWith(expect.objectContaining({ title: 'Partially completed' }));
   });
 
-  it('undoes a restricted thumbnail with the video, and a thumbnail failure does not fail the undo', async () => {
-    api.moderateMedia.mockImplementation(thumbnailNotFound);
+  it('removes the restriction from the video only, and offers the thumbnail its own button', async () => {
     renderWithProvider(
       <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]}
         hasRestrictedMedia={true}
@@ -296,18 +298,22 @@ describe('EventActions: a video thumbnail never breaks the video action', () => 
         ]} />
     );
 
+    expect(screen.getByRole('button', { name: 'Remove thumbnail restriction (1)' })).toBeEnabled();
     fireEvent.click(screen.getByRole('button', { name: 'Remove Restriction' }));
 
     await waitFor(() => expect(toast).toHaveBeenCalledWith({
       title: 'Restriction removed',
-      description: 'Thumbnail not changed: not found on the media server',
+      description: 'Thumbnail left restricted',
     }));
-    // The video goes first even when the status list names the thumbnail first.
-    expect(api.moderateMedia.mock.calls.map((call) => call[0])).toEqual([VIDEO, THUMB]);
+    expect(api.moderateMedia.mock.calls).toEqual([[VIDEO, 'SAFE', 'Restriction removed by moderator']]);
+    await waitFor(() => expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'remove_restriction',
+      reason: 'Removed restriction from 1 media file(s); thumbnail left restricted',
+    })));
+    expect(api.logDecision).toHaveBeenCalledTimes(1);
   });
 
-  it('unblocks a blocked thumbnail with the video, and a thumbnail failure does not fail the unblock', async () => {
-    api.moderateMedia.mockImplementation(thumbnailNotFound);
+  it('unblocks the video only, and offers the thumbnail its own button', async () => {
     renderWithProvider(
       <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]}
         hasBlockedMedia={true}
@@ -317,13 +323,173 @@ describe('EventActions: a video thumbnail never breaks the video action', () => 
         ]} />
     );
 
+    expect(screen.getByRole('button', { name: 'Unblock thumbnail (1)' })).toBeEnabled();
     fireEvent.click(screen.getByRole('button', { name: 'Unblock Media' }));
 
     await waitFor(() => expect(toast).toHaveBeenCalledWith({
       title: 'Media unblocked',
-      description: 'Thumbnail not changed: not found on the media server',
+      description: 'Thumbnail left blocked',
     }));
-    expect(api.moderateMedia.mock.calls.map((call) => call[0])).toEqual([VIDEO, THUMB]);
+    expect(api.moderateMedia.mock.calls).toEqual([[VIDEO, 'SAFE', 'Unblocked by moderator']]);
+  });
+
+  it.each([
+    ['Unblock thumbnail (1)', { isBlocked: true, isRestricted: false, action: 'PERMANENT_BAN' },
+      'Unblocked by moderator', 'Thumbnail unblocked', 'unblock_media', 'Unblocked 1 thumbnail(s)'],
+    ['Remove thumbnail restriction (1)', { isBlocked: false, isRestricted: true, action: 'AGE_RESTRICTED' },
+      'Restriction removed by moderator', 'Restriction removed from thumbnail', 'remove_restriction', 'Removed restriction from 1 thumbnail(s)'],
+  ] as const)('%s lifts the thumbnail alone, once a person asks', async (button, state, apiReason, title, action, reason) => {
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' },
+          { hash: THUMB, ...state },
+        ]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: button }));
+
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({ title }));
+    expect(api.moderateMedia.mock.calls).toEqual([[THUMB, 'SAFE', apiReason]]);
+    await waitFor(() => expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({ action, reason })));
+    expect(api.logDecision).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails a thumbnail undo out loud, since the thumbnail is the whole action', async () => {
+    api.moderateMedia.mockRejectedValue(new Error('moderation down'));
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' },
+          { hash: THUMB, isBlocked: true, isRestricted: false, action: 'PERMANENT_BAN' },
+        ]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Unblock thumbnail (1)' }));
+
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({
+      title: 'Failed to unblock thumbnail',
+      description: 'moderation down',
+      variant: 'destructive',
+    }));
+  });
+
+  it('records the thumbnails it lifted when a later one fails, and says so', async () => {
+    const SECOND_THUMB = 'c3d0f1a2b4e5968778695a4b3c2d1e0f9a8b7c6d5e4f30211203f4e5d6c7b8a9';
+    api.moderateMedia.mockImplementation((hash: string) =>
+      hash === SECOND_THUMB ? Promise.reject(new Error('moderation down')) : Promise.resolve({ success: true }));
+    const onActionComplete = vi.fn();
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB, SECOND_THUMB]}
+        onActionComplete={onActionComplete}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' },
+          { hash: THUMB, isBlocked: true, isRestricted: false, action: 'PERMANENT_BAN' },
+          { hash: SECOND_THUMB, isBlocked: true, isRestricted: false, action: 'PERMANENT_BAN' },
+        ]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Unblock thumbnail (2)' }));
+
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({
+      title: 'Failed to unblock thumbnail',
+      description: '1 of 2 lifted, then: moderation down',
+      variant: 'destructive',
+      duration: 10000,
+    }));
+    await waitFor(() => expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'unblock_media',
+      reason: 'Unblocked 1 thumbnail(s); 1 of 2 lifted, then: moderation down',
+    })));
+    expect(api.logDecision).toHaveBeenCalledTimes(1);
+    // Something changed, so the screen checks the media status again.
+    expect(onActionComplete).toHaveBeenCalled();
+  });
+
+  it('adds a failed audit write to the partial-undo warning instead of replacing it', async () => {
+    const SECOND_THUMB = 'c3d0f1a2b4e5968778695a4b3c2d1e0f9a8b7c6d5e4f30211203f4e5d6c7b8a9';
+    api.moderateMedia.mockImplementation((hash: string) =>
+      hash === SECOND_THUMB ? Promise.reject(new Error('moderation down')) : Promise.resolve({ success: true }));
+    api.logDecision.mockImplementation(() => new Promise((_, reject) => setTimeout(() => reject(new Error('audit down')), 20)));
+    toastsOnScreen.value = [{ id: 'partial-toast', open: true }];
+    const shown = { id: 'partial-toast', update: vi.fn(), dismiss: vi.fn() };
+    toast.mockReturnValueOnce(shown);
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB, SECOND_THUMB]}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' },
+          { hash: THUMB, isBlocked: true, isRestricted: false, action: 'PERMANENT_BAN' },
+          { hash: SECOND_THUMB, isBlocked: true, isRestricted: false, action: 'PERMANENT_BAN' },
+        ]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Unblock thumbnail (2)' }));
+
+    await waitFor(() => expect(shown.update).toHaveBeenCalledWith({
+      id: 'partial-toast',
+      title: 'Failed to unblock thumbnail',
+      description: '1 of 2 lifted, then: moderation down; audit log not recorded',
+      variant: 'destructive',
+      duration: 10000,
+    }));
+    expect(toast).toHaveBeenCalledTimes(1);
+  });
+
+  it('records the video files it lifted when a later one fails, and says so', async () => {
+    const SECOND_VIDEO = 'd4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3';
+    api.moderateMedia.mockImplementation((hash: string) =>
+      hash === SECOND_VIDEO ? Promise.reject(new Error('moderation down')) : Promise.resolve({ success: true }));
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO, SECOND_VIDEO]}
+        hasRestrictedMedia={true}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: false, isRestricted: true, action: 'AGE_RESTRICTED' },
+          { hash: SECOND_VIDEO, isBlocked: false, isRestricted: true, action: 'AGE_RESTRICTED' },
+        ]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove Restriction' }));
+
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({
+      title: 'Failed to remove restriction',
+      description: '1 of 2 lifted, then: moderation down',
+      variant: 'destructive',
+      duration: 10000,
+    }));
+    await waitFor(() => expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'remove_restriction',
+      reason: 'Removed restriction from 1 media file(s); 1 of 2 lifted, then: moderation down',
+    })));
+    expect(api.logDecision).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves a thumbnail that was 18+ on its own blocked when the video it was blocked with is unblocked', async () => {
+    // Block overwrites the thumbnail's 18+ gate, and its stored action then matches
+    // the video's, so only a person can tell the two apart.
+    const statuses = (video: string, thumb: string) => [
+      { hash: VIDEO, isBlocked: video === 'PERMANENT_BAN', isRestricted: false, action: video },
+      { hash: THUMB, isBlocked: thumb === 'PERMANENT_BAN', isRestricted: thumb === 'AGE_RESTRICTED', action: thumb },
+    ];
+    const ui = (video: string, thumb: string) => (
+      <QueryClientProvider client={new QueryClient()}>
+        <TooltipProvider>
+          <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]}
+            hasBlockedMedia={video === 'PERMANENT_BAN'} mediaHashStatuses={statuses(video, thumb)} />
+        </TooltipProvider>
+      </QueryClientProvider>
+    );
+    const { rerender } = render(ui('SAFE', 'AGE_RESTRICTED'));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Block Media (2)' }));
+    await waitFor(() => expect(api.moderateMedia).toHaveBeenCalledTimes(2));
+
+    // The status check answers again after the action.
+    rerender(ui('PERMANENT_BAN', 'PERMANENT_BAN'));
+    api.moderateMedia.mockClear();
+    fireEvent.click(screen.getByRole('button', { name: 'Unblock Media' }));
+
+    await waitFor(() => expect(api.moderateMedia).toHaveBeenCalledTimes(1));
+    expect(api.moderateMedia.mock.calls).toEqual([[VIDEO, 'SAFE', 'Unblocked by moderator']]);
   });
 
   it('reports the thumbnail failure in the words the worker sends', async () => {
@@ -404,6 +570,7 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
       title: 'Video age restricted; thumbnail NOT age restricted',
       description: workerError(THUMB, 500),
       variant: 'destructive',
+      duration: 10000,
     }));
     expect(toast).not.toHaveBeenCalledWith(expect.objectContaining({ title: 'Age restricted 1 media file(s)' }));
     // The video did change, so the screen refreshes to show it.
@@ -439,8 +606,105 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
       title: 'Video age restricted; thumbnail NOT age restricted',
       description: `${workerError(THUMB, 500)}; audit log not recorded`,
       variant: 'destructive',
+      duration: 10000,
     }));
     expect(toast).toHaveBeenCalledTimes(1);
+  });
+
+  // An audit failure the test releases once the screen has moved on.
+  const heldAuditFailure = () => {
+    let release = () => {};
+    const write = () => new Promise((_, reject) => { release = () => reject(new Error('audit down')); });
+    return { write, release: () => release() };
+  };
+  const tree = (qc: QueryClient) => (
+    <QueryClientProvider client={qc}>
+      <TooltipProvider>
+        <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]} />
+      </TooltipProvider>
+    </QueryClientProvider>
+  );
+
+  it('reads the toasts on screen when the audit write fails, not as they were at the action', async () => {
+    api.moderateMedia.mockImplementation(failing({ [THUMB]: 500 }));
+    const audit = heldAuditFailure();
+    api.logDecision.mockImplementation(audit.write);
+    const shown = { id: 'warning-toast', update: vi.fn(), dismiss: vi.fn() };
+    toast.mockReturnValueOnce(shown);
+    const qc = new QueryClient();
+    const { rerender } = render(tree(qc));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Age Restrict (2)' }));
+    await waitFor(() => expect(toast).toHaveBeenCalledTimes(1));
+    // The warning reaches the screen after the action rendered.
+    toastsOnScreen.value = [{ id: 'warning-toast', open: true }];
+    rerender(tree(qc));
+    audit.release();
+
+    await waitFor(() => expect(shown.update).toHaveBeenCalled());
+    expect(toast).toHaveBeenCalledTimes(1);
+  });
+
+  it('still adds a failed audit write to the warning after the screen that showed it is gone', async () => {
+    // The moderator moved on to another report, but the warning is still up.
+    api.moderateMedia.mockImplementation(failing({ [THUMB]: 500 }));
+    const audit = heldAuditFailure();
+    api.logDecision.mockImplementation(audit.write);
+    const shown = warningHandle();
+    toast.mockReturnValueOnce(shown);
+    const { unmount } = render(tree(new QueryClient()));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Age Restrict (2)' }));
+    await waitFor(() => expect(toast).toHaveBeenCalledTimes(1));
+    unmount();
+    audit.release();
+
+    await waitFor(() => expect(shown.update).toHaveBeenCalledWith(expect.objectContaining({
+      description: `${workerError(THUMB, 500)}; audit log not recorded`,
+    })));
+    expect(toast).toHaveBeenCalledTimes(1);
+  });
+
+  it('puts an audit failure that lands before the toast shows on that toast', async () => {
+    // The combined delete's first audit write goes out before the media deletes.
+    api.logDecision.mockRejectedValue(new Error('audit down'));
+    api.deleteMedia.mockImplementation(() => new Promise((resolve) => setTimeout(() => resolve({ success: true }), 30)));
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Event & Media' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm Delete' }));
+
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({
+      title: 'Event and media permanently deleted',
+      description: 'Audit log not recorded',
+    }));
+    expect(toast).toHaveBeenCalledTimes(1);
+  });
+
+  it("adds a failed audit write to a partial Delete Event & Media's warning", async () => {
+    api.deleteMedia.mockRejectedValue(new Error('moderation down'));
+    api.logDecision.mockImplementation(slowAuditFailure);
+    const shown = { id: 'partial-toast', update: vi.fn(), dismiss: vi.fn() };
+    toastsOnScreen.value = [{ id: 'partial-toast', open: true }];
+    toast.mockReturnValueOnce(shown);
+    const onActionComplete = vi.fn();
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]}
+        onActionComplete={onActionComplete} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Event & Media' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm Delete' }));
+
+    await waitFor(() => expect(shown.update).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'Partially completed',
+      variant: 'destructive',
+      description: expect.stringMatching(/; audit log not recorded$/),
+    })));
+    expect(toast).toHaveBeenCalledTimes(1);
+    expect(onActionComplete).toHaveBeenCalled();
   });
 
   it('reports a failed audit write on its own once the warning is closed', async () => {
@@ -449,6 +713,22 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
     api.moderateMedia.mockImplementation(failing({ [THUMB]: 500 }));
     api.logDecision.mockImplementation(slowAuditFailure);
     const shown = warningHandle(false);
+    toast.mockReturnValueOnce(shown);
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Age Restrict (2)' }));
+
+    await waitFor(() => expect(toast).toHaveBeenLastCalledWith({ title: 'Action applied; audit log not recorded' }));
+    expect(shown.update).not.toHaveBeenCalled();
+  });
+
+  it('reports a failed audit write on its own once a later toast replaced the warning', async () => {
+    api.moderateMedia.mockImplementation(failing({ [THUMB]: 500 }));
+    api.logDecision.mockImplementation(slowAuditFailure);
+    const shown = { id: 'warning-toast', update: vi.fn(), dismiss: vi.fn() };
+    toastsOnScreen.value = [{ id: 'later-toast', open: true }];
     toast.mockReturnValueOnce(shown);
     renderWithProvider(
       <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]} />
@@ -484,6 +764,9 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
 
   it('still reports a failed audit write after a plain success', async () => {
     api.logDecision.mockImplementation(slowAuditFailure);
+    // The success toast is still open: only a warning takes the failure in place.
+    const shown = warningHandle();
+    toast.mockReturnValueOnce(shown);
     renderWithProvider(
       <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]} />
     );
@@ -491,6 +774,7 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
     fireEvent.click(screen.getByRole('button', { name: 'Age Restrict (2)' }));
 
     await waitFor(() => expect(toast).toHaveBeenLastCalledWith({ title: 'Action applied; audit log not recorded' }));
+    expect(shown.update).not.toHaveBeenCalled();
   });
 
   it('keeps a not-found thumbnail a quiet note, in the real worker wording', async () => {
@@ -519,6 +803,7 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
     await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({
       title: 'Video age restricted; thumbnail NOT age restricted',
       variant: 'destructive',
+      duration: 10000,
     })));
   });
 
@@ -533,6 +818,7 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
     await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({
       title: 'Video age restricted; 2 thumbnails NOT age restricted',
       variant: 'destructive',
+      duration: 10000,
     })));
   });
 
@@ -553,28 +839,36 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
       title,
       description: workerError(THUMB, 500),
       variant: 'destructive',
+      duration: 10000,
     }));
     expect(toast).not.toHaveBeenCalledWith(expect.objectContaining({ title: 'Partially completed' }));
   });
 
   it.each([
-    ['Remove Restriction', 'Restriction removed from video; thumbnail still restricted', { isBlocked: false, isRestricted: true, action: 'AGE_RESTRICTED' }],
-    ['Unblock Media', 'Video unblocked; thumbnail still blocked', { isBlocked: true, isRestricted: false, action: 'PERMANENT_BAN' }],
-  ] as const)('warns in red when %s leaves the thumbnail gated', async (button, title, state) => {
-    api.moderateMedia.mockImplementation(failing({ [THUMB]: 500 }));
+    ['Block Media (2)', 'Video blocked; thumbnail NOT blocked', 'moderateMedia', false, 1],
+    ['Delete Media (2)', 'Video deleted; thumbnail NOT deleted', 'deleteMedia', true, 1],
+    ['Delete Event & Media', 'Event and video deleted; thumbnail NOT deleted', 'deleteMedia', true, 2],
+  ] as const)('adds a failed audit write to the warning %s shows', async (button, title, call, confirm, writes) => {
+    api[call].mockImplementation(failing({ [THUMB]: 500 }));
+    api.logDecision.mockImplementation(slowAuditFailure);
+    const shown = warningHandle();
+    toast.mockReturnValueOnce(shown);
     renderWithProvider(
-      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]}
-        hasBlockedMedia={state.isBlocked} hasRestrictedMedia={state.isRestricted}
-        mediaHashStatuses={[{ hash: VIDEO, ...state }, { hash: THUMB, ...state }]} />
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]} />
     );
 
     fireEvent.click(screen.getByRole('button', { name: button }));
+    if (confirm) fireEvent.click(await screen.findByRole('button', { name: 'Confirm Delete' }));
 
-    await waitFor(() => expect(toast).toHaveBeenCalledWith({
+    await waitFor(() => expect(shown.update).toHaveBeenCalledWith({
+      id: 'warning-toast',
       title,
-      description: workerError(THUMB, 500),
+      description: `${workerError(THUMB, 500)}; audit log not recorded`,
       variant: 'destructive',
+      duration: 10000,
     }));
+    expect(toast).toHaveBeenCalledTimes(1);
+    expect(api.logDecision).toHaveBeenCalledTimes(writes);
   });
 
   it('offers Age Restrict again on a restricted video with a thumbnail, and it reaches the thumbnail', async () => {
@@ -618,6 +912,87 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
       [VIDEO, 'PERMANENT_BAN', 'Blocked by moderator'],
       [THUMB, 'PERMANENT_BAN', 'Blocked by moderator'],
     ]);
+  });
+
+  it('offers no Block again on a video age review hid, so a hide never becomes a permanent ban', () => {
+    // Age review un-hides on clear only what is hidden (worker/src/bulk-moderate.ts
+    // MAY_CHANGE_FROM.SAFE), so a ban sent here would outlive the case.
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]}
+        hasBlockedMedia={true}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: true, isRestricted: false, action: 'QUARANTINE' },
+          { hash: THUMB, isBlocked: false, isRestricted: false, action: null },
+        ]} />
+    );
+
+    expect(screen.getByRole('button', { name: 'Unblock Media' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Block again/ })).not.toBeInTheDocument();
+  });
+
+  it('offers Block again when one video file is blocked and another is open, and it reaches both', async () => {
+    const SECOND_VIDEO = 'd4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3';
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO, SECOND_VIDEO]} thumbnailHashes={[THUMB]}
+        hasBlockedMedia={true}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: true, isRestricted: false, action: 'PERMANENT_BAN' },
+          { hash: SECOND_VIDEO, isBlocked: false, isRestricted: false, action: null },
+          { hash: THUMB, isBlocked: false, isRestricted: false, action: null },
+        ]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Block again (3)' }));
+
+    await waitFor(() => expect(api.moderateMedia).toHaveBeenCalledTimes(3));
+    expect(api.moderateMedia.mock.calls.map((call) => call[0])).toEqual([VIDEO, SECOND_VIDEO, THUMB]);
+  });
+
+  it.each([
+    ['deleted', { isBlocked: false, isRestricted: false, action: 'DELETE' }],
+    ['unreadable', { isBlocked: false, isRestricted: false, action: null, unreadable: true }],
+  ] as const)('offers no Block again when another video file is %s', (_, state) => {
+    const SECOND_VIDEO = 'd4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3';
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO, SECOND_VIDEO]} thumbnailHashes={[THUMB]}
+        hasBlockedMedia={true}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: true, isRestricted: false, action: 'PERMANENT_BAN' },
+          { hash: SECOND_VIDEO, ...state },
+          { hash: THUMB, isBlocked: false, isRestricted: false, action: null },
+        ]} />
+    );
+
+    expect(screen.queryByRole('button', { name: /Block again/ })).not.toBeInTheDocument();
+  });
+
+  it('offers no Block again when another video file has no status yet', () => {
+    const SECOND_VIDEO = 'd4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3';
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO, SECOND_VIDEO]} thumbnailHashes={[THUMB]}
+        hasBlockedMedia={true}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: true, isRestricted: false, action: 'PERMANENT_BAN' },
+          { hash: THUMB, isBlocked: false, isRestricted: false, action: null },
+        ]} />
+    );
+
+    expect(screen.queryByRole('button', { name: /Block again/ })).not.toBeInTheDocument();
+  });
+
+  it('offers no Block again when another video file is an age-review hide', () => {
+    const SECOND_VIDEO = 'd4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3';
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO, SECOND_VIDEO]} thumbnailHashes={[THUMB]}
+        hasBlockedMedia={true}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: true, isRestricted: false, action: 'PERMANENT_BAN' },
+          { hash: SECOND_VIDEO, isBlocked: true, isRestricted: false, action: 'QUARANTINE' },
+          { hash: THUMB, isBlocked: false, isRestricted: false, action: null },
+        ]} />
+    );
+
+    expect(screen.queryByRole('button', { name: /Block again/ })).not.toBeInTheDocument();
   });
 
   it('offers no Age Restrict again when the only thumbnail is already blocked', () => {
@@ -671,6 +1046,21 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
     expect(screen.getByRole('button', { name: 'Block again (2)' })).toBeDisabled();
   });
 
+  it("holds the thumbnail's own undo buttons until the status check answers", () => {
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB, OTHER_THUMB]}
+        mediaStatusLoading={true}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' },
+          { hash: THUMB, isBlocked: true, isRestricted: false, action: 'PERMANENT_BAN' },
+          { hash: OTHER_THUMB, isBlocked: false, isRestricted: true, action: 'AGE_RESTRICTED' },
+        ]} />
+    );
+
+    expect(screen.getByRole('button', { name: 'Unblock thumbnail (1)' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Remove thumbnail restriction (1)' })).toBeDisabled();
+  });
+
   it('fails Unblock Media as before when the video fails, without touching the thumbnail', async () => {
     api.moderateMedia.mockRejectedValue(new Error('moderation down'));
     renderWithProvider(
@@ -707,28 +1097,162 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
     expect(api.deleteMedia.mock.calls.map((call) => call[0])).toEqual([VIDEO]);
   });
 
-  it('leaves a thumbnail blocked separately when the video is unblocked, and says so', async () => {
+  it('offers no one-click lift for a thumbnail the automated checks hid, and says it stayed blocked', async () => {
     renderWithProvider(
       <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]}
         hasBlockedMedia={true}
         mediaHashStatuses={[
           { hash: VIDEO, isBlocked: true, isRestricted: false, action: 'PERMANENT_BAN' },
-          // Quarantined by the automated checks, not by this moderator.
+          // Quarantined by the automated checks, not by a moderator on this screen.
           { hash: THUMB, isBlocked: true, isRestricted: false, action: 'QUARANTINE' },
         ]} />
     );
 
+    expect(screen.queryByRole('button', { name: /Unblock thumbnail/ })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Unblock Media' }));
 
     await waitFor(() => expect(toast).toHaveBeenCalledWith({
       title: 'Media unblocked',
-      description: 'Thumbnail left blocked: it was blocked separately',
+      description: 'Thumbnail left blocked',
     }));
     expect(api.moderateMedia.mock.calls).toEqual([[VIDEO, 'SAFE', 'Unblocked by moderator']]);
-    await waitFor(() => expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({
-      action: 'unblock_media',
-      reason: 'Unblocked 1 media file(s); thumbnail left blocked: it was blocked separately',
-    })));
+  });
+
+  it('offers the thumbnail button only for the thumbnails this screen gates, and lifts only those', async () => {
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB, OTHER_THUMB]}
+        hasBlockedMedia={true}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: true, isRestricted: false, action: 'PERMANENT_BAN' },
+          { hash: THUMB, isBlocked: true, isRestricted: false, action: 'PERMANENT_BAN' },
+          { hash: OTHER_THUMB, isBlocked: true, isRestricted: false, action: 'QUARANTINE' },
+        ]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Unblock thumbnail (1)' }));
+
+    await waitFor(() => expect(api.moderateMedia).toHaveBeenCalledTimes(1));
+    expect(api.moderateMedia.mock.calls).toEqual([[THUMB, 'SAFE', 'Unblocked by moderator']]);
+  });
+
+  it('removes the restriction from the restricted thumbnail only, never a blocked one', async () => {
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB, OTHER_THUMB]}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' },
+          { hash: THUMB, isBlocked: false, isRestricted: true, action: 'AGE_RESTRICTED' },
+          { hash: OTHER_THUMB, isBlocked: true, isRestricted: false, action: 'PERMANENT_BAN' },
+        ]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove thumbnail restriction (1)' }));
+
+    await waitFor(() => expect(api.moderateMedia).toHaveBeenCalledTimes(1));
+    expect(api.moderateMedia.mock.calls).toEqual([[THUMB, 'SAFE', 'Restriction removed by moderator']]);
+    await waitFor(() => expect(api.logDecision).toHaveBeenCalledTimes(1));
+  });
+
+  it('removes the restriction only from the restricted video file, never a blocked one', async () => {
+    const SECOND_VIDEO = 'd4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3';
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO, SECOND_VIDEO]}
+        hasRestrictedMedia={true} hasBlockedMedia={true}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: false, isRestricted: true, action: 'AGE_RESTRICTED' },
+          { hash: SECOND_VIDEO, isBlocked: true, isRestricted: false, action: 'PERMANENT_BAN' },
+        ]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove Restriction' }));
+
+    await waitFor(() => expect(api.moderateMedia).toHaveBeenCalledTimes(1));
+    expect(api.moderateMedia.mock.calls).toEqual([[VIDEO, 'SAFE', 'Restriction removed by moderator']]);
+    await waitFor(() => expect(api.logDecision).toHaveBeenCalledTimes(1));
+  });
+
+  it('offers no Block again on a video that is not blocked', () => {
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' },
+          { hash: THUMB, isBlocked: false, isRestricted: false, action: null },
+        ]} />
+    );
+
+    expect(screen.getByRole('button', { name: 'Block Media (2)' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Block again/ })).not.toBeInTheDocument();
+  });
+
+  it('offers no Block again when the only thumbnail was deleted, and counts only what it blocks', () => {
+    const { unmount } = renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]}
+        hasBlockedMedia={true}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: true, isRestricted: false, action: 'PERMANENT_BAN' },
+          { hash: THUMB, isBlocked: false, isRestricted: false, action: 'DELETE' },
+        ]} />
+    );
+    expect(screen.queryByRole('button', { name: /Block again/ })).not.toBeInTheDocument();
+    unmount();
+
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB, OTHER_THUMB]}
+        hasBlockedMedia={true}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: true, isRestricted: false, action: 'PERMANENT_BAN' },
+          { hash: THUMB, isBlocked: false, isRestricted: false, action: 'DELETE' },
+          { hash: OTHER_THUMB, isBlocked: false, isRestricted: false, action: null },
+        ]} />
+    );
+    expect(screen.getByRole('button', { name: 'Block again (2)' })).toBeInTheDocument();
+  });
+
+  it('offers a deleted video no Block or Age Restrict, which would restore it', () => {
+    // Any status but DELETE moves a deleted file out of Deleted on the media server
+    // (divine-blossom handle_admin_moderate), so any status here would bring it back.
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: false, isRestricted: false, action: 'DELETE' },
+          { hash: THUMB, isBlocked: false, isRestricted: false, action: null },
+        ]} />
+    );
+
+    expect(screen.getByRole('button', { name: 'Block Media (deleted)' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Age Restrict (deleted)' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: /^(Block Media|Age Restrict) \(\d+\)/ })).not.toBeInTheDocument();
+    // Deleting again changes nothing the media server would serve.
+    expect(screen.getByRole('button', { name: 'Delete Media (2)' })).toBeEnabled();
+  });
+
+  it('offers no Age Restrict again when one of the video files was deleted', () => {
+    const SECOND_VIDEO = 'd4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3';
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO, SECOND_VIDEO]} thumbnailHashes={[THUMB]}
+        hasRestrictedMedia={true}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: false, isRestricted: true, action: 'AGE_RESTRICTED' },
+          { hash: SECOND_VIDEO, isBlocked: false, isRestricted: false, action: 'DELETE' },
+          { hash: THUMB, isBlocked: false, isRestricted: false, action: null },
+        ]} />
+    );
+
+    expect(screen.queryByRole('button', { name: /Age Restrict again/ })).not.toBeInTheDocument();
+  });
+
+  it('never blocks a thumbnail that was deleted', async () => {
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: false, isRestricted: false },
+          { hash: THUMB, isBlocked: false, isRestricted: false, action: 'DELETE' },
+        ]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Block Media (1)' }));
+
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({ title: 'Blocked 1 media file(s)' }));
+    expect(api.moderateMedia.mock.calls).toEqual([[VIDEO, 'PERMANENT_BAN', 'Blocked by moderator']]);
   });
 
   it('leaves a thumbnail whose status could not be read when the video is unblocked', async () => {
@@ -750,80 +1274,6 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
     expect(api.moderateMedia.mock.calls.map((call) => call[0])).toEqual([VIDEO]);
   });
 
-  it('keeps the left-alone note when another thumbnail fails for real', async () => {
-    api.moderateMedia.mockImplementation(failing({ [THUMB]: 500 }));
-    renderWithProvider(
-      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB, OTHER_THUMB]}
-        hasBlockedMedia={true}
-        mediaHashStatuses={[
-          { hash: VIDEO, isBlocked: true, isRestricted: false, action: 'PERMANENT_BAN' },
-          { hash: THUMB, isBlocked: true, isRestricted: false, action: 'PERMANENT_BAN' },
-          { hash: OTHER_THUMB, isBlocked: true, isRestricted: false, action: 'QUARANTINE' },
-        ]} />
-    );
-
-    fireEvent.click(screen.getByRole('button', { name: 'Unblock Media' }));
-
-    await waitFor(() => expect(toast).toHaveBeenCalledWith({
-      title: 'Video unblocked; thumbnail still blocked',
-      description: `${workerError(THUMB, 500)}; thumbnail left blocked: it was blocked separately`,
-      variant: 'destructive',
-    }));
-  });
-
-  it('undoes a thumbnail that matches any of the video files', async () => {
-    const SECOND_VIDEO = 'd4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3';
-    renderWithProvider(
-      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO, SECOND_VIDEO]} thumbnailHashes={[THUMB]}
-        hasBlockedMedia={true}
-        mediaHashStatuses={[
-          { hash: VIDEO, isBlocked: true, isRestricted: false, action: 'PERMANENT_BAN' },
-          { hash: SECOND_VIDEO, isBlocked: true, isRestricted: false, action: 'QUARANTINE' },
-          { hash: THUMB, isBlocked: true, isRestricted: false, action: 'QUARANTINE' },
-        ]} />
-    );
-
-    fireEvent.click(screen.getByRole('button', { name: 'Unblock Media' }));
-
-    await waitFor(() => expect(toast).toHaveBeenCalledWith({ title: 'Media unblocked' }));
-    expect(api.moderateMedia.mock.calls.map((call) => call[0])).toEqual([VIDEO, SECOND_VIDEO, THUMB]);
-  });
-
-  it('leaves a permanently blocked thumbnail when a quarantined video is unblocked', async () => {
-    renderWithProvider(
-      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]}
-        hasBlockedMedia={true}
-        mediaHashStatuses={[
-          { hash: VIDEO, isBlocked: true, isRestricted: false, action: 'QUARANTINE' },
-          { hash: THUMB, isBlocked: true, isRestricted: false, action: 'PERMANENT_BAN' },
-        ]} />
-    );
-
-    fireEvent.click(screen.getByRole('button', { name: 'Unblock Media' }));
-
-    await waitFor(() => expect(toast).toHaveBeenCalledWith({
-      title: 'Media unblocked',
-      description: 'Thumbnail left blocked: it was blocked separately',
-    }));
-    expect(api.moderateMedia.mock.calls.map((call) => call[0])).toEqual([VIDEO]);
-  });
-
-  it('leaves a gated thumbnail alone when undo cannot tell which action gated it', async () => {
-    renderWithProvider(
-      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]}
-        hasBlockedMedia={true}
-        mediaHashStatuses={[
-          { hash: VIDEO, isBlocked: true, isRestricted: false },
-          { hash: THUMB, isBlocked: true, isRestricted: false },
-        ]} />
-    );
-
-    fireEvent.click(screen.getByRole('button', { name: 'Unblock Media' }));
-
-    await waitFor(() => expect(api.moderateMedia).toHaveBeenCalledTimes(1));
-    expect(api.moderateMedia.mock.calls.map((call) => call[0])).toEqual([VIDEO]);
-  });
-
   it('offers no Age Restrict again when another of the video files could not be read', () => {
     const SECOND_VIDEO = 'd4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3';
     renderWithProvider(
@@ -840,7 +1290,7 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
     expect(screen.queryByRole('button', { name: /Age Restrict again/ })).not.toBeInTheDocument();
   });
 
-  it('withholds Age Restrict when the video status could not be read, so a block is never weakened', () => {
+  it('withholds Block and Age Restrict when the video status could not be read', () => {
     renderWithProvider(
       <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]}
         mediaHashStatuses={[
@@ -851,8 +1301,69 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
 
     expect(screen.getByRole('button', { name: 'Age Restrict (status unknown)' })).toBeDisabled();
     expect(screen.queryByRole('button', { name: /^Age Restrict \(\d+\)/ })).not.toBeInTheDocument();
-    // Blocking is never weaker, so it stays available.
-    expect(screen.getByRole('button', { name: 'Block Media (2)' })).toBeEnabled();
+    // An unknown video may be an age-review hide, which a block would outlast,
+    // or deleted, which a block would bring back. So Block waits too.
+    expect(screen.getByRole('button', { name: 'Block Media (status unknown)' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: /^Block Media \(\d+\)/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Delete Media (2)' })).toBeEnabled();
+  });
+
+  it('offers no thumbnail lift while a video is hidden, so a thumbnail never opens under an age-review hide', () => {
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB, OTHER_THUMB]}
+        hasBlockedMedia={true}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: true, isRestricted: false, action: 'QUARANTINE' },
+          { hash: THUMB, isBlocked: true, isRestricted: false, action: 'PERMANENT_BAN' },
+          { hash: OTHER_THUMB, isBlocked: false, isRestricted: true, action: 'AGE_RESTRICTED' },
+        ]} />
+    );
+
+    expect(screen.getByRole('button', { name: 'Unblock Media' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Unblock thumbnail/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Remove thumbnail restriction/ })).not.toBeInTheDocument();
+  });
+
+  it('offers no thumbnail lift while a video status could not be read, since the video may be hidden', () => {
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: false, isRestricted: false, action: null, unreadable: true },
+          { hash: THUMB, isBlocked: true, isRestricted: false, action: 'PERMANENT_BAN' },
+        ]} />
+    );
+
+    expect(screen.queryByRole('button', { name: /Unblock thumbnail/ })).not.toBeInTheDocument();
+  });
+
+  it('keeps the partial-failure warnings up for 10 seconds too', async () => {
+    api.deleteMedia.mockRejectedValue(new Error('moderation down'));
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Event & Media' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm Delete' }));
+
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'Partially completed',
+      duration: 10000,
+    })));
+  });
+
+  it('keeps a red thumbnail warning up for 10 seconds', async () => {
+    api.moderateMedia.mockImplementation(failing({ [THUMB]: 500 }));
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Age Restrict (2)' }));
+
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'Video age restricted; thumbnail NOT age restricted',
+      variant: 'destructive',
+      duration: 10000,
+    })));
   });
 
   it('skips a thumbnail whose status could not be read when age restricting, and warns it may be open', async () => {
@@ -870,6 +1381,7 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
       title: 'Video age restricted; thumbnail NOT age restricted',
       description: 'Thumbnail skipped: its status could not be read',
       variant: 'destructive',
+      duration: 10000,
     }));
     expect(api.moderateMedia.mock.calls).toEqual([[VIDEO, 'AGE_RESTRICTED', 'Age restricted by moderator']]);
     await waitFor(() => expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({
@@ -894,6 +1406,7 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
       title: 'Video age restricted; 2 thumbnails NOT age restricted',
       description: `${workerError(OTHER_THUMB, 500)}; thumbnail skipped: its status could not be read`,
       variant: 'destructive',
+      duration: 10000,
     }));
   });
 
@@ -935,8 +1448,8 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
   });
 
   it('never age restricts a thumbnail that was deleted', async () => {
-    // The media server restores a soft-deleted file to whatever status it is sent
-    // (divine-blossom handle_admin_moderate_action), so this would serve it again.
+    // Any status but DELETE moves a deleted file out of Deleted on the media server
+    // (divine-blossom handle_admin_moderate), so this would bring it back.
     renderWithProvider(
       <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]}
         mediaHashStatuses={[

@@ -120,7 +120,29 @@ describe('extractMediaFiles', () => {
     expect(extractMediaFiles('', tags)).toEqual({ media: [VIDEO], thumbnails: [THUMB] });
   });
 
-  it('does not let an empty entry swallow the next one and hide the video', () => {
+  it('never pairs two "key value" entries, so a thumbnail before the mime entry stays a thumbnail', () => {
+    // A "key value" entry has a space; only a bare key takes the next element as
+    // its value. Paired anyway, 'image …' would be read as the url's value and
+    // the thumbnail would join the video files.
+    const tags = [[
+      'imeta',
+      `url https://media.divine.video/${VIDEO}`,
+      `image https://media.divine.video/${THUMB}`,
+      'm video/mp4',
+    ]];
+
+    expect(extractMediaFiles('', tags)).toEqual({ media: [VIDEO], thumbnails: [THUMB] });
+  });
+
+  it('reads keys and the mime type in any case, in both formats', () => {
+    const mobile = [['imeta', `URL https://media.divine.video/${VIDEO}`, 'm Video/MP4', `Image https://media.divine.video/${THUMB}`]];
+    const web = [['imeta', 'URL', `https://media.divine.video/${VIDEO}`, 'M', 'video/MP4', 'IMAGE', `https://media.divine.video/${THUMB}`]];
+
+    expect(extractMediaFiles('', mobile)).toEqual({ media: [VIDEO], thumbnails: [THUMB] });
+    expect(extractMediaFiles('', web)).toEqual({ media: [VIDEO], thumbnails: [THUMB] });
+  });
+
+  it('reads past an empty entry and a key with an empty value', () => {
     const tags = [[
       'imeta',
       `url https://media.divine.video/${VIDEO}`,

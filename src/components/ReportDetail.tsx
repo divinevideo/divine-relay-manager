@@ -80,6 +80,11 @@ interface ReportDetailProps {
 }
 
 // Helper to extract report target
+// The http(s) URLs in some text, joined, so only a hash inside a URL is read.
+function mediaUrlsIn(text: string): string {
+  return (text.match(/https?:\/\/[^\s"'\\]+/g) ?? []).join(' ');
+}
+
 function getReportTarget(event: NostrEvent): { type: 'event' | 'pubkey'; value: string } | null {
   const eTag = event.tags.find(t => t[0] === 'e');
   if (eTag) return { type: 'event', value: eTag[1] };
@@ -389,13 +394,19 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
     // out of the content's JSON when useThread found none (a banned repost shown
     // from the ban list, or one whose e-tag fetch missed). Some out-of-spec
     // reposts carry a media URL as plain text instead, which the preview shows,
-    // so that is read too, but never text that looks like JSON.
+    // so that is read too. Content that looks like JSON but isn't an event (cut
+    // off, or with no string content) is read for its media URLs only, so the
+    // buttons still reach what the preview shows but never take a bare id or key
+    // in it for a file.
     if (displayEvent && isRepostKind(displayEvent.kind)) {
       add('', displayEvent.tags);
       const inner = parseRepostedEvent(displayEvent.content);
       const original = repostedEvent ?? inner;
       if (original) add(original.content, original.tags);
-      if (!inner && !/^\s*[[{]/.test(displayEvent.content)) add(displayEvent.content, []);
+      if (!inner) {
+        const looksLikeJson = /^\s*[[{]/.test(displayEvent.content);
+        add(looksLikeJson ? mediaUrlsIn(displayEvent.content) : displayEvent.content, []);
+      }
     } else if (displayEvent) {
       add(displayEvent.content, displayEvent.tags);
     }
@@ -405,8 +416,8 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
     };
   }, [displayEvent, context.thread?.repostedEvent]);
 
-  // Check media status from moderation service. Thumbnails are included, so the
-  // undo buttons reach a gated thumbnail and Age Restrict skips a blocked one.
+  // Check media status from moderation service. Thumbnails are included, so a
+  // gated thumbnail gets its own undo button and Age Restrict skips a blocked one.
   const allMediaHashes = useMemo(() => [...mediaHashes, ...thumbnailHashes], [mediaHashes, thumbnailHashes]);
   const mediaStatus = useMediaStatus(allMediaHashes);
   // Which buttons show follows the video, so a thumbnail blocked on its own can't

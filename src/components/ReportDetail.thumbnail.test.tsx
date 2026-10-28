@@ -242,6 +242,7 @@ describe('ReportDetail for a reported video with its own thumbnail', () => {
     ['an object that is not an event', JSON.stringify({ id: VIDEO_EVENT_ID, pubkey: REPORTED_PUBKEY })],
     ['cut off', `{"id":"${VIDEO_EVENT_ID}","pubkey":"${REPORTED_PUBKEY}"`],
     ['an array', JSON.stringify([VIDEO_EVENT_ID, REPORTED_PUBKEY])],
+    ['after leading whitespace', `  ${JSON.stringify({ id: VIDEO_EVENT_ID, pubkey: REPORTED_PUBKEY })}`],
   ])('reads no files from the text of a repost whose content is JSON %s', (_, content) => {
     repost.resolved = false;
     repost.value = {
@@ -257,6 +258,44 @@ describe('ReportDetail for a reported video with its own thumbnail', () => {
     renderDetail();
 
     expect(eventActionsProps.value).toMatchObject({ mediaHashes: [], thumbnailHashes: [] });
+  });
+
+  it.each([
+    ['cut off', `{"content":"https://media.divine.video/${OTHER_VIDEO}.mp4","id":"${VIDEO_EVENT_ID}"`],
+    ['whose content is not a string', JSON.stringify({ id: VIDEO_EVENT_ID, content: 5, note: `https://media.divine.video/${OTHER_VIDEO}.mp4` })],
+  ])('reads the media URLs, and only those, of a repost whose content is JSON %s', (_, content) => {
+    // The preview still shows the video, so the buttons must reach it, but a bare
+    // id or key in the JSON is never read as a file.
+    repost.resolved = false;
+    repost.value = {
+      id: '9'.repeat(64),
+      pubkey: '8'.repeat(64),
+      created_at: 1751000100,
+      kind: 6,
+      tags: [['e', VIDEO_EVENT_ID], ['p', REPORTED_PUBKEY]],
+      content,
+      sig: 'b'.repeat(128),
+    };
+
+    renderDetail();
+
+    expect(eventActionsProps.value).toMatchObject({ mediaHashes: [OTHER_VIDEO], thumbnailHashes: [] });
+  });
+
+  it("reads a repost's own media tags as well as the original's files", () => {
+    repost.value = {
+      id: '9'.repeat(64),
+      pubkey: '8'.repeat(64),
+      created_at: 1751000100,
+      kind: 6,
+      tags: [['e', VIDEO_EVENT_ID], ['p', REPORTED_PUBKEY], ['imeta', `url https://media.divine.video/${OTHER_VIDEO}`, 'm video/mp4']],
+      content: JSON.stringify(VIDEO_EVENT.value),
+      sig: 'b'.repeat(128),
+    };
+
+    renderDetail();
+
+    expect(eventActionsProps.value).toMatchObject({ mediaHashes: [OTHER_VIDEO, VIDEO], thumbnailHashes: [THUMB] });
   });
 
   it.each([
@@ -287,7 +326,7 @@ describe('ReportDetail for a reported video with its own thumbnail', () => {
     expect(eventActionsProps.value).toMatchObject({ mediaHashes: [VIDEO], thumbnailHashes: [THUMB] });
   });
 
-  it('checks the thumbnail status too, so the undo buttons can reach it', () => {
+  it('checks the thumbnail status too, so a gated thumbnail gets its own undo button', () => {
     renderDetail();
 
     expect(mediaStatusCalls.value.at(-1)).toEqual([VIDEO, THUMB]);
